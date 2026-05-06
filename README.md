@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/tensorplate_branding_header_dark.png" alt="TensorPlate" width="100%">
+</p>
+
 # TensorPlate
 
 TensorPlate is an inference platform for edge AI and robotics. It is designed for reliable, observable model serving on hardware-constrained devices, with a C++ runtime hot path and Rust control-plane components.
@@ -19,7 +23,7 @@ TensorPlate is intended to provide:
 TensorPlate contributions should preserve these core constraints:
 
 - Runtime hot-path and serving-worker code is C++20.
-- Device agent, watchdog, and CLI code is Rust.
+- Device agent, observability, and CLI code is Rust.
 - Python SDK code is a thin HTTP API wrapper.
 - Runtime behavior that varies by deployment belongs in config.
 - Fallible hardware-boundary operations return `Result<T>`.
@@ -66,6 +70,12 @@ Issues are organized as:
 - Bug: incorrect behavior, regression, crash, or contract violation.
 
 Pull requests should link an issue, describe acceptance criteria coverage, include test evidence, and note changelog impact.
+
+Branches names should be named after issues: 'git checkout -b issue-##' 
+
+For features, issues are implemented at tasks issues levels then merged into feature branch. 
+
+For bugs, issues can be merged directly into 'develop' or 'feature' branch. 
 
 ## Security
 
