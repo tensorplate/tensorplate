@@ -19,7 +19,7 @@ Affected area:
 - [ ] Input adapter
 - [ ] Telemetry or hooks
 - [ ] Agent
-- [ ] Watchdog
+- [ ] Observability
 - [ ] CLI
 - [ ] Python SDK
 - [ ] ROS 2

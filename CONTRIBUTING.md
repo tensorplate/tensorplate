@@ -18,7 +18,7 @@ Before implementation starts, every Feature and Task should have clear acceptanc
 ### Language boundaries
 
 - Runtime hot-path and serving-worker code is C++20.
-- Device agent, watchdog, and primary CLI code is Rust.
+- Device agent, observability service, and primary CLI code is Rust.
 - Python SDK code is a thin HTTP API wrapper and must not use C++ FFI.
 - Rust and C++ communicate through versioned IPC, HTTP, or protocol messages by default.
 - In-process interop requires a narrow C ABI with explicit ownership. Do not pass C++ STL types, Rust-owned memory, vendor SDK types, or `BufferRef` internals across that boundary.
@@ -31,7 +31,7 @@ Dependencies flow downward only:
 agent -> serving_worker -> input -> buffer -> serving -> scheduler -> ModelLoader -> adapter internals
 ```
 
-The watchdog observes serving-worker health independently. Do not introduce upward dependencies between these layers.
+The observability service observes serving-worker health independently. Do not introduce upward dependencies between these layers.
 
 ### Design patterns
 
