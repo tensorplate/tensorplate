@@ -58,6 +58,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - `docs/contributing/local-validation.md` enumerating the canonical
   CMake/CTest/clang-format/clang-tidy and Cargo commands that mirror CI
   (V01-E01-F05-T03).
+- `include/tensorplate/version.hpp` (generated from `.hpp.in` by CMake's
+  `configure_file`) exposing four independent version surfaces:
+  `kRuntimeVersion`, `kProtocolVersion`, `kBundleFormatVersion`, and the
+  per-component MAJOR/MINOR/PATCH constants (V01-E01-F06-T01).
+- `tensorplate_protocol::PROTOCOL_VERSION_*` and
+  `BUNDLE_FORMAT_VERSION_*` Rust constants mirroring the C++ surface
+  (V01-E01-F06-T01).
+- T1 unit tests (C++ `version_test.cpp`, Rust `tests` module in
+  `protocol/rust`) verifying that composed version strings agree with
+  their components on each side (V01-E01-F06-T01).
+- `docs/architecture/versioning.md` documenting the runtime / protocol /
+  schema / bundle-format surfaces, bump rules, and the planned
+  compatibility-validation path (V01-E01-F06-T02).
+- `CONTRIBUTING.md` "Release and Changelog Policy" section listing the
+  changes that require a `CHANGELOG.md` entry plus a version bump
+  (V01-E01-F06-T03).
 
 ### Changed
 

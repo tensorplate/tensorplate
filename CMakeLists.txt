@@ -39,6 +39,36 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
 
+# Version metadata. The runtime version comes from project(); the protocol
+# and bundle format versions evolve on independent cadences and live here.
+# All four are surfaced through include/tensorplate/version.hpp.
+set(TP_RUNTIME_VERSION_SUFFIX       "dev"  CACHE STRING
+    "Pre-release / build suffix appended to runtime version (empty for releases).")
+set(TP_PROTOCOL_VERSION_MAJOR       0      CACHE STRING
+    "Cross-process schema major version (independent of runtime).")
+set(TP_PROTOCOL_VERSION_MINOR       1      CACHE STRING
+    "Cross-process schema minor version.")
+set(TP_BUNDLE_FORMAT_VERSION_MAJOR  0      CACHE STRING
+    "Model bundle on-disk format major version (independent of runtime).")
+set(TP_BUNDLE_FORMAT_VERSION_MINOR  1      CACHE STRING
+    "Model bundle on-disk format minor version.")
+
+if(TP_RUNTIME_VERSION_SUFFIX STREQUAL "")
+  set(TP_RUNTIME_VERSION_STRING "${PROJECT_VERSION}")
+else()
+  set(TP_RUNTIME_VERSION_STRING "${PROJECT_VERSION}-${TP_RUNTIME_VERSION_SUFFIX}")
+endif()
+set(TP_PROTOCOL_VERSION_STRING
+    "${TP_PROTOCOL_VERSION_MAJOR}.${TP_PROTOCOL_VERSION_MINOR}")
+set(TP_BUNDLE_FORMAT_VERSION_STRING
+    "${TP_BUNDLE_FORMAT_VERSION_MAJOR}.${TP_BUNDLE_FORMAT_VERSION_MINOR}")
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/tensorplate/version.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/include/tensorplate/version.hpp"
+  @ONLY
+)
+
 # Project-wide options.
 option(TP_BUILD_TESTS       "Build the C++ test tree" ON)
 option(TP_BUILD_SERVING_WORKER

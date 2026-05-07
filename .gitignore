@@ -78,3 +78,7 @@ tmp/
 # Generated documentation
 docs/api/
 site/
+
+# CMake-generated public headers (configured at build time).
+# The source template is include/tensorplate/version.hpp.in.
+include/tensorplate/version.hpp

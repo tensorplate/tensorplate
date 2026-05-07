@@ -210,6 +210,42 @@ T3, T4, and T5 workflows are added in later epics (V01-E05, V01-E15) and
 will not block ordinary PRs. Branch protection should require the five
 PR-gated jobs above.
 
+## Release and Changelog Policy
+
+TensorPlate v0.1 maintains four independent version surfaces - runtime,
+protocol, schema, and bundle format. The full rules and bump matrix live
+in [`docs/architecture/versioning.md`](docs/architecture/versioning.md).
+This section is the contributor-facing summary.
+
+`CHANGELOG.md` is the authoritative public release-notes record. PRs that
+change any of the following must include a `CHANGELOG.md` entry under the
+appropriate `[Unreleased]` subsection, and must bump the matching version
+constants in the same PR:
+
+- Public C++ interface under `include/tensorplate/` (runtime version).
+- New, removed, or renamed runtime error codes (runtime version).
+- Cross-process schemas under `protocol/schemas/` (protocol + schema version).
+- Config schemas under `config/schemas/` (schema version).
+- Bundle format layout or manifest fields (bundle format version).
+- Feature flags introduced or graduated (runtime version, plus a flag note).
+- Pinned toolchain versions in `rust-toolchain.toml` or build-system
+  requirements in `CMakeLists.txt` (runtime version, listed under
+  *Changed*).
+
+PRs that only change internal C++ source, internal Rust modules, tests,
+docs, or CI plumbing do **not** require a `CHANGELOG.md` entry.
+
+The version constants live at:
+
+- Runtime: `project(TensorPlate VERSION ...)` in `CMakeLists.txt`,
+  surfaced through [`include/tensorplate/version.hpp.in`](include/tensorplate/version.hpp.in).
+- Protocol and bundle format: `TP_PROTOCOL_VERSION_*` and
+  `TP_BUNDLE_FORMAT_VERSION_*` cache entries in `CMakeLists.txt`,
+  mirrored in [`protocol/rust/src/lib.rs`](protocol/rust/src/lib.rs).
+
+Reviewers should reject PRs that change a public contract without the
+accompanying changelog entry and version bump.
+
 ## Pull Request Expectations
 
 Every PR should include:

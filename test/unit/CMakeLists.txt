@@ -2,6 +2,7 @@
 
 add_executable(tp_test_unit
   smoke_test.cpp
+  version_test.cpp
 )
 
 target_link_libraries(tp_test_unit
