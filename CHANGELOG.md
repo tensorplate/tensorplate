@@ -46,6 +46,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - vcpkg and Cargo dependency caching, per-workflow concurrency, and a
   documented PR / nightly / release-branch status policy in
   `CONTRIBUTING.md` (V01-E01-F04-T03).
+- `.devcontainer/Dockerfile` and `.devcontainer/devcontainer.json`
+  delivering a reproducible Ubuntu 22.04 dev image with CMake, Ninja,
+  Clang 15, clang-format/-tidy, vcpkg, and the pinned Rust toolchain;
+  named volumes mount the vcpkg and cargo caches across rebuilds
+  (V01-E01-F05-T01).
+- `docs/contributing/jetson-cross-compile.md` documenting the supported
+  cross-compile path: `cmake/toolchains/aarch64-jetson.cmake`,
+  TP_JETSON_SYSROOT/CC/CXX inputs, and JetPack/TensorRT/CUDA system
+  ownership (V01-E01-F05-T02).
+- `docs/contributing/local-validation.md` enumerating the canonical
+  CMake/CTest/clang-format/clang-tidy and Cargo commands that mirror CI
+  (V01-E01-F05-T03).
 
 ### Changed
 

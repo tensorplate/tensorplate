@@ -100,8 +100,13 @@ Static checks expected by area:
 
 The build is split between CMake/vcpkg for C++ (`runtime/`, `serving_worker/`,
 C++ tests) and Cargo for Rust (`agent/`, `cli/`, `observability/`,
-`protocol/rust/`). Cargo wiring lands in V01-E01-F03; the C++ commands below
-are available now.
+`protocol/rust/`). The fastest way to a working environment is the
+devcontainer at [`.devcontainer/`](.devcontainer/devcontainer.json), which
+preinstalls Clang 15, Ninja, CMake, vcpkg, and the pinned Rust toolchain.
+For the canonical command sequence that mirrors CI, see
+[`docs/contributing/local-validation.md`](docs/contributing/local-validation.md).
+For Jetson cross-compile setup, see
+[`docs/contributing/jetson-cross-compile.md`](docs/contributing/jetson-cross-compile.md).
 
 ### C++ (runtime, serving worker, T1 tests)
 
