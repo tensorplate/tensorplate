@@ -1,0 +1,23 @@
+[package]
+name = "tensorplate-observability"
+description = "TensorPlate independent health monitor service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "tensorplate-observability"
+path = "src/main.rs"
+
+[dependencies]
+tensorplate-protocol = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

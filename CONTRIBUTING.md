@@ -142,6 +142,28 @@ support lands.
 `.clang-format` and `.clang-tidy`. CI invokes them through the workflows in
 `.github/workflows/` (V01-E01-F04).
 
+### Rust (agent, CLI, observability, protocol crate)
+
+The Rust workspace is rooted at `Cargo.toml`. The toolchain is pinned in
+`rust-toolchain.toml`; rustup will install it on first invocation.
+
+```bash
+# Build all workspace members.
+cargo build --workspace
+
+# Run all unit and integration tests.
+cargo test --workspace
+
+# Format and lint.
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Workspace-wide lints (clippy + rustc) are declared under `[workspace.lints]`
+in the root `Cargo.toml`. Per-crate `[lints] workspace = true` makes each
+crate inherit them. Bumping the pinned toolchain in `rust-toolchain.toml`
+requires a CHANGELOG entry.
+
 ## Pull Request Expectations
 
 Every PR should include:

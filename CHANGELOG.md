@@ -27,6 +27,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   helpers; `TP_ENABLE_SANITIZERS` and `TP_WARNINGS_AS_ERRORS` options;
   `tp_test_unit` GoogleTest target with smoke coverage (V01-E01-F02-T03).
 - `.clang-format` and `.clang-tidy` baseline configurations.
+- Cargo workspace at the repository root with members `tensorplate-agent`,
+  `tensorplate-cli`, `tensorplate-observability`, and `tensorplate-protocol`,
+  pinned `rust-toolchain.toml` (1.78.0), `rustfmt.toml` baseline, and
+  workspace-wide rustc and clippy lints (V01-E01-F03-T01).
+- Crate entrypoints with version banners and a baseline test in
+  `tensorplate-protocol` proving workspace builds end to end without
+  device hardware (V01-E01-F03-T02).
+- Documented Rust quality commands (`cargo build`, `cargo test`,
+  `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`) in `CONTRIBUTING.md` (V01-E01-F03-T03).
 
 ### Changed
 

@@ -1,0 +1,61 @@
+# TensorPlate Rust workspace.
+#
+# v0.1 management-plane and observability components live here. The C++
+# runtime and serving worker are built separately via CMake (see
+# CMakeLists.txt). Communication between Rust and C++ happens through
+# versioned IPC and protocol schemas, never in-process FFI in v0.1.
+
+[workspace]
+resolver = "2"
+members = [
+    "agent",
+    "cli",
+    "observability",
+    "protocol/rust",
+]
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+homepage = "https://github.com/tensorplate/tensorplate"
+repository = "https://github.com/tensorplate/tensorplate"
+authors = ["TensorPlate Contributors"]
+
+[workspace.dependencies]
+tensorplate-protocol = { path = "protocol/rust", version = "0.1.0-dev" }
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+debug = "line-tables-only"
+strip = "debuginfo"
+
+[profile.release-dbg]
+inherits = "release"
+debug = true
+strip = "none"
