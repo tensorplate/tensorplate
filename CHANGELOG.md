@@ -16,6 +16,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   dependencies, and forbidden upward dependencies (V01-E01-F01-T02).
 - Test tree layout for tiers T1 through T5 plus shared mocks and model
   fixtures, documented in `test/README.md` (V01-E01-F01-T03).
+- Root CMake build with `tp_runtime` (alias `tp::runtime`) static library,
+  `tp_serving_worker` binary (output `tensorplate-serving`), and CTest
+  wiring with T1 label (V01-E01-F02-T01).
+- vcpkg manifest (`vcpkg.json`) declaring the GoogleTest dependency and
+  reserving feature flags for adapter SDKs; toolchain stubs
+  `cmake/toolchains/x86_64-linux-gnu.cmake` and
+  `cmake/toolchains/aarch64-jetson.cmake` (V01-E01-F02-T02).
+- `cmake/features/warnings.cmake` and `cmake/features/sanitizers.cmake`
+  helpers; `TP_ENABLE_SANITIZERS` and `TP_WARNINGS_AS_ERRORS` options;
+  `tp_test_unit` GoogleTest target with smoke coverage (V01-E01-F02-T03).
+- `.clang-format` and `.clang-tidy` baseline configurations.
 
 ### Changed
 

@@ -96,6 +96,52 @@ Static checks expected by area:
 - New feature flags must be documented.
 - Public behavior changes, interface changes, and new error codes require `CHANGELOG.md` entries.
 
+## Local Build and Test
+
+The build is split between CMake/vcpkg for C++ (`runtime/`, `serving_worker/`,
+C++ tests) and Cargo for Rust (`agent/`, `cli/`, `observability/`,
+`protocol/rust/`). Cargo wiring lands in V01-E01-F03; the C++ commands below
+are available now.
+
+### C++ (runtime, serving worker, T1 tests)
+
+```bash
+# One-time: install vcpkg and export VCPKG_ROOT.
+git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+"$HOME/vcpkg/bootstrap-vcpkg.sh"
+export VCPKG_ROOT="$HOME/vcpkg"
+
+# Configure (Ninja generator, vcpkg manifest mode).
+cmake -S . -B build \
+  -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+
+# Build the runtime, serving worker, and unit tests.
+cmake --build build
+
+# Run T1 unit tests.
+ctest --test-dir build --output-on-failure -L T1
+
+# ASAN/UBSAN dev configure.
+cmake -S . -B build-asan \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DTP_ENABLE_SANITIZERS=ON \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build-asan
+ctest --test-dir build-asan --output-on-failure -L T1
+```
+
+`vcpkg.json` declares the C++ dependency baseline (currently GoogleTest).
+Adapter SDKs (TensorRT, ONNX Runtime, CUDA) are not vendored; they are picked
+up from the host environment when the corresponding `cmake/modules/Find*`
+support lands.
+
+`clang-format` and `clang-tidy` are configured at the repo root via
+`.clang-format` and `.clang-tidy`. CI invokes them through the workflows in
+`.github/workflows/` (V01-E01-F04).
+
 ## Pull Request Expectations
 
 Every PR should include:

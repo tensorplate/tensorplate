@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "tensorplate",
+  "version-string": "0.1.0-dev",
+  "description": "TensorPlate edge AI inference platform.",
+  "homepage": "https://github.com/tensorplate/tensorplate",
+  "license": "Apache-2.0",
+  "supports": "(linux | osx | windows) & !uwp",
+  "dependencies": [
+    {
+      "name": "gtest",
+      "version>=": "1.14.0"
+    }
+  ],
+  "features": {
+    "tensorrt-adapter": {
+      "description": "Build the TensorRT backend adapter (system-provided TensorRT, not vendored).",
+      "dependencies": []
+    },
+    "onnxruntime-adapter": {
+      "description": "Build the ONNX Runtime backend adapter.",
+      "dependencies": []
+    }
+  }
+}
