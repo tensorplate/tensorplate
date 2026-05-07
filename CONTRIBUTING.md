@@ -164,6 +164,47 @@ in the root `Cargo.toml`. Per-crate `[lints] workspace = true` makes each
 crate inherit them. Bumping the pinned toolchain in `rust-toolchain.toml`
 requires a CHANGELOG entry.
 
+## Continuous Integration
+
+Two workflows live under `.github/workflows/`:
+
+- `cpp.yml` builds the C++ targets and runs T1 unit tests on Ubuntu 22.04.
+  Jobs: `build-test` (release and ASAN/UBSAN matrix), `format` (clang-format
+  --dry-run -Werror over all tracked C++ files), and `tidy` (clang-tidy on
+  runtime and serving worker translation units against the configured
+  `compile_commands.json`).
+- `rust.yml` runs `cargo fmt --all -- --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, and `cargo test --workspace`. The pinned
+  toolchain in `rust-toolchain.toml` is materialized via `rustup toolchain
+  install`.
+
+### Caching
+
+- vcpkg installed packages and download archives are cached per workflow
+  with a key derived from `vcpkg.json`.
+- Cargo build artifacts and registry are cached via
+  [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) keyed on
+  `Cargo.lock` and `rust-toolchain.toml`.
+- `concurrency` cancels superseded runs on the same branch so PR pushes do
+  not pile up.
+
+### Status policy
+
+| Job | Required for PR merge | Branch / trigger |
+| --- | --- | --- |
+| `cpp.yml / build-test (relwithdebinfo)` | Yes | PR + push to main, develop |
+| `cpp.yml / build-test (asan-ubsan)` | Yes | PR + push to main, develop |
+| `cpp.yml / format` | Yes | PR + push to main, develop |
+| `cpp.yml / tidy` | Yes | PR + push to main, develop |
+| `rust.yml / fmt + clippy + test` | Yes | PR + push to main, develop |
+| T3 adapter contract tests | No (nightly / release) | scheduled or release branch |
+| T4 hardware-in-loop | No | release branch only, requires Jetson |
+| T5 benchmark regression | No | release branch only |
+
+T3, T4, and T5 workflows are added in later epics (V01-E05, V01-E15) and
+will not block ordinary PRs. Branch protection should require the five
+PR-gated jobs above.
+
 ## Pull Request Expectations
 
 Every PR should include:

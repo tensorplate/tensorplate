@@ -37,6 +37,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Documented Rust quality commands (`cargo build`, `cargo test`,
   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`) in `CONTRIBUTING.md` (V01-E01-F03-T03).
+- `.github/workflows/cpp.yml` running the C++ build, T1 unit tests in a
+  release and ASAN/UBSAN matrix, `clang-format --dry-run -Werror`, and
+  `clang-tidy` against the exported compile commands (V01-E01-F04-T01).
+- `.github/workflows/rust.yml` running `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace` against the pinned toolchain (V01-E01-F04-T02).
+- vcpkg and Cargo dependency caching, per-workflow concurrency, and a
+  documented PR / nightly / release-branch status policy in
+  `CONTRIBUTING.md` (V01-E01-F04-T03).
 
 ### Changed
 
