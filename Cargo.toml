@@ -1,9 +1,9 @@
 # TensorPlate Rust workspace.
 #
-# v0.1 management-plane and observability components live here. The C++
+# v0.1.0 management-plane and observability components live here. The C++
 # runtime and serving worker are built separately via CMake (see
 # CMakeLists.txt). Communication between Rust and C++ happens through
-# versioned IPC and protocol schemas, never in-process FFI in v0.1.
+# versioned IPC and protocol schemas, never in-process FFI in v0.1.0.
 
 [workspace]
 resolver = "2"

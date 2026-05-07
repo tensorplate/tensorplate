@@ -1,6 +1,6 @@
 # Versioning
 
-TensorPlate v0.1 maintains four independent version surfaces. Components
+TensorPlate v0.1.0 maintains four independent version surfaces. Components
 that exchange data must declare what they speak (and what they accept) so
 mismatches surface as typed errors instead of undefined behavior.
 

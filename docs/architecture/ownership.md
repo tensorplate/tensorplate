@@ -59,7 +59,7 @@ Dependencies flow downward only. Upward dependencies are forbidden.
 ## Process and protocol boundary
 
 C++ and Rust components communicate through versioned process or protocol
-boundaries. v0.1 deliberately does not introduce in-process C++/Rust FFI.
+boundaries. v0.1.0 deliberately does not introduce in-process C++/Rust FFI.
 If a future milestone requires it, a narrow C ABI with explicit ownership
 must be designed; STL types, vendor SDK types, Rust-owned memory, and
 `BufferRef` internals must not cross that boundary.

@@ -27,6 +27,6 @@ contracts.
 - The observability service detects a wedged serving worker without
   requiring agent cooperation.
 - Reference safe-state output is local; ROS 2 health-topic stubs are
-  optional in v0.1.
+  optional in v0.1.0.
 
 Implementation lands in V01-E10.

@@ -212,7 +212,7 @@ PR-gated jobs above.
 
 ## Release and Changelog Policy
 
-TensorPlate v0.1 maintains four independent version surfaces - runtime,
+TensorPlate v0.1.0 maintains four independent version surfaces - runtime,
 protocol, schema, and bundle format. The full rules and bump matrix live
 in [`docs/architecture/versioning.md`](docs/architecture/versioning.md).
 This section is the contributor-facing summary.

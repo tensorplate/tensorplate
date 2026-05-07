@@ -1,6 +1,6 @@
 # T4 Hardware-in-loop tests
 
-Full-stack tests run on target hardware (Jetson Orin in v0.1). Validates
+Full-stack tests run on target hardware (Jetson Orin in v0.1.0). Validates
 end-to-end deploy and inference, agent supervision, observability heartbeat
 loss, and crash-loop transitions.
 

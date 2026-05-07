@@ -1,6 +1,6 @@
 # TensorPlate root CMake build.
 #
-# This file establishes the v0.1 C++20 build graph for the runtime, the
+# This file establishes the v0.1.0 C++20 build graph for the runtime, the
 # serving worker process, and the C++ test tree. Implementation lands in
 # V01-E02 and later; this file only wires the targets and quality gates.
 

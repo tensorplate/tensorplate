@@ -12,7 +12,7 @@ respective components.
 - [Versioning](versioning.md) — runtime, protocol, schema, and bundle
   format version conventions (V01-E01-F06).
 
-Additional architecture topics are added as the v0.1 epics land.
+Additional architecture topics are added as the v0.1.0 epics land.
 
 ## Related contributor docs
 

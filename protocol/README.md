@@ -24,6 +24,6 @@ C++ and Rust components.
 - Schema breaking changes require a `CHANGELOG.md` entry and bump of
   the protocol or schema version per V01-E01-F06.
 - Protocol IDLs are the source of truth. Hand-written bindings are
-  acceptable in v0.1 but must be documented against the schema.
+  acceptable in v0.1.0 but must be documented against the schema.
 
 Schema content lands in V01-E02.

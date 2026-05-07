@@ -39,7 +39,7 @@ pub const BUNDLE_FORMAT_VERSION_MINOR: u32 = 1;
 /// Model bundle format version string in `MAJOR.MINOR` form.
 pub const BUNDLE_FORMAT_VERSION: &str = "0.1";
 
-/// Crate-level marker used by the v0.1 scaffolding tests. Replaced by the
+/// Crate-level marker used by the v0.1.0 scaffolding tests. Replaced by the
 /// real protocol surface in V01-E02.
 pub const SKELETON_MARKER: &str = "tensorplate-protocol-skeleton";
 

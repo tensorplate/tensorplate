@@ -1,6 +1,6 @@
 # Cross toolchain stub for NVIDIA Jetson Orin (aarch64) targets.
 #
-# v0.1 does not ship a vendored cross toolchain. Contributors point this
+# v0.1.0 does not ship a vendored cross toolchain. Contributors point this
 # file at a JetPack-provided sysroot and aarch64 GCC by setting:
 #
 #   TP_JETSON_SYSROOT     - absolute path to the Jetson sysroot (with

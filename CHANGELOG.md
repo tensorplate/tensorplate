@@ -8,7 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
-- Top-level package skeleton for v0.1: `include/tensorplate/`, `runtime/`,
+- Top-level package skeleton for v0.1.0: `include/tensorplate/`, `runtime/`,
   `serving_worker/`, `agent/`, `cli/`, `observability/`, `protocol/schemas/`,
   `protocol/rust/`, `config/schemas/`, `test/`, `cmake/`, and
   `docs/architecture/` (V01-E01-F01).
@@ -77,7 +77,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
-- `README.md` repository layout block now reflects the realized v0.1
+- `README.md` repository layout block now reflects the realized v0.1.0
   package skeleton and links to the ownership document.
 
 ### Deprecated

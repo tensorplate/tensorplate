@@ -1,7 +1,7 @@
 # Jetson cross-compile setup
 
 This document covers how to build TensorPlate's C++ components for the
-NVIDIA Jetson Orin family (aarch64) from an x86_64 development host. v0.1
+NVIDIA Jetson Orin family (aarch64) from an x86_64 development host. v0.1.0
 deliberately separates this path from the default x86_64 developer loop:
 **missing Jetson dependencies must not block CI** for ordinary PRs.
 
