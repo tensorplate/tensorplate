@@ -33,22 +33,25 @@ TensorPlate contributions should preserve these core constraints:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contribution contract.
 
-## Planned Repository Layout
+## Repository Layout
 
 ```text
 include/tensorplate/    Public C++ headers
-runtime/                Core inference runtime
-serving_worker/         Data-plane worker process
+runtime/                Core inference runtime (C++20)
+serving_worker/         Data-plane worker process (C++20)
 agent/                  Rust device agent
-watchdog/               Rust safety monitor
 cli/                    Rust operator CLI
-sdk/python/             Python SDK
-test/                   Unit, integration, contract, HIL, and benchmark tests
+observability/          Rust independent health monitor
+protocol/schemas/       Language-neutral cross-component schemas
+protocol/rust/          Rust protocol crate consuming the schemas
 config/schemas/         Deployment and runtime config schemas
-protocol/               Language-neutral schemas and generated bindings
-cmake/                  Toolchains, modules, and feature flags
+test/                   Unit, integration, contract, HIL, and benchmark tests
+cmake/                  CMake toolchains, modules, and feature flags
 docs/                   Public architecture and contributing docs
 ```
+
+See [`docs/architecture/ownership.md`](docs/architecture/ownership.md) for
+package owners, allowed dependencies, and review gates.
 
 ## Getting Started
 
