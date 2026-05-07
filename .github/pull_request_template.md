@@ -23,7 +23,7 @@ Linked issue: #
 - [ ] Change preserves downward-only layer dependencies.
 - [ ] Runtime behavior that varies by deployment is config-driven.
 - [ ] Fallible hardware-boundary operations return `Result<T>`.
-- [ ] No exceptions are introduced at or below the `ModelLoader` interface.
+- [ ] No exceptions are introduced at or below the `ExecutionSession` interface.
 - [ ] Cross-layer payloads use value objects and `BufferRef` / `TensorView` where applicable.
 - [ ] Hardware resources are managed through RAII wrappers where applicable.
 - [ ] No backend names, device paths, or magic numbers are hardcoded.
@@ -34,10 +34,10 @@ Linked issue: #
 
 - [ ] This PR does not change public interfaces.
 - [ ] This PR changes `include/tensorplate/` and needs tech lead approval.
-- [ ] This PR changes `ModelLoader` methods and includes written justification.
+- [ ] This PR changes `ExecutionSession` methods and includes written justification.
 - [ ] This PR adds or changes an adapter and includes T3 contract test evidence.
 
-ModelLoader/interface justification, if applicable:
+ExecutionSession/interface justification, if applicable:
 
 ```text
 

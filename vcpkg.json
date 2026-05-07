@@ -17,8 +17,8 @@
       "description": "Build the TensorRT backend adapter (system-provided TensorRT, not vendored).",
       "dependencies": []
     },
-    "onnxruntime-adapter": {
-      "description": "Build the ONNX Runtime backend adapter.",
+    "libtorch-adapter": {
+      "description": "Build the PyTorch/LibTorch backend adapter.",
       "dependencies": []
     }
   }

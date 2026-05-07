@@ -4,7 +4,7 @@
 //
 // This header exists only so the v0.1.0 scaffolding has at least one symbol
 // per CMake target and can be linked end-to-end before V01-E02 lands the
-// real value types and ModelLoader interface.
+// real value types and ExecutionSession interface.
 
 #pragma once
 

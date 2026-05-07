@@ -15,7 +15,7 @@ TensorPlate is intended to provide:
 - A hardware-adjacent inference runtime for devices such as Jetson and Kria-class edge systems.
 - A serving worker with explicit lifecycle, readiness, and health contracts.
 - A Rust device agent for deployment, rollback, supervision, and desired-state reconciliation.
-- Adapter-based backend support for runtimes such as TensorRT and ONNX Runtime.
+- Adapter-based backend support for runtimes such as TensorRT and PyTorch/LibTorch.
 - A test strategy that separates unit, integration, adapter contract, hardware-in-loop, and benchmark validation.
 
 ## Architecture Principles

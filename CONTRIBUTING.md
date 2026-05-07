@@ -28,7 +28,7 @@ Before implementation starts, every Feature and Task should have clear acceptanc
 Dependencies flow downward only:
 
 ```text
-agent -> serving_worker -> input -> buffer -> serving -> scheduler -> ModelLoader -> adapter internals
+agent -> serving_worker -> input -> buffer -> serving -> scheduler -> ExecutionSession -> adapter internals
 ```
 
 The observability service observes serving-worker health independently. Do not introduce upward dependencies between these layers.
@@ -37,7 +37,7 @@ The observability service observes serving-worker health independently. Do not i
 
 Use the established pattern for the component being changed:
 
-- `ModelLoader` uses Non-Virtual Interface (NVI). Public methods remain non-virtual and delegate to private virtual adapter hooks.
+- `ExecutionSession` uses Non-Virtual Interface (NVI). Public methods remain non-virtual and delegate to private virtual adapter hooks.
 - Backend adapters are created through the registry/factory. Do not branch on backend names outside the registry.
 - `InferScheduler` implementations use the Strategy pattern. Executors should depend on the scheduler interface, not concrete scheduler types.
 - Fallback model chains and lifecycle hooks use configured chains of responsibility, not hardcoded branches.
@@ -49,7 +49,7 @@ Use the established pattern for the component being changed:
 ## Error Handling
 
 - Use `Result<T>` for fallible operations at hardware and interface boundaries.
-- Do not throw exceptions at or below the `ModelLoader` interface.
+- Do not throw exceptions at or below the `ExecutionSession` interface.
 - Use typed error codes such as `LoadFailed`, `NotReady`, `InferenceFailed`, `ShapeMismatch`, `OOMError`, `Unsupported`, `Timeout`, and `ConfigInvalid`.
 - Propagate errors upward until a real handling boundary logs context and translates the failure.
 - Panic-level failures must emit structured fatal logs, trigger the safety path, and terminate cleanly.
@@ -70,7 +70,7 @@ Choose the narrowest test tier that proves the behavior, then add broader tests 
 | --- | --- | --- |
 | T1 unit | Single class, no hardware | Every PR |
 | T2 integration | Multiple classes with mocks, no hardware | Every PR |
-| T3 adapter contract | Real adapters through `ModelLoader*` | Nightly and release |
+| T3 adapter contract | Real adapters through `ExecutionSession*` | Nightly and release |
 | T4 hardware-in-loop | Full stack on target hardware | Release branch |
 | T5 benchmark regression | Latency, throughput, power, memory | Release branch |
 
@@ -139,7 +139,7 @@ ctest --test-dir build-asan --output-on-failure -L T1
 ```
 
 `vcpkg.json` declares the C++ dependency baseline (currently GoogleTest).
-Adapter SDKs (TensorRT, ONNX Runtime, CUDA) are not vendored; they are picked
+Adapter SDKs (TensorRT, PyTorch/LibTorch, CUDA) are not vendored; they are picked
 up from the host environment when the corresponding `cmake/modules/Find*`
 support lands.
 
@@ -259,7 +259,7 @@ Every PR should include:
 Additional review gates:
 
 - Changes under `include/tensorplate/` require tech lead approval.
-- Changes to `ModelLoader` methods require written justification and tech lead review.
+- Changes to `ExecutionSession` methods require written justification and tech lead review.
 - New adapters require passing T3 adapter contract tests before merge.
 - No PR may merge with failing T1 or T2 tests.
 

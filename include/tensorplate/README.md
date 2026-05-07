@@ -12,7 +12,7 @@ Public C++ headers for the TensorPlate runtime.
 
 - Public types and interfaces consumed by the serving worker, adapters, and tests.
 - Includes core value objects (`InferRequest`, `InferResult`, `BufferRef`,
-  `TensorView`, `Result<T>`, `Error`) and the `ModelLoader` / `ExecutionSession`
+  `TensorView`, `Result<T>`, `Error`) and the `ExecutionSession`
   Non-Virtual Interface in later milestones.
 - Includes runtime version constants (`version.hpp`) introduced under V01-E01-F06.
   This file is **generated** from `version.hpp.in` by CMake's `configure_file()`
@@ -20,7 +20,7 @@ Public C++ headers for the TensorPlate runtime.
 
 ## Rules
 
-- No vendor SDK types (TensorRT, ONNX Runtime, CUDA) appear in this directory.
+- No vendor SDK types (TensorRT, PyTorch/LibTorch, CUDA) appear in this directory.
 - No upward dependency on `serving_worker/`, `agent/`, `cli/`, or `observability/`.
 - Changes here require tech lead approval per [CONTRIBUTING.md](../../CONTRIBUTING.md).
 - Public methods get Doxygen comments before merge.

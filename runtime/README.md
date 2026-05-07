@@ -1,6 +1,6 @@
 # `runtime/`
 
-Core C++ inference runtime. Owns the `ModelLoader` / `ExecutionSession`
+Core C++ inference runtime. Owns the `ExecutionSession`
 NVI implementation, scheduler, buffer plane, and adapter registry.
 
 ## Ownership
@@ -30,7 +30,7 @@ libraries declared in `vcpkg.json`. It must not depend on `serving_worker/`,
 ## Rules
 
 - Hardware-boundary operations return `Result<T>`. Exceptions are not thrown
-  at or below the `ModelLoader` interface.
+  at or below the `ExecutionSession` interface.
 - Cross-layer payloads use `BufferRef` and `TensorView`.
 - Hardware resources are owned through RAII wrappers private to adapter code.
 - No backend names, device paths, or magic numbers are hardcoded.

@@ -1,6 +1,6 @@
 # T3 Adapter contract tests
 
-Real backend adapters exercised through the `ModelLoader*` / `ExecutionSession`
+Real backend adapters exercised through the `ExecutionSession`
 interface. Validates lifecycle, readiness, shape mismatch, bad path, unload,
 and `BufferRef` lifetime invariants.
 

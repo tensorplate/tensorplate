@@ -14,7 +14,7 @@ TensorPlate ships:
 
 - A CMake cross toolchain stub at
   [`cmake/toolchains/aarch64-jetson.cmake`](../../cmake/toolchains/aarch64-jetson.cmake).
-- The `tensorrt-adapter` and `onnxruntime-adapter` feature flags in
+- The `tensorrt-adapter` and `libtorch-adapter` feature flags in
   `vcpkg.json`. These do not vendor the SDKs; they only opt the build into
   finding them.
 

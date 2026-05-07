@@ -31,7 +31,7 @@ Link Feature issues that implement this Epic.
 
 Relevant architecture contracts from `tensorplate-internal-docs/implementation-guidlines.md`:
 
-- [ ] ModelLoader Non-Virtual Interface (NVI)
+- [ ] ExecutionSession Non-Virtual Interface (NVI)
 - [ ] Backend Abstract Factory + Registry
 - [ ] InferScheduler Strategy Pattern
 - [ ] Fallback or hook Chain of Responsibility
@@ -50,7 +50,7 @@ Expected package areas:
 Review gates:
 
 - [ ] Tech lead approval required if `include/tensorplate/` changes.
-- [ ] Written justification required if `ModelLoader` methods change.
+- [ ] Written justification required if `ExecutionSession` methods change.
 - [ ] New adapters require T3 adapter contract test evidence.
 
 ## Epic Acceptance Criteria

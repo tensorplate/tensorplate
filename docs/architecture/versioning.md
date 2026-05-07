@@ -53,10 +53,10 @@ read from it.
   `include/tensorplate/`, new error codes, new config fields with safe
   defaults.
 - **Major** (`0.x -> 1.0`): any change that breaks compiled callers of
-  `include/tensorplate/`, including `ModelLoader` method signatures.
+  `include/tensorplate/`, including `ExecutionSession` method signatures.
 
 `include/tensorplate/` changes require tech lead approval per
-`CONTRIBUTING.md`. `ModelLoader` method changes additionally require a
+`CONTRIBUTING.md`. `ExecutionSession` method changes additionally require a
 written justification.
 
 ### Protocol version
@@ -111,7 +111,7 @@ The first concrete validations land alongside V01-E02 (`Result<T>` /
 | --- | --- | --- | --- | --- |
 | Bug fix in a runtime adapter | patch | - | - | - |
 | Add new C++ value type field with default | minor | - | - | - |
-| Remove a `ModelLoader` method | major | - | - | - |
+| Remove a `ExecutionSession` method | major | - | - | - |
 | Add new optional field to `InferRequest` | - | minor | - | minor (its schema) |
 | Change `InferRequest.payload` type | - | major | - | major (its schema) |
 | Add `bundle.assets/` optional sidecar dir | - | - | minor | - |

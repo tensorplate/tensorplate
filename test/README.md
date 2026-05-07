@@ -9,7 +9,7 @@ stay fast and hardware/release-only checks stay separate.
 | --- | --- | --- | --- |
 | `unit/` | T1 | Single class or function. No hardware. No process startup. | Yes |
 | `integration/` | T2 | Multiple classes, possibly across layers, using mocks for hardware. | Yes |
-| `contract/` | T3 | Real adapters exercised through `ModelLoader*` interfaces. | Nightly / release |
+| `contract/` | T3 | Real adapters exercised through `ExecutionSession*` interfaces. | Nightly / release |
 | `hil/` | T4 | Full stack on target hardware (e.g., Jetson Orin). | Release branch only |
 | `benchmark/` | T5 | Latency, throughput, memory, and power regression. | Release branch only |
 | `mocks/` | — | Shared fakes and mocks consumed by `unit/`, `integration/`, and `contract/`. | n/a |

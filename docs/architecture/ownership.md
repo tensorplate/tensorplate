@@ -85,13 +85,13 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
   calls route through `agent/`.
 - `observability/` must not depend on `agent/` to detect a wedged
   serving worker.
-- No vendor SDK type (TensorRT, ONNX Runtime, CUDA) appears in
+- No vendor SDK type (TensorRT, PyTorch/LibTorch, CUDA) appears in
   `include/tensorplate/`.
 
 ## Review gates
 
 - Changes under `include/tensorplate/` require tech lead approval.
-- Changes to `ModelLoader` methods require written justification and tech
+- Changes to `ExecutionSession` methods require written justification and tech
   lead review.
 - New adapters require T3 contract test evidence before merge.
 - New cross-layer dependencies require an update to this document.

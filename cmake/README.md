@@ -14,7 +14,7 @@ CMake helpers for the C++ build.
 
 ## Rules
 
-- Vendor SDK detection (TensorRT, CUDA, ONNX Runtime) lives under
+- Vendor SDK detection (TensorRT, CUDA, PyTorch/LibTorch) lives under
   `modules/` and is opt-in. The default x86_64 build must succeed without
   Jetson SDKs available.
 - Toolchain files do not bake in absolute host paths.
