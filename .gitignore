@@ -1,0 +1,80 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# CMake and C++ build output
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+Testing/
+CTestTestfile.cmake
+install_manifest.txt
+
+# vcpkg
+vcpkg_installed/
+
+# Compiled artifacts
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.o
+*.obj
+*.out
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# Rust
+target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Node and generated frontend artifacts, if docs/site tooling is added
+node_modules/
+dist/
+.vite/
+
+# Benchmark and local runtime artifacts
+benchmarks/out/
+reports/
+tmp/
+*.trace
+*.prof
+
+# Generated documentation
+docs/api/
+site/
