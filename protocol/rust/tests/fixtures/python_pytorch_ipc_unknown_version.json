@@ -1,0 +1,5 @@
+{
+  "schema_version": "99.99",
+  "message_id": "msg-future",
+  "kind": "load_model"
+}

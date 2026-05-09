@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "kind": "missed_deadline",
+  "monotonic_timestamp_ns": 1700000000000,
+  "correlation_id": "req-7",
+  "control_loop_metrics": {
+    "jitter_p50_ms": 1.2,
+    "jitter_p95_ms": 3.4,
+    "jitter_p99_ms": 5.6,
+    "jitter_max_ms": 8.0,
+    "mean_frequency_hz": 30.0,
+    "frequency_stddev_hz": 0.6,
+    "frequency_error_pct": 2.0,
+    "rolling_window_seconds": 60
+  },
+  "error_code": "timeout",
+  "message": "stage missed by 1.8 ms"
+}

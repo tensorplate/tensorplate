@@ -27,20 +27,34 @@
 use serde::de::DeserializeOwned;
 
 pub mod buffer_ref;
+pub mod deploy_transaction;
+pub mod desired_state;
 pub mod error;
+pub mod health_event;
 pub mod infer_request;
 pub mod infer_result;
 pub mod model_spec;
+pub mod python_pytorch_ipc;
 pub mod tensor_view;
+pub mod worker_status;
 
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
+pub use deploy_transaction::{
+    DeployFailure, DeployState, DeployTransaction, DeployTransactionError,
+};
+pub use desired_state::{DesiredState, DesiredStateError, Rollout, RolloutStrategy};
 pub use error::{ErrorCode, ProtocolError};
+pub use health_event::{ControlLoopMetrics, HealthEvent, HealthEventKind};
 pub use infer_request::{InferRequest, InferRequestError, NamedInput, RequestMetadata};
 pub use infer_result::{
     InferResult, InferResultError, InferResultStatus, InferenceTiming, NamedOutput,
 };
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
+pub use python_pytorch_ipc::{
+    IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
+};
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
+pub use worker_status::{ComponentState, WorkerStatus, WorkerStatusError};
 
 /// Cross-process protocol major version. Bumping this is a breaking change
 /// to any schema under `protocol/schemas/`.

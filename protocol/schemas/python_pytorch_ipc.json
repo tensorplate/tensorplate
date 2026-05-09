@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/python_pytorch_ipc.json",
+  "title": "TensorPlate Python/PyTorch Sidecar IPC Header",
+  "description": "Schema header for the message exchange between `tensorplate-serving` (C++) and the managed Python/PyTorch sidecar backend. Each IPC message on the Unix domain socket is `[length-prefixed JSON header][raw tensor payload bytes]`. Tensor payloads are NEVER JSON-encoded; this schema describes only the header.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "message_id", "kind"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "message_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Per-message identifier. Replies (response / event) carry the same `message_id` as the originating request."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Inference correlation id propagated from the originating InferRequest."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "load_model",
+        "load_model_response",
+        "prime",
+        "prime_response",
+        "infer",
+        "infer_response",
+        "infer_async",
+        "infer_async_response",
+        "cancel",
+        "cancel_response",
+        "unload",
+        "unload_response",
+        "health_check",
+        "health_check_response",
+        "ready_event",
+        "error_event",
+        "metric_event"
+      ],
+      "description": "Message kind. `*_response` messages carry the same `message_id` as the originating request; `*_event` messages are unsolicited and carry their own `message_id`."
+    },
+    "deadline_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic absolute deadline in nanoseconds (sender-clock). The sidecar treats sender and receiver clocks as the same domain because both run on the local device."
+    },
+    "tensors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "tensor", "payload_offset", "payload_length"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tensor": {
+            "$ref": "https://schemas.tensorplate.io/v0.1/tensor_view.json"
+          },
+          "payload_offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Offset of this tensor's raw bytes inside the message's tensor-payload region (the region that follows the JSON header on the wire)."
+          },
+          "payload_length": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Length of this tensor's raw bytes inside the tensor-payload region."
+          }
+        }
+      },
+      "description": "Per-message tensor manifest. The bytes themselves ride after the JSON header, packed at the offsets recorded here."
+    },
+    "model_spec": {
+      "$ref": "https://schemas.tensorplate.io/v0.1/model_spec.json",
+      "description": "Present on `load_model`."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error"],
+      "description": "Status discriminator on `*_response` and `error_event` messages."
+    },
+    "error": {
+      "$ref": "https://schemas.tensorplate.io/v0.1/error.json"
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Payload of `metric_event` messages.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value_f64": {
+          "type": "number"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "load_model"
+          }
+        }
+      },
+      "then": {
+        "required": ["model_spec"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "error_event"
+          }
+        }
+      },
+      "then": {
+        "required": ["error"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "metric_event"
+          }
+        }
+      },
+      "then": {
+        "required": ["metric"]
+      }
+    }
+  ]
+}

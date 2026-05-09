@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/desired_state.json",
+  "title": "TensorPlate Desired State",
+  "description": "Declarative reconciliation target consumed by `tensorplate-agent`. v0.1.0 supports exactly one active deployment per device; multi-deployment / fleet semantics land post-v0.1.0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "deployment_id", "bundle_digest"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "deployment_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier for this deployment intent. Distinct from `bundle_digest`: redeploying the same bundle bumps `deployment_id`."
+    },
+    "bundle_digest": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$",
+      "description": "Content-addressed digest of the deployable bundle, e.g. `sha256:ab12...`. Verified by the agent before staging (V01-E08)."
+    },
+    "bundle_format_version": {
+      "type": "string",
+      "default": "0.1",
+      "description": "On-disk bundle format version. Bundles encoded against an older format require the agent to refuse promotion."
+    },
+    "model_spec": {
+      "$ref": "https://schemas.tensorplate.io/v0.1/model_spec.json"
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Rollout policy. v0.1.0 supports `immediate`; future versions may add `canary` / `staged`.",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["immediate"],
+          "default": "immediate"
+        }
+      }
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Operator-supplied labels for status / observability filtering. Not interpreted by the runtime."
+    }
+  }
+}

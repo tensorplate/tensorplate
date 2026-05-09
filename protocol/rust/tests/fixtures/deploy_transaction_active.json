@@ -1,0 +1,9 @@
+{
+  "schema_version": "0.1",
+  "transaction_id": "tx-2024-05-09-1",
+  "deployment_id": "vision-orin-nano-2024-05-09",
+  "bundle_digest": "sha256:c0ffee0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "state": "active",
+  "started_monotonic_ns": 1700000000000,
+  "last_transition_monotonic_ns": 1700000005000
+}

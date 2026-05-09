@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/worker_status.json",
+  "title": "TensorPlate Worker Status",
+  "description": "Status payload published by `tensorplate-serving` and consumed by `tensorplate-agent`, the CLI, and `tensorplate-observability`. The same fields populate the V01-E10 ROS 2 `diagnostic_msgs/msg/DiagnosticArray` health topic.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "agent_state",
+    "serving_state",
+    "observability_state"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "agent_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"],
+      "description": "Coarse `tensorplate-agent` state. `unknown` is emitted before the agent reports for the first time."
+    },
+    "serving_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"],
+      "description": "Coarse serving-worker state. Drives ROS 2 health-topic level mapping (`ready` -> OK, `degraded` -> WARN, `failed` -> ERROR)."
+    },
+    "observability_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"],
+      "description": "Coarse observability-service state. `failed` here implies operator-visible loss of health signal but does not by itself fail the device."
+    },
+    "active_deployment": {
+      "type": "string",
+      "description": "`deployment_id` of the currently-active deployment. Empty if no deployment has been promoted."
+    },
+    "backend": {
+      "type": "string",
+      "description": "Backend name in use, e.g. `tensorrt`, `libtorch`, `python_pytorch`. Empty when no model is loaded."
+    },
+    "missed_heartbeat_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Cumulative missed heartbeat count since the worker started. Reset on worker restart."
+    },
+    "missed_deadline_rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 0,
+      "description": "Fraction of requests whose deadline was missed in the most-recent rolling window. Range [0, 1]."
+    },
+    "queue_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Current scheduler queue depth (in-flight + waiting)."
+    },
+    "last_error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Most-recent typed error code seen by the worker. Absent if the worker is healthy."
+    },
+    "last_error_message": {
+      "type": "string",
+      "description": "Optional human-readable message that accompanies `last_error_code`."
+    }
+  }
+}

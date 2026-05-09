@@ -204,6 +204,51 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   optional timing field preservation, equality, and explicit
   compatibility of every `Error::Code` with the result taxonomy
   (V01-E02-F04-T03).
+- `docs/architecture/protocol.md` documenting the v0.1.0 protocol
+  format selection (JSON Schema Draft 7), versioning policy
+  (`schema_version` const-fixed, mandatory
+  `decode_with_version_check`), hand-written-binding strategy, and
+  the round-trip contract between Rust serde mirrors and the
+  shared fixtures (V01-E02-F07-T01).
+- `protocol/schemas/desired_state.json` (V01-E02-F07-T02),
+  `protocol/schemas/worker_status.json` carrying the V01-E10 ROS 2
+  health-publisher fields (`agent_state`, `serving_state`,
+  `observability_state`, `active_deployment`, `backend`,
+  `missed_heartbeat_count`, `missed_deadline_rate`, `queue_depth`,
+  `last_error_code`) (V01-E02-F07-T03),
+  `protocol/schemas/health_event.json` with the V01-E12-reserved
+  control-loop telemetry block (jitter p50/p95/p99/max, mean
+  frequency, frequency stddev, frequency-error percent, rolling
+  window) and monotonic-only timestamps (V01-E02-F07-T04),
+  `protocol/schemas/deploy_transaction.json` covering the
+  received -> verified -> staged -> capacity_checked -> prepared ->
+  warmed -> promoted -> active state machine plus terminal
+  failed / rolled_back states with typed-and-recoverable failure
+  metadata (V01-E02-F07-T05), and
+  `protocol/schemas/python_pytorch_ipc.json` defining the JSON
+  header for the Unix domain socket IPC (LoadModel / Prime /
+  Infer / InferAsync / Cancel / Unload / HealthCheck plus
+  ready / error / metric events) with raw tensor bytes carried
+  after the header rather than JSON-encoded (V01-E02-F07-T06).
+- Rust mirrors `tensorplate_protocol::DesiredState`,
+  `WorkerStatus`, `HealthEvent`, `ControlLoopMetrics`,
+  `DeployTransaction` / `DeployFailure` / `DeployState`, and
+  `IpcMessage` with serde round-trip, validating constructors
+  (e.g. `DesiredState::new` rejects malformed bundle digests,
+  `WorkerStatus::new` rejects out-of-range
+  `missed_deadline_rate`, `DeployTransaction::new` enforces the
+  failure-metadata invariant, `IpcMessage::validate` enforces the
+  JSON Schema `allOf` rules), and `decode_with_version_check`
+  acceptance/rejection tests.
+- `protocol/rust/tests/round_trip.rs` integration suite with nine
+  canonical JSON fixtures (vision and SmolVLA desired-state,
+  ready / degraded worker-status, missed-deadline health event
+  with full control-loop metrics, active and failed deploy
+  transactions, sidecar load-model header, and a
+  schema-version-rejection negative fixture) covering the
+  V01-E02-F07-T07 cross-language contract.
+- `protocol/schemas/README.md` updated to reflect the realized
+  schema set and conventions; per-schema ownership table.
 
 ### Changed
 

@@ -1,0 +1,18 @@
+{
+  "schema_version": "0.1",
+  "deployment_id": "vision-orin-nano-2024-05-09",
+  "bundle_digest": "sha256:c0ffee0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "bundle_format_version": "0.1",
+  "model_spec": {
+    "schema_version": "0.1",
+    "model_id": "yolov8n",
+    "model_class": "vision",
+    "artifact_path": "models/yolov8n.engine",
+    "backend_hint": "tensorrt",
+    "precision_hint": "fp16"
+  },
+  "labels": {
+    "env": "lab",
+    "robot": "so-100"
+  }
+}

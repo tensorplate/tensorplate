@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/health_event.json",
+  "title": "TensorPlate Health Event",
+  "description": "Discrete health-state event emitted by the serving worker and consumed by `tensorplate-observability` and the V01-E10 ROS 2 health-topic publisher. Carries monotonic timing; never wall-clock.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "monotonic_timestamp_ns"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "heartbeat",
+        "ready",
+        "degraded",
+        "failed",
+        "no_heartbeat",
+        "missed_deadline",
+        "overload"
+      ],
+      "description": "Discrete event kind. The set is union-stable: post-v0.1.0 additions append rather than rename."
+    },
+    "monotonic_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp in nanoseconds. Sampled from `std::chrono::steady_clock` (C++) or `std::time::Instant` (Rust). NEVER wall-clock."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Optional request correlation id (for `missed_deadline` / `overload` events tied to a specific request)."
+    },
+    "control_loop_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Reserved control-loop telemetry fields (V01-E12). Defined in v0.1.0 so VLA validation runs can populate them without a schema bump.",
+      "properties": {
+        "jitter_p50_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "jitter_p95_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "jitter_p99_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "jitter_max_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "mean_frequency_hz": {
+          "type": "number",
+          "minimum": 0
+        },
+        "frequency_stddev_hz": {
+          "type": "number",
+          "minimum": 0
+        },
+        "frequency_error_pct": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rolling_window_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "Length of the rolling window for the metrics in this event. Default 60s per V01-E12."
+        }
+      }
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Typed error code accompanying `degraded` / `failed` / `missed_deadline` / `overload` events."
+    },
+    "message": {
+      "type": "string",
+      "description": "Optional human-readable message; not parsed by the observability service."
+    }
+  }
+}
