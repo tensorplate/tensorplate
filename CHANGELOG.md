@@ -116,6 +116,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   artifact_path, backend_hint, present-but-empty profile_id), enum
   string round-trip, equality, and Rust round-trip
   (V01-E02-F02-T03).
+- `include/tensorplate/buffer/buffer_ref.hpp` defining the
+  `tensorplate::BufferRef` opaque buffer-handle value object with the
+  `BufferOwnership` (`Owned` / `Borrowed` / `Released`) state machine,
+  documented copy/move contract, `kNullId` released sentinel, and
+  `mark_released()` idempotent tombstone; the underlying allocator
+  lands in V01-E03 (V01-E02-F05-T01).
+- Documented copy/move/release semantics in the public header and
+  through T1 unit tests, including the convention that holders needing
+  unique-ptr-style invalidation must call `mark_released()` on the
+  source explicitly (V01-E02-F05-T02).
+- `protocol/schemas/buffer_ref.json` and Rust mirror
+  `tensorplate_protocol::BufferRef` for protocol/test fixtures that
+  compare buffer identity without transferring memory
+  (V01-E02-F05-T03).
 
 ### Changed
 

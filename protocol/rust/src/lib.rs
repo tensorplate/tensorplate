@@ -26,9 +26,11 @@
 
 use serde::de::DeserializeOwned;
 
+pub mod buffer_ref;
 pub mod error;
 pub mod model_spec;
 
+pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
 pub use error::{ErrorCode, ProtocolError};
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 
