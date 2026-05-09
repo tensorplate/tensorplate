@@ -12,6 +12,7 @@ enforced at review time. Changes here require tech lead approval.
 | `include/tensorplate/` | runtime / public interface | C++20 | header-only | runtime tech lead |
 | `runtime/` | runtime core (data plane) | C++20 | `tp_runtime` library | runtime tech lead |
 | `serving_worker/` | data plane (process) | C++20 | `tp_serving_worker` binary | runtime tech lead |
+| `backends/python_pytorch/` | data plane (out-of-process backend) | Python 3.10+ | `tensorplate-pytorch-backend` package | runtime tech lead + backend owner |
 | `agent/` | management plane (process) | Rust | `tensorplate-agent` binary | agent owner |
 | `cli/` | management plane (operator client) | Rust | `tensorplate-cli` binary | agent owner |
 | `observability/` | safety / observability (process) | Rust | `tensorplate-observability` binary | safety owner |
@@ -46,12 +47,20 @@ Dependencies flow downward only. Upward dependencies are forbidden.
                                               │ adapter internals│
                                               │  (private; under │
                                               │   runtime/src/)  │
+                                              └─────────┬────────┘
+                                                        │ versioned IPC
+                                                        ▼
+                                              ┌──────────────────┐
+                                              │ backends/        │
+                                              │   python_pytorch │
+                                              │  (out-of-process)│
                                               └──────────────────┘
 
   observability/ observes serving_worker/ heartbeats and agent/ events
   through protocol contracts. It is not on the data path.
 
-  protocol/schemas/ is consumed as data by both planes.
+  protocol/schemas/ is consumed as data by both planes and by
+  backends/python_pytorch/ over IPC.
   protocol/rust/   is consumed by agent/, cli/, observability/.
   include/tensorplate/ is consumed by runtime/, serving_worker/, and tests.
 ```
@@ -75,6 +84,7 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
 | `cli/` | `protocol/rust/`, approved third-party Rust crates |
 | `observability/` | `protocol/rust/`, approved third-party Rust crates |
 | `protocol/rust/` | approved third-party Rust crates only |
+| `backends/python_pytorch/` | `protocol/schemas/` (IPC contract), approved Python wheels (PyTorch, etc., system-provided) |
 
 ## Forbidden dependencies
 
@@ -87,6 +97,10 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
   serving worker.
 - No vendor SDK type (TensorRT, PyTorch/LibTorch, CUDA) appears in
   `include/tensorplate/`.
+- `backends/python_pytorch/` must not import any C++ runtime module or
+  link against `runtime/`, `serving_worker/`, `agent/`, `cli/`, or
+  `observability/`. It speaks the runtime over the IPC contract under
+  `protocol/schemas/` only.
 
 ## Review gates
 

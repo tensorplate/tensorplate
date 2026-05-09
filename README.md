@@ -36,18 +36,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contribution contract.
 ## Repository Layout
 
 ```text
-include/tensorplate/    Public C++ headers
-runtime/                Core inference runtime (C++20)
-serving_worker/         Data-plane worker process (C++20)
-agent/                  Rust device agent
-cli/                    Rust operator CLI
-observability/          Rust independent health monitor
-protocol/schemas/       Language-neutral cross-component schemas
-protocol/rust/          Rust protocol crate consuming the schemas
-config/schemas/         Deployment and runtime config schemas
-test/                   Unit, integration, contract, HIL, and benchmark tests
-cmake/                  CMake toolchains, modules, and feature flags
-docs/                   Public architecture and contributing docs
+include/tensorplate/         Public C++ headers
+runtime/                     Core inference runtime (C++20)
+serving_worker/              Data-plane worker process (C++20)
+backends/python_pytorch/     Out-of-process Python/PyTorch backend
+agent/                       Rust device agent
+cli/                         Rust operator CLI
+observability/               Rust independent health monitor
+protocol/schemas/            Language-neutral cross-component schemas
+protocol/rust/               Rust protocol crate consuming the schemas
+config/schemas/              Deployment and runtime config schemas
+test/                        Unit, integration, contract, HIL, and benchmark tests
+cmake/                       CMake toolchains, modules, and feature flags
+docs/                        Public architecture and contributing docs
 ```
 
 See [`docs/architecture/ownership.md`](docs/architecture/ownership.md) for

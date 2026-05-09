@@ -169,6 +169,27 @@ in the root `Cargo.toml`. Per-crate `[lints] workspace = true` makes each
 crate inherit them. Bumping the pinned toolchain in `rust-toolchain.toml`
 requires a CHANGELOG entry.
 
+### Python (PyTorch backend under `backends/python_pytorch/`)
+
+The PyTorch backend is a separate Python 3.10+ package. It does not link
+against the C++ runtime; it talks to `tensorplate-serving` over the
+versioned IPC under `protocol/schemas/`. PyTorch and other framework
+dependencies join in V01-E05; until then the package builds and tests
+against the Python standard library only.
+
+```bash
+cd backends/python_pytorch
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev]"
+
+# Quality gates that mirror .github/workflows/python.yml:
+ruff check .
+ruff format --check .
+mypy src tests
+pytest -q
+```
+
 ## Continuous Integration
 
 Two workflows live under `.github/workflows/`:
@@ -182,6 +203,10 @@ Two workflows live under `.github/workflows/`:
   --all-targets -- -D warnings`, and `cargo test --workspace`. The pinned
   toolchain in `rust-toolchain.toml` is materialized via `rustup toolchain
   install`.
+- `python.yml` installs `backends/python_pytorch/` in editable mode with
+  the `[dev]` extras and runs `ruff check .`, `ruff format --check .`,
+  `mypy src tests`, and `pytest -q`. PyTorch itself is not pulled in
+  during V01-E01-F01 scaffolding.
 
 ### Caching
 
@@ -202,6 +227,7 @@ Two workflows live under `.github/workflows/`:
 | `cpp.yml / format` | Yes | PR + push to main, develop |
 | `cpp.yml / tidy` | Yes | PR + push to main, develop |
 | `rust.yml / fmt + clippy + test` | Yes | PR + push to main, develop |
+| `python.yml / ruff + mypy + pytest` | Yes | PR + push to main, develop |
 | T3 adapter contract tests | No (nightly / release) | scheduled or release branch |
 | T4 hardware-in-loop | No | release branch only, requires Jetson |
 | T5 benchmark regression | No | release branch only |

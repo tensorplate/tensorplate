@@ -74,6 +74,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - `CONTRIBUTING.md` "Release and Changelog Policy" section listing the
   changes that require a `CHANGELOG.md` entry plus a version bump
   (V01-E01-F06-T03).
+- `backends/python_pytorch/` package skeleton for the out-of-process
+  PyTorch backend per the V01-E01 scope expansion: PEP 621
+  `pyproject.toml`, namespace package
+  `tensorplate_pytorch_backend` with mirrored protocol/bundle-format
+  version constants, `py.typed` marker, ruff/ruff-format/mypy/pytest
+  configuration, and a smoke test suite (V01-E01-F01).
+- `.github/workflows/python.yml` running `ruff check`,
+  `ruff format --check`, `mypy src tests`, and `pytest -q` against
+  Python 3.10 and 3.12 on Ubuntu 22.04 with pip caching.
+- `docs/architecture/ownership.md` updated with the new package row,
+  out-of-process IPC dependency arrow, and forbidden-dependency rule
+  preventing the Python backend from linking against any C++ runtime
+  module.
 
 ### Changed
 
