@@ -130,6 +130,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `tensorplate_protocol::BufferRef` for protocol/test fixtures that
   compare buffer identity without transferring memory
   (V01-E02-F05-T03).
+- `include/tensorplate/buffer/tensor_view.hpp` defining
+  `tensorplate::TensorView` with `DType`
+  (`float32`, `float16`, `bfloat16`, `int64`, `int32`, `int16`,
+  `int8`, `uint8`, `bool`) and `Layout` (`row_major`, `col_major`)
+  enums, locked dtype byte-width table, and a validating `create()`
+  factory that auto-computes `byte_size` and rejects rank-0 / non-
+  positive dims / size underflow / size-overflow with typed errors
+  (V01-E02-F06-T01, T02).
+- `protocol/schemas/tensor_view.json` and Rust mirror
+  `tensorplate_protocol::TensorView` with serde round-trip,
+  defaults compression for layout / byte_offset / byte_size, and
+  matching `TensorViewError` taxonomy (V01-E02-F06-T03).
+- T1 unit tests for dtype/layout name round-trip, locked byte-width
+  table, valid construction, automatic byte_size, padding-allowed
+  explicit byte_size, underflow rejection, empty/zero/negative shape
+  rejection, SmolVLA-style chunk shape `[chunk_size, action_dim]`,
+  byte_offset preservation, and equality.
 
 ### Changed
 

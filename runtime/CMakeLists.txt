@@ -9,6 +9,7 @@ add_library(tp_runtime STATIC
   src/core/error.cpp
   src/core/model_spec.cpp
   src/buffer/buffer_ref.cpp
+  src/buffer/tensor_view.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)

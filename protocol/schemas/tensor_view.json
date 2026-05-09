@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/tensor_view.json",
+  "title": "TensorPlate TensorView",
+  "description": "Tensor metadata describing the dtype, shape, layout, and byte-window of a tensor region inside a BufferRef. Mirrors include/tensorplate/buffer/tensor_view.hpp::TensorView. The view does NOT carry memory; pair with `buffer_ref.json` for a full payload reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dtype", "shape"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "dtype": {
+      "type": "string",
+      "enum": [
+        "float32",
+        "float16",
+        "bfloat16",
+        "int64",
+        "int32",
+        "int16",
+        "int8",
+        "uint8",
+        "bool"
+      ],
+      "description": "Element data type. v0.1.0 covers the dtypes required by vision-on-TensorRT and SmolVLA-on-`python_pytorch`; additional dtypes can be added without a schema bump."
+    },
+    "shape": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Per-axis extent. Zero-volume tensors are not representable in v0.1.0."
+      },
+      "description": "Tensor shape. Rank >= 1; all entries must be >= 1."
+    },
+    "layout": {
+      "type": "string",
+      "enum": ["row_major", "col_major"],
+      "default": "row_major",
+      "description": "Memory layout. v0.1.0 supports row-major (C-contiguous) and column-major (Fortran-contiguous) only."
+    },
+    "byte_offset": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Offset of the tensor region inside the owning BufferRef."
+    },
+    "byte_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Tensor region size in bytes. If absent or 0 on decode, the consumer computes product(shape) * dtype_byte_width(dtype). If present, it must be >= the computed value."
+    }
+  }
+}

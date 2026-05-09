@@ -6,6 +6,7 @@ add_executable(tp_test_unit
   result_test.cpp
   model_spec_test.cpp
   buffer_ref_test.cpp
+  tensor_view_test.cpp
 )
 
 target_link_libraries(tp_test_unit
