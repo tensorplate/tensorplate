@@ -35,14 +35,18 @@ constexpr std::array<std::pair<Error::Code, std::string_view>, 9> kCodeNames = {
 
 std::string_view to_string(Error::Code code) noexcept {
   for (const auto& [c, name] : kCodeNames) {
-    if (c == code) return name;
+    if (c == code) {
+      return name;
+    }
   }
   return "internal";
 }
 
 std::optional<Error::Code> error_code_from_string(std::string_view name) noexcept {
   for (const auto& [c, candidate] : kCodeNames) {
-    if (candidate == name) return c;
+    if (candidate == name) {
+      return c;
+    }
   }
   return std::nullopt;
 }

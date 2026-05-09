@@ -15,17 +15,17 @@
 
 #pragma once
 
-#include "tensorplate/buffer/buffer_ref.hpp"
-#include "tensorplate/buffer/tensor_view.hpp"
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <chrono>
 #include <optional>
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/tensor_view.hpp"
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -62,8 +62,7 @@ struct InferenceTiming {
 
   friend bool operator==(const InferenceTiming& lhs, const InferenceTiming& rhs) noexcept {
     return lhs.queue_latency == rhs.queue_latency &&
-           lhs.execution_latency == rhs.execution_latency &&
-           lhs.total_latency == rhs.total_latency;
+           lhs.execution_latency == rhs.execution_latency && lhs.total_latency == rhs.total_latency;
   }
   friend bool operator!=(const InferenceTiming& lhs, const InferenceTiming& rhs) noexcept {
     return !(lhs == rhs);

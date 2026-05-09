@@ -109,7 +109,9 @@ TEST(ResultVoid, EqualityComparesErrorState) {
 
 // Compile-time documentation that Result<T> carries [[nodiscard]] so that
 // ignoring a hardware-boundary status is a warning, not silent UB.
-[[maybe_unused]] Result<int> nodiscard_check_helper() { return 0; }
+[[maybe_unused]] Result<int> nodiscard_check_helper() {
+  return 0;
+}
 
 TEST(Result, ResultsArePolymorphicAcrossNamespaceAlias) {
   // The planning doc references types as `tp::Result<T>`; the alias must work.

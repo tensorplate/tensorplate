@@ -17,10 +17,6 @@
 
 #pragma once
 
-#include "tensorplate/buffer/buffer_ref.hpp"
-#include "tensorplate/buffer/tensor_view.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -28,6 +24,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/tensor_view.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -74,8 +74,7 @@ struct RequestMetadata {
   std::unordered_map<std::string, std::string> extra;
 
   friend bool operator==(const RequestMetadata& lhs, const RequestMetadata& rhs) noexcept {
-    return lhs.correlation_id == rhs.correlation_id &&
-           lhs.action_chunk_id == rhs.action_chunk_id &&
+    return lhs.correlation_id == rhs.correlation_id && lhs.action_chunk_id == rhs.action_chunk_id &&
            lhs.action_chunk_sequence == rhs.action_chunk_sequence &&
            lhs.stale_after_sequence == rhs.stale_after_sequence && lhs.extra == rhs.extra;
   }
@@ -102,8 +101,7 @@ class InferRequest {
   ///   - any input has an empty name
   ///   - duplicate input names are present
   static Result<InferRequest> create(std::string request_id, std::string endpoint,
-                                     std::vector<NamedInput> inputs,
-                                     RequestMetadata metadata = {},
+                                     std::vector<NamedInput> inputs, RequestMetadata metadata = {},
                                      std::optional<TimePoint> deadline = std::nullopt);
 
   /// Convenience factory that converts a relative deadline (milliseconds)

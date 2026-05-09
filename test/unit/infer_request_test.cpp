@@ -6,15 +6,15 @@
 
 #include <gtest/gtest.h>
 
-#include "tensorplate/buffer/buffer_ref.hpp"
-#include "tensorplate/buffer/tensor_view.hpp"
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <chrono>
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/tensor_view.hpp"
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace {
 

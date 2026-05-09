@@ -17,13 +17,13 @@
 
 #pragma once
 
-#include "tensorplate/core/error.hpp"
-
 #include <exception>
 #include <optional>
 #include <type_traits>
 #include <utility>
 #include <variant>
+
+#include "tensorplate/core/error.hpp"
 
 namespace tensorplate {
 
@@ -71,8 +71,8 @@ class [[nodiscard]] Result {
  public:
   using value_type = T;
 
-  Result(const T& value) : storage_(std::in_place_index<0>, value) {}                    // NOLINT
-  Result(T&& value) noexcept(std::is_nothrow_move_constructible_v<T>)                    // NOLINT
+  Result(const T& value) : storage_(std::in_place_index<0>, value) {}  // NOLINT
+  Result(T&& value) noexcept(std::is_nothrow_move_constructible_v<T>)  // NOLINT
       : storage_(std::in_place_index<0>, std::move(value)) {}
   Result(Unexpected u) noexcept : storage_(std::in_place_index<1>, std::move(u.error)) {}  // NOLINT
 
@@ -86,34 +86,41 @@ class [[nodiscard]] Result {
   [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
   T& value() & {
-    if (!has_value()) throw BadResultAccess{};
+    if (!has_value())
+      throw BadResultAccess{};
     return std::get<0>(storage_);
   }
   const T& value() const& {
-    if (!has_value()) throw BadResultAccess{};
+    if (!has_value())
+      throw BadResultAccess{};
     return std::get<0>(storage_);
   }
   T&& value() && {
-    if (!has_value()) throw BadResultAccess{};
+    if (!has_value())
+      throw BadResultAccess{};
     return std::move(std::get<0>(storage_));
   }
 
   Error& error() & {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return std::get<1>(storage_);
   }
   const Error& error() const& {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return std::get<1>(storage_);
   }
   Error&& error() && {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return std::move(std::get<1>(storage_));
   }
 
   template <typename U>
   T value_or(U&& default_value) const& {
-    if (has_value()) return std::get<0>(storage_);
+    if (has_value())
+      return std::get<0>(storage_);
     return T{std::forward<U>(default_value)};
   }
 
@@ -145,19 +152,23 @@ class [[nodiscard]] Result<void> {
   [[nodiscard]] explicit operator bool() const noexcept { return has_value(); }
 
   void value() const {
-    if (!has_value()) throw BadResultAccess{};
+    if (!has_value())
+      throw BadResultAccess{};
   }
 
   Error& error() & {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return *error_;
   }
   const Error& error() const& {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return *error_;
   }
   Error&& error() && {
-    if (has_value()) throw BadResultAccess{};
+    if (has_value())
+      throw BadResultAccess{};
     return std::move(*error_);
   }
 

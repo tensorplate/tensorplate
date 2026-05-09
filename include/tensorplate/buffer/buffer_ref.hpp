@@ -45,12 +45,12 @@
 
 #pragma once
 
-#include "tensorplate/core/result.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 

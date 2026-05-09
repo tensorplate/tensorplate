@@ -4,13 +4,13 @@
 
 #include "tensorplate/core/infer_result.hpp"
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <variant>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -31,8 +31,7 @@ Result<void> validate_outputs(const InferResult::Outputs& outputs) {
   seen.reserve(outputs.size());
   for (const auto& o : outputs) {
     if (o.name.empty()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "InferResult.outputs entry has empty `name`");
+      return unexpected(Error::Code::ConfigInvalid, "InferResult.outputs entry has empty `name`");
     }
     auto [_, inserted] = seen.insert(o.name);
     if (!inserted) {
@@ -76,14 +75,14 @@ InferResult InferResult::create_failure(std::string request_id, Error error,
 }
 
 const InferResult::Outputs& InferResult::outputs() const noexcept {
-  if (auto* outs = std::get_if<Outputs>(&payload_)) {
+  if (const auto* outs = std::get_if<Outputs>(&payload_)) {
     return *outs;
   }
   return empty_outputs();
 }
 
 const Error& InferResult::error() const noexcept {
-  if (auto* err = std::get_if<Error>(&payload_)) {
+  if (const auto* err = std::get_if<Error>(&payload_)) {
     return *err;
   }
   return placeholder_error();

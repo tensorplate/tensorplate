@@ -4,12 +4,12 @@
 
 #include "tensorplate/buffer/buffer_ref.hpp"
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <array>
 #include <string_view>
 #include <utility>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -25,14 +25,18 @@ constexpr std::array<std::pair<BufferOwnership, std::string_view>, 3> kOwnership
 
 std::string_view to_string(BufferOwnership ownership) noexcept {
   for (const auto& [o, name] : kOwnershipNames) {
-    if (o == ownership) return name;
+    if (o == ownership) {
+      return name;
+    }
   }
   return "released";
 }
 
 std::optional<BufferOwnership> buffer_ownership_from_string(std::string_view name) noexcept {
   for (const auto& [o, candidate] : kOwnershipNames) {
-    if (candidate == name) return o;
+    if (candidate == name) {
+      return o;
+    }
   }
   return std::nullopt;
 }

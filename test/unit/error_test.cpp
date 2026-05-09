@@ -52,8 +52,7 @@ TEST(Error, MakeWithoutContext) {
 }
 
 TEST(Error, MakeWithContextPreservesAllFields) {
-  auto e =
-      Error::make(Error::Code::ShapeMismatch, "rank mismatch", "input=image_front rank=4");
+  auto e = Error::make(Error::Code::ShapeMismatch, "rank mismatch", "input=image_front rank=4");
   EXPECT_EQ(e.code, Error::Code::ShapeMismatch);
   EXPECT_EQ(e.message, "rank mismatch");
   ASSERT_TRUE(e.context.has_value());

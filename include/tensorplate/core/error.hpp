@@ -55,9 +55,7 @@ struct Error {
   friend bool operator!=(const Error& lhs, const Error& rhs) noexcept { return !(lhs == rhs); }
 
   /// Convenience factory matching the protocol "code/message/context" shape.
-  static Error make(Code c, std::string msg) {
-    return Error{c, std::move(msg), std::nullopt};
-  }
+  static Error make(Code c, std::string msg) { return Error{c, std::move(msg), std::nullopt}; }
   static Error make(Code c, std::string msg, std::string ctx) {
     return Error{c, std::move(msg), std::optional<std::string>{std::move(ctx)}};
   }

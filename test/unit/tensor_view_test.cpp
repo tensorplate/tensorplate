@@ -6,11 +6,11 @@
 
 #include <gtest/gtest.h>
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <cstdint>
 #include <vector>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace {
 

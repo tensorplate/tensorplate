@@ -6,20 +6,20 @@
 
 #include <gtest/gtest.h>
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <optional>
 #include <string>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace {
 
 using tensorplate::Error;
-using tensorplate::ModelClass;
 using tensorplate::model_class_from_string;
+using tensorplate::ModelClass;
 using tensorplate::ModelSpec;
-using tensorplate::PrecisionHint;
 using tensorplate::precision_hint_from_string;
+using tensorplate::PrecisionHint;
 using tensorplate::Result;
 using tensorplate::to_string;
 

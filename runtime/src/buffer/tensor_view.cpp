@@ -6,15 +6,15 @@
 
 #include "tensorplate/buffer/tensor_view.hpp"
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string_view>
 #include <utility>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -53,35 +53,45 @@ constexpr std::array<std::pair<DType, std::size_t>, 9> kDtypeByteWidths = {{
 
 std::size_t dtype_byte_width(DType dtype) noexcept {
   for (const auto& [d, width] : kDtypeByteWidths) {
-    if (d == dtype) return width;
+    if (d == dtype) {
+      return width;
+    }
   }
   return 0;
 }
 
 std::string_view to_string(DType dtype) noexcept {
   for (const auto& [d, name] : kDtypeNames) {
-    if (d == dtype) return name;
+    if (d == dtype) {
+      return name;
+    }
   }
   return "float32";
 }
 
 std::string_view to_string(Layout layout) noexcept {
   for (const auto& [l, name] : kLayoutNames) {
-    if (l == layout) return name;
+    if (l == layout) {
+      return name;
+    }
   }
   return "row_major";
 }
 
 std::optional<DType> dtype_from_string(std::string_view name) noexcept {
   for (const auto& [d, candidate] : kDtypeNames) {
-    if (candidate == name) return d;
+    if (candidate == name) {
+      return d;
+    }
   }
   return std::nullopt;
 }
 
 std::optional<Layout> layout_from_string(std::string_view name) noexcept {
   for (const auto& [l, candidate] : kLayoutNames) {
-    if (candidate == name) return l;
+    if (candidate == name) {
+      return l;
+    }
   }
   return std::nullopt;
 }
@@ -100,12 +110,16 @@ namespace {
 // arithmetic. Returns std::nullopt on overflow so the caller can surface a
 // typed Error::Code::ShapeMismatch.
 std::optional<std::size_t> compute_byte_size(const std::vector<std::int64_t>& shape,
-                                              DType dtype) noexcept {
+                                             DType dtype) noexcept {
   const std::size_t element_width = dtype_byte_width(dtype);
-  if (element_width == 0) return std::nullopt;
+  if (element_width == 0) {
+    return std::nullopt;
+  }
   std::size_t total = element_width;
   for (auto d : shape) {
-    if (d <= 0) return std::nullopt;
+    if (d <= 0) {
+      return std::nullopt;
+    }
     const auto ud = static_cast<std::size_t>(d);
     if (ud != 0 && total > std::numeric_limits<std::size_t>::max() / ud) {
       return std::nullopt;

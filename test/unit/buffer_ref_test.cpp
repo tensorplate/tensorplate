@@ -14,8 +14,8 @@
 
 namespace {
 
-using tensorplate::BufferOwnership;
 using tensorplate::buffer_ownership_from_string;
+using tensorplate::BufferOwnership;
 using tensorplate::BufferRef;
 using tensorplate::Error;
 using tensorplate::to_string;

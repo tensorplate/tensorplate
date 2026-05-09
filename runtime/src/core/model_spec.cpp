@@ -5,13 +5,13 @@
 
 #include "tensorplate/core/model_spec.hpp"
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <array>
 #include <string>
 #include <string_view>
 #include <utility>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -39,28 +39,36 @@ constexpr std::array<std::pair<PrecisionHint, std::string_view>, 6> kPrecisionNa
 
 std::string_view to_string(ModelClass cls) noexcept {
   for (const auto& [c, name] : kClassNames) {
-    if (c == cls) return name;
+    if (c == cls) {
+      return name;
+    }
   }
   return "custom";
 }
 
 std::optional<ModelClass> model_class_from_string(std::string_view name) noexcept {
   for (const auto& [c, candidate] : kClassNames) {
-    if (candidate == name) return c;
+    if (candidate == name) {
+      return c;
+    }
   }
   return std::nullopt;
 }
 
 std::string_view to_string(PrecisionHint hint) noexcept {
   for (const auto& [p, name] : kPrecisionNames) {
-    if (p == hint) return name;
+    if (p == hint) {
+      return name;
+    }
   }
   return "auto";
 }
 
 std::optional<PrecisionHint> precision_hint_from_string(std::string_view name) noexcept {
   for (const auto& [p, candidate] : kPrecisionNames) {
-    if (candidate == name) return p;
+    if (candidate == name) {
+      return p;
+    }
   }
   return std::nullopt;
 }

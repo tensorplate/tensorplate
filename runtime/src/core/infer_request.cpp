@@ -4,14 +4,14 @@
 
 #include "tensorplate/core/infer_request.hpp"
 
-#include "tensorplate/core/error.hpp"
-#include "tensorplate/core/result.hpp"
-
 #include <chrono>
 #include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -26,8 +26,7 @@ Result<void> validate_inputs(const std::vector<NamedInput>& inputs) {
   seen.reserve(inputs.size());
   for (const auto& in : inputs) {
     if (in.name.empty()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "InferRequest.inputs entry has empty `name`");
+      return unexpected(Error::Code::ConfigInvalid, "InferRequest.inputs entry has empty `name`");
     }
     auto [_, inserted] = seen.insert(in.name);
     if (!inserted) {
@@ -41,8 +40,7 @@ Result<void> validate_inputs(const std::vector<NamedInput>& inputs) {
 }  // namespace
 
 Result<InferRequest> InferRequest::create(std::string request_id, std::string endpoint,
-                                          std::vector<NamedInput> inputs,
-                                          RequestMetadata metadata,
+                                          std::vector<NamedInput> inputs, RequestMetadata metadata,
                                           std::optional<TimePoint> deadline) {
   if (request_id.empty()) {
     return unexpected(Error::Code::ConfigInvalid, "InferRequest.request_id must be non-empty");
@@ -84,10 +82,14 @@ bool InferRequest::is_expired() const noexcept {
 }
 
 std::optional<InferRequest::Duration> InferRequest::time_until_deadline() const noexcept {
-  if (!deadline_.has_value()) return std::nullopt;
+  if (!deadline_.has_value()) {
+    return std::nullopt;
+  }
   const auto delta = *deadline_ - Clock::now();
   const auto delta_ms = std::chrono::duration_cast<Duration>(delta);
-  if (delta_ms.count() < 0) return Duration::zero();
+  if (delta_ms.count() < 0) {
+    return Duration::zero();
+  }
   return delta_ms;
 }
 

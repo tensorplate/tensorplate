@@ -9,12 +9,12 @@
 
 #pragma once
 
-#include "tensorplate/core/result.hpp"
-
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 

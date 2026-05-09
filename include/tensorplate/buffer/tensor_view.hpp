@@ -11,13 +11,13 @@
 
 #pragma once
 
-#include "tensorplate/core/result.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
 #include <vector>
+
+#include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
 
@@ -85,8 +85,8 @@ class TensorView {
   /// `byte_size` only when describing an over-allocated buffer where
   /// the trailing bytes are reserved padding.
   static Result<TensorView> create(DType dtype, std::vector<std::int64_t> shape,
-                                   Layout layout = Layout::RowMajor,
-                                   std::size_t byte_offset = 0, std::size_t byte_size = 0);
+                                   Layout layout = Layout::RowMajor, std::size_t byte_offset = 0,
+                                   std::size_t byte_size = 0);
 
   [[nodiscard]] DType dtype() const noexcept { return dtype_; }
   [[nodiscard]] const std::vector<std::int64_t>& shape() const noexcept { return shape_; }
