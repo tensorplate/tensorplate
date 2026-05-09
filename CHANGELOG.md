@@ -147,6 +147,38 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   explicit byte_size, underflow rejection, empty/zero/negative shape
   rejection, SmolVLA-style chunk shape `[chunk_size, action_dim]`,
   byte_offset preservation, and equality.
+- `include/tensorplate/core/infer_request.hpp` defining the
+  `tensorplate::InferRequest` value object with a vector of named
+  inputs, request metadata, and an optional monotonic
+  `std::chrono::steady_clock::time_point` deadline. `NamedInput`
+  binds a stable name to a `BufferRef` and a `TensorView`; the
+  request supports single-input vision (n=1) and SmolVLA-class
+  multi-input (image_front, image_wrist, state, instruction)
+  through the same type. Validating `create()` and
+  `create_with_relative_deadline()` factories return
+  `Result<InferRequest>` (V01-E02-F03-T01).
+- `tensorplate::RequestMetadata` carries explicit
+  `correlation_id`, `action_chunk_id`, `action_chunk_sequence`, and
+  `stale_after_sequence` fields preserving the LeRobot
+  PolicyServer async-inference contract, plus a free-form
+  string/string `extra` map for caller metadata
+  (V01-E02-F03-T02).
+- `protocol/schemas/infer_request.json` (JSON Schema Draft 7) with
+  `$ref` references to `buffer_ref.json` and `tensor_view.json`,
+  optional `metadata`, and a relative `deadline_ms` field that
+  receivers convert to a monotonic absolute deadline by sampling
+  their own steady clock.
+- Rust mirror `tensorplate_protocol::InferRequest` with
+  `RequestMetadata`, `NamedInput`, `InferRequestError`, and the
+  same validation rules as the C++ factory.
+- T1 unit tests for single-input and SmolVLA-style multi-input
+  construction, LeRobot async metadata preservation, validation
+  rejection (empty request_id / endpoint / inputs / input name and
+  duplicate input names), no-deadline / future-deadline / past-
+  deadline / clamped-to-zero behavior, the relative-deadline
+  factory's negative-value rejection and monotonic conversion,
+  equality, and the requirement that fixtures build without a
+  buffer-pool or adapter (V01-E02-F03-T03).
 
 ### Changed
 

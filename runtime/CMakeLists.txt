@@ -8,6 +8,7 @@ add_library(tp_runtime STATIC
   src/skeleton.cpp
   src/core/error.cpp
   src/core/model_spec.cpp
+  src/core/infer_request.cpp
   src/buffer/buffer_ref.cpp
   src/buffer/tensor_view.cpp
 )
