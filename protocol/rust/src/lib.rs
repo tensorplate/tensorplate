@@ -27,8 +27,10 @@
 use serde::de::DeserializeOwned;
 
 pub mod error;
+pub mod model_spec;
 
 pub use error::{ErrorCode, ProtocolError};
+pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 
 /// Cross-process protocol major version. Bumping this is a breaking change
 /// to any schema under `protocol/schemas/`.

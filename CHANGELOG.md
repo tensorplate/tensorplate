@@ -103,6 +103,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   rejection of unknown `schema_version` values (V01-E02-F01-T02).
 - T1 unit tests for `Error`, `Result<T>`, the protocol round-trip, and
   unknown-schema-version rejection (V01-E02-F01-T03).
+- `include/tensorplate/core/model_spec.hpp` defining the
+  `tensorplate::ModelSpec` value object with `ModelClass`
+  (`vision`, `speech`, `language`, `vla`, `embedding`, `custom`) and
+  `PrecisionHint` (`auto`, `fp32`, `fp16`, `bfloat16`, `int8`, `int4`)
+  taxonomies and a validating `create()` factory returning
+  `Result<ModelSpec>` (V01-E02-F02-T01).
+- `protocol/schemas/model_spec.json` and the Rust mirror
+  `tensorplate_protocol::ModelSpec` with serde round-trip and
+  `decode_with_version_check` support (V01-E02-F02-T02).
+- T1 unit tests for `ModelSpec` validation (empty model_id,
+  artifact_path, backend_hint, present-but-empty profile_id), enum
+  string round-trip, equality, and Rust round-trip
+  (V01-E02-F02-T03).
 
 ### Changed
 
