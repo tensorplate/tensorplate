@@ -6,11 +6,11 @@
 // install paths exist. The real HTTP endpoint, request router, scheduler
 // integration, and graceful shutdown land in V01-E07.
 
-#include "tensorplate/version.hpp"
-
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
+
+#include "tensorplate/version.hpp"
 
 namespace {
 
