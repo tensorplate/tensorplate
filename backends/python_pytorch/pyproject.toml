@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorplate-pytorch-backend"
+description = "TensorPlate Python/PyTorch backend service for fallback and SmolVLA-class workloads."
+version = "0.1.0.dev0"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+readme = "README.md"
+authors = [{ name = "TensorPlate Contributors" }]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# PyTorch and the actual model dependencies join in V01-E05; the V01-E01
+# scaffolding has no runtime dependencies so the package builds and tests
+# anywhere a recent CPython is available.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/tensorplate/tensorplate"
+Repository = "https://github.com/tensorplate/tensorplate"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tensorplate_pytorch_backend*"]
+
+[tool.setuptools.package-data]
+tensorplate_pytorch_backend = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "PT",   # pytest style
+    "RUF",  # ruff-native
+    "ANN",  # annotations
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

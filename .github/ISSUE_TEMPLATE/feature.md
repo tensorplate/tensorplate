@@ -47,7 +47,7 @@ Testing:
 
 - [ ] T1 unit tests for new logic.
 - [ ] T2 integration tests for cross-layer interactions.
-- [ ] T3 adapter contract tests via `ModelLoader*` pointer if a new adapter is added.
+- [ ] T3 adapter contract tests via `ExecutionSession*` pointer if a new adapter is added.
 - [ ] T4 hardware-in-loop validation if hardware behavior changes.
 - [ ] T5 benchmark regression validation if performance-sensitive behavior changes.
 
@@ -63,7 +63,7 @@ Static checks:
 
 - [ ] Acceptance criteria are met.
 - [ ] Implementation matches the required guideline pattern for the touched area.
-- [ ] No new public virtual methods are added to `ModelLoader` without tech lead sign-off.
+- [ ] No new public virtual methods are added to `ExecutionSession` without tech lead sign-off.
 - [ ] Public types and methods have Doxygen comments where applicable.
 - [ ] Config schema, feature flag, protocol, or migration docs are updated where applicable.
 - [ ] `CHANGELOG.md` is updated when behavior or public contracts changed.

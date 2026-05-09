@@ -1,0 +1,49 @@
+---
+# TensorPlate C++ formatting baseline.
+# Run with: clang-format -i path/to/file.cpp
+# Verified by CI with: clang-format --dry-run -Werror
+
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+
+ColumnLimit: 100
+IndentWidth: 2
+UseTab: Never
+TabWidth: 2
+
+DerivePointerAlignment: false
+PointerAlignment: Left
+ReferenceAlignment: Pointer
+
+AccessModifierOffset: -1
+NamespaceIndentation: None
+FixNamespaceComments: true
+ShortNamespaceLines: 0
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+AlwaysBreakTemplateDeclarations: Yes
+
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>$'
+    Priority: 1
+  - Regex: '^<.*>$'
+    Priority: 2
+  - Regex: '^"tensorplate/'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+EmptyLineBeforeAccessModifier: LogicalBlock
+KeepEmptyLinesAtTheStartOfBlocks: false

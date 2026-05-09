@@ -1,0 +1,8 @@
+# Pinned stable Rust toolchain so all contributors and CI runners build
+# against the same compiler. Bumping this is a release-engineering decision
+# and requires a CHANGELOG entry.
+
+[toolchain]
+channel = "1.78.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

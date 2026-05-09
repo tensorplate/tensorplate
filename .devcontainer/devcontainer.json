@@ -1,0 +1,60 @@
+{
+  "name": "TensorPlate dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "RUST_TOOLCHAIN": "1.78.0"
+    }
+  },
+  "remoteUser": "tp",
+  "workspaceFolder": "/workspaces/tensorplate",
+  "containerEnv": {
+    "VCPKG_ROOT": "/opt/vcpkg",
+    "CC": "clang-15",
+    "CXX": "clang++-15"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "C_Cpp.default.cStandard": "c17",
+        "C_Cpp.default.cppStandard": "c++20",
+        "C_Cpp.default.intelliSenseMode": "linux-clang-x64",
+        "C_Cpp.intelliSenseEngine": "disabled",
+        "clangd.arguments": [
+          "--background-index",
+          "--clang-tidy",
+          "--header-insertion=iwyu",
+          "--compile-commands-dir=${workspaceFolder}/build"
+        ],
+        "cmake.configureArgs": [
+          "-DCMAKE_TOOLCHAIN_FILE=${env:VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${workspaceFolder}/cmake/toolchains/x86_64-linux-gnu.cmake"
+        ],
+        "cmake.generator": "Ninja",
+        "rust-analyzer.cargo.allTargets": true,
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true,
+        "[cpp]": {
+          "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+        },
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        }
+      },
+      "extensions": [
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools",
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "github.vscode-github-actions"
+      ]
+    }
+  },
+  "mounts": [
+    "source=tensorplate-vcpkg-cache,target=/var/cache/vcpkg,type=volume",
+    "source=tensorplate-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=tensorplate-cargo-git,target=/usr/local/cargo/git,type=volume"
+  ],
+  "postCreateCommand": ".devcontainer/post-create.sh"
+}

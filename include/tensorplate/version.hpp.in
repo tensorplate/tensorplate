@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// TensorPlate runtime and protocol version constants.
+//
+// This file is generated from include/tensorplate/version.hpp.in by
+// CMake's configure_file(). Do not edit the generated header directly.
+//
+// Versioning rules and the relationship between runtime, protocol, schema,
+// and bundle format versions live in
+// docs/architecture/versioning.md.
+
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace tensorplate {
+
+// ---------------------------------------------------------------------------
+// Runtime version - tied to the CMake project() version. Bumping this
+// requires a CHANGELOG.md entry per CONTRIBUTING.md.
+// ---------------------------------------------------------------------------
+
+/// Runtime major version (compatibility-breaking bumps).
+inline constexpr std::uint32_t kRuntimeVersionMajor = @TensorPlate_VERSION_MAJOR@;
+
+/// Runtime minor version (additive feature bumps).
+inline constexpr std::uint32_t kRuntimeVersionMinor = @TensorPlate_VERSION_MINOR@;
+
+/// Runtime patch version (bug-fix bumps; no contract change).
+inline constexpr std::uint32_t kRuntimeVersionPatch = @TensorPlate_VERSION_PATCH@;
+
+/// Pre-release / build suffix appended to runtime version strings.
+/// Empty for stable releases.
+inline constexpr std::string_view kRuntimeVersionSuffix = "@TP_RUNTIME_VERSION_SUFFIX@";
+
+/// Full runtime version string in `MAJOR.MINOR.PATCH[-SUFFIX]` form.
+inline constexpr std::string_view kRuntimeVersion = "@TP_RUNTIME_VERSION_STRING@";
+
+// ---------------------------------------------------------------------------
+// Protocol version - the version of the cross-process schemas in
+// protocol/schemas/. Independent of the runtime version because Rust and
+// C++ components evolve on different cadences.
+// ---------------------------------------------------------------------------
+
+/// Protocol major version (breaking schema change).
+inline constexpr std::uint32_t kProtocolVersionMajor = @TP_PROTOCOL_VERSION_MAJOR@;
+
+/// Protocol minor version (additive schema change).
+inline constexpr std::uint32_t kProtocolVersionMinor = @TP_PROTOCOL_VERSION_MINOR@;
+
+/// Protocol version string in `MAJOR.MINOR` form.
+inline constexpr std::string_view kProtocolVersion = "@TP_PROTOCOL_VERSION_STRING@";
+
+// ---------------------------------------------------------------------------
+// Bundle format version - the version of the deployable model bundle
+// layout described in V01-E13. Bumped only when the on-disk bundle format
+// changes; runtime bumps do not imply a bundle bump.
+// ---------------------------------------------------------------------------
+
+/// Bundle format major version.
+inline constexpr std::uint32_t kBundleFormatVersionMajor = @TP_BUNDLE_FORMAT_VERSION_MAJOR@;
+
+/// Bundle format minor version.
+inline constexpr std::uint32_t kBundleFormatVersionMinor = @TP_BUNDLE_FORMAT_VERSION_MINOR@;
+
+/// Bundle format version string in `MAJOR.MINOR` form.
+inline constexpr std::string_view kBundleFormatVersion = "@TP_BUNDLE_FORMAT_VERSION_STRING@";
+
+}  // namespace tensorplate

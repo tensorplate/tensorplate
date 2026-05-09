@@ -31,7 +31,7 @@ Treat these areas as security-sensitive:
 
 - Device agent deployment, rollback, authentication, and control-plane communication.
 - Serving-worker local control IPC.
-- Watchdog heartbeat, fatal-error reporting, and safe-state signaling.
+- Observability heartbeat, fatal-error reporting, and safe-state signaling.
 - Config parsing and schema validation.
 - Protocol schemas and generated bindings.
 - Model loading and backend adapter boundaries.

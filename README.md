@@ -15,7 +15,7 @@ TensorPlate is intended to provide:
 - A hardware-adjacent inference runtime for devices such as Jetson and Kria-class edge systems.
 - A serving worker with explicit lifecycle, readiness, and health contracts.
 - A Rust device agent for deployment, rollback, supervision, and desired-state reconciliation.
-- Adapter-based backend support for runtimes such as TensorRT and ONNX Runtime.
+- Adapter-based backend support for runtimes such as TensorRT and PyTorch/LibTorch.
 - A test strategy that separates unit, integration, adapter contract, hardware-in-loop, and benchmark validation.
 
 ## Architecture Principles
@@ -33,22 +33,26 @@ TensorPlate contributions should preserve these core constraints:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the working contribution contract.
 
-## Planned Repository Layout
+## Repository Layout
 
 ```text
-include/tensorplate/    Public C++ headers
-runtime/                Core inference runtime
-serving_worker/         Data-plane worker process
-agent/                  Rust device agent
-watchdog/               Rust safety monitor
-cli/                    Rust operator CLI
-sdk/python/             Python SDK
-test/                   Unit, integration, contract, HIL, and benchmark tests
-config/schemas/         Deployment and runtime config schemas
-protocol/               Language-neutral schemas and generated bindings
-cmake/                  Toolchains, modules, and feature flags
-docs/                   Public architecture and contributing docs
+include/tensorplate/         Public C++ headers
+runtime/                     Core inference runtime (C++20)
+serving_worker/              Data-plane worker process (C++20)
+backends/python_pytorch/     Out-of-process Python/PyTorch backend
+agent/                       Rust device agent
+cli/                         Rust operator CLI
+observability/               Rust independent health monitor
+protocol/schemas/            Language-neutral cross-component schemas
+protocol/rust/               Rust protocol crate consuming the schemas
+config/schemas/              Deployment and runtime config schemas
+test/                        Unit, integration, contract, HIL, and benchmark tests
+cmake/                       CMake toolchains, modules, and feature flags
+docs/                        Public architecture and contributing docs
 ```
+
+See [`docs/architecture/ownership.md`](docs/architecture/ownership.md) for
+package owners, allowed dependencies, and review gates.
 
 ## Getting Started
 

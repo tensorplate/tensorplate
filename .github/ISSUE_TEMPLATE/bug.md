@@ -12,14 +12,14 @@ Describe the defect and why it matters.
 Affected area:
 
 - [ ] Runtime core
-- [ ] ModelLoader adapter
+- [ ] ExecutionSession adapter
 - [ ] Scheduler
 - [ ] Serving mode
 - [ ] Buffer plane
 - [ ] Input adapter
 - [ ] Telemetry or hooks
 - [ ] Agent
-- [ ] Watchdog
+- [ ] Observability
 - [ ] CLI
 - [ ] Python SDK
 - [ ] ROS 2
@@ -48,7 +48,7 @@ Environment:
 - Branch or commit:
 - OS:
 - Hardware target:
-- CUDA/TensorRT/ONNX Runtime version:
+- CUDA/TensorRT/PyTorch version:
 - Feature flags:
 
 Expected:
@@ -85,7 +85,7 @@ Investigation:
 Possible contract impact:
 
 - [ ] Layer dependency direction
-- [ ] ModelLoader NVI contract
+- [ ] ExecutionSession NVI contract
 - [ ] Backend registry/factory contract
 - [ ] InferScheduler strategy contract
 - [ ] `Result<T>` and typed error propagation

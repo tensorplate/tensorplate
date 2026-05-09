@@ -1,0 +1,159 @@
+name: C++
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: cpp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_GENERATOR: Ninja
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+jobs:
+  build-test:
+    name: build + T1 (${{ matrix.preset }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: relwithdebinfo
+            build_type: RelWithDebInfo
+            sanitizers: 'OFF'
+          - preset: asan-ubsan
+            build_type: Debug
+            sanitizers: 'ON'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            clang-15 \
+            clang++-15 \
+            llvm-15 \
+            ca-certificates
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+
+      - name: Export vcpkg cache credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Cache vcpkg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ matrix.preset }}-
+            vcpkg-${{ runner.os }}-
+
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DTP_WARNINGS_AS_ERRORS=ON \
+            -DTP_ENABLE_SANITIZERS=${{ matrix.sanitizers }} \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: T1 unit tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure -L T1
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-15
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
+      - name: Check formatting
+        shell: bash
+        run: |
+          mapfile -t files < <(
+            git ls-files include runtime serving_worker test \
+              | grep -E '\.(cpp|cc|cxx|hpp|hh|h)$' || true
+          )
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No C++ files to format-check."
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}"
+          clang-format --dry-run -Werror "${files[@]}"
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            clang-15 \
+            clang++-15 \
+            clang-tidy-15
+          sudo update-alternatives --install /usr/bin/clang      clang      /usr/bin/clang-15      100
+          sudo update-alternatives --install /usr/bin/clang++    clang++    /usr/bin/clang++-15    100
+          sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
+
+      - name: Cache vcpkg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/vcpkg_installed
+            ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-tidy-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-
+
+      - name: Configure (export compile_commands.json)
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+
+      - name: Run clang-tidy
+        shell: bash
+        run: |
+          mapfile -t files < <(
+            git ls-files runtime serving_worker | grep -E '\.cpp$' || true
+          )
+          if [[ ${#files[@]} -eq 0 ]]; then
+            echo "No C++ source files for clang-tidy."
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}"
+          clang-tidy --quiet -p build --warnings-as-errors='*' "${files[@]}"
