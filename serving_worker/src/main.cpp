@@ -6,19 +6,18 @@
 // install paths exist. The real HTTP endpoint, request router, scheduler
 // integration, and graceful shutdown land in V01-E07.
 
+#include "tensorplate/version.hpp"
+
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
 
-#include "tensorplate/internal/skeleton.hpp"
-
 namespace {
 
-constexpr std::string_view kVersion = "0.1.0-dev";
-
 int print_version() {
-  std::cout << "tensorplate-serving " << kVersion << '\n'
-            << "runtime skeleton: " << tensorplate::internal::runtime_skeleton_marker() << '\n';
+  std::cout << "tensorplate-serving " << tensorplate::kRuntimeVersion << '\n'
+            << "protocol " << tensorplate::kProtocolVersion << '\n'
+            << "bundle-format " << tensorplate::kBundleFormatVersion << '\n';
   return EXIT_SUCCESS;
 }
 

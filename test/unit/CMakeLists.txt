@@ -1,7 +1,6 @@
 # T1 unit tests for tp_runtime.
 
 add_executable(tp_test_unit
-  smoke_test.cpp
   version_test.cpp
 )
 

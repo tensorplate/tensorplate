@@ -14,8 +14,6 @@ target_include_directories(tp_runtime
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated/include>
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_compile_features(tp_runtime PUBLIC cxx_std_20)
