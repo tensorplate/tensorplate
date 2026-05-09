@@ -6,12 +6,8 @@
   "homepage": "https://github.com/tensorplate/tensorplate",
   "license": "Apache-2.0",
   "supports": "(linux | osx | windows) & !uwp",
-  "builtin-baseline": "99a97de2cb371449d4fb9dc970f2ac562d689ec2",
   "dependencies": [
-    {
-      "name": "gtest",
-      "version>=": "1.14.0"
-    }
+    "gtest"
   ],
   "features": {
     "tensorrt-adapter": {
