@@ -87,6 +87,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   out-of-process IPC dependency arrow, and forbidden-dependency rule
   preventing the Python backend from linking against any C++ runtime
   module.
+- `include/tensorplate/core/error.hpp` defining the `tensorplate::Error`
+  value object and the stable `Error::Code` taxonomy
+  (`ConfigInvalid`, `LoadFailed`, `NotReady`, `ShapeMismatch`,
+  `Unsupported`, `OOMError`, `Timeout`, `InferenceFailed`, `Internal`)
+  with snake_case `to_string` / `error_code_from_string` helpers
+  (V01-E02-F01-T01).
+- `include/tensorplate/core/result.hpp` providing
+  `tensorplate::Result<T>` (and `Result<void>`) with std::expected-shaped
+  semantics and a `tp` namespace alias for the planning-doc API surface
+  (V01-E02-F01-T01).
+- `protocol/schemas/error.json` (JSON Schema Draft 7) and Rust mirror
+  `tensorplate_protocol::ProtocolError` / `ErrorCode`, plus
+  `decode_with_version_check` and `DecodeError` enforcing typed
+  rejection of unknown `schema_version` values (V01-E02-F01-T02).
+- T1 unit tests for `Error`, `Result<T>`, the protocol round-trip, and
+  unknown-schema-version rejection (V01-E02-F01-T03).
 
 ### Changed
 

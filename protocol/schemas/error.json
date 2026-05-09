@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/error.json",
+  "title": "TensorPlate Error",
+  "description": "Typed error payload shared by C++ runtime, Rust agent/CLI/observability, and the Python sidecar backend. Mirrors include/tensorplate/core/error.hpp::Error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "code", "message"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "Schema family version. Decoders MUST reject unknown values with Error::Code::Unsupported."
+    },
+    "code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Stable error code. The numeric C++ enum value is NOT part of the wire protocol; only these strings are."
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable single-line summary."
+    },
+    "context": {
+      "type": "string",
+      "description": "Optional additional context (file path, request id, backend detail)."
+    }
+  }
+}

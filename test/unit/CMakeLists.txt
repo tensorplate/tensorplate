@@ -2,6 +2,8 @@
 
 add_executable(tp_test_unit
   version_test.cpp
+  error_test.cpp
+  result_test.cpp
 )
 
 target_link_libraries(tp_test_unit

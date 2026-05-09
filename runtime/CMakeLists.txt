@@ -6,6 +6,7 @@
 
 add_library(tp_runtime STATIC
   src/skeleton.cpp
+  src/core/error.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)
