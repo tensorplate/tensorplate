@@ -179,6 +179,31 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   factory's negative-value rejection and monotonic conversion,
   equality, and the requirement that fixtures build without a
   buffer-pool or adapter (V01-E02-F03-T03).
+- `include/tensorplate/core/infer_result.hpp` defining
+  `tensorplate::InferResult` as a discriminated value carrying
+  either a non-empty vector of `NamedOutput`s or a typed
+  `tensorplate::Error`, plus optional `InferenceTiming`
+  breakdowns (queue / execution / total latency in nanoseconds)
+  populated by the V01-E04 ExecutionSession NVI wrapper. Chunk-
+  shaped VLA action output is one pattern of `outputs` and does
+  not require a VLA-specific result type. Success construction
+  validates output naming the same way `InferRequest` validates
+  inputs (V01-E02-F04-T01).
+- `protocol/schemas/infer_result.json` (JSON Schema Draft 7) with
+  $ref-composed `error.json` / `buffer_ref.json` / `tensor_view.json`
+  fragments and an `allOf` constraint that enforces the
+  status / outputs / error invariant on the wire. Rust mirror
+  `tensorplate_protocol::InferResult` with `InferResultStatus`,
+  `NamedOutput`, `InferenceTiming`, and `InferResultError`
+  taxonomy (V01-E02-F04-T02).
+- T1 unit tests covering success construction with chunk-shaped
+  output, multi-named-output ordering, validation rejection
+  (empty / duplicate / empty-name outputs), failure construction
+  preserving the typed error code, ingress-time empty-request_id
+  failures, safe-default accessors on wrong-state lookups,
+  optional timing field preservation, equality, and explicit
+  compatibility of every `Error::Code` with the result taxonomy
+  (V01-E02-F04-T03).
 
 ### Changed
 

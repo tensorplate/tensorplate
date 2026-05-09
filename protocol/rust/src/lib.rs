@@ -29,12 +29,16 @@ use serde::de::DeserializeOwned;
 pub mod buffer_ref;
 pub mod error;
 pub mod infer_request;
+pub mod infer_result;
 pub mod model_spec;
 pub mod tensor_view;
 
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
 pub use error::{ErrorCode, ProtocolError};
 pub use infer_request::{InferRequest, InferRequestError, NamedInput, RequestMetadata};
+pub use infer_result::{
+    InferResult, InferResultError, InferResultStatus, InferenceTiming, NamedOutput,
+};
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
 
