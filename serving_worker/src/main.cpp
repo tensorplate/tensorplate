@@ -18,8 +18,7 @@ constexpr std::string_view kVersion = "0.1.0-dev";
 
 int print_version() {
   std::cout << "tensorplate-serving " << kVersion << '\n'
-            << "runtime skeleton: "
-            << tensorplate::internal::runtime_skeleton_marker() << '\n';
+            << "runtime skeleton: " << tensorplate::internal::runtime_skeleton_marker() << '\n';
   return EXIT_SUCCESS;
 }
 

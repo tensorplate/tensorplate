@@ -4,11 +4,11 @@
 // exposed by include/tensorplate/version.hpp are all populated and that the
 // composed strings agree with the component fields.
 
+#include "tensorplate/version.hpp"
+
 #include <gtest/gtest.h>
 
 #include <string>
-
-#include "tensorplate/version.hpp"
 
 namespace {
 
@@ -34,15 +34,14 @@ TEST(Version, RuntimeStringMatchesComponents) {
 }
 
 TEST(Version, ProtocolStringMatchesComponents) {
-  EXPECT_EQ(compose_two(tensorplate::kProtocolVersionMajor,
-                        tensorplate::kProtocolVersionMinor),
+  EXPECT_EQ(compose_two(tensorplate::kProtocolVersionMajor, tensorplate::kProtocolVersionMinor),
             std::string(tensorplate::kProtocolVersion));
 }
 
 TEST(Version, BundleFormatStringMatchesComponents) {
-  EXPECT_EQ(compose_two(tensorplate::kBundleFormatVersionMajor,
-                        tensorplate::kBundleFormatVersionMinor),
-            std::string(tensorplate::kBundleFormatVersion));
+  EXPECT_EQ(
+      compose_two(tensorplate::kBundleFormatVersionMajor, tensorplate::kBundleFormatVersionMinor),
+      std::string(tensorplate::kBundleFormatVersion));
 }
 
 TEST(Version, RuntimeIsNonZero) {
