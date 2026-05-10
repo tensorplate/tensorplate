@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::model_spec::ModelSpec;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Rollout policy. v0.1.0 supports `Immediate` only; future versions
 /// (canary / staged) extend without renaming.
@@ -101,6 +101,23 @@ impl DesiredState {
             rollout,
             labels,
         })
+    }
+}
+
+impl ValidatePayload for DesiredState {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        let model_spec = self
+            .model_spec
+            .map(ValidatePayload::validate_payload)
+            .transpose()?;
+        Self::new(
+            self.deployment_id,
+            self.bundle_digest,
+            model_spec,
+            self.rollout,
+            self.labels,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
     }
 }
 

@@ -47,16 +47,19 @@ Bindings are **hand-written** in v0.1.0:
 | Rust    | `protocol/rust/src/<name>.rs` |
 | C++     | `include/tensorplate/core/*.hpp` and `include/tensorplate/buffer/*.hpp` (value objects) |
 
-The Rust crate is the authoritative serde mirror. C++ value objects
-mirror the same fields and use stable string mappings declared in
-runtime translation units. Round-trip fixtures under
-`protocol/rust/tests/` and `test/integration/` guard against drift.
+The Rust crate is the authoritative serde mirror. Each root payload
+implements `ValidatePayload` so `decode_with_version_check` rejects
+current-version data that violates constructor-level invariants. C++
+value objects mirror the same fields and use stable string mappings
+declared in runtime translation units; C++ JSON round trips start once
+the V01-E07 / V01-E05 bindings land.
 
 ## Adding a new payload
 
 1. Add `protocol/schemas/<name>.json` with `schema_version`
    `const="0.1"` and `additionalProperties: false`.
-2. Add `protocol/rust/src/<name>.rs` with serde-derived structs.
+2. Add `protocol/rust/src/<name>.rs` with serde-derived structs and a
+   `ValidatePayload` implementation for semantic validation.
 3. Add a hand-written C++ mirror if the payload crosses the C++
    runtime boundary.
 4. Add a round-trip test under `protocol/rust/tests/` or

@@ -7,7 +7,6 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,6 +118,22 @@ TEST(InferRequest, RejectsDuplicateInputNames) {
   EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
 }
 
+TEST(InferRequest, RejectsMissingInputBuffer) {
+  NamedInput bad = vision_input();
+  bad.buffer = BufferRef{};
+  auto r = InferRequest::create("req-1", "yolov8n", {bad});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
+}
+
+TEST(InferRequest, RejectsMalformedMetadata) {
+  RequestMetadata md;
+  md.correlation_id = "";
+  auto r = InferRequest::create("req-1", "yolov8n", {vision_input()}, md);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
+}
+
 TEST(InferRequest, NoDeadlineMeansNeverExpired) {
   auto r = InferRequest::create("req-1", "yolov8n", {vision_input()});
   ASSERT_TRUE(r.has_value());
@@ -137,22 +152,23 @@ TEST(InferRequest, FutureDeadlineReportsTimeRemaining) {
   EXPECT_LE(remaining->count(), 500);
 }
 
-TEST(InferRequest, PastDeadlineIsExpired) {
+TEST(InferRequest, RejectsExpiredDeadline) {
   auto deadline = InferRequest::Clock::now() - milliseconds(10);
   auto r = InferRequest::create("req-1", "yolov8n", {vision_input()}, {}, deadline);
-  ASSERT_TRUE(r.has_value());
-  EXPECT_TRUE(r.value().is_expired());
-  // Expired deadlines clamp to zero so admission policies treat
-  // "expired" and "0 ms remaining" the same way.
-  ASSERT_TRUE(r.value().time_until_deadline().has_value());
-  EXPECT_EQ(r.value().time_until_deadline()->count(), 0);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::Timeout);
 }
 
-TEST(InferRequest, RelativeDeadlineFactoryRejectsNegative) {
+TEST(InferRequest, RelativeDeadlineFactoryRejectsNonPositive) {
   auto r = InferRequest::create_with_relative_deadline("req-1", "yolov8n", {vision_input()}, {},
                                                        milliseconds(-1));
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
+
+  auto zero = InferRequest::create_with_relative_deadline("req-1", "yolov8n", {vision_input()}, {},
+                                                          milliseconds(0));
+  ASSERT_FALSE(zero.has_value());
+  EXPECT_EQ(zero.error().code, Error::Code::ConfigInvalid);
 }
 
 TEST(InferRequest, RelativeDeadlineFactoryProducesMonotonicDeadline) {

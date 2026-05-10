@@ -99,7 +99,10 @@ class InferRequest {
   ///   - `endpoint` is empty
   ///   - `inputs` is empty
   ///   - any input has an empty name
+  ///   - any input carries a released / missing buffer
   ///   - duplicate input names are present
+  ///   - metadata IDs are present but empty
+  /// Returns Error::Code::Timeout if `deadline` has already expired.
   static Result<InferRequest> create(std::string request_id, std::string endpoint,
                                      std::vector<NamedInput> inputs, RequestMetadata metadata = {},
                                      std::optional<TimePoint> deadline = std::nullopt);
@@ -107,7 +110,7 @@ class InferRequest {
   /// Convenience factory that converts a relative deadline (milliseconds)
   /// into a monotonic absolute deadline at the moment of construction.
   /// Used by HTTP / IPC adapters that receive a wire-format relative
-  /// deadline in JSON.
+  /// deadline in JSON. Present relative deadlines must be > 0 ms.
   static Result<InferRequest> create_with_relative_deadline(
       std::string request_id, std::string endpoint, std::vector<NamedInput> inputs,
       RequestMetadata metadata, std::optional<Duration> relative_deadline);

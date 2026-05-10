@@ -84,7 +84,7 @@ schema churn.
 ## Round-trip contract
 
 `protocol/rust/tests/fixtures/` holds canonical JSON payloads. The
-v0.1.0 round-trip contract is:
+v0.1.0 Rust fixture contract is:
 
 1. Each fixture parses cleanly via
    `decode_with_version_check::<T>` for its schema type.
@@ -93,9 +93,10 @@ v0.1.0 round-trip contract is:
    equal to the first.
 
 The C++ side picks up the same fixtures in V01-E07 / V01-E05 once
-JSON parsing is wired in. Until then, structural parity is enforced
-by the hand-written value objects and by the matching validation
-rules between `<T>::create` (C++) and `<T>::new` (Rust).
+JSON parsing is wired in. Until then, this PR does not claim the
+V01-E02-F07-T07 Rust/C++ round-trip acceptance criterion as complete;
+it establishes the fixture set and validates the Rust binding against
+the same semantic rules used by the C++ value-object factories.
 
 ## Adding a new payload
 

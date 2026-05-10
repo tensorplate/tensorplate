@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::buffer_ref::BufferRef;
 use crate::tensor_view::TensorView;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// One named input binding: stable name plus payload buffer plus tensor
 /// metadata. Mirrors C++ `tensorplate::NamedInput`.
@@ -88,6 +88,16 @@ pub enum InferRequestError {
     EmptyInputName,
     #[error("InferRequest.inputs has duplicate name `{0}`")]
     DuplicateInputName(String),
+    #[error("InferRequest.deadline_ms, if present, must be > 0")]
+    InvalidDeadline,
+    #[error("InferRequest.metadata.correlation_id, if present, must be non-empty")]
+    EmptyCorrelationId,
+    #[error("InferRequest.metadata.action_chunk_id, if present, must be non-empty")]
+    EmptyActionChunkId,
+    #[error("InferRequest input `{name}` has invalid buffer: {reason}")]
+    InvalidInputBuffer { name: String, reason: String },
+    #[error("InferRequest input `{name}` has invalid tensor: {reason}")]
+    InvalidInputTensor { name: String, reason: String },
 }
 
 impl InferRequest {
@@ -114,24 +124,66 @@ impl InferRequest {
         if inputs.is_empty() {
             return Err(InferRequestError::EmptyInputs);
         }
-        let mut seen: std::collections::HashSet<&str> =
+        if deadline_ms == Some(0) {
+            return Err(InferRequestError::InvalidDeadline);
+        }
+        if matches!(metadata.correlation_id.as_deref(), Some("")) {
+            return Err(InferRequestError::EmptyCorrelationId);
+        }
+        if matches!(metadata.action_chunk_id.as_deref(), Some("")) {
+            return Err(InferRequestError::EmptyActionChunkId);
+        }
+
+        let mut validated_inputs = Vec::with_capacity(inputs.len());
+        let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(inputs.len());
-        for input in &inputs {
+        for input in inputs {
             if input.name.is_empty() {
                 return Err(InferRequestError::EmptyInputName);
             }
-            if !seen.insert(input.name.as_str()) {
+            if !seen.insert(input.name.clone()) {
                 return Err(InferRequestError::DuplicateInputName(input.name.clone()));
             }
+            let name = input.name;
+            let buffer = input.buffer.validate_payload().map_err(|err| {
+                InferRequestError::InvalidInputBuffer {
+                    name: name.clone(),
+                    reason: err.to_string(),
+                }
+            })?;
+            let tensor = input.tensor.validate_payload().map_err(|err| {
+                InferRequestError::InvalidInputTensor {
+                    name: name.clone(),
+                    reason: err.to_string(),
+                }
+            })?;
+            validated_inputs.push(NamedInput {
+                name,
+                buffer,
+                tensor,
+            });
         }
         Ok(Self {
             schema_version: SCHEMA_VERSION.to_string(),
             request_id,
             endpoint,
-            inputs,
+            inputs: validated_inputs,
             metadata,
             deadline_ms,
         })
+    }
+}
+
+impl ValidatePayload for InferRequest {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Self::new(
+            self.request_id,
+            self.endpoint,
+            self.inputs,
+            self.metadata,
+            self.deadline_ms,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
     }
 }
 
@@ -240,6 +292,10 @@ mod tests {
             InferRequest::new("id", "ep", vec![], RequestMetadata::default(), None),
             Err(InferRequestError::EmptyInputs)
         ));
+        assert!(matches!(
+            InferRequest::new("id", "ep", v.clone(), RequestMetadata::default(), Some(0)),
+            Err(InferRequestError::InvalidDeadline)
+        ));
 
         let bad_name = NamedInput {
             name: String::new(),
@@ -272,5 +328,48 @@ mod tests {
         let json = serde_json::to_string(&req).expect("serialize");
         let back: InferRequest = decode_with_version_check(&json).expect("decode");
         assert_eq!(back.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_duplicate_inputs() {
+        let json = format!(
+            r#"{{
+                "schema_version":"{SCHEMA_VERSION}",
+                "request_id":"req-4",
+                "endpoint":"yolo",
+                "inputs":[
+                    {{
+                        "name":"image",
+                        "buffer":{{"schema_version":"{SCHEMA_VERSION}","id":1,"size_bytes":4,"ownership":"owned"}},
+                        "tensor":{{"schema_version":"{SCHEMA_VERSION}","dtype":"float32","shape":[1]}}
+                    }},
+                    {{
+                        "name":"image",
+                        "buffer":{{"schema_version":"{SCHEMA_VERSION}","id":2,"size_bytes":4,"ownership":"owned"}},
+                        "tensor":{{"schema_version":"{SCHEMA_VERSION}","dtype":"float32","shape":[1]}}
+                    }}
+                ]
+            }}"#
+        );
+        let err = decode_with_version_check::<InferRequest>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_invalid_input_buffer() {
+        let json = format!(
+            r#"{{
+                "schema_version":"{SCHEMA_VERSION}",
+                "request_id":"req-5",
+                "endpoint":"yolo",
+                "inputs":[{{
+                    "name":"image",
+                    "buffer":{{"schema_version":"{SCHEMA_VERSION}","id":0,"size_bytes":4,"ownership":"owned"}},
+                    "tensor":{{"schema_version":"{SCHEMA_VERSION}","dtype":"float32","shape":[1]}}
+                }}]
+            }}"#
+        );
+        let err = decode_with_version_check::<InferRequest>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

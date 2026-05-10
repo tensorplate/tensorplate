@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Stable error codes shared with the C++ runtime and JSON Schema.
 ///
@@ -90,6 +90,12 @@ impl ProtocolError {
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
         self
+    }
+}
+
+impl ValidatePayload for ProtocolError {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Ok(self)
     }
 }
 

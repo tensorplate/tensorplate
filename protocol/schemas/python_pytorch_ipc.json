@@ -18,6 +18,7 @@
     },
     "correlation_id": {
       "type": "string",
+      "minLength": 1,
       "description": "Inference correlation id propagated from the originating InferRequest."
     },
     "kind": {
@@ -69,7 +70,7 @@
           },
           "payload_length": {
             "type": "integer",
-            "minimum": 0,
+            "minimum": 1,
             "description": "Length of this tensor's raw bytes inside the tensor-payload region."
           }
         }
@@ -92,6 +93,7 @@
       "type": "object",
       "additionalProperties": false,
       "description": "Payload of `metric_event` messages.",
+      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
@@ -126,12 +128,50 @@
       "if": {
         "properties": {
           "kind": {
+            "enum": [
+              "load_model_response",
+              "prime_response",
+              "infer_response",
+              "infer_async_response",
+              "cancel_response",
+              "unload_response",
+              "health_check_response"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": ["status"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["error"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
             "const": "error_event"
           }
         }
       },
       "then": {
-        "required": ["error"]
+        "required": ["status", "error"],
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        }
       }
     },
     {
@@ -144,6 +184,44 @@
       },
       "then": {
         "required": ["metric"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["infer", "infer_async"]
+          }
+        }
+      },
+      "then": {
+        "required": ["correlation_id", "tensors"],
+        "properties": {
+          "tensors": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["infer_response", "infer_async_response"]
+          },
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": ["kind", "status"]
+      },
+      "then": {
+        "required": ["tensors"],
+        "properties": {
+          "tensors": {
+            "minItems": 1
+          }
+        }
       }
     }
   ]

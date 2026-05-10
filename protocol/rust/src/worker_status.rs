@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Coarse component state shared by `agent_state`, `serving_state`, and
 /// `observability_state`. The values map directly to the V01-E10 ROS 2
@@ -110,6 +110,37 @@ impl WorkerStatus {
     }
 }
 
+impl ValidatePayload for WorkerStatus {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        let last_error = match (self.last_error_code, self.last_error_message) {
+            (Some(code), Some(message)) => Some((code, message)),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(DecodeError::InvalidPayload(
+                    "WorkerStatus.last_error_message must be present with last_error_code".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(DecodeError::InvalidPayload(
+                    "WorkerStatus.last_error_code must be present with last_error_message".into(),
+                ));
+            }
+        };
+        Self::new(
+            self.agent_state,
+            self.serving_state,
+            self.observability_state,
+            self.active_deployment,
+            self.backend,
+            self.missed_heartbeat_count,
+            self.missed_deadline_rate,
+            self.queue_depth,
+            last_error,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -187,5 +218,14 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_invalid_rate() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","agent_state":"ready","serving_state":"ready","observability_state":"ready","missed_deadline_rate":1.25}}"#
+        );
+        let err = decode_with_version_check::<WorkerStatus>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

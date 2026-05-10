@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// State machine for the deploy transaction. Forward-only along the
 /// success path; `Failed` and `RolledBack` are terminal.
@@ -72,6 +72,21 @@ pub enum DeployTransactionError {
     MissingFailureMetadata,
     #[error("DeployTransaction.failure must be absent for non-terminal-failure states")]
     SpuriousFailureMetadata,
+    #[error("DeployTransaction.bundle_digest, if present, must follow the `algo:hex` form")]
+    InvalidBundleDigest,
+}
+
+fn looks_like_digest(d: &str) -> bool {
+    if let Some((algo, hex)) = d.split_once(':') {
+        let algo_ok = !algo.is_empty()
+            && algo
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        let hex_ok = !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+        algo_ok && hex_ok
+    } else {
+        false
+    }
 }
 
 impl DeployTransaction {
@@ -97,6 +112,10 @@ impl DeployTransaction {
         if deployment_id.is_empty() {
             return Err(DeployTransactionError::EmptyDeploymentId);
         }
+        let bundle_digest = bundle_digest.into();
+        if !bundle_digest.is_empty() && !looks_like_digest(&bundle_digest) {
+            return Err(DeployTransactionError::InvalidBundleDigest);
+        }
         let is_failure_state = matches!(state, DeployState::Failed | DeployState::RolledBack);
         if is_failure_state && failure.is_none() {
             return Err(DeployTransactionError::MissingFailureMetadata);
@@ -108,12 +127,27 @@ impl DeployTransaction {
             schema_version: SCHEMA_VERSION.to_string(),
             transaction_id,
             deployment_id,
-            bundle_digest: bundle_digest.into(),
+            bundle_digest,
             state,
             started_monotonic_ns,
             last_transition_monotonic_ns,
             failure,
         })
+    }
+}
+
+impl ValidatePayload for DeployTransaction {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Self::new(
+            self.transaction_id,
+            self.deployment_id,
+            self.bundle_digest,
+            self.state,
+            self.started_monotonic_ns,
+            self.last_transition_monotonic_ns,
+            self.failure,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
     }
 }
 
@@ -230,5 +264,14 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_failed_without_failure() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","transaction_id":"tx","deployment_id":"d","bundle_digest":"sha256:ab","state":"failed"}}"#
+        );
+        let err = decode_with_version_check::<DeployTransaction>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

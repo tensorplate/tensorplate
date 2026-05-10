@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::buffer_ref::BufferRef;
 use crate::error::ProtocolError;
 use crate::tensor_view::TensorView;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// One named output binding: stable name plus payload buffer plus tensor
 /// metadata, with an optional semantic tag.
@@ -79,6 +79,12 @@ pub enum InferResultError {
     EmptyOutputName,
     #[error("InferResult.outputs has duplicate name `{0}`")]
     DuplicateOutputName(String),
+    #[error("InferResult.outputs entry `{0}` has empty `semantic_tag`")]
+    EmptySemanticTag(String),
+    #[error("InferResult output `{name}` has invalid buffer: {reason}")]
+    InvalidOutputBuffer { name: String, reason: String },
+    #[error("InferResult output `{name}` has invalid tensor: {reason}")]
+    InvalidOutputTensor { name: String, reason: String },
 }
 
 impl InferResult {
@@ -95,21 +101,44 @@ impl InferResult {
         if outputs.is_empty() {
             return Err(InferResultError::EmptyOutputs);
         }
-        let mut seen: std::collections::HashSet<&str> =
+        let mut validated_outputs = Vec::with_capacity(outputs.len());
+        let mut seen: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(outputs.len());
-        for o in &outputs {
+        for o in outputs {
             if o.name.is_empty() {
                 return Err(InferResultError::EmptyOutputName);
             }
-            if !seen.insert(o.name.as_str()) {
+            if !seen.insert(o.name.clone()) {
                 return Err(InferResultError::DuplicateOutputName(o.name.clone()));
             }
+            if matches!(o.semantic_tag.as_deref(), Some("")) {
+                return Err(InferResultError::EmptySemanticTag(o.name));
+            }
+            let name = o.name;
+            let buffer = o.buffer.validate_payload().map_err(|err| {
+                InferResultError::InvalidOutputBuffer {
+                    name: name.clone(),
+                    reason: err.to_string(),
+                }
+            })?;
+            let tensor = o.tensor.validate_payload().map_err(|err| {
+                InferResultError::InvalidOutputTensor {
+                    name: name.clone(),
+                    reason: err.to_string(),
+                }
+            })?;
+            validated_outputs.push(NamedOutput {
+                name,
+                buffer,
+                tensor,
+                semantic_tag: o.semantic_tag,
+            });
         }
         Ok(Self {
             schema_version: SCHEMA_VERSION.to_string(),
             request_id: request_id.into(),
             status: InferResultStatus::Success,
-            outputs: Some(outputs),
+            outputs: Some(validated_outputs),
             error: None,
             timing,
         })
@@ -136,6 +165,45 @@ impl InferResult {
     #[must_use]
     pub fn is_success(&self) -> bool {
         matches!(self.status, InferResultStatus::Success)
+    }
+}
+
+impl ValidatePayload for InferResult {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        match self.status {
+            InferResultStatus::Success => {
+                if self.error.is_some() {
+                    return Err(DecodeError::InvalidPayload(
+                        "InferResult success must not carry `error`".into(),
+                    ));
+                }
+                Self::success(
+                    self.request_id,
+                    self.outputs.ok_or_else(|| {
+                        DecodeError::InvalidPayload(
+                            "InferResult success must carry at least one named output".into(),
+                        )
+                    })?,
+                    self.timing,
+                )
+                .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
+            }
+            InferResultStatus::Failure => {
+                if self.outputs.is_some() {
+                    return Err(DecodeError::InvalidPayload(
+                        "InferResult failure must not carry `outputs`".into(),
+                    ));
+                }
+                let error = self.error.ok_or_else(|| {
+                    DecodeError::InvalidPayload("InferResult failure must carry `error`".into())
+                })?;
+                Ok(Self::failure(
+                    self.request_id,
+                    error.validate_payload()?,
+                    self.timing,
+                ))
+            }
+        }
     }
 }
 
@@ -245,5 +313,24 @@ mod tests {
         let json = serde_json::to_string(&r).expect("serialize");
         let back: InferResult = decode_with_version_check(&json).expect("decode");
         assert_eq!(back.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_status_invariant_violation() {
+        let json = format!(
+            r#"{{
+                "schema_version":"{SCHEMA_VERSION}",
+                "request_id":"req-1",
+                "status":"success",
+                "outputs":[{{
+                    "name":"action_chunk",
+                    "buffer":{{"schema_version":"{SCHEMA_VERSION}","id":101,"size_bytes":448,"ownership":"owned"}},
+                    "tensor":{{"schema_version":"{SCHEMA_VERSION}","dtype":"float32","shape":[16,7]}}
+                }}],
+                "error":{{"schema_version":"{SCHEMA_VERSION}","code":"internal","message":"should not be present"}}
+            }}"#
+        );
+        let err = decode_with_version_check::<InferResult>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

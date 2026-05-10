@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Discrete health-event kind. The set is union-stable: post-v0.1.0
 /// additions append rather than rename.
@@ -104,6 +104,42 @@ impl HealthEvent {
     }
 }
 
+fn validate_non_negative_metric(name: &str, value: Option<f64>) -> Result<(), DecodeError> {
+    if matches!(value, Some(v) if v < 0.0 || !v.is_finite()) {
+        return Err(DecodeError::InvalidPayload(format!(
+            "HealthEvent.control_loop_metrics.{name} must be finite and >= 0"
+        )));
+    }
+    Ok(())
+}
+
+impl ValidatePayload for HealthEvent {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        validate_non_negative_metric("jitter_p50_ms", self.control_loop_metrics.jitter_p50_ms)?;
+        validate_non_negative_metric("jitter_p95_ms", self.control_loop_metrics.jitter_p95_ms)?;
+        validate_non_negative_metric("jitter_p99_ms", self.control_loop_metrics.jitter_p99_ms)?;
+        validate_non_negative_metric("jitter_max_ms", self.control_loop_metrics.jitter_max_ms)?;
+        validate_non_negative_metric(
+            "mean_frequency_hz",
+            self.control_loop_metrics.mean_frequency_hz,
+        )?;
+        validate_non_negative_metric(
+            "frequency_stddev_hz",
+            self.control_loop_metrics.frequency_stddev_hz,
+        )?;
+        validate_non_negative_metric(
+            "frequency_error_pct",
+            self.control_loop_metrics.frequency_error_pct,
+        )?;
+        if matches!(self.control_loop_metrics.rolling_window_seconds, Some(0)) {
+            return Err(DecodeError::InvalidPayload(
+                "HealthEvent.control_loop_metrics.rolling_window_seconds must be >= 1".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -172,5 +208,14 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_negative_metric() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","kind":"missed_deadline","monotonic_timestamp_ns":1,"control_loop_metrics":{{"jitter_p95_ms":-1.0}}}}"#
+        );
+        let err = decode_with_version_check::<HealthEvent>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Model class taxonomy. v0.1.0 validates only `Vision` and `Vla`; the
 /// remaining values are reserved so future bundle parsing does not require
@@ -146,6 +146,20 @@ impl ModelSpec {
     }
 }
 
+impl ValidatePayload for ModelSpec {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Self::new(
+            self.model_id,
+            self.model_class,
+            self.artifact_path,
+            self.backend_hint,
+            self.precision_hint,
+            self.profile_id,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -259,5 +273,14 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_invalid_payload() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","model_id":"","model_class":"vision","artifact_path":"p","backend_hint":"tensorrt"}}"#
+        );
+        let err = decode_with_version_check::<ModelSpec>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

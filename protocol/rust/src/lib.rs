@@ -117,6 +117,11 @@ pub enum DecodeError {
         /// The version string the build was compiled against.
         expected: &'static str,
     },
+
+    /// Payload decoded at the current schema version but violated semantic
+    /// validation that JSON field types cannot express.
+    #[error("invalid payload: {0}")]
+    InvalidPayload(String),
 }
 
 impl From<DecodeError> for ProtocolError {
@@ -133,8 +138,25 @@ impl From<DecodeError> for ProtocolError {
                 ErrorCode::Unsupported,
                 format!("unsupported schema_version `{got}` (expected `{expected}`)"),
             ),
+            DecodeError::InvalidPayload(message) => {
+                ProtocolError::new(ErrorCode::ConfigInvalid, message)
+            }
         }
     }
+}
+
+/// Semantic validation hook for protocol payloads decoded from JSON.
+///
+/// `serde` enforces type shape. Implementations here enforce the same
+/// semantic rules as the public constructors, and may canonicalize fields
+/// whose schema defaults need runtime computation.
+pub trait ValidatePayload: Sized {
+    /// Validate and return the decoded payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::InvalidPayload`] when semantic validation fails.
+    fn validate_payload(self) -> Result<Self, DecodeError>;
 }
 
 /// Decode a JSON payload of type `T` after verifying that its top-level
@@ -147,12 +169,16 @@ impl From<DecodeError> for ProtocolError {
 /// # Errors
 ///
 /// - [`DecodeError::Malformed`] if the bytes are not valid JSON or `T`'s
-///   structural validation fails.
+///   serde structural decode fails.
 /// - [`DecodeError::MissingSchemaVersion`] if the top-level
 ///   `schema_version` field is missing or not a string.
 /// - [`DecodeError::UnsupportedSchemaVersion`] if the version string
 ///   does not equal [`SCHEMA_VERSION`].
-pub fn decode_with_version_check<T: DeserializeOwned>(json: &str) -> Result<T, DecodeError> {
+/// - [`DecodeError::InvalidPayload`] if semantic validation fails.
+pub fn decode_with_version_check<T>(json: &str) -> Result<T, DecodeError>
+where
+    T: DeserializeOwned + ValidatePayload,
+{
     let value: serde_json::Value = serde_json::from_str(json)?;
     let observed = value
         .get("schema_version")
@@ -165,7 +191,7 @@ pub fn decode_with_version_check<T: DeserializeOwned>(json: &str) -> Result<T, D
         });
     }
     let parsed: T = serde_json::from_value(value)?;
-    Ok(parsed)
+    parsed.validate_payload()
 }
 
 #[cfg(test)]

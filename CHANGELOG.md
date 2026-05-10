@@ -239,14 +239,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `missed_deadline_rate`, `DeployTransaction::new` enforces the
   failure-metadata invariant, `IpcMessage::validate` enforces the
   JSON Schema `allOf` rules), and `decode_with_version_check`
-  acceptance/rejection tests.
+  semantic validation plus acceptance/rejection tests.
 - `protocol/rust/tests/round_trip.rs` integration suite with nine
   canonical JSON fixtures (vision and SmolVLA desired-state,
   ready / degraded worker-status, missed-deadline health event
   with full control-loop metrics, active and failed deploy
   transactions, sidecar load-model header, and a
-  schema-version-rejection negative fixture) covering the
-  V01-E02-F07-T07 cross-language contract.
+  schema-version-rejection negative fixture) covering the Rust side
+  of the fixture contract. C++ / Python binding round trips remain
+  deferred until those bindings land in V01-E07 / V01-E05.
 - `protocol/schemas/README.md` updated to reflect the realized
   schema set and conventions; per-schema ownership table.
 
@@ -254,6 +255,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - `README.md` repository layout block now reflects the realized v0.1.0
   package skeleton and links to the ownership document.
+- `tensorplate_protocol::decode_with_version_check` now rejects
+  current-version payloads that deserialize structurally but violate
+  constructor-level invariants, returning `DecodeError::InvalidPayload`
+  mapped to `ErrorCode::ConfigInvalid`.
+- `InferRequest` construction now rejects released / missing input
+  buffers, present-but-empty metadata IDs, and already-expired
+  deadlines.
 
 ### Deprecated
 

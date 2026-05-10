@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Element data type. Stable wire names match the JSON Schema and the C++
 /// `tensorplate::DType` enum.
@@ -162,6 +162,19 @@ impl TensorView {
     }
 }
 
+impl ValidatePayload for TensorView {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Self::new(
+            self.dtype,
+            self.shape,
+            self.layout,
+            self.byte_offset,
+            self.byte_size,
+        )
+        .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -253,6 +266,7 @@ mod tests {
         assert_eq!(v.dtype, DType::Float16);
         assert_eq!(v.shape, vec![1, 3, 224, 224]);
         assert_eq!(v.layout, Layout::RowMajor);
+        assert_eq!(v.byte_size, 3 * 224 * 224 * 2);
     }
 
     #[test]
@@ -263,5 +277,13 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_invalid_shape() {
+        let json =
+            format!(r#"{{"schema_version":"{SCHEMA_VERSION}","dtype":"float32","shape":[1,0]}}"#);
+        let err = decode_with_version_check::<TensorView>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

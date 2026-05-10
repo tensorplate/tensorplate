@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E02-F07-T07: cross-language round-trip fixtures.
+// V01-E02-F07-T07: canonical protocol fixtures.
 //
-// The committed JSON files under `tests/fixtures/` are the cross-language
-// contract for v0.1 protocol payloads. v0.1.0 implements the Rust side of
-// the round trip in this integration suite; the C++ side picks up these
-// same fixtures when V01-E07 lands the HTTP server (for desired_state /
-// worker_status / health_event consumers) and when V01-E05 lands the
-// Python sidecar IPC framing (for python_pytorch_ipc).
+// The committed JSON files under `tests/fixtures/` are the canonical
+// contract for v0.1 protocol payloads. This suite validates the Rust side
+// of the fixture contract; C++ and Python binding round trips pick up
+// these same fixtures when their JSON/IPC bindings land in V01-E07 /
+// V01-E05.
 //
 // What "round trip" means here:
 //   1. Read the fixture from disk.
@@ -29,7 +28,7 @@ use std::path::PathBuf;
 
 use tensorplate_protocol::{
     decode_with_version_check, DecodeError, DeployTransaction, DesiredState, HealthEvent,
-    IpcMessage, WorkerStatus, SCHEMA_VERSION,
+    IpcMessage, ValidatePayload, WorkerStatus, SCHEMA_VERSION,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -47,7 +46,11 @@ fn load(name: &str) -> String {
 
 fn round_trip<T>(name: &str)
 where
-    T: serde::de::DeserializeOwned + serde::Serialize + std::fmt::Debug + PartialEq,
+    T: serde::de::DeserializeOwned
+        + serde::Serialize
+        + std::fmt::Debug
+        + PartialEq
+        + ValidatePayload,
 {
     let raw = load(name);
     let first: T = decode_with_version_check(&raw)

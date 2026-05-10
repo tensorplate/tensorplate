@@ -28,11 +28,27 @@ Result<void> validate_inputs(const std::vector<NamedInput>& inputs) {
     if (in.name.empty()) {
       return unexpected(Error::Code::ConfigInvalid, "InferRequest.inputs entry has empty `name`");
     }
+    if (!in.buffer.is_valid()) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "InferRequest.inputs entry has a released or missing buffer");
+    }
     auto [_, inserted] = seen.insert(in.name);
     if (!inserted) {
       return unexpected(Error::Code::ConfigInvalid,
                         "InferRequest.inputs has duplicate name `" + in.name + "`");
     }
+  }
+  return Result<void>{};
+}
+
+Result<void> validate_metadata(const RequestMetadata& metadata) {
+  if (metadata.correlation_id.has_value() && metadata.correlation_id->empty()) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "InferRequest.metadata.correlation_id, if present, must be non-empty");
+  }
+  if (metadata.action_chunk_id.has_value() && metadata.action_chunk_id->empty()) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "InferRequest.metadata.action_chunk_id, if present, must be non-empty");
   }
   return Result<void>{};
 }
@@ -52,6 +68,13 @@ Result<InferRequest> InferRequest::create(std::string request_id, std::string en
   if (!inputs_ok) {
     return unexpected(std::move(inputs_ok).error());
   }
+  auto metadata_ok = validate_metadata(metadata);
+  if (!metadata_ok) {
+    return unexpected(std::move(metadata_ok).error());
+  }
+  if (deadline.has_value() && Clock::now() >= *deadline) {
+    return unexpected(Error::Code::Timeout, "InferRequest.deadline has already expired");
+  }
 
   InferRequest req;
   req.request_id_ = std::move(request_id);
@@ -67,9 +90,9 @@ Result<InferRequest> InferRequest::create_with_relative_deadline(
     RequestMetadata metadata, std::optional<Duration> relative_deadline) {
   std::optional<TimePoint> absolute;
   if (relative_deadline.has_value()) {
-    if (relative_deadline->count() < 0) {
+    if (relative_deadline->count() <= 0) {
       return unexpected(Error::Code::ConfigInvalid,
-                        "InferRequest relative deadline must be >= 0 ms");
+                        "InferRequest relative deadline must be > 0 ms");
     }
     absolute = Clock::now() + *relative_deadline;
   }

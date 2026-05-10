@@ -79,7 +79,10 @@
         }
       },
       "then": {
-        "required": ["outputs"]
+        "required": ["outputs"],
+        "not": {
+          "required": ["error"]
+        }
       }
     },
     {
@@ -91,7 +94,10 @@
         }
       },
       "then": {
-        "required": ["error"]
+        "required": ["error"],
+        "not": {
+          "required": ["outputs"]
+        }
       }
     }
   ]

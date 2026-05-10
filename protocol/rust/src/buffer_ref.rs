@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Sentinel id reserved for the released / "no buffer" handle.
 pub const NULL_BUFFER_ID: u64 = 0;
@@ -113,6 +113,13 @@ impl BufferRef {
     }
 }
 
+impl ValidatePayload for BufferRef {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        Self::new(self.id, self.size_bytes, self.ownership)
+            .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -183,5 +190,14 @@ mod tests {
         let h: BufferRef = decode_with_version_check(&json).expect("decode");
         assert_eq!(h.id, 1);
         assert_eq!(h.ownership, BufferOwnership::Borrowed);
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_invalid_handle() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","id":0,"size_bytes":16,"ownership":"owned"}}"#
+        );
+        let err = decode_with_version_check::<BufferRef>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }

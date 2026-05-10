@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ProtocolError;
 use crate::model_spec::ModelSpec;
 use crate::tensor_view::TensorView;
-use crate::SCHEMA_VERSION;
+use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Sidecar IPC message kind. `*_response` messages carry the same
 /// `message_id` as the originating request; `*_event` messages are
@@ -117,6 +117,32 @@ pub enum IpcMessageError {
     ErrorEventMissingError,
     #[error("metric_event messages require `metric`")]
     MetricEventMissingMetric,
+    #[error("IpcMessage.correlation_id, if present, must be non-empty")]
+    EmptyCorrelationId,
+    #[error("IpcMessage tensors require non-empty `name`")]
+    EmptyTensorName,
+    #[error("IpcMessage tensor `{0}` must have payload_length > 0")]
+    EmptyTensorPayload(String),
+    #[error("IpcMessage tensor `{name}` has invalid tensor metadata: {reason}")]
+    InvalidTensor { name: String, reason: String },
+    #[error("IpcMessage.model_spec is invalid: {0}")]
+    InvalidModelSpec(String),
+    #[error("IpcMessage.error is invalid: {0}")]
+    InvalidError(String),
+    #[error("metric_event.metric.name must be non-empty")]
+    EmptyMetricName,
+    #[error("infer and infer_async messages require correlation_id")]
+    InferMissingCorrelationId,
+    #[error("infer and infer_async messages require at least one tensor")]
+    InferMissingTensors,
+    #[error("response messages require `status`")]
+    ResponseMissingStatus,
+    #[error("error status messages require `error`")]
+    ErrorStatusMissingError,
+    #[error("error_event messages require status=error")]
+    ErrorEventRequiresErrorStatus,
+    #[error("successful infer responses require at least one output tensor")]
+    InferOkResponseMissingTensors,
 }
 
 impl IpcMessage {
@@ -157,18 +183,147 @@ impl IpcMessage {
         if self.message_id.is_empty() {
             return Err(IpcMessageError::EmptyMessageId);
         }
-        match self.kind {
-            IpcMessageKind::LoadModel if self.model_spec.is_none() => {
+        if matches!(self.correlation_id.as_deref(), Some("")) {
+            return Err(IpcMessageError::EmptyCorrelationId);
+        }
+        let tensors = validate_tensors(self.tensors)?;
+        let model_spec = validate_model_spec(self.model_spec)?;
+        let error = validate_error(self.error)?;
+        validate_metric(&self.metric)?;
+        let normalized = Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            message_id: self.message_id,
+            kind: self.kind,
+            correlation_id: self.correlation_id,
+            deadline_ns: self.deadline_ns,
+            tensors,
+            model_spec,
+            status: self.status,
+            error,
+            metric: self.metric,
+        };
+
+        validate_kind_invariants(&normalized)?;
+        match normalized.kind {
+            IpcMessageKind::LoadModel if normalized.model_spec.is_none() => {
                 Err(IpcMessageError::LoadModelMissingSpec)
             }
-            IpcMessageKind::ErrorEvent if self.error.is_none() => {
+            IpcMessageKind::ErrorEvent if normalized.error.is_none() => {
                 Err(IpcMessageError::ErrorEventMissingError)
             }
-            IpcMessageKind::MetricEvent if self.metric.is_none() => {
+            IpcMessageKind::MetricEvent if normalized.metric.is_none() => {
                 Err(IpcMessageError::MetricEventMissingMetric)
             }
-            _ => Ok(self),
+            _ => Ok(normalized),
         }
+    }
+}
+
+fn validate_tensors(tensors: Vec<IpcTensor>) -> Result<Vec<IpcTensor>, IpcMessageError> {
+    let mut validated = Vec::with_capacity(tensors.len());
+    for tensor in tensors {
+        if tensor.name.is_empty() {
+            return Err(IpcMessageError::EmptyTensorName);
+        }
+        if tensor.payload_length == 0 {
+            return Err(IpcMessageError::EmptyTensorPayload(tensor.name));
+        }
+        let name = tensor.name;
+        let metadata =
+            tensor
+                .tensor
+                .validate_payload()
+                .map_err(|err| IpcMessageError::InvalidTensor {
+                    name: name.clone(),
+                    reason: err.to_string(),
+                })?;
+        validated.push(IpcTensor {
+            name,
+            tensor: metadata,
+            payload_offset: tensor.payload_offset,
+            payload_length: tensor.payload_length,
+        });
+    }
+    Ok(validated)
+}
+
+fn validate_model_spec(
+    model_spec: Option<ModelSpec>,
+) -> Result<Option<ModelSpec>, IpcMessageError> {
+    model_spec
+        .map(ValidatePayload::validate_payload)
+        .transpose()
+        .map_err(|err| IpcMessageError::InvalidModelSpec(err.to_string()))
+}
+
+fn validate_error(error: Option<ProtocolError>) -> Result<Option<ProtocolError>, IpcMessageError> {
+    error
+        .map(ValidatePayload::validate_payload)
+        .transpose()
+        .map_err(|err| IpcMessageError::InvalidError(err.to_string()))
+}
+
+fn validate_metric(metric: &Option<IpcMetric>) -> Result<(), IpcMessageError> {
+    if matches!(metric.as_ref().map(|metric| metric.name.as_str()), Some("")) {
+        return Err(IpcMessageError::EmptyMetricName);
+    }
+    Ok(())
+}
+
+fn validate_kind_invariants(message: &IpcMessage) -> Result<(), IpcMessageError> {
+    if matches!(
+        message.kind,
+        IpcMessageKind::Infer | IpcMessageKind::InferAsync
+    ) && message.correlation_id.is_none()
+    {
+        return Err(IpcMessageError::InferMissingCorrelationId);
+    }
+    if matches!(
+        message.kind,
+        IpcMessageKind::Infer | IpcMessageKind::InferAsync
+    ) && message.tensors.is_empty()
+    {
+        return Err(IpcMessageError::InferMissingTensors);
+    }
+    if is_response_kind(message.kind) && message.status.is_none() {
+        return Err(IpcMessageError::ResponseMissingStatus);
+    }
+    if matches!(message.status, Some(IpcStatus::Error)) && message.error.is_none() {
+        return Err(IpcMessageError::ErrorStatusMissingError);
+    }
+    if message.kind == IpcMessageKind::ErrorEvent && message.status != Some(IpcStatus::Error) {
+        return Err(IpcMessageError::ErrorEventRequiresErrorStatus);
+    }
+    if matches!(
+        (message.kind, message.status),
+        (
+            IpcMessageKind::InferResponse | IpcMessageKind::InferAsyncResponse,
+            Some(IpcStatus::Ok)
+        )
+    ) && message.tensors.is_empty()
+    {
+        return Err(IpcMessageError::InferOkResponseMissingTensors);
+    }
+    Ok(())
+}
+
+fn is_response_kind(kind: IpcMessageKind) -> bool {
+    matches!(
+        kind,
+        IpcMessageKind::LoadModelResponse
+            | IpcMessageKind::PrimeResponse
+            | IpcMessageKind::InferResponse
+            | IpcMessageKind::InferAsyncResponse
+            | IpcMessageKind::CancelResponse
+            | IpcMessageKind::UnloadResponse
+            | IpcMessageKind::HealthCheckResponse
+    )
+}
+
+impl ValidatePayload for IpcMessage {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        self.validate()
+            .map_err(|err| DecodeError::InvalidPayload(err.to_string()))
     }
 }
 
@@ -195,6 +350,16 @@ mod tests {
             None,
         )
         .expect("spec")
+    }
+
+    fn sample_tensor(name: &str) -> IpcTensor {
+        IpcTensor {
+            name: name.into(),
+            tensor: TensorView::new(DType::Float32, vec![16, 7], Layout::RowMajor, 0, 0)
+                .expect("view"),
+            payload_offset: 0,
+            payload_length: 16 * 7 * 4,
+        }
     }
 
     #[test]
@@ -243,12 +408,14 @@ mod tests {
             kind: IpcMessageKind::InferResponse,
             correlation_id: Some("req-7".into()),
             deadline_ns: None,
-            tensors: vec![],
+            tensors: vec![sample_tensor("action_chunk")],
             model_spec: None,
             status: Some(IpcStatus::Ok),
             error: None,
             metric: None,
-        };
+        }
+        .validate()
+        .expect("valid");
         let json = serde_json::to_string(&m).expect("serialize");
         let back: IpcMessage = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(m, back);
@@ -346,5 +513,23 @@ mod tests {
             err,
             crate::DecodeError::UnsupportedSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_load_model_without_spec() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","message_id":"msg","kind":"load_model"}}"#
+        );
+        let err = decode_with_version_check::<IpcMessage>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_current_schema_infer_response_without_tensors() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","message_id":"msg","kind":"infer_response","status":"ok"}}"#
+        );
+        let err = decode_with_version_check::<IpcMessage>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
     }
 }
