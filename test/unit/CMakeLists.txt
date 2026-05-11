@@ -2,6 +2,13 @@
 
 add_executable(tp_test_unit
   version_test.cpp
+  error_test.cpp
+  result_test.cpp
+  model_spec_test.cpp
+  buffer_ref_test.cpp
+  tensor_view_test.cpp
+  infer_request_test.cpp
+  infer_result_test.cpp
 )
 
 target_link_libraries(tp_test_unit

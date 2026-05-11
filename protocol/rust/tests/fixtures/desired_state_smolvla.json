@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "deployment_id": "smolvla-orin-nano-2024-05-09",
+  "bundle_digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+  "bundle_format_version": "0.1",
+  "model_spec": {
+    "schema_version": "0.1",
+    "model_id": "smolvla-450m",
+    "model_class": "vla",
+    "artifact_path": "models/smolvla.pt",
+    "backend_hint": "python_pytorch"
+  }
+}

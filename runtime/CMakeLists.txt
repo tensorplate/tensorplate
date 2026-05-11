@@ -6,6 +6,12 @@
 
 add_library(tp_runtime STATIC
   src/skeleton.cpp
+  src/core/error.cpp
+  src/core/model_spec.cpp
+  src/core/infer_request.cpp
+  src/core/infer_result.cpp
+  src/buffer/buffer_ref.cpp
+  src/buffer/tensor_view.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)

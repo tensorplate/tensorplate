@@ -1,0 +1,13 @@
+{
+  "schema_version": "0.1",
+  "agent_state": "ready",
+  "serving_state": "degraded",
+  "observability_state": "ready",
+  "active_deployment": "smolvla-orin-nano-2024-05-09",
+  "backend": "python_pytorch",
+  "missed_heartbeat_count": 2,
+  "missed_deadline_rate": 0.07,
+  "queue_depth": 4,
+  "last_error_code": "timeout",
+  "last_error_message": "deadline exceeded for chunk-12"
+}

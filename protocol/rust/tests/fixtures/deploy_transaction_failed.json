@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "transaction_id": "tx-2024-05-09-2",
+  "deployment_id": "smolvla-orin-nano-2024-05-09",
+  "bundle_digest": "sha256:abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+  "state": "failed",
+  "started_monotonic_ns": 1700000010000,
+  "last_transition_monotonic_ns": 1700000020000,
+  "failure": {
+    "error_code": "load_failed",
+    "message": "missing weights file: models/smolvla.pt",
+    "recoverable": false
+  }
+}

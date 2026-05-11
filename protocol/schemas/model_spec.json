@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/model_spec.json",
+  "title": "TensorPlate ModelSpec",
+  "description": "Model identity, model class, and backend-selection metadata. Mirrors include/tensorplate/core/model_spec.hpp::ModelSpec.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_id",
+    "model_class",
+    "artifact_path",
+    "backend_hint"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier for the deployed model."
+    },
+    "model_class": {
+      "type": "string",
+      "enum": ["vision", "speech", "language", "vla", "embedding", "custom"],
+      "description": "Model-class taxonomy. v0.1.0 validates only `vision` and `vla`; the remaining values are reserved for forward compatibility (V01-E13)."
+    },
+    "artifact_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the loadable model artifact within the bundle (engine, state dict, .xmodel, ...)."
+    },
+    "backend_hint": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bundle-author declaration of the execution backend (e.g., `tensorrt`, `libtorch`, `python_pytorch`). The runtime validates availability and rejects unknown hints with the typed `unsupported` error; it never falls back heuristically."
+    },
+    "precision_hint": {
+      "type": "string",
+      "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"],
+      "default": "auto",
+      "description": "Numeric precision profile. Backends that cannot honor the hint return `unsupported` rather than silently downgrading."
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional opaque identifier referencing a vendor-specific tuning profile inside the bundle."
+    }
+  }
+}

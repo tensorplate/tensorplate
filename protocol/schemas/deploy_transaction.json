@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/deploy_transaction.json",
+  "title": "TensorPlate Deploy Transaction",
+  "description": "Durable state record for one in-progress or completed deploy transaction. Owned by `tensorplate-agent` (V01-E08). The state machine is intentionally explicit so a mid-transaction agent restart (V01-E08-T03) can resume from durable state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "transaction_id", "deployment_id", "state"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "transaction_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this transaction. New on every deploy attempt."
+    },
+    "deployment_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target `deployment_id` from the desired-state record."
+    },
+    "bundle_digest": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$",
+      "description": "Content-addressed bundle digest under transaction."
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "received",
+        "verified",
+        "staged",
+        "capacity_checked",
+        "prepared",
+        "warmed",
+        "promoted",
+        "active",
+        "failed",
+        "rolled_back"
+      ],
+      "description": "Current state in the transaction lifecycle. Strictly forward-only along the success path; `failed` and `rolled_back` are terminal."
+    },
+    "started_monotonic_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp at which the transaction entered the `received` state."
+    },
+    "last_transition_monotonic_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp of the most-recent state transition."
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Populated when `state` is `failed` or `rolled_back`. Carries typed reason and recoverability metadata.",
+      "required": ["error_code", "recoverable"],
+      "properties": {
+        "error_code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "recoverable": {
+          "type": "boolean",
+          "description": "If true, retrying the same transaction is reasonable (transient capacity, reachable bundle store, etc.). If false, the operator must intervene."
+        }
+      }
+    }
+  }
+}

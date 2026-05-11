@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/infer_request.json",
+  "title": "TensorPlate InferRequest",
+  "description": "Normalized inference-request payload used by the local HTTP endpoint and the LeRobot PolicyServer-compatible async path. Mirrors include/tensorplate/core/infer_request.hpp::InferRequest. Single-input vision is the n=1 case of `inputs`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "endpoint", "inputs"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Per-request identity. Distinct from `metadata.action_chunk_id`; a single LeRobot async chunk may be served by multiple `request_id`s if the policy server retries."
+    },
+    "endpoint": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target model identity or routed endpoint. The runtime resolves this against the active deployment."
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "buffer", "tensor"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Stable model-input name (e.g., `image`, `image_front`, `state`)."
+          },
+          "buffer": {
+            "$ref": "https://schemas.tensorplate.io/v0.1/buffer_ref.json"
+          },
+          "tensor": {
+            "$ref": "https://schemas.tensorplate.io/v0.1/tensor_view.json"
+          }
+        }
+      },
+      "description": "Vector of named inputs. Validators reject duplicate `name` values."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Correlation id propagated from request ingress through the result, log lines, and metric labels."
+        },
+        "action_chunk_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "LeRobot async-action-chunk identity."
+        },
+        "action_chunk_sequence": {
+          "type": "integer",
+          "description": "Sequence number of an asynchronous action chunk within an episode."
+        },
+        "stale_after_sequence": {
+          "type": "integer",
+          "description": "LeRobot stale-request marker. Requests with `action_chunk_sequence` <= this value are considered stale and must be cancelled or expired."
+        },
+        "extra": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Free-form caller metadata. v0.1.0 transport: only string values."
+        }
+      }
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Relative deadline in milliseconds from the moment the receiver decodes this payload. Receivers convert it to a monotonic absolute deadline by sampling `std::chrono::steady_clock`. Absent value => no deadline."
+    }
+  }
+}

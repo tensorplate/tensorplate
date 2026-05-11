@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/infer_result.json",
+  "title": "TensorPlate InferResult",
+  "description": "Normalized inference-result payload. Mirrors include/tensorplate/core/infer_result.hpp::InferResult. The result is either a success (vector of named outputs) or a failure (typed Error); the `status` field discriminates between them. Chunk-shaped VLA action output is one pattern of `outputs` and does not require a VLA-specific result type.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "status"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "request_id": {
+      "type": "string",
+      "description": "Correlation id copied from the originating InferRequest. Empty for synthetic / ingress-time errors that fail before request_id is parsed."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure"],
+      "description": "Result discriminator. `success` => `outputs` is present and non-empty. `failure` => `error` is present."
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "buffer", "tensor"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "buffer": {
+            "$ref": "https://schemas.tensorplate.io/v0.1/buffer_ref.json"
+          },
+          "tensor": {
+            "$ref": "https://schemas.tensorplate.io/v0.1/tensor_view.json"
+          },
+          "semantic_tag": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional semantic tag, e.g. `action_chunk`, `logits`, `detections`."
+          }
+        }
+      }
+    },
+    "error": {
+      "$ref": "https://schemas.tensorplate.io/v0.1/error.json"
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Latency breakdown in nanoseconds. All fields optional; populated by the ExecutionSession NVI wrapper (V01-E04). Failed inferences may carry partial timing.",
+      "properties": {
+        "queue_latency_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "execution_latency_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_latency_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "success"
+          }
+        }
+      },
+      "then": {
+        "required": ["outputs"],
+        "not": {
+          "required": ["error"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          }
+        }
+      },
+      "then": {
+        "required": ["error"],
+        "not": {
+          "required": ["outputs"]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": "0.1",
+  "agent_state": "ready",
+  "serving_state": "ready",
+  "observability_state": "ready",
+  "active_deployment": "vision-orin-nano-2024-05-09",
+  "backend": "tensorrt"
+}

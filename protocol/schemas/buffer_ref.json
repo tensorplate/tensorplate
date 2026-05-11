@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/buffer_ref.json",
+  "title": "TensorPlate BufferRef",
+  "description": "Opaque buffer-handle identity. The schema is intentionally NOT a memory-transfer wire format; it carries only the metadata required to compare buffer identities across logs, traces, and test fixtures. Mirrors include/tensorplate/buffer/buffer_ref.hpp::BufferRef.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "size_bytes", "ownership"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "description": "Unique identity within the buffer pool lifetime. The value 0 is the released sentinel and is paired with `ownership` `released`."
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Allocated size in bytes. Must be > 0 for `owned` / `borrowed`; 0 only for the released sentinel."
+    },
+    "ownership": {
+      "type": "string",
+      "enum": ["owned", "borrowed", "released"],
+      "description": "Coarse ownership state. See header for the responsibility matrix."
+    }
+  }
+}

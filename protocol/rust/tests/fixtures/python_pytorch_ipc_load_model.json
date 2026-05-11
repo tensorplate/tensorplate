@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.1",
+  "message_id": "msg-load-1",
+  "kind": "load_model",
+  "model_spec": {
+    "schema_version": "0.1",
+    "model_id": "smolvla-450m",
+    "model_class": "vla",
+    "artifact_path": "models/smolvla.pt",
+    "backend_hint": "python_pytorch"
+  }
+}
