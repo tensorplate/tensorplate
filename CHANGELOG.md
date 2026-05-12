@@ -8,6 +8,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `BufferManager` v0.1.0 CPU buffer plane: capacity-bounded allocator with
+  monotonic ids, aligned heap-backed storage, validated configuration,
+  thread-safe allocate/release/data/view access, accounting snapshot
+  (in-use bytes, active count, high-water mark, allocation/release failure
+  counters), and derived `MemoryPressure` level. Storage is freed exactly
+  once; double-release and stale-handle release return typed
+  `Error::Code::Internal` (V01-E03-F01, V01-E03-F02).
+- `docs/architecture/buffer-plane.md` describing the buffer-plane
+  ownership model, copy/move semantics, cleanup-path contracts, and the
+  scope boundaries that V01-E03 deliberately respects (V01-E03-F02).
 - Top-level package skeleton for v0.1.0: `include/tensorplate/`, `runtime/`,
   `serving_worker/`, `agent/`, `cli/`, `observability/`, `protocol/schemas/`,
   `protocol/rust/`, `config/schemas/`, `test/`, `cmake/`, and
