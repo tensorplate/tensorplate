@@ -9,8 +9,14 @@ add_executable(tp_test_unit
   tensor_view_test.cpp
   buffer_manager_test.cpp
   buffer_cleanup_test.cpp
+  buffer_ingress_test.cpp
   infer_request_test.cpp
   infer_result_test.cpp
+)
+
+target_include_directories(tp_test_unit
+  PRIVATE
+    ${CMAKE_SOURCE_DIR}/test/mocks
 )
 
 target_link_libraries(tp_test_unit

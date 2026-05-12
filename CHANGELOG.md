@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Ingress copy helpers `copy_payload_into_buffer` and
+  `build_named_inputs` that turn caller-owned byte payloads into
+  buffer-plane-owned `BufferRef` storage with a single copy. Multi-input
+  builds reject duplicate names, oversized payloads, and tensor-window
+  metadata that does not fit the allocated buffer; partial allocations
+  are released before an error is returned. Shared vision and
+  SmolVLA-style payload fixtures live in
+  `test/mocks/ingress_fixtures.hpp` and will be reused by the V01-E07
+  HTTP router (V01-E03-F04).
 - Buffer cleanup helpers `release_request_buffers`,
   `release_partial_outputs`, and the `RequestBufferGuard` RAII wrapper.
   Helpers release every unique buffer id at most once, do not block,

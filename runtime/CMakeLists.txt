@@ -14,6 +14,7 @@ add_library(tp_runtime STATIC
   src/buffer/tensor_view.cpp
   src/buffer/buffer_manager.cpp
   src/buffer/cleanup.cpp
+  src/buffer/ingress.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)
