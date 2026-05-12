@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Session output helpers `allocate_output_buffer`, `build_named_output`,
+  and `build_named_outputs`. The execution session allocates one owned
+  buffer per output, pairs it with a validated `TensorView` byte window,
+  and assembles `NamedOutput` value objects (including chunk-shaped VLA
+  action outputs). Multi-output builds reject duplicate names and
+  release any partial allocations on later failure (V01-E03-F05).
 - Ingress copy helpers `copy_payload_into_buffer` and
   `build_named_inputs` that turn caller-owned byte payloads into
   buffer-plane-owned `BufferRef` storage with a single copy. Multi-input

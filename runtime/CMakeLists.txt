@@ -15,6 +15,7 @@ add_library(tp_runtime STATIC
   src/buffer/buffer_manager.cpp
   src/buffer/cleanup.cpp
   src/buffer/ingress.cpp
+  src/buffer/output.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)

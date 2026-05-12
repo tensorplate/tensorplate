@@ -10,6 +10,7 @@ add_executable(tp_test_unit
   buffer_manager_test.cpp
   buffer_cleanup_test.cpp
   buffer_ingress_test.cpp
+  buffer_output_test.cpp
   infer_request_test.cpp
   infer_result_test.cpp
 )
