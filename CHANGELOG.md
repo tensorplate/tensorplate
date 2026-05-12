@@ -8,6 +8,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Developer-facing C++ example `tensorplate-example-buffer-plane` under
+  `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
+  end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
+  mock policy → `InferResult` → cancellation cleanup → double-release
+  diagnosis → pressure-event subscription. Toggle with the
+  `TP_BUILD_EXAMPLES` CMake option (defaults ON).
+- T2 integration test `tp_test_integration` exercising the same loop
+  under GoogleTest (`test/integration/buffer_plane_e2e_test.cpp`).
 - Memory-pressure event shape and emission: `MemoryPressure` level
   (normal / warning / critical), `BufferPressureEvent` payload (pool
   name, previous + current level, capacity, in-use bytes, active count,

@@ -73,6 +73,8 @@ configure_file(
 option(TP_BUILD_TESTS       "Build the C++ test tree" ON)
 option(TP_BUILD_SERVING_WORKER
        "Build the tensorplate-serving worker binary" ON)
+option(TP_BUILD_EXAMPLES
+       "Build the developer-facing examples under examples/" ON)
 option(TP_ENABLE_SANITIZERS "Enable ASAN/UBSAN on tp_* targets" OFF)
 option(TP_WARNINGS_AS_ERRORS
        "Treat C++ warnings as errors on tp_* targets" OFF)
@@ -92,11 +94,16 @@ if(TP_BUILD_TESTS)
   add_subdirectory(test)
 endif()
 
+if(TP_BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
 # Status banner so misconfigurations are obvious in CI logs.
 message(STATUS "TensorPlate ${PROJECT_VERSION}")
 message(STATUS "  build type        : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ standard      : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  tests             : ${TP_BUILD_TESTS}")
 message(STATUS "  serving worker    : ${TP_BUILD_SERVING_WORKER}")
+message(STATUS "  examples          : ${TP_BUILD_EXAMPLES}")
 message(STATUS "  sanitizers (A/U)  : ${TP_ENABLE_SANITIZERS}")
 message(STATUS "  warnings as errors: ${TP_WARNINGS_AS_ERRORS}")

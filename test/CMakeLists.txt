@@ -26,5 +26,6 @@ endif()
 include(GoogleTest)
 
 add_subdirectory(unit)
+add_subdirectory(integration)
 
-# T2/T3/T4/T5 subdirectories are added when their first test lands.
+# T3/T4/T5 subdirectories are added when their first test lands.
