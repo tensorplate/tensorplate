@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Buffer cleanup helpers `release_request_buffers`,
+  `release_partial_outputs`, and the `RequestBufferGuard` RAII wrapper.
+  Helpers release every unique buffer id at most once, do not block,
+  preserve original request errors, and report release failures through
+  a `CleanupReport`. Used by scheduler cancellation, deadline expiry,
+  and execution-session error paths (V01-E03-F03).
 - `BufferManager` v0.1.0 CPU buffer plane: capacity-bounded allocator with
   monotonic ids, aligned heap-backed storage, validated configuration,
   thread-safe allocate/release/data/view access, accounting snapshot

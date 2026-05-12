@@ -8,6 +8,7 @@ add_executable(tp_test_unit
   buffer_ref_test.cpp
   tensor_view_test.cpp
   buffer_manager_test.cpp
+  buffer_cleanup_test.cpp
   infer_request_test.cpp
   infer_result_test.cpp
 )

@@ -13,6 +13,7 @@ add_library(tp_runtime STATIC
   src/buffer/buffer_ref.cpp
   src/buffer/tensor_view.cpp
   src/buffer/buffer_manager.cpp
+  src/buffer/cleanup.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)
