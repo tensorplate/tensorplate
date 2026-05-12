@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/buffer_pressure_event.json",
+  "title": "TensorPlate Buffer Pressure Event",
+  "description": "Memory-pressure transition emitted by the v0.1.0 CPU buffer plane. Carries the same fields a metrics scrape would expose, plus the previous/current pressure level so subscribers can audit transitions without resampling. Mirrors include/tensorplate/buffer/buffer_manager.hpp::BufferPressureEvent.\n\nv0.1.0 emits these only on level changes (Normal -> Warning, Warning -> Critical, etc.). The exact threshold policy is configurable; defaults are warning >= 75 %, critical >= 90 % of capacity.\n\nThis schema intentionally does NOT carry raw memory addresses, request payloads, or per-request labels. Observability work in V01-E12 wires per-endpoint labels above this layer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "pool_name",
+    "previous",
+    "current",
+    "capacity_bytes",
+    "in_use_bytes",
+    "active_count",
+    "high_water_bytes",
+    "allocation_failures"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "pool_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, low-cardinality buffer-pool label (`BufferManagerConfig::pool_name`). Snake_case recommended."
+    },
+    "previous": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"],
+      "description": "Pressure level before this transition."
+    },
+    "current": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"],
+      "description": "Pressure level after this transition."
+    },
+    "capacity_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Configured `BufferManagerConfig::capacity_bytes` at the time of the event."
+    },
+    "in_use_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sum of `size_bytes` across active buffers at the time of the event."
+    },
+    "active_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of currently active (Owned) buffers."
+    },
+    "high_water_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "High-water mark of `in_use_bytes` since manager construction."
+    },
+    "allocation_failures": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonically increasing count of allocation failures attributable to pressure (capacity-exceeded or allocator bad_alloc). Validation rejections (zero-byte, alignment) are NOT counted; they are caller bugs, not pressure."
+    }
+  }
+}

@@ -26,6 +26,7 @@
 
 use serde::de::DeserializeOwned;
 
+pub mod buffer_pressure_event;
 pub mod buffer_ref;
 pub mod deploy_transaction;
 pub mod desired_state;
@@ -38,6 +39,7 @@ pub mod python_pytorch_ipc;
 pub mod tensor_view;
 pub mod worker_status;
 
+pub use buffer_pressure_event::{BufferPressureEvent, BufferPressureEventError, MemoryPressure};
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
 pub use deploy_transaction::{
     DeployFailure, DeployState, DeployTransaction, DeployTransactionError,

@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Memory-pressure event shape and emission: `MemoryPressure` level
+  (normal / warning / critical), `BufferPressureEvent` payload (pool
+  name, previous + current level, capacity, in-use bytes, active count,
+  high-water mark, allocation failures), and a subscribe/unsubscribe
+  hook on `BufferManager`. The buffer manager emits one event per
+  threshold crossing; metrics collection cannot block buffer allocation
+  or release. Mirrored on the wire in
+  `protocol/schemas/buffer_pressure_event.json` and in the Rust
+  `tensorplate-protocol` crate (V01-E03-F06).
 - Session output helpers `allocate_output_buffer`, `build_named_output`,
   and `build_named_outputs`. The execution session allocates one owned
   buffer per output, pairs it with a validated `TensorView` byte window,
