@@ -12,6 +12,7 @@ add_library(tp_runtime STATIC
   src/core/infer_result.cpp
   src/buffer/buffer_ref.cpp
   src/buffer/tensor_view.cpp
+  src/buffer/buffer_manager.cpp
 )
 
 add_library(tp::runtime ALIAS tp_runtime)
