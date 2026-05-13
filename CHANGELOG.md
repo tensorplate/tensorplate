@@ -68,6 +68,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `set_buffer_manager`, partial adapter-published outputs are released
   via `release_partial_outputs` so a failed `infer` does not leak buffer
   capacity (V01-E04-F04-T02).
+- `ExecutionSession::infer_async` typed unsupported path: the default
+  `do_infer_async` returns `Error::Code::Unsupported` so v0.1.0 adapters
+  without native async satisfy the public method shape without
+  pretending to be async. Readiness (`NotReady`) and request validation
+  errors (`ConfigInvalid`, `ShapeMismatch`, `Timeout`) are surfaced
+  **before** the unsupported capability is considered, and the
+  unsupported path allocates no output buffers and never dispatches to
+  adapter execution. Native-async adapters override `do_infer_async`
+  to return an `AsyncInferHandle` whose `async_id` is session-scoped
+  and monotonically increasing through the `next_async_id()` helper
+  (V01-E04-F05).
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
