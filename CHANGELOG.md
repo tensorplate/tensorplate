@@ -79,6 +79,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   to return an `AsyncInferHandle` whose `async_id` is session-scoped
   and monotonically increasing through the `next_async_id()` helper
   (V01-E04-F05).
+- Shared V01-E04 ExecutionSession conformance suite at
+  `test/contract/execution_session_conformance.hpp`. A
+  `tensorplate::testing::SessionFactory` closure plus a
+  `ConformanceConfig` drives any `ExecutionSession*` adapter through
+  backend-name identity, initial state, the load -> prime -> infer ->
+  unload happy path, infer-before-prime, prime-before-load, bad model
+  path, shape mismatch, infer_async (typed Unsupported or handle),
+  unload-then-infer, and `BufferRef` lifetime invariants. Real backend
+  adapters (TensorRT, LibTorch, Python/PyTorch sidecar, future Vitis
+  AI) reuse the same suite without rewriting it. A T1 mock-conformance
+  test in `test/unit/execution_session_conformance_test.cpp` runs the
+  suite through `MockSession` so the suite is self-testing
+  (V01-E04-F07-T01).
+- `docs/architecture/non-gpu-lifecycle-review.md` recording the
+  V01-E04-F07-T02 non-GPU lifecycle compatibility review and sign-off.
+  The review walks `ExecutionSession`, `ModelSpec`, `BufferRef`,
+  `TensorView`, and the event taxonomy against a future Kria/Vitis AI
+  adapter (`.xmodel` discovery, DPU runner instantiation, fixed-shape
+  binding, INT8 calibration metadata, adapter-owned memory copies) and
+  confirms the V01-E04 interface is implementable without public
+  interface revision before V01-E05 adapter work begins. A compile-time
+  macro guard in the T1 interface test mechanically enforces that no
+  CUDA / TensorRT / LibTorch / Vitis AI / XRT / DPU SDK type leaks into
+  the public ExecutionSession header (V01-E04-F07-T02).
 - Lifecycle and inference event emission from every public NVI wrapper.
   `load`, `prime`, `infer`, `infer_async`, and `unload` emit paired
   `*_start` / `*_end` events on success and `*_failed` (or

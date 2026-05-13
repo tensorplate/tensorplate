@@ -20,11 +20,13 @@ add_executable(tp_test_unit
   execution_session_infer_test.cpp
   execution_session_async_test.cpp
   execution_session_events_test.cpp
+  execution_session_conformance_test.cpp
 )
 
 target_include_directories(tp_test_unit
   PRIVATE
     ${CMAKE_SOURCE_DIR}/test/mocks
+    ${CMAKE_SOURCE_DIR}/test/contract
 )
 
 target_link_libraries(tp_test_unit
