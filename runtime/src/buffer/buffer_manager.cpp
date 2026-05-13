@@ -166,20 +166,24 @@ struct BufferManager::Impl {
     record_pressure_event_locked(previous, now);
   }
 
-  static void free_storage(std::byte* p, std::size_t /*alignment*/) noexcept {
-    // std::aligned_alloc allocations are released with std::free per the
-    // C++17 standard. We do not use the global aligned operator new here
-    // because clang-format-14/15 disagree on its required whitespace and
-    // we want a single representation that survives any formatter.
-    std::free(p);
+  static void free_storage(std::byte* p, std::size_t alignment) noexcept {
+    if (p == nullptr) {
+      return;
+    }
+    // Match the aligned new used in `allocate_storage`. The
+    // space-before-paren matches the CI clang-format-15 expectation; it
+    // also satisfies clang-format-14. Aligned operator new/delete is
+    // chosen over std::aligned_alloc + std::free because clang-tidy's
+    // cppcoreguidelines-no-malloc / cppcoreguidelines-owning-memory
+    // checks reject the C-style allocator pair.
+    ::operator delete (p, std::align_val_t{alignment});
   }
 
   static std::byte* allocate_storage(std::size_t size, std::size_t alignment) {
-    // std::aligned_alloc requires that `size` be a multiple of
-    // `alignment`; round up so the underlying allocator can serve the
-    // request reliably across platforms.
+    // Size is rounded up to alignment so the underlying allocator can
+    // serve the request reliably across platforms.
     const std::size_t allocated = round_up_to_alignment(size, alignment);
-    return static_cast<std::byte*>(std::aligned_alloc(alignment, allocated));
+    return static_cast<std::byte*>(::operator new (allocated, std::align_val_t{alignment}));
   }
 };
 
@@ -287,10 +291,10 @@ Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t al
                         "BufferManager.allocate: capacity_bytes would be exceeded");
     }
 
-    std::byte* storage = Impl::allocate_storage(size_bytes, effective_alignment);
-    if (storage == nullptr) {
-      // std::aligned_alloc reports failure as nullptr rather than
-      // throwing std::bad_alloc. Surface it as OOMError consistently.
+    std::byte* storage = nullptr;
+    try {
+      storage = Impl::allocate_storage(size_bytes, effective_alignment);
+    } catch (const std::bad_alloc&) {
       ++impl_->allocation_failures;
       impl_->maybe_record_pressure_event_locked();
       return unexpected(Error::Code::OOMError,
