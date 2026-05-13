@@ -13,9 +13,11 @@
 #include "tensorplate/core/execution_session.hpp"
 
 #include <array>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -134,7 +136,77 @@ SessionState prime_failure_state(Error::Code code) noexcept {
   return code == Error::Code::ConfigInvalid ? SessionState::Loaded : SessionState::Failed;
 }
 
+/// True iff `view.byte_offset() + view.byte_size()` fits inside `buffer`
+/// without overflow. Returns false for released buffers as a safety net;
+/// the F03 wrapper rejects released buffers before reaching this check.
+bool buffer_window_fits(const BufferRef& buffer, const TensorView& view) noexcept {
+  if (!buffer.is_valid()) {
+    return false;
+  }
+  const std::size_t offset = view.byte_offset();
+  const std::size_t size = view.byte_size();
+  const std::size_t end = offset + size;
+  if (end < offset) {  // overflow guard
+    return false;
+  }
+  return end <= buffer.size_bytes();
+}
+
 }  // namespace
+
+// -- NVI request validation (V01-E04-F03). ------------------------------------
+
+Result<void> ExecutionSession::validate_request_for_infer(const InferRequest& request) const {
+  // `InferRequest::create` already rejects most of these at construction.
+  // The NVI wrapper re-validates so adapter-side callers that bypass the
+  // factory (e.g. test fixtures, future codecs) still fail *before*
+  // adapter dispatch.
+  if (request.request_id().empty()) {
+    return unexpected(Error::Code::ConfigInvalid, "InferRequest.request_id is empty");
+  }
+  if (request.endpoint().empty()) {
+    return unexpected(Error::Code::ConfigInvalid, "InferRequest.endpoint is empty");
+  }
+  if (request.inputs().empty()) {
+    return unexpected(Error::Code::ConfigInvalid, "InferRequest has no inputs");
+  }
+
+  std::unordered_set<std::string> seen_names;
+  seen_names.reserve(request.inputs().size());
+
+  for (const auto& input : request.inputs()) {
+    if (input.name.empty()) {
+      return unexpected(Error::Code::ConfigInvalid, "InferRequest input has empty name");
+    }
+    auto [_, inserted] = seen_names.insert(input.name);
+    if (!inserted) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "InferRequest has duplicate input name `" + input.name + "`");
+    }
+
+    // Released / missing input buffers are rejected before adapter dispatch.
+    if (!input.buffer.is_valid()) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "InferRequest input `" + input.name + "` carries a released buffer");
+    }
+
+    // Tensor byte windows must fit inside their owning buffers. A
+    // mismatch surfaces as ShapeMismatch so callers can distinguish a
+    // tensor/buffer geometry bug from generic config invalidity.
+    if (!buffer_window_fits(input.buffer, input.tensor)) {
+      return unexpected(
+          Error::Code::ShapeMismatch,
+          "InferRequest input `" + input.name +
+              "` tensor window does not fit inside its buffer (offset + size > buffer size)");
+    }
+  }
+
+  if (request.is_expired()) {
+    return unexpected(Error::Code::Timeout, "InferRequest deadline already expired at dispatch");
+  }
+
+  return Result<void>{};
+}
 
 Result<void> ExecutionSession::load(const ModelSpec& spec) {
   if (state_ != SessionState::Unloaded) {
@@ -183,13 +255,20 @@ Result<void> ExecutionSession::prime() {
 }
 
 Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
-  // F02 gate only: full request/output validation lands in F03, and
-  // monotonic timing + InferResult construction in F04. Sessions that
-  // are not Ready must surface NotReady before any adapter dispatch.
+  // F03 readiness + validation gates run before adapter dispatch.
+  // Monotonic timing + output validation land in F04; event emission
+  // lands in F06.
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer requires Ready state (current: " +
                                std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto validation = validate_request_for_infer(request);
+  if (!validation) {
+    auto err = std::move(validation).error();
     last_error_ = err;
     return unexpected(std::move(err));
   }
@@ -214,13 +293,20 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
 }
 
 Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& request) {
-  // F02 gate only. The typed Unsupported shape comes from the default
-  // do_infer_async; F05 adds the full async wrapper (validation, event
-  // emission, and the Unsupported event distinct from generic failure).
+  // F03 readiness + validation gates run before adapter dispatch. The
+  // unsupported event variant (distinct from generic failure) lands in
+  // F05; F06 adds event emission.
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer_async requires Ready state (current: " +
                                std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto validation = validate_request_for_infer(request);
+  if (!validation) {
+    auto err = std::move(validation).error();
     last_error_ = err;
     return unexpected(std::move(err));
   }

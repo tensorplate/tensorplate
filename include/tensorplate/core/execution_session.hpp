@@ -313,11 +313,13 @@ class ExecutionSession {
   [[nodiscard]] std::uint64_t next_async_id() noexcept { return next_async_id_++; }
 
  private:
-  // The NVI helpers (`emit_event`, request/output validation) are
-  // defined alongside the lifecycle wrapper that uses them (V01-E04-F02
-  // and later). The data members below are part of the NVI contract
-  // from V01-E04-F01 onward so that adapters can reason about session
-  // state through the public observers.
+  /// Validate an InferRequest before adapter dispatch. Rejects empty
+  /// request_id / endpoint / inputs, empty input names, duplicate input
+  /// names, released or missing input buffers, tensor byte windows that
+  /// do not fit inside their owning buffers, and requests whose
+  /// monotonic deadline has already expired (V01-E04-F03).
+  [[nodiscard]] Result<void> validate_request_for_infer(const InferRequest& request) const;
+
   SessionState state_ = SessionState::Unloaded;
   std::optional<ModelSpec> model_;
   std::optional<Error> last_error_;

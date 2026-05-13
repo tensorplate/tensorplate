@@ -44,6 +44,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   success/failure and inspect adapter dispatch counts and last-seen
   request/spec. Used by the V01-E04 lifecycle, validation, timing,
   async, event-emission, and conformance test suites.
+- NVI readiness and validation gates in `ExecutionSession::infer` and
+  `ExecutionSession::infer_async`: requests are rejected before any
+  adapter dispatch when the session is not `Ready` (`NotReady`), when
+  `request_id` / `endpoint` / `inputs` are empty (`ConfigInvalid`), on
+  empty or duplicate input names (`ConfigInvalid`), on released or
+  missing input buffers (`ConfigInvalid`), on tensor byte windows that
+  do not fit inside their owning buffers (`ShapeMismatch`), and on
+  already-expired monotonic deadlines (`Timeout`). The gates apply
+  uniformly to sync and async paths so adapter `do_infer` /
+  `do_infer_async` implementations cannot bypass them (V01-E04-F03).
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
