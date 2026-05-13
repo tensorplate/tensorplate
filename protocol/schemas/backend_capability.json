@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/backend_capability.json",
+  "title": "TensorPlate Backend Capability",
+  "description": "Vendor-neutral capability record published by every registered execution backend adapter (V01-E05-F01). Consumed by bundle validation, status reporting, and the adapter conformance harness. Mirrors `tensorplate::BackendCapability` in `include/tensorplate/backend/capability.hpp` and exists so that capability records can cross process boundaries without leaking adapter-specific types.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["backend_name", "supported_precision", "shape_support"],
+  "properties": {
+    "backend_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable adapter key (e.g. `tensorrt`, `libtorch`, `python_pytorch`). Matches the BackendRegistry key under which the adapter is registered."
+    },
+    "profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional backend-specific profile identifier (e.g. TensorRT optimization-profile name)."
+    },
+    "supported_precision": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"]
+      },
+      "description": "PrecisionHint values the adapter accepts in `ModelSpec.precision_hint`. Stable snake_case wire names mirroring the enum in model_spec.json."
+    },
+    "shape_support": {
+      "type": "string",
+      "enum": ["dynamic", "fixed", "range_bounded"],
+      "description": "How strictly the adapter constrains input tensor shapes."
+    },
+    "supports_async": {
+      "type": "boolean",
+      "default": false,
+      "description": "True iff the adapter implements native async (`do_infer_async`); v0.1.0 baseline adapters default to false."
+    },
+    "supports_generation": {
+      "type": "boolean",
+      "default": false,
+      "description": "Autoregressive generation primitive (v0.2)."
+    },
+    "supports_streaming": {
+      "type": "boolean",
+      "default": false,
+      "description": "Streaming output primitive (v0.2)."
+    },
+    "supports_kv_cache": {
+      "type": "boolean",
+      "default": false,
+      "description": "KV-cache lifecycle ownership (v0.2)."
+    },
+    "op_coverage_score_pct": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Coarse percentage of model ops the adapter can execute (e.g. for ONNX coverage warnings)."
+    },
+    "memory_estimate_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Adapter-published static memory estimate. Must be <= memory_limit_bytes if both are set."
+    },
+    "memory_limit_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Adapter-published hard memory ceiling, when known."
+    },
+    "target_compatibility_notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Free-form target/hardware notes (e.g. `requires Jetson Orin`, `Vitis AI DPU only`)."
+    }
+  }
+}

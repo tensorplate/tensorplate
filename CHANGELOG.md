@@ -8,6 +8,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `include/tensorplate/backend/capability.hpp` and
+  `include/tensorplate/backend/registry.hpp` defining the vendor-neutral
+  `tensorplate::BackendCapability` value object and the thread-safe
+  `tensorplate::BackendRegistry` used by bundle validation and
+  execution-session creation. Capability records publish backend name,
+  optional profile id, supported precision list, shape-support tier,
+  async / generation / streaming / KV-cache flags, op-coverage
+  percentage, and memory estimate/limit. The registry rejects empty
+  keys, null factories, and capability/name mismatches with
+  `Error::Code::ConfigInvalid`; duplicate registration returns
+  `Error::Code::Internal`; unknown backends surface as
+  `Error::Code::Unsupported`. `validate_backend_hint` rejects unknown
+  backends and declared precisions that the adapter does not advertise
+  without falling back at inference time (V01-E05-F01).
+- `include/tensorplate/backend/builtin.hpp` exposes
+  `register_builtin_backends(BackendRegistry&)` so callers (the serving
+  worker, conformance tests, doctor checks) can opt their registry into
+  the adapter set compiled into `tp_runtime`. Adapter availability is
+  driven by the new `TP_ENABLE_TENSORRT`, `TP_ENABLE_LIBTORCH`, and
+  `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` CMake options (all OFF by default
+  for host CI; flipped on per adapter in V01-E05-F02 / F03 / F05).
+- `protocol/schemas/backend_capability.json` mirrors `BackendCapability`
+  so capability records can cross process boundaries without leaking
+  adapter-specific types.
 - `include/tensorplate/core/execution_session.hpp` defining the canonical
   public `tensorplate::ExecutionSession` lifecycle interface. The public
   method set is `load`, `prime`, `infer`, `infer_async`, `unload`,
