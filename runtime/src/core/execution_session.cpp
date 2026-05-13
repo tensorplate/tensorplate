@@ -1,22 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E04-F01-T02: ExecutionSession enum wire-name tables and default
-// `do_*` implementations.
+// V01-E04-F02: ExecutionSession lifecycle state machine.
 //
-// The lifecycle state machine, NVI readiness/validation gates, sync
-// inference path with timing, async method shape, and event emission
-// land in V01-E04-F02 / F03 / F04 / F05 / F06 respectively. Until those
-// arrive, the public lifecycle methods route through the default
-// `do_*` virtual implementations defined below; concrete adapters
-// override them as usual.
+// Builds on the V01-E04-F01 public interface by wiring the lifecycle
+// transitions (unloaded -> loaded -> primed/ready, plus failed and
+// recovery via unload) into the non-virtual public methods. Request
+// validation, output validation, monotonic timing, async unsupported
+// path, and event emission land in V01-E04-F03 / F04 / F05 / F06; the
+// public lifecycle gates ("infer before prime returns NotReady") are
+// already enforced here.
 
 #include "tensorplate/core/execution_session.hpp"
 
 #include <array>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
+#include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
+#include "tensorplate/core/infer_request.hpp"
+#include "tensorplate/core/infer_result.hpp"
 #include "tensorplate/core/result.hpp"
 
 namespace tensorplate {
@@ -101,12 +108,6 @@ std::optional<SessionEventKind> session_event_kind_from_string(std::string_view 
 }
 
 // -- Default `do_*` implementations. -----------------------------------------
-//
-// V01-E04-F02 introduces the lifecycle state machine that drives the
-// public methods. Until then, the public methods are not yet wired to
-// these defaults; concrete adapters can override `do_load` / `do_infer`
-// and rely on the default `do_prime` / `do_infer_async` / `do_unload`
-// once the wrappers land.
 
 Result<void> ExecutionSession::do_prime() {
   return Result<void>{};
@@ -121,35 +122,140 @@ Result<void> ExecutionSession::do_unload() {
   return Result<void>{};
 }
 
-// -- Public lifecycle methods (V01-E04-F02..F06). ----------------------------
-//
-// Stubs returning NotReady until the lifecycle wrapper lands in
-// V01-E04-F02. These ensure the public symbol set is linkable so that
-// downstream targets compile against the header.
+// -- Lifecycle state machine (V01-E04-F02). -----------------------------------
 
-Result<void> ExecutionSession::load(const ModelSpec& /*spec*/) {
-  return unexpected(Error::Code::NotReady,
-                    "ExecutionSession::load wrapper not yet implemented (V01-E04-F02)");
+namespace {
+
+/// Map an adapter-reported error into the post-prime state transition.
+/// `ConfigInvalid` is treated as recoverable: the host can adjust
+/// configuration and retry `prime`. Every other failure transitions the
+/// session into `Failed` so the host knows recovery requires `unload`.
+SessionState prime_failure_state(Error::Code code) noexcept {
+  return code == Error::Code::ConfigInvalid ? SessionState::Loaded : SessionState::Failed;
+}
+
+}  // namespace
+
+Result<void> ExecutionSession::load(const ModelSpec& spec) {
+  if (state_ != SessionState::Unloaded) {
+    auto err = Error::make(Error::Code::NotReady,
+                           "ExecutionSession::load requires Unloaded state (current: " +
+                               std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto result = do_load(spec);
+  if (!result) {
+    auto err = std::move(result).error();
+    model_.reset();
+    state_ = SessionState::Failed;
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  model_ = spec;
+  state_ = SessionState::Loaded;
+  last_error_.reset();
+  return Result<void>{};
 }
 
 Result<void> ExecutionSession::prime() {
-  return unexpected(Error::Code::NotReady,
-                    "ExecutionSession::prime wrapper not yet implemented (V01-E04-F02)");
+  if (state_ != SessionState::Loaded) {
+    auto err = Error::make(Error::Code::NotReady,
+                           "ExecutionSession::prime requires Loaded state (current: " +
+                               std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto result = do_prime();
+  if (!result) {
+    auto err = std::move(result).error();
+    state_ = prime_failure_state(err.code);
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  state_ = SessionState::Ready;
+  last_error_.reset();
+  return Result<void>{};
 }
 
-Result<InferResult> ExecutionSession::infer(const InferRequest& /*request*/) {
-  return unexpected(Error::Code::NotReady,
-                    "ExecutionSession::infer wrapper not yet implemented (V01-E04-F03/F04)");
+Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
+  // F02 gate only: full request/output validation lands in F03, and
+  // monotonic timing + InferResult construction in F04. Sessions that
+  // are not Ready must surface NotReady before any adapter dispatch.
+  if (state_ != SessionState::Ready) {
+    auto err = Error::make(Error::Code::NotReady,
+                           "ExecutionSession::infer requires Ready state (current: " +
+                               std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto adapter_result = do_infer(request);
+  if (!adapter_result) {
+    auto err = std::move(adapter_result).error();
+    last_error_ = err;
+    return InferResult::create_failure(request.request_id(), std::move(err));
+  }
+
+  auto outputs = std::move(adapter_result).value();
+  auto result = InferResult::create_success(request.request_id(), std::move(outputs));
+  if (!result) {
+    auto err = std::move(result).error();
+    last_error_ = err;
+    return InferResult::create_failure(request.request_id(), std::move(err));
+  }
+
+  last_error_.reset();
+  return std::move(result).value();
 }
 
-Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& /*request*/) {
-  return unexpected(Error::Code::NotReady,
-                    "ExecutionSession::infer_async wrapper not yet implemented (V01-E04-F05)");
+Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& request) {
+  // F02 gate only. The typed Unsupported shape comes from the default
+  // do_infer_async; F05 adds the full async wrapper (validation, event
+  // emission, and the Unsupported event distinct from generic failure).
+  if (state_ != SessionState::Ready) {
+    auto err = Error::make(Error::Code::NotReady,
+                           "ExecutionSession::infer_async requires Ready state (current: " +
+                               std::string(to_string(state_)) + ")");
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  auto adapter_result = do_infer_async(request);
+  if (!adapter_result) {
+    auto err = std::move(adapter_result).error();
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  last_error_.reset();
+  return adapter_result;
 }
 
 Result<void> ExecutionSession::unload() {
-  return unexpected(Error::Code::NotReady,
-                    "ExecutionSession::unload wrapper not yet implemented (V01-E04-F02)");
+  // Unload from Unloaded is a no-op success so cleanup paths that
+  // call unload defensively don't need to query state first.
+  if (state_ == SessionState::Unloaded) {
+    last_error_.reset();
+    return Result<void>{};
+  }
+
+  auto result = do_unload();
+  if (!result) {
+    auto err = std::move(result).error();
+    state_ = SessionState::Failed;
+    last_error_ = err;
+    return unexpected(std::move(err));
+  }
+
+  state_ = SessionState::Unloaded;
+  model_.reset();
+  last_error_.reset();
+  return Result<void>{};
 }
 
 }  // namespace tensorplate

@@ -28,6 +28,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   record with `to_string` / `session_event_kind_from_string` helpers,
   plus the `tensorplate::SessionEventSink` interface used by the NVI
   wrapper to emit lifecycle and inference events.
+- Session lifecycle state machine wiring the V01-E04-F01 public methods
+  through the protected `do_*` adapter override points: `load`
+  transitions `unloaded -> loaded` (or `unloaded -> failed`), `prime`
+  transitions `loaded -> ready` (or `loaded -> loaded` on
+  `ConfigInvalid`, otherwise `loaded -> failed`), `unload` returns any
+  state to `unloaded` (or transitions to `failed` on adapter failure),
+  and `infer` / `infer_async` surface `Error::Code::NotReady` before
+  any adapter dispatch unless the session is `Ready`. The state
+  machine is adapter-neutral and intentionally general enough for
+  TensorRT engine setup, LibTorch model load, Python sidecar startup,
+  and a future Vitis AI `.xmodel` / DPU lifecycle (V01-E04-F02).
+- Shared mock `tensorplate::testing::MockSession` under `test/mocks/`
+  that drops into `ExecutionSession*` and lets tests program adapter
+  success/failure and inspect adapter dispatch counts and last-seen
+  request/spec. Used by the V01-E04 lifecycle, validation, timing,
+  async, event-emission, and conformance test suites.
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
