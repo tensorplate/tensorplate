@@ -6,6 +6,8 @@
 // suite in `test/contract/` so the V01-E04 contract is one source of
 // truth across every adapter family.
 
+#include "execution_session_conformance.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstddef>
@@ -13,11 +15,11 @@
 #include <utility>
 #include <vector>
 
-#include "execution_session_conformance.hpp"
-#include "mock_execution_session.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/execution_session.hpp"
+
+#include "mock_execution_session.hpp"
 
 namespace {
 
@@ -43,9 +45,8 @@ SessionFactory make_mock_factory() {
     // a tensor window that fits its buffer. A 1x4 float32 fits in
     // 16 bytes regardless of the configured input shape.
     auto tv = TensorView::create(DType::Float32, {1, 4}).value();
-    auto buf = BufferRef::create(/*id=*/0xC0FFEE, /*size_bytes=*/16,
-                                 BufferOwnership::Owned)
-                   .value();
+    auto buf =
+        BufferRef::create(/*id=*/0xC0FFEE, /*size_bytes=*/16, BufferOwnership::Owned).value();
     session->set_next_infer_outputs({NamedOutput{"out0", buf, tv, std::nullopt}});
     return session;
   };

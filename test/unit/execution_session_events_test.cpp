@@ -21,14 +21,15 @@
 #include <utility>
 #include <vector>
 
-#include "mock_execution_session.hpp"
-#include "recording_event_sink.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/infer_request.hpp"
 #include "tensorplate/core/model_spec.hpp"
+
+#include "mock_execution_session.hpp"
+#include "recording_event_sink.hpp"
 
 namespace {
 
@@ -153,8 +154,7 @@ TEST(SessionEvents, ValidationFailureBeforeAdapterEmitsValidationFailed) {
   // Tensor window overflows its buffer.
   auto tv = TensorView::create(DType::Float32, {1, 8}).value();
   auto buf = BufferRef::create(1, 16, BufferOwnership::Owned).value();
-  auto req =
-      InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}).value();
+  auto req = InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}).value();
 
   auto r = s.infer(req);
   ASSERT_FALSE(r.has_value());

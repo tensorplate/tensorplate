@@ -23,10 +23,11 @@
 
 #pragma once
 
+#include <gtest/gtest.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <utility>
@@ -192,10 +193,9 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   //    Adapters that accept any path (mock) skip this branch.
   {
     auto session = factory();
-    auto bad =
-        ModelSpec::create("conformance-bad", ModelClass::Vision,
-                          "/tensorplate/conformance/does_not_exist", cfg.backend_hint)
-            .value();
+    auto bad = ModelSpec::create("conformance-bad", ModelClass::Vision,
+                                 "/tensorplate/conformance/does_not_exist", cfg.backend_hint)
+                   .value();
     auto r = session->load(bad);
     // Either succeeds (mock) or returns a typed error (real adapter).
     if (!r.has_value()) {

@@ -159,7 +159,7 @@ bool buffer_window_fits(const BufferRef& buffer, const TensorView& view) noexcep
 
 // -- NVI request validation (V01-E04-F03). ------------------------------------
 
-Result<void> ExecutionSession::validate_request_for_infer(const InferRequest& request) const {
+Result<void> ExecutionSession::validate_request_for_infer(const InferRequest& request) {
   // `InferRequest::create` already rejects most of these at construction.
   // The NVI wrapper re-validates so adapter-side callers that bypass the
   // factory (e.g. test fixtures, future codecs) still fail *before*
@@ -235,18 +235,17 @@ void ExecutionSession::emit_event(SessionEventKind kind,
   ev.duration = duration;
   ev.state_after = state_;
 
-  // A misbehaving sink must never corrupt session state. The
-  // SessionEventSink::on_event contract is noexcept; catch defensively
-  // anyway so a sink that violates the contract cannot break the
-  // inference path.
+  // A misbehaving sink must never corrupt session state. Production
+  // sinks should be noexcept by convention; the public interface does
+  // not require it, so we swallow any exception that escapes
+  // `on_event` to keep emission fire-and-forget.
   try {
     event_sink_->on_event(ev);
-  } catch (...) {  // NOLINT(bugprone-empty-catch): intentional, sink contract is noexcept.
+  } catch (...) {  // NOLINT(bugprone-empty-catch): emission is intentionally fire-and-forget.
   }
 }
 
-Result<void> ExecutionSession::validate_outputs_for_infer(
-    const std::vector<NamedOutput>& outputs) const {
+Result<void> ExecutionSession::validate_outputs_for_infer(const std::vector<NamedOutput>& outputs) {
   if (outputs.empty()) {
     return unexpected(Error::Code::InferenceFailed,
                       "adapter `do_infer` returned an empty outputs vector");
@@ -269,9 +268,9 @@ Result<void> ExecutionSession::validate_outputs_for_infer(
                         "adapter output `" + output.name + "` has a released buffer");
     }
     if (!buffer_window_fits(output.buffer, output.tensor)) {
-      return unexpected(Error::Code::ShapeMismatch,
-                        "adapter output `" + output.name +
-                            "` tensor window does not fit inside its buffer");
+      return unexpected(
+          Error::Code::ShapeMismatch,
+          "adapter output `" + output.name + "` tensor window does not fit inside its buffer");
     }
   }
 
@@ -292,8 +291,7 @@ Result<void> ExecutionSession::load(const ModelSpec& spec) {
 
   const auto start = Clock::now();
   auto result = do_load(spec);
-  const auto duration =
-      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+  const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
 
   if (!result) {
     auto err = std::move(result).error();
@@ -325,8 +323,7 @@ Result<void> ExecutionSession::prime() {
 
   const auto start = Clock::now();
   auto result = do_prime();
-  const auto duration =
-      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+  const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
 
   if (!result) {
     auto err = std::move(result).error();
@@ -378,10 +375,8 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   const auto start = Clock::now();
   auto adapter_result = do_infer(request);
   const auto end = Clock::now();
-  const auto exec_latency =
-      std::chrono::duration_cast<InferenceTiming::Duration>(end - start);
-  const auto event_duration =
-      std::chrono::duration_cast<SessionEvent::Duration>(end - start);
+  const auto exec_latency = std::chrono::duration_cast<InferenceTiming::Duration>(end - start);
+  const auto event_duration = std::chrono::duration_cast<SessionEvent::Duration>(end - start);
 
   InferenceTiming timing;
   timing.execution_latency = exec_latency;
@@ -433,16 +428,14 @@ Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& reque
     req_id = request.request_id();
   }
 
-  emit_event(SessionEventKind::InferAsyncStart, req_id, std::nullopt,
-             SessionEvent::Duration{0});
+  emit_event(SessionEventKind::InferAsyncStart, req_id, std::nullopt, SessionEvent::Duration{0});
 
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer_async requires Ready state (current: " +
                                std::string(to_string(state_)) + ")");
     last_error_ = err;
-    emit_event(SessionEventKind::ValidationFailed, req_id, err.code,
-               SessionEvent::Duration{0});
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
@@ -450,15 +443,13 @@ Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& reque
   if (!validation) {
     auto err = std::move(validation).error();
     last_error_ = err;
-    emit_event(SessionEventKind::ValidationFailed, req_id, err.code,
-               SessionEvent::Duration{0});
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
   const auto start = Clock::now();
   auto adapter_result = do_infer_async(request);
-  const auto duration =
-      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+  const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
 
   if (!adapter_result) {
     auto err = std::move(adapter_result).error();
@@ -486,15 +477,13 @@ Result<void> ExecutionSession::unload() {
   // call unload defensively don't need to query state first.
   if (state_ == SessionState::Unloaded) {
     last_error_.reset();
-    emit_event(SessionEventKind::UnloadEnd, std::nullopt, std::nullopt,
-               SessionEvent::Duration{0});
+    emit_event(SessionEventKind::UnloadEnd, std::nullopt, std::nullopt, SessionEvent::Duration{0});
     return Result<void>{};
   }
 
   const auto start = Clock::now();
   auto result = do_unload();
-  const auto duration =
-      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+  const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
 
   if (!result) {
     auto err = std::move(result).error();

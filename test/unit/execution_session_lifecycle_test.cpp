@@ -18,10 +18,11 @@
 
 #include <string_view>
 
-#include "mock_execution_session.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
+
+#include "mock_execution_session.hpp"
 
 namespace {
 

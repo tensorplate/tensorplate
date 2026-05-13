@@ -16,12 +16,12 @@
 // Lifecycle behavior (state machine, NVI gates, timing, async,
 // events) is exercised in V01-E04-F02..F06 tests.
 
-#include "tensorplate/core/execution_session.hpp"
-
 #include <gtest/gtest.h>
 
 #include <string_view>
 #include <type_traits>
+
+#include "tensorplate/core/execution_session.hpp"
 
 // Vendor-SDK hygiene check: the public header must compile without
 // pulling in any CUDA, TensorRT, PyTorch/LibTorch, Vitis AI, XRT, DPU,
@@ -67,8 +67,8 @@ TEST(ExecutionSessionInterface, PublicMethodSignatures) {
   using PrimeFn = tensorplate::Result<void> (ExecutionSession::*)();
   using InferFn = tensorplate::Result<tensorplate::InferResult> (ExecutionSession::*)(
       const tensorplate::InferRequest&);
-  using InferAsyncFn = tensorplate::Result<AsyncInferHandle> (ExecutionSession::*)(
-      const tensorplate::InferRequest&);
+  using InferAsyncFn =
+      tensorplate::Result<AsyncInferHandle> (ExecutionSession::*)(const tensorplate::InferRequest&);
   using UnloadFn = tensorplate::Result<void> (ExecutionSession::*)();
   using IsReadyFn = bool (ExecutionSession::*)() const noexcept;
   using BackendNameFn = std::string_view (ExecutionSession::*)() const noexcept;

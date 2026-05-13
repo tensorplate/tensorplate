@@ -23,7 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include "mock_execution_session.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
@@ -31,6 +30,8 @@
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/infer_request.hpp"
 #include "tensorplate/core/model_spec.hpp"
+
+#include "mock_execution_session.hpp"
 
 namespace {
 
@@ -102,8 +103,7 @@ TEST(SessionInferAsync, ValidationBeatsUnsupported) {
   // Build a tensor window that overflows its buffer.
   auto tv = TensorView::create(DType::Float32, {1, 8}).value();  // 32 bytes
   auto buf = BufferRef::create(1, 16, BufferOwnership::Owned).value();
-  auto req =
-      InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}).value();
+  auto req = InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}).value();
 
   auto r = s.infer_async(req);
   ASSERT_FALSE(r.has_value());
@@ -117,11 +117,9 @@ TEST(SessionInferAsync, ExpiredDeadlineBeatsUnsupported) {
 
   auto tv = TensorView::create(DType::Float32, {1, 4}).value();
   auto buf = BufferRef::create(1, 16, BufferOwnership::Owned).value();
-  const auto deadline =
-      InferRequest::Clock::now() + std::chrono::milliseconds(10);
-  auto req = InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}, {},
-                                  deadline)
-                 .value();
+  const auto deadline = InferRequest::Clock::now() + std::chrono::milliseconds(10);
+  auto req =
+      InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}, {}, deadline).value();
   std::this_thread::sleep_for(std::chrono::milliseconds(25));
 
   auto r = s.infer_async(req);

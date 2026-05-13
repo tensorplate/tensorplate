@@ -59,8 +59,7 @@ enum class SessionState : std::uint8_t {
 };
 
 [[nodiscard]] std::string_view to_string(SessionState state) noexcept;
-[[nodiscard]] std::optional<SessionState> session_state_from_string(
-    std::string_view name) noexcept;
+[[nodiscard]] std::optional<SessionState> session_state_from_string(std::string_view name) noexcept;
 
 /// Async-inference handle returned by `infer_async`.
 ///
@@ -320,22 +319,26 @@ class ExecutionSession {
   /// names, released or missing input buffers, tensor byte windows that
   /// do not fit inside their owning buffers, and requests whose
   /// monotonic deadline has already expired (V01-E04-F03).
-  [[nodiscard]] Result<void> validate_request_for_infer(const InferRequest& request) const;
+  ///
+  /// Static because the gate is a pure function of the request value
+  /// object; no session state is consulted.
+  [[nodiscard]] static Result<void> validate_request_for_infer(const InferRequest& request);
 
   /// Validate an adapter-published outputs vector before wrapping it in
   /// an `InferResult`. Rejects empty outputs vectors, empty / duplicate
   /// names, released or missing output buffers, and tensor byte windows
   /// that do not fit inside their owning buffers (V01-E04-F04).
-  [[nodiscard]] Result<void> validate_outputs_for_infer(
-      const std::vector<NamedOutput>& outputs) const;
+  ///
+  /// Static for the same reason as `validate_request_for_infer`.
+  [[nodiscard]] static Result<void> validate_outputs_for_infer(
+      const std::vector<NamedOutput>& outputs);
 
   /// Emit a `SessionEvent` through the registered sink. Fire-and-forget:
   /// a missing sink is a no-op, and any exception thrown by a
   /// misbehaving sink is swallowed so it cannot corrupt session state
   /// (V01-E04-F06).
   void emit_event(SessionEventKind kind, const std::optional<std::string>& request_id,
-                  std::optional<Error::Code> error_code,
-                  SessionEvent::Duration duration) noexcept;
+                  std::optional<Error::Code> error_code, SessionEvent::Duration duration) noexcept;
 
   SessionState state_ = SessionState::Unloaded;
   std::optional<ModelSpec> model_;

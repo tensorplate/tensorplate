@@ -24,13 +24,14 @@
 #include <utility>
 #include <vector>
 
-#include "mock_execution_session.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/infer_request.hpp"
 #include "tensorplate/core/model_spec.hpp"
+
+#include "mock_execution_session.hpp"
 
 namespace {
 
@@ -94,8 +95,7 @@ TEST(SessionValidation, ReleasedInputBufferRejectedBeforeDispatch) {
   (void)released;
   EXPECT_EQ(s.dispatch_counts().infer, 0u);
 
-  auto bad =
-      InferRequest::create("req-1", "/infer", {NamedInput{"in0", BufferRef{}, tv}});
+  auto bad = InferRequest::create("req-1", "/infer", {NamedInput{"in0", BufferRef{}, tv}});
   ASSERT_FALSE(bad.has_value());
   EXPECT_EQ(bad.error().code, Error::Code::ConfigInvalid);
 }
@@ -125,10 +125,10 @@ TEST(SessionValidation, TensorWindowWithOffsetMustFitInBuffer) {
   put_into_ready(s);
 
   // 16-byte view at offset 8 inside a 16-byte buffer -> ShapeMismatch.
-  auto tv = TensorView::create(DType::Float32, {1, 4},
-                               tensorplate::Layout::RowMajor, /*byte_offset=*/8,
-                               /*byte_size=*/16)
-                .value();
+  auto tv =
+      TensorView::create(DType::Float32, {1, 4}, tensorplate::Layout::RowMajor, /*byte_offset=*/8,
+                         /*byte_size=*/16)
+          .value();
   std::vector<NamedInput> inputs;
   inputs.push_back(make_input("in0", /*id=*/1, /*buffer_bytes=*/16, tv));
 
@@ -153,8 +153,7 @@ TEST(SessionValidation, ExpiredDeadlineReturnsTimeout) {
 
   // Build with a future deadline so InferRequest::create accepts it,
   // then sleep past it.
-  const auto deadline =
-      InferRequest::Clock::now() + std::chrono::milliseconds(10);
+  const auto deadline = InferRequest::Clock::now() + std::chrono::milliseconds(10);
   auto req = InferRequest::create("req-1", "/infer", std::move(inputs), {}, deadline);
   ASSERT_TRUE(req.has_value());
 
@@ -205,8 +204,7 @@ TEST(SessionValidation, ValidRequestReachesAdapter) {
 
   // Configure the adapter to publish exactly one output so the wrapper
   // returns a success InferResult.
-  auto out_buf =
-      BufferRef::create(/*id=*/42, /*size_bytes=*/16, BufferOwnership::Owned).value();
+  auto out_buf = BufferRef::create(/*id=*/42, /*size_bytes=*/16, BufferOwnership::Owned).value();
   auto out_tv = TensorView::create(DType::Float32, {1, 4}).value();
   s.set_next_infer_outputs({tensorplate::NamedOutput{"out0", out_buf, out_tv, std::nullopt}});
 

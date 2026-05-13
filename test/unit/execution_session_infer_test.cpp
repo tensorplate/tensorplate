@@ -23,7 +23,6 @@
 #include <utility>
 #include <vector>
 
-#include "mock_execution_session.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/output.hpp"
@@ -32,6 +31,8 @@
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/infer_request.hpp"
 #include "tensorplate/core/model_spec.hpp"
+
+#include "mock_execution_session.hpp"
 
 namespace {
 
@@ -122,8 +123,7 @@ TEST(SessionInfer, AdapterFailureStillStampsExecutionLatency) {
   MockSession s;
   put_into_ready(s);
 
-  s.next_infer_fails_with(
-      Error::make(Error::Code::InferenceFailed, "kernel launch failed"));
+  s.next_infer_fails_with(Error::make(Error::Code::InferenceFailed, "kernel launch failed"));
 
   auto r = s.infer(valid_request());
   ASSERT_TRUE(r.has_value());  // Adapter failures surface as failure InferResult.
@@ -181,9 +181,7 @@ TEST(SessionInfer, ValidationFailureReturnsResultErrorNotFailureInferResult) {
   // Build a request whose tensor window does not fit.
   auto tv = TensorView::create(DType::Float32, {1, 8}).value();  // 32 bytes
   auto buf = BufferRef::create(1, 16, BufferOwnership::Owned).value();
-  auto req = InferRequest::create("req-1", "/infer",
-                                  {NamedInput{"in0", buf, tv}})
-                 .value();
+  auto req = InferRequest::create("req-1", "/infer", {NamedInput{"in0", buf, tv}}).value();
 
   auto r = s.infer(req);
   ASSERT_FALSE(r.has_value());
@@ -258,11 +256,11 @@ TEST(SessionInfer, BadOutputReleasesPartialBuffersThroughManager) {
 
   // Build two real outputs through the buffer manager. The second view
   // overflows its buffer, so the wrapper must release both.
-  auto good_tv = TensorView::create(DType::Float32, {1, 4}).value();    // 16 bytes
-  auto bad_tv = TensorView::create(DType::Float32, {1, 16}).value();    // 64 bytes
-  auto good = tensorplate::build_named_output(
-      *manager, OutputDescriptor{.name = "good", .tensor = good_tv})
-                  .value();
+  auto good_tv = TensorView::create(DType::Float32, {1, 4}).value();  // 16 bytes
+  auto bad_tv = TensorView::create(DType::Float32, {1, 16}).value();  // 64 bytes
+  auto good =
+      tensorplate::build_named_output(*manager, OutputDescriptor{.name = "good", .tensor = good_tv})
+          .value();
   // Allocate a buffer too small for `bad_tv` so output validation
   // rejects it. Allocate manually so the bounds check fires inside the
   // session wrapper rather than at allocation time.
