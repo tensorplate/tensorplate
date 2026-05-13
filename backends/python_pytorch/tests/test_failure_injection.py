@@ -14,13 +14,17 @@ import contextlib
 import socket
 import threading
 import uuid
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, cast
 
 import pytest
 
 from tensorplate_pytorch_backend import codec, protocol
+from tensorplate_pytorch_backend.backends import Backend
 from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
 from tensorplate_pytorch_backend.runner import SidecarRunner
+
+RunnerPair = tuple[socket.socket, SidecarRunner, "_ProgrammableFactory"]
 
 
 def _make_request(kind: str, **extra: Any) -> codec.SidecarFrame:
@@ -78,10 +82,10 @@ def _model_spec() -> dict[str, Any]:
 
 
 @pytest.fixture
-def runner_pair():
+def runner_pair() -> Iterator[RunnerPair]:
     factory = _ProgrammableFactory()
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    runner = SidecarRunner(b, backend_factories={"fixture": factory})  # type: ignore[arg-type]
+    runner = SidecarRunner(b, backend_factories={"fixture": cast(type[Backend], factory)})
     thread = threading.Thread(target=runner.serve_forever, daemon=True)
     thread.start()
     yield a, runner, factory
@@ -91,7 +95,7 @@ def runner_pair():
     thread.join(timeout=5.0)
 
 
-def test_load_failure_returns_typed_load_failed(runner_pair) -> None:
+def test_load_failure_returns_typed_load_failed(runner_pair: RunnerPair) -> None:
     client, _, factory = runner_pair
     factory.program = {"load": (protocol.ERR_LOAD_FAILED, "engine missing")}
     resp = _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec()))
@@ -99,7 +103,7 @@ def test_load_failure_returns_typed_load_failed(runner_pair) -> None:
     assert resp.header["error"]["code"] == protocol.ERR_LOAD_FAILED
 
 
-def test_prime_failure_returns_typed_inference_failed(runner_pair) -> None:
+def test_prime_failure_returns_typed_inference_failed(runner_pair: RunnerPair) -> None:
     client, _, factory = runner_pair
     factory.program = {"prime": (protocol.ERR_INFERENCE_FAILED, "prime crashed")}
     assert (
@@ -113,7 +117,7 @@ def test_prime_failure_returns_typed_inference_failed(runner_pair) -> None:
     assert resp.header["error"]["code"] == protocol.ERR_INFERENCE_FAILED
 
 
-def test_infer_failure_returns_typed_inference_failed(runner_pair) -> None:
+def test_infer_failure_returns_typed_inference_failed(runner_pair: RunnerPair) -> None:
     client, _, factory = runner_pair
     factory.program = {"infer": (protocol.ERR_INFERENCE_FAILED, "infer crashed")}
     assert (
@@ -144,14 +148,14 @@ def test_infer_failure_returns_typed_inference_failed(runner_pair) -> None:
     assert resp.header["error"]["code"] == protocol.ERR_INFERENCE_FAILED
 
 
-def test_missing_model_spec_returns_config_invalid(runner_pair) -> None:
+def test_missing_model_spec_returns_config_invalid(runner_pair: RunnerPair) -> None:
     client, _, _ = runner_pair
     resp = _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL))
     assert resp.header["status"] == protocol.STATUS_ERROR
     assert resp.header["error"]["code"] == protocol.ERR_CONFIG_INVALID
 
 
-def test_malformed_tensor_entry_returns_config_invalid(runner_pair) -> None:
+def test_malformed_tensor_entry_returns_config_invalid(runner_pair: RunnerPair) -> None:
     client, _, _ = runner_pair
     assert (
         _round_trip(
@@ -176,7 +180,7 @@ def test_malformed_tensor_entry_returns_config_invalid(runner_pair) -> None:
     assert resp.header["error"]["code"] == protocol.ERR_CONFIG_INVALID
 
 
-def test_cancel_records_request_id_on_backend(runner_pair) -> None:
+def test_cancel_records_request_id_on_backend(runner_pair: RunnerPair) -> None:
     client, _, factory = runner_pair
     _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec()))
     _round_trip(client, _make_request(protocol.KIND_CANCEL, correlation_id="r-late"))

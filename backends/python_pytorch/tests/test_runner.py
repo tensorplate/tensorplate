@@ -12,6 +12,7 @@ import contextlib
 import socket
 import threading
 import uuid
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -55,7 +56,7 @@ def _drive(client_sock: socket.socket, server_sock: socket.socket) -> SidecarRun
 
 
 @pytest.fixture
-def runner_pair() -> tuple[socket.socket, SidecarRunner]:
+def runner_pair() -> Iterator[tuple[socket.socket, SidecarRunner]]:
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     runner = _drive(a, b)
     yield a, runner
