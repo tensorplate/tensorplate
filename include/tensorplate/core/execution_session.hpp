@@ -320,6 +320,13 @@ class ExecutionSession {
   /// monotonic deadline has already expired (V01-E04-F03).
   [[nodiscard]] Result<void> validate_request_for_infer(const InferRequest& request) const;
 
+  /// Validate an adapter-published outputs vector before wrapping it in
+  /// an `InferResult`. Rejects empty outputs vectors, empty / duplicate
+  /// names, released or missing output buffers, and tensor byte windows
+  /// that do not fit inside their owning buffers (V01-E04-F04).
+  [[nodiscard]] Result<void> validate_outputs_for_infer(
+      const std::vector<NamedOutput>& outputs) const;
+
   SessionState state_ = SessionState::Unloaded;
   std::optional<ModelSpec> model_;
   std::optional<Error> last_error_;

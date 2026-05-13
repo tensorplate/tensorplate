@@ -13,6 +13,7 @@
 #include "tensorplate/core/execution_session.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -21,7 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/infer_request.hpp"
@@ -208,6 +211,39 @@ Result<void> ExecutionSession::validate_request_for_infer(const InferRequest& re
   return Result<void>{};
 }
 
+Result<void> ExecutionSession::validate_outputs_for_infer(
+    const std::vector<NamedOutput>& outputs) const {
+  if (outputs.empty()) {
+    return unexpected(Error::Code::InferenceFailed,
+                      "adapter `do_infer` returned an empty outputs vector");
+  }
+
+  std::unordered_set<std::string> seen_names;
+  seen_names.reserve(outputs.size());
+
+  for (const auto& output : outputs) {
+    if (output.name.empty()) {
+      return unexpected(Error::Code::InferenceFailed, "adapter output has empty name");
+    }
+    auto [_, inserted] = seen_names.insert(output.name);
+    if (!inserted) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "adapter outputs have duplicate name `" + output.name + "`");
+    }
+    if (!output.buffer.is_valid()) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "adapter output `" + output.name + "` has a released buffer");
+    }
+    if (!buffer_window_fits(output.buffer, output.tensor)) {
+      return unexpected(Error::Code::ShapeMismatch,
+                        "adapter output `" + output.name +
+                            "` tensor window does not fit inside its buffer");
+    }
+  }
+
+  return Result<void>{};
+}
+
 Result<void> ExecutionSession::load(const ModelSpec& spec) {
   if (state_ != SessionState::Unloaded) {
     auto err = Error::make(Error::Code::NotReady,
@@ -256,8 +292,8 @@ Result<void> ExecutionSession::prime() {
 
 Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   // F03 readiness + validation gates run before adapter dispatch.
-  // Monotonic timing + output validation land in F04; event emission
-  // lands in F06.
+  // F04 wraps the adapter call in monotonic timing and validates the
+  // adapter-published outputs before returning success.
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer requires Ready state (current: " +
@@ -273,19 +309,46 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
     return unexpected(std::move(err));
   }
 
+  // Monotonic latency stamping around adapter dispatch. Uses
+  // `std::chrono::steady_clock` so the timing field is unaffected by
+  // wall-clock changes. Both successful and failed adapter calls have
+  // `execution_latency` populated.
+  const auto start = Clock::now();
   auto adapter_result = do_infer(request);
+  const auto end = Clock::now();
+  const auto exec_latency =
+      std::chrono::duration_cast<InferenceTiming::Duration>(end - start);
+
+  InferenceTiming timing;
+  timing.execution_latency = exec_latency;
+
   if (!adapter_result) {
     auto err = std::move(adapter_result).error();
     last_error_ = err;
-    return InferResult::create_failure(request.request_id(), std::move(err));
+    return InferResult::create_failure(request.request_id(), std::move(err), timing);
   }
 
   auto outputs = std::move(adapter_result).value();
-  auto result = InferResult::create_success(request.request_id(), std::move(outputs));
+
+  // Output validation: released buffers, out-of-bounds windows, empty /
+  // duplicate names all fail before success is published. Partial
+  // outputs (allocated by the adapter) are released through the buffer
+  // plane when a manager is wired.
+  auto output_validation = validate_outputs_for_infer(outputs);
+  if (!output_validation) {
+    auto err = std::move(output_validation).error();
+    last_error_ = err;
+    if (buffer_manager_ != nullptr) {
+      (void)release_partial_outputs(*buffer_manager_, outputs);
+    }
+    return InferResult::create_failure(request.request_id(), std::move(err), timing);
+  }
+
+  auto result = InferResult::create_success(request.request_id(), std::move(outputs), timing);
   if (!result) {
     auto err = std::move(result).error();
     last_error_ = err;
-    return InferResult::create_failure(request.request_id(), std::move(err));
+    return InferResult::create_failure(request.request_id(), std::move(err), timing);
   }
 
   last_error_.reset();

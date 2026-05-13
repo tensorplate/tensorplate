@@ -54,6 +54,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   already-expired monotonic deadlines (`Timeout`). The gates apply
   uniformly to sync and async paths so adapter `do_infer` /
   `do_infer_async` implementations cannot bypass them (V01-E04-F03).
+- Monotonic latency stamping in `ExecutionSession::infer`: the wrapper
+  measures `execution_latency` around the adapter `do_infer` call using
+  `std::chrono::steady_clock` (no wall-clock dependency) and stamps it
+  into the returned `InferResult` on both success and adapter-failure
+  paths. Readiness and validation failures bypass the adapter entirely
+  and surface as `Result::error` rather than a failure `InferResult`
+  (V01-E04-F04-T01).
+- Output validation in `ExecutionSession::infer`: empty outputs vectors,
+  empty or duplicate output names, released output buffers, and tensor
+  byte windows that overflow their buffers are all rejected before
+  success is returned. When a `BufferManager` is wired through
+  `set_buffer_manager`, partial adapter-published outputs are released
+  via `release_partial_outputs` so a failed `infer` does not leak buffer
+  capacity (V01-E04-F04-T02).
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
