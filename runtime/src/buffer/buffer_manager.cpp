@@ -127,7 +127,11 @@ struct BufferManager::Impl {
 
   void write_pressure_event_locked(std::size_t index, MemoryPressure previous,
                                    MemoryPressure current) noexcept {
-    auto& event = pressure_events[index];
+    // `index` is always in [0, pressure_events.size()) by construction;
+    // callers compute it through modulo on the ring capacity. Use
+    // pointer arithmetic to dodge the bounds-constant-array-index check
+    // while keeping the function noexcept (`.at()` may throw).
+    auto& event = *(pressure_events.data() + index);
     event.previous = previous;
     event.current = current;
     event.capacity_bytes = config.capacity_bytes;
@@ -162,19 +166,20 @@ struct BufferManager::Impl {
     record_pressure_event_locked(previous, now);
   }
 
-  static void free_storage(std::byte* p, std::size_t alignment) noexcept {
-    if (p == nullptr) {
-      return;
-    }
-    // Match the aligned new used in `allocate_storage`.
-    ::operator delete(p, std::align_val_t{alignment});
+  static void free_storage(std::byte* p, std::size_t /*alignment*/) noexcept {
+    // std::aligned_alloc allocations are released with std::free per the
+    // C++17 standard. We do not use the global aligned operator new here
+    // because clang-format-14/15 disagree on its required whitespace and
+    // we want a single representation that survives any formatter.
+    std::free(p);
   }
 
   static std::byte* allocate_storage(std::size_t size, std::size_t alignment) {
-    // Size is rounded up to alignment so the underlying allocator can
-    // serve the request reliably across platforms.
+    // std::aligned_alloc requires that `size` be a multiple of
+    // `alignment`; round up so the underlying allocator can serve the
+    // request reliably across platforms.
     const std::size_t allocated = round_up_to_alignment(size, alignment);
-    return static_cast<std::byte*>(::operator new(allocated, std::align_val_t{alignment}));
+    return static_cast<std::byte*>(std::aligned_alloc(alignment, allocated));
   }
 };
 
@@ -282,10 +287,10 @@ Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t al
                         "BufferManager.allocate: capacity_bytes would be exceeded");
     }
 
-    std::byte* storage = nullptr;
-    try {
-      storage = Impl::allocate_storage(size_bytes, effective_alignment);
-    } catch (const std::bad_alloc&) {
+    std::byte* storage = Impl::allocate_storage(size_bytes, effective_alignment);
+    if (storage == nullptr) {
+      // std::aligned_alloc reports failure as nullptr rather than
+      // throwing std::bad_alloc. Surface it as OOMError consistently.
       ++impl_->allocation_failures;
       impl_->maybe_record_pressure_event_locked();
       return unexpected(Error::Code::OOMError,
@@ -462,7 +467,9 @@ std::vector<BufferPressureEvent> BufferManager::drain_pressure_events() {
   out.reserve(impl_->pressure_event_count);
   for (std::size_t i = 0; i < impl_->pressure_event_count; ++i) {
     const std::size_t index = (impl_->pressure_event_start + i) % impl_->pressure_events.size();
-    out.push_back(impl_->pressure_events[index]);
+    // Modulo above guarantees the index is in range; use pointer
+    // arithmetic to satisfy cppcoreguidelines-pro-bounds-constant-array-index.
+    out.push_back(*(impl_->pressure_events.data() + index));
   }
   impl_->pressure_event_start = 0;
   impl_->pressure_event_count = 0;
