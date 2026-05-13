@@ -76,8 +76,8 @@ class PythonPytorchAdapterFixture : public ::testing::Test {
  protected:
   void SetUp() override {
     if (!python_backend_available()) {
-      GTEST_SKIP() << "tensorplate_pytorch_backend not importable from "
-                   << locate_python() << " (CI should install backends/python_pytorch/)";
+      GTEST_SKIP() << "tensorplate_pytorch_backend not importable from " << locate_python()
+                   << " (CI should install backends/python_pytorch/)";
     }
     setenv("TP_TEST_PYTHON_EXE", locate_python().c_str(), 1);
   }
@@ -105,8 +105,7 @@ TEST_F(PythonPytorchAdapterFixture, FixtureBackendEchoesInputs) {
   auto session = std::move(session_r).value();
 
   auto spec =
-      ModelSpec::create("smolvla-fixture", ModelClass::Vla, "/dev/null", "python_pytorch")
-          .value();
+      ModelSpec::create("smolvla-fixture", ModelClass::Vla, "/dev/null", "python_pytorch").value();
   auto load_r = session->load(spec);
   ASSERT_TRUE(load_r.has_value()) << load_r.error().message;
   ASSERT_TRUE(session->prime().has_value());
@@ -153,8 +152,7 @@ TEST_F(PythonPytorchAdapterFixture, InferBeforePrimeReturnsNotReady) {
   ExecutionSessionRuntimeHooks hooks{};
   hooks.buffer_manager = manager.get();
   auto session = reg.create_session("python_pytorch", hooks).value();
-  auto spec =
-      ModelSpec::create("m", ModelClass::Vla, "/dev/null", "python_pytorch").value();
+  auto spec = ModelSpec::create("m", ModelClass::Vla, "/dev/null", "python_pytorch").value();
   ASSERT_TRUE(session->load(spec).has_value());
 
   auto tv = TensorView::create(DType::Float32, {1, 1}).value();

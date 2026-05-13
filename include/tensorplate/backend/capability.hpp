@@ -65,9 +65,9 @@ class BackendCapability {
   static Result<BackendCapability> create(
       std::string backend_name, std::vector<PrecisionHint> supported_precision,
       ShapeSupport shape_support = ShapeSupport::Dynamic,
-      std::optional<std::string> profile_id = std::nullopt,
-      bool supports_async = false, bool supports_generation = false,
-      bool supports_streaming = false, bool supports_kv_cache = false,
+      std::optional<std::string> profile_id = std::nullopt, bool supports_async = false,
+      bool supports_generation = false, bool supports_streaming = false,
+      bool supports_kv_cache = false,
       std::optional<std::uint8_t> op_coverage_score_pct = std::nullopt,
       std::optional<std::uint64_t> memory_estimate_bytes = std::nullopt,
       std::optional<std::uint64_t> memory_limit_bytes = std::nullopt,

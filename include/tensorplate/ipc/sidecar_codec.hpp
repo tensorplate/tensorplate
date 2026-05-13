@@ -46,8 +46,8 @@ inline constexpr std::uint32_t kFrameMagic = 0x54505343u;
 
 /// Inclusive maxima for malformed-frame rejection. Generous but
 /// bounded; sidecars sending more must split the message.
-inline constexpr std::uint32_t kMaxHeaderLen = 1u << 20;       // 1 MiB
-inline constexpr std::uint32_t kMaxPayloadLen = 256u << 20;    // 256 MiB
+inline constexpr std::uint32_t kMaxHeaderLen = 1u << 20;     // 1 MiB
+inline constexpr std::uint32_t kMaxPayloadLen = 256u << 20;  // 256 MiB
 
 /// Decoded sidecar frame. Header is the JSON string as transmitted on
 /// the wire so the caller can parse with the same JSON library used

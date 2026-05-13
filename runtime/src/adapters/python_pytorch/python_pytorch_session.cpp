@@ -10,14 +10,13 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/backend/registry.hpp"
@@ -68,7 +67,8 @@ std::string next_message_id() {
 }
 
 Error::Code error_code_from_wire(const std::string& wire) {
-  if (auto c = error_code_from_string(wire); c.has_value()) return *c;
+  if (auto c = error_code_from_string(wire); c.has_value())
+    return *c;
   return Error::Code::Internal;
 }
 
@@ -89,7 +89,8 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
 [[nodiscard]] Result<void> write_frame(ipc::UnixSocket& sock, const ipc::SidecarFrame& frame,
                                        ipc::UnixSocket::TimePoint deadline) {
   auto enc = ipc::encode_frame(frame);
-  if (!enc.has_value()) return unexpected(enc.error());
+  if (!enc.has_value())
+    return unexpected(enc.error());
   return sock.write_all(std::span<const std::byte>(enc.value()), deadline);
 }
 
@@ -104,8 +105,7 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   auto u32 = [&](std::size_t off) {
     return (static_cast<std::uint32_t>(p[off]) << 24) |
            (static_cast<std::uint32_t>(p[off + 1]) << 16) |
-           (static_cast<std::uint32_t>(p[off + 2]) << 8) |
-           static_cast<std::uint32_t>(p[off + 3]);
+           (static_cast<std::uint32_t>(p[off + 2]) << 8) | static_cast<std::uint32_t>(p[off + 3]);
   };
   if (u32(0) != ipc::kFrameMagic) {
     return unexpected(Error::Code::InferenceFailed, "sidecar frame magic mismatch");
@@ -121,7 +121,8 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   }
   buf.resize(16 + hdr_len + pld_len);
   if (hdr_len + pld_len > 0) {
-    if (auto r = sock.read_exact(std::span<std::byte>(buf.data() + 16, hdr_len + pld_len), deadline);
+    if (auto r =
+            sock.read_exact(std::span<std::byte>(buf.data() + 16, hdr_len + pld_len), deadline);
         !r.has_value()) {
       return unexpected(r.error());
     }
@@ -137,7 +138,8 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   const std::string code_str = err.value("code", "internal");
   const std::string message = err.value("message", "sidecar error");
   std::optional<std::string> context;
-  if (err.contains("context")) context = err.at("context").get<std::string>();
+  if (err.contains("context"))
+    context = err.at("context").get<std::string>();
   return Error{error_code_from_wire(code_str), message, std::move(context)};
 }
 
@@ -164,8 +166,7 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   auto dtype = dtype_from_string(obj.at("dtype").get<std::string>());
   if (!dtype.has_value()) {
     return unexpected(Error::Code::InferenceFailed,
-                      "tensor metadata has unknown dtype " +
-                          obj.at("dtype").get<std::string>());
+                      "tensor metadata has unknown dtype " + obj.at("dtype").get<std::string>());
   }
   std::vector<std::int64_t> shape = obj.at("shape").get<std::vector<std::int64_t>>();
   return TensorView::create(*dtype, std::move(shape));
@@ -228,7 +229,8 @@ class PythonPytorchSession final : public ExecutionSession {
     SidecarLaunchRequest req;
     req.python_exe = config_.python_exe;
     auto proc_r = SidecarProcess::start(req, launcher_, deadline_from_now(config_.startup_timeout));
-    if (!proc_r.has_value()) return unexpected(proc_r.error());
+    if (!proc_r.has_value())
+      return unexpected(proc_r.error());
     process_ = std::move(proc_r).value();
 
     // Read the ready_event the runner emits on connect.
@@ -251,22 +253,24 @@ class PythonPytorchSession final : public ExecutionSession {
     req_hdr["kind"] = std::string(kKindLoadModel);
     req_hdr["model_spec"] = model_spec_to_json(spec);
 
-    auto resp = exchange(req_hdr, /*payload=*/{},
-                         deadline_from_now(config_.startup_timeout),
+    auto resp = exchange(req_hdr, /*payload=*/{}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindLoadModelResponse), Error::Code::LoadFailed);
-    if (!resp.has_value()) return unexpected(resp.error());
+    if (!resp.has_value())
+      return unexpected(resp.error());
     return Result<void>{};
   }
 
   Result<void> do_prime() override {
-    if (!process_) return unexpected(Error::Code::NotReady, "sidecar not started");
+    if (!process_)
+      return unexpected(Error::Code::NotReady, "sidecar not started");
     json hdr;
     hdr["schema_version"] = std::string(kSchemaVersion);
     hdr["message_id"] = next_message_id();
     hdr["kind"] = std::string(kKindPrime);
     auto resp = exchange(hdr, {}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindPrimeResponse), Error::Code::LoadFailed);
-    if (!resp.has_value()) return unexpected(resp.error());
+    if (!resp.has_value())
+      return unexpected(resp.error());
     return Result<void>{};
   }
 
@@ -276,7 +280,8 @@ class PythonPytorchSession final : public ExecutionSession {
 
   Result<AsyncInferHandle> do_infer_async(const InferRequest& request) override {
     auto outputs = run_infer(request, /*async_dispatch=*/true);
-    if (!outputs.has_value()) return unexpected(outputs.error());
+    if (!outputs.has_value())
+      return unexpected(outputs.error());
     // The Python runner returns the outputs synchronously; we still
     // honor the async method shape so callers can correlate. The
     // outputs are dropped here because v0.1.0 has no async-result
@@ -290,7 +295,8 @@ class PythonPytorchSession final : public ExecutionSession {
   [[nodiscard]] bool supports_native_async() const noexcept override { return true; }
 
   Result<void> do_unload() override {
-    if (!process_) return Result<void>{};
+    if (!process_)
+      return Result<void>{};
     json hdr;
     hdr["schema_version"] = std::string(kSchemaVersion);
     hdr["message_id"] = next_message_id();
@@ -299,7 +305,8 @@ class PythonPytorchSession final : public ExecutionSession {
                          std::string(kKindUnloadResponse), Error::Code::InferenceFailed);
     process_->shutdown();
     process_.reset();
-    if (!resp.has_value()) return unexpected(resp.error());
+    if (!resp.has_value())
+      return unexpected(resp.error());
     return Result<void>{};
   }
 
@@ -307,7 +314,8 @@ class PythonPytorchSession final : public ExecutionSession {
   Result<json> exchange(const json& request_header, const std::vector<std::byte>& payload,
                         ipc::UnixSocket::TimePoint deadline, const std::string& expected_kind,
                         Error::Code default_error_code) {
-    if (!process_) return unexpected(Error::Code::NotReady, "sidecar not started");
+    if (!process_)
+      return unexpected(Error::Code::NotReady, "sidecar not started");
     ipc::SidecarFrame frame;
     frame.json_header = request_header.dump();
     frame.payload = payload;
@@ -315,7 +323,8 @@ class PythonPytorchSession final : public ExecutionSession {
       return unexpected(w.error());
     }
     auto resp = read_frame(process_->socket(), deadline);
-    if (!resp.has_value()) return unexpected(resp.error());
+    if (!resp.has_value())
+      return unexpected(resp.error());
     auto hdr = json::parse(resp.value().json_header, nullptr, false);
     if (hdr.is_discarded()) {
       return unexpected(Error::Code::InferenceFailed, "sidecar returned malformed JSON header");
@@ -341,7 +350,8 @@ class PythonPytorchSession final : public ExecutionSession {
   }
 
   Result<std::vector<NamedOutput>> run_infer(const InferRequest& request, bool async_dispatch) {
-    if (!process_) return unexpected(Error::Code::NotReady, "sidecar not started");
+    if (!process_)
+      return unexpected(Error::Code::NotReady, "sidecar not started");
 
     // Pack inputs.
     json hdr;
@@ -358,7 +368,8 @@ class PythonPytorchSession final : public ExecutionSession {
     }
     for (const auto& in : request.inputs()) {
       auto view = manager_->view(in.buffer, in.tensor);
-      if (!view.has_value()) return unexpected(view.error());
+      if (!view.has_value())
+        return unexpected(view.error());
       const std::size_t offset = payload.size();
       payload.insert(payload.end(), view.value().begin(), view.value().end());
       json entry;
@@ -385,8 +396,7 @@ class PythonPytorchSession final : public ExecutionSession {
     // Parse outputs.
     std::vector<NamedOutput> outputs;
     if (!resp.value().contains("tensors")) {
-      return unexpected(Error::Code::InferenceFailed,
-                        "sidecar infer response missing tensors[]");
+      return unexpected(Error::Code::InferenceFailed, "sidecar infer response missing tensors[]");
     }
     for (const auto& entry : resp.value().at("tensors")) {
       const auto offset = entry.value("payload_offset", 0u);
@@ -396,13 +406,16 @@ class PythonPytorchSession final : public ExecutionSession {
                           "sidecar tensor payload window out of range");
       }
       auto tv = tensor_view_from_json(entry.at("tensor"));
-      if (!tv.has_value()) return unexpected(tv.error());
+      if (!tv.has_value())
+        return unexpected(tv.error());
 
       auto buf_r = manager_->allocate(length);
-      if (!buf_r.has_value()) return unexpected(buf_r.error());
+      if (!buf_r.has_value())
+        return unexpected(buf_r.error());
       auto buffer = buf_r.value();
       auto dst = manager_->data(buffer);
-      if (!dst.has_value()) return unexpected(dst.error());
+      if (!dst.has_value())
+        return unexpected(dst.error());
       std::memcpy(dst.value().data(), last_payload_.data() + offset, length);
 
       NamedOutput out;
@@ -426,11 +439,11 @@ class PythonPytorchSession final : public ExecutionSession {
 namespace tensorplate {
 
 Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
+  using adapters::python_pytorch::default_fork_exec_launcher;
   using adapters::python_pytorch::kBackendName;
   using adapters::python_pytorch::make_python_pytorch_capability;
   using adapters::python_pytorch::PythonPytorchConfig;
   using adapters::python_pytorch::PythonPytorchSession;
-  using adapters::python_pytorch::default_fork_exec_launcher;
   return registry.register_backend(BackendEntry{
       std::string(kBackendName),
       make_python_pytorch_capability(),

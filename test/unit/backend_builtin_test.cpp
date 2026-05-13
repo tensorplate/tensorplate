@@ -5,14 +5,13 @@
 // into `tp_runtime`. Per-adapter conformance lands in the adapter
 // feature tests (V01-E05-F02, F03, F05).
 
-#include "tensorplate/backend/builtin.hpp"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
+#include "tensorplate/backend/builtin.hpp"
 #include "tensorplate/backend/registry.hpp"
 
 namespace tensorplate {

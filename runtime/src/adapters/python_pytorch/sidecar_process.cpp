@@ -10,8 +10,8 @@
 #include <unistd.h>
 
 #include <atomic>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -76,10 +76,13 @@ SidecarHandle& SidecarHandle::operator=(SidecarHandle&& other) noexcept {
   return *this;
 }
 
-SidecarHandle::~SidecarHandle() { terminate(); }
+SidecarHandle::~SidecarHandle() {
+  terminate();
+}
 
 bool SidecarHandle::is_alive() const noexcept {
-  if (!is_alive_) return false;
+  if (!is_alive_)
+    return false;
   return is_alive_(*this);
 }
 
@@ -100,7 +103,8 @@ void SidecarHandle::terminate() noexcept {
 namespace {
 
 bool reap_pid(int pid, bool wait_for_exit) noexcept {
-  if (pid <= 0) return true;
+  if (pid <= 0)
+    return true;
   const int flags = wait_for_exit ? 0 : WNOHANG;
   int status = 0;
   const int r = ::waitpid(pid, &status, flags);
@@ -119,16 +123,19 @@ SidecarLauncher default_fork_exec_launcher() {
     argv_storage.emplace_back("tensorplate_pytorch_backend");
     argv_storage.emplace_back("--socket");
     argv_storage.push_back(req.socket_path);
-    for (const auto& e : req.extra_args) argv_storage.push_back(e);
+    for (const auto& e : req.extra_args)
+      argv_storage.push_back(e);
     std::vector<char*> argv;
     argv.reserve(argv_storage.size() + 1);
-    for (auto& s : argv_storage) argv.push_back(s.data());
+    for (auto& s : argv_storage)
+      argv.push_back(s.data());
     argv.push_back(nullptr);
 
     std::vector<std::string> env_storage = req.environment;
     std::vector<char*> envp_raw;
     envp_raw.reserve(env_storage.size() + 1);
-    for (auto& e : env_storage) envp_raw.push_back(e.data());
+    for (auto& e : env_storage)
+      envp_raw.push_back(e.data());
     envp_raw.push_back(nullptr);
 
     const pid_t pid = ::fork();
@@ -152,13 +159,15 @@ SidecarLauncher default_fork_exec_launcher() {
     // Parent.
     auto terminate_fn = [](SidecarHandle& h) {
       const int pid_local = h.pid();
-      if (pid_local <= 0) return;
+      if (pid_local <= 0)
+        return;
       ::kill(pid_local, SIGTERM);
       // Give the child a brief moment to clean up.
       for (int i = 0; i < 50; ++i) {
         int status = 0;
         const int r = ::waitpid(pid_local, &status, WNOHANG);
-        if (r != 0) return;
+        if (r != 0)
+          return;
         ::usleep(10 * 1000);
       }
       ::kill(pid_local, SIGKILL);
@@ -166,7 +175,8 @@ SidecarLauncher default_fork_exec_launcher() {
     };
     auto is_alive_fn = [](const SidecarHandle& h) {
       const int pid_local = h.pid();
-      if (pid_local <= 0) return false;
+      if (pid_local <= 0)
+        return false;
       int status = 0;
       const int r = ::waitpid(pid_local, &status, WNOHANG);
       return r == 0;
@@ -187,11 +197,11 @@ Result<std::unique_ptr<SidecarProcess>> SidecarProcess::start(const SidecarLaunc
   }
 
   auto proc = std::unique_ptr<SidecarProcess>(new SidecarProcess);
-  proc->socket_path_ =
-      req.socket_path.empty() ? make_socket_path() : req.socket_path;
+  proc->socket_path_ = req.socket_path.empty() ? make_socket_path() : req.socket_path;
 
   auto listener_r = ipc::UnixSocket::create_stream();
-  if (!listener_r.has_value()) return unexpected(listener_r.error());
+  if (!listener_r.has_value())
+    return unexpected(listener_r.error());
   proc->listener_ = std::move(listener_r).value();
   if (auto r = proc->listener_.bind_and_listen(proc->socket_path_); !r.has_value()) {
     std::filesystem::remove(proc->socket_path_);
@@ -219,9 +229,13 @@ Result<std::unique_ptr<SidecarProcess>> SidecarProcess::start(const SidecarLaunc
   return proc;
 }
 
-SidecarProcess::~SidecarProcess() { shutdown(); }
+SidecarProcess::~SidecarProcess() {
+  shutdown();
+}
 
-bool SidecarProcess::is_alive() const noexcept { return handle_.is_alive(); }
+bool SidecarProcess::is_alive() const noexcept {
+  return handle_.is_alive();
+}
 
 void SidecarProcess::shutdown() noexcept {
   client_.close();

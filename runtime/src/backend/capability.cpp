@@ -25,9 +25,12 @@ std::string_view to_string(ShapeSupport support) noexcept {
 }
 
 std::optional<ShapeSupport> shape_support_from_string(std::string_view name) noexcept {
-  if (name == "dynamic") return ShapeSupport::Dynamic;
-  if (name == "fixed") return ShapeSupport::Fixed;
-  if (name == "range_bounded") return ShapeSupport::RangeBounded;
+  if (name == "dynamic")
+    return ShapeSupport::Dynamic;
+  if (name == "fixed")
+    return ShapeSupport::Fixed;
+  if (name == "range_bounded")
+    return ShapeSupport::RangeBounded;
   return std::nullopt;
 }
 
@@ -86,8 +89,7 @@ bool BackendCapability::accepts_precision(PrecisionHint hint) const noexcept {
 bool operator==(const BackendCapability& lhs, const BackendCapability& rhs) noexcept {
   return lhs.backend_name_ == rhs.backend_name_ && lhs.profile_id_ == rhs.profile_id_ &&
          lhs.supported_precision_ == rhs.supported_precision_ &&
-         lhs.shape_support_ == rhs.shape_support_ &&
-         lhs.supports_async_ == rhs.supports_async_ &&
+         lhs.shape_support_ == rhs.shape_support_ && lhs.supports_async_ == rhs.supports_async_ &&
          lhs.supports_generation_ == rhs.supports_generation_ &&
          lhs.supports_streaming_ == rhs.supports_streaming_ &&
          lhs.supports_kv_cache_ == rhs.supports_kv_cache_ &&

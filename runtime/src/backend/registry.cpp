@@ -42,7 +42,8 @@ Result<void> BackendRegistry::register_backend(BackendEntry entry) {
 bool BackendRegistry::deregister_backend(std::string_view backend_name) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(std::string(backend_name));
-  if (it == entries_.end()) return false;
+  if (it == entries_.end())
+    return false;
   entries_.erase(it);
   return true;
 }
@@ -102,8 +103,7 @@ Result<void> BackendRegistry::validate_backend_hint(const ModelSpec& spec) const
   if (!cap.accepts_precision(spec.precision_hint())) {
     return unexpected(Error::make(
         Error::Code::Unsupported, "declared precision is not supported by backend",
-        "backend=" + hint +
-            ", requested=" + std::string(to_string(spec.precision_hint()))));
+        "backend=" + hint + ", requested=" + std::string(to_string(spec.precision_hint()))));
   }
   return Result<void>{};
 }

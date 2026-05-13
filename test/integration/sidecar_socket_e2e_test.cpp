@@ -4,11 +4,7 @@
 // socket helpers. Forks a child process that binds + accepts and
 // exchanges one sidecar frame through the helpers.
 
-#include "tensorplate/ipc/sidecar_codec.hpp"
-#include "tensorplate/ipc/unix_socket.hpp"
-
 #include <gtest/gtest.h>
-
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -22,6 +18,8 @@
 #include <vector>
 
 #include "tensorplate/core/error.hpp"
+#include "tensorplate/ipc/sidecar_codec.hpp"
+#include "tensorplate/ipc/unix_socket.hpp"
 
 namespace tensorplate::ipc {
 namespace {
@@ -51,26 +49,32 @@ TEST(SidecarSocket, RoundTripsOneFrameAcrossProcesses) {
   if (pid == 0) {
     // Child: connect, write a frame, read a frame, exit.
     auto sock_r = UnixSocket::create_stream();
-    if (!sock_r.has_value()) std::_Exit(11);
+    if (!sock_r.has_value())
+      std::_Exit(11);
     auto sock = std::move(sock_r).value();
-    if (!sock.connect(path, default_deadline()).has_value()) std::_Exit(12);
+    if (!sock.connect(path, default_deadline()).has_value())
+      std::_Exit(12);
 
     SidecarFrame frame;
     frame.json_header = R"({"schema_version":"0.1","kind":"prime","message_id":"c1"})";
     auto enc_r = encode_frame(frame);
-    if (!enc_r.has_value()) std::_Exit(13);
-    if (!sock.write_all(enc_r.value(), default_deadline()).has_value()) std::_Exit(14);
+    if (!enc_r.has_value())
+      std::_Exit(13);
+    if (!sock.write_all(enc_r.value(), default_deadline()).has_value())
+      std::_Exit(14);
 
     // Read the response prefix + body. The parent sends a 16-byte
     // prefixed frame; for simplicity we read into a large buffer and
     // attempt decode in a loop.
     std::vector<std::byte> buf(4096);
     auto read_r = sock.read_exact(std::span<std::byte>(buf.data(), 16), default_deadline());
-    if (!read_r.has_value()) std::_Exit(15);
+    if (!read_r.has_value())
+      std::_Exit(15);
     // Body follows the prefix; parent sends a 0-byte payload.
     std::size_t consumed = 0;
     auto dec = decode_frame(std::span<const std::byte>(buf.data(), 16), &consumed);
-    if (!dec.has_value() && dec.error().code != Error::Code::NotReady) std::_Exit(16);
+    if (!dec.has_value() && dec.error().code != Error::Code::NotReady)
+      std::_Exit(16);
     // The response prefix says hdr_len = N; read that next.
     // To keep this test simple we expect the parent's response body
     // to fit in the original 4 KiB buf.
@@ -88,10 +92,12 @@ TEST(SidecarSocket, RoundTripsOneFrameAcrossProcesses) {
       const std::uint32_t pld_len = u32(12);
       auto read2 = sock.read_exact(std::span<std::byte>(buf.data() + 16, hdr_len + pld_len),
                                    default_deadline());
-      if (!read2.has_value()) std::_Exit(17);
-      auto dec2 = decode_frame(std::span<const std::byte>(buf.data(), 16 + hdr_len + pld_len),
-                               nullptr);
-      if (!dec2.has_value()) std::_Exit(18);
+      if (!read2.has_value())
+        std::_Exit(17);
+      auto dec2 =
+          decode_frame(std::span<const std::byte>(buf.data(), 16 + hdr_len + pld_len), nullptr);
+      if (!dec2.has_value())
+        std::_Exit(18);
     }
     std::_Exit(0);
   }
@@ -109,8 +115,7 @@ TEST(SidecarSocket, RoundTripsOneFrameAcrossProcesses) {
   auto u32 = [&](std::size_t off) {
     return (static_cast<std::uint32_t>(p[off]) << 24) |
            (static_cast<std::uint32_t>(p[off + 1]) << 16) |
-           (static_cast<std::uint32_t>(p[off + 2]) << 8) |
-           static_cast<std::uint32_t>(p[off + 3]);
+           (static_cast<std::uint32_t>(p[off + 2]) << 8) | static_cast<std::uint32_t>(p[off + 3]);
   };
   const std::uint32_t hdr_len = u32(8);
   const std::uint32_t pld_len = u32(12);
@@ -124,7 +129,8 @@ TEST(SidecarSocket, RoundTripsOneFrameAcrossProcesses) {
 
   // Send a tiny response frame back.
   SidecarFrame resp;
-  resp.json_header = R"({"schema_version":"0.1","kind":"prime_response","message_id":"c1","status":"ok"})";
+  resp.json_header =
+      R"({"schema_version":"0.1","kind":"prime_response","message_id":"c1","status":"ok"})";
   auto resp_enc = encode_frame(resp);
   ASSERT_TRUE(resp_enc.has_value());
   ASSERT_TRUE(client.write_all(resp_enc.value(), default_deadline()).has_value());

@@ -29,10 +29,8 @@ void write_be_u32(std::byte* out, std::uint32_t value) noexcept {
 }
 
 std::uint32_t read_be_u32(const std::byte* in) noexcept {
-  return (static_cast<std::uint32_t>(in[0]) << 24) |
-         (static_cast<std::uint32_t>(in[1]) << 16) |
-         (static_cast<std::uint32_t>(in[2]) << 8) |
-         static_cast<std::uint32_t>(in[3]);
+  return (static_cast<std::uint32_t>(in[0]) << 24) | (static_cast<std::uint32_t>(in[1]) << 16) |
+         (static_cast<std::uint32_t>(in[2]) << 8) | static_cast<std::uint32_t>(in[3]);
 }
 
 }  // namespace
@@ -78,10 +76,10 @@ Result<SidecarFrame> decode_frame(std::span<const std::byte> bytes, std::size_t*
   }
   const std::uint32_t version = read_be_u32(bytes.data() + 4);
   if (version != kProtocolWireVersion) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "sidecar frame protocol version " + std::to_string(version) +
-                          " is not supported (expected " +
-                          std::to_string(kProtocolWireVersion) + ")");
+    return unexpected(Error::Code::ConfigInvalid, "sidecar frame protocol version " +
+                                                      std::to_string(version) +
+                                                      " is not supported (expected " +
+                                                      std::to_string(kProtocolWireVersion) + ")");
   }
   const std::uint32_t hdr_len = read_be_u32(bytes.data() + 8);
   const std::uint32_t pld_len = read_be_u32(bytes.data() + 12);

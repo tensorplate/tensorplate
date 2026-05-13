@@ -57,8 +57,7 @@ TEST(LibTorchAdapter, LoadWithoutSdkReportsUnsupported) {
   auto session = reg.create_session("libtorch");
   ASSERT_TRUE(session.has_value());
 
-  auto spec =
-      ModelSpec::create("torch-m", ModelClass::Vision, "/dev/null", "libtorch").value();
+  auto spec = ModelSpec::create("torch-m", ModelClass::Vision, "/dev/null", "libtorch").value();
   auto r = session.value()->load(spec);
 #if TP_HAS_LIBTORCH_SDK
   if (!r.has_value()) {
@@ -76,8 +75,7 @@ TEST(LibTorchAdapter, PythonPytorchBundleNeverRedirectsToLibtorch) {
   // `Unsupported` rather than silently selecting the libtorch adapter.
   BackendRegistry reg;
   ASSERT_TRUE(register_libtorch_backend(reg).has_value());
-  auto spec =
-      ModelSpec::create("smolvla", ModelClass::Vla, "/dev/null", "python_pytorch").value();
+  auto spec = ModelSpec::create("smolvla", ModelClass::Vla, "/dev/null", "python_pytorch").value();
   auto r = reg.validate_backend_hint(spec);
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Unsupported);

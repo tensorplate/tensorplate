@@ -30,11 +30,13 @@ constexpr std::size_t kSunPathMax = sizeof(sockaddr_un::sun_path);
 
 int millis_until(UnixSocket::TimePoint deadline) noexcept {
   const auto now = UnixSocket::Clock::now();
-  if (deadline <= now) return 0;
+  if (deadline <= now)
+    return 0;
   using ms = std::chrono::milliseconds;
   const auto remaining = std::chrono::duration_cast<ms>(deadline - now);
   // Cap at ~int max so poll() doesn't overflow.
-  if (remaining.count() > 1'000'000'000) return 1'000'000'000;
+  if (remaining.count() > 1'000'000'000)
+    return 1'000'000'000;
   return static_cast<int>(remaining.count());
 }
 
@@ -50,18 +52,21 @@ Result<void> wait_for(int fd, short events, UnixSocket::TimePoint deadline) {
   while (true) {
     const int ms = millis_until(deadline);
     const int r = ::poll(&pfd, 1, ms);
-    if (r > 0) return Result<void>{};
+    if (r > 0)
+      return Result<void>{};
     if (r == 0) {
       return unexpected(Error::Code::Timeout, "deadline elapsed waiting for socket");
     }
-    if (errno == EINTR) continue;
+    if (errno == EINTR)
+      continue;
     return unexpected(make_errno_error(Error::Code::LoadFailed, "poll failed"));
   }
 }
 
 Result<void> set_nonblock(int fd) {
   const int flags = ::fcntl(fd, F_GETFL, 0);
-  if (flags < 0) return unexpected(make_errno_error(Error::Code::LoadFailed, "fcntl(F_GETFL)"));
+  if (flags < 0)
+    return unexpected(make_errno_error(Error::Code::LoadFailed, "fcntl(F_GETFL)"));
   if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "fcntl(F_SETFL O_NONBLOCK)"));
   }
@@ -70,9 +75,8 @@ Result<void> set_nonblock(int fd) {
 
 Result<void> fill_sockaddr(sockaddr_un* addr, std::string_view path) {
   if (path.size() + 1 > kSunPathMax) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "unix-socket path exceeds sun_path limit (" +
-                          std::to_string(kSunPathMax) + " bytes)");
+    return unexpected(Error::Code::ConfigInvalid, "unix-socket path exceeds sun_path limit (" +
+                                                      std::to_string(kSunPathMax) + " bytes)");
   }
   std::memset(addr, 0, sizeof(*addr));
   addr->sun_family = AF_UNIX;
@@ -83,9 +87,13 @@ Result<void> fill_sockaddr(sockaddr_un* addr, std::string_view path) {
 
 }  // namespace
 
-UnixSocket::~UnixSocket() { close(); }
+UnixSocket::~UnixSocket() {
+  close();
+}
 
-UnixSocket::UnixSocket(UnixSocket&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+UnixSocket::UnixSocket(UnixSocket&& other) noexcept : fd_(other.fd_) {
+  other.fd_ = -1;
+}
 
 UnixSocket& UnixSocket::operator=(UnixSocket&& other) noexcept {
   if (this != &other) {
@@ -120,24 +128,28 @@ Result<void> UnixSocket::connect(std::string_view path, TimePoint deadline) {
     return unexpected(Error::Code::Internal, "UnixSocket::connect on closed socket");
   }
   sockaddr_un addr;
-  if (auto r = fill_sockaddr(&addr, path); !r.has_value()) return unexpected(r.error());
+  if (auto r = fill_sockaddr(&addr, path); !r.has_value())
+    return unexpected(r.error());
 
   while (true) {
     const int r = ::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (r == 0) return Result<void>{};
-    if (errno == EINTR) continue;
+    if (r == 0)
+      return Result<void>{};
+    if (errno == EINTR)
+      continue;
     if (errno == EINPROGRESS || errno == EALREADY) {
       auto w = wait_for(fd_, POLLOUT, deadline);
-      if (!w.has_value()) return unexpected(w.error());
+      if (!w.has_value())
+        return unexpected(w.error());
       int err = 0;
       socklen_t len = sizeof(err);
       if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
         return unexpected(make_errno_error(Error::Code::LoadFailed, "getsockopt(SO_ERROR)"));
       }
-      if (err == 0) return Result<void>{};
+      if (err == 0)
+        return Result<void>{};
       errno = err;
-      return unexpected(
-          make_errno_error(Error::Code::LoadFailed, "unix-socket connect failed"));
+      return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket connect failed"));
     }
     if (errno == ENOENT) {
       return unexpected(Error::Code::LoadFailed,
@@ -152,7 +164,8 @@ Result<void> UnixSocket::bind_and_listen(std::string_view path, int backlog) {
     return unexpected(Error::Code::Internal, "UnixSocket::bind_and_listen on closed socket");
   }
   sockaddr_un addr;
-  if (auto r = fill_sockaddr(&addr, path); !r.has_value()) return unexpected(r.error());
+  if (auto r = fill_sockaddr(&addr, path); !r.has_value())
+    return unexpected(r.error());
 
   ::unlink(addr.sun_path);
   if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -177,10 +190,12 @@ Result<UnixSocket> UnixSocket::accept(TimePoint deadline) {
       }
       return s;
     }
-    if (errno == EINTR) continue;
+    if (errno == EINTR)
+      continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLIN, deadline);
-      if (!w.has_value()) return unexpected(w.error());
+      if (!w.has_value())
+        return unexpected(w.error());
       continue;
     }
     return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket accept failed"));
@@ -201,10 +216,12 @@ Result<void> UnixSocket::read_exact(std::span<std::byte> out, TimePoint deadline
     if (n == 0) {
       return unexpected(Error::Code::LoadFailed, "unix-socket peer closed mid-frame");
     }
-    if (errno == EINTR) continue;
+    if (errno == EINTR)
+      continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLIN, deadline);
-      if (!w.has_value()) return unexpected(w.error());
+      if (!w.has_value())
+        return unexpected(w.error());
       continue;
     }
     return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket recv failed"));
@@ -223,10 +240,12 @@ Result<void> UnixSocket::write_all(std::span<const std::byte> bytes, TimePoint d
       offset += static_cast<std::size_t>(n);
       continue;
     }
-    if (errno == EINTR) continue;
+    if (errno == EINTR)
+      continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLOUT, deadline);
-      if (!w.has_value()) return unexpected(w.error());
+      if (!w.has_value())
+        return unexpected(w.error());
       continue;
     }
     if (errno == EPIPE) {

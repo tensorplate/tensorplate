@@ -2,13 +2,12 @@
 //
 // V01-E05-F01-T01: Unit tests for `BackendCapability`.
 
-#include "tensorplate/backend/capability.hpp"
-
 #include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
 
+#include "tensorplate/backend/capability.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/model_spec.hpp"
 
@@ -48,20 +47,19 @@ TEST(BackendCapability, EmptyProfileIdRejected) {
 }
 
 TEST(BackendCapability, OutOfRangeOpCoverageRejected) {
-  auto cap = BackendCapability::create(
-      "tensorrt", {PrecisionHint::Fp16}, ShapeSupport::Dynamic, std::nullopt,
-      /*supports_async=*/false, false, false, false,
-      /*op_coverage_score_pct=*/std::optional<std::uint8_t>{200});
+  auto cap = BackendCapability::create("tensorrt", {PrecisionHint::Fp16}, ShapeSupport::Dynamic,
+                                       std::nullopt,
+                                       /*supports_async=*/false, false, false, false,
+                                       /*op_coverage_score_pct=*/std::optional<std::uint8_t>{200});
   ASSERT_FALSE(cap.has_value());
   EXPECT_EQ(cap.error().code, Error::Code::ConfigInvalid);
 }
 
 TEST(BackendCapability, EstimateGreaterThanLimitRejected) {
-  auto cap = BackendCapability::create(
-      "tensorrt", {PrecisionHint::Fp16}, ShapeSupport::Dynamic, std::nullopt, false, false, false,
-      false, std::nullopt,
-      /*memory_estimate_bytes=*/std::optional<std::uint64_t>{200u},
-      /*memory_limit_bytes=*/std::optional<std::uint64_t>{100u});
+  auto cap = BackendCapability::create("tensorrt", {PrecisionHint::Fp16}, ShapeSupport::Dynamic,
+                                       std::nullopt, false, false, false, false, std::nullopt,
+                                       /*memory_estimate_bytes=*/std::optional<std::uint64_t>{200u},
+                                       /*memory_limit_bytes=*/std::optional<std::uint64_t>{100u});
   ASSERT_FALSE(cap.has_value());
   EXPECT_EQ(cap.error().code, Error::Code::ConfigInvalid);
 }

@@ -2,14 +2,13 @@
 //
 // V01-E05-F01-T02 / T03: Unit tests for `BackendRegistry`.
 
-#include "tensorplate/backend/registry.hpp"
-
 #include <gtest/gtest.h>
 
 #include <memory>
 #include <string>
 
 #include "tensorplate/backend/capability.hpp"
+#include "tensorplate/backend/registry.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
@@ -28,8 +27,7 @@ BackendCapability simple_cap(const std::string& name,
 }
 
 ExecutionSessionFactory mock_factory(const std::string& name) {
-  return [name](ExecutionSessionRuntimeHooks hooks)
-             -> Result<std::unique_ptr<ExecutionSession>> {
+  return [name](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
     return std::unique_ptr<ExecutionSession>(
         new MockSession(name, hooks.event_sink, hooks.buffer_manager));
   };
@@ -102,8 +100,8 @@ TEST(BackendRegistry, RegisteredBackendsSortedAndStable) {
                   .has_value());
   ASSERT_TRUE(reg.register_backend({"tensorrt", simple_cap("tensorrt"), mock_factory("tensorrt")})
                   .has_value());
-  ASSERT_TRUE(reg.register_backend(
-                     {"python_pytorch", simple_cap("python_pytorch"), mock_factory("python_pytorch")})
+  ASSERT_TRUE(reg.register_backend({"python_pytorch", simple_cap("python_pytorch"),
+                                    mock_factory("python_pytorch")})
                   .has_value());
 
   auto names = reg.registered_backends();
@@ -131,8 +129,7 @@ TEST(BackendRegistry, ValidateBackendHintRejectsUnknown) {
 
 TEST(BackendRegistry, ValidateBackendHintAcceptsAutoPrecision) {
   BackendRegistry reg;
-  ASSERT_TRUE(reg.register_backend({"tensorrt",
-                                    simple_cap("tensorrt", {PrecisionHint::Fp16}),
+  ASSERT_TRUE(reg.register_backend({"tensorrt", simple_cap("tensorrt", {PrecisionHint::Fp16}),
                                     mock_factory("tensorrt")})
                   .has_value());
   auto spec = ModelSpec::create("vision-m", ModelClass::Vision, "/dev/null", "tensorrt",
@@ -143,8 +140,7 @@ TEST(BackendRegistry, ValidateBackendHintAcceptsAutoPrecision) {
 
 TEST(BackendRegistry, ValidateBackendHintRejectsUnsupportedPrecision) {
   BackendRegistry reg;
-  ASSERT_TRUE(reg.register_backend({"tensorrt",
-                                    simple_cap("tensorrt", {PrecisionHint::Fp16}),
+  ASSERT_TRUE(reg.register_backend({"tensorrt", simple_cap("tensorrt", {PrecisionHint::Fp16}),
                                     mock_factory("tensorrt")})
                   .has_value());
   auto spec = ModelSpec::create("vision-m", ModelClass::Vision, "/dev/null", "tensorrt",
@@ -179,8 +175,8 @@ TEST(BackendRegistry, FactoryReceivesHooks) {
   bool seen_sink = false;
   bool seen_manager = false;
 
-  ExecutionSessionFactory f = [&](ExecutionSessionRuntimeHooks hooks)
-      -> Result<std::unique_ptr<ExecutionSession>> {
+  ExecutionSessionFactory f =
+      [&](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
     seen_sink = (hooks.event_sink != nullptr);
     seen_manager = (hooks.buffer_manager != nullptr);
     return std::unique_ptr<ExecutionSession>(new MockSession("mock"));

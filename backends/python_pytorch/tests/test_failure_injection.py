@@ -102,8 +102,12 @@ def test_load_failure_returns_typed_load_failed(runner_pair) -> None:
 def test_prime_failure_returns_typed_inference_failed(runner_pair) -> None:
     client, _, factory = runner_pair
     factory.program = {"prime": (protocol.ERR_INFERENCE_FAILED, "prime crashed")}
-    assert _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())) \
-        .header["status"] == protocol.STATUS_OK
+    assert (
+        _round_trip(
+            client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())
+        ).header["status"]
+        == protocol.STATUS_OK
+    )
     resp = _round_trip(client, _make_request(protocol.KIND_PRIME))
     assert resp.header["status"] == protocol.STATUS_ERROR
     assert resp.header["error"]["code"] == protocol.ERR_INFERENCE_FAILED
@@ -112,15 +116,26 @@ def test_prime_failure_returns_typed_inference_failed(runner_pair) -> None:
 def test_infer_failure_returns_typed_inference_failed(runner_pair) -> None:
     client, _, factory = runner_pair
     factory.program = {"infer": (protocol.ERR_INFERENCE_FAILED, "infer crashed")}
-    assert _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())) \
-        .header["status"] == protocol.STATUS_OK
-    assert _round_trip(client, _make_request(protocol.KIND_PRIME)).header["status"] == protocol.STATUS_OK
+    assert (
+        _round_trip(
+            client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())
+        ).header["status"]
+        == protocol.STATUS_OK
+    )
+    assert (
+        _round_trip(client, _make_request(protocol.KIND_PRIME)).header["status"]
+        == protocol.STATUS_OK
+    )
     req = _make_request(
         protocol.KIND_INFER,
         correlation_id="r",
         tensors=[
-            {"name": "x", "tensor": {"dtype": "uint8", "shape": [1]},
-             "payload_offset": 0, "payload_length": 1}
+            {
+                "name": "x",
+                "tensor": {"dtype": "uint8", "shape": [1]},
+                "payload_offset": 0,
+                "payload_length": 1,
+            }
         ],
     )
     req.payload = b"\x01"
@@ -138,14 +153,22 @@ def test_missing_model_spec_returns_config_invalid(runner_pair) -> None:
 
 def test_malformed_tensor_entry_returns_config_invalid(runner_pair) -> None:
     client, _, _ = runner_pair
-    assert _round_trip(client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())) \
-        .header["status"] == protocol.STATUS_OK
-    assert _round_trip(client, _make_request(protocol.KIND_PRIME)).header["status"] == protocol.STATUS_OK
+    assert (
+        _round_trip(
+            client, _make_request(protocol.KIND_LOAD_MODEL, model_spec=_model_spec())
+        ).header["status"]
+        == protocol.STATUS_OK
+    )
+    assert (
+        _round_trip(client, _make_request(protocol.KIND_PRIME)).header["status"]
+        == protocol.STATUS_OK
+    )
     req = _make_request(
         protocol.KIND_INFER,
         correlation_id="r",
-        tensors=[{"tensor": {"dtype": "uint8", "shape": [1]}, "payload_offset": 0,
-                  "payload_length": 1}],  # name missing
+        tensors=[
+            {"tensor": {"dtype": "uint8", "shape": [1]}, "payload_offset": 0, "payload_length": 1}
+        ],  # name missing
     )
     req.payload = b"\x01"
     resp = _round_trip(client, req)

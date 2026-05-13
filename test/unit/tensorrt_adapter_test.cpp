@@ -65,8 +65,7 @@ TEST(TensorRTAdapter, LoadWithoutSdkReportsUnsupported) {
   auto session = reg.create_session("tensorrt");
   ASSERT_TRUE(session.has_value());
 
-  auto spec =
-      ModelSpec::create("trt-vision", ModelClass::Vision, "/dev/null", "tensorrt").value();
+  auto spec = ModelSpec::create("trt-vision", ModelClass::Vision, "/dev/null", "tensorrt").value();
   auto r = session.value()->load(spec);
 #if TP_HAS_TENSORRT_SDK
   // With SDK present, `/dev/null` is either parseable (unlikely) or
@@ -84,18 +83,18 @@ TEST(TensorRTAdapter, LoadWithoutSdkReportsUnsupported) {
 TEST(TensorRTAdapter, ValidateBackendHintAcceptsAdvertisedPrecision) {
   BackendRegistry reg;
   ASSERT_TRUE(register_tensorrt_backend(reg).has_value());
-  auto spec = ModelSpec::create("v", ModelClass::Vision, "/dev/null", "tensorrt",
-                                PrecisionHint::Fp16)
-                  .value();
+  auto spec =
+      ModelSpec::create("v", ModelClass::Vision, "/dev/null", "tensorrt", PrecisionHint::Fp16)
+          .value();
   EXPECT_TRUE(reg.validate_backend_hint(spec).has_value());
 }
 
 TEST(TensorRTAdapter, ValidateBackendHintRejectsBfloat16) {
   BackendRegistry reg;
   ASSERT_TRUE(register_tensorrt_backend(reg).has_value());
-  auto spec = ModelSpec::create("v", ModelClass::Vision, "/dev/null", "tensorrt",
-                                PrecisionHint::BFloat16)
-                  .value();
+  auto spec =
+      ModelSpec::create("v", ModelClass::Vision, "/dev/null", "tensorrt", PrecisionHint::BFloat16)
+          .value();
   auto r = reg.validate_backend_hint(spec);
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Unsupported);
