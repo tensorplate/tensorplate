@@ -4,6 +4,18 @@
 # adapter directory (TensorRT, LibTorch, Python/PyTorch sidecar), and
 # the IPC framing helpers that the sidecar adapter rides on.
 
+# V01-E05 adapter feature flags. Declared up front so the conditional
+# source-list appends below can read them. TensorRT and LibTorch
+# default OFF (host CI is clean of proprietary SDKs); the Python
+# sidecar defaults ON because the runner is stdlib-only.
+option(TP_ENABLE_TENSORRT
+       "Build the TensorRT execution-backend adapter (V01-E05-F02)." OFF)
+option(TP_ENABLE_LIBTORCH
+       "Build the LibTorch native execution-backend adapter (V01-E05-F03)." OFF)
+option(TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+       "Build the Python/PyTorch sidecar execution-backend adapter (V01-E05-F05)."
+       ON)
+
 set(_tp_runtime_sources
   src/skeleton.cpp
   src/core/error.cpp
@@ -46,17 +58,6 @@ if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
     src/adapters/python_pytorch/python_pytorch_session.cpp
   )
 endif()
-
-# V01-E05 adapter feature flags. Off by default so host CI builds clean
-# without proprietary SDKs. When ON, the adapter source file registers
-# its factory through `tensorplate::register_builtin_backends()`.
-option(TP_ENABLE_TENSORRT
-       "Build the TensorRT execution-backend adapter (V01-E05-F02)." OFF)
-option(TP_ENABLE_LIBTORCH
-       "Build the LibTorch native execution-backend adapter (V01-E05-F03)." OFF)
-option(TP_ENABLE_PYTHON_PYTORCH_SIDECAR
-       "Build the Python/PyTorch sidecar execution-backend adapter (V01-E05-F05)."
-       ON)
 
 add_library(tp_runtime STATIC ${_tp_runtime_sources})
 

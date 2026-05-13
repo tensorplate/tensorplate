@@ -22,10 +22,10 @@ namespace {
 constexpr std::size_t kFramePrefixBytes = 16;
 
 void write_be_u32(std::byte* out, std::uint32_t value) noexcept {
-  out[0] = static_cast<std::byte>((value >> 24) & 0xFFu);
-  out[1] = static_cast<std::byte>((value >> 16) & 0xFFu);
-  out[2] = static_cast<std::byte>((value >> 8) & 0xFFu);
-  out[3] = static_cast<std::byte>(value & 0xFFu);
+  out[0] = static_cast<std::byte>((value >> 24) & 0xFFU);
+  out[1] = static_cast<std::byte>((value >> 16) & 0xFFU);
+  out[2] = static_cast<std::byte>((value >> 8) & 0xFFU);
+  out[3] = static_cast<std::byte>(value & 0xFFU);
 }
 
 std::uint32_t read_be_u32(const std::byte* in) noexcept {

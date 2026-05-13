@@ -4,7 +4,6 @@
 
 #include "sidecar_process.hpp"
 
-#include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -29,14 +28,17 @@ namespace tensorplate::adapters::python_pytorch {
 
 namespace {
 
-std::atomic<std::uint64_t> g_next_socket_seq{0};
+std::atomic<std::uint64_t>& socket_seq() noexcept {
+  static std::atomic<std::uint64_t> seq{0};
+  return seq;
+}
 
 std::string make_socket_path() {
   const char* tmp_env = std::getenv("TMPDIR");
   std::filesystem::path tmp = (tmp_env != nullptr && *tmp_env != '\0')
                                   ? std::filesystem::path(tmp_env)
                                   : std::filesystem::temp_directory_path();
-  const auto seq = g_next_socket_seq.fetch_add(1, std::memory_order_relaxed);
+  const auto seq = socket_seq().fetch_add(1, std::memory_order_relaxed);
   return (tmp / ("tp_sidecar_" + std::to_string(::getpid()) + "_" + std::to_string(seq) + ".sock"))
       .string();
 }
@@ -81,8 +83,9 @@ SidecarHandle::~SidecarHandle() {
 }
 
 bool SidecarHandle::is_alive() const noexcept {
-  if (!is_alive_)
+  if (!is_alive_) {
     return false;
+  }
   return is_alive_(*this);
 }
 
@@ -103,40 +106,76 @@ void SidecarHandle::terminate() noexcept {
 namespace {
 
 bool reap_pid(int pid, bool wait_for_exit) noexcept {
-  if (pid <= 0)
+  if (pid <= 0) {
     return true;
+  }
   const int flags = wait_for_exit ? 0 : WNOHANG;
   int status = 0;
   const int r = ::waitpid(pid, &status, flags);
   return r > 0 || (r == 0 && !wait_for_exit);
 }
 
+std::vector<std::string> build_argv_storage(const SidecarLaunchRequest& req) {
+  std::vector<std::string> argv_storage;
+  argv_storage.reserve(6 + req.extra_args.size());
+  argv_storage.push_back(req.python_exe);
+  argv_storage.emplace_back("-m");
+  argv_storage.emplace_back("tensorplate_pytorch_backend");
+  argv_storage.emplace_back("--socket");
+  argv_storage.push_back(req.socket_path);
+  for (const auto& e : req.extra_args) {
+    argv_storage.push_back(e);
+  }
+  return argv_storage;
+}
+
+std::vector<char*> argv_pointers(std::vector<std::string>& argv_storage) {
+  std::vector<char*> argv;
+  argv.reserve(argv_storage.size() + 1);
+  for (auto& s : argv_storage) {
+    argv.push_back(s.data());
+  }
+  argv.push_back(nullptr);
+  return argv;
+}
+
+void terminate_sidecar(SidecarHandle& h) noexcept {
+  const int pid_local = h.pid();
+  if (pid_local <= 0) {
+    return;
+  }
+  ::kill(pid_local, SIGTERM);
+  // Give the child a brief moment to clean up.
+  for (int i = 0; i < 50; ++i) {
+    int status = 0;
+    const int r = ::waitpid(pid_local, &status, WNOHANG);
+    if (r != 0) {
+      return;
+    }
+    ::usleep(10 * 1000);
+  }
+  ::kill(pid_local, SIGKILL);
+  (void)reap_pid(pid_local, /*wait_for_exit=*/true);
+}
+
+bool sidecar_is_alive(const SidecarHandle& h) noexcept {
+  const int pid_local = h.pid();
+  if (pid_local <= 0) {
+    return false;
+  }
+  int status = 0;
+  const int r = ::waitpid(pid_local, &status, WNOHANG);
+  return r == 0;
+}
+
 }  // namespace
 
 SidecarLauncher default_fork_exec_launcher() {
   return [](const SidecarLaunchRequest& req) -> Result<SidecarHandle> {
-    // Build argv before forking. After fork() we cannot allocate.
-    std::vector<std::string> argv_storage;
-    argv_storage.reserve(6 + req.extra_args.size());
-    argv_storage.push_back(req.python_exe);
-    argv_storage.emplace_back("-m");
-    argv_storage.emplace_back("tensorplate_pytorch_backend");
-    argv_storage.emplace_back("--socket");
-    argv_storage.push_back(req.socket_path);
-    for (const auto& e : req.extra_args)
-      argv_storage.push_back(e);
-    std::vector<char*> argv;
-    argv.reserve(argv_storage.size() + 1);
-    for (auto& s : argv_storage)
-      argv.push_back(s.data());
-    argv.push_back(nullptr);
-
+    // Build argv before forking; after fork() we cannot allocate.
+    std::vector<std::string> argv_storage = build_argv_storage(req);
+    std::vector<char*> argv = argv_pointers(argv_storage);
     std::vector<std::string> env_storage = req.environment;
-    std::vector<char*> envp_raw;
-    envp_raw.reserve(env_storage.size() + 1);
-    for (auto& e : env_storage)
-      envp_raw.push_back(e.data());
-    envp_raw.push_back(nullptr);
 
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -144,44 +183,15 @@ SidecarLauncher default_fork_exec_launcher() {
                                     std::string("fork failed: ") + std::strerror(errno)));
     }
     if (pid == 0) {
-      // Child.
-      if (!env_storage.empty()) {
-        // Apply each env var with putenv. setenv copies, putenv does
-        // not; we keep env_storage alive until exec which discards it.
-        for (auto& e : env_storage) {
-          ::putenv(e.data());
-        }
+      // Child. Apply env overrides, then exec; the storage above stays
+      // alive until execvp replaces the address space.
+      for (auto& e : env_storage) {
+        ::putenv(e.data());
       }
       ::execvp(req.python_exe.c_str(), argv.data());
-      // Exec failed.
       std::_Exit(127);
     }
-    // Parent.
-    auto terminate_fn = [](SidecarHandle& h) {
-      const int pid_local = h.pid();
-      if (pid_local <= 0)
-        return;
-      ::kill(pid_local, SIGTERM);
-      // Give the child a brief moment to clean up.
-      for (int i = 0; i < 50; ++i) {
-        int status = 0;
-        const int r = ::waitpid(pid_local, &status, WNOHANG);
-        if (r != 0)
-          return;
-        ::usleep(10 * 1000);
-      }
-      ::kill(pid_local, SIGKILL);
-      (void)reap_pid(pid_local, /*wait_for_exit=*/true);
-    };
-    auto is_alive_fn = [](const SidecarHandle& h) {
-      const int pid_local = h.pid();
-      if (pid_local <= 0)
-        return false;
-      int status = 0;
-      const int r = ::waitpid(pid_local, &status, WNOHANG);
-      return r == 0;
-    };
-    return SidecarHandle::make(pid, std::move(terminate_fn), std::move(is_alive_fn));
+    return SidecarHandle::make(pid, terminate_sidecar, sidecar_is_alive);
   };
 }
 
@@ -200,8 +210,9 @@ Result<std::unique_ptr<SidecarProcess>> SidecarProcess::start(const SidecarLaunc
   proc->socket_path_ = req.socket_path.empty() ? make_socket_path() : req.socket_path;
 
   auto listener_r = ipc::UnixSocket::create_stream();
-  if (!listener_r.has_value())
+  if (!listener_r.has_value()) {
     return unexpected(listener_r.error());
+  }
   proc->listener_ = std::move(listener_r).value();
   if (auto r = proc->listener_.bind_and_listen(proc->socket_path_); !r.has_value()) {
     std::filesystem::remove(proc->socket_path_);

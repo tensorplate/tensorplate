@@ -28,15 +28,32 @@ namespace {
 
 constexpr std::size_t kSunPathMax = sizeof(sockaddr_un::sun_path);
 
+// `fcntl` is variadic by signature; the wrapper centralizes the
+// NOLINT suppression so callers stay readable.
+int set_fcntl(int fd, int cmd, int arg) noexcept {
+  return ::fcntl(fd, cmd, arg);  // NOLINT(cppcoreguidelines-pro-type-vararg)
+}
+
+// Treat sockaddr_un::sun_path as a writable char buffer with a known
+// extent. This centralizes the
+// `cppcoreguidelines-pro-bounds-array-to-pointer-decay` suppression so
+// callers stay readable.
+char* sun_path_ptr(sockaddr_un* addr) noexcept {
+  return static_cast<char*>(
+      addr->sun_path);  // NOLINT(cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+}
+
 int millis_until(UnixSocket::TimePoint deadline) noexcept {
   const auto now = UnixSocket::Clock::now();
-  if (deadline <= now)
+  if (deadline <= now) {
     return 0;
+  }
   using ms = std::chrono::milliseconds;
   const auto remaining = std::chrono::duration_cast<ms>(deadline - now);
   // Cap at ~int max so poll() doesn't overflow.
-  if (remaining.count() > 1'000'000'000)
+  if (remaining.count() > 1'000'000'000) {
     return 1'000'000'000;
+  }
   return static_cast<int>(remaining.count());
 }
 
@@ -45,29 +62,32 @@ Error make_errno_error(Error::Code code, const std::string& what) {
 }
 
 Result<void> wait_for(int fd, short events, UnixSocket::TimePoint deadline) {
-  struct pollfd pfd;
+  struct pollfd pfd {};
   pfd.fd = fd;
   pfd.events = events;
   pfd.revents = 0;
   while (true) {
     const int ms = millis_until(deadline);
     const int r = ::poll(&pfd, 1, ms);
-    if (r > 0)
+    if (r > 0) {
       return Result<void>{};
+    }
     if (r == 0) {
       return unexpected(Error::Code::Timeout, "deadline elapsed waiting for socket");
     }
-    if (errno == EINTR)
+    if (errno == EINTR) {
       continue;
+    }
     return unexpected(make_errno_error(Error::Code::LoadFailed, "poll failed"));
   }
 }
 
 Result<void> set_nonblock(int fd) {
-  const int flags = ::fcntl(fd, F_GETFL, 0);
-  if (flags < 0)
+  const int flags = set_fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "fcntl(F_GETFL)"));
-  if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+  }
+  if (set_fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "fcntl(F_SETFL O_NONBLOCK)"));
   }
   return Result<void>{};
@@ -80,8 +100,9 @@ Result<void> fill_sockaddr(sockaddr_un* addr, std::string_view path) {
   }
   std::memset(addr, 0, sizeof(*addr));
   addr->sun_family = AF_UNIX;
-  std::memcpy(addr->sun_path, path.data(), path.size());
-  addr->sun_path[path.size()] = '\0';
+  char* sun = sun_path_ptr(addr);
+  std::memcpy(sun, path.data(), path.size());
+  sun[path.size()] = '\0';
   return Result<void>{};
 }
 
@@ -123,31 +144,45 @@ Result<UnixSocket> UnixSocket::create_stream() {
   return sock;
 }
 
-Result<void> UnixSocket::connect(std::string_view path, TimePoint deadline) {
+// `connect` / `bind_and_listen` / `accept` / `read_exact` / `write_all`
+// modify the kernel-side state of the file descriptor owned by `fd_`.
+// clang-tidy's `readability-make-member-function-const` cannot see that
+// through the opaque syscall and would otherwise flag every operation
+// that does not write to the C++ member. The methods stay non-const
+// because the externally observable behavior of the socket changes; the
+// suppressions are localized to the affected declarations.
+
+Result<void> UnixSocket::connect(  // NOLINT(readability-make-member-function-const)
+    std::string_view path, TimePoint deadline) {
   if (fd_ < 0) {
     return unexpected(Error::Code::Internal, "UnixSocket::connect on closed socket");
   }
-  sockaddr_un addr;
-  if (auto r = fill_sockaddr(&addr, path); !r.has_value())
+  sockaddr_un addr{};
+  if (auto r = fill_sockaddr(&addr, path); !r.has_value()) {
     return unexpected(r.error());
+  }
 
   while (true) {
     const int r = ::connect(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    if (r == 0)
+    if (r == 0) {
       return Result<void>{};
-    if (errno == EINTR)
+    }
+    if (errno == EINTR) {
       continue;
+    }
     if (errno == EINPROGRESS || errno == EALREADY) {
       auto w = wait_for(fd_, POLLOUT, deadline);
-      if (!w.has_value())
+      if (!w.has_value()) {
         return unexpected(w.error());
+      }
       int err = 0;
       socklen_t len = sizeof(err);
       if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
         return unexpected(make_errno_error(Error::Code::LoadFailed, "getsockopt(SO_ERROR)"));
       }
-      if (err == 0)
+      if (err == 0) {
         return Result<void>{};
+      }
       errno = err;
       return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket connect failed"));
     }
@@ -159,15 +194,17 @@ Result<void> UnixSocket::connect(std::string_view path, TimePoint deadline) {
   }
 }
 
-Result<void> UnixSocket::bind_and_listen(std::string_view path, int backlog) {
+Result<void> UnixSocket::bind_and_listen(  // NOLINT(readability-make-member-function-const)
+    std::string_view path, int backlog) {
   if (fd_ < 0) {
     return unexpected(Error::Code::Internal, "UnixSocket::bind_and_listen on closed socket");
   }
-  sockaddr_un addr;
-  if (auto r = fill_sockaddr(&addr, path); !r.has_value())
+  sockaddr_un addr{};
+  if (auto r = fill_sockaddr(&addr, path); !r.has_value()) {
     return unexpected(r.error());
+  }
 
-  ::unlink(addr.sun_path);
+  ::unlink(sun_path_ptr(&addr));
   if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket bind failed"));
   }
@@ -177,7 +214,8 @@ Result<void> UnixSocket::bind_and_listen(std::string_view path, int backlog) {
   return Result<void>{};
 }
 
-Result<UnixSocket> UnixSocket::accept(TimePoint deadline) {
+Result<UnixSocket> UnixSocket::accept(  // NOLINT(readability-make-member-function-const)
+    TimePoint deadline) {
   if (fd_ < 0) {
     return unexpected(Error::Code::Internal, "UnixSocket::accept on closed socket");
   }
@@ -190,19 +228,22 @@ Result<UnixSocket> UnixSocket::accept(TimePoint deadline) {
       }
       return s;
     }
-    if (errno == EINTR)
+    if (errno == EINTR) {
       continue;
+    }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLIN, deadline);
-      if (!w.has_value())
+      if (!w.has_value()) {
         return unexpected(w.error());
+      }
       continue;
     }
     return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket accept failed"));
   }
 }
 
-Result<void> UnixSocket::read_exact(std::span<std::byte> out, TimePoint deadline) {
+Result<void> UnixSocket::read_exact(  // NOLINT(readability-make-member-function-const)
+    std::span<std::byte> out, TimePoint deadline) {
   if (fd_ < 0) {
     return unexpected(Error::Code::Internal, "UnixSocket::read_exact on closed socket");
   }
@@ -216,12 +257,14 @@ Result<void> UnixSocket::read_exact(std::span<std::byte> out, TimePoint deadline
     if (n == 0) {
       return unexpected(Error::Code::LoadFailed, "unix-socket peer closed mid-frame");
     }
-    if (errno == EINTR)
+    if (errno == EINTR) {
       continue;
+    }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLIN, deadline);
-      if (!w.has_value())
+      if (!w.has_value()) {
         return unexpected(w.error());
+      }
       continue;
     }
     return unexpected(make_errno_error(Error::Code::LoadFailed, "unix-socket recv failed"));
@@ -229,7 +272,8 @@ Result<void> UnixSocket::read_exact(std::span<std::byte> out, TimePoint deadline
   return Result<void>{};
 }
 
-Result<void> UnixSocket::write_all(std::span<const std::byte> bytes, TimePoint deadline) {
+Result<void> UnixSocket::write_all(  // NOLINT(readability-make-member-function-const)
+    std::span<const std::byte> bytes, TimePoint deadline) {
   if (fd_ < 0) {
     return unexpected(Error::Code::Internal, "UnixSocket::write_all on closed socket");
   }
@@ -240,12 +284,14 @@ Result<void> UnixSocket::write_all(std::span<const std::byte> bytes, TimePoint d
       offset += static_cast<std::size_t>(n);
       continue;
     }
-    if (errno == EINTR)
+    if (errno == EINTR) {
       continue;
+    }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       auto w = wait_for(fd_, POLLOUT, deadline);
-      if (!w.has_value())
+      if (!w.has_value()) {
         return unexpected(w.error());
+      }
       continue;
     }
     if (errno == EPIPE) {

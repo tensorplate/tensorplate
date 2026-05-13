@@ -29,16 +29,19 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry);
 
 Result<void> register_builtin_backends([[maybe_unused]] BackendRegistry& registry) {
 #if TP_ENABLE_TENSORRT
-  if (auto r = register_tensorrt_backend(registry); !r.has_value())
+  if (auto r = register_tensorrt_backend(registry); !r.has_value()) {
     return r;
+  }
 #endif
 #if TP_ENABLE_LIBTORCH
-  if (auto r = register_libtorch_backend(registry); !r.has_value())
+  if (auto r = register_libtorch_backend(registry); !r.has_value()) {
     return r;
+  }
 #endif
 #if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
-  if (auto r = register_python_pytorch_backend(registry); !r.has_value())
+  if (auto r = register_python_pytorch_backend(registry); !r.has_value()) {
     return r;
+  }
 #endif
   return Result<void>{};
 }

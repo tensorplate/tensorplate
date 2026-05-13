@@ -98,8 +98,9 @@ TensorRTLogger& trt_logger() noexcept {
 template <typename T>
 struct TrtDeleter {
   void operator()(T* ptr) const noexcept {
-    if (ptr != nullptr)
+    if (ptr != nullptr) {
       ptr->destroy();
+    }
   }
 };
 
@@ -110,8 +111,9 @@ struct CudaStreamHandle {
   cudaStream_t stream = nullptr;
   CudaStreamHandle() = default;
   ~CudaStreamHandle() {
-    if (stream != nullptr)
+    if (stream != nullptr) {
       cudaStreamDestroy(stream);
+    }
   }
   CudaStreamHandle(const CudaStreamHandle&) = delete;
   CudaStreamHandle& operator=(const CudaStreamHandle&) = delete;
@@ -120,8 +122,9 @@ struct CudaStreamHandle {
   }
   CudaStreamHandle& operator=(CudaStreamHandle&& other) noexcept {
     if (this != &other) {
-      if (stream != nullptr)
+      if (stream != nullptr) {
         cudaStreamDestroy(stream);
+      }
       stream = other.stream;
       other.stream = nullptr;
     }
@@ -134,8 +137,9 @@ struct CudaDeviceBuffer {
   std::size_t size_bytes = 0;
   CudaDeviceBuffer() = default;
   ~CudaDeviceBuffer() {
-    if (device_ptr != nullptr)
+    if (device_ptr != nullptr) {
       cudaFree(device_ptr);
+    }
   }
   CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
   CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
@@ -146,8 +150,9 @@ struct CudaDeviceBuffer {
   }
   CudaDeviceBuffer& operator=(CudaDeviceBuffer&& other) noexcept {
     if (this != &other) {
-      if (device_ptr != nullptr)
+      if (device_ptr != nullptr) {
         cudaFree(device_ptr);
+      }
       device_ptr = other.device_ptr;
       size_bytes = other.size_bytes;
       other.device_ptr = nullptr;
@@ -206,8 +211,9 @@ class TensorRTSession final : public ExecutionSession {
     }
 
     auto bytes_r = read_file(path);
-    if (!bytes_r.has_value())
+    if (!bytes_r.has_value()) {
       return unexpected(bytes_r.error());
+    }
 
     state_ = std::make_unique<TensorRTState>();
     state_->runtime.reset(nvinfer1::createInferRuntime(trt_logger()));

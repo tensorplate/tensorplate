@@ -42,8 +42,9 @@ Result<void> BackendRegistry::register_backend(BackendEntry entry) {
 bool BackendRegistry::deregister_backend(std::string_view backend_name) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = entries_.find(std::string(backend_name));
-  if (it == entries_.end())
+  if (it == entries_.end()) {
     return false;
+  }
   entries_.erase(it);
   return true;
 }

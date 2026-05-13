@@ -25,12 +25,15 @@ std::string_view to_string(ShapeSupport support) noexcept {
 }
 
 std::optional<ShapeSupport> shape_support_from_string(std::string_view name) noexcept {
-  if (name == "dynamic")
+  if (name == "dynamic") {
     return ShapeSupport::Dynamic;
-  if (name == "fixed")
+  }
+  if (name == "fixed") {
     return ShapeSupport::Fixed;
-  if (name == "range_bounded")
+  }
+  if (name == "range_bounded") {
     return ShapeSupport::RangeBounded;
+  }
   return std::nullopt;
 }
 
@@ -52,7 +55,7 @@ Result<BackendCapability> BackendCapability::create(
   if (profile_id.has_value() && profile_id->empty()) {
     return unexpected(Error::Code::ConfigInvalid, "profile_id must not be empty when set");
   }
-  if (op_coverage_score_pct.has_value() && *op_coverage_score_pct > 100u) {
+  if (op_coverage_score_pct.has_value() && *op_coverage_score_pct > 100U) {
     return unexpected(Error::Code::ConfigInvalid,
                       "op_coverage_score_pct must be in the range [0, 100]");
   }
