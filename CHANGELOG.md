@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- TensorRT execution backend adapter shell under
+  `runtime/src/adapters/tensorrt/` (registered as `tensorrt`). The
+  adapter publishes its `BackendCapability` (FP32/FP16/INT8, fixed-shape
+  binding, sync execution only) and owns TensorRT and CUDA SDK handles
+  privately through RAII wrappers (`TensorRTState`, `CudaStreamHandle`,
+  `CudaDeviceBuffer`). The adapter compiles when `TP_ENABLE_TENSORRT=ON`;
+  if the CMake configuration detects an installed TensorRT/CUDA SDK it
+  defines `TP_HAS_TENSORRT_SDK=1` and the adapter deserializes the
+  engine file and creates the runtime/engine/execution context. Without
+  the SDK the adapter still registers and surfaces typed
+  `Error::Code::Unsupported` from `do_load` with an actionable message
+  so `tensorplate doctor` can enumerate it (V01-E05-F02-T01 / T02).
+- T1 unit tests under `test/unit/tensorrt_adapter_test.cpp` covering
+  registration under the stable key, capability-record consistency,
+  backend_name on the constructed session, load-without-SDK returning
+  `Unsupported`, and `validate_backend_hint` precision filtering.
+  Vision golden conformance (T3) and Orin HIL validation (T4) land in
+  V01-E05-F02-T03 / V01-E05-F06.
 - `include/tensorplate/backend/capability.hpp` and
   `include/tensorplate/backend/registry.hpp` defining the vendor-neutral
   `tensorplate::BackendCapability` value object and the thread-safe

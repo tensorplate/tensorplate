@@ -23,6 +23,12 @@ set(_tp_runtime_sources
   src/backend/builtin.cpp
 )
 
+if(TP_ENABLE_TENSORRT)
+  list(APPEND _tp_runtime_sources
+    src/adapters/tensorrt/tensorrt_session.cpp
+  )
+endif()
+
 # V01-E05 adapter feature flags. Off by default so host CI builds clean
 # without proprietary SDKs. When ON, the adapter source file registers
 # its factory through `tensorplate::register_builtin_backends()`.
@@ -50,6 +56,28 @@ target_compile_features(tp_runtime PUBLIC cxx_std_20)
 
 if(TP_ENABLE_TENSORRT)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_TENSORRT=1)
+  # Probe for the TensorRT and CUDA SDKs. When both are usable, expose
+  # the headers/libraries and define TP_HAS_TENSORRT_SDK so the adapter
+  # compiles its real execution path. Host CI builds with the flag on
+  # but no SDK installed register the adapter and surface typed
+  # Unsupported from `load` instead of failing the build.
+  find_package(CUDAToolkit QUIET)
+  find_path(TP_TENSORRT_INCLUDE_DIR NvInfer.h
+    HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
+    PATH_SUFFIXES include)
+  find_library(TP_TENSORRT_NVINFER_LIB nvinfer
+    HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu lib/aarch64-linux-gnu)
+  if(TP_TENSORRT_INCLUDE_DIR AND TP_TENSORRT_NVINFER_LIB AND CUDAToolkit_FOUND)
+    message(STATUS "TensorRT SDK detected; building real TensorRT adapter execution path")
+    target_compile_definitions(tp_runtime PRIVATE TP_HAS_TENSORRT_SDK=1)
+    target_include_directories(tp_runtime PRIVATE ${TP_TENSORRT_INCLUDE_DIR})
+    target_link_libraries(tp_runtime PUBLIC ${TP_TENSORRT_NVINFER_LIB} CUDA::cudart)
+  else()
+    message(STATUS
+      "TensorRT SDK not found; building TensorRT adapter without execution support "
+      "(load() returns Unsupported). Set TENSORRT_ROOT / install CUDAToolkit to enable.")
+  endif()
 endif()
 if(TP_ENABLE_LIBTORCH)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_LIBTORCH=1)
