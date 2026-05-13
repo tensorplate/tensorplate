@@ -29,6 +29,12 @@ if(TP_ENABLE_TENSORRT)
   )
 endif()
 
+if(TP_ENABLE_LIBTORCH)
+  list(APPEND _tp_runtime_sources
+    src/adapters/libtorch/libtorch_session.cpp
+  )
+endif()
+
 # V01-E05 adapter feature flags. Off by default so host CI builds clean
 # without proprietary SDKs. When ON, the adapter source file registers
 # its factory through `tensorplate::register_builtin_backends()`.
@@ -81,6 +87,26 @@ if(TP_ENABLE_TENSORRT)
 endif()
 if(TP_ENABLE_LIBTORCH)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_LIBTORCH=1)
+  # `Torch_DIR` points at a libtorch install (cmake/Torch). Without it
+  # the adapter still compiles and surfaces typed `Unsupported` from
+  # `load`; with it, the adapter executes TorchScript modules.
+  find_package(Torch QUIET)
+  if(Torch_FOUND)
+    message(STATUS "LibTorch found; building real LibTorch adapter execution path")
+    target_compile_definitions(tp_runtime PRIVATE TP_HAS_LIBTORCH_SDK=1)
+    target_link_libraries(tp_runtime PUBLIC ${TORCH_LIBRARIES})
+    # `set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")` is
+    # the standard recipe; apply it on the target only to keep the
+    # ABI scope localized.
+    if(TORCH_CXX_FLAGS)
+      separate_arguments(_tp_torch_flags UNIX_COMMAND "${TORCH_CXX_FLAGS}")
+      target_compile_options(tp_runtime PRIVATE ${_tp_torch_flags})
+    endif()
+  else()
+    message(STATUS
+      "LibTorch not found; building LibTorch adapter without execution support "
+      "(load() returns Unsupported). Set Torch_DIR to enable.")
+  endif()
 endif()
 if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_PYTHON_PYTORCH_SIDECAR=1)

@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- LibTorch native execution backend adapter shell under
+  `runtime/src/adapters/libtorch/` (registered as `libtorch`). Loads
+  TorchScript (`torch::jit::load`) modules and is positioned as a
+  reference / native-C++ backend, *not* a fallback for
+  `python_pytorch` bundles. Capability record advertises
+  FP32/FP16/BFloat16 precision and dynamic-shape support; async,
+  generation, streaming, and KV-cache flags remain false. The adapter
+  source compiles when `TP_ENABLE_LIBTORCH=ON`; when CMake also locates
+  a LibTorch C++ distribution (`Torch_DIR` -> `find_package(Torch)`),
+  it defines `TP_HAS_LIBTORCH_SDK=1` and the adapter loads the
+  TorchScript module. Without the SDK the adapter still registers and
+  surfaces typed `Error::Code::Unsupported` from `do_load` with an
+  actionable rebuild hint. T1 unit tests in
+  `test/unit/libtorch_adapter_test.cpp` cover registration, capability
+  publication, the no-SDK `Unsupported` path, and explicit verification
+  that `backend_hint: python_pytorch` does not silently redirect to
+  LibTorch (V01-E05-F03-T01 / T02). Exported-graph fixture (T3) and
+  host T3 / Jetson T4 conformance land in V01-E05-F03-T03 and
+  V01-E05-F06.
 - TensorRT execution backend adapter shell under
   `runtime/src/adapters/tensorrt/` (registered as `tensorrt`). The
   adapter publishes its `BackendCapability` (FP32/FP16/INT8, fixed-shape

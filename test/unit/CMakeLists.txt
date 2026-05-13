@@ -25,6 +25,7 @@ add_executable(tp_test_unit
   backend_registry_test.cpp
   backend_builtin_test.cpp
   tensorrt_adapter_test.cpp
+  libtorch_adapter_test.cpp
 )
 
 target_include_directories(tp_test_unit
