@@ -43,6 +43,11 @@ using json = nlohmann::json;
 
 constexpr std::string_view kSchemaVersion = "0.1";
 
+// Message kinds the adapter sends to and accepts from the sidecar.
+// Cancel / health_check / error_event are defined by the protocol
+// schema but not yet driven by the V01-E05-F05 adapter; the scheduler
+// (V01-E06) and the agent's worker supervision (V01-E09) will issue
+// them once their wiring lands.
 constexpr std::string_view kKindLoadModel = "load_model";
 constexpr std::string_view kKindLoadModelResponse = "load_model_response";
 constexpr std::string_view kKindPrime = "prime";
@@ -51,14 +56,9 @@ constexpr std::string_view kKindInfer = "infer";
 constexpr std::string_view kKindInferResponse = "infer_response";
 constexpr std::string_view kKindInferAsync = "infer_async";
 constexpr std::string_view kKindInferAsyncResponse = "infer_async_response";
-constexpr std::string_view kKindCancel = "cancel";
-constexpr std::string_view kKindCancelResponse = "cancel_response";
 constexpr std::string_view kKindUnload = "unload";
 constexpr std::string_view kKindUnloadResponse = "unload_response";
-constexpr std::string_view kKindHealthCheck = "health_check";
-constexpr std::string_view kKindHealthCheckResponse = "health_check_response";
 constexpr std::string_view kKindReadyEvent = "ready_event";
-constexpr std::string_view kKindErrorEvent = "error_event";
 
 std::atomic<std::uint64_t>& message_seq() noexcept {
   static std::atomic<std::uint64_t> seq{0};
