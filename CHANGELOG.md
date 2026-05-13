@@ -37,10 +37,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   hooks; the new tests cover typed `load_failed`, `inference_failed`,
   `config_invalid` (missing model_spec, malformed tensor entry), and
   the cancel-then-recordable-by-backend path. Combined with the
-  V01-E05-F04 runner tests, the failure matrix now covers startup
-  failure, malformed response, timeout, cancellation, process exit
-  (covered via the C++ supervisor's shutdown path), missing
-  heartbeat, and deterministic buffer release.
+  V01-E05-F04 runner tests and C++ supervisor shutdown behavior, the
+  host baseline covers typed runner errors, timeout/cancel message
+  handling, malformed request rejection, and deterministic cleanup
+  paths; heartbeat-driven liveness and externally killed sidecar
+  recovery remain scheduler/supervision follow-up work.
 - Golden-output fixture matrix and tolerance documentation at
   `test/models/GOLDEN_FIXTURES.md`. Defines what a golden fixture
   means for each adapter family, where each runs in the CI tier, how
@@ -56,16 +57,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   subprocess per execution session (the V01-E05 closed decision), binds
   a Unix-domain socket under `TMPDIR`, accepts the child's connection,
   reads its `ready_event`, and translates `ExecutionSession::load /
-  prime / infer / infer_async / unload` into the sidecar IPC schema
-  (V01-E05-F04). Capability record declares
-  `python_pytorch` async-capable (the only adapter that does in v0.1.0)
-  and dynamic-shape; generation, streaming, and KV-cache remain false.
+  prime / infer / unload` into the sidecar IPC schema (V01-E05-F04).
+  The sidecar wire protocol includes `infer_async`, but the C++ adapter
+  keeps native async disabled until V01-E06 provides a real completion
+  channel; `ExecutionSession::infer_async` therefore returns typed
+  `Unsupported` without dispatching or allocating outputs. Capability
+  record declares dynamic-shape support; async, generation, streaming,
+  and KV-cache remain false.
 - `SidecarProcess` (in `runtime/src/adapters/python_pytorch/`) owns the
   subprocess + socket pair, terminates the child with SIGTERM (or
   SIGKILL after a 500 ms grace period) on unload / error, and unlinks
   the socket path. `SidecarLauncher` is injectable so tests can run the
   Python runner via a non-default interpreter without touching the
-  adapter code; the default launcher does `fork()` +
+  adapter code. The built-in factory honors
+  `TP_PYTHON_PYTORCH_EXECUTABLE`, `TP_TEST_PYTHON_EXE`, then
+  `TP_TEST_PYTHON` before falling back to `python3`; the default
+  launcher does `fork()` +
   `execvp(python3, "-m", "tensorplate_pytorch_backend", "--socket",
   path)`.
 - Input/output tensor marshaling: inputs are read out of `BufferManager`
@@ -81,7 +88,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   monotonic deadline; sidecar timeouts surface as
   `Error::Code::Timeout`; malformed response frames map to
   `Error::Code::InferenceFailed`. The adapter terminates the sidecar on
-  shutdown so the OS does not retain a zombie.
+  unload, load failure, and transport failure so the OS does not retain
+  a zombie. Adapter-owned heartbeat polling and `Cancel` dispatch are
+  reserved for the scheduler/supervision wiring that owns async result
+  delivery.
 - `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` is flipped on by default in
   `runtime/CMakeLists.txt`. When the flag is on the runtime links
   `nlohmann_json::nlohmann_json` (header-only) for JSON header
@@ -90,10 +100,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `test/integration/python_pytorch_adapter_test.cpp` exercises the full
   C++ ↔ Python lifecycle through the `FixtureBackend`: registration,
   capability publication, end-to-end echo (load → prime → infer →
-  unload through real Unix-socket IPC), and infer-before-prime
-  returning `NotReady`. The test skips when `python3 -c "import
-  tensorplate_pytorch_backend"` fails so host CI without the editable
-  install passes cleanly.
+  unload through real Unix-socket IPC), wrapper-level `infer_async`
+  returning typed `Unsupported` without output allocation, and
+  infer-before-prime returning `NotReady`. C++ CI now installs
+  `backends/python_pytorch` before running T2/T3 so the round-trip is
+  exercised instead of silently skipped.
 - Python/PyTorch sidecar IPC contract and Python backend runner
   (V01-E05-F04). The on-wire envelope is documented in
   `include/tensorplate/ipc/sidecar_codec.hpp`:

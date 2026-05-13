@@ -55,8 +55,7 @@ using SessionFactory = std::function<std::unique_ptr<ExecutionSession>()>;
 /// conformance scenario allocates input buffers from. Adapters that
 /// consume input buffers via `BufferManager::view` (e.g. the Python
 /// sidecar) need this; the mock adapter does not.
-using SessionFactoryWithManager =
-    std::function<std::unique_ptr<ExecutionSession>(BufferManager&)>;
+using SessionFactoryWithManager = std::function<std::unique_ptr<ExecutionSession>(BufferManager&)>;
 
 /// Conformance-test configuration. The adapter author fills in the
 /// fields a real backend needs (model artifact path, expected backend

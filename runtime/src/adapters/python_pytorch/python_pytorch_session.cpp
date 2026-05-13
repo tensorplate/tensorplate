@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -44,18 +45,16 @@ using json = nlohmann::json;
 constexpr std::string_view kSchemaVersion = "0.1";
 
 // Message kinds the adapter sends to and accepts from the sidecar.
-// Cancel / health_check / error_event are defined by the protocol
-// schema but not yet driven by the V01-E05-F05 adapter; the scheduler
-// (V01-E06) and the agent's worker supervision (V01-E09) will issue
-// them once their wiring lands.
+// InferAsync / Cancel / health_check / error_event are defined by the
+// protocol schema but not yet driven by the C++ ExecutionSession adapter;
+// the scheduler (V01-E06) and the agent's worker supervision (V01-E09)
+// will issue them once their completion/cancellation wiring lands.
 constexpr std::string_view kKindLoadModel = "load_model";
 constexpr std::string_view kKindLoadModelResponse = "load_model_response";
 constexpr std::string_view kKindPrime = "prime";
 constexpr std::string_view kKindPrimeResponse = "prime_response";
 constexpr std::string_view kKindInfer = "infer";
 constexpr std::string_view kKindInferResponse = "infer_response";
-constexpr std::string_view kKindInferAsync = "infer_async";
-constexpr std::string_view kKindInferAsyncResponse = "infer_async_response";
 constexpr std::string_view kKindUnload = "unload";
 constexpr std::string_view kKindUnloadResponse = "unload_response";
 constexpr std::string_view kKindReadyEvent = "ready_event";
@@ -67,6 +66,17 @@ std::atomic<std::uint64_t>& message_seq() noexcept {
 
 std::string next_message_id() {
   return "tp-msg-" + std::to_string(message_seq().fetch_add(1, std::memory_order_relaxed));
+}
+
+std::string configured_python_exe() {
+  for (const char* name :
+       {"TP_PYTHON_PYTORCH_EXECUTABLE", "TP_TEST_PYTHON_EXE", "TP_TEST_PYTHON"}) {
+    const char* value = std::getenv(name);
+    if (value != nullptr && *value != '\0') {
+      return value;
+    }
+  }
+  return "python3";
 }
 
 Error::Code error_code_from_wire(const std::string& wire) {
@@ -205,7 +215,7 @@ BackendCapability make_python_pytorch_capability() {
   return BackendCapability::create(std::string(kBackendName), std::move(precision),
                                    /*shape_support=*/ShapeSupport::Dynamic,
                                    /*profile_id=*/std::nullopt,
-                                   /*supports_async=*/true,
+                                   /*supports_async=*/false,
                                    /*supports_generation=*/false,
                                    /*supports_streaming=*/false,
                                    /*supports_kv_cache=*/false,
@@ -263,6 +273,7 @@ class PythonPytorchSession final : public ExecutionSession {
     auto resp = exchange(req_hdr, /*payload=*/{}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindLoadModelResponse), Error::Code::LoadFailed);
     if (!resp.has_value()) {
+      shutdown_sidecar();
       return unexpected(resp.error());
     }
     return Result<void>{};
@@ -285,25 +296,8 @@ class PythonPytorchSession final : public ExecutionSession {
   }
 
   Result<std::vector<NamedOutput>> do_infer(const InferRequest& request) override {
-    return run_infer(request, /*async_dispatch=*/false);
+    return run_infer(request);
   }
-
-  Result<AsyncInferHandle> do_infer_async(const InferRequest& request) override {
-    auto outputs = run_infer(request, /*async_dispatch=*/true);
-    if (!outputs.has_value()) {
-      return unexpected(outputs.error());
-    }
-    // The Python runner returns the outputs synchronously; we still
-    // honor the async method shape so callers can correlate. The
-    // outputs are dropped here because v0.1.0 has no async-result
-    // delivery channel yet; the scheduler in V01-E06 wires it.
-    AsyncInferHandle handle;
-    handle.request_id = request.request_id();
-    handle.async_id = next_async_id();
-    return handle;
-  }
-
-  [[nodiscard]] bool supports_native_async() const noexcept override { return true; }
 
   Result<void> do_unload() override {
     if (!process_) {
@@ -315,8 +309,7 @@ class PythonPytorchSession final : public ExecutionSession {
     hdr["kind"] = std::string(kKindUnload);
     auto resp = exchange(hdr, {}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindUnloadResponse), Error::Code::InferenceFailed);
-    process_->shutdown();
-    process_.reset();
+    shutdown_sidecar();
     if (!resp.has_value()) {
       return unexpected(resp.error());
     }
@@ -334,23 +327,25 @@ class PythonPytorchSession final : public ExecutionSession {
     frame.json_header = request_header.dump();
     frame.payload = payload;
     if (auto w = write_frame(process_->socket(), frame, deadline); !w.has_value()) {
-      return unexpected(w.error());
+      return transport_failure(w.error());
     }
     auto resp = read_frame(process_->socket(), deadline);
     if (!resp.has_value()) {
-      return unexpected(resp.error());
+      return transport_failure(resp.error());
     }
     auto hdr = json::parse(resp.value().json_header, nullptr, false);
     if (hdr.is_discarded()) {
-      return unexpected(Error::Code::InferenceFailed, "sidecar returned malformed JSON header");
+      return transport_failure(
+          Error::make(Error::Code::InferenceFailed, "sidecar returned malformed JSON header"));
     }
     const std::string status = hdr.value("status", "ok");
     if (status == "error") {
       return unexpected(error_from_response(hdr, default_error_code));
     }
     if (!expected_kind.empty() && hdr.value("kind", "") != expected_kind) {
-      return unexpected(Error::Code::InferenceFailed,
-                        "sidecar response kind mismatch (expected " + expected_kind + ")");
+      return transport_failure(
+          Error::make(Error::Code::InferenceFailed,
+                      "sidecar response kind mismatch (expected " + expected_kind + ")"));
     }
     // Attach payload to header object so callers can read it via the
     // json `__payload__` extension key; we intentionally do not embed
@@ -364,7 +359,20 @@ class PythonPytorchSession final : public ExecutionSession {
     return hdr;
   }
 
-  Result<std::vector<NamedOutput>> run_infer(const InferRequest& request, bool async_dispatch) {
+  Result<json> transport_failure(Error error) {
+    shutdown_sidecar();
+    return unexpected(std::move(error));
+  }
+
+  void shutdown_sidecar() noexcept {
+    if (process_) {
+      process_->shutdown();
+      process_.reset();
+    }
+    last_payload_.clear();
+  }
+
+  Result<std::vector<NamedOutput>> run_infer(const InferRequest& request) {
     if (!process_) {
       return unexpected(Error::Code::NotReady, "sidecar not started");
     }
@@ -373,7 +381,7 @@ class PythonPytorchSession final : public ExecutionSession {
     json hdr;
     hdr["schema_version"] = std::string(kSchemaVersion);
     hdr["message_id"] = next_message_id();
-    hdr["kind"] = async_dispatch ? std::string(kKindInferAsync) : std::string(kKindInfer);
+    hdr["kind"] = std::string(kKindInfer);
     hdr["correlation_id"] = request.request_id();
     json tensors_in = json::array();
     std::vector<std::byte> payload;
@@ -399,8 +407,7 @@ class PythonPytorchSession final : public ExecutionSession {
     hdr["tensors"] = std::move(tensors_in);
 
     const auto deadline = clamped_deadline(request, config_.infer_timeout);
-    const std::string expected_kind =
-        async_dispatch ? std::string(kKindInferAsyncResponse) : std::string(kKindInferResponse);
+    const std::string expected_kind = std::string(kKindInferResponse);
     auto resp = exchange(hdr, payload, deadline, expected_kind, Error::Code::InferenceFailed);
     if (!resp.has_value()) {
       // Release the request buffers in line with V01-E03 contract; the
@@ -465,8 +472,10 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
       std::string(kBackendName),
       make_python_pytorch_capability(),
       [](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
+        PythonPytorchConfig config;
+        config.python_exe = adapters::python_pytorch::configured_python_exe();
         return std::unique_ptr<ExecutionSession>(
-            new PythonPytorchSession(hooks, PythonPytorchConfig{}, default_fork_exec_launcher()));
+            new PythonPytorchSession(hooks, std::move(config), default_fork_exec_launcher()));
       },
   });
 }

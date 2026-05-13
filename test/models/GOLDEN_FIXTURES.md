@@ -91,8 +91,9 @@ real-adapter contract test in
 The `FixtureBackend` is sufficient to exercise:
 - named multi-input requests (V01-E04 NVI validation),
 - named outputs with explicit metadata,
-- async-method-shape coverage (the fixture's `infer_async` reuses
-  the sync path; the adapter still allocates a fresh `async_id`),
+- async-method-shape coverage (the sidecar protocol accepts
+  `infer_async`, while the C++ `ExecutionSession` adapter returns typed
+  `Unsupported` until V01-E06 provides result delivery),
 - exact bytewise correctness of the input/output round-trip,
 - failure-injection paths via the `fail_load` / `fail_prime` /
   `fail_infer` hooks (covered in

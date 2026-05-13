@@ -89,7 +89,7 @@ TEST_F(PythonPytorchAdapterFixture, RegistersUnderStableKey) {
   EXPECT_TRUE(reg.is_registered("python_pytorch"));
   auto cap = reg.capability("python_pytorch");
   ASSERT_TRUE(cap.has_value());
-  EXPECT_TRUE(cap.value().supports_async());
+  EXPECT_FALSE(cap.value().supports_async());
   EXPECT_FALSE(cap.value().supports_generation());
 }
 
@@ -164,6 +164,33 @@ TEST_F(PythonPytorchAdapterFixture, InferBeforePrimeReturnsNotReady) {
   // The NVI wrapper rejects with NotReady before the adapter is hit.
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::NotReady);
+  (void)manager->release_if_owned(buf);
+  ASSERT_TRUE(session->unload().has_value());
+}
+
+TEST_F(PythonPytorchAdapterFixture, InferAsyncReturnsUnsupportedWithoutAllocatingOutputs) {
+  BackendRegistry reg;
+  ASSERT_TRUE(register_builtin_backends(reg).has_value());
+  auto manager = make_manager();
+  ExecutionSessionRuntimeHooks hooks{};
+  hooks.buffer_manager = manager.get();
+  auto session = reg.create_session("python_pytorch", hooks).value();
+  auto spec = ModelSpec::create("m", ModelClass::Vla, "/dev/null", "python_pytorch").value();
+  ASSERT_TRUE(session->load(spec).has_value());
+  ASSERT_TRUE(session->prime().has_value());
+
+  auto tv = TensorView::create(DType::Float32, {1, 1}).value();
+  auto buf = manager->allocate(4).value();
+  std::vector<NamedInput> inputs;
+  inputs.push_back(NamedInput{"x", buf, tv});
+  auto req = InferRequest::create("async-r", "/infer", std::move(inputs)).value();
+
+  const auto before = manager->accounting().active_count;
+  auto r = session->infer_async(req);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::Unsupported);
+  EXPECT_EQ(manager->accounting().active_count, before);
+
   (void)manager->release_if_owned(buf);
   ASSERT_TRUE(session->unload().has_value());
 }
