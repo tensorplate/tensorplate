@@ -8,6 +8,55 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Developer-facing C++ example `tensorplate-example-buffer-plane` under
+  `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
+  end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
+  mock policy → `InferResult` → cancellation cleanup → double-release
+  diagnosis → pressure-event draining. Toggle with the
+  `TP_BUILD_EXAMPLES` CMake option (defaults ON).
+- T2 integration test `tp_test_integration` exercising the same loop
+  under GoogleTest (`test/integration/buffer_plane_e2e_test.cpp`).
+- Memory-pressure event shape and emission: `MemoryPressure` level
+  (normal / warning / critical), `BufferPressureEvent` payload (pool
+  name, previous + current level, capacity, in-use bytes, active count,
+  high-water mark, allocation failures), and a bounded event ring drained
+  through `BufferManager::drain_pressure_events`. The buffer manager
+  records one event per threshold crossing without invoking callbacks or
+  I/O on allocation/release paths. Mirrored on the wire in
+  `protocol/schemas/buffer_pressure_event.json` and in the Rust
+  `tensorplate-protocol` crate (V01-E03-F06).
+- Session output helpers `allocate_output_buffer`, `build_named_output`,
+  and `build_named_outputs`. The execution session allocates one owned
+  buffer per output, pairs it with a validated `TensorView` byte window,
+  and assembles `NamedOutput` value objects (including chunk-shaped VLA
+  action outputs). Multi-output builds reject duplicate names and
+  release any partial allocations on later failure (V01-E03-F05).
+- Ingress copy helpers `copy_payload_into_buffer` and
+  `build_named_inputs` that turn caller-owned byte payloads into
+  buffer-plane-owned `BufferRef` storage with a single copy. Multi-input
+  builds reject duplicate names, oversized payloads, and tensor-window
+  metadata that does not fit the allocated buffer; partial allocations
+  are released before an error is returned. Shared vision and
+  SmolVLA-style payload fixtures live in
+  `test/mocks/ingress_fixtures.hpp` and will be reused by the V01-E07
+  HTTP router (V01-E03-F04).
+- Buffer cleanup helpers `release_request_buffers`,
+  `release_partial_outputs`, and the `RequestBufferGuard` RAII wrapper.
+  Helpers release every unique buffer id at most once, never throw, avoid
+  allocation on the successful cleanup path, preserve original request
+  errors, and report release failures through a `CleanupReport`. Used by
+  scheduler cancellation, deadline expiry, and execution-session error
+  paths (V01-E03-F03).
+- `BufferManager` v0.1.0 CPU buffer plane: capacity-bounded allocator with
+  monotonic ids, aligned heap-backed storage, validated configuration,
+  thread-safe allocate/release/data/view access, accounting snapshot
+  (in-use bytes, active count, high-water mark, allocation/release failure
+  counters), and derived `MemoryPressure` level. Storage is freed exactly
+  once; double-release and stale-handle release return typed
+  `Error::Code::Internal` (V01-E03-F01, V01-E03-F02).
+- `docs/architecture/buffer-plane.md` describing the buffer-plane
+  ownership model, copy/move semantics, cleanup-path contracts, and the
+  scope boundaries that V01-E03 deliberately respects (V01-E03-F02).
 - Top-level package skeleton for v0.1.0: `include/tensorplate/`, `runtime/`,
   `serving_worker/`, `agent/`, `cli/`, `observability/`, `protocol/schemas/`,
   `protocol/rust/`, `config/schemas/`, `test/`, `cmake/`, and
