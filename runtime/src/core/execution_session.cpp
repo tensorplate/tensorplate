@@ -211,6 +211,40 @@ Result<void> ExecutionSession::validate_request_for_infer(const InferRequest& re
   return Result<void>{};
 }
 
+// -- NVI event emission (V01-E04-F06). ----------------------------------------
+
+void ExecutionSession::emit_event(SessionEventKind kind,
+                                  const std::optional<std::string>& request_id,
+                                  std::optional<Error::Code> error_code,
+                                  SessionEvent::Duration duration) noexcept {
+  if (event_sink_ == nullptr) {
+    return;
+  }
+
+  SessionEvent ev;
+  ev.kind = kind;
+  // `backend_name()` is the only public virtual that adapters implement;
+  // copy into a std::string so the event record stays valid past
+  // adapter teardown.
+  ev.backend_name = std::string(this->backend_name());
+  if (model_.has_value()) {
+    ev.model_id = model_->model_id();
+  }
+  ev.request_id = request_id;
+  ev.error_code = error_code;
+  ev.duration = duration;
+  ev.state_after = state_;
+
+  // A misbehaving sink must never corrupt session state. The
+  // SessionEventSink::on_event contract is noexcept; catch defensively
+  // anyway so a sink that violates the contract cannot break the
+  // inference path.
+  try {
+    event_sink_->on_event(ev);
+  } catch (...) {  // NOLINT(bugprone-empty-catch): intentional, sink contract is noexcept.
+  }
+}
+
 Result<void> ExecutionSession::validate_outputs_for_infer(
     const std::vector<NamedOutput>& outputs) const {
   if (outputs.empty()) {
@@ -245,48 +279,66 @@ Result<void> ExecutionSession::validate_outputs_for_infer(
 }
 
 Result<void> ExecutionSession::load(const ModelSpec& spec) {
+  emit_event(SessionEventKind::LoadStart, std::nullopt, std::nullopt, SessionEvent::Duration{0});
+
   if (state_ != SessionState::Unloaded) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::load requires Unloaded state (current: " +
                                std::string(to_string(state_)) + ")");
     last_error_ = err;
+    emit_event(SessionEventKind::LoadFailed, std::nullopt, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
+  const auto start = Clock::now();
   auto result = do_load(spec);
+  const auto duration =
+      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+
   if (!result) {
     auto err = std::move(result).error();
     model_.reset();
     state_ = SessionState::Failed;
     last_error_ = err;
+    emit_event(SessionEventKind::LoadFailed, std::nullopt, err.code, duration);
     return unexpected(std::move(err));
   }
 
   model_ = spec;
   state_ = SessionState::Loaded;
   last_error_.reset();
+  emit_event(SessionEventKind::LoadEnd, std::nullopt, std::nullopt, duration);
   return Result<void>{};
 }
 
 Result<void> ExecutionSession::prime() {
+  emit_event(SessionEventKind::PrimeStart, std::nullopt, std::nullopt, SessionEvent::Duration{0});
+
   if (state_ != SessionState::Loaded) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::prime requires Loaded state (current: " +
                                std::string(to_string(state_)) + ")");
     last_error_ = err;
+    emit_event(SessionEventKind::PrimeFailed, std::nullopt, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
+  const auto start = Clock::now();
   auto result = do_prime();
+  const auto duration =
+      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+
   if (!result) {
     auto err = std::move(result).error();
     state_ = prime_failure_state(err.code);
     last_error_ = err;
+    emit_event(SessionEventKind::PrimeFailed, std::nullopt, err.code, duration);
     return unexpected(std::move(err));
   }
 
   state_ = SessionState::Ready;
   last_error_.reset();
+  emit_event(SessionEventKind::PrimeEnd, std::nullopt, std::nullopt, duration);
   return Result<void>{};
 }
 
@@ -294,11 +346,20 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   // F03 readiness + validation gates run before adapter dispatch.
   // F04 wraps the adapter call in monotonic timing and validates the
   // adapter-published outputs before returning success.
+  // F06 emits paired lifecycle events around every path.
+  std::optional<std::string> req_id;
+  if (!request.request_id().empty()) {
+    req_id = request.request_id();
+  }
+
+  emit_event(SessionEventKind::InferStart, req_id, std::nullopt, SessionEvent::Duration{0});
+
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer requires Ready state (current: " +
                                std::string(to_string(state_)) + ")");
     last_error_ = err;
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
@@ -306,6 +367,7 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   if (!validation) {
     auto err = std::move(validation).error();
     last_error_ = err;
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code, SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
@@ -318,6 +380,8 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   const auto end = Clock::now();
   const auto exec_latency =
       std::chrono::duration_cast<InferenceTiming::Duration>(end - start);
+  const auto event_duration =
+      std::chrono::duration_cast<SessionEvent::Duration>(end - start);
 
   InferenceTiming timing;
   timing.execution_latency = exec_latency;
@@ -325,6 +389,7 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   if (!adapter_result) {
     auto err = std::move(adapter_result).error();
     last_error_ = err;
+    emit_event(SessionEventKind::InferFailed, req_id, err.code, event_duration);
     return InferResult::create_failure(request.request_id(), std::move(err), timing);
   }
 
@@ -341,6 +406,7 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
     if (buffer_manager_ != nullptr) {
       (void)release_partial_outputs(*buffer_manager_, outputs);
     }
+    emit_event(SessionEventKind::InferFailed, req_id, err.code, event_duration);
     return InferResult::create_failure(request.request_id(), std::move(err), timing);
   }
 
@@ -348,22 +414,35 @@ Result<InferResult> ExecutionSession::infer(const InferRequest& request) {
   if (!result) {
     auto err = std::move(result).error();
     last_error_ = err;
+    emit_event(SessionEventKind::InferFailed, req_id, err.code, event_duration);
     return InferResult::create_failure(request.request_id(), std::move(err), timing);
   }
 
   last_error_.reset();
+  emit_event(SessionEventKind::InferEnd, req_id, std::nullopt, event_duration);
   return std::move(result).value();
 }
 
 Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& request) {
-  // F03 readiness + validation gates run before adapter dispatch. The
-  // unsupported event variant (distinct from generic failure) lands in
-  // F05; F06 adds event emission.
+  // F03 readiness + validation gates run before adapter dispatch. F05
+  // differentiates the typed Unsupported event variant from generic
+  // adapter failure; F06 emits paired lifecycle events around every
+  // path.
+  std::optional<std::string> req_id;
+  if (!request.request_id().empty()) {
+    req_id = request.request_id();
+  }
+
+  emit_event(SessionEventKind::InferAsyncStart, req_id, std::nullopt,
+             SessionEvent::Duration{0});
+
   if (state_ != SessionState::Ready) {
     auto err = Error::make(Error::Code::NotReady,
                            "ExecutionSession::infer_async requires Ready state (current: " +
                                std::string(to_string(state_)) + ")");
     last_error_ = err;
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code,
+               SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
@@ -371,39 +450,64 @@ Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& reque
   if (!validation) {
     auto err = std::move(validation).error();
     last_error_ = err;
+    emit_event(SessionEventKind::ValidationFailed, req_id, err.code,
+               SessionEvent::Duration{0});
     return unexpected(std::move(err));
   }
 
+  const auto start = Clock::now();
   auto adapter_result = do_infer_async(request);
+  const auto duration =
+      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+
   if (!adapter_result) {
     auto err = std::move(adapter_result).error();
     last_error_ = err;
+    // The Unsupported variant is reported as a distinct event so
+    // observability can count it separately from genuine adapter
+    // failure (OOMError, Internal, InferenceFailed, ...).
+    if (err.code == Error::Code::Unsupported) {
+      emit_event(SessionEventKind::UnsupportedAsync, req_id, err.code, duration);
+    } else {
+      emit_event(SessionEventKind::InferAsyncFailed, req_id, err.code, duration);
+    }
     return unexpected(std::move(err));
   }
 
   last_error_.reset();
+  emit_event(SessionEventKind::InferAsyncEnd, req_id, std::nullopt, duration);
   return adapter_result;
 }
 
 Result<void> ExecutionSession::unload() {
+  emit_event(SessionEventKind::UnloadStart, std::nullopt, std::nullopt, SessionEvent::Duration{0});
+
   // Unload from Unloaded is a no-op success so cleanup paths that
   // call unload defensively don't need to query state first.
   if (state_ == SessionState::Unloaded) {
     last_error_.reset();
+    emit_event(SessionEventKind::UnloadEnd, std::nullopt, std::nullopt,
+               SessionEvent::Duration{0});
     return Result<void>{};
   }
 
+  const auto start = Clock::now();
   auto result = do_unload();
+  const auto duration =
+      std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+
   if (!result) {
     auto err = std::move(result).error();
     state_ = SessionState::Failed;
     last_error_ = err;
+    emit_event(SessionEventKind::UnloadFailed, std::nullopt, err.code, duration);
     return unexpected(std::move(err));
   }
 
   state_ = SessionState::Unloaded;
   model_.reset();
   last_error_.reset();
+  emit_event(SessionEventKind::UnloadEnd, std::nullopt, std::nullopt, duration);
   return Result<void>{};
 }
 

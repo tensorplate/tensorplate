@@ -142,13 +142,15 @@ struct SessionEvent {
 
 /// Sink for `SessionEvent` records. Implementations must be safe to call
 /// from the NVI wrapper hot path: emission must be non-blocking and must
-/// not allocate unbounded memory. Implementations are also called from
-/// `noexcept` paths; throwing exceptions out of `on_event` is a
-/// programmer error and will be caught by the wrapper.
+/// not allocate unbounded memory. The NVI wrapper invokes `on_event`
+/// inside a defensive `try { ... } catch (...) {}`; a sink that throws
+/// will not corrupt session state, but it will still be observably
+/// slower than a well-behaved sink. Prefer noexcept implementations in
+/// production.
 class SessionEventSink {
  public:
   virtual ~SessionEventSink() = default;
-  virtual void on_event(const SessionEvent& event) noexcept = 0;
+  virtual void on_event(const SessionEvent& event) = 0;
 };
 
 /// Canonical public execution-session lifecycle interface.
@@ -326,6 +328,14 @@ class ExecutionSession {
   /// that do not fit inside their owning buffers (V01-E04-F04).
   [[nodiscard]] Result<void> validate_outputs_for_infer(
       const std::vector<NamedOutput>& outputs) const;
+
+  /// Emit a `SessionEvent` through the registered sink. Fire-and-forget:
+  /// a missing sink is a no-op, and any exception thrown by a
+  /// misbehaving sink is swallowed so it cannot corrupt session state
+  /// (V01-E04-F06).
+  void emit_event(SessionEventKind kind, const std::optional<std::string>& request_id,
+                  std::optional<Error::Code> error_code,
+                  SessionEvent::Duration duration) noexcept;
 
   SessionState state_ = SessionState::Unloaded;
   std::optional<ModelSpec> model_;

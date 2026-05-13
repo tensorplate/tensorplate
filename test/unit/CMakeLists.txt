@@ -19,6 +19,7 @@ add_executable(tp_test_unit
   execution_session_validation_test.cpp
   execution_session_infer_test.cpp
   execution_session_async_test.cpp
+  execution_session_events_test.cpp
 )
 
 target_include_directories(tp_test_unit

@@ -79,6 +79,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   to return an `AsyncInferHandle` whose `async_id` is session-scoped
   and monotonically increasing through the `next_async_id()` helper
   (V01-E04-F05).
+- Lifecycle and inference event emission from every public NVI wrapper.
+  `load`, `prime`, `infer`, `infer_async`, and `unload` emit paired
+  `*_start` / `*_end` events on success and `*_failed` (or
+  `validation_failed` for pre-dispatch rejection, `unsupported_async`
+  for the typed Unsupported async path) on failure. Each event carries
+  bounded fields (`backend_name`, optional `model_id`, optional
+  `request_id`, optional `Error::Code`, monotonic `duration`, and
+  `state_after`) and no raw payload bytes. Emission is wrapped in a
+  defensive `try { ... } catch (...) {}` so a throwing sink cannot
+  corrupt session state; the wrapper continues the lifecycle path
+  unchanged. Tests use the new `tensorplate::testing::RecordingEventSink`
+  and `tensorplate::testing::ThrowingEventSink` shared mocks
+  (V01-E04-F06).
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
