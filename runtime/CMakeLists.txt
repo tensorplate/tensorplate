@@ -10,6 +10,7 @@ add_library(tp_runtime STATIC
   src/core/model_spec.cpp
   src/core/infer_request.cpp
   src/core/infer_result.cpp
+  src/core/execution_session.cpp
   src/buffer/buffer_ref.cpp
   src/buffer/tensor_view.cpp
   src/buffer/buffer_manager.cpp

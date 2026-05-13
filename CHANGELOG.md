@@ -8,6 +8,115 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `include/tensorplate/core/execution_session.hpp` defining the canonical
+  public `tensorplate::ExecutionSession` lifecycle interface. The public
+  method set is `load`, `prime`, `infer`, `infer_async`, `unload`,
+  `is_ready`, and `backend_name`; lifecycle methods are non-virtual NVI
+  wrappers and adapters override protected `do_*` implementation methods.
+  No vendor SDK type appears in the header (V01-E04-F01-T02).
+- `docs/architecture/execution-session.md` documenting the canonical
+  `ExecutionSession` name decision (selected over the alternate
+  `ModelLoader` spelling carried in the older implementation guidelines),
+  the NVI pattern, the lifecycle state machine, the async method shape,
+  the event taxonomy, and the non-GPU compatibility review notes
+  (V01-E04-F01-T01).
+- `tensorplate::SessionState` enum (`unloaded`, `loaded`, `ready`,
+  `failed`) with `to_string` / `session_state_from_string` helpers, and
+  `tensorplate::AsyncInferHandle` carrying `request_id` plus a
+  session-scoped monotonically increasing `async_id`.
+- `tensorplate::SessionEventKind` enum and `tensorplate::SessionEvent`
+  record with `to_string` / `session_event_kind_from_string` helpers,
+  plus the `tensorplate::SessionEventSink` interface used by the NVI
+  wrapper to emit lifecycle and inference events.
+- Session lifecycle state machine wiring the V01-E04-F01 public methods
+  through the protected `do_*` adapter override points: `load`
+  transitions `unloaded -> loaded` (or `unloaded -> failed`), `prime`
+  transitions `loaded -> ready` (or `loaded -> loaded` on
+  `ConfigInvalid`, otherwise `loaded -> failed`), `unload` returns any
+  state to `unloaded` (or transitions to `failed` on adapter failure),
+  and `infer` / `infer_async` surface `Error::Code::NotReady` before
+  any adapter dispatch unless the session is `Ready`. The state
+  machine is adapter-neutral and intentionally general enough for
+  TensorRT engine setup, LibTorch model load, Python sidecar startup,
+  and a future Vitis AI `.xmodel` / DPU lifecycle (V01-E04-F02).
+- Shared mock `tensorplate::testing::MockSession` under `test/mocks/`
+  that drops into `ExecutionSession*` and lets tests program adapter
+  success/failure and inspect adapter dispatch counts and last-seen
+  request/spec. Used by the V01-E04 lifecycle, validation, timing,
+  async, event-emission, and conformance test suites.
+- NVI readiness and validation gates in `ExecutionSession::infer` and
+  `ExecutionSession::infer_async`: requests are rejected before any
+  adapter dispatch when the session is not `Ready` (`NotReady`), when
+  `request_id` / `endpoint` / `inputs` are empty (`ConfigInvalid`), on
+  empty or duplicate input names (`ConfigInvalid`), on released or
+  missing input buffers (`ConfigInvalid`), on tensor byte windows that
+  do not fit inside their owning buffers (`ShapeMismatch`), and on
+  already-expired monotonic deadlines (`Timeout`). The gates apply
+  uniformly to sync and async paths so adapter `do_infer` /
+  `do_infer_async` implementations cannot bypass them (V01-E04-F03).
+- Monotonic latency stamping in `ExecutionSession::infer`: the wrapper
+  measures `execution_latency` around the adapter `do_infer` call using
+  `std::chrono::steady_clock` (no wall-clock dependency) and stamps it
+  into the returned `InferResult` on both success and adapter-failure
+  paths. Readiness and validation failures bypass the adapter entirely
+  and surface as `Result::error` rather than a failure `InferResult`
+  (V01-E04-F04-T01).
+- Output validation in `ExecutionSession::infer`: empty outputs vectors,
+  empty or duplicate output names, released output buffers, and tensor
+  byte windows that overflow their buffers are all rejected before
+  success is returned. When a `BufferManager` is supplied through
+  adapter construction hooks, partial adapter-published outputs are
+  released via `release_partial_outputs` so a failed `infer` does not
+  leak buffer capacity (V01-E04-F04-T02).
+- `ExecutionSession::infer_async` typed unsupported path: the default
+  wrapper path returns `Error::Code::Unsupported` so v0.1.0 adapters
+  without native async satisfy the public method shape without
+  pretending to be async. Readiness (`NotReady`) and request validation
+  errors (`ConfigInvalid`, `ShapeMismatch`, `Timeout`) are surfaced
+  **before** the unsupported capability is considered, and the
+  unsupported path allocates no output buffers and never dispatches to
+  adapter execution. Native-async adapters opt in through the protected
+  capability hook and override `do_infer_async` to return an
+  `AsyncInferHandle` whose `async_id` is session-scoped and
+  monotonically increasing through the `next_async_id()` helper
+  (V01-E04-F05).
+- Shared V01-E04 ExecutionSession conformance suite at
+  `test/contract/execution_session_conformance.hpp`. A
+  `tensorplate::testing::SessionFactory` closure plus a
+  `ConformanceConfig` drives any `ExecutionSession*` adapter through
+  backend-name identity, initial not-ready state, the load -> prime ->
+  infer -> unload happy path, infer-before-prime, prime-before-load,
+  bad model path, shape mismatch, infer_async (typed Unsupported or
+  handle), unload-then-infer, and `BufferRef` lifetime invariants. Real backend
+  adapters (TensorRT, LibTorch, Python/PyTorch sidecar, future Vitis
+  AI) reuse the same suite without rewriting it. A T1 mock-conformance
+  test in `test/unit/execution_session_conformance_test.cpp` runs the
+  suite through `MockSession` so the suite is self-testing
+  (V01-E04-F07-T01).
+- `docs/architecture/non-gpu-lifecycle-review.md` recording the
+  V01-E04-F07-T02 non-GPU lifecycle compatibility review and sign-off.
+  The review walks `ExecutionSession`, `ModelSpec`, `BufferRef`,
+  `TensorView`, and the event taxonomy against a future Kria/Vitis AI
+  adapter (`.xmodel` discovery, DPU runner instantiation, fixed-shape
+  binding, INT8 calibration metadata, adapter-owned memory copies) and
+  confirms the V01-E04 interface is implementable without public
+  interface revision before V01-E05 adapter work begins. A compile-time
+  macro guard in the T1 interface test mechanically enforces that no
+  CUDA / TensorRT / LibTorch / Vitis AI / XRT / DPU SDK type leaks into
+  the public ExecutionSession header (V01-E04-F07-T02).
+- Lifecycle and inference event emission from every public NVI wrapper.
+  `load`, `prime`, `infer`, `infer_async`, and `unload` emit paired
+  `*_start` / `*_end` events on success and `*_failed` (or
+  `validation_failed` for pre-dispatch rejection, `unsupported_async`
+  for the typed Unsupported async path) on failure. Each event carries
+  bounded fields (`backend_name`, optional `model_id`, optional
+  `request_id`, optional `Error::Code`, monotonic `duration`, and
+  `state_after`) and no raw payload bytes. Emission is wrapped in a
+  defensive `try { ... } catch (...) {}` so a throwing sink cannot
+  corrupt session state; the wrapper continues the lifecycle path
+  unchanged. Tests use the new `tensorplate::testing::RecordingEventSink`
+  and `tensorplate::testing::ThrowingEventSink` shared mocks
+  (V01-E04-F06).
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
