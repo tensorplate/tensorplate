@@ -21,6 +21,11 @@ set(_tp_runtime_sources
   src/backend/capability.cpp
   src/backend/registry.cpp
   src/backend/builtin.cpp
+  # V01-E05-F04: Unix-socket framing helpers. Always built so the
+  # codec and socket helpers can be unit-tested in T1 even when no
+  # adapter consumes them yet.
+  src/ipc/sidecar_codec.cpp
+  src/ipc/unix_socket.cpp
 )
 
 if(TP_ENABLE_TENSORRT)

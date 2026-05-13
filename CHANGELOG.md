@@ -8,6 +8,53 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Python/PyTorch sidecar IPC contract and Python backend runner
+  (V01-E05-F04). The on-wire envelope is documented in
+  `include/tensorplate/ipc/sidecar_codec.hpp`:
+  `[u32 magic 'TPSC'][u32 wire_version][u32 header_len][u32 payload_len]
+   [JSON header][raw tensor payload]`, all u32 fields big-endian, with
+  generous-but-bounded maxima (1 MiB header, 256 MiB payload). The
+  schema for the JSON header lives in
+  `protocol/schemas/python_pytorch_ipc.json` and covers the seven
+  request kinds (`load_model`, `prime`, `infer`, `infer_async`,
+  `cancel`, `unload`, `health_check`) plus matching `*_response`
+  kinds and the unsolicited `ready_event` / `error_event` /
+  `metric_event` events.
+- C++ codec helpers (`encode_frame`, `decode_frame`, `decode_frames`)
+  that distinguish typed `Error::Code::NotReady` ("need more bytes")
+  from `Error::Code::ConfigInvalid` ("malformed frame") so adapters can
+  loop on streaming reads safely. Implemented in
+  `runtime/src/ipc/sidecar_codec.cpp`; covered by
+  `test/unit/sidecar_codec_test.cpp` for round-trips, partial-prefix
+  / partial-body, bad magic, bad wire version, oversized header /
+  payload, and multi-frame pipelines stopping at a partial frame.
+- `include/tensorplate/ipc/unix_socket.hpp` plus
+  `runtime/src/ipc/unix_socket.cpp`: minimal RAII `UnixSocket` wrapper
+  around POSIX stream sockets with monotonic-deadline-aware
+  `connect`, `bind_and_listen`, `accept`, `read_exact`, and
+  `write_all`. Returns `Error::Code::Timeout` on deadline exhaustion
+  and `Error::Code::ConfigInvalid` for paths exceeding `sun_path`.
+  Covered by `test/integration/sidecar_socket_e2e_test.cpp` which
+  forks a child and round-trips one frame end-to-end.
+- Python backend runner under
+  `backends/python_pytorch/src/tensorplate_pytorch_backend/`:
+  `codec.py` mirrors the C++ wire format; `protocol.py` enumerates
+  the schema constants; `backends/` ships the dependency-free
+  `FixtureBackend` (echoes inputs as `echo_<name>` outputs) plus the
+  `Backend` Protocol that the V01-E05-F05 TorchScript / SmolVLA
+  backend will implement; `runner.py` runs a synchronous
+  request/response loop with typed `BackendError` mapping to
+  `*_response status: error` frames, and is wired as the
+  `tensorplate-backend-python-pytorch` console script in
+  `pyproject.toml`. Twenty-one pytest tests under
+  `backends/python_pytorch/tests/` cover the codec round-trips, the
+  lifecycle happy path through the fixture backend, infer-before-load
+  (`not_ready`), unknown / bad-version (`unsupported`),
+  cancel-then-infer (`timeout`), health-check, async-infer
+  identification, and payload-window overflow (`shape_mismatch`).
+- `nlohmann-json` added to `vcpkg.json` (header-only) so the V01-E05-F05
+  C++ adapter can parse the JSON sidecar header without re-implementing
+  a JSON decoder.
 - LibTorch native execution backend adapter shell under
   `runtime/src/adapters/libtorch/` (registered as `libtorch`). Loads
   TorchScript (`torch::jit::load`) modules and is positioned as a

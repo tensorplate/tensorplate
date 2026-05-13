@@ -6,6 +6,7 @@
 
 add_executable(tp_test_integration
   buffer_plane_e2e_test.cpp
+  sidecar_socket_e2e_test.cpp
 )
 
 target_include_directories(tp_test_integration
