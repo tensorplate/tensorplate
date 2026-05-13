@@ -8,6 +8,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `include/tensorplate/core/execution_session.hpp` defining the canonical
+  public `tensorplate::ExecutionSession` lifecycle interface. The public
+  method set is `load`, `prime`, `infer`, `infer_async`, `unload`,
+  `is_ready`, and `backend_name`; lifecycle methods are non-virtual NVI
+  wrappers and adapters override protected `do_*` implementation methods.
+  No vendor SDK type appears in the header (V01-E04-F01-T02).
+- `docs/architecture/execution-session.md` documenting the canonical
+  `ExecutionSession` name decision (selected over the alternate
+  `ModelLoader` spelling carried in the older implementation guidelines),
+  the NVI pattern, the lifecycle state machine, the async method shape,
+  the event taxonomy, and the non-GPU compatibility review notes
+  (V01-E04-F01-T01).
+- `tensorplate::SessionState` enum (`unloaded`, `loaded`, `ready`,
+  `failed`) with `to_string` / `session_state_from_string` helpers, and
+  `tensorplate::AsyncInferHandle` carrying `request_id` plus a
+  session-scoped monotonically increasing `async_id`.
+- `tensorplate::SessionEventKind` enum and `tensorplate::SessionEvent`
+  record with `to_string` / `session_event_kind_from_string` helpers,
+  plus the `tensorplate::SessionEventSink` interface used by the NVI
+  wrapper to emit lifecycle and inference events.
 - Developer-facing C++ example `tensorplate-example-buffer-plane` under
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →

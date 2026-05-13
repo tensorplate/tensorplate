@@ -1,0 +1,329 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// V01-E04-F01-T02: Public ExecutionSession lifecycle interface.
+//
+// `tensorplate::ExecutionSession` is the backend-neutral execution
+// contract that every adapter (TensorRT, LibTorch, Python/PyTorch
+// sidecar, and a future Vitis AI adapter) implements and that higher
+// runtime layers call.
+//
+// The public lifecycle methods are **non-virtual** wrappers (NVI). They
+// enforce readiness, validation, monotonic latency stamping, and event
+// emission, then delegate to **protected** `do_*` implementation methods
+// that adapters override. Callers cannot bypass the NVI guarantees.
+//
+// Public method set (exact, see docs/architecture/execution-session.md
+// for the canonical-name decision):
+//
+//   load          - load the model artifact described by ModelSpec
+//   prime         - adapter readiness / fixed-shape binding / warmup
+//   infer         - synchronous inference, returns InferResult
+//   infer_async   - method shape always present; may return Unsupported
+//   unload        - release session-owned state
+//   is_ready      - observer
+//   backend_name  - observer
+//
+// No vendor SDK type appears in this header.
+
+#pragma once
+
+#include <chrono>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/infer_request.hpp"
+#include "tensorplate/core/infer_result.hpp"
+#include "tensorplate/core/model_spec.hpp"
+#include "tensorplate/core/result.hpp"
+
+namespace tensorplate {
+
+class BufferManager;
+
+/// Session lifecycle state. Stable, lowercase, snake_case wire names; see
+/// `to_string(SessionState)` and the table in
+/// `docs/architecture/execution-session.md`.
+enum class SessionState : std::uint8_t {
+  /// Initial state. No model loaded.
+  Unloaded = 0,
+  /// `load` succeeded. `prime` has not yet been called.
+  Loaded = 1,
+  /// `prime` succeeded. `infer` is permitted.
+  Ready = 2,
+  /// Last lifecycle call failed. Recover with `unload`.
+  Failed = 3,
+};
+
+[[nodiscard]] std::string_view to_string(SessionState state) noexcept;
+[[nodiscard]] std::optional<SessionState> session_state_from_string(
+    std::string_view name) noexcept;
+
+/// Async-inference handle returned by `infer_async`.
+///
+/// The handle carries the originating `request_id` plus a session-scoped
+/// monotonically increasing `async_id` so the scheduler (V01-E06) and
+/// LeRobot-compatible serving (V01-E07) can correlate cancellation and
+/// completion observation without changing the public interface. It does
+/// not assume threads, CUDA streams, Python futures, or backend-specific
+/// handles. v0.1.0 adapters that do not implement native async return
+/// `Error::Code::Unsupported` instead of a handle.
+struct AsyncInferHandle {
+  /// Mirror of the originating `InferRequest::request_id`.
+  std::string request_id;
+
+  /// Session-scoped identifier. Monotonically increasing; never zero.
+  std::uint64_t async_id = 0;
+
+  friend bool operator==(const AsyncInferHandle& lhs, const AsyncInferHandle& rhs) noexcept {
+    return lhs.request_id == rhs.request_id && lhs.async_id == rhs.async_id;
+  }
+  friend bool operator!=(const AsyncInferHandle& lhs, const AsyncInferHandle& rhs) noexcept {
+    return !(lhs == rhs);
+  }
+};
+
+/// Kind tag for `SessionEvent`. Stable lowercase snake_case wire names; see
+/// `to_string(SessionEventKind)`.
+enum class SessionEventKind : std::uint8_t {
+  LoadStart = 0,
+  LoadEnd = 1,
+  LoadFailed = 2,
+  PrimeStart = 3,
+  PrimeEnd = 4,
+  PrimeFailed = 5,
+  InferStart = 6,
+  InferEnd = 7,
+  InferFailed = 8,
+  InferAsyncStart = 9,
+  InferAsyncEnd = 10,
+  InferAsyncFailed = 11,
+  UnloadStart = 12,
+  UnloadEnd = 13,
+  UnloadFailed = 14,
+  /// Emitted when the NVI wrapper rejects a request before adapter
+  /// dispatch (released buffer, out-of-bounds tensor window, etc).
+  ValidationFailed = 15,
+  /// Emitted on the default `do_infer_async` path for adapters without
+  /// native async support.
+  UnsupportedAsync = 16,
+};
+
+[[nodiscard]] std::string_view to_string(SessionEventKind kind) noexcept;
+[[nodiscard]] std::optional<SessionEventKind> session_event_kind_from_string(
+    std::string_view name) noexcept;
+
+/// In-process session event record. Bounded fields; no raw payload bytes.
+///
+/// Field semantics:
+///   - `kind`           : event kind tag.
+///   - `backend_name`   : stable adapter label echoed from `backend_name()`.
+///   - `model_id`       : ModelSpec model_id if a model is loaded.
+///   - `request_id`     : populated on infer/async events.
+///   - `error_code`     : populated on `*_Failed`, `ValidationFailed`, and
+///                        `UnsupportedAsync` events.
+///   - `duration`       : monotonic duration of the wrapped operation.
+///                        Zero on `*_Start` events.
+///   - `state_after`    : session state after the event is recorded.
+struct SessionEvent {
+  using Duration = std::chrono::nanoseconds;
+
+  SessionEventKind kind = SessionEventKind::ValidationFailed;
+  std::string backend_name;
+  std::optional<std::string> model_id;
+  std::optional<std::string> request_id;
+  std::optional<Error::Code> error_code;
+  Duration duration{0};
+  SessionState state_after = SessionState::Unloaded;
+};
+
+/// Sink for `SessionEvent` records. Implementations must be safe to call
+/// from the NVI wrapper hot path: emission must be non-blocking and must
+/// not allocate unbounded memory. Implementations are also called from
+/// `noexcept` paths; throwing exceptions out of `on_event` is a
+/// programmer error and will be caught by the wrapper.
+class SessionEventSink {
+ public:
+  virtual ~SessionEventSink() = default;
+  virtual void on_event(const SessionEvent& event) noexcept = 0;
+};
+
+/// Canonical public execution-session lifecycle interface.
+///
+/// **Non-virtual interface (NVI).** Public lifecycle methods are
+/// non-virtual; adapters override the protected `do_*` methods. Public
+/// methods enforce readiness, validation, monotonic timing, and event
+/// emission before delegating to adapter code.
+///
+/// **Threading.** Public lifecycle methods are *not* safe to call
+/// concurrently on the same session. Concurrency is supplied by the
+/// scheduler (V01-E06), which serializes lifecycle calls per session.
+/// Const observers (`state`, `is_ready`, `backend_name`) are safe to
+/// call from any thread without external locking.
+///
+/// **Ownership.** `ExecutionSession` does not own a `BufferManager`. The
+/// host wires one in through `set_buffer_manager()` before the first
+/// `infer` call so the NVI wrapper can validate input/output buffer
+/// windows. Without a manager, the NVI wrapper performs only the
+/// metadata-level validation that does not require a buffer table.
+///
+/// **Vendor neutrality.** This header pulls in no CUDA, TensorRT,
+/// PyTorch/LibTorch, ONNX Runtime, Vitis AI, XRT, or DPU types.
+class ExecutionSession {
+ public:
+  using Clock = std::chrono::steady_clock;
+
+  ExecutionSession() noexcept = default;
+  virtual ~ExecutionSession() = default;
+
+  ExecutionSession(const ExecutionSession&) = delete;
+  ExecutionSession& operator=(const ExecutionSession&) = delete;
+  ExecutionSession(ExecutionSession&&) = delete;
+  ExecutionSession& operator=(ExecutionSession&&) = delete;
+
+  // -- Public lifecycle methods (non-virtual). -------------------------------
+
+  /// Load the model artifact described by `spec`. Permitted only from
+  /// `Unloaded`. On success, transitions to `Loaded`. On failure,
+  /// transitions to `Failed` and the previous model is dropped.
+  ///
+  /// Errors:
+  ///   - `NotReady`: session is not in `Unloaded` state.
+  ///   - any typed error returned by the adapter `do_load`.
+  Result<void> load(const ModelSpec& spec);
+
+  /// Prime the session for inference. Permitted only from `Loaded`. On
+  /// success, transitions to `Ready`. On failure, the state machine
+  /// stays in `Loaded` if the adapter reports a recoverable error
+  /// (`ConfigInvalid`); otherwise it transitions to `Failed`.
+  ///
+  /// Errors:
+  ///   - `NotReady`: session is not in `Loaded` state.
+  ///   - any typed error returned by the adapter `do_prime`.
+  Result<void> prime();
+
+  /// Run synchronous inference. Permitted only from `Ready`. Returns an
+  /// `InferResult` (success or failure) with `execution_latency` stamped
+  /// using `std::chrono::steady_clock`. The session state is not changed
+  /// by infer failures; the typed error is returned in the result.
+  ///
+  /// Returns a fallible `Result<InferResult>` for callers that observe
+  /// readiness/validation errors distinctly from adapter failures:
+  ///   - `Result::error` carries readiness or validation errors that
+  ///     never reached the adapter (e.g. `NotReady`,
+  ///     `ConfigInvalid`, `ShapeMismatch` from the NVI wrapper).
+  ///   - `Result::value()` is an `InferResult` whose own `error()` field
+  ///     carries an adapter-side `InferenceFailed` / `OOMError` /
+  ///     `Timeout` / `Internal` typed code with timing populated.
+  ///
+  /// In all cases, `execution_latency` is recorded around the call to
+  /// `do_infer` and event emission is paired.
+  Result<InferResult> infer(const InferRequest& request);
+
+  /// Schedule asynchronous inference. The method shape is always
+  /// present from v0.1.0. Adapters that do not implement native async
+  /// return `Error::Code::Unsupported` and the NVI wrapper does not
+  /// allocate output buffers or dispatch to adapter execution. Readiness
+  /// and validation errors are surfaced *before* the unsupported check.
+  Result<AsyncInferHandle> infer_async(const InferRequest& request);
+
+  /// Release session-owned state and return the session to `Unloaded`.
+  /// Permitted from `Loaded`, `Ready`, or `Failed`. `unload` on
+  /// `Unloaded` is a no-op success.
+  ///
+  /// On failure, transitions to `Failed` and surfaces the typed error.
+  Result<void> unload();
+
+  // -- Observers. ------------------------------------------------------------
+
+  /// True iff the session can serve `infer` immediately (state `Ready`).
+  [[nodiscard]] bool is_ready() const noexcept { return state_ == SessionState::Ready; }
+
+  /// Current lifecycle state. Safe to call from any state.
+  [[nodiscard]] SessionState state() const noexcept { return state_; }
+
+  /// Stable adapter label. Adapter-defined; low cardinality (e.g.
+  /// "mock", "tensorrt", "libtorch", "python_pytorch"). Implemented by
+  /// the adapter so the NVI wrapper can echo it on every event.
+  [[nodiscard]] virtual std::string_view backend_name() const noexcept = 0;
+
+  /// Last successfully loaded `ModelSpec`. Cleared by `unload` and by
+  /// `load` failures.
+  [[nodiscard]] const std::optional<ModelSpec>& loaded_model() const noexcept { return model_; }
+
+  /// Most recent typed `Error` recorded by any failing lifecycle call.
+  /// Cleared by a subsequent successful lifecycle call and by `unload`.
+  [[nodiscard]] const std::optional<Error>& last_error() const noexcept { return last_error_; }
+
+  // -- Host wiring. ----------------------------------------------------------
+
+  /// Register an event sink. nullptr disables emission. Must be wired
+  /// before lifecycle work begins; setting a new sink mid-session is
+  /// permitted but races with concurrent emission and is not recommended.
+  void set_event_sink(SessionEventSink* sink) noexcept { event_sink_ = sink; }
+
+  /// Register the buffer manager used to validate input/output buffer
+  /// windows during `infer`. nullptr disables the buffer-table check
+  /// (the NVI wrapper still validates BufferRef ownership state and the
+  /// TensorView byte window against `BufferRef::size_bytes()`).
+  void set_buffer_manager(BufferManager* manager) noexcept { buffer_manager_ = manager; }
+
+  [[nodiscard]] SessionEventSink* event_sink() const noexcept { return event_sink_; }
+  [[nodiscard]] BufferManager* buffer_manager() const noexcept { return buffer_manager_; }
+
+ protected:
+  // -- Adapter override points (protected, virtual). -------------------------
+
+  /// Called by `load` after readiness checks. The wrapper passes the
+  /// validated spec; adapters may safely take a copy.
+  ///
+  /// Adapters must return typed errors for backend-specific failures
+  /// (`LoadFailed`, `ConfigInvalid`, `Unsupported`, `OOMError`). They
+  /// must not throw exceptions; the wrapper does not unwind exceptions.
+  virtual Result<void> do_load(const ModelSpec& spec) = 0;
+
+  /// Called by `prime` after readiness checks. Default is success no-op
+  /// so adapters that have no separate priming step can skip it.
+  virtual Result<void> do_prime();
+
+  /// Called by `infer` after readiness + validation. Adapters publish a
+  /// vector of `NamedOutput` value objects; the wrapper validates each
+  /// output buffer + tensor view, stamps timing, and wraps it in an
+  /// `InferResult`. Adapters that fail return a typed error; the wrapper
+  /// converts that to a failure `InferResult` with timing.
+  virtual Result<std::vector<NamedOutput>> do_infer(const InferRequest& request) = 0;
+
+  /// Called by `infer_async` after readiness + validation. Default
+  /// returns `Error::Code::Unsupported`; the wrapper emits the
+  /// `UnsupportedAsync` event.
+  virtual Result<AsyncInferHandle> do_infer_async(const InferRequest& request);
+
+  /// Called by `unload`. Default is success no-op so adapters that have
+  /// no teardown can skip it.
+  virtual Result<void> do_unload();
+
+  // -- Adapter helpers. ------------------------------------------------------
+
+  /// Adapters call this to claim the next session-scoped async id. Used
+  /// only by adapters that implement native async; the default
+  /// `do_infer_async` (Unsupported) does not call this.
+  [[nodiscard]] std::uint64_t next_async_id() noexcept { return next_async_id_++; }
+
+ private:
+  // The NVI helpers (`emit_event`, request/output validation) are
+  // defined alongside the lifecycle wrapper that uses them (V01-E04-F02
+  // and later). The data members below are part of the NVI contract
+  // from V01-E04-F01 onward so that adapters can reason about session
+  // state through the public observers.
+  SessionState state_ = SessionState::Unloaded;
+  std::optional<ModelSpec> model_;
+  std::optional<Error> last_error_;
+  SessionEventSink* event_sink_ = nullptr;
+  BufferManager* buffer_manager_ = nullptr;
+  std::uint64_t next_async_id_ = 1;
+};
+
+}  // namespace tensorplate

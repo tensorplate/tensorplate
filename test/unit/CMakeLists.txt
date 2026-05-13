@@ -14,6 +14,7 @@ add_executable(tp_test_unit
   buffer_pressure_test.cpp
   infer_request_test.cpp
   infer_result_test.cpp
+  execution_session_interface_test.cpp
 )
 
 target_include_directories(tp_test_unit
