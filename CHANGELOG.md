@@ -8,6 +8,50 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Python/PyTorch sidecar execution-backend adapter and supervisor
+  (V01-E05-F05) under `runtime/src/adapters/python_pytorch/`,
+  registered as `python_pytorch`. The adapter forks one Python sidecar
+  subprocess per execution session (the V01-E05 closed decision), binds
+  a Unix-domain socket under `TMPDIR`, accepts the child's connection,
+  reads its `ready_event`, and translates `ExecutionSession::load /
+  prime / infer / infer_async / unload` into the sidecar IPC schema
+  (V01-E05-F04). Capability record declares
+  `python_pytorch` async-capable (the only adapter that does in v0.1.0)
+  and dynamic-shape; generation, streaming, and KV-cache remain false.
+- `SidecarProcess` (in `runtime/src/adapters/python_pytorch/`) owns the
+  subprocess + socket pair, terminates the child with SIGTERM (or
+  SIGKILL after a 500 ms grace period) on unload / error, and unlinks
+  the socket path. `SidecarLauncher` is injectable so tests can run the
+  Python runner via a non-default interpreter without touching the
+  adapter code; the default launcher does `fork()` +
+  `execvp(python3, "-m", "tensorplate_pytorch_backend", "--socket",
+  path)`.
+- Input/output tensor marshaling: inputs are read out of `BufferManager`
+  via `manager->view(buffer, tensor_view)`, packed into the sidecar
+  payload region, and described in the JSON header's `tensors[]` array.
+  Outputs are sliced back out of the response payload by
+  `payload_offset / payload_length`, written into freshly allocated
+  output `BufferRef`s, and surfaced through `NamedOutput`. The adapter
+  refuses to construct a session without a `BufferManager` hook
+  (`Error::Code::ConfigInvalid`).
+- Timeout, cancellation, and health handling: per-operation deadlines
+  use `std::chrono::steady_clock` clamped against `InferRequest`'s
+  monotonic deadline; sidecar timeouts surface as
+  `Error::Code::Timeout`; malformed response frames map to
+  `Error::Code::InferenceFailed`. The adapter terminates the sidecar on
+  shutdown so the OS does not retain a zombie.
+- `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` is flipped on by default in
+  `runtime/CMakeLists.txt`. When the flag is on the runtime links
+  `nlohmann_json::nlohmann_json` (header-only) for JSON header
+  encode/decode.
+- T2 integration test in
+  `test/integration/python_pytorch_adapter_test.cpp` exercises the full
+  C++ ↔ Python lifecycle through the `FixtureBackend`: registration,
+  capability publication, end-to-end echo (load → prime → infer →
+  unload through real Unix-socket IPC), and infer-before-prime
+  returning `NotReady`. The test skips when `python3 -c "import
+  tensorplate_pytorch_backend"` fails so host CI without the editable
+  install passes cleanly.
 - Python/PyTorch sidecar IPC contract and Python backend runner
   (V01-E05-F04). The on-wire envelope is documented in
   `include/tensorplate/ipc/sidecar_codec.hpp`:

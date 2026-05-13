@@ -40,6 +40,13 @@ if(TP_ENABLE_LIBTORCH)
   )
 endif()
 
+if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
+  list(APPEND _tp_runtime_sources
+    src/adapters/python_pytorch/sidecar_process.cpp
+    src/adapters/python_pytorch/python_pytorch_session.cpp
+  )
+endif()
+
 # V01-E05 adapter feature flags. Off by default so host CI builds clean
 # without proprietary SDKs. When ON, the adapter source file registers
 # its factory through `tensorplate::register_builtin_backends()`.
@@ -49,7 +56,7 @@ option(TP_ENABLE_LIBTORCH
        "Build the LibTorch native execution-backend adapter (V01-E05-F03)." OFF)
 option(TP_ENABLE_PYTHON_PYTORCH_SIDECAR
        "Build the Python/PyTorch sidecar execution-backend adapter (V01-E05-F05)."
-       OFF)
+       ON)
 
 add_library(tp_runtime STATIC ${_tp_runtime_sources})
 
@@ -115,6 +122,11 @@ if(TP_ENABLE_LIBTORCH)
 endif()
 if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_PYTHON_PYTORCH_SIDECAR=1)
+  # The sidecar adapter parses JSON sidecar headers via nlohmann::json
+  # (header-only); v0.1.0 requires it via vcpkg. The link below is a
+  # header-only INTERFACE target, so no runtime libs are pulled in.
+  find_package(nlohmann_json CONFIG REQUIRED)
+  target_link_libraries(tp_runtime PUBLIC nlohmann_json::nlohmann_json)
 endif()
 
 set_target_properties(tp_runtime PROPERTIES
