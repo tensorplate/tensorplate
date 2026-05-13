@@ -64,29 +64,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Output validation in `ExecutionSession::infer`: empty outputs vectors,
   empty or duplicate output names, released output buffers, and tensor
   byte windows that overflow their buffers are all rejected before
-  success is returned. When a `BufferManager` is wired through
-  `set_buffer_manager`, partial adapter-published outputs are released
-  via `release_partial_outputs` so a failed `infer` does not leak buffer
-  capacity (V01-E04-F04-T02).
+  success is returned. When a `BufferManager` is supplied through
+  adapter construction hooks, partial adapter-published outputs are
+  released via `release_partial_outputs` so a failed `infer` does not
+  leak buffer capacity (V01-E04-F04-T02).
 - `ExecutionSession::infer_async` typed unsupported path: the default
-  `do_infer_async` returns `Error::Code::Unsupported` so v0.1.0 adapters
+  wrapper path returns `Error::Code::Unsupported` so v0.1.0 adapters
   without native async satisfy the public method shape without
   pretending to be async. Readiness (`NotReady`) and request validation
   errors (`ConfigInvalid`, `ShapeMismatch`, `Timeout`) are surfaced
   **before** the unsupported capability is considered, and the
   unsupported path allocates no output buffers and never dispatches to
-  adapter execution. Native-async adapters override `do_infer_async`
-  to return an `AsyncInferHandle` whose `async_id` is session-scoped
-  and monotonically increasing through the `next_async_id()` helper
+  adapter execution. Native-async adapters opt in through the protected
+  capability hook and override `do_infer_async` to return an
+  `AsyncInferHandle` whose `async_id` is session-scoped and
+  monotonically increasing through the `next_async_id()` helper
   (V01-E04-F05).
 - Shared V01-E04 ExecutionSession conformance suite at
   `test/contract/execution_session_conformance.hpp`. A
   `tensorplate::testing::SessionFactory` closure plus a
   `ConformanceConfig` drives any `ExecutionSession*` adapter through
-  backend-name identity, initial state, the load -> prime -> infer ->
-  unload happy path, infer-before-prime, prime-before-load, bad model
-  path, shape mismatch, infer_async (typed Unsupported or handle),
-  unload-then-infer, and `BufferRef` lifetime invariants. Real backend
+  backend-name identity, initial not-ready state, the load -> prime ->
+  infer -> unload happy path, infer-before-prime, prime-before-load,
+  bad model path, shape mismatch, infer_async (typed Unsupported or
+  handle), unload-then-infer, and `BufferRef` lifetime invariants. Real backend
   adapters (TensorRT, LibTorch, Python/PyTorch sidecar, future Vitis
   AI) reuse the same suite without rewriting it. A T1 mock-conformance
   test in `test/unit/execution_session_conformance_test.cpp` runs the

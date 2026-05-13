@@ -32,7 +32,7 @@ are the mechanical proofs that follow from this review.
 | Adapter-owned memory copies | `BufferRef` does not expose raw pointers; an adapter that requires copies into DPU-compatible memory does the copy internally without changing `BufferRef` semantics. | OK |
 | Backend health and readiness | `do_load` / `do_prime` return typed `Result<void>`; the NVI wrapper transitions to `Failed` (or `Loaded` on `ConfigInvalid`) without assuming GPU-only semantics. | OK |
 | Streaming / generation / KV-cache | Not in the V01-E04 contract; deferred to V01-E05 capability publication and V0.2 generation primitives. | OK |
-| `infer_async` shape | Default returns typed `Unsupported`; adapters that lack native async (Vitis AI / DPU in v0.1.0) inherit the default. | OK |
+| `infer_async` shape | Wrapper returns typed `Unsupported` without adapter execution dispatch unless an adapter reports native async support. Vitis AI / DPU can remain unsupported in v0.1.0. | OK |
 | Latency stamping | `std::chrono::steady_clock` is monotonic across all silicon; no CUDA-event dependency. | OK |
 | Event records | `SessionEvent` fields are bounded and adapter-neutral (`backend_name`, `model_id`, `request_id`, `Error::Code`, `duration`, `state_after`). No CUDA / TensorRT type appears anywhere in the record. | OK |
 

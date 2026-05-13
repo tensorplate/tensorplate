@@ -139,7 +139,6 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   // -- Initial state is Unloaded.
   {
     auto session = factory();
-    EXPECT_EQ(session->state(), SessionState::Unloaded);
     EXPECT_FALSE(session->is_ready());
   }
 
@@ -147,32 +146,28 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
 
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
-    EXPECT_EQ(session->state(), SessionState::Loaded);
+    EXPECT_FALSE(session->is_ready());
     ASSERT_TRUE(session->prime().has_value());
     EXPECT_TRUE(session->is_ready());
 
     auto req = valid_request(*manager, cfg);
     auto r = session->infer(req);
     ASSERT_TRUE(r.has_value()) << (r.has_value() ? "" : r.error().message);
-    EXPECT_TRUE(r.value().is_success() || r.value().is_failure());
-    if (r.value().is_success()) {
-      ASSERT_TRUE(r.value().timing().execution_latency.has_value());
-      EXPECT_GE(r.value().timing().execution_latency->count(), 0);
-      EXPECT_FALSE(r.value().outputs().empty());
-    }
+    ASSERT_TRUE(r.value().is_success()) << r.value().error().message;
+    ASSERT_TRUE(r.value().timing().execution_latency.has_value());
+    EXPECT_GE(r.value().timing().execution_latency->count(), 0);
+    EXPECT_FALSE(r.value().outputs().empty());
 
     ASSERT_TRUE(session->unload().has_value());
-    EXPECT_EQ(session->state(), SessionState::Unloaded);
+    EXPECT_FALSE(session->is_ready());
   }
 
   // -- infer before prime returns NotReady (no adapter dispatch).
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
 
     auto req = valid_request(*manager, cfg);
@@ -203,10 +198,9 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
                   r.error().code == Error::Code::ConfigInvalid)
           << "bad-path load must surface LoadFailed or ConfigInvalid; got "
           << static_cast<int>(r.error().code);
-      EXPECT_EQ(session->state(), SessionState::Failed);
       // Unload recovers.
       EXPECT_TRUE(session->unload().has_value());
-      EXPECT_EQ(session->state(), SessionState::Unloaded);
+      EXPECT_FALSE(session->is_ready());
     }
   }
 
@@ -214,7 +208,6 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
@@ -243,7 +236,6 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
@@ -263,7 +255,6 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
     ASSERT_TRUE(session->unload().has_value());
@@ -282,14 +273,15 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   {
     auto session = factory();
     auto manager = make_manager();
-    session->set_buffer_manager(manager.get());
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
     const auto baseline = manager->accounting().active_count;
     auto req = valid_request(*manager, cfg);
     EXPECT_EQ(manager->accounting().active_count, baseline + 1);
-    (void)session->infer(req);
+    auto r = session->infer(req);
+    ASSERT_TRUE(r.has_value()) << (r.has_value() ? "" : r.error().message);
+    ASSERT_TRUE(r.value().is_success()) << r.value().error().message;
     // Input buffer is still owned by the request value; it is not
     // freed by `infer`. Release it the way the scheduler would.
     EXPECT_GE(manager->accounting().active_count, baseline + 1);

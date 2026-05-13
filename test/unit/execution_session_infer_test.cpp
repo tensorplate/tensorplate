@@ -249,9 +249,8 @@ TEST(SessionInfer, AdapterEmptyOutputsRejected) {
 // -- Partial outputs released through the buffer manager --------------------
 
 TEST(SessionInfer, BadOutputReleasesPartialBuffersThroughManager) {
-  MockSession s;
   auto manager = make_manager();
-  s.set_buffer_manager(manager.get());
+  MockSession s("mock", nullptr, manager.get());
   put_into_ready(s);
 
   // Build two real outputs through the buffer manager. The second view

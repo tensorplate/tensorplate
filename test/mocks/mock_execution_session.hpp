@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
@@ -52,7 +53,10 @@ class MockSession final : public ExecutionSession {
     std::size_t unload = 0;
   };
 
-  explicit MockSession(std::string backend = "mock") : backend_name_(std::move(backend)) {}
+  explicit MockSession(std::string backend = "mock", SessionEventSink* event_sink = nullptr,
+                       BufferManager* buffer_manager = nullptr)
+      : ExecutionSession(ExecutionSessionRuntimeHooks{event_sink, buffer_manager}),
+        backend_name_(std::move(backend)) {}
 
   [[nodiscard]] std::string_view backend_name() const noexcept override { return backend_name_; }
 
@@ -88,6 +92,15 @@ class MockSession final : public ExecutionSession {
   }
   [[nodiscard]] const std::optional<std::string>& last_infer_async_request_id() const noexcept {
     return last_infer_async_request_id_;
+  }
+  [[nodiscard]] SessionState observed_state() const noexcept {
+    return current_state_for_diagnostics();
+  }
+  [[nodiscard]] const std::optional<ModelSpec>& observed_loaded_model() const noexcept {
+    return loaded_model_for_diagnostics();
+  }
+  [[nodiscard]] const std::optional<Error>& observed_last_error() const noexcept {
+    return last_error_for_diagnostics();
   }
 
  protected:
@@ -139,6 +152,8 @@ class MockSession final : public ExecutionSession {
     h.async_id = next_async_id();
     return h;
   }
+
+  [[nodiscard]] bool supports_native_async() const noexcept override { return native_async_; }
 
   Result<void> do_unload() override {
     ++dispatch_counts_.unload;

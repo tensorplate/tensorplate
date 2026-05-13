@@ -20,6 +20,7 @@
 
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "tensorplate/core/execution_session.hpp"
 
@@ -45,7 +46,40 @@ namespace {
 using tensorplate::AsyncInferHandle;
 using tensorplate::ExecutionSession;
 using tensorplate::SessionEventKind;
+using tensorplate::SessionEventSink;
 using tensorplate::SessionState;
+
+template <typename T, typename = void>
+struct HasPublicState : std::false_type {};
+template <typename T>
+struct HasPublicState<T, std::void_t<decltype(std::declval<const T&>().state())>> : std::true_type {
+};
+
+template <typename T, typename = void>
+struct HasPublicLoadedModel : std::false_type {};
+template <typename T>
+struct HasPublicLoadedModel<T, std::void_t<decltype(std::declval<const T&>().loaded_model())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasPublicLastError : std::false_type {};
+template <typename T>
+struct HasPublicLastError<T, std::void_t<decltype(std::declval<const T&>().last_error())>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasPublicSetEventSink : std::false_type {};
+template <typename T>
+struct HasPublicSetEventSink<
+    T, std::void_t<decltype(std::declval<T&>().set_event_sink(std::declval<SessionEventSink*>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasPublicSetBufferManager : std::false_type {};
+template <typename T>
+struct HasPublicSetBufferManager<T, std::void_t<decltype(std::declval<T&>().set_buffer_manager(
+                                        std::declval<tensorplate::BufferManager*>()))>>
+    : std::true_type {};
 
 // -----------------------------------------------------------------------------
 // Public-surface tests
@@ -82,6 +116,14 @@ TEST(ExecutionSessionInterface, PublicMethodSignatures) {
   [[maybe_unused]] BackendNameFn backend_name_fn = &ExecutionSession::backend_name;
 
   SUCCEED();
+}
+
+TEST(ExecutionSessionInterface, DoesNotExposeExtraPublicDiagnosticsOrWiringMethods) {
+  static_assert(!HasPublicState<ExecutionSession>::value);
+  static_assert(!HasPublicLoadedModel<ExecutionSession>::value);
+  static_assert(!HasPublicLastError<ExecutionSession>::value);
+  static_assert(!HasPublicSetEventSink<ExecutionSession>::value);
+  static_assert(!HasPublicSetBufferManager<ExecutionSession>::value);
 }
 
 TEST(ExecutionSessionInterface, IsNotCopyableOrMovable) {

@@ -49,7 +49,7 @@ ExecutionSession                  (public, non-virtual)
    load        ─► do_load         (protected, pure virtual)
    prime       ─► do_prime        (protected, virtual; default no-op)
    infer       ─► do_infer        (protected, pure virtual)
-   infer_async ─► do_infer_async  (protected, virtual; default Unsupported)
+   infer_async ─► do_infer_async  (protected, virtual; native async only)
    unload      ─► do_unload       (protected, virtual; default no-op)
 ```
 
@@ -114,10 +114,12 @@ revision.
 ## Async method shape (V01-E04-F05)
 
 `infer_async` is always present on the public interface from v0.1.0. The
-default `do_infer_async` returns `Error::Code::Unsupported`; adapters that
-do not implement native async receive the same readiness, validation,
-timing, and event hooks as the sync path. The unsupported path does not
-allocate output buffers and does not dispatch to adapter execution.
+wrapper checks readiness and validates the request first. If the adapter
+does not report native async support, the wrapper returns
+`Error::Code::Unsupported`, emits `UnsupportedAsync`, and does not
+dispatch to adapter execution. Adapters that do implement native async
+opt in through the protected capability hook and then receive the same
+timing and event hooks as the sync path.
 
 The async return type is `Result<AsyncInferHandle>`. The handle carries
 the originating `request_id` plus a session-scoped monotonically
@@ -157,7 +159,7 @@ hot path's critical section.
 | `InferAsyncStart` / `InferAsyncEnd` / `InferAsyncFailed` | `infer_async_start` / `infer_async_end` / `infer_async_failed` | `infer_async` wrapper enters / completes / fails |
 | `UnloadStart` / `UnloadEnd` / `UnloadFailed` | `unload_start` / `unload_end` / `unload_failed` | `unload` wrapper enters / completes / fails |
 | `ValidationFailed` | `validation_failed` | NVI rejects request before dispatch |
-| `UnsupportedAsync` | `unsupported_async` | `infer_async` reaches default Unsupported path |
+| `UnsupportedAsync` | `unsupported_async` | `infer_async` returns wrapper-level Unsupported |
 
 Each event carries bounded fields: `kind`, `backend_name`, optional
 `model_id`, optional `request_id`, optional `error_code`, monotonic

@@ -5,8 +5,8 @@
 // Covers:
 //   - `infer_async` is present on the public lifecycle interface and
 //     returns `Result<AsyncInferHandle>`,
-//   - the default `do_infer_async` returns `Error::Code::Unsupported`
-//     (typed) on a Ready session, distinct from generic adapter failure,
+//   - the wrapper returns `Error::Code::Unsupported` (typed) on a
+//     Ready session without adapter dispatch,
 //   - readiness and validation errors are surfaced **before** the
 //     unsupported capability is considered (Not-Ready / shape mismatch
 //     / expired deadline / released buffer beat Unsupported),
@@ -81,10 +81,9 @@ TEST(SessionInferAsync, DefaultReturnsTypedUnsupportedOnReady) {
   auto r = s.infer_async(valid_request());
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Unsupported);
-  // The adapter was reached but reported Unsupported — the dispatch
-  // count increments because the default do_infer_async is what
-  // produces the typed error.
-  EXPECT_EQ(s.dispatch_counts().infer_async, 1u);
+  // Unsupported is produced by the NVI wrapper without dispatching to
+  // adapter execution.
+  EXPECT_EQ(s.dispatch_counts().infer_async, 0u);
 }
 
 TEST(SessionInferAsync, NotReadyBeatsUnsupported) {
@@ -131,9 +130,8 @@ TEST(SessionInferAsync, ExpiredDeadlineBeatsUnsupported) {
 // -- Unsupported path does not allocate output buffers ---------------------
 
 TEST(SessionInferAsync, UnsupportedPathDoesNotAllocateOutputBuffers) {
-  MockSession s;
   auto manager = make_manager();
-  s.set_buffer_manager(manager.get());
+  MockSession s("mock", nullptr, manager.get());
   put_into_ready(s);
 
   const auto before = manager->accounting();

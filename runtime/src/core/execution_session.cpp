@@ -448,6 +448,15 @@ Result<AsyncInferHandle> ExecutionSession::infer_async(const InferRequest& reque
   }
 
   const auto start = Clock::now();
+  if (!supports_native_async()) {
+    auto err = Error::make(Error::Code::Unsupported,
+                           "this ExecutionSession does not implement native async inference");
+    const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
+    last_error_ = err;
+    emit_event(SessionEventKind::UnsupportedAsync, req_id, err.code, duration);
+    return unexpected(std::move(err));
+  }
+
   auto adapter_result = do_infer_async(request);
   const auto duration = std::chrono::duration_cast<SessionEvent::Duration>(Clock::now() - start);
 

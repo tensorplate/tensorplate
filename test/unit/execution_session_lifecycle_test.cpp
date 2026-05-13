@@ -42,10 +42,10 @@ ModelSpec make_spec(std::string name = "mock-model") {
 
 TEST(SessionLifecycle, InitialStateIsUnloaded) {
   MockSession s;
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
   EXPECT_FALSE(s.is_ready());
-  EXPECT_FALSE(s.loaded_model().has_value());
-  EXPECT_FALSE(s.last_error().has_value());
+  EXPECT_FALSE(s.observed_loaded_model().has_value());
+  EXPECT_FALSE(s.observed_last_error().has_value());
 }
 
 // -- Load transitions ---------------------------------------------------------
@@ -55,11 +55,11 @@ TEST(SessionLifecycle, LoadFromUnloadedSucceeds) {
   auto spec = make_spec();
   ASSERT_TRUE(s.load(spec).has_value());
 
-  EXPECT_EQ(s.state(), SessionState::Loaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
   EXPECT_FALSE(s.is_ready());
-  ASSERT_TRUE(s.loaded_model().has_value());
-  EXPECT_EQ(s.loaded_model()->model_id(), "mock-model");
-  EXPECT_FALSE(s.last_error().has_value());
+  ASSERT_TRUE(s.observed_loaded_model().has_value());
+  EXPECT_EQ(s.observed_loaded_model()->model_id(), "mock-model");
+  EXPECT_FALSE(s.observed_last_error().has_value());
   EXPECT_EQ(s.dispatch_counts().load, 1u);
 }
 
@@ -70,11 +70,11 @@ TEST(SessionLifecycle, LoadFailureTransitionsToFailed) {
   auto r = s.load(make_spec());
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::LoadFailed);
-  EXPECT_EQ(s.state(), SessionState::Failed);
+  EXPECT_EQ(s.observed_state(), SessionState::Failed);
   EXPECT_FALSE(s.is_ready());
-  EXPECT_FALSE(s.loaded_model().has_value());
-  ASSERT_TRUE(s.last_error().has_value());
-  EXPECT_EQ(s.last_error()->code, Error::Code::LoadFailed);
+  EXPECT_FALSE(s.observed_loaded_model().has_value());
+  ASSERT_TRUE(s.observed_last_error().has_value());
+  EXPECT_EQ(s.observed_last_error()->code, Error::Code::LoadFailed);
 }
 
 TEST(SessionLifecycle, LoadWhileAlreadyLoadedReturnsNotReady) {
@@ -87,21 +87,21 @@ TEST(SessionLifecycle, LoadWhileAlreadyLoadedReturnsNotReady) {
   // Adapter must NOT have been re-dispatched.
   EXPECT_EQ(s.dispatch_counts().load, 1u);
   // Existing loaded state is preserved.
-  EXPECT_EQ(s.state(), SessionState::Loaded);
-  ASSERT_TRUE(s.loaded_model().has_value());
-  EXPECT_EQ(s.loaded_model()->model_id(), "mock-model");
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
+  ASSERT_TRUE(s.observed_loaded_model().has_value());
+  EXPECT_EQ(s.observed_loaded_model()->model_id(), "mock-model");
 }
 
 TEST(SessionLifecycle, LoadWhileReadyReturnsNotReady) {
   MockSession s;
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
-  ASSERT_EQ(s.state(), SessionState::Ready);
+  ASSERT_EQ(s.observed_state(), SessionState::Ready);
 
   auto r = s.load(make_spec("other"));
   EXPECT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::NotReady);
-  EXPECT_EQ(s.state(), SessionState::Ready);
+  EXPECT_EQ(s.observed_state(), SessionState::Ready);
 }
 
 // -- Prime transitions --------------------------------------------------------
@@ -111,7 +111,7 @@ TEST(SessionLifecycle, PrimeBeforeLoadReturnsNotReady) {
   auto r = s.prime();
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::NotReady);
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
   EXPECT_EQ(s.dispatch_counts().prime, 0u);
 }
 
@@ -119,9 +119,9 @@ TEST(SessionLifecycle, PrimeFromLoadedSucceeds) {
   MockSession s;
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
-  EXPECT_EQ(s.state(), SessionState::Ready);
+  EXPECT_EQ(s.observed_state(), SessionState::Ready);
   EXPECT_TRUE(s.is_ready());
-  EXPECT_FALSE(s.last_error().has_value());
+  EXPECT_FALSE(s.observed_last_error().has_value());
 }
 
 TEST(SessionLifecycle, PrimeConfigInvalidStaysInLoaded) {
@@ -133,9 +133,9 @@ TEST(SessionLifecycle, PrimeConfigInvalidStaysInLoaded) {
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
   // Recoverable failure: still in Loaded so host can retry.
-  EXPECT_EQ(s.state(), SessionState::Loaded);
-  ASSERT_TRUE(s.last_error().has_value());
-  EXPECT_EQ(s.last_error()->code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
+  ASSERT_TRUE(s.observed_last_error().has_value());
+  EXPECT_EQ(s.observed_last_error()->code, Error::Code::ConfigInvalid);
 }
 
 TEST(SessionLifecycle, PrimeOtherFailureTransitionsToFailed) {
@@ -146,7 +146,7 @@ TEST(SessionLifecycle, PrimeOtherFailureTransitionsToFailed) {
   auto r = s.prime();
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Internal);
-  EXPECT_EQ(s.state(), SessionState::Failed);
+  EXPECT_EQ(s.observed_state(), SessionState::Failed);
 }
 
 TEST(SessionLifecycle, PrimeAgainAfterReadyReturnsNotReady) {
@@ -157,7 +157,7 @@ TEST(SessionLifecycle, PrimeAgainAfterReadyReturnsNotReady) {
   auto r = s.prime();
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::NotReady);
-  EXPECT_EQ(s.state(), SessionState::Ready);
+  EXPECT_EQ(s.observed_state(), SessionState::Ready);
   EXPECT_EQ(s.dispatch_counts().prime, 1u);
 }
 
@@ -205,7 +205,7 @@ TEST(SessionLifecycle, InferBeforePrimeReturnsNotReady) {
   EXPECT_EQ(r.error().code, Error::Code::NotReady);
   // Adapter must NOT have been dispatched.
   EXPECT_EQ(s.dispatch_counts().infer, 0u);
-  EXPECT_EQ(s.state(), SessionState::Loaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
 }
 
 // -- Unload transitions -------------------------------------------------------
@@ -213,7 +213,7 @@ TEST(SessionLifecycle, InferBeforePrimeReturnsNotReady) {
 TEST(SessionLifecycle, UnloadFromUnloadedIsNoOpSuccess) {
   MockSession s;
   ASSERT_TRUE(s.unload().has_value());
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
   EXPECT_EQ(s.dispatch_counts().unload, 0u);
 }
 
@@ -222,8 +222,8 @@ TEST(SessionLifecycle, UnloadFromLoadedReturnsToUnloaded) {
   ASSERT_TRUE(s.load(make_spec()).has_value());
 
   ASSERT_TRUE(s.unload().has_value());
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
-  EXPECT_FALSE(s.loaded_model().has_value());
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
+  EXPECT_FALSE(s.observed_loaded_model().has_value());
   EXPECT_EQ(s.dispatch_counts().unload, 1u);
 }
 
@@ -233,21 +233,21 @@ TEST(SessionLifecycle, UnloadFromReadyReturnsToUnloaded) {
   ASSERT_TRUE(s.prime().has_value());
 
   ASSERT_TRUE(s.unload().has_value());
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
 }
 
 TEST(SessionLifecycle, UnloadAfterFailedReturnsToUnloaded) {
   MockSession s;
   s.next_load_fails_with(Error::make(Error::Code::LoadFailed, "boom"));
   ASSERT_FALSE(s.load(make_spec()).has_value());
-  ASSERT_EQ(s.state(), SessionState::Failed);
+  ASSERT_EQ(s.observed_state(), SessionState::Failed);
 
   ASSERT_TRUE(s.unload().has_value());
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
-  EXPECT_FALSE(s.loaded_model().has_value());
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
+  EXPECT_FALSE(s.observed_loaded_model().has_value());
   // Reloading after recovery must work.
   ASSERT_TRUE(s.load(make_spec("recovered")).has_value());
-  EXPECT_EQ(s.state(), SessionState::Loaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
 }
 
 TEST(SessionLifecycle, UnloadFailureTransitionsToFailed) {
@@ -258,7 +258,7 @@ TEST(SessionLifecycle, UnloadFailureTransitionsToFailed) {
   auto r = s.unload();
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Internal);
-  EXPECT_EQ(s.state(), SessionState::Failed);
+  EXPECT_EQ(s.observed_state(), SessionState::Failed);
 }
 
 // -- Diagnostic name mapping --------------------------------------------------

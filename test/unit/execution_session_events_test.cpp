@@ -69,9 +69,8 @@ NamedOutput valid_output() {
 // -- Lifecycle event ordering -------------------------------------------------
 
 TEST(SessionEvents, FullLifecycleEmitsPairedStartEndEvents) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -94,9 +93,8 @@ TEST(SessionEvents, FullLifecycleEmitsPairedStartEndEvents) {
 }
 
 TEST(SessionEvents, BackendNameIsCarriedOnEveryEvent) {
-  MockSession s("mock-vision");
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock-vision", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
 
@@ -106,9 +104,8 @@ TEST(SessionEvents, BackendNameIsCarriedOnEveryEvent) {
 }
 
 TEST(SessionEvents, ModelIdIsPopulatedAfterLoad) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -126,9 +123,8 @@ TEST(SessionEvents, ModelIdIsPopulatedAfterLoad) {
 // -- Failure events ----------------------------------------------------------
 
 TEST(SessionEvents, AdapterLoadFailureEmitsLoadFailedWithErrorCode) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
   s.next_load_fails_with(Error::make(Error::Code::LoadFailed, "boom"));
 
   auto r = s.load(make_spec());
@@ -143,9 +139,8 @@ TEST(SessionEvents, AdapterLoadFailureEmitsLoadFailedWithErrorCode) {
 }
 
 TEST(SessionEvents, ValidationFailureBeforeAdapterEmitsValidationFailed) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -172,9 +167,8 @@ TEST(SessionEvents, ValidationFailureBeforeAdapterEmitsValidationFailed) {
 }
 
 TEST(SessionEvents, AsyncUnsupportedEmitsUnsupportedAsyncEvent) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -193,10 +187,9 @@ TEST(SessionEvents, AsyncUnsupportedEmitsUnsupportedAsyncEvent) {
 }
 
 TEST(SessionEvents, NativeAsyncFailureEmitsInferAsyncFailedNotUnsupported) {
-  MockSession s;
-  s.enable_native_async();
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
+  s.enable_native_async();
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -215,9 +208,8 @@ TEST(SessionEvents, NativeAsyncFailureEmitsInferAsyncFailedNotUnsupported) {
 }
 
 TEST(SessionEvents, InferStartCarriesRequestId) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -238,9 +230,8 @@ TEST(SessionEvents, InferStartCarriesRequestId) {
 // -- state_after on every event ----------------------------------------------
 
 TEST(SessionEvents, StateAfterFieldReflectsPostEventState) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());
@@ -256,15 +247,14 @@ TEST(SessionEvents, StateAfterFieldReflectsPostEventState) {
 // -- Throwing sink cannot corrupt session state -----------------------------
 
 TEST(SessionEvents, ThrowingSinkDoesNotCorruptSessionState) {
-  MockSession s;
   ThrowingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   // Lifecycle should still complete despite every emit throwing.
   ASSERT_TRUE(s.load(make_spec()).has_value());
-  EXPECT_EQ(s.state(), SessionState::Loaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Loaded);
   ASSERT_TRUE(s.prime().has_value());
-  EXPECT_EQ(s.state(), SessionState::Ready);
+  EXPECT_EQ(s.observed_state(), SessionState::Ready);
 
   s.set_next_infer_outputs({valid_output()});
   auto r = s.infer(valid_request());
@@ -272,7 +262,7 @@ TEST(SessionEvents, ThrowingSinkDoesNotCorruptSessionState) {
   EXPECT_TRUE(r.value().is_success());
 
   ASSERT_TRUE(s.unload().has_value());
-  EXPECT_EQ(s.state(), SessionState::Unloaded);
+  EXPECT_EQ(s.observed_state(), SessionState::Unloaded);
 
   EXPECT_GT(sink.calls(), 0u);
 }
@@ -292,9 +282,8 @@ TEST(SessionEvents, NullSinkIsSafeAndProducesNoEvents) {
 // -- Event duration is non-negative -----------------------------------------
 
 TEST(SessionEvents, AdapterEventDurationIsNonNegative) {
-  MockSession s;
   RecordingEventSink sink;
-  s.set_event_sink(&sink);
+  MockSession s("mock", &sink);
 
   ASSERT_TRUE(s.load(make_spec()).has_value());
   ASSERT_TRUE(s.prime().has_value());

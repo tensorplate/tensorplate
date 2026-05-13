@@ -106,8 +106,8 @@ enum class SessionEventKind : std::uint8_t {
   /// Emitted when the NVI wrapper rejects a request before adapter
   /// dispatch (released buffer, out-of-bounds tensor window, etc).
   ValidationFailed = 15,
-  /// Emitted on the default `do_infer_async` path for adapters without
-  /// native async support.
+  /// Emitted by the wrapper when adapters do not report native async
+  /// support.
   UnsupportedAsync = 16,
 };
 
@@ -152,6 +152,19 @@ class SessionEventSink {
   virtual void on_event(const SessionEvent& event) = 0;
 };
 
+/// Runtime hooks supplied by adapter factories or test mocks when a
+/// concrete session is constructed. Kept separate from the public
+/// `ExecutionSession` method set so callers see only the lifecycle
+/// contract.
+struct ExecutionSessionRuntimeHooks {
+  /// Optional fire-and-forget event sink. nullptr disables emission.
+  SessionEventSink* event_sink = nullptr;
+
+  /// Optional buffer manager used to release partial adapter outputs
+  /// after output validation fails. nullptr disables that cleanup path.
+  BufferManager* buffer_manager = nullptr;
+};
+
 /// Canonical public execution-session lifecycle interface.
 ///
 /// **Non-virtual interface (NVI).** Public lifecycle methods are
@@ -162,14 +175,15 @@ class SessionEventSink {
 /// **Threading.** Public lifecycle methods are *not* safe to call
 /// concurrently on the same session. Concurrency is supplied by the
 /// scheduler (V01-E06), which serializes lifecycle calls per session.
-/// Const observers (`state`, `is_ready`, `backend_name`) are safe to
-/// call from any thread without external locking.
+/// Const observers (`is_ready`, `backend_name`) are safe to call from
+/// any thread without external locking.
 ///
-/// **Ownership.** `ExecutionSession` does not own a `BufferManager`. The
-/// host wires one in through `set_buffer_manager()` before the first
-/// `infer` call so the NVI wrapper can validate input/output buffer
-/// windows. Without a manager, the NVI wrapper performs only the
-/// metadata-level validation that does not require a buffer table.
+/// **Ownership.** `ExecutionSession` does not own a `BufferManager` or
+/// `SessionEventSink`. Concrete adapters receive optional runtime hooks
+/// from their factory and pass them to the protected constructor.
+/// Without a manager, the NVI wrapper still validates BufferRef
+/// ownership state and TensorView byte windows, but cannot release
+/// partial adapter outputs through the buffer plane.
 ///
 /// **Vendor neutrality.** This header pulls in no CUDA, TensorRT,
 /// PyTorch/LibTorch, ONNX Runtime, Vitis AI, XRT, or DPU types.
@@ -243,39 +257,15 @@ class ExecutionSession {
   /// True iff the session can serve `infer` immediately (state `Ready`).
   [[nodiscard]] bool is_ready() const noexcept { return state_ == SessionState::Ready; }
 
-  /// Current lifecycle state. Safe to call from any state.
-  [[nodiscard]] SessionState state() const noexcept { return state_; }
-
   /// Stable adapter label. Adapter-defined; low cardinality (e.g.
   /// "mock", "tensorrt", "libtorch", "python_pytorch"). Implemented by
   /// the adapter so the NVI wrapper can echo it on every event.
   [[nodiscard]] virtual std::string_view backend_name() const noexcept = 0;
 
-  /// Last successfully loaded `ModelSpec`. Cleared by `unload` and by
-  /// `load` failures.
-  [[nodiscard]] const std::optional<ModelSpec>& loaded_model() const noexcept { return model_; }
-
-  /// Most recent typed `Error` recorded by any failing lifecycle call.
-  /// Cleared by a subsequent successful lifecycle call and by `unload`.
-  [[nodiscard]] const std::optional<Error>& last_error() const noexcept { return last_error_; }
-
-  // -- Host wiring. ----------------------------------------------------------
-
-  /// Register an event sink. nullptr disables emission. Must be wired
-  /// before lifecycle work begins; setting a new sink mid-session is
-  /// permitted but races with concurrent emission and is not recommended.
-  void set_event_sink(SessionEventSink* sink) noexcept { event_sink_ = sink; }
-
-  /// Register the buffer manager used to validate input/output buffer
-  /// windows during `infer`. nullptr disables the buffer-table check
-  /// (the NVI wrapper still validates BufferRef ownership state and the
-  /// TensorView byte window against `BufferRef::size_bytes()`).
-  void set_buffer_manager(BufferManager* manager) noexcept { buffer_manager_ = manager; }
-
-  [[nodiscard]] SessionEventSink* event_sink() const noexcept { return event_sink_; }
-  [[nodiscard]] BufferManager* buffer_manager() const noexcept { return buffer_manager_; }
-
  protected:
+  explicit ExecutionSession(ExecutionSessionRuntimeHooks hooks) noexcept
+      : event_sink_(hooks.event_sink), buffer_manager_(hooks.buffer_manager) {}
+
   // -- Adapter override points (protected, virtual). -------------------------
 
   /// Called by `load` after readiness checks. The wrapper passes the
@@ -297,10 +287,16 @@ class ExecutionSession {
   /// converts that to a failure `InferResult` with timing.
   virtual Result<std::vector<NamedOutput>> do_infer(const InferRequest& request) = 0;
 
-  /// Called by `infer_async` after readiness + validation. Default
-  /// returns `Error::Code::Unsupported`; the wrapper emits the
-  /// `UnsupportedAsync` event.
+  /// Called by `infer_async` after readiness + validation only when
+  /// `supports_native_async()` is true. Default returns
+  /// `Error::Code::Unsupported` as a safety net for adapters that opt
+  /// into native async incorrectly.
   virtual Result<AsyncInferHandle> do_infer_async(const InferRequest& request);
+
+  /// True when the adapter implements native async execution and wants
+  /// the NVI wrapper to dispatch to `do_infer_async`. The default false
+  /// path returns typed `Unsupported` without adapter dispatch.
+  [[nodiscard]] virtual bool supports_native_async() const noexcept { return false; }
 
   /// Called by `unload`. Default is success no-op so adapters that have
   /// no teardown can skip it.
@@ -309,9 +305,19 @@ class ExecutionSession {
   // -- Adapter helpers. ------------------------------------------------------
 
   /// Adapters call this to claim the next session-scoped async id. Used
-  /// only by adapters that implement native async; the default
-  /// `do_infer_async` (Unsupported) does not call this.
+  /// only by adapters that implement native async; the wrapper-level
+  /// Unsupported path does not call this.
   [[nodiscard]] std::uint64_t next_async_id() noexcept { return next_async_id_++; }
+
+  /// Protected diagnostics for tests and adapter-owned instrumentation.
+  /// These are intentionally not part of the public lifecycle contract.
+  [[nodiscard]] SessionState current_state_for_diagnostics() const noexcept { return state_; }
+  [[nodiscard]] const std::optional<ModelSpec>& loaded_model_for_diagnostics() const noexcept {
+    return model_;
+  }
+  [[nodiscard]] const std::optional<Error>& last_error_for_diagnostics() const noexcept {
+    return last_error_;
+  }
 
  private:
   /// Validate an InferRequest before adapter dispatch. Rejects empty
