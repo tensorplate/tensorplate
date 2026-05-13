@@ -8,6 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Kria / Vitis AI adapter design-review document at
+  `docs/architecture/kria-vitis-ai-review.md` (V01-E05-F07). Maps a
+  future Xilinx/AMD Kria adapter using Vitis AI and DPU execution
+  against the published v0.1.0 contracts (`ExecutionSession` NVI,
+  `BackendCapability`, `BackendRegistry`, `ModelSpec` and the
+  `backend_hint` enum, `BufferRef` / `TensorView`, the bundle
+  envelope, and the session event taxonomy). The review concludes
+  that **no public interface change is required for v0.1.0 freeze**;
+  the only work required for a future Vitis AI adapter is a new
+  `runtime/src/adapters/vitis_ai/` directory, a bundle sibling block
+  for Vitis-style calibration metadata (addable through the V01-E13
+  schema-evolution rules), a T1 unit-test set mirroring the
+  TensorRT / LibTorch pattern, and Kria K26 / K24 HIL validation.
 - Real-adapter conformance harness (V01-E05-F06-T01) at
   `test/contract/real_adapter_conformance_test.cpp` (T3). Reuses the
   V01-E04 `ExecutionSession` conformance suite from
