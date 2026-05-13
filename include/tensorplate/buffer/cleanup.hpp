@@ -11,10 +11,11 @@
 //
 //   - They release every *unique* buffer id at most once. Duplicate ids
 //     in malformed input fixtures do not cause a double release.
-//   - They never throw and never block.
+//   - They never throw and never allocate on the successful cleanup path.
 //   - They surface release failures through a CleanupReport so the
 //     caller can preserve the original request error and still emit a
-//     structured log if cleanup itself misbehaved.
+//     structured log if cleanup itself misbehaved. Error details are
+//     best-effort; the error counter is authoritative if memory is tight.
 //
 // The helpers are deliberately backend-neutral: they take an
 // `InferRequest` or a list of `NamedOutput` values, not a scheduler
@@ -23,6 +24,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -41,13 +43,22 @@ struct CleanupReport {
   /// Number of buffers actually released by this pass.
   std::size_t buffers_released = 0;
 
+  /// Number of release attempts that returned a typed error or threw while
+  /// the helper was trying to release a buffer. This counter is authoritative
+  /// even if storing the detailed Error object below failed.
+  std::size_t release_errors = 0;
+
+  /// Number of release errors whose detailed Error object could not be stored
+  /// because the cleanup path was already under memory pressure.
+  std::size_t dropped_errors = 0;
+
   /// Number of release attempts that returned a typed error (unknown
-  /// handle, double release). Each entry in `errors` corresponds to one
-  /// such failure.
+  /// handle, double release). This is a best-effort sample; use
+  /// `release_errors` for the complete count.
   std::vector<Error> errors;
 
   /// True if the cleanup pass freed everything it tried to free.
-  [[nodiscard]] bool clean() const noexcept { return errors.empty(); }
+  [[nodiscard]] bool clean() const noexcept { return release_errors == 0; }
 };
 
 /// Release every unique input buffer in `request`. Idempotent on
@@ -67,8 +78,8 @@ struct CleanupReport {
 /// execution session when result construction fails after one or more
 /// outputs were allocated. Does not touch input buffers; caller pairs
 /// this with `release_request_buffers` when both must be cleaned up.
-[[nodiscard]] CleanupReport release_partial_outputs(BufferManager& manager,
-                                                    const std::vector<NamedOutput>& outputs) noexcept;
+[[nodiscard]] CleanupReport release_partial_outputs(
+    BufferManager& manager, const std::vector<NamedOutput>& outputs) noexcept;
 
 /// RAII guard that releases the input buffers of `request` when it
 /// leaves scope unless `dismiss()` is called first. Useful for the
@@ -82,7 +93,7 @@ struct CleanupReport {
 class RequestBufferGuard {
  public:
   RequestBufferGuard(BufferManager& manager, const InferRequest& request) noexcept;
-  ~RequestBufferGuard();
+  ~RequestBufferGuard() noexcept;
 
   RequestBufferGuard(const RequestBufferGuard&) = delete;
   RequestBufferGuard& operator=(const RequestBufferGuard&) = delete;

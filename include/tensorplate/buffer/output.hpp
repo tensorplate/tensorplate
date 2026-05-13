@@ -75,13 +75,13 @@ struct OutputDescriptor {
 [[nodiscard]] Result<BufferRef> allocate_output_buffer(BufferManager& manager,
                                                        const TensorView& tensor,
                                                        std::size_t buffer_size_bytes = 0,
-                                                       OutputAllocationContext ctx = {});
+                                                       const OutputAllocationContext& ctx = {});
 
 /// Assemble one NamedOutput by allocating an owned buffer and validating
 /// the view bounds against it.
 [[nodiscard]] Result<NamedOutput> build_named_output(BufferManager& manager,
                                                      const OutputDescriptor& descriptor,
-                                                     OutputAllocationContext ctx = {});
+                                                     const OutputAllocationContext& ctx = {});
 
 /// Assemble multiple NamedOutputs. If any descriptor fails, every
 /// buffer this call allocated is released before the error is returned.
@@ -92,6 +92,6 @@ struct OutputDescriptor {
 /// allocator errors from BufferManager.
 [[nodiscard]] Result<std::vector<NamedOutput>> build_named_outputs(
     BufferManager& manager, const std::vector<OutputDescriptor>& descriptors,
-    OutputAllocationContext ctx = {});
+    const OutputAllocationContext& ctx = {});
 
 }  // namespace tensorplate

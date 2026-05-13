@@ -3,13 +3,12 @@
 // V01-E03-F06-T01 / T02 unit coverage for buffer-plane pressure metrics
 // and the pressure-transition event hook.
 
-#include <atomic>
+#include <gtest/gtest.h>
+
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/core/error.hpp"
@@ -114,19 +113,18 @@ TEST(PressureMetrics, ThresholdCrossingEmitsObservableTransition) {
   auto mgr = BufferManager::create(std::move(cfg)).value();
 
   std::vector<BufferPressureEvent> events;
-  auto sub_id = mgr->subscribe_pressure(
-      [&events](const BufferPressureEvent& e) { events.push_back(e); });
-  ASSERT_NE(sub_id, 0u);
 
   // Below warning threshold.
   auto h1 = mgr->allocate(400);
   ASSERT_TRUE(h1.has_value());
+  events = mgr->drain_pressure_events();
   EXPECT_TRUE(events.empty());
   EXPECT_EQ(mgr->accounting().pressure, MemoryPressure::Normal);
 
   // Cross into Warning (>=500 / 1000).
   auto h2 = mgr->allocate(200);
   ASSERT_TRUE(h2.has_value());
+  events = mgr->drain_pressure_events();
   ASSERT_EQ(events.size(), 1u);
   EXPECT_EQ(events.front().previous, MemoryPressure::Normal);
   EXPECT_EQ(events.front().current, MemoryPressure::Warning);
@@ -138,37 +136,34 @@ TEST(PressureMetrics, ThresholdCrossingEmitsObservableTransition) {
   // Cross into Critical (>=900 / 1000).
   auto h3 = mgr->allocate(300);
   ASSERT_TRUE(h3.has_value());
+  auto more_events = mgr->drain_pressure_events();
+  events.insert(events.end(), more_events.begin(), more_events.end());
   ASSERT_EQ(events.size(), 2u);
   EXPECT_EQ(events.back().previous, MemoryPressure::Warning);
   EXPECT_EQ(events.back().current, MemoryPressure::Critical);
 
-  // Releasing drops us back to Normal in one transition (release frees
-  // all 900 bytes).
+  // Releasing all buffers walks pressure back down to Normal.
   ASSERT_TRUE(mgr->release(h1.value()).has_value());
   ASSERT_TRUE(mgr->release(h2.value()).has_value());
   ASSERT_TRUE(mgr->release(h3.value()).has_value());
+  more_events = mgr->drain_pressure_events();
+  events.insert(events.end(), more_events.begin(), more_events.end());
   // Last event should be the transition back to Normal.
   EXPECT_EQ(events.back().current, MemoryPressure::Normal);
-
-  mgr->unsubscribe_pressure(sub_id);
 }
 
-TEST(PressureMetrics, UnsubscribeStopsFutureEvents) {
+TEST(PressureMetrics, DrainingClearsRetainedEvents) {
   BufferManagerConfig cfg;
   cfg.pool_name = "metrics_test";
   cfg.capacity_bytes = 1000;
   cfg.max_buffer_bytes = 1000;
   auto mgr = BufferManager::create(std::move(cfg)).value();
 
-  std::atomic<int> calls{0};
-  auto id = mgr->subscribe_pressure([&calls](const BufferPressureEvent&) { ++calls; });
-  ASSERT_NE(id, 0u);
-  mgr->unsubscribe_pressure(id);
-
-  // After unsubscribe, threshold crossings must not invoke the callback.
+  // After one drain, the same retained event should not be returned again.
   auto h = mgr->allocate(950);
   ASSERT_TRUE(h.has_value());
-  EXPECT_EQ(calls.load(), 0);
+  EXPECT_EQ(mgr->drain_pressure_events().size(), 1u);
+  EXPECT_TRUE(mgr->drain_pressure_events().empty());
 
   ASSERT_TRUE(mgr->release(h.value()).has_value());
 }

@@ -42,11 +42,11 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
@@ -138,7 +138,8 @@ struct BufferAccounting {
 };
 
 /// Pressure-transition event. Emitted by the manager when `pressure`
-/// changes value. Plain data; subscribers receive a copy. Stable wire
+/// changes value. Plain data; the manager records a bounded in-memory copy
+/// that callers can drain outside allocation/release hot paths. Stable wire
 /// names live in `protocol/schemas/buffer_pressure_event.json`.
 struct BufferPressureEvent {
   std::string pool_name;
@@ -174,11 +175,9 @@ class BufferManager {
   /// specific allocators that are out of scope for v0.1.0.
   static constexpr std::size_t kMaxAlignment = 4096;
 
-  /// Pressure-event subscriber callback. Invoked synchronously while the
-  /// manager mutex is held; subscribers must not block or call back into
-  /// the manager (deadlock). Use the event to record metrics or wake an
-  /// asynchronous reporter, not to perform I/O.
-  using PressureSubscriber = std::function<void(const BufferPressureEvent&)>;
+  /// Maximum number of pressure transitions retained for later draining.
+  /// When the ring is full, newer transitions overwrite the oldest entries.
+  static constexpr std::size_t kPressureEventBufferCapacity = 32;
 
   /// Validating factory. Returns Error::Code::ConfigInvalid on bad config.
   static Result<std::unique_ptr<BufferManager>> create(BufferManagerConfig config);
@@ -258,14 +257,11 @@ class BufferManager {
   /// Snapshot of current accounting plus derived pressure state.
   [[nodiscard]] BufferAccounting accounting() const;
 
-  /// Subscribe to pressure-transition events. Returns a non-zero
-  /// subscription id; pass it to `unsubscribe_pressure` to remove the
-  /// subscriber. Subscribers fire synchronously on the allocation /
-  /// release thread; see `PressureSubscriber`.
-  std::uint64_t subscribe_pressure(PressureSubscriber subscriber);
-
-  /// Remove a pressure subscriber. No-op if id is unknown.
-  void unsubscribe_pressure(std::uint64_t subscription_id);
+  /// Drain recorded pressure-transition events. Allocation and release only
+  /// append to a bounded in-memory ring; callbacks and I/O are intentionally
+  /// kept out of those hot paths. This method copies the retained events and
+  /// clears the ring.
+  [[nodiscard]] std::vector<BufferPressureEvent> drain_pressure_events();
 
   /// Returns the configured pool label (low-cardinality metric label).
   [[nodiscard]] std::string_view pool_name() const noexcept;

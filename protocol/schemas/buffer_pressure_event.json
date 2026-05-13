@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://schemas.tensorplate.io/v0.1/buffer_pressure_event.json",
   "title": "TensorPlate Buffer Pressure Event",
-  "description": "Memory-pressure transition emitted by the v0.1.0 CPU buffer plane. Carries the same fields a metrics scrape would expose, plus the previous/current pressure level so subscribers can audit transitions without resampling. Mirrors include/tensorplate/buffer/buffer_manager.hpp::BufferPressureEvent.\n\nv0.1.0 emits these only on level changes (Normal -> Warning, Warning -> Critical, etc.). The exact threshold policy is configurable; defaults are warning >= 75 %, critical >= 90 % of capacity.\n\nThis schema intentionally does NOT carry raw memory addresses, request payloads, or per-request labels. Observability work in V01-E12 wires per-endpoint labels above this layer.",
+  "description": "Memory-pressure transition emitted by the v0.1.0 CPU buffer plane. Carries the same fields a metrics scrape would expose, plus the previous/current pressure level so consumers can audit transitions without resampling. Mirrors include/tensorplate/buffer/buffer_manager.hpp::BufferPressureEvent.\n\nv0.1.0 records these only on level changes (Normal -> Warning, Warning -> Critical, etc.). The exact threshold policy is configurable; defaults are warning >= 75 %, critical >= 90 % of capacity.\n\nThis schema intentionally does NOT carry raw memory addresses, request payloads, or per-request labels. Observability work in V01-E12 wires per-endpoint labels above this layer.",
   "type": "object",
   "additionalProperties": false,
   "required": [

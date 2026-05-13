@@ -5,14 +5,14 @@
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 
+#include <gtest/gtest.h>
+
 #include <cstddef>
 #include <cstring>
 #include <memory>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 #include "tensorplate/buffer/buffer_ref.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
@@ -310,9 +310,8 @@ TEST(BufferManagerView, RejectsOutOfBoundsTensorWindow) {
   ASSERT_FALSE(bv.has_value());
   EXPECT_EQ(bv.error().code, Error::Code::ShapeMismatch);
 
-  auto offset_overflow =
-      TensorView::create(DType::UInt8, {32}, tensorplate::Layout::RowMajor,
-                         /*byte_offset=*/40, /*byte_size=*/32);
+  auto offset_overflow = TensorView::create(DType::UInt8, {32}, tensorplate::Layout::RowMajor,
+                                            /*byte_offset=*/40, /*byte_size=*/32);
   ASSERT_TRUE(offset_overflow.has_value());
   auto ov = mgr->view(h.value(), offset_overflow.value());
   ASSERT_FALSE(ov.has_value());

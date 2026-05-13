@@ -10,7 +10,7 @@
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 
-#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -97,16 +97,19 @@ struct BufferManager::Impl {
   std::uint64_t release_failures = 0;
   MemoryPressure last_pressure = MemoryPressure::Normal;
 
-  // Pressure-subscriber registry.
-  std::uint64_t next_subscription_id = 1;
-  std::vector<std::pair<std::uint64_t, PressureSubscriber>> pressure_subscribers;
+  // Bounded pressure-event ring. Allocation/release paths record transitions
+  // here and never call user code.
+  std::array<BufferPressureEvent, BufferManager::kPressureEventBufferCapacity> pressure_events{};
+  std::size_t pressure_event_start = 0;
+  std::size_t pressure_event_count = 0;
+  std::uint64_t pressure_events_dropped = 0;
 
   MemoryPressure compute_pressure_locked() const noexcept {
     if (config.capacity_bytes == 0) {
       return MemoryPressure::Normal;
     }
-    const double fraction = static_cast<double>(in_use_bytes) /
-                            static_cast<double>(config.capacity_bytes);
+    const double fraction =
+        static_cast<double>(in_use_bytes) / static_cast<double>(config.capacity_bytes);
     if (fraction >= config.critical_threshold) {
       return MemoryPressure::Critical;
     }
@@ -116,29 +119,47 @@ struct BufferManager::Impl {
     return MemoryPressure::Normal;
   }
 
-  // Emit a pressure event to all subscribers if the level changed.
-  // Subscribers run synchronously under `mu`; the contract documents that
-  // they must not block or re-enter the manager.
-  void maybe_emit_pressure_event_locked() {
-    const MemoryPressure now = compute_pressure_locked();
-    if (now == last_pressure) {
-      return;
+  void initialize_pressure_event_slots() {
+    for (auto& event : pressure_events) {
+      event.pool_name = config.pool_name;
     }
-    BufferPressureEvent event{};
-    event.pool_name = config.pool_name;
-    event.previous = last_pressure;
-    event.current = now;
+  }
+
+  void write_pressure_event_locked(std::size_t index, MemoryPressure previous,
+                                   MemoryPressure current) noexcept {
+    auto& event = pressure_events[index];
+    event.previous = previous;
+    event.current = current;
     event.capacity_bytes = config.capacity_bytes;
     event.in_use_bytes = in_use_bytes;
     event.active_count = active_count;
     event.high_water_bytes = high_water_bytes;
     event.allocation_failures = allocation_failures;
-    last_pressure = now;
-    for (const auto& [_, sub] : pressure_subscribers) {
-      if (sub) {
-        sub(event);
-      }
+  }
+
+  void record_pressure_event_locked(MemoryPressure previous, MemoryPressure current) noexcept {
+    if (pressure_event_count < pressure_events.size()) {
+      const std::size_t index =
+          (pressure_event_start + pressure_event_count) % pressure_events.size();
+      write_pressure_event_locked(index, previous, current);
+      ++pressure_event_count;
+      return;
     }
+    write_pressure_event_locked(pressure_event_start, previous, current);
+    pressure_event_start = (pressure_event_start + 1) % pressure_events.size();
+    ++pressure_events_dropped;
+  }
+
+  // Record a pressure event if the level changed. This function does not
+  // allocate or invoke external code; the fixed ring is prepared at create().
+  void maybe_record_pressure_event_locked() noexcept {
+    const MemoryPressure now = compute_pressure_locked();
+    if (now == last_pressure) {
+      return;
+    }
+    const MemoryPressure previous = last_pressure;
+    last_pressure = now;
+    record_pressure_event_locked(previous, now);
   }
 
   static void free_storage(std::byte* p, std::size_t alignment) noexcept {
@@ -161,8 +182,7 @@ namespace {
 
 Result<void> validate_config(const BufferManagerConfig& cfg) {
   if (cfg.capacity_bytes == 0) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "BufferManagerConfig.capacity_bytes must be > 0");
+    return unexpected(Error::Code::ConfigInvalid, "BufferManagerConfig.capacity_bytes must be > 0");
   }
   if (cfg.max_buffer_bytes != 0 && cfg.max_buffer_bytes > cfg.capacity_bytes) {
     return unexpected(Error::Code::ConfigInvalid,
@@ -197,9 +217,8 @@ BufferManager::~BufferManager() {
   if (!impl_) {
     return;
   }
-  // Reclaim any storage still held in the table. We do not invoke
-  // subscribers from the destructor: the manager is going away and
-  // there is no useful pressure transition to report.
+  // Reclaim any storage still held in the table. The manager is going away,
+  // so there is no useful pressure transition to record.
   std::lock_guard<std::mutex> lock(impl_->mu);
   for (auto& [_, entry] : impl_->entries) {
     if (!entry.released && entry.storage != nullptr) {
@@ -219,16 +238,22 @@ Result<std::unique_ptr<BufferManager>> BufferManager::create(BufferManagerConfig
   if (!ok) {
     return unexpected(std::move(ok).error());
   }
-  auto impl = std::make_unique<Impl>();
-  impl->config = std::move(config);
-  // Wrap with the private constructor; std::make_unique cannot reach it.
-  return std::unique_ptr<BufferManager>(new BufferManager(std::move(impl)));
+  try {
+    auto impl = std::make_unique<Impl>();
+    impl->config = std::move(config);
+    impl->initialize_pressure_event_slots();
+    // Wrap with the private constructor; std::make_unique cannot reach it.
+    return std::unique_ptr<BufferManager>(new BufferManager(std::move(impl)));
+  } catch (const std::bad_alloc&) {
+    return unexpected(Error::Code::OOMError, "BufferManager.create: allocation failed");
+  } catch (...) {
+    return unexpected(Error::Code::Internal, "BufferManager.create: unexpected failure");
+  }
 }
 
 Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t alignment) {
   if (size_bytes == 0) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "BufferManager.allocate: size_bytes must be > 0");
+    return unexpected(Error::Code::ConfigInvalid, "BufferManager.allocate: size_bytes must be > 0");
   }
   std::size_t effective_alignment = alignment;
   {
@@ -252,7 +277,7 @@ Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t al
     if (impl_->in_use_bytes + size_bytes < impl_->in_use_bytes ||  // overflow guard
         impl_->in_use_bytes + size_bytes > impl_->config.capacity_bytes) {
       ++impl_->allocation_failures;
-      impl_->maybe_emit_pressure_event_locked();
+      impl_->maybe_record_pressure_event_locked();
       return unexpected(Error::Code::OOMError,
                         "BufferManager.allocate: capacity_bytes would be exceeded");
     }
@@ -262,10 +287,26 @@ Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t al
       storage = Impl::allocate_storage(size_bytes, effective_alignment);
     } catch (const std::bad_alloc&) {
       ++impl_->allocation_failures;
-      impl_->maybe_emit_pressure_event_locked();
+      impl_->maybe_record_pressure_event_locked();
       return unexpected(Error::Code::OOMError,
                         "BufferManager.allocate: underlying allocator failed");
     }
+    struct StorageGuard {
+      std::byte* storage = nullptr;
+      std::size_t alignment = 0;
+
+      StorageGuard(std::byte* storage_in, std::size_t alignment_in) noexcept
+          : storage(storage_in), alignment(alignment_in) {}
+      ~StorageGuard() noexcept { Impl::free_storage(storage, alignment); }
+
+      StorageGuard(const StorageGuard&) = delete;
+      StorageGuard& operator=(const StorageGuard&) = delete;
+      StorageGuard(StorageGuard&&) = delete;
+      StorageGuard& operator=(StorageGuard&&) = delete;
+
+      void release() noexcept { storage = nullptr; }
+    };
+    StorageGuard storage_guard{storage, effective_alignment};
 
     const std::uint64_t id = impl_->next_id++;
     Impl::Entry entry{};
@@ -273,21 +314,41 @@ Result<BufferRef> BufferManager::allocate(std::size_t size_bytes, std::size_t al
     entry.size_bytes = size_bytes;
     entry.alignment = effective_alignment;
     entry.released = false;
-    impl_->entries.emplace(id, entry);
+    std::unordered_map<std::uint64_t, Impl::Entry>::iterator inserted;
+    try {
+      auto [it, ok] = impl_->entries.emplace(id, entry);
+      if (!ok) {
+        ++impl_->allocation_failures;
+        return unexpected(Error::Code::Internal,
+                          "BufferManager.allocate: generated duplicate buffer id");
+      }
+      inserted = it;
+      storage_guard.release();
+    } catch (const std::bad_alloc&) {
+      ++impl_->allocation_failures;
+      impl_->maybe_record_pressure_event_locked();
+      return unexpected(Error::Code::OOMError,
+                        "BufferManager.allocate: failed to record allocation metadata");
+    } catch (...) {
+      ++impl_->allocation_failures;
+      impl_->maybe_record_pressure_event_locked();
+      return unexpected(Error::Code::Internal,
+                        "BufferManager.allocate: failed to record allocation metadata");
+    }
 
     impl_->in_use_bytes += size_bytes;
     ++impl_->active_count;
     if (impl_->in_use_bytes > impl_->high_water_bytes) {
       impl_->high_water_bytes = impl_->in_use_bytes;
     }
-    impl_->maybe_emit_pressure_event_locked();
+    impl_->maybe_record_pressure_event_locked();
 
     auto ref = BufferRef::create(id, size_bytes, BufferOwnership::Owned);
     if (!ref) {
       // Should not happen given the validation above; treat as a manager
       // invariant violation.
-      Impl::free_storage(storage, effective_alignment);
-      impl_->entries.erase(id);
+      Impl::free_storage(inserted->second.storage, inserted->second.alignment);
+      impl_->entries.erase(inserted);
       impl_->in_use_bytes -= size_bytes;
       --impl_->active_count;
       ++impl_->allocation_failures;
@@ -306,16 +367,15 @@ Result<void> BufferManager::release(BufferRef handle) {
   auto it = impl_->entries.find(handle.id());
   if (it == impl_->entries.end()) {
     ++impl_->release_failures;
-    return unexpected(Error::Code::Internal,
-                      "BufferManager.release: handle id " + std::to_string(handle.id()) +
-                          " is not known to this manager");
+    return unexpected(Error::Code::Internal, "BufferManager.release: handle id " +
+                                                 std::to_string(handle.id()) +
+                                                 " is not known to this manager");
   }
   auto& entry = it->second;
   if (entry.released) {
     ++impl_->release_failures;
-    return unexpected(Error::Code::Internal,
-                      "BufferManager.release: double release of handle id " +
-                          std::to_string(handle.id()));
+    return unexpected(Error::Code::Internal, "BufferManager.release: double release of handle id " +
+                                                 std::to_string(handle.id()));
   }
   if (entry.size_bytes != handle.size_bytes()) {
     ++impl_->release_failures;
@@ -328,7 +388,7 @@ Result<void> BufferManager::release(BufferRef handle) {
 
   impl_->in_use_bytes -= entry.size_bytes;
   --impl_->active_count;
-  impl_->maybe_emit_pressure_event_locked();
+  impl_->maybe_record_pressure_event_locked();
   return Result<void>{};
 }
 
@@ -336,7 +396,7 @@ Result<bool> BufferManager::release_if_owned(BufferRef handle) {
   if (handle.is_null() || handle.ownership() == BufferOwnership::Released) {
     return false;
   }
-  auto r = release(std::move(handle));
+  auto r = release(handle);
   if (!r) {
     return unexpected(std::move(r).error());
   }
@@ -396,25 +456,17 @@ BufferAccounting BufferManager::accounting() const {
   return snap;
 }
 
-std::uint64_t BufferManager::subscribe_pressure(PressureSubscriber subscriber) {
-  if (!subscriber) {
-    return 0;
-  }
+std::vector<BufferPressureEvent> BufferManager::drain_pressure_events() {
   std::lock_guard<std::mutex> lock(impl_->mu);
-  const std::uint64_t id = impl_->next_subscription_id++;
-  impl_->pressure_subscribers.emplace_back(id, std::move(subscriber));
-  return id;
-}
-
-void BufferManager::unsubscribe_pressure(std::uint64_t subscription_id) {
-  if (subscription_id == 0) {
-    return;
+  std::vector<BufferPressureEvent> out;
+  out.reserve(impl_->pressure_event_count);
+  for (std::size_t i = 0; i < impl_->pressure_event_count; ++i) {
+    const std::size_t index = (impl_->pressure_event_start + i) % impl_->pressure_events.size();
+    out.push_back(impl_->pressure_events[index]);
   }
-  std::lock_guard<std::mutex> lock(impl_->mu);
-  auto& subs = impl_->pressure_subscribers;
-  subs.erase(std::remove_if(subs.begin(), subs.end(),
-                            [&](const auto& kv) { return kv.first == subscription_id; }),
-             subs.end());
+  impl_->pressure_event_start = 0;
+  impl_->pressure_event_count = 0;
+  return out;
 }
 
 std::string_view BufferManager::pool_name() const noexcept {

@@ -77,6 +77,15 @@ The helpers in [`runtime/src/buffer/cleanup.cpp`](../../runtime/src/buffer/clean
 `BufferManager::release_if_owned`, which is idempotent on Released and
 null-sentinel handles.
 
+## Pressure Events
+
+The manager derives pressure from in-use bytes and records transitions in
+a bounded in-memory ring. Allocation and release never call callbacks,
+perform I/O, or block on the observability service. Consumers that
+need transition details call `BufferManager::drain_pressure_events()` from
+outside the hot path and forward those plain-value events to metrics or
+logs.
+
 ## What is **not** in scope for v0.1.0
 
 - No GPU/CUDA memory pools. The Vitis AI / DPU adapter design review in

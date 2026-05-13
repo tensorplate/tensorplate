@@ -42,7 +42,7 @@ void rollback(BufferManager& manager, std::vector<BufferRef>& allocated) noexcep
 
 Result<BufferRef> allocate_output_buffer(BufferManager& manager, const TensorView& tensor,
                                          std::size_t buffer_size_bytes,
-                                         OutputAllocationContext /*ctx*/) {
+                                         const OutputAllocationContext& /*ctx*/) {
   auto required = required_buffer_size(tensor);
   if (!required.has_value()) {
     return unexpected(Error::Code::ConfigInvalid,
@@ -62,7 +62,7 @@ Result<BufferRef> allocate_output_buffer(BufferManager& manager, const TensorVie
 }
 
 Result<NamedOutput> build_named_output(BufferManager& manager, const OutputDescriptor& descriptor,
-                                       OutputAllocationContext ctx) {
+                                       const OutputAllocationContext& ctx) {
   if (descriptor.name.empty()) {
     return unexpected(Error::Code::ConfigInvalid, "build_named_output: descriptor has empty name");
   }
@@ -79,18 +79,18 @@ Result<NamedOutput> build_named_output(BufferManager& manager, const OutputDescr
     (void)manager.release_if_owned(handle.value());
     return unexpected(Error::Code::ShapeMismatch,
                       "build_named_output: tensor window does not fit inside allocated "
-                      "buffer for output `" + descriptor.name + "`");
+                      "buffer for output `" +
+                          descriptor.name + "`");
   }
   NamedOutput out{descriptor.name, handle.value(), descriptor.tensor, descriptor.semantic_tag};
   return out;
 }
 
-Result<std::vector<NamedOutput>> build_named_outputs(BufferManager& manager,
-                                                     const std::vector<OutputDescriptor>& descriptors,
-                                                     OutputAllocationContext ctx) {
+Result<std::vector<NamedOutput>> build_named_outputs(
+    BufferManager& manager, const std::vector<OutputDescriptor>& descriptors,
+    const OutputAllocationContext& ctx) {
   if (descriptors.empty()) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "build_named_outputs: descriptor list is empty");
+    return unexpected(Error::Code::ConfigInvalid, "build_named_outputs: descriptor list is empty");
   }
   std::vector<NamedOutput> result;
   result.reserve(descriptors.size());

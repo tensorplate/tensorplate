@@ -18,6 +18,9 @@
 // mock "policy" routine that reads input bytes through the manager and
 // writes mock output bytes back, exactly as a real adapter will.
 
+#include <gtest/gtest.h>
+
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -25,8 +28,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <gtest/gtest.h>
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
@@ -63,8 +64,8 @@ Result<InferResult> run_mock_policy(BufferManager& mgr, const InferRequest& req)
   auto action_view = TensorView::create(DType::Float32, {4, 7});
   EXPECT_TRUE(action_view.has_value());
   std::vector<OutputDescriptor> descs;
-  descs.push_back({"action_chunk", action_view.value(),
-                   std::optional<std::string>{"action_chunk"}, 0});
+  descs.push_back(
+      {"action_chunk", action_view.value(), std::optional<std::string>{"action_chunk"}, 0});
 
   auto outs = build_named_outputs(mgr, descs);
   if (!outs.has_value()) {
@@ -120,8 +121,8 @@ Result<InferResult> run_mock_policy(BufferManager& mgr, const InferRequest& req)
 
 TEST(BufferPlaneE2E, EndToEndVisionRequestThroughBufferPlane) {
   auto mgr = make_manager();
-  const auto fixtures = testing::make_vision_fixture(64, 64, 3);
-  auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+  const auto fixtures = tensorplate::testing::make_vision_fixture(64, 64, 3);
+  auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
   ASSERT_TRUE(inputs.has_value());
 
   auto req = InferRequest::create("vision-1", "/policy", std::move(inputs).value());
@@ -131,8 +132,8 @@ TEST(BufferPlaneE2E, EndToEndVisionRequestThroughBufferPlane) {
   // manager and then release it.
   {
     RequestBufferGuard guard(*mgr, req.value());
-    auto bytes = mgr->view(req.value().inputs().front().buffer,
-                           req.value().inputs().front().tensor);
+    auto bytes =
+        mgr->view(req.value().inputs().front().buffer, req.value().inputs().front().tensor);
     ASSERT_TRUE(bytes.has_value());
     EXPECT_EQ(bytes.value().size(), 64u * 64u * 3u);
     // No outputs in this minimal happy-path assertion; the guard
@@ -143,8 +144,8 @@ TEST(BufferPlaneE2E, EndToEndVisionRequestThroughBufferPlane) {
 
 TEST(BufferPlaneE2E, EndToEndSmolVLARequestProducesInferResult) {
   auto mgr = make_manager();
-  const auto fixtures = testing::make_smolvla_fixture();
-  auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+  const auto fixtures = tensorplate::testing::make_smolvla_fixture();
+  auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
   ASSERT_TRUE(inputs.has_value());
 
   auto req = InferRequest::create("vla-1", "/policy", std::move(inputs).value());
@@ -175,8 +176,8 @@ TEST(BufferPlaneE2E, EndToEndSmolVLARequestProducesInferResult) {
 
 TEST(BufferPlaneE2E, CancellationReleasesEveryInputBuffer) {
   auto mgr = make_manager();
-  const auto fixtures = testing::make_smolvla_fixture();
-  auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+  const auto fixtures = tensorplate::testing::make_smolvla_fixture();
+  auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
   ASSERT_TRUE(inputs.has_value());
 
   auto req = InferRequest::create("cancel-1", "/policy", std::move(inputs).value());
@@ -196,8 +197,8 @@ TEST(BufferPlaneE2E, CancellationReleasesEveryInputBuffer) {
 
 TEST(BufferPlaneE2E, TimeoutReleasesEveryInputBufferThroughGuard) {
   auto mgr = make_manager();
-  const auto fixtures = testing::make_vision_fixture(32, 32, 3);
-  auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+  const auto fixtures = tensorplate::testing::make_vision_fixture(32, 32, 3);
+  auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
   ASSERT_TRUE(inputs.has_value());
 
   // Build a request with an already-expired relative deadline; the
@@ -227,8 +228,8 @@ TEST(BufferPlaneE2E, TimeoutReleasesEveryInputBufferThroughGuard) {
 
 TEST(BufferPlaneE2E, ErrorPathReleasesPartialOutputsAndInputs) {
   auto mgr = make_manager();
-  const auto fixtures = testing::make_vision_fixture(32, 32, 3);
-  auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+  const auto fixtures = tensorplate::testing::make_vision_fixture(32, 32, 3);
+  auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
   ASSERT_TRUE(inputs.has_value());
   auto req = InferRequest::create("err-1", "/policy", std::move(inputs).value());
   ASSERT_TRUE(req.has_value());
@@ -267,20 +268,27 @@ TEST(BufferPlaneE2E, PressureTransitionsObservableUnderRealLoad) {
   auto mgr = BufferManager::create(std::move(cfg)).value();
 
   std::vector<MemoryPressure> levels;
-  mgr->subscribe_pressure([&levels](const BufferPressureEvent& e) { levels.push_back(e.current); });
 
   std::vector<BufferRef> handles;
-  // Allocate 7 buffers of 32 KiB so we cross both thresholds.
-  for (int i = 0; i < 7; ++i) {
+  // Allocate 8 buffers of 32 KiB so we cross both thresholds.
+  for (int i = 0; i < 8; ++i) {
     auto h = mgr->allocate(32 * 1024);
     if (h.has_value()) {
       handles.push_back(h.value());
     }
   }
+  for (const auto& e : mgr->drain_pressure_events()) {
+    levels.push_back(e.current);
+  }
   ASSERT_FALSE(levels.empty());
+  EXPECT_NE(levels.end(), std::find(levels.begin(), levels.end(), MemoryPressure::Warning));
+  EXPECT_NE(levels.end(), std::find(levels.begin(), levels.end(), MemoryPressure::Critical));
   // Walking back down emits a Normal transition.
   for (auto& h : handles) {
     ASSERT_TRUE(mgr->release(h).has_value());
+  }
+  for (const auto& e : mgr->drain_pressure_events()) {
+    levels.push_back(e.current);
   }
   EXPECT_EQ(levels.back(), MemoryPressure::Normal);
 }

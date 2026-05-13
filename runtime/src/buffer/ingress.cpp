@@ -96,8 +96,7 @@ Result<std::vector<NamedInput>> build_named_inputs(BufferManager& manager,
   for (const auto& in : inputs) {
     if (in.name.empty()) {
       rollback(manager, allocated);
-      return unexpected(Error::Code::ConfigInvalid,
-                        "build_named_inputs: input has empty name");
+      return unexpected(Error::Code::ConfigInvalid, "build_named_inputs: input has empty name");
     }
     if (!seen_names.insert(in.name).second) {
       rollback(manager, allocated);
@@ -120,7 +119,8 @@ Result<std::vector<NamedInput>> build_named_inputs(BufferManager& manager,
       rollback(manager, allocated);
       return unexpected(Error::Code::ShapeMismatch,
                         "build_named_inputs: declared tensor window does not fit inside the "
-                        "allocated buffer for input `" + in.name + "`");
+                        "allocated buffer for input `" +
+                            in.name + "`");
     }
 
     result.push_back(NamedInput{in.name, handle.value(), in.tensor});

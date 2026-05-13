@@ -3,7 +3,7 @@
 // V01-E03-F04-T01 / T02 unit coverage for ingress copy and multi-input
 // build helpers.
 
-#include "tensorplate/buffer/ingress.hpp"
+#include <gtest/gtest.h>
 
 #include <array>
 #include <cstddef>
@@ -14,10 +14,9 @@
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
+#include "tensorplate/buffer/ingress.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/infer_request.hpp"
@@ -52,7 +51,8 @@ std::unique_ptr<BufferManager> make_manager(std::size_t capacity = 1024 * 1024,
 
 TEST(IngressCopy, CopiesExactBytesIntoOwnedStorage) {
   auto mgr = make_manager();
-  std::array<std::byte, 4> input{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+  std::array<std::byte, 4> input{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                 std::byte{0xEF}};
   auto h = copy_payload_into_buffer(*mgr, std::span<const std::byte>(input));
   ASSERT_TRUE(h.has_value());
   EXPECT_EQ(h.value().size_bytes(), 4u);

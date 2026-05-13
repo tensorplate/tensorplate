@@ -12,17 +12,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `examples/buffer_plane/` that walks the V01-E03 buffer plane end to
   end: ingress copy → `BufferRef` + `TensorView` → `InferRequest` →
   mock policy → `InferResult` → cancellation cleanup → double-release
-  diagnosis → pressure-event subscription. Toggle with the
+  diagnosis → pressure-event draining. Toggle with the
   `TP_BUILD_EXAMPLES` CMake option (defaults ON).
 - T2 integration test `tp_test_integration` exercising the same loop
   under GoogleTest (`test/integration/buffer_plane_e2e_test.cpp`).
 - Memory-pressure event shape and emission: `MemoryPressure` level
   (normal / warning / critical), `BufferPressureEvent` payload (pool
   name, previous + current level, capacity, in-use bytes, active count,
-  high-water mark, allocation failures), and a subscribe/unsubscribe
-  hook on `BufferManager`. The buffer manager emits one event per
-  threshold crossing; metrics collection cannot block buffer allocation
-  or release. Mirrored on the wire in
+  high-water mark, allocation failures), and a bounded event ring drained
+  through `BufferManager::drain_pressure_events`. The buffer manager
+  records one event per threshold crossing without invoking callbacks or
+  I/O on allocation/release paths. Mirrored on the wire in
   `protocol/schemas/buffer_pressure_event.json` and in the Rust
   `tensorplate-protocol` crate (V01-E03-F06).
 - Session output helpers `allocate_output_buffer`, `build_named_output`,
@@ -42,10 +42,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   HTTP router (V01-E03-F04).
 - Buffer cleanup helpers `release_request_buffers`,
   `release_partial_outputs`, and the `RequestBufferGuard` RAII wrapper.
-  Helpers release every unique buffer id at most once, do not block,
-  preserve original request errors, and report release failures through
-  a `CleanupReport`. Used by scheduler cancellation, deadline expiry,
-  and execution-session error paths (V01-E03-F03).
+  Helpers release every unique buffer id at most once, never throw, avoid
+  allocation on the successful cleanup path, preserve original request
+  errors, and report release failures through a `CleanupReport`. Used by
+  scheduler cancellation, deadline expiry, and execution-session error
+  paths (V01-E03-F03).
 - `BufferManager` v0.1.0 CPU buffer plane: capacity-bounded allocator with
   monotonic ids, aligned heap-backed storage, validated configuration,
   thread-safe allocate/release/data/view access, accounting snapshot

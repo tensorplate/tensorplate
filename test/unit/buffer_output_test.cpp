@@ -2,17 +2,16 @@
 //
 // V01-E03-F05-T01 / T02 unit coverage for session output buffer helpers.
 
-#include "tensorplate/buffer/output.hpp"
+#include <gtest/gtest.h>
 
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
+#include "tensorplate/buffer/output.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/infer_result.hpp"

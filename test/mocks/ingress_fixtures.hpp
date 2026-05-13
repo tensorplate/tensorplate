@@ -61,7 +61,8 @@ inline std::vector<PayloadFixture> make_smolvla_fixture() {
     for (std::size_t i = 0; i < b.size(); ++i)
       b[i] = static_cast<std::byte>(i & 0xFF);
     auto v = TensorView::create(DType::UInt8, {h, w, c});
-    if (!v.has_value()) std::abort();
+    if (!v.has_value())
+      std::abort();
     out.push_back(PayloadFixture{"image_front", std::move(b), v.value()});
   }
   // Wrist camera: same shape, different bytes so equality checks can
@@ -74,7 +75,8 @@ inline std::vector<PayloadFixture> make_smolvla_fixture() {
     for (std::size_t i = 0; i < b.size(); ++i)
       b[i] = static_cast<std::byte>((i * 7 + 13) & 0xFF);
     auto v = TensorView::create(DType::UInt8, {h, w, c});
-    if (!v.has_value()) std::abort();
+    if (!v.has_value())
+      std::abort();
     out.push_back(PayloadFixture{"image_wrist", std::move(b), v.value()});
   }
   // State vector: float32, length 8.
@@ -84,7 +86,8 @@ inline std::vector<PayloadFixture> make_smolvla_fixture() {
     for (std::size_t i = 0; i < b.size(); ++i)
       b[i] = static_cast<std::byte>(i);
     auto v = TensorView::create(DType::Float32, {n});
-    if (!v.has_value()) std::abort();
+    if (!v.has_value())
+      std::abort();
     out.push_back(PayloadFixture{"state", std::move(b), v.value()});
   }
   // Instruction tokens: int64, length 16.
@@ -94,7 +97,8 @@ inline std::vector<PayloadFixture> make_smolvla_fixture() {
     for (std::size_t i = 0; i < b.size(); ++i)
       b[i] = static_cast<std::byte>(i + 100);
     auto v = TensorView::create(DType::Int64, {n});
-    if (!v.has_value()) std::abort();
+    if (!v.has_value())
+      std::abort();
     out.push_back(PayloadFixture{"instruction_tokens", std::move(b), v.value()});
   }
   return out;

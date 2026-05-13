@@ -2,7 +2,7 @@
 //
 // V01-E03-F03-T01 / T02 unit coverage for the buffer cleanup helpers.
 
-#include "tensorplate/buffer/cleanup.hpp"
+#include <gtest/gtest.h>
 
 #include <cstddef>
 #include <memory>
@@ -10,10 +10,9 @@
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
-
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/infer_request.hpp"

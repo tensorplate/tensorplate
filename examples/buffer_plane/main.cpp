@@ -10,7 +10,7 @@
 //     -> mock policy execution (read inputs, write output)
 //     -> InferResult
 //     -> cancellation/timeout/error cleanup demos
-//     -> pressure-event subscriber demo
+//     -> pressure-event drain demo
 //
 // The program exits 0 on success and a non-zero exit code on the first
 // buffer-plane invariant violation. It is meant for `make example` and
@@ -38,13 +38,13 @@ namespace {
 
 using namespace tensorplate;
 
-#define EXAMPLE_CHECK(cond, msg)                                            \
-  do {                                                                      \
-    if (!(cond)) {                                                          \
-      std::fprintf(stderr, "buffer-plane example FAILED: %s (%s:%d)\n",     \
-                   (msg), __FILE__, __LINE__);                              \
-      std::exit(1);                                                         \
-    }                                                                       \
+#define EXAMPLE_CHECK(cond, msg)                                                         \
+  do {                                                                                   \
+    if (!(cond)) {                                                                       \
+      std::fprintf(stderr, "buffer-plane example FAILED: %s (%s:%d)\n", (msg), __FILE__, \
+                   __LINE__);                                                            \
+      std::exit(1);                                                                      \
+    }                                                                                    \
   } while (0)
 
 void log_accounting(const BufferManager& mgr, const char* tag) {
@@ -61,13 +61,15 @@ Result<InferResult> run_mock_policy(BufferManager& mgr, const InferRequest& req)
   RequestBufferGuard input_guard(mgr, req);
 
   auto action_view = TensorView::create(DType::Float32, {4, 7});
-  if (!action_view) return unexpected(std::move(action_view).error());
+  if (!action_view)
+    return unexpected(std::move(action_view).error());
   std::vector<OutputDescriptor> descs;
-  descs.push_back({"action_chunk", action_view.value(),
-                   std::optional<std::string>{"action_chunk"}, 0});
+  descs.push_back(
+      {"action_chunk", action_view.value(), std::optional<std::string>{"action_chunk"}, 0});
 
   auto outs = build_named_outputs(mgr, descs);
-  if (!outs) return unexpected(std::move(outs).error());
+  if (!outs)
+    return unexpected(std::move(outs).error());
 
   // Touch one named input through the safe view path so we exercise
   // the bounds-checked accessor.
@@ -120,8 +122,8 @@ int main() {
 
   // 2. SmolVLA-style multi-input request: ingress copy + InferRequest.
   {
-    const auto fixtures = testing::make_smolvla_fixture();
-    auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+    const auto fixtures = tensorplate::testing::make_smolvla_fixture();
+    auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
     EXAMPLE_CHECK(inputs.has_value(), "build_named_inputs(smolvla)");
     auto req = InferRequest::create("smolvla-1", "/policy", std::move(inputs).value());
     EXAMPLE_CHECK(req.has_value(), "InferRequest::create");
@@ -142,8 +144,8 @@ int main() {
 
   // 3. Cancellation cleanup: build a request, cancel it, ensure inputs go away.
   {
-    const auto fixtures = testing::make_vision_fixture(32, 32, 3);
-    auto inputs = build_named_inputs(*mgr, testing::as_ingress_inputs(fixtures));
+    const auto fixtures = tensorplate::testing::make_vision_fixture(32, 32, 3);
+    auto inputs = build_named_inputs(*mgr, tensorplate::testing::as_ingress_inputs(fixtures));
     EXAMPLE_CHECK(inputs.has_value(), "build_named_inputs(vision)");
     auto req = InferRequest::create("vision-cancel", "/policy", std::move(inputs).value());
     EXAMPLE_CHECK(req.has_value(), "InferRequest::create(cancel)");
@@ -171,22 +173,26 @@ int main() {
   // 5. Pressure events as the pool fills and drains.
   {
     int transitions = 0;
-    auto sub = mgr->subscribe_pressure([&transitions](const BufferPressureEvent& e) {
-      ++transitions;
-      std::printf("[pressure] %s -> %s (in_use=%zu, capacity=%zu)\n",
-                  std::string(to_string(e.previous)).c_str(),
-                  std::string(to_string(e.current)).c_str(), e.in_use_bytes, e.capacity_bytes);
-    });
+    auto print_events = [&]() {
+      for (const auto& e : mgr->drain_pressure_events()) {
+        ++transitions;
+        std::printf("[pressure] %s -> %s (in_use=%zu, capacity=%zu)\n",
+                    std::string(to_string(e.previous)).c_str(),
+                    std::string(to_string(e.current)).c_str(), e.in_use_bytes, e.capacity_bytes);
+      }
+    };
 
     std::vector<BufferRef> handles;
     for (int i = 0; i < 60; ++i) {
       auto h = mgr->allocate(64 * 1024);
-      if (h.has_value()) handles.push_back(h.value());
+      if (h.has_value())
+        handles.push_back(h.value());
     }
+    print_events();
     for (auto& h : handles) {
       EXAMPLE_CHECK(mgr->release(h).has_value(), "release pressure-test handle");
     }
-    mgr->unsubscribe_pressure(sub);
+    print_events();
     EXAMPLE_CHECK(transitions >= 2, "at least one threshold crossing observed");
     std::printf("[pressure] observed %d transitions\n", transitions);
   }
