@@ -27,5 +27,6 @@ include(GoogleTest)
 
 add_subdirectory(unit)
 add_subdirectory(integration)
+add_subdirectory(contract)
 
-# T3/T4/T5 subdirectories are added when their first test lands.
+# T4/T5 subdirectories are added when their first test lands.

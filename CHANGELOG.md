@@ -8,6 +8,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Real-adapter conformance harness (V01-E05-F06-T01) at
+  `test/contract/real_adapter_conformance_test.cpp` (T3). Reuses the
+  V01-E04 `ExecutionSession` conformance suite from
+  `test/contract/execution_session_conformance.hpp` and runs it
+  against every adapter compiled into this build of `tp_runtime`. The
+  `python_pytorch` adapter passes the full lifecycle suite on host CI
+  via the `FixtureBackend`; the TensorRT and LibTorch variants run
+  only when their SDKs are detected (HIL/release tier per
+  V01-E05-F02 / F03). `test/CMakeLists.txt` now compiles
+  `tp_test_contract` and labels its tests `T3`.
+- Sidecar failure-injection tests (V01-E05-F06-T03) at
+  `backends/python_pytorch/tests/test_failure_injection.py`. The
+  `FixtureBackend` exposes `fail_load` / `fail_prime` / `fail_infer`
+  hooks; the new tests cover typed `load_failed`, `inference_failed`,
+  `config_invalid` (missing model_spec, malformed tensor entry), and
+  the cancel-then-recordable-by-backend path. Combined with the
+  V01-E05-F04 runner tests, the failure matrix now covers startup
+  failure, malformed response, timeout, cancellation, process exit
+  (covered via the C++ supervisor's shutdown path), missing
+  heartbeat, and deterministic buffer release.
+- Golden-output fixture matrix and tolerance documentation at
+  `test/models/GOLDEN_FIXTURES.md`. Defines what a golden fixture
+  means for each adapter family, where each runs in the CI tier, how
+  it is generated, what its expected output and tolerance are, and
+  how the JSON comparison helper will work when the first real
+  fixture lands. The fixture backend round-trip already covers exact
+  bytewise correctness for `python_pytorch`; vision-TensorRT and
+  LibTorch golden artifacts land in V01-E05-F02-T03 / F03-T03 /
+  V01-E15.
 - Python/PyTorch sidecar execution-backend adapter and supervisor
   (V01-E05-F05) under `runtime/src/adapters/python_pytorch/`,
   registered as `python_pytorch`. The adapter forks one Python sidecar
