@@ -45,17 +45,6 @@ BackendRegistry& shared_registry() {
   return reg;
 }
 
-BufferManager* shared_manager() {
-  static std::unique_ptr<BufferManager> mgr = []() {
-    BufferManagerConfig bm;
-    bm.pool_name = "real-adapter-conformance";
-    bm.capacity_bytes = 1 << 20;
-    bm.max_buffer_bytes = 1 << 18;
-    return BufferManager::create(std::move(bm)).value();
-  }();
-  return mgr.get();
-}
-
 TEST(RealAdapterConformance, PythonPytorchSatisfiesV01E04Contract) {
   if (!python_backend_available()) {
     GTEST_SKIP() << "tensorplate_pytorch_backend not importable";
@@ -65,9 +54,13 @@ TEST(RealAdapterConformance, PythonPytorchSatisfiesV01E04Contract) {
   cfg.expected_backend_name = "python_pytorch";
   cfg.backend_hint = "python_pytorch";
 
-  testing::SessionFactory factory = []() -> std::unique_ptr<ExecutionSession> {
+  // Bind the adapter's BufferManager hook to the scenario's manager so
+  // input reads (`manager->view`) and output allocations
+  // (`manager->allocate`) all happen against the same accounting.
+  testing::SessionFactoryWithManager factory =
+      [](BufferManager& manager) -> std::unique_ptr<ExecutionSession> {
     ExecutionSessionRuntimeHooks hooks{};
-    hooks.buffer_manager = shared_manager();
+    hooks.buffer_manager = &manager;
     auto session = shared_registry().create_session("python_pytorch", hooks);
     EXPECT_TRUE(session.has_value()) << (session.has_value() ? "" : session.error().message);
     return std::move(session).value();
