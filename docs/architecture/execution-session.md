@@ -9,18 +9,6 @@ tree. Changes here require tech lead approval.
 
 The canonical public C++ type is **`tensorplate::ExecutionSession`**.
 
-Context:
-
-- The v0.1.0 architecture and roadmap
-  ([`tensorplate-internals/planning/v0.1.0/tensorplate-oss-v0.1-architecture-and-roadmap.md`](../../tensorplate-internals/planning/v0.1.0/tensorplate-oss-v0.1-architecture-and-roadmap.md))
-  refers to the public lifecycle interface as `ExecutionSession`.
-- An older draft of the implementation guidelines
-  (`tensorplate-internals/guidelines/implementation-guidlines.md`) referred to
-  the same concept as `ModelLoader`. That alternate spelling is **not**
-  introduced as a real type, an alias, or a compatibility shim. The
-  guideline document will be updated; until it is, treat every mention of
-  `ModelLoader` in the implementation guidelines as a synonym for the public
-  `ExecutionSession`.
 
 There is exactly one canonical public method set:
 
