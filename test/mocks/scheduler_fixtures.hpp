@@ -72,17 +72,28 @@ inline SchedulerRequest make_request_with_owned_buffer(
     BufferManager& manager, const SchedulerClock& clock, std::string request_id,
     std::size_t byte_size = 64,
     std::optional<InferRequest::TimePoint> deadline = std::nullopt) {
-  auto buf = manager.allocate(byte_size).value();
-  auto view = TensorView::create(DType::Float32,
-                                 {1, static_cast<std::int64_t>(byte_size / 4)}, Layout::RowMajor,
-                                 0, byte_size)
-                  .value();
+  auto buf_r = manager.allocate(byte_size);
+  if (!buf_r) {
+    throw std::runtime_error("test fixture: manager.allocate failed: " + buf_r.error().message);
+  }
+  auto buf = std::move(buf_r).value();
+  auto view_r = TensorView::create(DType::Float32,
+                                   {1, static_cast<std::int64_t>(byte_size / 4)},
+                                   Layout::RowMajor, 0, byte_size);
+  if (!view_r) {
+    throw std::runtime_error("test fixture: TensorView::create failed: " +
+                             view_r.error().message);
+  }
+  auto view = std::move(view_r).value();
   std::vector<NamedInput> inputs;
   inputs.push_back(NamedInput{"input", buf, view});
-  auto req = InferRequest::create(std::move(request_id), "test/endpoint", std::move(inputs), {},
-                                  deadline)
-                 .value();
-  return SchedulerRequest{std::move(req), "mock", "model", {}, clock.now()};
+  auto req_r = InferRequest::create(std::move(request_id), "test/endpoint", std::move(inputs),
+                                    {}, deadline);
+  if (!req_r) {
+    throw std::runtime_error("test fixture: InferRequest::create failed: " +
+                             req_r.error().message);
+  }
+  return SchedulerRequest{std::move(req_r).value(), "mock", "model", {}, clock.now()};
 }
 
 /// Recording event sink used across scheduler tests.

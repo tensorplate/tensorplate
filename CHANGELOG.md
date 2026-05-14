@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Deadline-aware admission and queued-expiry coverage (V01-E06-F03)
+  at `test/unit/scheduler_deadline_test.cpp`. The `FifoScheduler`
+  uses the injected `SchedulerClock` (monotonic only) for every
+  deadline decision and rejects new admission with
+  `Error::Code::Timeout` when a request is already past its deadline
+  or when its estimated completion exceeds `deadline +
+  deadline_margin`. The estimate accounts for current queue depth
+  and in-flight count using the configured
+  `default_service_estimate`; per-request `ServiceEstimate` overrides
+  the default. `expire_due()` and `next()` both sweep stale queued
+  requests, releasing input buffers through `release_request_buffers`
+  when a `BufferManager` is wired into runtime hooks. 12 T1 cases
+  cover boundary admission, monotonic-time isolation from wall
+  clock, queue-depth-aware rejection, and deterministic
+  buffer release on rejection. The shared `FakeSchedulerClock`
+  default origin is now anchored to real `steady_clock` + 1 hour so
+  deadlines composed against the fake clock also satisfy
+  `InferRequest::create`'s validation gate.
 - FIFO scheduler ordering and capacity coverage (V01-E06-F02) at
   `test/unit/scheduler_fifo_test.cpp`. The v0.1.0 default
   `FifoScheduler` (registered under the stable `fifo` policy key)

@@ -14,16 +14,18 @@
 
 namespace tensorplate::testing {
 
-/// Monotonic fake clock. Construction starts at an arbitrary monotonic
-/// origin so tests do not accidentally depend on the system steady
-/// clock's epoch.
+/// Monotonic fake clock. Construction starts past real
+/// `std::chrono::steady_clock::now()` so deadlines computed from
+/// `now()` are also valid against real-clock validation paths inside
+/// value objects (e.g. InferRequest::create).
 class FakeSchedulerClock final : public SchedulerClock {
  public:
-  /// Start the fake at `origin`. Defaults to a fixed offset 1 hour
-  /// past `steady_clock`'s zero so the fake never returns zero (which
-  /// some metric encoders treat as "missing").
-  explicit FakeSchedulerClock(
-      SchedulerClock::TimePoint origin = SchedulerClock::TimePoint{std::chrono::hours{1}}) noexcept
+  /// Default origin: real steady_clock now + 1 hour so any deadline
+  /// derived from this fake clock is unambiguously "in the future"
+  /// against either clock domain. Tests that need a specific origin
+  /// pass one explicitly.
+  explicit FakeSchedulerClock(SchedulerClock::TimePoint origin = std::chrono::steady_clock::now() +
+                                                                  std::chrono::hours{1}) noexcept
       : now_(origin) {}
 
   TimePoint now() const noexcept override {

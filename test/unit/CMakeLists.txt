@@ -29,6 +29,7 @@ add_executable(tp_test_unit
   sidecar_codec_test.cpp
   scheduler_interface_test.cpp
   scheduler_fifo_test.cpp
+  scheduler_deadline_test.cpp
 )
 
 target_include_directories(tp_test_unit
