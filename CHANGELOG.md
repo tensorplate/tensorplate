@@ -8,6 +8,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Scheduler completion, cancellation, and buffer-cleanup coverage
+  (V01-E06-F04) at `test/unit/scheduler_cancellation_test.cpp`.
+  `on_completion` removes in-flight accounting exactly once;
+  duplicate completion and completion of an unknown id return
+  typed `Error::Code::Internal` no-ops. `cancel` handles queued and
+  in-flight requests by id: queued cancellation removes from the
+  queue and releases input `BufferRef`s through the V01-E03 cleanup
+  helpers; in-flight cancellation clears accounting and tombstones
+  the id so a racing `on_completion` is a typed no-op. Double
+  cancel and cancel-after-completion surface
+  `Error::Code::NotReady`. `expire_due()` releases queued input
+  buffers on stale-deadline removal. `shutdown()` drains every
+  queued request (releasing buffers), tombstones every in-flight id,
+  and flips subsequent admits to `Error::Code::NotReady`. SmolVLA-
+  style async chunk requests (with `RequestMetadata::action_chunk_id`
+  /`action_chunk_sequence`) and synchronous vision requests share
+  the same cleanup path. 12 T1 cases.
 - Deadline-aware admission and queued-expiry coverage (V01-E06-F03)
   at `test/unit/scheduler_deadline_test.cpp`. The `FifoScheduler`
   uses the injected `SchedulerClock` (monotonic only) for every
