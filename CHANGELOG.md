@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `InferScheduler` public interface (V01-E06-F01) at
+  `include/tensorplate/scheduler/scheduler.hpp` plus the supporting
+  envelope (`SchedulerRequest`), monotonic clock abstraction
+  (`SchedulerClock` / `SystemSchedulerClock`), pressure value
+  objects (`PressureSignal`, `PressureSource`, `PressureSeverity`),
+  and the `SchedulerEvent` / `SchedulerEventSink` /
+  `SchedulerMetrics` types. Includes the `InferSchedulerConcept`
+  compile-time interface check. Strategy pattern is mediated by a
+  `SchedulerPolicyRegistry` and the `make_scheduler` /
+  `validate_scheduler_config` factory entry points in
+  `include/tensorplate/scheduler/factory.hpp`. v0.1.0 registers the
+  built-in `fifo` policy; unknown policies return
+  `Error::Code::Unsupported`. New config schema at
+  `config/schemas/scheduler.json`. Architecture doc at
+  `docs/architecture/scheduler.md`. T1 coverage at
+  `test/unit/scheduler_interface_test.cpp` plus shared mocks at
+  `test/mocks/fake_scheduler_clock.hpp` and
+  `test/mocks/scheduler_fixtures.hpp`.
 - Kria / Vitis AI adapter design-review document at
   `docs/architecture/kria-vitis-ai-review.md` (V01-E05-F07). Maps a
   future Xilinx/AMD Kria adapter using Vitis AI and DPU execution

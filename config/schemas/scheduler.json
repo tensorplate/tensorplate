@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/scheduler.json",
+  "title": "TensorPlate Scheduler Config",
+  "description": "Runtime configuration consumed by the serving worker to construct an InferScheduler. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerConfig.\n\nv0.1.0 supports the 'fifo' policy. Unknown policy strings are rejected with Error::Code::Unsupported. All durations are monotonic; wall-clock time is never consulted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "policy": {
+      "type": "string",
+      "enum": ["fifo"],
+      "description": "Stable scheduler policy key. v0.1.0 supports only 'fifo'."
+    },
+    "queue_capacity": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 64,
+      "description": "Maximum admitted-but-undispatched depth. Admission past this returns Error::Code::OOMError."
+    },
+    "in_flight_capacity": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Maximum concurrent in-flight requests. Defaults to 1 to reflect the single-session serving model."
+    },
+    "deadline_margin_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5,
+      "description": "Deadline-margin in milliseconds. The scheduler accepts a request whose estimated completion is at most this many milliseconds later than its deadline."
+    },
+    "default_service_estimate_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 10,
+      "description": "Service-time estimate in milliseconds when no per-request estimate is available."
+    },
+    "pressure_reject_threshold": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"],
+      "default": "critical",
+      "description": "Pressure severity at which new admission is rejected. 'normal' disables pressure-based rejection (record-only mode); 'critical' is the recommended v0.1.0 default."
+    }
+  }
+}

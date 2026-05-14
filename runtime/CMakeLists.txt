@@ -38,6 +38,11 @@ set(_tp_runtime_sources
   # adapter consumes them yet.
   src/ipc/sidecar_codec.cpp
   src/ipc/unix_socket.cpp
+  # V01-E06: scheduler baseline. Interface, FIFO implementation,
+  # factory, and shared string helpers.
+  src/scheduler/scheduler_strings.cpp
+  src/scheduler/factory.cpp
+  src/scheduler/fifo_scheduler.cpp
 )
 
 if(TP_ENABLE_TENSORRT)
