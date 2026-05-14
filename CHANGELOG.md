@@ -8,6 +8,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Scheduler memory and thermal pressure-aware admission
+  (V01-E06-F06). New protocol schema at
+  `protocol/schemas/scheduler_pressure_signal.json` documents the
+  `PressureSignal` value object (`source`, `severity`,
+  `timestamp_unix_nanos`, optional bounded `detail`) without any
+  vendor SDK type. The scheduler records the most recent severity
+  per source; `SchedulerConfig::pressure_reject_threshold` selects
+  whether warning- or critical-level pressure rejects new admission
+  with `Error::Code::OOMError` (incrementing
+  `admission_rejected_pressure`) or runs in record-only mode.
+  Queued and in-flight work is never killed solely by a pressure
+  signal at v0.1.0 baseline. T1 coverage at
+  `test/unit/scheduler_pressure_test.cpp` (10 cases) including the
+  V01-E03 `BufferAccounting::pressure -> PressureSeverity` mapping
+  used to bridge buffer-plane accounting into the scheduler.
 - Scheduler metrics and event protocol schemas (V01-E06-F05) at
   `protocol/schemas/scheduler_metrics.json` and
   `protocol/schemas/scheduler_event.json`. The metrics snapshot

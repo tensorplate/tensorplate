@@ -32,6 +32,7 @@ add_executable(tp_test_unit
   scheduler_deadline_test.cpp
   scheduler_cancellation_test.cpp
   scheduler_metrics_test.cpp
+  scheduler_pressure_test.cpp
 )
 
 target_include_directories(tp_test_unit
