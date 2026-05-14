@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/scheduler_event.json",
+  "title": "TensorPlate Scheduler Event",
+  "description": "Bounded event record emitted by the v0.1.0 InferScheduler on admission, dispatch, completion, cancellation, expiry, and pressure transitions. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerEvent.\n\nThe scheduler emits one event per state transition. Labels are explicit fields so downstream observability (V01-E12) can scrape them without parsing free text. Slow event subscribers cannot block scheduler critical-path methods (admit / next / on_completion / cancel / expire_due / on_pressure / shutdown): the scheduler invokes the sink inside a defensive try/catch and never blocks on it.\n\nThis schema intentionally does NOT carry raw payload bytes, BufferRef ids, or per-request labels beyond the bounded fields below.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "policy", "timestamp_unix_nanos"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "admitted",
+        "admission_rejected",
+        "dispatched",
+        "completed",
+        "cancelled",
+        "expired",
+        "memory_pressure",
+        "thermal_pressure"
+      ]
+    },
+    "request_id": {
+      "type": "string",
+      "description": "Originating request id. Empty for some pressure events."
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "Routing identity from the request envelope."
+    },
+    "backend_name": {
+      "type": "string",
+      "description": "Adapter that owns or would own the request. Stable, low-cardinality label."
+    },
+    "policy": {
+      "type": "string",
+      "enum": ["fifo"],
+      "description": "Stable scheduler policy label echoed on every event."
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Optional bounded error code carried on rejection / expiry / cancellation events."
+    },
+    "completion_status": {
+      "type": "string",
+      "enum": ["success", "failure"],
+      "description": "Populated for 'completed' events."
+    },
+    "cancellation_reason": {
+      "type": "string",
+      "enum": ["client_request", "stale_sequence", "shutdown", "pressure"],
+      "description": "Populated for 'cancelled' events."
+    },
+    "pressure_source": {
+      "type": "string",
+      "enum": ["memory", "thermal"],
+      "description": "Populated for 'memory_pressure' / 'thermal_pressure' events."
+    },
+    "pressure_severity": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"],
+      "description": "Populated for 'memory_pressure' / 'thermal_pressure' events and for pressure-related rejections."
+    },
+    "wait_time_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic wait time spent in the queue before the event fired. Populated on 'dispatched', 'cancelled', and 'expired' for queued requests; zero otherwise."
+    },
+    "timestamp_unix_nanos": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic timestamp captured by the scheduler when the event was recorded. Encoded as steady-clock time_since_epoch nanoseconds; not directly comparable to wall-clock timestamps but stable per process."
+    }
+  }
+}

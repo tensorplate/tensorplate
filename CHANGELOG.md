@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Scheduler metrics and event protocol schemas (V01-E06-F05) at
+  `protocol/schemas/scheduler_metrics.json` and
+  `protocol/schemas/scheduler_event.json`. The metrics snapshot
+  documents queue depth / in-flight count / accepted / rejected
+  (overload / deadline / pressure) / expired / cancelled / completed
+  (success / failure) / pressure-event counters, plus wait-time
+  aggregates (sum / samples / max) using monotonic
+  steady-clock nanoseconds. The event schema documents the bounded
+  event labels (`endpoint`, `backend_name`, `policy`,
+  `error_code`, `completion_status`, `cancellation_reason`,
+  `pressure_source`, `pressure_severity`, `wait_time_ns`,
+  `timestamp_unix_nanos`) emitted on every state transition. T1
+  coverage at `test/unit/scheduler_metrics_test.cpp` (10 cases)
+  asserts counter increments per state-transition path, event
+  ordering, bounded labels, and that a throwing event sink cannot
+  break the scheduler critical path or counter accuracy.
 - Scheduler completion, cancellation, and buffer-cleanup coverage
   (V01-E06-F04) at `test/unit/scheduler_cancellation_test.cpp`.
   `on_completion` removes in-flight accounting exactly once;
