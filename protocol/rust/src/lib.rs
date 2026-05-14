@@ -53,7 +53,7 @@ pub use infer_result::{
 };
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 pub use python_pytorch_ipc::{
-    IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
+    IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
 };
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
 pub use worker_status::{ComponentState, WorkerStatus, WorkerStatusError};

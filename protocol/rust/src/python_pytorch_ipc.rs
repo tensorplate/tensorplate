@@ -73,6 +73,15 @@ pub struct IpcMetric {
 
 impl Eq for IpcMetric {}
 
+/// Payload of successful `health_check_response` messages.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IpcHealth {
+    pub ready: bool,
+    pub backend_factory: Option<String>,
+    pub uptime_ns: u64,
+    pub last_error: Option<String>,
+}
+
 /// Mirror of `protocol/schemas/python_pytorch_ipc.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IpcMessage {
@@ -85,6 +94,9 @@ pub struct IpcMessage {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ns: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub async_id: Option<u64>,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tensors: Vec<IpcTensor>,
@@ -101,6 +113,9 @@ pub struct IpcMessage {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<IpcMetric>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<IpcHealth>,
 }
 
 impl Eq for IpcMessage {}
@@ -143,6 +158,14 @@ pub enum IpcMessageError {
     ErrorEventRequiresErrorStatus,
     #[error("successful infer responses require at least one output tensor")]
     InferOkResponseMissingTensors,
+    #[error("successful infer_async responses require async_id")]
+    InferAsyncOkResponseMissingAsyncId,
+    #[error("IpcMessage.async_id, if present, must be > 0")]
+    ZeroAsyncId,
+    #[error("successful health_check_response messages require health")]
+    HealthResponseMissingHealth,
+    #[error("health.backend_factory, if present, must be non-empty")]
+    EmptyHealthBackendFactory,
 }
 
 impl IpcMessage {
@@ -165,11 +188,13 @@ impl IpcMessage {
             kind: IpcMessageKind::LoadModel,
             correlation_id: None,
             deadline_ns: None,
+            async_id: None,
             tensors: Vec::new(),
             model_spec: Some(model_spec),
             status: None,
             error: None,
             metric: None,
+            health: None,
         })
     }
 
@@ -190,17 +215,20 @@ impl IpcMessage {
         let model_spec = validate_model_spec(self.model_spec)?;
         let error = validate_error(self.error)?;
         validate_metric(&self.metric)?;
+        validate_health(&self.health)?;
         let normalized = Self {
             schema_version: SCHEMA_VERSION.to_string(),
             message_id: self.message_id,
             kind: self.kind,
             correlation_id: self.correlation_id,
             deadline_ns: self.deadline_ns,
+            async_id: self.async_id,
             tensors,
             model_spec,
             status: self.status,
             error,
             metric: self.metric,
+            health: self.health,
         };
 
         validate_kind_invariants(&normalized)?;
@@ -270,7 +298,22 @@ fn validate_metric(metric: &Option<IpcMetric>) -> Result<(), IpcMessageError> {
     Ok(())
 }
 
+fn validate_health(health: &Option<IpcHealth>) -> Result<(), IpcMessageError> {
+    if matches!(
+        health
+            .as_ref()
+            .and_then(|health| health.backend_factory.as_deref()),
+        Some("")
+    ) {
+        return Err(IpcMessageError::EmptyHealthBackendFactory);
+    }
+    Ok(())
+}
+
 fn validate_kind_invariants(message: &IpcMessage) -> Result<(), IpcMessageError> {
+    if message.async_id == Some(0) {
+        return Err(IpcMessageError::ZeroAsyncId);
+    }
     if matches!(
         message.kind,
         IpcMessageKind::Infer | IpcMessageKind::InferAsync
@@ -304,6 +347,20 @@ fn validate_kind_invariants(message: &IpcMessage) -> Result<(), IpcMessageError>
     {
         return Err(IpcMessageError::InferOkResponseMissingTensors);
     }
+    if matches!(
+        (message.kind, message.status),
+        (IpcMessageKind::InferAsyncResponse, Some(IpcStatus::Ok))
+    ) && message.async_id.is_none()
+    {
+        return Err(IpcMessageError::InferAsyncOkResponseMissingAsyncId);
+    }
+    if matches!(
+        (message.kind, message.status),
+        (IpcMessageKind::HealthCheckResponse, Some(IpcStatus::Ok))
+    ) && message.health.is_none()
+    {
+        return Err(IpcMessageError::HealthResponseMissingHealth);
+    }
     Ok(())
 }
 
@@ -332,7 +389,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
+        IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
         SCHEMA_VERSION,
     };
     use crate::decode_with_version_check;
@@ -382,6 +439,7 @@ mod tests {
             kind: IpcMessageKind::Infer,
             correlation_id: Some("req-7".into()),
             deadline_ns: Some(1_700_000_000_000),
+            async_id: None,
             tensors: vec![IpcTensor {
                 name: "image".into(),
                 tensor: view,
@@ -392,6 +450,7 @@ mod tests {
             status: None,
             error: None,
             metric: None,
+            health: None,
         };
         let json = serde_json::to_string(&m).expect("serialize");
         let back: IpcMessage = serde_json::from_str(&json).expect("deserialize");
@@ -408,11 +467,64 @@ mod tests {
             kind: IpcMessageKind::InferResponse,
             correlation_id: Some("req-7".into()),
             deadline_ns: None,
+            async_id: None,
             tensors: vec![sample_tensor("action_chunk")],
             model_spec: None,
             status: Some(IpcStatus::Ok),
             error: None,
             metric: None,
+            health: None,
+        }
+        .validate()
+        .expect("valid");
+        let json = serde_json::to_string(&m).expect("serialize");
+        let back: IpcMessage = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn infer_async_response_requires_async_id() {
+        let bad = IpcMessage {
+            schema_version: SCHEMA_VERSION.to_string(),
+            message_id: "msg-async".into(),
+            kind: IpcMessageKind::InferAsyncResponse,
+            correlation_id: Some("req-7".into()),
+            deadline_ns: None,
+            async_id: None,
+            tensors: vec![sample_tensor("action_chunk")],
+            model_spec: None,
+            status: Some(IpcStatus::Ok),
+            error: None,
+            metric: None,
+            health: None,
+        }
+        .validate();
+        assert!(matches!(
+            bad,
+            Err(IpcMessageError::InferAsyncOkResponseMissingAsyncId)
+        ));
+    }
+
+    #[test]
+    fn health_check_response_round_trips() {
+        let m = IpcMessage {
+            schema_version: SCHEMA_VERSION.to_string(),
+            message_id: "health-1".into(),
+            kind: IpcMessageKind::HealthCheckResponse,
+            correlation_id: None,
+            deadline_ns: None,
+            async_id: None,
+            tensors: vec![],
+            model_spec: None,
+            status: Some(IpcStatus::Ok),
+            error: None,
+            metric: None,
+            health: Some(IpcHealth {
+                ready: true,
+                backend_factory: Some("fixture".into()),
+                uptime_ns: 42,
+                last_error: None,
+            }),
         }
         .validate()
         .expect("valid");
@@ -429,11 +541,13 @@ mod tests {
             kind: IpcMessageKind::ErrorEvent,
             correlation_id: None,
             deadline_ns: None,
+            async_id: None,
             tensors: vec![],
             model_spec: None,
             status: Some(IpcStatus::Error),
             error: Some(ProtocolError::new(ErrorCode::LoadFailed, "weights missing")),
             metric: None,
+            health: None,
         }
         .validate()
         .expect("valid");
@@ -452,6 +566,7 @@ mod tests {
             kind: IpcMessageKind::MetricEvent,
             correlation_id: None,
             deadline_ns: None,
+            async_id: None,
             tensors: vec![],
             model_spec: None,
             status: None,
@@ -461,6 +576,7 @@ mod tests {
                 value_f64: Some(8.5),
                 labels,
             }),
+            health: None,
         }
         .validate()
         .expect("valid");
@@ -477,11 +593,13 @@ mod tests {
             kind: IpcMessageKind::LoadModel,
             correlation_id: None,
             deadline_ns: None,
+            async_id: None,
             tensors: vec![],
             model_spec: None,
             status: None,
             error: None,
             metric: None,
+            health: None,
         }
         .validate();
         assert!(matches!(bad, Err(IpcMessageError::LoadModelMissingSpec)));
@@ -495,11 +613,13 @@ mod tests {
             kind: IpcMessageKind::HealthCheck,
             correlation_id: None,
             deadline_ns: None,
+            async_id: None,
             tensors: vec![],
             model_spec: None,
             status: None,
             error: None,
             metric: None,
+            health: None,
         }
         .validate();
         assert!(matches!(bad, Err(IpcMessageError::EmptyMessageId)));

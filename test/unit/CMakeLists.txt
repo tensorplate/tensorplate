@@ -33,6 +33,7 @@ target_include_directories(tp_test_unit
   PRIVATE
     ${CMAKE_SOURCE_DIR}/test/mocks
     ${CMAKE_SOURCE_DIR}/test/contract
+    ${CMAKE_SOURCE_DIR}/runtime/src
 )
 
 target_link_libraries(tp_test_unit

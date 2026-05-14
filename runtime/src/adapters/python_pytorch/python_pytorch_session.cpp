@@ -23,6 +23,7 @@
 #include "tensorplate/backend/registry.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/buffer/output.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
@@ -45,10 +46,10 @@ using json = nlohmann::json;
 constexpr std::string_view kSchemaVersion = "0.1";
 
 // Message kinds the adapter sends to and accepts from the sidecar.
-// InferAsync / Cancel / health_check / error_event are defined by the
-// protocol schema but not yet driven by the C++ ExecutionSession adapter;
-// the scheduler (V01-E06) and the agent's worker supervision (V01-E09)
-// will issue them once their completion/cancellation wiring lands.
+// InferAsync / Cancel / error_event are defined by the protocol schema
+// but not yet driven by the C++ ExecutionSession adapter; the scheduler
+// (V01-E06) and the agent's worker supervision (V01-E09) will issue
+// them once their completion/cancellation wiring lands.
 constexpr std::string_view kKindLoadModel = "load_model";
 constexpr std::string_view kKindLoadModelResponse = "load_model_response";
 constexpr std::string_view kKindPrime = "prime";
@@ -57,6 +58,8 @@ constexpr std::string_view kKindInfer = "infer";
 constexpr std::string_view kKindInferResponse = "infer_response";
 constexpr std::string_view kKindUnload = "unload";
 constexpr std::string_view kKindUnloadResponse = "unload_response";
+constexpr std::string_view kKindHealthCheck = "health_check";
+constexpr std::string_view kKindHealthCheckResponse = "health_check_response";
 constexpr std::string_view kKindReadyEvent = "ready_event";
 
 std::atomic<std::uint64_t>& message_seq() noexcept {
@@ -84,6 +87,39 @@ Error::Code error_code_from_wire(const std::string& wire) {
     return *c;
   }
   return Error::Code::Internal;
+}
+
+std::optional<std::string> string_field(const json& obj, const char* name) {
+  if (!obj.is_object()) {
+    return std::nullopt;
+  }
+  auto it = obj.find(name);
+  if (it == obj.end() || !it->is_string()) {
+    return std::nullopt;
+  }
+  return it->get<std::string>();
+}
+
+std::optional<bool> bool_field(const json& obj, const char* name) {
+  if (!obj.is_object()) {
+    return std::nullopt;
+  }
+  auto it = obj.find(name);
+  if (it == obj.end() || !it->is_boolean()) {
+    return std::nullopt;
+  }
+  return it->get<bool>();
+}
+
+std::optional<std::size_t> size_field(const json& obj, const char* name) {
+  if (!obj.is_object()) {
+    return std::nullopt;
+  }
+  auto it = obj.find(name);
+  if (it == obj.end() || !it->is_number_unsigned()) {
+    return std::nullopt;
+  }
+  return it->get<std::size_t>();
 }
 
 ipc::UnixSocket::TimePoint deadline_from_now(std::chrono::milliseconds dur) {
@@ -146,16 +182,14 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
 }
 
 [[nodiscard]] Error error_from_response(const json& header, Error::Code default_code) {
-  if (!header.contains("error")) {
+  auto err_it = header.find("error");
+  if (err_it == header.end() || !err_it->is_object()) {
     return Error::make(default_code, "sidecar returned error without error envelope");
   }
-  const auto& err = header.at("error");
-  const std::string code_str = err.value("code", "internal");
-  const std::string message = err.value("message", "sidecar error");
-  std::optional<std::string> context;
-  if (err.contains("context")) {
-    context = err.at("context").get<std::string>();
-  }
+  const auto& err = *err_it;
+  const std::string code_str = string_field(err, "code").value_or("internal");
+  const std::string message = string_field(err, "message").value_or("sidecar error");
+  std::optional<std::string> context = string_field(err, "context");
   return Error{error_code_from_wire(code_str), message, std::move(context)};
 }
 
@@ -175,16 +209,26 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   if (!obj.is_object()) {
     return unexpected(Error::Code::InferenceFailed, "tensor metadata is not a JSON object");
   }
-  if (!obj.contains("dtype") || !obj.contains("shape")) {
+  auto dtype_str = string_field(obj, "dtype");
+  auto shape_it = obj.find("shape");
+  if (!dtype_str.has_value() || shape_it == obj.end() || !shape_it->is_array()) {
     return unexpected(Error::Code::InferenceFailed,
                       "tensor metadata missing required fields (dtype, shape)");
   }
-  auto dtype = dtype_from_string(obj.at("dtype").get<std::string>());
+  auto dtype = dtype_from_string(*dtype_str);
   if (!dtype.has_value()) {
     return unexpected(Error::Code::InferenceFailed,
-                      "tensor metadata has unknown dtype " + obj.at("dtype").get<std::string>());
+                      "tensor metadata has unknown dtype " + *dtype_str);
   }
-  std::vector<std::int64_t> shape = obj.at("shape").get<std::vector<std::int64_t>>();
+  std::vector<std::int64_t> shape;
+  shape.reserve(shape_it->size());
+  for (const auto& dim : *shape_it) {
+    if (!dim.is_number_integer()) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "tensor metadata shape contains a non-integer dimension");
+    }
+    shape.push_back(dim.get<std::int64_t>());
+  }
   return TensorView::create(*dtype, std::move(shape));
 }
 
@@ -258,7 +302,9 @@ class PythonPytorchSession final : public ExecutionSession {
       return unexpected(ready.error());
     }
     auto ready_hdr = json::parse(ready.value().json_header, nullptr, /*allow_exceptions=*/false);
-    if (ready_hdr.is_discarded() || ready_hdr.value("kind", "") != std::string(kKindReadyEvent)) {
+    if (ready_hdr.is_discarded() ||
+        string_field(ready_hdr, "schema_version").value_or("") != std::string(kSchemaVersion) ||
+        string_field(ready_hdr, "kind").value_or("") != std::string(kKindReadyEvent)) {
       process_->shutdown();
       process_.reset();
       return unexpected(Error::Code::LoadFailed, "sidecar did not emit ready_event on connect");
@@ -292,6 +338,10 @@ class PythonPytorchSession final : public ExecutionSession {
     if (!resp.has_value()) {
       return unexpected(resp.error());
     }
+    auto health = verify_sidecar_health();
+    if (!health.has_value()) {
+      return unexpected(health.error());
+    }
     return Result<void>{};
   }
 
@@ -323,6 +373,9 @@ class PythonPytorchSession final : public ExecutionSession {
     if (!process_) {
       return unexpected(Error::Code::NotReady, "sidecar not started");
     }
+    if (!process_->is_alive()) {
+      return transport_failure(Error::make(Error::Code::InferenceFailed, "sidecar process exited"));
+    }
     ipc::SidecarFrame frame;
     frame.json_header = request_header.dump();
     frame.payload = payload;
@@ -338,11 +391,20 @@ class PythonPytorchSession final : public ExecutionSession {
       return transport_failure(
           Error::make(Error::Code::InferenceFailed, "sidecar returned malformed JSON header"));
     }
-    const std::string status = hdr.value("status", "ok");
+    if (string_field(hdr, "schema_version").value_or("") != std::string(kSchemaVersion)) {
+      return transport_failure(
+          Error::make(Error::Code::InferenceFailed, "sidecar response schema_version mismatch"));
+    }
+    const std::string status = string_field(hdr, "status").value_or("ok");
     if (status == "error") {
+      last_payload_.clear();
       return unexpected(error_from_response(hdr, default_error_code));
     }
-    if (!expected_kind.empty() && hdr.value("kind", "") != expected_kind) {
+    if (status != "ok") {
+      return transport_failure(
+          Error::make(Error::Code::InferenceFailed, "sidecar response status is not ok/error"));
+    }
+    if (!expected_kind.empty() && string_field(hdr, "kind").value_or("") != expected_kind) {
       return transport_failure(
           Error::make(Error::Code::InferenceFailed,
                       "sidecar response kind mismatch (expected " + expected_kind + ")"));
@@ -370,6 +432,35 @@ class PythonPytorchSession final : public ExecutionSession {
       process_.reset();
     }
     last_payload_.clear();
+  }
+
+  Result<void> verify_sidecar_health() {
+    if (!process_) {
+      return unexpected(Error::Code::NotReady, "sidecar not started");
+    }
+    json hdr;
+    hdr["schema_version"] = std::string(kSchemaVersion);
+    hdr["message_id"] = next_message_id();
+    hdr["kind"] = std::string(kKindHealthCheck);
+    auto resp = exchange(hdr, {}, deadline_from_now(config_.health_timeout),
+                         std::string(kKindHealthCheckResponse), Error::Code::InferenceFailed);
+    if (!resp.has_value()) {
+      return unexpected(resp.error());
+    }
+    auto health_it = resp.value().find("health");
+    if (health_it == resp.value().end() || !health_it->is_object()) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "sidecar health_check_response missing health payload");
+    }
+    auto ready = bool_field(*health_it, "ready");
+    if (!ready.has_value()) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "sidecar health payload missing boolean ready field");
+    }
+    if (!*ready) {
+      return unexpected(Error::Code::NotReady, "sidecar health check reported not ready");
+    }
+    return Result<void>{};
   }
 
   Result<std::vector<NamedOutput>> run_infer(const InferRequest& request) {
@@ -419,34 +510,57 @@ class PythonPytorchSession final : public ExecutionSession {
 
     // Parse outputs.
     std::vector<NamedOutput> outputs;
-    if (!resp.value().contains("tensors")) {
-      return unexpected(Error::Code::InferenceFailed, "sidecar infer response missing tensors[]");
-    }
-    for (const auto& entry : resp.value().at("tensors")) {
-      const auto offset = entry.value("payload_offset", 0U);
-      const auto length = entry.value("payload_length", 0U);
-      if (offset + length > last_payload_.size()) {
-        return unexpected(Error::Code::InferenceFailed,
-                          "sidecar tensor payload window out of range");
+    auto fail = [&](Error error) -> Result<std::vector<NamedOutput>> {
+      if (manager_ != nullptr) {
+        (void)release_partial_outputs(*manager_, outputs);
       }
-      auto tv = tensor_view_from_json(entry.at("tensor"));
+      return unexpected(std::move(error));
+    };
+    auto tensors_it = resp.value().find("tensors");
+    if (tensors_it == resp.value().end() || !tensors_it->is_array()) {
+      return fail(
+          Error::make(Error::Code::InferenceFailed, "sidecar infer response missing tensors[]"));
+    }
+    for (const auto& entry : *tensors_it) {
+      if (!entry.is_object()) {
+        return fail(
+            Error::make(Error::Code::InferenceFailed, "sidecar tensor entry is not a JSON object"));
+      }
+      auto name = string_field(entry, "name");
+      auto offset = size_field(entry, "payload_offset");
+      auto length = size_field(entry, "payload_length");
+      auto tensor_it = entry.find("tensor");
+      if (!name.has_value() || name->empty() || !offset.has_value() || !length.has_value() ||
+          tensor_it == entry.end()) {
+        return fail(Error::make(Error::Code::InferenceFailed,
+                                "sidecar tensor entry missing required metadata"));
+      }
+      if (*length == 0) {
+        return fail(Error::make(Error::Code::InferenceFailed,
+                                "sidecar tensor payload_length must be non-zero"));
+      }
+      if (*offset > last_payload_.size() || *length > last_payload_.size() - *offset) {
+        return fail(Error::make(Error::Code::InferenceFailed,
+                                "sidecar tensor payload window out of range"));
+      }
+      auto tv = tensor_view_from_json(*tensor_it);
       if (!tv.has_value()) {
-        return unexpected(tv.error());
+        return fail(tv.error());
       }
 
-      auto buf_r = manager_->allocate(length);
+      auto buf_r = manager_->allocate(*length);
       if (!buf_r.has_value()) {
-        return unexpected(buf_r.error());
+        return fail(buf_r.error());
       }
       auto buffer = buf_r.value();
       auto dst = manager_->data(buffer);
       if (!dst.has_value()) {
-        return unexpected(dst.error());
+        outputs.push_back(NamedOutput{*name, buffer, std::move(tv).value(), std::nullopt});
+        return fail(dst.error());
       }
-      std::memcpy(dst.value().data(), last_payload_.data() + offset, length);
+      std::memcpy(dst.value().data(), last_payload_.data() + *offset, *length);
 
-      outputs.push_back(NamedOutput{entry.value("name", std::string{}), buffer,
-                                    std::move(tv).value(), std::nullopt});
+      outputs.push_back(NamedOutput{std::move(*name), buffer, std::move(tv).value(), std::nullopt});
     }
     return outputs;
   }

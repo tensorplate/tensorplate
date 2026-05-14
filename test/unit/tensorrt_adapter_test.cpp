@@ -24,6 +24,8 @@ TEST(TensorRTAdapter, FeatureFlagDisabled) {
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
 
+#include "adapters/tensorrt/tensorrt_session.hpp"
+
 namespace tensorplate {
 namespace {
 

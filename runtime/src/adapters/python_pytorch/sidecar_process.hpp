@@ -6,8 +6,9 @@
 // and the Unix-domain socket the C++ adapter exchanges frames on. A
 // sidecar is started by the adapter at `do_load` time and torn down by
 // the adapter at `do_unload` time; the supervisor is also responsible
-// for killing the process when the adapter detects a dead heartbeat or
-// a malformed response, so the OS does not retain a zombie.
+// for killing the process when the adapter detects a transport failure
+// or malformed response, so the OS does not retain a zombie. Active
+// heartbeat polling is owned by the scheduler/supervision layer.
 
 #pragma once
 

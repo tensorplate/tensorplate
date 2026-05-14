@@ -87,7 +87,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   use `std::chrono::steady_clock` clamped against `InferRequest`'s
   monotonic deadline; sidecar timeouts surface as
   `Error::Code::Timeout`; malformed response frames map to
-  `Error::Code::InferenceFailed`. The adapter terminates the sidecar on
+  `Error::Code::InferenceFailed`. `prime` performs a real
+  `health_check` round-trip and requires a ready health payload before
+  publishing the session as ready. The adapter terminates the sidecar on
   unload, load failure, and transport failure so the OS does not retain
   a zombie. Adapter-owned heartbeat polling and `Cancel` dispatch are
   reserved for the scheduler/supervision wiring that owns async result
@@ -105,6 +107,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   infer-before-prime returning `NotReady`. C++ CI now installs
   `backends/python_pytorch` before running T2/T3 so the round-trip is
   exercised instead of silently skipped.
+- C++ CI now includes an adapter-shell job that builds with
+  `TP_ENABLE_TENSORRT=ON` and `TP_ENABLE_LIBTORCH=ON` on a host without
+  proprietary SDKs, then runs T1. This keeps the no-SDK registration and
+  typed `Unsupported` paths compiling even when the default host matrix
+  leaves hardware adapters disabled.
 - Python/PyTorch sidecar IPC contract and Python backend runner
   (V01-E05-F04). The on-wire envelope is documented in
   `include/tensorplate/ipc/sidecar_codec.hpp`:
@@ -116,7 +123,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   request kinds (`load_model`, `prime`, `infer`, `infer_async`,
   `cancel`, `unload`, `health_check`) plus matching `*_response`
   kinds and the unsolicited `ready_event` / `error_event` /
-  `metric_event` events.
+  `metric_event` events. Successful `infer_async_response` headers carry
+  `async_id`; successful `health_check_response` headers carry a bounded
+  `health` payload (`ready`, `backend_factory`, `uptime_ns`,
+  `last_error`). The Rust protocol mirror models these fields so schema
+  fixtures do not drift from the Python runner.
 - C++ codec helpers (`encode_frame`, `decode_frame`, `decode_frames`)
   that distinguish typed `Error::Code::NotReady` ("need more bytes")
   from `Error::Code::ConfigInvalid` ("malformed frame") so adapters can
@@ -162,15 +173,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   source compiles when `TP_ENABLE_LIBTORCH=ON`; when CMake also locates
   a LibTorch C++ distribution (`Torch_DIR` -> `find_package(Torch)`),
   it defines `TP_HAS_LIBTORCH_SDK=1` and the adapter loads the
-  TorchScript module. Without the SDK the adapter still registers and
+  TorchScript module, maps row-major `BufferManager` inputs to CPU
+  tensors, executes synchronous `forward`, and materializes Tensor or
+  Tuple[Tensor, ...] outputs back into owned output buffers. Without
+  the SDK the adapter still registers and
   surfaces typed `Error::Code::Unsupported` from `do_load` with an
   actionable rebuild hint. T1 unit tests in
   `test/unit/libtorch_adapter_test.cpp` cover registration, capability
   publication, the no-SDK `Unsupported` path, and explicit verification
   that `backend_hint: python_pytorch` does not silently redirect to
-  LibTorch (V01-E05-F03-T01 / T02). Exported-graph fixture (T3) and
-  host T3 / Jetson T4 conformance land in V01-E05-F03-T03 and
-  V01-E05-F06.
+  LibTorch (V01-E05-F03-T01 / T02). Exported-graph fixture generation,
+  SDK-enabled T3 evidence, and Jetson T4 conformance land in
+  V01-E05-F03-T03 and V01-E05-F06.
 - TensorRT execution backend adapter shell under
   `runtime/src/adapters/tensorrt/` (registered as `tensorrt`). The
   adapter publishes its `BackendCapability` (FP32/FP16/INT8, fixed-shape

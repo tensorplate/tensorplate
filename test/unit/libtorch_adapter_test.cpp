@@ -18,6 +18,8 @@ TEST(LibTorchAdapter, FeatureFlagDisabled) {
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
 
+#include "adapters/libtorch/libtorch_session.hpp"
+
 namespace tensorplate {
 namespace {
 
