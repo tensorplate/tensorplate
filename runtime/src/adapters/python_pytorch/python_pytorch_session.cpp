@@ -463,24 +463,13 @@ class PythonPytorchSession final : public ExecutionSession {
     return Result<void>{};
   }
 
-  Result<std::vector<NamedOutput>> run_infer(const InferRequest& request) {
-    if (!process_) {
-      return unexpected(Error::Code::NotReady, "sidecar not started");
-    }
-
-    // Pack inputs.
-    json hdr;
+  Result<void> pack_request(const InferRequest& request, json& hdr,
+                            std::vector<std::byte>& payload) {
     hdr["schema_version"] = std::string(kSchemaVersion);
     hdr["message_id"] = next_message_id();
     hdr["kind"] = std::string(kKindInfer);
     hdr["correlation_id"] = request.request_id();
     json tensors_in = json::array();
-    std::vector<std::byte> payload;
-    payload.reserve(1024);
-    if (manager_ == nullptr) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "python_pytorch adapter requires a BufferManager hook");
-    }
     for (const auto& in : request.inputs()) {
       auto view = manager_->view(in.buffer, in.tensor);
       if (!view.has_value()) {
@@ -496,73 +485,93 @@ class PythonPytorchSession final : public ExecutionSession {
       tensors_in.push_back(std::move(entry));
     }
     hdr["tensors"] = std::move(tensors_in);
+    return Result<void>{};
+  }
+
+  Result<NamedOutput> decode_one_output(const json& entry) {
+    if (!entry.is_object()) {
+      return unexpected(Error::Code::InferenceFailed, "sidecar tensor entry is not a JSON object");
+    }
+    auto name = string_field(entry, "name");
+    auto offset = size_field(entry, "payload_offset");
+    auto length = size_field(entry, "payload_length");
+    auto tensor_it = entry.find("tensor");
+    if (!name.has_value() || name->empty() || !offset.has_value() || !length.has_value() ||
+        tensor_it == entry.end()) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "sidecar tensor entry missing required metadata");
+    }
+    if (*length == 0) {
+      return unexpected(Error::Code::InferenceFailed,
+                        "sidecar tensor payload_length must be non-zero");
+    }
+    if (*offset > last_payload_.size() || *length > last_payload_.size() - *offset) {
+      return unexpected(Error::Code::InferenceFailed, "sidecar tensor payload window out of range");
+    }
+    auto tv = tensor_view_from_json(*tensor_it);
+    if (!tv.has_value()) {
+      return unexpected(tv.error());
+    }
+
+    auto buf_r = manager_->allocate(*length);
+    if (!buf_r.has_value()) {
+      return unexpected(buf_r.error());
+    }
+    auto buffer = buf_r.value();
+    auto dst = manager_->data(buffer);
+    if (!dst.has_value()) {
+      // Buffer allocated but unwritable; let the caller release it.
+      (void)manager_->release_if_owned(buffer);
+      return unexpected(dst.error());
+    }
+    std::memcpy(dst.value().data(), last_payload_.data() + *offset, *length);
+    return NamedOutput{std::move(*name), buffer, std::move(tv).value(), std::nullopt};
+  }
+
+  Result<std::vector<NamedOutput>> decode_response(const json& response_header) {
+    std::vector<NamedOutput> outputs;
+    auto fail = [&](Error error) -> Result<std::vector<NamedOutput>> {
+      (void)release_partial_outputs(*manager_, outputs);
+      return unexpected(std::move(error));
+    };
+    auto tensors_it = response_header.find("tensors");
+    if (tensors_it == response_header.end() || !tensors_it->is_array()) {
+      return fail(
+          Error::make(Error::Code::InferenceFailed, "sidecar infer response missing tensors[]"));
+    }
+    for (const auto& entry : *tensors_it) {
+      auto out_r = decode_one_output(entry);
+      if (!out_r.has_value()) {
+        return fail(out_r.error());
+      }
+      outputs.push_back(std::move(out_r).value());
+    }
+    return outputs;
+  }
+
+  Result<std::vector<NamedOutput>> run_infer(const InferRequest& request) {
+    if (!process_) {
+      return unexpected(Error::Code::NotReady, "sidecar not started");
+    }
+    if (manager_ == nullptr) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "python_pytorch adapter requires a BufferManager hook");
+    }
+
+    json hdr;
+    std::vector<std::byte> payload;
+    payload.reserve(1024);
+    if (auto r = pack_request(request, hdr, payload); !r.has_value()) {
+      return unexpected(r.error());
+    }
 
     const auto deadline = clamped_deadline(request, config_.infer_timeout);
     const std::string expected_kind = std::string(kKindInferResponse);
     auto resp = exchange(hdr, payload, deadline, expected_kind, Error::Code::InferenceFailed);
     if (!resp.has_value()) {
-      // Release the request buffers in line with V01-E03 contract; the
-      // host owns request buffers, so we do nothing here, but if the
-      // sidecar reports timeout we ensure the process is still alive
-      // for the next attempt.
       return unexpected(resp.error());
     }
-
-    // Parse outputs.
-    std::vector<NamedOutput> outputs;
-    auto fail = [&](Error error) -> Result<std::vector<NamedOutput>> {
-      if (manager_ != nullptr) {
-        (void)release_partial_outputs(*manager_, outputs);
-      }
-      return unexpected(std::move(error));
-    };
-    auto tensors_it = resp.value().find("tensors");
-    if (tensors_it == resp.value().end() || !tensors_it->is_array()) {
-      return fail(
-          Error::make(Error::Code::InferenceFailed, "sidecar infer response missing tensors[]"));
-    }
-    for (const auto& entry : *tensors_it) {
-      if (!entry.is_object()) {
-        return fail(
-            Error::make(Error::Code::InferenceFailed, "sidecar tensor entry is not a JSON object"));
-      }
-      auto name = string_field(entry, "name");
-      auto offset = size_field(entry, "payload_offset");
-      auto length = size_field(entry, "payload_length");
-      auto tensor_it = entry.find("tensor");
-      if (!name.has_value() || name->empty() || !offset.has_value() || !length.has_value() ||
-          tensor_it == entry.end()) {
-        return fail(Error::make(Error::Code::InferenceFailed,
-                                "sidecar tensor entry missing required metadata"));
-      }
-      if (*length == 0) {
-        return fail(Error::make(Error::Code::InferenceFailed,
-                                "sidecar tensor payload_length must be non-zero"));
-      }
-      if (*offset > last_payload_.size() || *length > last_payload_.size() - *offset) {
-        return fail(Error::make(Error::Code::InferenceFailed,
-                                "sidecar tensor payload window out of range"));
-      }
-      auto tv = tensor_view_from_json(*tensor_it);
-      if (!tv.has_value()) {
-        return fail(tv.error());
-      }
-
-      auto buf_r = manager_->allocate(*length);
-      if (!buf_r.has_value()) {
-        return fail(buf_r.error());
-      }
-      auto buffer = buf_r.value();
-      auto dst = manager_->data(buffer);
-      if (!dst.has_value()) {
-        outputs.push_back(NamedOutput{*name, buffer, std::move(tv).value(), std::nullopt});
-        return fail(dst.error());
-      }
-      std::memcpy(dst.value().data(), last_payload_.data() + *offset, *length);
-
-      outputs.push_back(NamedOutput{std::move(*name), buffer, std::move(tv).value(), std::nullopt});
-    }
-    return outputs;
+    return decode_response(resp.value());
   }
 
   PythonPytorchConfig config_;
