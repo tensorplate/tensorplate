@@ -8,6 +8,9 @@ a clean CI pass.
 > Hardware-dependent tiers (T3 contract, T4 hardware-in-loop, T5 benchmark)
 > are not part of this baseline and are not required for ordinary PRs.
 > See [`test/README.md`](../../test/README.md) for tier scope and gating.
+> For the manual Jetson target-device pass used by adapter/release
+> readiness, see
+> [`jetson-target-validation.md`](jetson-target-validation.md).
 
 ## Prerequisites
 

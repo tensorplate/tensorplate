@@ -8,6 +8,225 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Kria / Vitis AI adapter design-review document at
+  `docs/architecture/kria-vitis-ai-review.md` (V01-E05-F07). Maps a
+  future Xilinx/AMD Kria adapter using Vitis AI and DPU execution
+  against the published v0.1.0 contracts (`ExecutionSession` NVI,
+  `BackendCapability`, `BackendRegistry`, `ModelSpec` and the
+  `backend_hint` enum, `BufferRef` / `TensorView`, the bundle
+  envelope, and the session event taxonomy). The review concludes
+  that **no public interface change is required for v0.1.0 freeze**;
+  the only work required for a future Vitis AI adapter is a new
+  `runtime/src/adapters/vitis_ai/` directory, a bundle sibling block
+  for Vitis-style calibration metadata (addable through the V01-E13
+  schema-evolution rules), a T1 unit-test set mirroring the
+  TensorRT / LibTorch pattern, and Kria K26 / K24 HIL validation.
+- Real-adapter conformance harness (V01-E05-F06-T01) at
+  `test/contract/real_adapter_conformance_test.cpp` (T3). Reuses the
+  V01-E04 `ExecutionSession` conformance suite from
+  `test/contract/execution_session_conformance.hpp` and runs it
+  against every adapter compiled into this build of `tp_runtime`. The
+  `python_pytorch` adapter passes the full lifecycle suite on host CI
+  via the `FixtureBackend`; the TensorRT and LibTorch variants run
+  only when their SDKs are detected (HIL/release tier per
+  V01-E05-F02 / F03). `test/CMakeLists.txt` now compiles
+  `tp_test_contract` and labels its tests `T3`.
+- Sidecar failure-injection tests (V01-E05-F06-T03) at
+  `backends/python_pytorch/tests/test_failure_injection.py`. The
+  `FixtureBackend` exposes `fail_load` / `fail_prime` / `fail_infer`
+  hooks; the new tests cover typed `load_failed`, `inference_failed`,
+  `config_invalid` (missing model_spec, malformed tensor entry), and
+  the cancel-then-recordable-by-backend path. Combined with the
+  V01-E05-F04 runner tests and C++ supervisor shutdown behavior, the
+  host baseline covers typed runner errors, timeout/cancel message
+  handling, malformed request rejection, and deterministic cleanup
+  paths; heartbeat-driven liveness and externally killed sidecar
+  recovery remain scheduler/supervision follow-up work.
+- Golden-output fixture matrix and tolerance documentation at
+  `test/models/GOLDEN_FIXTURES.md`. Defines what a golden fixture
+  means for each adapter family, where each runs in the CI tier, how
+  it is generated, what its expected output and tolerance are, and
+  how the JSON comparison helper will work when the first real
+  fixture lands. The fixture backend round-trip already covers exact
+  bytewise correctness for `python_pytorch`; vision-TensorRT and
+  LibTorch golden artifacts land in V01-E05-F02-T03 / F03-T03 /
+  V01-E15.
+- Python/PyTorch sidecar execution-backend adapter and supervisor
+  (V01-E05-F05) under `runtime/src/adapters/python_pytorch/`,
+  registered as `python_pytorch`. The adapter forks one Python sidecar
+  subprocess per execution session (the V01-E05 closed decision), binds
+  a Unix-domain socket under `TMPDIR`, accepts the child's connection,
+  reads its `ready_event`, and translates `ExecutionSession::load /
+  prime / infer / unload` into the sidecar IPC schema (V01-E05-F04).
+  The sidecar wire protocol includes `infer_async`, but the C++ adapter
+  keeps native async disabled until V01-E06 provides a real completion
+  channel; `ExecutionSession::infer_async` therefore returns typed
+  `Unsupported` without dispatching or allocating outputs. Capability
+  record declares dynamic-shape support; async, generation, streaming,
+  and KV-cache remain false.
+- `SidecarProcess` (in `runtime/src/adapters/python_pytorch/`) owns the
+  subprocess + socket pair, terminates the child with SIGTERM (or
+  SIGKILL after a 500 ms grace period) on unload / error, and unlinks
+  the socket path. `SidecarLauncher` is injectable so tests can run the
+  Python runner via a non-default interpreter without touching the
+  adapter code. The built-in factory honors
+  `TP_PYTHON_PYTORCH_EXECUTABLE`, `TP_TEST_PYTHON_EXE`, then
+  `TP_TEST_PYTHON` before falling back to `python3`; the default
+  launcher does `fork()` +
+  `execvp(python3, "-m", "tensorplate_pytorch_backend", "--socket",
+  path)`.
+- Input/output tensor marshaling: inputs are read out of `BufferManager`
+  via `manager->view(buffer, tensor_view)`, packed into the sidecar
+  payload region, and described in the JSON header's `tensors[]` array.
+  Outputs are sliced back out of the response payload by
+  `payload_offset / payload_length`, written into freshly allocated
+  output `BufferRef`s, and surfaced through `NamedOutput`. The adapter
+  refuses to construct a session without a `BufferManager` hook
+  (`Error::Code::ConfigInvalid`).
+- Timeout, cancellation, and health handling: per-operation deadlines
+  use `std::chrono::steady_clock` clamped against `InferRequest`'s
+  monotonic deadline; sidecar timeouts surface as
+  `Error::Code::Timeout`; malformed response frames map to
+  `Error::Code::InferenceFailed`. `prime` performs a real
+  `health_check` round-trip and requires a ready health payload before
+  publishing the session as ready. The adapter terminates the sidecar on
+  unload, load failure, and transport failure so the OS does not retain
+  a zombie. Adapter-owned heartbeat polling and `Cancel` dispatch are
+  reserved for the scheduler/supervision wiring that owns async result
+  delivery.
+- `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` is flipped on by default in
+  `runtime/CMakeLists.txt`. When the flag is on the runtime links
+  `nlohmann_json::nlohmann_json` (header-only) for JSON header
+  encode/decode.
+- T2 integration test in
+  `test/integration/python_pytorch_adapter_test.cpp` exercises the full
+  C++ ↔ Python lifecycle through the `FixtureBackend`: registration,
+  capability publication, end-to-end echo (load → prime → infer →
+  unload through real Unix-socket IPC), wrapper-level `infer_async`
+  returning typed `Unsupported` without output allocation, and
+  infer-before-prime returning `NotReady`. C++ CI now installs
+  `backends/python_pytorch` before running T2/T3 so the round-trip is
+  exercised instead of silently skipped.
+- C++ CI now includes an adapter-shell job that builds with
+  `TP_ENABLE_TENSORRT=ON` and `TP_ENABLE_LIBTORCH=ON` on a host without
+  proprietary SDKs, then runs T1. This keeps the no-SDK registration and
+  typed `Unsupported` paths compiling even when the default host matrix
+  leaves hardware adapters disabled.
+- Python/PyTorch sidecar IPC contract and Python backend runner
+  (V01-E05-F04). The on-wire envelope is documented in
+  `include/tensorplate/ipc/sidecar_codec.hpp`:
+  `[u32 magic 'TPSC'][u32 wire_version][u32 header_len][u32 payload_len]
+   [JSON header][raw tensor payload]`, all u32 fields big-endian, with
+  generous-but-bounded maxima (1 MiB header, 256 MiB payload). The
+  schema for the JSON header lives in
+  `protocol/schemas/python_pytorch_ipc.json` and covers the seven
+  request kinds (`load_model`, `prime`, `infer`, `infer_async`,
+  `cancel`, `unload`, `health_check`) plus matching `*_response`
+  kinds and the unsolicited `ready_event` / `error_event` /
+  `metric_event` events. Successful `infer_async_response` headers carry
+  `async_id`; successful `health_check_response` headers carry a bounded
+  `health` payload (`ready`, `backend_factory`, `uptime_ns`,
+  `last_error`). The Rust protocol mirror models these fields so schema
+  fixtures do not drift from the Python runner.
+- C++ codec helpers (`encode_frame`, `decode_frame`, `decode_frames`)
+  that distinguish typed `Error::Code::NotReady` ("need more bytes")
+  from `Error::Code::ConfigInvalid` ("malformed frame") so adapters can
+  loop on streaming reads safely. Implemented in
+  `runtime/src/ipc/sidecar_codec.cpp`; covered by
+  `test/unit/sidecar_codec_test.cpp` for round-trips, partial-prefix
+  / partial-body, bad magic, bad wire version, oversized header /
+  payload, and multi-frame pipelines stopping at a partial frame.
+- `include/tensorplate/ipc/unix_socket.hpp` plus
+  `runtime/src/ipc/unix_socket.cpp`: minimal RAII `UnixSocket` wrapper
+  around POSIX stream sockets with monotonic-deadline-aware
+  `connect`, `bind_and_listen`, `accept`, `read_exact`, and
+  `write_all`. Returns `Error::Code::Timeout` on deadline exhaustion
+  and `Error::Code::ConfigInvalid` for paths exceeding `sun_path`.
+  Covered by `test/integration/sidecar_socket_e2e_test.cpp` which
+  forks a child and round-trips one frame end-to-end.
+- Python backend runner under
+  `backends/python_pytorch/src/tensorplate_pytorch_backend/`:
+  `codec.py` mirrors the C++ wire format; `protocol.py` enumerates
+  the schema constants; `backends/` ships the dependency-free
+  `FixtureBackend` (echoes inputs as `echo_<name>` outputs) plus the
+  `Backend` Protocol that the V01-E05-F05 TorchScript / SmolVLA
+  backend will implement; `runner.py` runs a synchronous
+  request/response loop with typed `BackendError` mapping to
+  `*_response status: error` frames, and is wired as the
+  `tensorplate-backend-python-pytorch` console script in
+  `pyproject.toml`. Twenty-one pytest tests under
+  `backends/python_pytorch/tests/` cover the codec round-trips, the
+  lifecycle happy path through the fixture backend, infer-before-load
+  (`not_ready`), unknown / bad-version (`unsupported`),
+  cancel-then-infer (`timeout`), health-check, async-infer
+  identification, and payload-window overflow (`shape_mismatch`).
+- `nlohmann-json` added to `vcpkg.json` (header-only) so the V01-E05-F05
+  C++ adapter can parse the JSON sidecar header without re-implementing
+  a JSON decoder.
+- LibTorch native execution backend adapter shell under
+  `runtime/src/adapters/libtorch/` (registered as `libtorch`). Loads
+  TorchScript (`torch::jit::load`) modules and is positioned as a
+  reference / native-C++ backend, *not* a fallback for
+  `python_pytorch` bundles. Capability record advertises
+  FP32/FP16/BFloat16 precision and dynamic-shape support; async,
+  generation, streaming, and KV-cache flags remain false. The adapter
+  source compiles when `TP_ENABLE_LIBTORCH=ON`; when CMake also locates
+  a LibTorch C++ distribution (`Torch_DIR` -> `find_package(Torch)`),
+  it defines `TP_HAS_LIBTORCH_SDK=1` and the adapter loads the
+  TorchScript module, maps row-major `BufferManager` inputs to CPU
+  tensors, executes synchronous `forward`, and materializes Tensor or
+  Tuple[Tensor, ...] outputs back into owned output buffers. Without
+  the SDK the adapter still registers and
+  surfaces typed `Error::Code::Unsupported` from `do_load` with an
+  actionable rebuild hint. T1 unit tests in
+  `test/unit/libtorch_adapter_test.cpp` cover registration, capability
+  publication, the no-SDK `Unsupported` path, and explicit verification
+  that `backend_hint: python_pytorch` does not silently redirect to
+  LibTorch (V01-E05-F03-T01 / T02). Exported-graph fixture generation,
+  SDK-enabled T3 evidence, and Jetson T4 conformance land in
+  V01-E05-F03-T03 and V01-E05-F06.
+- TensorRT execution backend adapter shell under
+  `runtime/src/adapters/tensorrt/` (registered as `tensorrt`). The
+  adapter publishes its `BackendCapability` (FP32/FP16/INT8, fixed-shape
+  binding, sync execution only) and owns TensorRT and CUDA SDK handles
+  privately through RAII wrappers (`TensorRTState`, `CudaStreamHandle`,
+  `CudaDeviceBuffer`). The adapter compiles when `TP_ENABLE_TENSORRT=ON`;
+  if the CMake configuration detects an installed TensorRT/CUDA SDK it
+  defines `TP_HAS_TENSORRT_SDK=1` and the adapter deserializes the
+  engine file and creates the runtime/engine/execution context. Without
+  the SDK the adapter still registers and surfaces typed
+  `Error::Code::Unsupported` from `do_load` with an actionable message
+  so `tensorplate doctor` can enumerate it (V01-E05-F02-T01 / T02).
+- T1 unit tests under `test/unit/tensorrt_adapter_test.cpp` covering
+  registration under the stable key, capability-record consistency,
+  backend_name on the constructed session, load-without-SDK returning
+  `Unsupported`, and `validate_backend_hint` precision filtering.
+  Vision golden conformance (T3) and Orin HIL validation (T4) land in
+  V01-E05-F02-T03 / V01-E05-F06.
+- `include/tensorplate/backend/capability.hpp` and
+  `include/tensorplate/backend/registry.hpp` defining the vendor-neutral
+  `tensorplate::BackendCapability` value object and the thread-safe
+  `tensorplate::BackendRegistry` used by bundle validation and
+  execution-session creation. Capability records publish backend name,
+  optional profile id, supported precision list, shape-support tier,
+  async / generation / streaming / KV-cache flags, op-coverage
+  percentage, and memory estimate/limit. The registry rejects empty
+  keys, null factories, and capability/name mismatches with
+  `Error::Code::ConfigInvalid`; duplicate registration returns
+  `Error::Code::Internal`; unknown backends surface as
+  `Error::Code::Unsupported`. `validate_backend_hint` rejects unknown
+  backends and declared precisions that the adapter does not advertise
+  without falling back at inference time (V01-E05-F01).
+- `include/tensorplate/backend/builtin.hpp` exposes
+  `register_builtin_backends(BackendRegistry&)` so callers (the serving
+  worker, conformance tests, doctor checks) can opt their registry into
+  the adapter set compiled into `tp_runtime`. Adapter availability is
+  driven by the new `TP_ENABLE_TENSORRT`, `TP_ENABLE_LIBTORCH`, and
+  `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` CMake options (all OFF by default
+  for host CI; flipped on per adapter in V01-E05-F02 / F03 / F05).
+- `protocol/schemas/backend_capability.json` mirrors `BackendCapability`
+  so capability records can cross process boundaries without leaking
+  adapter-specific types.
 - `include/tensorplate/core/execution_session.hpp` defining the canonical
   public `tensorplate::ExecutionSession` lifecycle interface. The public
   method set is `load`, `prime`, `infer`, `infer_async`, `unload`,

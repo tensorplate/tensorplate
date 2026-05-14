@@ -1,0 +1,12 @@
+{
+  "schema_version": "0.1",
+  "message_id": "health-1",
+  "kind": "health_check_response",
+  "status": "ok",
+  "health": {
+    "ready": true,
+    "backend_factory": "fixture",
+    "uptime_ns": 42,
+    "last_error": null
+  }
+}

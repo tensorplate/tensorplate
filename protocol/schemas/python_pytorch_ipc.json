@@ -49,6 +49,11 @@
       "minimum": 0,
       "description": "Monotonic absolute deadline in nanoseconds (sender-clock). The sidecar treats sender and receiver clocks as the same domain because both run on the local device."
     },
+    "async_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Session-scoped async identifier present on successful `infer_async_response` messages."
+    },
     "tensors": {
       "type": "array",
       "items": {
@@ -109,6 +114,28 @@
           }
         }
       }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Payload of `health_check_response` messages.",
+      "required": ["ready", "backend_factory", "uptime_ns", "last_error"],
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "backend_factory": {
+          "type": ["string", "null"],
+          "description": "Name of the loaded Python backend factory, or null before load."
+        },
+        "uptime_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_error": {
+          "type": ["string", "null"]
+        }
+      }
     }
   },
   "allOf": [
@@ -122,6 +149,38 @@
       },
       "then": {
         "required": ["model_spec"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "health_check_response"
+          },
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": ["kind", "status"]
+      },
+      "then": {
+        "required": ["health"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "infer_async_response"
+          },
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": ["kind", "status"]
+      },
+      "then": {
+        "required": ["async_id"]
       }
     },
     {

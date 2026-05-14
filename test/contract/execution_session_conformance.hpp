@@ -50,6 +50,13 @@ namespace tensorplate::testing {
 /// adapter-specific configuration baked in.
 using SessionFactory = std::function<std::unique_ptr<ExecutionSession>()>;
 
+/// Factory variant that receives the scenario's BufferManager so the
+/// adapter can register its hook against the same manager the
+/// conformance scenario allocates input buffers from. Adapters that
+/// consume input buffers via `BufferManager::view` (e.g. the Python
+/// sidecar) need this; the mock adapter does not.
+using SessionFactoryWithManager = std::function<std::unique_ptr<ExecutionSession>(BufferManager&)>;
+
 /// Conformance-test configuration. The adapter author fills in the
 /// fields a real backend needs (model artifact path, expected backend
 /// name, sample input fixture shape); the suite derives everything
@@ -125,27 +132,36 @@ inline std::unique_ptr<BufferManager> make_manager() {
 /// adapter produced by `factory`. The suite drives the adapter only
 /// through the public `ExecutionSession*` interface, so a passing run
 /// proves the adapter respects the NVI contract.
+///
+/// `factory` receives the scenario's `BufferManager` so adapters that
+/// allocate output buffers or read input buffers via
+/// `BufferManager::view` (e.g. the Python sidecar) bind their hook to
+/// the same manager the scenario allocates inputs from. Adapters that
+/// do not consume the manager (e.g. the mock) may ignore the
+/// parameter.
 inline void run_execution_session_conformance(const ConformanceConfig& cfg,
-                                              const SessionFactory& factory) {
+                                              const SessionFactoryWithManager& factory) {
   using namespace conformance;
 
   // -- backend_name is non-empty and matches the configured expectation.
   {
-    auto session = factory();
+    auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(std::string(session->backend_name()), cfg.expected_backend_name);
   }
 
   // -- Initial state is Unloaded.
   {
-    auto session = factory();
+    auto manager = make_manager();
+    auto session = factory(*manager);
     EXPECT_FALSE(session->is_ready());
   }
 
   // -- Lifecycle happy path: load -> prime -> infer -> unload.
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
 
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     EXPECT_FALSE(session->is_ready());
@@ -166,8 +182,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
 
   // -- infer before prime returns NotReady (no adapter dispatch).
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
 
     auto req = valid_request(*manager, cfg);
@@ -178,7 +194,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
 
   // -- prime before load returns NotReady.
   {
-    auto session = factory();
+    auto manager = make_manager();
+    auto session = factory(*manager);
     auto r = session->prime();
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, Error::Code::NotReady);
@@ -187,7 +204,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   // -- Bad model path is rejected by the adapter at load time.
   //    Adapters that accept any path (mock) skip this branch.
   {
-    auto session = factory();
+    auto manager = make_manager();
+    auto session = factory(*manager);
     auto bad = ModelSpec::create("conformance-bad", ModelClass::Vision,
                                  "/tensorplate/conformance/does_not_exist", cfg.backend_hint)
                    .value();
@@ -206,8 +224,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
 
   // -- Shape mismatch is rejected before adapter dispatch (ShapeMismatch).
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
@@ -234,8 +252,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   //    the adapter must be consistent with its capability declaration
   //    (which the conformance suite does not yet introspect — V01-E05).
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
@@ -253,8 +271,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
 
   // -- unload then infer returns NotReady.
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
     ASSERT_TRUE(session->unload().has_value());
@@ -271,8 +289,8 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
   //    successful infer leaves the input buffer in the manager's
   //    active accounting until the caller releases it.
   {
-    auto session = factory();
     auto manager = make_manager();
+    auto session = factory(*manager);
     ASSERT_TRUE(session->load(make_spec(cfg)).has_value());
     ASSERT_TRUE(session->prime().has_value());
 
@@ -288,8 +306,21 @@ inline void run_execution_session_conformance(const ConformanceConfig& cfg,
     for (const auto& in : req.inputs()) {
       (void)manager->release_if_owned(in.buffer);
     }
+    // Adapters that allocate output buffers from the same manager
+    // (e.g. the Python sidecar) leave the outputs active until the
+    // caller releases them; release everything the session published.
+    for (const auto& out : r.value().outputs()) {
+      (void)manager->release_if_owned(out.buffer);
+    }
     EXPECT_EQ(manager->accounting().active_count, baseline);
   }
+}
+
+/// Backward-compatible overload for adapters whose factory does not
+/// need the scenario's BufferManager (e.g. the mock).
+inline void run_execution_session_conformance(const ConformanceConfig& cfg,
+                                              const SessionFactory& factory) {
+  run_execution_session_conformance(cfg, [&](BufferManager& /*unused*/) { return factory(); });
 }
 
 }  // namespace tensorplate::testing

@@ -257,9 +257,10 @@ TEST(SessionInfer, BadOutputReleasesPartialBuffersThroughManager) {
   // overflows its buffer, so the wrapper must release both.
   auto good_tv = TensorView::create(DType::Float32, {1, 4}).value();  // 16 bytes
   auto bad_tv = TensorView::create(DType::Float32, {1, 16}).value();  // 64 bytes
-  auto good =
-      tensorplate::build_named_output(*manager, OutputDescriptor{.name = "good", .tensor = good_tv})
-          .value();
+  auto good = tensorplate::build_named_output(
+                  *manager,
+                  OutputDescriptor{.name = "good", .tensor = good_tv, .semantic_tag = std::nullopt})
+                  .value();
   // Allocate a buffer too small for `bad_tv` so output validation
   // rejects it. Allocate manually so the bounds check fires inside the
   // session wrapper rather than at allocation time.

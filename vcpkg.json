@@ -7,7 +7,8 @@
   "license": "Apache-2.0",
   "supports": "(linux | osx | windows) & !uwp",
   "dependencies": [
-    "gtest"
+    "gtest",
+    "nlohmann-json"
   ],
   "features": {
     "tensorrt-adapter": {

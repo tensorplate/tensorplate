@@ -28,4 +28,5 @@ Additional architecture topics are added as the v0.1.0 epics land.
 ## Related contributor docs
 
 - [Jetson cross-compile setup](../contributing/jetson-cross-compile.md)
+- [Jetson target validation](../contributing/jetson-target-validation.md)
 - [Local validation commands](../contributing/local-validation.md)

@@ -33,6 +33,8 @@ stay fast and hardware/release-only checks stay separate.
   release branches.
 - T5 benchmarks publish results as artifacts; their pass/fail thresholds are
   reviewed per release.
+- Manual Jetson target validation for adapter/release readiness is documented
+  in [`docs/contributing/jetson-target-validation.md`](../docs/contributing/jetson-target-validation.md).
 
 ## Running
 
@@ -47,6 +49,9 @@ ctest --test-dir build --output-on-failure -L T1
 # Rust workspace tests (lands in V01-E01-F03-T02)
 cargo test --workspace
 ```
+
+For on-device Jetson validation of T1/T2/T3 with TensorRT enabled, use
+[`docs/contributing/jetson-target-validation.md`](../docs/contributing/jetson-target-validation.md).
 
 ## Adding a new test
 

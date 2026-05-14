@@ -29,10 +29,13 @@ milestone provides:
   importable and consistent with the C++ and Rust version surfaces.
 - A `python.yml` CI workflow running ruff, mypy, and pytest.
 
-V01-E05 lands the actual backend (TorchScript / `torch.compile` model
-loader, the IPC adapter to the C++ runtime, capability publication for
-async / generation / streaming / KV-cache / fixed-shape, and the
-SmolVLA validation harness).
+V01-E05 lands the IPC runner, dependency-free fixture backend, and C++
+sidecar adapter used to prove the process/socket boundary. Real
+TorchScript / `torch.compile` / SmolVLA model loading stays out of the
+host-CI baseline and lands with the model-specific validation work.
+Published capabilities must match the C++ adapter: native async,
+generation, streaming, KV-cache, and fixed-shape support remain disabled
+unless a concrete backend implements them.
 
 ## Why not in-process LibTorch?
 

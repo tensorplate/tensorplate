@@ -106,6 +106,11 @@ fn python_pytorch_ipc_load_model_round_trip() {
 }
 
 #[test]
+fn python_pytorch_ipc_health_check_response_round_trip() {
+    round_trip::<IpcMessage>("python_pytorch_ipc_health_check_response.json");
+}
+
+#[test]
 fn unknown_schema_version_is_rejected_with_typed_error() {
     let raw = load("python_pytorch_ipc_unknown_version.json");
     let err = decode_with_version_check::<IpcMessage>(&raw).expect_err("must reject");

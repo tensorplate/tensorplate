@@ -21,12 +21,19 @@ add_executable(tp_test_unit
   execution_session_async_test.cpp
   execution_session_events_test.cpp
   execution_session_conformance_test.cpp
+  backend_capability_test.cpp
+  backend_registry_test.cpp
+  backend_builtin_test.cpp
+  tensorrt_adapter_test.cpp
+  libtorch_adapter_test.cpp
+  sidecar_codec_test.cpp
 )
 
 target_include_directories(tp_test_unit
   PRIVATE
     ${CMAKE_SOURCE_DIR}/test/mocks
     ${CMAKE_SOURCE_DIR}/test/contract
+    ${CMAKE_SOURCE_DIR}/runtime/src
 )
 
 target_link_libraries(tp_test_unit
