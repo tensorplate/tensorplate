@@ -8,6 +8,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- FIFO scheduler ordering and capacity coverage (V01-E06-F02) at
+  `test/unit/scheduler_fifo_test.cpp`. The v0.1.0 default
+  `FifoScheduler` (registered under the stable `fifo` policy key)
+  preserves enqueue order among admitted requests, enforces
+  `queue_capacity` with `Error::Code::OOMError`, gates dispatch on
+  `in_flight_capacity`, increments in-flight on dispatch (not on
+  enqueue), and exposes queue depth / in-flight count / wait-time
+  high water through the `metrics()` snapshot without leaking the
+  internal `std::deque` to callers. 13 T1 cases assert the dispatch
+  order, capacity behavior, completion-frees-slot semantics, and
+  that mock executor code only holds `InferScheduler*` (not
+  `FifoScheduler*`).
 - `InferScheduler` public interface (V01-E06-F01) at
   `include/tensorplate/scheduler/scheduler.hpp` plus the supporting
   envelope (`SchedulerRequest`), monotonic clock abstraction
