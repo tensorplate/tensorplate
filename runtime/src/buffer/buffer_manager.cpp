@@ -176,14 +176,14 @@ struct BufferManager::Impl {
     // chosen over std::aligned_alloc + std::free because clang-tidy's
     // cppcoreguidelines-no-malloc / cppcoreguidelines-owning-memory
     // checks reject the C-style allocator pair.
-    ::operator delete(p, std::align_val_t{alignment});
+    ::operator delete (p, std::align_val_t{alignment});
   }
 
   static std::byte* allocate_storage(std::size_t size, std::size_t alignment) {
     // Size is rounded up to alignment so the underlying allocator can
     // serve the request reliably across platforms.
     const std::size_t allocated = round_up_to_alignment(size, alignment);
-    return static_cast<std::byte*>(::operator new(allocated, std::align_val_t{alignment}));
+    return static_cast<std::byte*>(::operator new (allocated, std::align_val_t{alignment}));
   }
 };
 
