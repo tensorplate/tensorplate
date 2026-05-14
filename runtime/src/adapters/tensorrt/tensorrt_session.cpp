@@ -93,13 +93,19 @@ TensorRTLogger& trt_logger() noexcept {
   return logger;
 }
 
-/// RAII wrapper for any TensorRT SDK handle. Calls `destroy()` on
-/// release; nullptr is a no-op.
+/// RAII wrapper for TensorRT SDK handles. TensorRT 10 removed the
+/// legacy `destroy()` member and expects normal deletion; older
+/// releases still require `destroy()` because public destructors were
+/// not part of the supported API.
 template <typename T>
 struct TrtDeleter {
   void operator()(T* ptr) const noexcept {
     if (ptr != nullptr) {
+#if NV_TENSORRT_MAJOR >= 10
+      delete ptr;
+#else
       ptr->destroy();
+#endif
     }
   }
 };
