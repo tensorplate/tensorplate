@@ -6,7 +6,9 @@ deliberately separates this path from the default x86_64 developer loop:
 **missing Jetson dependencies must not block CI** for ordinary PRs.
 
 The Jetson hardware-in-loop (T4) tests run only on release branches against
-real devices; see [`test/hil/`](../../test/hil/).
+real devices; see [`test/hil/`](../../test/hil/). For the current native
+on-device T1/T2/T3 validation pass, see
+[`jetson-target-validation.md`](jetson-target-validation.md).
 
 ## What we ship and what is system-provided
 
@@ -67,16 +69,21 @@ clear error if `TP_JETSON_SYSROOT`, `TP_JETSON_CC`, or `TP_JETSON_CXX` are
 missing. This is intentional: the absence of a hardcoded host path means
 the toolchain file does not bake in any contributor's machine.
 
-## Verifying on device
+## Verifying cross-compiled artifacts on device
 
 T4 hardware-in-loop validation lands in V01-E15 along with the end-to-end
-deploy and inference loop. Until then, on-device verification is manual:
+deploy and inference loop. Until then, cross-compiled artifacts can be
+smoke-tested manually:
 
 ```bash
 # On the Jetson device:
 file ./build-jetson/serving_worker/tensorplate-serving
 ./build-jetson/serving_worker/tensorplate-serving --version
 ```
+
+For a stronger target-device pass that builds natively on the Jetson with
+TensorRT enabled and runs T1/T2/T3, use
+[`jetson-target-validation.md`](jetson-target-validation.md).
 
 ## Why this is not in the default devcontainer
 

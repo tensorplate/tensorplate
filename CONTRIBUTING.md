@@ -107,6 +107,9 @@ For the canonical command sequence that mirrors CI, see
 [`docs/contributing/local-validation.md`](docs/contributing/local-validation.md).
 For Jetson cross-compile setup, see
 [`docs/contributing/jetson-cross-compile.md`](docs/contributing/jetson-cross-compile.md).
+For native Jetson target validation of adapter/release-readiness changes,
+see
+[`docs/contributing/jetson-target-validation.md`](docs/contributing/jetson-target-validation.md).
 
 ### C++ (runtime, serving worker, T1 tests)
 
