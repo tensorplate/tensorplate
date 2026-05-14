@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- SmolVLA-style async chunk and stale-cancel scheduler fixtures
+  (V01-E06-F07). New shared mocks at `test/mocks/vla_fixtures.hpp`
+  (named multi-input payload `image_front` /`proprioception` /
+  `instruction`, action-chunk identity, LeRobot
+  `stale_after_sequence` marker, helper that filters queued
+  envelopes by stale sequence, all backed by small fake buffers
+  through a real `BufferManager`). New T2 coverage at
+  `test/integration/scheduler_smolvla_test.cpp` (7 cases) covers
+  overlapping chunk admission and arrival-order dispatch, queued
+  stale-sequence cancellation with deterministic buffer release,
+  in-flight stale cancellation observability through the
+  `SchedulerEvent` (`cancellation_reason = stale_sequence`),
+  deadline-margin admission rejection under load, queued expiry
+  under overlapping requests, and a mixed admit/dispatch/complete
+  /expire/cancel flow that asserts metrics counts and
+  `BufferManager::accounting().active_count == 0` end-to-end.
+  Tests run against a mock executor / `InferScheduler*` pointer
+  and do not require SmolVLA weights.
 - Scheduler memory and thermal pressure-aware admission
   (V01-E06-F06). New protocol schema at
   `protocol/schemas/scheduler_pressure_signal.json` documents the
