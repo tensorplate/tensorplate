@@ -348,6 +348,11 @@ Result<void> ServingWorker::Impl::start_listener() {
   return Result<void>{};
 }
 
+// Dispatcher / evictor only reach `Impl` members through their
+// `unique_ptr` holders so clang-tidy concludes the methods can be
+// const. We keep them non-const so a future hook on `Impl` (e.g.
+// dispatcher state) does not force a signature churn.
+// NOLINTNEXTLINE(readability-make-member-function-const)
 void ServingWorker::Impl::dispatcher_loop() {
   while (!stop_workers.load()) {
     if (!pipeline->dispatch_one(*async_store)) {
@@ -358,6 +363,7 @@ void ServingWorker::Impl::dispatcher_loop() {
   }
 }
 
+// NOLINTNEXTLINE(readability-make-member-function-const)
 void ServingWorker::Impl::evictor_loop() {
   while (!stop_workers.load()) {
     async_store->enforce_bounds();
