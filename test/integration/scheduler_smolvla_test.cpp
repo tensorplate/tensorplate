@@ -22,20 +22,21 @@
 // sidecar; the scheduler is exercised through the abstract
 // InferScheduler* pointer.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
-
-#include "fake_scheduler_clock.hpp"
-#include "scheduler_fixtures.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
+
+#include "fake_scheduler_clock.hpp"
+#include "scheduler_fixtures.hpp"
 #include "vla_fixtures.hpp"
 
 namespace {
@@ -80,8 +81,8 @@ TEST(SchedulerSmolVla, OverlappingChunkRequestsAdmitAndDispatchInOrder) {
   std::vector<std::string> dispatched;
   while (auto next = h.scheduler->next()) {
     dispatched.push_back(next->request_id());
-    ASSERT_TRUE(h.scheduler->on_completion(next->request_id(), CompletionStatus::Success,
-                                           std::nullopt));
+    ASSERT_TRUE(
+        h.scheduler->on_completion(next->request_id(), CompletionStatus::Success, std::nullopt));
   }
   ASSERT_EQ(dispatched.size(), 3u);
   EXPECT_EQ(dispatched[0], "vla-1");
@@ -161,9 +162,9 @@ TEST(SchedulerSmolVla, DeadlineMarginRejectsImpossibleChunks) {
   // request) = now + 25 ms; deadline + margin = now + 5 ms + 20 ms =
   // now + 25 ms. Equal-to admits; bump the deadline down to fail.
   const auto tight_deadline = h.clock->now() + std::chrono::milliseconds{4};
-  auto rejected = h.scheduler->admit(
-      make_vla_request(*h.manager, *h.clock, "vla-late", /*sequence=*/100,
-                       /*stale_after_sequence=*/std::nullopt, tight_deadline));
+  auto rejected =
+      h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-late", /*sequence=*/100,
+                                          /*stale_after_sequence=*/std::nullopt, tight_deadline));
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error().code, Error::Code::Timeout);
   EXPECT_EQ(h.scheduler->metrics().admission_rejected_deadline, 1u);
@@ -179,10 +180,10 @@ TEST(SchedulerSmolVla, ExpiryUnderOverlappingRequests) {
   // advance.
   const auto d1 = h.clock->now() + std::chrono::milliseconds{2};
   const auto d2 = h.clock->now() + std::chrono::milliseconds{4};
-  ASSERT_TRUE(h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-1", 1,
-                                                  std::nullopt, d1)));
-  ASSERT_TRUE(h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-2", 2,
-                                                  std::nullopt, d2)));
+  ASSERT_TRUE(
+      h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-1", 1, std::nullopt, d1)));
+  ASSERT_TRUE(
+      h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-2", 2, std::nullopt, d2)));
   EXPECT_EQ(h.manager->accounting().active_count, 6u);
 
   // Advance past both deadlines.
@@ -206,8 +207,7 @@ TEST(SchedulerSmolVla, OutcomeMetricsReflectMixedFlow) {
   // Expired chunk.
   const auto d = h.clock->now() + std::chrono::milliseconds{2};
   ASSERT_TRUE(
-      h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-stale", 2,
-                                           std::nullopt, d)));
+      h.scheduler->admit(make_vla_request(*h.manager, *h.clock, "vla-stale", 2, std::nullopt, d)));
   h.clock->advance_ms(std::chrono::milliseconds{20});
   EXPECT_EQ(h.scheduler->expire_due(), 1u);
 

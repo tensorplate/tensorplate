@@ -301,7 +301,8 @@ std::optional<SchedulerRequest> FifoScheduler::next() {
   metrics_.queue_depth = queue_.size();
 
   const auto now_tp = now();
-  const auto wait = std::chrono::duration_cast<SchedulerClock::Duration>(now_tp - head.enqueue_time());
+  const auto wait =
+      std::chrono::duration_cast<SchedulerClock::Duration>(now_tp - head.enqueue_time());
   record_wait_locked(wait);
 
   in_flight_ids_.insert(head.request_id());
@@ -366,8 +367,8 @@ Result<void> FifoScheduler::cancel(std::string_view request_id, CancellationReas
   // Queued path: find and remove from the queue, release buffers.
   for (auto it = queue_.begin(); it != queue_.end(); ++it) {
     if (it->request_id() == id) {
-      const auto wait = std::chrono::duration_cast<SchedulerClock::Duration>(
-          now() - it->enqueue_time());
+      const auto wait =
+          std::chrono::duration_cast<SchedulerClock::Duration>(now() - it->enqueue_time());
       record_wait_locked(wait);
 
       SchedulerEvent event;
@@ -423,8 +424,8 @@ std::size_t FifoScheduler::expire_due_locked() {
   std::size_t removed = 0;
   for (auto it = queue_.begin(); it != queue_.end();) {
     if (is_expired_locked(*it)) {
-      const auto wait = std::chrono::duration_cast<SchedulerClock::Duration>(
-          now() - it->enqueue_time());
+      const auto wait =
+          std::chrono::duration_cast<SchedulerClock::Duration>(now() - it->enqueue_time());
       record_wait_locked(wait);
 
       SchedulerEvent event;
@@ -484,8 +485,8 @@ std::size_t FifoScheduler::shutdown() {
   // Cancel everything queued.
   while (!queue_.empty()) {
     auto& head = queue_.front();
-    const auto wait = std::chrono::duration_cast<SchedulerClock::Duration>(
-        now() - head.enqueue_time());
+    const auto wait =
+        std::chrono::duration_cast<SchedulerClock::Duration>(now() - head.enqueue_time());
     record_wait_locked(wait);
 
     SchedulerEvent event;

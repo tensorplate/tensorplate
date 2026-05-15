@@ -25,9 +25,8 @@
 namespace tensorplate {
 
 /// Factory closure that constructs a concrete InferScheduler.
-using SchedulerFactoryFn =
-    std::function<Result<std::unique_ptr<InferScheduler>>(const SchedulerConfig& config,
-                                                          SchedulerRuntimeHooks hooks)>;
+using SchedulerFactoryFn = std::function<Result<std::unique_ptr<InferScheduler>>(
+    const SchedulerConfig& config, SchedulerRuntimeHooks hooks)>;
 
 /// Process-wide policy registry. The runtime registers the built-in
 /// "fifo" policy at first use through `register_builtin_scheduler_policies`.

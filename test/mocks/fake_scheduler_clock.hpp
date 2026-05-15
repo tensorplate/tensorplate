@@ -25,7 +25,7 @@ class FakeSchedulerClock final : public SchedulerClock {
   /// against either clock domain. Tests that need a specific origin
   /// pass one explicitly.
   explicit FakeSchedulerClock(SchedulerClock::TimePoint origin = std::chrono::steady_clock::now() +
-                                                                  std::chrono::hours{1}) noexcept
+                                                                 std::chrono::hours{1}) noexcept
       : now_(origin) {}
 
   TimePoint now() const noexcept override {

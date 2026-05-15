@@ -10,18 +10,19 @@
 //   - Executor-style code can hold the scheduler through the abstract
 //     interface and never branches on the concrete type.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <string>
 
-#include <gtest/gtest.h>
-
-#include "fake_scheduler_clock.hpp"
-#include "scheduler_fixtures.hpp"
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/pressure.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
+
+#include "fake_scheduler_clock.hpp"
+#include "scheduler_fixtures.hpp"
 
 namespace {
 
@@ -117,9 +118,9 @@ TEST(SchedulerFactory, ExecutorStyleCallerOnlyHoldsInterfaceReference) {
 TEST(SchedulerFactory, LocalRegistryDuplicateRegistrationFails) {
   SchedulerPolicyRegistry local;
   register_builtin_scheduler_policies(local);
-  auto err =
-      local.register_policy("fifo", [](const SchedulerConfig&, SchedulerRuntimeHooks)
-                                        -> Result<std::unique_ptr<InferScheduler>> {
+  auto err = local.register_policy(
+      "fifo",
+      [](const SchedulerConfig&, SchedulerRuntimeHooks) -> Result<std::unique_ptr<InferScheduler>> {
         return unexpected(Error::Code::Internal, "test");
       });
   ASSERT_FALSE(err);
@@ -128,10 +129,11 @@ TEST(SchedulerFactory, LocalRegistryDuplicateRegistrationFails) {
 
 TEST(SchedulerFactory, EmptyNameRegistrationIsConfigInvalid) {
   SchedulerPolicyRegistry local;
-  auto err = local.register_policy("", [](const SchedulerConfig&, SchedulerRuntimeHooks)
-                                            -> Result<std::unique_ptr<InferScheduler>> {
-    return unexpected(Error::Code::Internal, "test");
-  });
+  auto err = local.register_policy(
+      "",
+      [](const SchedulerConfig&, SchedulerRuntimeHooks) -> Result<std::unique_ptr<InferScheduler>> {
+        return unexpected(Error::Code::Internal, "test");
+      });
   ASSERT_FALSE(err);
   EXPECT_EQ(err.error().code, Error::Code::ConfigInvalid);
 }
@@ -197,7 +199,7 @@ TEST(SchedulerRequest, EnvelopePreservesIdentity) {
   ServiceEstimate est;
   est.estimated_service_time = std::chrono::milliseconds{3};
   SchedulerRequest envelope{std::move(req), "tensorrt", "model-a", est, clock.now(),
-                             /*priority=*/7};
+                            /*priority=*/7};
   EXPECT_EQ(envelope.request_id(), "req-1");
   EXPECT_EQ(envelope.endpoint(), "endpoint-a");
   EXPECT_EQ(envelope.backend_name(), "tensorrt");

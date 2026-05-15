@@ -12,19 +12,20 @@
 //   - Sync requests and SmolVLA-style async chunk requests share the
 //     same cleanup path.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
 
-#include <gtest/gtest.h>
-
-#include "fake_scheduler_clock.hpp"
-#include "scheduler_fixtures.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
+
+#include "fake_scheduler_clock.hpp"
+#include "scheduler_fixtures.hpp"
 
 namespace {
 
@@ -58,8 +59,7 @@ struct ManagerHarness {
 
 TEST(SchedulerCompletion, RemovesInFlightAccounting) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   auto first = h.scheduler->next();
   ASSERT_TRUE(first.has_value());
   EXPECT_EQ(h.scheduler->metrics().in_flight, 1u);
@@ -71,8 +71,7 @@ TEST(SchedulerCompletion, RemovesInFlightAccounting) {
 
 TEST(SchedulerCompletion, FailureCompletionIncrementsFailureCounter) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   ASSERT_TRUE(h.scheduler->next().has_value());
   ASSERT_TRUE(
       h.scheduler->on_completion("a", CompletionStatus::Failure, Error::Code::InferenceFailed));
@@ -83,8 +82,7 @@ TEST(SchedulerCompletion, FailureCompletionIncrementsFailureCounter) {
 
 TEST(SchedulerCompletion, DuplicateCompletionIsTypedInternal) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   ASSERT_TRUE(h.scheduler->next().has_value());
   ASSERT_TRUE(h.scheduler->on_completion("a", CompletionStatus::Success, std::nullopt));
   auto dup = h.scheduler->on_completion("a", CompletionStatus::Success, std::nullopt);
@@ -103,8 +101,7 @@ TEST(SchedulerCompletion, UnknownRequestIdIsTypedInternal) {
 
 TEST(SchedulerCancel, QueuedReleaseInputBuffers) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   EXPECT_EQ(h.manager->accounting().active_count, 1u);
 
   ASSERT_TRUE(h.scheduler->cancel("a", CancellationReason::ClientRequest));
@@ -128,8 +125,7 @@ TEST(SchedulerCancel, QueuedExpiryReleasesInputBuffers) {
 
 TEST(SchedulerCancel, InFlightCancelClearsAccountingAndTombstones) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   auto next = h.scheduler->next();
   ASSERT_TRUE(next.has_value());
   EXPECT_EQ(h.scheduler->metrics().in_flight, 1u);
@@ -161,8 +157,7 @@ TEST(SchedulerCancel, UnknownIdReturnsNotReady) {
 
 TEST(SchedulerCancel, DoubleCancelInFlightSurfaceTypedNotReady) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   auto first = h.scheduler->next();
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(h.scheduler->cancel("a", CancellationReason::ClientRequest));
@@ -178,8 +173,7 @@ TEST(SchedulerCancel, DoubleCancelInFlightSurfaceTypedNotReady) {
 
 TEST(SchedulerCancel, CancelAfterCompletionReturnsNotReady) {
   ManagerHarness h;
-  ASSERT_TRUE(
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
+  ASSERT_TRUE(h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "a")));
   auto first = h.scheduler->next();
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(h.scheduler->on_completion("a", CompletionStatus::Success, std::nullopt));
@@ -213,8 +207,7 @@ TEST(SchedulerShutdown, DrainsQueuedAndCancelsInFlight) {
   EXPECT_EQ(h.manager->accounting().active_count, 0u);
 
   // Further admits are rejected NotReady.
-  auto rejected =
-      h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "d"));
+  auto rejected = h.scheduler->admit(make_request_with_owned_buffer(*h.manager, *h.clock, "d"));
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error().code, Error::Code::NotReady);
   // Buffers from the rejected admit are released too.
@@ -233,8 +226,7 @@ TEST(SchedulerCancel, AsyncChunkAndSyncShareCleanupPath) {
 
   // Build directly so we can attach metadata.
   auto buf = h.manager->allocate(64).value();
-  auto view =
-      TensorView::create(DType::Float32, {1, 16}, Layout::RowMajor, 0, 64).value();
+  auto view = TensorView::create(DType::Float32, {1, 16}, Layout::RowMajor, 0, 64).value();
   std::vector<NamedInput> inputs;
   inputs.push_back(NamedInput{"input", buf, view});
   auto req = InferRequest::create("vla-1", "policy/endpoint", std::move(inputs), meta).value();

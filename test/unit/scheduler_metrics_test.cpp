@@ -8,17 +8,18 @@
 // monotonic steady-clock nanoseconds; counter increments fire from the
 // scheduler critical-path methods even when the event sink throws.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 
-#include <gtest/gtest.h>
+#include "tensorplate/scheduler/factory.hpp"
+#include "tensorplate/scheduler/scheduler.hpp"
 
 #include "fake_scheduler_clock.hpp"
 #include "scheduler_fixtures.hpp"
-#include "tensorplate/scheduler/factory.hpp"
-#include "tensorplate/scheduler/scheduler.hpp"
 
 namespace {
 
@@ -98,23 +99,22 @@ TEST(SchedulerMetrics, RejectionCountersBreakOutByReason) {
 
   // Complete all of them so we can run the deadline test.
   while (auto n = h.scheduler->next()) {
-    ASSERT_TRUE(h.scheduler->on_completion(n->request_id(), CompletionStatus::Success,
-                                           std::nullopt));
+    ASSERT_TRUE(
+        h.scheduler->on_completion(n->request_id(), CompletionStatus::Success, std::nullopt));
   }
 
   // Build a request that's already past its deadline against the
   // fake clock: build with future deadline, advance, then admit.
   const auto future_deadline = h.clock->now() + std::chrono::milliseconds{5};
-  auto envelope = SchedulerRequest{make_infer_request("late", "endpoint", future_deadline),
-                                    "mock", "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("late", "endpoint", future_deadline), "mock", "model", {}, h.clock->now()};
   h.clock->advance_ms(std::chrono::milliseconds{50});
   auto deadline_rejected = h.scheduler->admit(std::move(envelope));
   ASSERT_FALSE(deadline_rejected);
   EXPECT_EQ(h.scheduler->metrics().admission_rejected_deadline, 1u);
 
   // Pressure rejection: drive critical memory and admit.
-  PressureSignal sig{PressureSource::Memory, PressureSeverity::Critical, h.clock->now(),
-                      "test"};
+  PressureSignal sig{PressureSource::Memory, PressureSeverity::Critical, h.clock->now(), "test"};
   h.scheduler->on_pressure(sig);
   auto pressure_rejected =
       h.scheduler->admit(make_scheduler_request(make_infer_request("pressed"), *h.clock));
@@ -160,8 +160,8 @@ TEST(SchedulerMetrics, EventOrderForAdmitDispatchComplete) {
 TEST(SchedulerMetrics, EventLabelsAreBounded) {
   MetricsHarness h;
   // Build with explicit endpoint / backend / model labels.
-  auto envelope = SchedulerRequest{make_infer_request("a", "vision/detector"), "tensorrt",
-                                    "model-detect", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "vision/detector"), "tensorrt", "model-detect", {}, h.clock->now()};
   ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
   const auto events = h.sink.events();
   ASSERT_EQ(events.size(), 1u);

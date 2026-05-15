@@ -45,8 +45,7 @@ inline NamedInput allocate_vla_input(BufferManager& manager, std::string name,
                                      std::size_t byte_size,
                                      const std::vector<std::int64_t>& shape) {
   auto buf = manager.allocate(byte_size).value();
-  auto view =
-      TensorView::create(DType::Float32, shape, Layout::RowMajor, 0, byte_size).value();
+  auto view = TensorView::create(DType::Float32, shape, Layout::RowMajor, 0, byte_size).value();
   return NamedInput{std::move(name), buf, view};
 }
 
@@ -54,23 +53,21 @@ inline NamedInput allocate_vla_input(BufferManager& manager, std::string name,
 /// payload (image_front, proprioception, instruction) and async
 /// chunk identity. Buffer sizes are small fakes; tests that need
 /// realistic SmolVLA shapes plug in their own sizes.
-inline SchedulerRequest make_vla_request(BufferManager& manager, const SchedulerClock& clock,
-                                         std::string request_id,
-                                         std::int64_t action_chunk_sequence,
-                                         std::optional<std::int64_t> stale_after_sequence =
-                                             std::nullopt,
-                                         std::optional<InferRequest::TimePoint> deadline =
-                                             std::nullopt) {
+inline SchedulerRequest make_vla_request(
+    BufferManager& manager, const SchedulerClock& clock, std::string request_id,
+    std::int64_t action_chunk_sequence,
+    std::optional<std::int64_t> stale_after_sequence = std::nullopt,
+    std::optional<InferRequest::TimePoint> deadline = std::nullopt) {
   std::vector<NamedInput> inputs;
   // Pretend image_front is a 2x2 RGB float32 (48 bytes) just so the
   // scheduler has something to release; SmolVLA-true shapes are
   // immaterial here.
   inputs.push_back(allocate_vla_input(manager, "image_front", /*byte_size=*/48,
-                                       /*shape=*/{1, 3, 2, 2}));
+                                      /*shape=*/{1, 3, 2, 2}));
   inputs.push_back(allocate_vla_input(manager, "proprioception", /*byte_size=*/32,
-                                       /*shape=*/{1, 8}));
+                                      /*shape=*/{1, 8}));
   inputs.push_back(allocate_vla_input(manager, "instruction", /*byte_size=*/16,
-                                       /*shape=*/{1, 4}));
+                                      /*shape=*/{1, 4}));
 
   RequestMetadata meta;
   meta.action_chunk_id = std::string{"chunk-"} + std::to_string(action_chunk_sequence);

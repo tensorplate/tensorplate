@@ -16,18 +16,19 @@
 //   - Queued and in-flight work is NOT cancelled by baseline pressure.
 //   - Pressure events appear on the SchedulerEventSink.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <utility>
 
-#include <gtest/gtest.h>
-
-#include "fake_scheduler_clock.hpp"
-#include "scheduler_fixtures.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/pressure.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
+
+#include "fake_scheduler_clock.hpp"
+#include "scheduler_fixtures.hpp"
 
 namespace {
 
@@ -55,7 +56,7 @@ struct PressureHarness {
 TEST(SchedulerPressure, SignalRecordsSeverityAndEmitsEvent) {
   PressureHarness h;
   PressureSignal sig{PressureSource::Memory, PressureSeverity::Warning, h.clock->now(),
-                      "test:warn"};
+                     "test:warn"};
   h.scheduler->on_pressure(sig);
 
   const auto m = h.scheduler->metrics();

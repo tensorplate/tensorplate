@@ -12,17 +12,18 @@
 //   - Mock executor code holds the scheduler through the abstract
 //     interface and never references the FIFO concrete type.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include <gtest/gtest.h>
+#include "tensorplate/scheduler/factory.hpp"
+#include "tensorplate/scheduler/scheduler.hpp"
 
 #include "fake_scheduler_clock.hpp"
 #include "scheduler_fixtures.hpp"
-#include "tensorplate/scheduler/factory.hpp"
-#include "tensorplate/scheduler/scheduler.hpp"
 
 namespace {
 
@@ -145,7 +146,8 @@ TEST(SchedulerFifo, MetricsHighWaterIsRetained) {
 
   // Drain and assert the high-water did not regress.
   while (auto n = h.scheduler->next()) {
-    ASSERT_TRUE(h.scheduler->on_completion(n->request_id(), CompletionStatus::Success, std::nullopt));
+    ASSERT_TRUE(
+        h.scheduler->on_completion(n->request_id(), CompletionStatus::Success, std::nullopt));
   }
   EXPECT_EQ(h.scheduler->metrics().queue_depth, 0u);
   EXPECT_EQ(h.scheduler->metrics().queue_depth_high_water, 4u);
@@ -166,8 +168,8 @@ TEST(SchedulerFifo, DispatchPopulatesWaitTime) {
 
 TEST(SchedulerFifo, AdmittedEventCarriesPolicyAndBackend) {
   SchedulerHarness h{/*queue=*/2, /*in_flight=*/1};
-  auto envelope = SchedulerRequest{make_infer_request("a"), "tensorrt", "model-x", {},
-                                    h.clock->now()};
+  auto envelope =
+      SchedulerRequest{make_infer_request("a"), "tensorrt", "model-x", {}, h.clock->now()};
   ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
   const auto events = h.sink.events();
   ASSERT_GE(events.size(), 1u);

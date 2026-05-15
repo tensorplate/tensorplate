@@ -34,9 +34,7 @@ class SchedulerClock {
 /// Production clock backed by std::chrono::steady_clock.
 class SystemSchedulerClock final : public SchedulerClock {
  public:
-  [[nodiscard]] TimePoint now() const noexcept override {
-    return std::chrono::steady_clock::now();
-  }
+  [[nodiscard]] TimePoint now() const noexcept override { return std::chrono::steady_clock::now(); }
 
   /// Convenience factory.
   [[nodiscard]] static std::unique_ptr<SchedulerClock> create() {

@@ -14,15 +14,16 @@
 //     explicit expire_due() entry point.
 //   - Records admission_rejected_deadline and expired counters.
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <utility>
 
-#include <gtest/gtest.h>
+#include "tensorplate/scheduler/factory.hpp"
+#include "tensorplate/scheduler/scheduler.hpp"
 
 #include "fake_scheduler_clock.hpp"
 #include "scheduler_fixtures.hpp"
-#include "tensorplate/scheduler/factory.hpp"
-#include "tensorplate/scheduler/scheduler.hpp"
 
 namespace {
 
@@ -37,8 +38,7 @@ struct DeadlineHarness {
 
   DeadlineHarness(std::chrono::milliseconds margin,
                   std::chrono::milliseconds default_estimate = std::chrono::milliseconds{1},
-                  std::size_t queue_capacity = 8,
-                  std::size_t in_flight_capacity = 4) {
+                  std::size_t queue_capacity = 8, std::size_t in_flight_capacity = 4) {
     SchedulerConfig config;
     config.deadline_margin = margin;
     config.default_service_estimate = default_estimate;
@@ -65,8 +65,8 @@ TEST(SchedulerDeadline, AlreadyPastDeadlineIsRejectedTimeout) {
   // by setting a future deadline first then advancing the clock past
   // it.
   const auto future_deadline = h.clock->now() + std::chrono::milliseconds{2};
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", future_deadline),
-                                    "mock", "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "endpoint-a", future_deadline), "mock", "model", {}, h.clock->now()};
   // Advance the clock past the deadline before admit().
   h.clock->advance_ms(std::chrono::milliseconds{10});
   auto rejected = h.scheduler->admit(std::move(envelope));
@@ -84,8 +84,8 @@ TEST(SchedulerDeadline, EstimateExceedsDeadlinePlusMarginRejects) {
   // queue_depth = 0, in_flight = 0, so estimated_completion = now + 50
   // ms, which exceeds deadline (5 ms) + margin (2 ms) = 7 ms.
   const auto deadline = h.clock->now() + std::chrono::milliseconds{5};
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock",
-                                    "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()};
   auto rejected = h.scheduler->admit(std::move(envelope));
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error().code, Error::Code::Timeout);
@@ -96,8 +96,8 @@ TEST(SchedulerDeadline, EstimateInsideDeadlinePlusMarginAccepts) {
   DeadlineHarness h{/*margin=*/std::chrono::milliseconds{20},
                     /*default_estimate=*/std::chrono::milliseconds{1}};
   const auto deadline = h.clock->now() + std::chrono::milliseconds{50};
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock",
-                                    "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()};
   ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
 }
 
@@ -107,8 +107,8 @@ TEST(SchedulerDeadline, BoundaryAtDeadlinePlusMarginAccepts) {
   DeadlineHarness h{/*margin=*/std::chrono::milliseconds{2},
                     /*default_estimate=*/std::chrono::milliseconds{5}};
   const auto deadline = h.clock->now() + std::chrono::milliseconds{3};
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock",
-                                    "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()};
   ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
 }
 
@@ -118,8 +118,8 @@ TEST(SchedulerDeadline, JustOverBoundaryRejects) {
   // estimated_completion = now + 6 ms; deadline + margin = now + 5 ms.
   // 6 > 5: reject.
   const auto deadline = h.clock->now() + std::chrono::milliseconds{3};
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock",
-                                    "model", {}, h.clock->now()};
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()};
   auto r = h.scheduler->admit(std::move(envelope));
   ASSERT_FALSE(r);
   EXPECT_EQ(r.error().code, Error::Code::Timeout);
@@ -134,17 +134,16 @@ TEST(SchedulerDeadline, PerRequestEstimateOverridesDefault) {
   ServiceEstimate est;
   est.estimated_service_time =
       std::chrono::duration_cast<SchedulerClock::Duration>(std::chrono::milliseconds{1});
-  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock",
-                                    "model", est, h.clock->now()};
+  auto envelope = SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock", "model",
+                                   est, h.clock->now()};
   ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
 }
 
 TEST(SchedulerDeadline, QueuedExpiryOnExplicitSweep) {
   DeadlineHarness h{std::chrono::milliseconds{50}};
   const auto deadline = h.clock->now() + std::chrono::milliseconds{5};
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock", "model",
-                        {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()}));
   EXPECT_EQ(h.scheduler->metrics().queue_depth, 1u);
 
   // Advance the clock past the deadline.
@@ -170,15 +169,16 @@ TEST(SchedulerDeadline, QueuedExpiryOnExplicitSweep) {
 TEST(SchedulerDeadline, QueuedExpirySweepsBeforeDispatch) {
   DeadlineHarness h{std::chrono::milliseconds{50}};
   const auto deadline = h.clock->now() + std::chrono::milliseconds{5};
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock", "model",
-                        {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()}));
   // Admit a second request with a later deadline so we have something
   // to dispatch after the sweep.
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{
-          make_infer_request("b", "endpoint-a", h.clock->now() + std::chrono::milliseconds{500}),
-          "mock", "model", {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("b", "endpoint-a", h.clock->now() + std::chrono::milliseconds{500}),
+      "mock",
+      "model",
+      {},
+      h.clock->now()}));
 
   h.clock->advance_ms(std::chrono::milliseconds{10});  // 'a' is now stale.
   auto next = h.scheduler->next();
@@ -194,9 +194,8 @@ TEST(SchedulerDeadline, DeadlineUsesMonotonicTimeNotWallTime) {
   // scheduler with the fake clock. The result must depend on the fake
   // (monotonic) clock alone, not on the system wall clock.
   const auto deadline = h.clock->now() + std::chrono::milliseconds{5};
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{make_infer_request("a", "endpoint-a", deadline), "mock", "model",
-                        {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()}));
   // Sleeping in real time has no effect; only fake-clock advance does.
   EXPECT_EQ(h.scheduler->expire_due(), 0u);
   h.clock->advance_ms(std::chrono::milliseconds{10});
@@ -245,12 +244,10 @@ TEST(SchedulerDeadline, EstimateAccountsForQueueDepth) {
                     /*default_estimate=*/std::chrono::milliseconds{5}};
   // Admit two head-of-line requests with generous deadlines.
   const auto far = h.clock->now() + std::chrono::milliseconds{500};
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{make_infer_request("a", "endpoint", far), "mock", "model",
-                        {}, h.clock->now()}));
-  ASSERT_TRUE(h.scheduler->admit(
-      SchedulerRequest{make_infer_request("b", "endpoint", far), "mock", "model",
-                        {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a", "endpoint", far), "mock", "model", {}, h.clock->now()}));
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("b", "endpoint", far), "mock", "model", {}, h.clock->now()}));
 
   // Now try to admit a request whose deadline is just barely later
   // than its own service estimate. The scheduler should reject because
@@ -258,9 +255,8 @@ TEST(SchedulerDeadline, EstimateAccountsForQueueDepth) {
   // would have to wait (5 ms * 2) + 5 ms = 15 ms, but its deadline is
   // only 12 ms out.
   const auto tight = h.clock->now() + std::chrono::milliseconds{12};
-  auto rejected = h.scheduler->admit(
-      SchedulerRequest{make_infer_request("c", "endpoint", tight), "mock", "model",
-                        {}, h.clock->now()});
+  auto rejected = h.scheduler->admit(SchedulerRequest{
+      make_infer_request("c", "endpoint", tight), "mock", "model", {}, h.clock->now()});
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error().code, Error::Code::Timeout);
 }
