@@ -18,7 +18,7 @@ std::optional<std::string_view> Request::header(std::string_view name) const noe
   return std::nullopt;
 }
 
-void Response::set_header(std::string name, std::string value) {
+void Response::set_header(std::string_view name, std::string value) {
   // Header names are stored lowercase to match the request side.
   std::string lname = lower_ascii(name);
   for (auto& h : headers) {

@@ -94,8 +94,7 @@ class ServingPipeline {
   /// dispatcher thread runs `dispatch_one` to make progress.
   ///
   /// Errors mirror `run_sync`.
-  [[nodiscard]] Result<AsyncAcceptOutcome> run_async(InferRequest request,
-                                                    AsyncPolicyStore& store);
+  [[nodiscard]] Result<AsyncAcceptOutcome> run_async(InferRequest request, AsyncPolicyStore& store);
 
   /// Dispatch the next admitted request through the scheduler.
   /// Called by the async dispatcher thread. Returns true if a

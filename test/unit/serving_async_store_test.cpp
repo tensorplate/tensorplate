@@ -58,7 +58,8 @@ TEST(AsyncPolicyStore, MarkInFlightAndPublish) {
   std::vector<NamedOutput> outs;
   auto res = InferResult::create_success("a", std::move(outs));
   // create_success rejects empty outputs; emulate by going through failure.
-  auto fail = InferResult::create_failure("a", Error{Error::Code::InferenceFailed, "x", std::nullopt});
+  auto fail =
+      InferResult::create_failure("a", Error{Error::Code::InferenceFailed, "x", std::nullopt});
   EXPECT_TRUE(store.publish_result("a", std::move(fail)));
   // Failure status: counts have moved from in_flight; completed
   // increments only on success. Failure publish via publish_result

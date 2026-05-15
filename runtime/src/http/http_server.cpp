@@ -53,11 +53,13 @@ bool is_loopback_literal(std::string_view host) {
 }
 
 int set_nonblock(int fd) {
-  int flags = ::fcntl(fd, F_GETFL, 0);
+  // POSIX ::fcntl is a vararg interface; suppress the cppcoreguidelines
+  // vararg check here rather than at every call site.
+  int flags = ::fcntl(fd, F_GETFL, 0);  // NOLINT(cppcoreguidelines-pro-type-vararg)
   if (flags < 0) {
     return -1;
   }
-  return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);  // NOLINT(cppcoreguidelines-pro-type-vararg)
 }
 
 // Read until either CRLFCRLF (header terminator) is seen, the
@@ -88,8 +90,8 @@ ssize_t read_until_headers(int fd, std::string& buffer, std::size_t max_header_b
     if (pr == 0) {
       return -3;  // timeout
     }
-    char chunk[kReadChunk];
-    ssize_t n = ::recv(fd, chunk, sizeof(chunk), 0);
+    std::array<char, kReadChunk> chunk{};
+    ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
         continue;
@@ -99,7 +101,7 @@ ssize_t read_until_headers(int fd, std::string& buffer, std::size_t max_header_b
     if (n == 0) {
       return -4;  // EOF before headers
     }
-    buffer.append(chunk, static_cast<std::size_t>(n));
+    buffer.append(chunk.data(), static_cast<std::size_t>(n));
   }
 }
 
@@ -122,10 +124,10 @@ ssize_t read_remaining_body(int fd, std::string& buffer, std::size_t need_total,
     if (pr == 0) {
       return -3;
     }
-    char chunk[kReadChunk];
-    ssize_t to_read = static_cast<ssize_t>(std::min<std::size_t>(sizeof(chunk),
-                                                                  need_total - buffer.size()));
-    ssize_t n = ::recv(fd, chunk, static_cast<std::size_t>(to_read), 0);
+    std::array<char, kReadChunk> chunk{};
+    ssize_t to_read =
+        static_cast<ssize_t>(std::min<std::size_t>(chunk.size(), need_total - buffer.size()));
+    ssize_t n = ::recv(fd, chunk.data(), static_cast<std::size_t>(to_read), 0);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
         continue;
@@ -135,13 +137,12 @@ ssize_t read_remaining_body(int fd, std::string& buffer, std::size_t need_total,
     if (n == 0) {
       return -4;
     }
-    buffer.append(chunk, static_cast<std::size_t>(n));
+    buffer.append(chunk.data(), static_cast<std::size_t>(n));
   }
   return static_cast<ssize_t>(buffer.size());
 }
 
-bool write_all(int fd, const std::string& data,
-               std::chrono::steady_clock::time_point deadline) {
+bool write_all(int fd, const std::string& data, std::chrono::steady_clock::time_point deadline) {
   std::size_t sent = 0;
   while (sent < data.size()) {
     auto now = std::chrono::steady_clock::now();
@@ -312,8 +313,7 @@ struct HttpServer::Impl {
       }
     }
     for (const auto& r : prefix_routes) {
-      if (r.method == req.method &&
-          req.path.compare(0, r.prefix.size(), r.prefix) == 0 &&
+      if (r.method == req.method && req.path.compare(0, r.prefix.size(), r.prefix) == 0 &&
           req.path.size() > r.prefix.size()) {
         try {
           return r.handler(req);
@@ -338,6 +338,7 @@ struct HttpServer::Impl {
     return Response::plain(404, "not found");
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
   void handle_connection(int fd) {
     auto deadline = std::chrono::steady_clock::now() + config.request_timeout;
     std::string buffer;
@@ -378,15 +379,15 @@ struct HttpServer::Impl {
       sockaddr_storage ss{};
       socklen_t slen = sizeof(ss);
       if (::getpeername(fd, reinterpret_cast<sockaddr*>(&ss), &slen) == 0) {
-        char host[INET6_ADDRSTRLEN] = {0};
+        std::array<char, INET6_ADDRSTRLEN> host{};
         if (ss.ss_family == AF_INET) {
           const auto* sa = reinterpret_cast<const sockaddr_in*>(&ss);
-          ::inet_ntop(AF_INET, &sa->sin_addr, host, sizeof(host));
-          req.peer = std::string{host} + ":" + std::to_string(ntohs(sa->sin_port));
+          ::inet_ntop(AF_INET, &sa->sin_addr, host.data(), host.size());
+          req.peer = std::string{host.data()} + ":" + std::to_string(ntohs(sa->sin_port));
         } else if (ss.ss_family == AF_INET6) {
           const auto* sa = reinterpret_cast<const sockaddr_in6*>(&ss);
-          ::inet_ntop(AF_INET6, &sa->sin6_addr, host, sizeof(host));
-          req.peer = std::string{"["} + host + "]:" + std::to_string(ntohs(sa->sin6_port));
+          ::inet_ntop(AF_INET6, &sa->sin6_addr, host.data(), host.size());
+          req.peer = std::string{"["} + host.data() + "]:" + std::to_string(ntohs(sa->sin6_port));
         }
       }
     }
@@ -505,18 +506,20 @@ struct HttpServer::Impl {
 
 HttpServer::HttpServer() : impl_(std::make_unique<Impl>()) {}
 
-HttpServer::~HttpServer() { stop(); }
+HttpServer::~HttpServer() {
+  stop();
+}
 
 void HttpServer::add_route(std::string method, std::string path, RouteHandler handler) {
   std::lock_guard<std::mutex> g(impl_->routes_mutex);
-  impl_->exact_routes.push_back(Impl::ExactRoute{std::move(method), std::move(path),
-                                                  std::move(handler)});
+  impl_->exact_routes.push_back(
+      Impl::ExactRoute{std::move(method), std::move(path), std::move(handler)});
 }
 
 void HttpServer::add_prefix_route(std::string method, std::string prefix, RouteHandler handler) {
   std::lock_guard<std::mutex> g(impl_->routes_mutex);
-  impl_->prefix_routes.push_back(Impl::PrefixRoute{std::move(method), std::move(prefix),
-                                                    std::move(handler)});
+  impl_->prefix_routes.push_back(
+      Impl::PrefixRoute{std::move(method), std::move(prefix), std::move(handler)});
 }
 
 Result<void> HttpServer::start(const HttpServerConfig& config) {
@@ -527,9 +530,9 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
     return unexpected(Error::Code::ConfigInvalid, "http server: bind_host is empty");
   }
   if (!is_loopback_literal(config.bind_host) && !config.allow_non_loopback) {
-    return unexpected(Error::Code::Unsupported,
-                      std::string{"http server: refuses to bind non-loopback host: "} +
-                          config.bind_host);
+    return unexpected(
+        Error::Code::Unsupported,
+        std::string{"http server: refuses to bind non-loopback host: "} + config.bind_host);
   }
   impl_->config = config;
 
@@ -620,8 +623,12 @@ void HttpServer::stop() {
   impl_->bound_port = 0;
 }
 
-bool HttpServer::is_running() const noexcept { return impl_->running.load(); }
+bool HttpServer::is_running() const noexcept {
+  return impl_->running.load();
+}
 
-std::uint16_t HttpServer::bound_port() const noexcept { return impl_->bound_port; }
+std::uint16_t HttpServer::bound_port() const noexcept {
+  return impl_->bound_port;
+}
 
 }  // namespace tensorplate::http

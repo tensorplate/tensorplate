@@ -94,10 +94,10 @@ class RequestRouter {
   RequestRouterDeps deps_;
   std::atomic<bool> stopping_{false};
 
-  [[nodiscard]] http::Response make_error_response(int http_status, std::string_view request_id,
-                                                   std::string_view correlation_id,
-                                                   Error::Code code, std::string_view message,
-                                                   std::optional<std::string_view> detail = {});
+  [[nodiscard]] http::Response make_error_response(
+      int http_status, std::string_view request_id, std::string_view correlation_id,
+      Error::Code code, std::string_view message,
+      std::optional<std::string_view> detail = {}) const;
 };
 
 }  // namespace serving

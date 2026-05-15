@@ -62,8 +62,7 @@ struct AsyncPolicyStore::Entry {
 
 AsyncPolicyStore::AsyncPolicyStore(AsyncPolicyConfig config, BufferManager& buffer_manager,
                                    const SchedulerClock* clock, ServingMetrics* metrics)
-    : config_(std::move(config)), buffer_manager_(buffer_manager), clock_(clock),
-      metrics_(metrics) {}
+    : config_(config), buffer_manager_(buffer_manager), clock_(clock), metrics_(metrics) {}
 
 AsyncPolicyStore::~AsyncPolicyStore() {
   // Release any retained buffers so the buffer manager sees zero
@@ -87,8 +86,7 @@ AsyncPolicyStore::~AsyncPolicyStore() {
 Result<void> AsyncPolicyStore::add_pending(const InferRequest& request) {
   std::lock_guard<std::mutex> g(mutex_);
   if (counts_.pending + counts_.in_flight >= config_.max_pending) {
-    return unexpected(Error::Code::OOMError,
-                      "async store: max_pending exceeded");
+    return unexpected(Error::Code::OOMError, "async store: max_pending exceeded");
   }
   if (by_id_.contains(request.request_id())) {
     return unexpected(Error::Code::Internal,
@@ -244,6 +242,7 @@ bool AsyncPolicyStore::mark_stale(std::string_view request_id) {
   return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 std::vector<std::string> AsyncPolicyStore::mark_stale_before_sequence(
     std::int64_t stale_after_sequence) {
   std::vector<std::string> staled;
@@ -322,6 +321,7 @@ bool AsyncPolicyStore::release_completed(std::string_view request_id) {
   return true;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void AsyncPolicyStore::enforce_bounds() {
   std::lock_guard<std::mutex> g(mutex_);
   if (clock_ == nullptr) {
@@ -331,11 +331,10 @@ void AsyncPolicyStore::enforce_bounds() {
   // Evict completed entries past TTL.
   for (auto it = entries_.begin(); it != entries_.end();) {
     auto* e = it->get();
-    const bool completed_like = e->status == AsyncStatus::Completed ||
-                                e->status == AsyncStatus::Failed ||
-                                e->status == AsyncStatus::Cancelled ||
-                                e->status == AsyncStatus::Stale ||
-                                e->status == AsyncStatus::Expired;
+    const bool completed_like =
+        e->status == AsyncStatus::Completed || e->status == AsyncStatus::Failed ||
+        e->status == AsyncStatus::Cancelled || e->status == AsyncStatus::Stale ||
+        e->status == AsyncStatus::Expired;
     if (completed_like && (now - e->completed_at) > config_.completed_ttl) {
       if (e->result.has_value()) {
         (void)release_partial_outputs(buffer_manager_, e->result->outputs());

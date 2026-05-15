@@ -30,9 +30,15 @@ ServingPipeline::ServingPipeline(ServingPipelineDeps deps) : deps_(std::move(dep
 
 ServingPipeline::~ServingPipeline() = default;
 
-void ServingPipeline::set_stopping(bool stopping) noexcept { stopping_.store(stopping); }
-bool ServingPipeline::is_stopping() const noexcept { return stopping_.load(); }
-std::string_view ServingPipeline::backend_name() const noexcept { return deps_.backend_name; }
+void ServingPipeline::set_stopping(bool stopping) noexcept {
+  stopping_.store(stopping);
+}
+bool ServingPipeline::is_stopping() const noexcept {
+  return stopping_.load();
+}
+std::string_view ServingPipeline::backend_name() const noexcept {
+  return deps_.backend_name;
+}
 
 SyncOutcome ServingPipeline::run_sync(InferRequest request) {
   SyncOutcome out;
@@ -73,8 +79,8 @@ SyncOutcome ServingPipeline::run_sync(InferRequest request) {
     // = 1 means this branch is reachable only when the test harness
     // already admitted other requests; we surface a typed error
     // rather than recursing.
-    out.result = unexpected(Error::Code::Internal,
-                            "serving pipeline: dispatched request_id mismatch");
+    out.result =
+        unexpected(Error::Code::Internal, "serving pipeline: dispatched request_id mismatch");
     return out;
   }
   const auto t_dispatch = Clock::now();
@@ -94,7 +100,7 @@ SyncOutcome ServingPipeline::run_sync(InferRequest request) {
   if (!inferred) {
     // Session/validation-layer rejection.
     (void)deps_.scheduler->on_completion(request_id, CompletionStatus::Failure,
-                                          inferred.error().code);
+                                         inferred.error().code);
     out.result = unexpected(inferred.error());
     if (deps_.metrics != nullptr) {
       deps_.metrics->increment_requests_failed();
@@ -197,7 +203,7 @@ bool ServingPipeline::dispatch_one(AsyncPolicyStore& store) {
   }
   if (!inferred) {
     (void)deps_.scheduler->on_completion(request_id, CompletionStatus::Failure,
-                                          inferred.error().code);
+                                         inferred.error().code);
     (void)store.publish_failure(request_id, inferred.error());
     if (deps_.metrics != nullptr) {
       deps_.metrics->increment_requests_failed();
@@ -215,7 +221,7 @@ bool ServingPipeline::dispatch_one(AsyncPolicyStore& store) {
         deps_.metrics->increment_cancelled();
       }
       (void)deps_.scheduler->on_completion(request_id, CompletionStatus::Failure,
-                                            Error::Code::NotReady);
+                                           Error::Code::NotReady);
       return true;
     }
   }

@@ -61,7 +61,7 @@ struct Response {
   std::string body;
 
   /// Convenience: set a header (replaces existing same-name).
-  void set_header(std::string name, std::string value);
+  void set_header(std::string_view name, std::string value);
 
   /// Convenience: build a JSON 200 response.
   static Response ok_json(std::string body) noexcept;

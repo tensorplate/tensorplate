@@ -6,6 +6,13 @@
 
 #pragma once
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -13,13 +20,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 namespace tensorplate::testing {
 

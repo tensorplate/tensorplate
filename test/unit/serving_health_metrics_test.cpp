@@ -4,9 +4,8 @@
 
 #include <gtest/gtest.h>
 
-#include <string>
-
 #include <nlohmann/json.hpp>
+#include <string>
 
 #include "tensorplate/serving/health.hpp"
 #include "tensorplate/serving/metrics.hpp"

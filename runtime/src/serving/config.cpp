@@ -7,12 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-
-#include <nlohmann/json.hpp>
 
 namespace tensorplate {
 
@@ -83,17 +82,18 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
 
 Result<void> ServingConfig::validate() const {
   if (schema_version != "0.1") {
-    return unexpected(Error::Code::Unsupported,
-                      std::string{"serving config schema_version not supported: "} + schema_version);
+    return unexpected(
+        Error::Code::Unsupported,
+        std::string{"serving config schema_version not supported: "} + schema_version);
   }
   if (bind.host.empty()) {
     return unexpected(Error::Code::ConfigInvalid, "serving config: bind.host is empty");
   }
   if (!host_is_loopback(bind.host)) {
     if (!bind.allow_non_loopback || !env_allows_non_loopback()) {
-      return unexpected(Error::Code::Unsupported,
-                        std::string{"serving config: non-loopback bind not permitted: "} +
-                            bind.host);
+      return unexpected(
+          Error::Code::Unsupported,
+          std::string{"serving config: non-loopback bind not permitted: "} + bind.host);
     }
   }
   if (http.max_body_bytes == 0) {
@@ -173,6 +173,7 @@ T value_or_default(const json& obj, std::string_view key, T fallback) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
   json root;
   try {
@@ -203,9 +204,8 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
           value_or_default<std::uint64_t>(h, "max_header_bytes", cfg.http.max_header_bytes));
       cfg.http.request_timeout = std::chrono::milliseconds{value_or_default<std::int64_t>(
           h, "request_timeout_ms", cfg.http.request_timeout.count())};
-      cfg.http.accept_thread_pool_size =
-          static_cast<std::size_t>(value_or_default<std::uint64_t>(
-              h, "accept_thread_pool_size", cfg.http.accept_thread_pool_size));
+      cfg.http.accept_thread_pool_size = static_cast<std::size_t>(value_or_default<std::uint64_t>(
+          h, "accept_thread_pool_size", cfg.http.accept_thread_pool_size));
     }
     if (root.contains("scheduler") && root["scheduler"].is_object()) {
       const auto& s = root["scheduler"];
@@ -218,8 +218,7 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
           s, "deadline_margin_ms", cfg.scheduler.deadline_margin.count())};
       cfg.scheduler.default_service_estimate =
           std::chrono::milliseconds{value_or_default<std::int64_t>(
-              s, "default_service_estimate_ms",
-              cfg.scheduler.default_service_estimate.count())};
+              s, "default_service_estimate_ms", cfg.scheduler.default_service_estimate.count())};
     }
     if (root.contains("buffer") && root["buffer"].is_object()) {
       const auto& b = root["buffer"];
@@ -231,13 +230,12 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
     }
     if (root.contains("async_policy") && root["async_policy"].is_object()) {
       const auto& a = root["async_policy"];
-      cfg.async_policy.max_completed = static_cast<std::size_t>(value_or_default<std::uint64_t>(
-          a, "max_completed", cfg.async_policy.max_completed));
+      cfg.async_policy.max_completed = static_cast<std::size_t>(
+          value_or_default<std::uint64_t>(a, "max_completed", cfg.async_policy.max_completed));
       cfg.async_policy.max_pending = static_cast<std::size_t>(
           value_or_default<std::uint64_t>(a, "max_pending", cfg.async_policy.max_pending));
-      cfg.async_policy.completed_ttl =
-          std::chrono::milliseconds{value_or_default<std::int64_t>(
-              a, "completed_ttl_ms", cfg.async_policy.completed_ttl.count())};
+      cfg.async_policy.completed_ttl = std::chrono::milliseconds{value_or_default<std::int64_t>(
+          a, "completed_ttl_ms", cfg.async_policy.completed_ttl.count())};
     }
     if (root.contains("shutdown") && root["shutdown"].is_object()) {
       const auto& s = root["shutdown"];
@@ -271,14 +269,13 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
       const auto& d = root["deployment"];
       cfg.deployment.use_mock_session =
           value_or_default<bool>(d, "use_mock_session", cfg.deployment.use_mock_session);
-      cfg.deployment.backend =
-          value_or_default<std::string>(d, "backend", cfg.deployment.backend);
+      cfg.deployment.backend = value_or_default<std::string>(d, "backend", cfg.deployment.backend);
       cfg.deployment.endpoint =
           value_or_default<std::string>(d, "endpoint", cfg.deployment.endpoint);
       if (d.contains("model") && d["model"].is_object()) {
         const auto& m = d["model"];
-        if (!m.contains("model_id") || !m.contains("model_class") ||
-            !m.contains("artifact_path") || !m.contains("backend_hint")) {
+        if (!m.contains("model_id") || !m.contains("model_class") || !m.contains("artifact_path") ||
+            !m.contains("backend_hint")) {
           return unexpected(Error::Code::ConfigInvalid,
                             "serving config: deployment.model missing required fields");
         }
@@ -320,8 +317,8 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
-  root["bind"] = {{"host", bind.host}, {"port", bind.port},
-                  {"allow_non_loopback", bind.allow_non_loopback}};
+  root["bind"] = {
+      {"host", bind.host}, {"port", bind.port}, {"allow_non_loopback", bind.allow_non_loopback}};
   root["http"] = {{"max_body_bytes", http.max_body_bytes},
                   {"max_header_bytes", http.max_header_bytes},
                   {"request_timeout_ms", static_cast<std::int64_t>(http.request_timeout.count())},

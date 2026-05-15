@@ -9,13 +9,12 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "tensorplate/backend/builtin.hpp"
 #include "tensorplate/backend/registry.hpp"
@@ -113,11 +112,15 @@ struct ServingWorker::Impl {
 
   Result<void> build();
   Result<void> start_listener();
-  void dispatcher_loop();
-  void evictor_loop();
+  // Dispatcher / evictor only call into the owned `unique_ptr` members, so
+  // they could be marked const; we keep them non-const so future hooks
+  // (e.g. recording dispatcher state on Impl) do not require an API change.
+  void dispatcher_loop();  // NOLINT(readability-make-member-function-const)
+  void evictor_loop();     // NOLINT(readability-make-member-function-const)
   void run_drain();
 };
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Result<void> ServingWorker::Impl::build() {
   if (auto v = config.validate(); !v) {
     log_stderr(config, "error", "config validation failed",
@@ -128,9 +131,9 @@ Result<void> ServingWorker::Impl::build() {
   {
     auto r = BufferManager::create(config.buffer);
     if (!r) {
-      log_stderr(config, "error", "buffer manager construction failed",
-                 {{"code", std::string{to_string(r.error().code)}},
-                  {"message", r.error().message}});
+      log_stderr(
+          config, "error", "buffer manager construction failed",
+          {{"code", std::string{to_string(r.error().code)}}, {"message", r.error().message}});
       return unexpected(r.error());
     }
     buffer_manager = std::move(r).value();
@@ -141,9 +144,9 @@ Result<void> ServingWorker::Impl::build() {
     registry = owned_registry.get();
     auto br = register_builtin_backends(*registry);
     if (!br) {
-      log_stderr(config, "warn", "builtin backend registration partial",
-                 {{"code", std::string{to_string(br.error().code)}},
-                  {"message", br.error().message}});
+      log_stderr(
+          config, "warn", "builtin backend registration partial",
+          {{"code", std::string{to_string(br.error().code)}}, {"message", br.error().message}});
     }
   }
   // Session.
@@ -151,18 +154,18 @@ Result<void> ServingWorker::Impl::build() {
     serving::MockSessionConfig mock_cfg;
     auto sess = std::make_unique<serving::MockServingSession>(*buffer_manager, mock_cfg);
     if (auto lr = sess->load(ModelSpec::create("mock-model", ModelClass::Custom, "mock://", "mock",
-                                                PrecisionHint::Auto)
-                                  .value());
+                                               PrecisionHint::Auto)
+                                 .value());
         !lr) {
-      log_stderr(config, "error", "mock session load failed",
-                 {{"code", std::string{to_string(lr.error().code)}},
-                  {"message", lr.error().message}});
+      log_stderr(
+          config, "error", "mock session load failed",
+          {{"code", std::string{to_string(lr.error().code)}}, {"message", lr.error().message}});
       return unexpected(lr.error());
     }
     if (auto pr = sess->prime(); !pr) {
-      log_stderr(config, "error", "mock session prime failed",
-                 {{"code", std::string{to_string(pr.error().code)}},
-                  {"message", pr.error().message}});
+      log_stderr(
+          config, "error", "mock session prime failed",
+          {{"code", std::string{to_string(pr.error().code)}}, {"message", pr.error().message}});
       return unexpected(pr.error());
     }
     session = std::move(sess);
@@ -182,22 +185,22 @@ Result<void> ServingWorker::Impl::build() {
     hooks.buffer_manager = buffer_manager.get();
     auto s_r = registry->create_session(config.deployment.model->backend_hint(), hooks);
     if (!s_r) {
-      log_stderr(config, "error", "session construction failed",
-                 {{"code", std::string{to_string(s_r.error().code)}},
-                  {"message", s_r.error().message}});
+      log_stderr(
+          config, "error", "session construction failed",
+          {{"code", std::string{to_string(s_r.error().code)}}, {"message", s_r.error().message}});
       return unexpected(s_r.error());
     }
     session = std::move(s_r).value();
     if (auto lr = session->load(*config.deployment.model); !lr) {
-      log_stderr(config, "error", "session load failed",
-                 {{"code", std::string{to_string(lr.error().code)}},
-                  {"message", lr.error().message}});
+      log_stderr(
+          config, "error", "session load failed",
+          {{"code", std::string{to_string(lr.error().code)}}, {"message", lr.error().message}});
       return unexpected(lr.error());
     }
     if (auto pr = session->prime(); !pr) {
-      log_stderr(config, "error", "session prime failed",
-                 {{"code", std::string{to_string(pr.error().code)}},
-                  {"message", pr.error().message}});
+      log_stderr(
+          config, "error", "session prime failed",
+          {{"code", std::string{to_string(pr.error().code)}}, {"message", pr.error().message}});
       return unexpected(pr.error());
     }
   }
@@ -211,9 +214,9 @@ Result<void> ServingWorker::Impl::build() {
   {
     auto r = make_scheduler(config.scheduler, sched_hooks);
     if (!r) {
-      log_stderr(config, "error", "scheduler construction failed",
-                 {{"code", std::string{to_string(r.error().code)}},
-                  {"message", r.error().message}});
+      log_stderr(
+          config, "error", "scheduler construction failed",
+          {{"code", std::string{to_string(r.error().code)}}, {"message", r.error().message}});
       return unexpected(r.error());
     }
     scheduler = std::move(r).value();
@@ -233,7 +236,7 @@ Result<void> ServingWorker::Impl::build() {
   metrics.set_labels(labels);
   // Async store.
   async_store = std::make_unique<serving::AsyncPolicyStore>(config.async_policy, *buffer_manager,
-                                                             clock.get(), &metrics);
+                                                            clock.get(), &metrics);
   // Pipeline.
   serving::ServingPipelineDeps p_deps;
   p_deps.scheduler = scheduler.get();
@@ -272,29 +275,26 @@ Result<void> ServingWorker::Impl::start_listener() {
   // safe; the server is owned by the worker.
   ServingWorker::Impl* self = this;
   // /infer
-  server->add_route("POST", "/infer", [self](const http::Request& req) {
-    return self->router->handle_infer(req);
-  });
+  server->add_route("POST", "/infer",
+                    [self](const http::Request& req) { return self->router->handle_infer(req); });
   // /policy/infer
   server->add_route("POST", "/policy/infer", [self](const http::Request& req) {
     return self->router->handle_policy_infer(req);
   });
   // /policy/result/<id>
-  server->add_prefix_route(
-      "GET", "/policy/result/", [self](const http::Request& req) {
-        std::string_view path = req.path;
-        constexpr std::string_view prefix = "/policy/result/";
-        std::string_view id = path.substr(prefix.size());
-        return self->router->handle_policy_result(req, id);
-      });
+  server->add_prefix_route("GET", "/policy/result/", [self](const http::Request& req) {
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/policy/result/";
+    std::string_view id = path.substr(prefix.size());
+    return self->router->handle_policy_result(req, id);
+  });
   // /policy/cancel/<id>
-  server->add_prefix_route(
-      "POST", "/policy/cancel/", [self](const http::Request& req) {
-        std::string_view path = req.path;
-        constexpr std::string_view prefix = "/policy/cancel/";
-        std::string_view id = path.substr(prefix.size());
-        return self->router->handle_policy_cancel(req, id);
-      });
+  server->add_prefix_route("POST", "/policy/cancel/", [self](const http::Request& req) {
+    std::string_view path = req.path;
+    constexpr std::string_view prefix = "/policy/cancel/";
+    std::string_view id = path.substr(prefix.size());
+    return self->router->handle_policy_cancel(req, id);
+  });
   // /health
   server->add_route("GET", "/health", [self](const http::Request& /*req*/) {
     if (self->config.health_mode == HealthMode::Disabled) {
@@ -312,12 +312,12 @@ Result<void> ServingWorker::Impl::start_listener() {
     if (self->buffer_manager != nullptr) {
       const auto acc = self->buffer_manager->accounting();
       self->metrics.record_buffer_accounting(acc.in_use_bytes, acc.active_count,
-                                              acc.high_water_bytes);
+                                             acc.high_water_bytes);
     }
     if (self->scheduler != nullptr) {
       const auto m = self->scheduler->metrics();
       self->metrics.record_scheduler_accounting(m.queue_depth, m.in_flight, m.admitted_total,
-                                                 m.completed_success, m.completed_failure);
+                                                m.completed_success, m.completed_failure);
     }
     auto snap = self->metrics.snapshot();
     if (self->config.metrics_mode == MetricsMode::PrometheusText) {
@@ -338,9 +338,9 @@ Result<void> ServingWorker::Impl::start_listener() {
   hcfg.allow_non_loopback = config.bind.allow_non_loopback;
   auto sr = server->start(hcfg);
   if (!sr) {
-    log_stderr(config, "error", "http server start failed",
-               {{"code", std::string{to_string(sr.error().code)}},
-                {"message", sr.error().message}});
+    log_stderr(
+        config, "error", "http server start failed",
+        {{"code", std::string{to_string(sr.error().code)}}, {"message", sr.error().message}});
     return unexpected(sr.error());
   }
   log_stderr(config, "info", "http server bound",
@@ -372,8 +372,7 @@ void ServingWorker::Impl::run_drain() {
     (void)scheduler->shutdown();
   }
   // Wait up to drain_deadline for in-flight to settle.
-  const auto deadline =
-      std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
+  const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
   while (std::chrono::steady_clock::now() < deadline) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {
@@ -396,8 +395,15 @@ void ServingWorker::Impl::run_drain() {
 ServingWorker::ServingWorker(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 
 ServingWorker::~ServingWorker() {
-  if (impl_) {
-    (void)stop();
+  // The destructor is implicitly noexcept; component teardown should not
+  // throw, but a misbehaving sink or third-party allocator could. Swallow
+  // any exception so destruction stays safe; details are non-recoverable
+  // here.
+  try {
+    if (impl_) {
+      (void)stop();
+    }
+  } catch (...) {  // NOLINT(bugprone-empty-catch): teardown is fire-and-forget.
   }
 }
 
@@ -411,7 +417,7 @@ Result<std::unique_ptr<ServingWorker>> ServingWorker::create(ServingConfig confi
 }
 
 Result<std::unique_ptr<ServingWorker>> ServingWorker::create(ServingConfig config,
-                                                              BackendRegistry& backend_registry) {
+                                                             BackendRegistry& backend_registry) {
   auto impl = std::make_unique<Impl>();
   impl->config = std::move(config);
   impl->registry = &backend_registry;
@@ -443,9 +449,8 @@ ServingExitCode ServingWorker::serve_forever() {
     return ServingExitCode::Internal;
   }
   if (auto r = start(); !r) {
-    impl_->exit_code = r.error().code == Error::Code::ConfigInvalid
-                            ? ServingExitCode::ConfigError
-                            : ServingExitCode::ServeError;
+    impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
+                                                                    : ServingExitCode::ServeError;
     return impl_->exit_code;
   }
   impl_->shutdown.wait_for_request();
@@ -453,22 +458,29 @@ ServingExitCode ServingWorker::serve_forever() {
 }
 
 void ServingWorker::shutdown(std::string_view reason) noexcept {
-  if (!impl_) {
-    return;
+  // The public shutdown method is noexcept so signal handlers and agent
+  // RPC paths can call it without unwinding. Swallow exceptions from
+  // logging / string construction so the shutdown intent always reaches
+  // the controller.
+  try {
+    if (!impl_) {
+      return;
+    }
+    if (!impl_->shutdown.is_stopping()) {
+      impl_->metrics.increment_shutdown_started();
+      log_stderr(impl_->config, "info", "shutdown requested", {{"reason", std::string{reason}}});
+    }
+    impl_->shutdown.request(std::string{reason});
+    impl_->shutdown.notify_request();
+    if (impl_->router != nullptr) {
+      impl_->router->set_stopping(true);
+    }
+    if (impl_->pipeline != nullptr) {
+      impl_->pipeline->set_stopping(true);
+    }
+    impl_->health.set_state(ServingState::Stopping);
+  } catch (...) {  // NOLINT(bugprone-empty-catch): noexcept shutdown is fire-and-forget.
   }
-  if (!impl_->shutdown.is_stopping()) {
-    impl_->metrics.increment_shutdown_started();
-    log_stderr(impl_->config, "info", "shutdown requested", {{"reason", std::string{reason}}});
-  }
-  impl_->shutdown.request(std::string{reason});
-  impl_->shutdown.notify_request();
-  if (impl_->router != nullptr) {
-    impl_->router->set_stopping(true);
-  }
-  if (impl_->pipeline != nullptr) {
-    impl_->pipeline->set_stopping(true);
-  }
-  impl_->health.set_state(ServingState::Stopping);
 }
 
 ServingExitCode ServingWorker::stop() {
@@ -517,12 +529,26 @@ std::uint16_t ServingWorker::bound_port() const noexcept {
   return impl_->server->bound_port();
 }
 
-const ServingConfig& ServingWorker::config() const noexcept { return impl_->config; }
-HealthState& ServingWorker::health() noexcept { return impl_->health; }
-ServingMetrics& ServingWorker::metrics() noexcept { return impl_->metrics; }
-BufferManager& ServingWorker::buffer_manager() noexcept { return *impl_->buffer_manager; }
-InferScheduler& ServingWorker::scheduler() noexcept { return *impl_->scheduler; }
-serving::AsyncPolicyStore& ServingWorker::async_store() noexcept { return *impl_->async_store; }
-serving::RequestRouter& ServingWorker::router() noexcept { return *impl_->router; }
+const ServingConfig& ServingWorker::config() const noexcept {
+  return impl_->config;
+}
+HealthState& ServingWorker::health() noexcept {
+  return impl_->health;
+}
+ServingMetrics& ServingWorker::metrics() noexcept {
+  return impl_->metrics;
+}
+BufferManager& ServingWorker::buffer_manager() noexcept {
+  return *impl_->buffer_manager;
+}
+InferScheduler& ServingWorker::scheduler() noexcept {
+  return *impl_->scheduler;
+}
+serving::AsyncPolicyStore& ServingWorker::async_store() noexcept {
+  return *impl_->async_store;
+}
+serving::RequestRouter& ServingWorker::router() noexcept {
+  return *impl_->router;
+}
 
 }  // namespace tensorplate

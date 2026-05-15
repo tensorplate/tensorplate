@@ -25,6 +25,11 @@
 
 namespace {
 
+// The signal handler reaches the worker through this pointer. It is
+// scoped to the lifetime of `main()` and reset before the worker is
+// destroyed; non-const access is required so `shutdown()` can be
+// invoked from the signal-handler path.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 tensorplate::ServingWorker* g_worker = nullptr;
 
 void handle_signal(int signum) {
@@ -34,7 +39,7 @@ void handle_signal(int signum) {
 }
 
 void install_signal_handlers() {
-  struct sigaction sa{};
+  struct sigaction sa {};
   sa.sa_handler = handle_signal;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = SA_RESTART;
@@ -61,6 +66,7 @@ void print_usage() {
             << "  --help                   Print this message and exit.\n";
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 tensorplate::Result<tensorplate::ServingConfig> load_config_from_args(int argc, char** argv,
                                                                       bool& help) {
   std::string config_path;
@@ -85,8 +91,7 @@ tensorplate::Result<tensorplate::ServingConfig> load_config_from_args(int argc, 
       try {
         bind_port = std::stoi(argv[++i]);
       } catch (...) {
-        return tensorplate::unexpected(tensorplate::Error::Code::ConfigInvalid,
-                                       "bad --bind-port");
+        return tensorplate::unexpected(tensorplate::Error::Code::ConfigInvalid, "bad --bind-port");
       }
     } else if (a == "--mock") {
       force_mock = true;

@@ -12,10 +12,9 @@
 
 #include <chrono>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
-
-#include <nlohmann/json.hpp>
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/serving/config.hpp"
@@ -143,8 +142,8 @@ TEST(ServingE2E, InferRouteHappyPath) {
 TEST(ServingE2E, InferPropagatesCorrelationIdFromMetadata) {
   auto h = ServingHarness::start(default_test_config());
   HttpClient client("127.0.0.1", h.port);
-  auto resp = client.post("/infer", make_infer_body("req-c", std::nullopt, std::nullopt,
-                                                     std::nullopt, "custom-cid"));
+  auto resp = client.post(
+      "/infer", make_infer_body("req-c", std::nullopt, std::nullopt, std::nullopt, "custom-cid"));
   ASSERT_EQ(resp.status, 200) << resp.body;
   EXPECT_EQ(resp.header("x-correlation-id"), "custom-cid");
   auto j = nlohmann::json::parse(resp.body);
@@ -192,8 +191,8 @@ TEST(ServingE2E, InferRejectsDuplicateInputNames) {
 TEST(ServingE2E, PolicyInferAndResult) {
   auto h = ServingHarness::start(default_test_config());
   HttpClient client("127.0.0.1", h.port);
-  auto accept = client.post("/policy/infer", make_infer_body("async-1", std::nullopt,
-                                                              std::nullopt, 1));
+  auto accept =
+      client.post("/policy/infer", make_infer_body("async-1", std::nullopt, std::nullopt, 1));
   ASSERT_EQ(accept.status, 202) << accept.body;
   auto aj = nlohmann::json::parse(accept.body);
   EXPECT_EQ(aj["status"], "accepted");
@@ -218,8 +217,8 @@ TEST(ServingE2E, PolicyCancelTransitionsState) {
   cfg.scheduler.in_flight_capacity = 1;
   auto h = ServingHarness::start(std::move(cfg));
   HttpClient client("127.0.0.1", h.port);
-  auto accept = client.post("/policy/infer", make_infer_body("async-cancel", std::nullopt,
-                                                              std::nullopt, 1));
+  auto accept =
+      client.post("/policy/infer", make_infer_body("async-cancel", std::nullopt, std::nullopt, 1));
   ASSERT_EQ(accept.status, 202);
   auto aj = nlohmann::json::parse(accept.body);
   std::string rid = aj["request_id"];

@@ -37,7 +37,7 @@ namespace tensorplate {
 
 /// Latency bucket boundaries (milliseconds). The trailing +Inf bucket
 /// is implicit.
-inline constexpr std::array<double, 11> kLatencyBucketsMs{0.5, 1.0, 2.0, 5.0,  10.0, 25.0,
+inline constexpr std::array<double, 11> kLatencyBucketsMs{0.5,  1.0,   2.0,   5.0,    10.0,  25.0,
                                                           50.0, 100.0, 250.0, 1000.0, 5000.0};
 
 /// Snapshot of a single latency histogram.
@@ -167,8 +167,7 @@ class ServingMetrics {
 
   /// Capture scheduler-side counters from `SchedulerMetrics`.
   void record_scheduler_accounting(std::size_t queue_depth, std::size_t in_flight,
-                                   std::uint64_t admitted_total,
-                                   std::uint64_t completed_success,
+                                   std::uint64_t admitted_total, std::uint64_t completed_success,
                                    std::uint64_t completed_failure) noexcept;
 
   [[nodiscard]] ServingMetricsSnapshot snapshot() const;

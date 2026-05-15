@@ -6,11 +6,10 @@
 #include <chrono>
 #include <iomanip>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <utility>
-
-#include <nlohmann/json.hpp>
 
 namespace tensorplate {
 
@@ -18,12 +17,12 @@ void LatencyHistogram::observe_ms(double ms) {
   std::lock_guard<std::mutex> g(mutex_);
   std::size_t idx = bucket_counts_.size() - 1;
   for (std::size_t i = 0; i < kLatencyBucketsMs.size(); ++i) {
-    if (ms <= kLatencyBucketsMs[i]) {
+    if (ms <= kLatencyBucketsMs.at(i)) {
       idx = i;
       break;
     }
   }
-  bucket_counts_[idx] += 1;
+  bucket_counts_.at(idx) += 1;
   total_count_ += 1;
   sum_ms_ += ms;
 }
@@ -73,8 +72,7 @@ void ServingMetrics::record_rejection(Error::Code code) noexcept {
   }
 }
 
-void ServingMetrics::record_buffer_accounting(std::size_t in_use_bytes,
-                                              std::size_t active_count,
+void ServingMetrics::record_buffer_accounting(std::size_t in_use_bytes, std::size_t active_count,
                                               std::size_t high_water_bytes) noexcept {
   buffer_in_use_bytes_.store(in_use_bytes);
   buffer_active_count_.store(active_count);
@@ -162,8 +160,8 @@ void render_histogram(std::ostringstream& oss, std::string_view name, std::strin
   oss << "# TYPE " << name << " histogram\n";
   std::uint64_t cumulative = 0;
   for (std::size_t i = 0; i < kLatencyBucketsMs.size(); ++i) {
-    cumulative += h.bucket_counts[i];
-    oss << name << "_bucket{" << label_str << ",le=\"" << kLatencyBucketsMs[i] << "\"} "
+    cumulative += h.bucket_counts.at(i);
+    oss << name << "_bucket{" << label_str << ",le=\"" << kLatencyBucketsMs.at(i) << "\"} "
         << cumulative << "\n";
   }
   cumulative += h.bucket_counts.back();
@@ -179,12 +177,12 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
   oss << std::fixed << std::setprecision(3);
   const auto labels = render_label_str(snap.labels);
 
-  render_counter(oss, "tensorplate_serving_requests_total", "Requests received by the serving worker.",
-                 snap.requests_total, labels);
-  render_counter(oss, "tensorplate_serving_requests_succeeded", "Requests that completed successfully.",
-                 snap.requests_succeeded, labels);
-  render_counter(oss, "tensorplate_serving_requests_failed", "Requests that returned a typed failure.",
-                 snap.requests_failed, labels);
+  render_counter(oss, "tensorplate_serving_requests_total",
+                 "Requests received by the serving worker.", snap.requests_total, labels);
+  render_counter(oss, "tensorplate_serving_requests_succeeded",
+                 "Requests that completed successfully.", snap.requests_succeeded, labels);
+  render_counter(oss, "tensorplate_serving_requests_failed",
+                 "Requests that returned a typed failure.", snap.requests_failed, labels);
   render_counter(oss, "tensorplate_serving_rejected_malformed",
                  "Requests rejected before buffer allocation for malformed payload.",
                  snap.requests_rejected_malformed, labels);
@@ -203,8 +201,8 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
   render_counter(oss, "tensorplate_serving_cancellations_total",
                  "Cancelled requests reaching the scheduler cancellation path.",
                  snap.requests_cancelled, labels);
-  render_counter(oss, "tensorplate_serving_expirations_total",
-                 "Requests expired by the scheduler.", snap.requests_expired, labels);
+  render_counter(oss, "tensorplate_serving_expirations_total", "Requests expired by the scheduler.",
+                 snap.requests_expired, labels);
 
   render_counter(oss, "tensorplate_serving_async_accepted", "Async-policy requests accepted.",
                  snap.async_accepted, labels);
@@ -227,17 +225,17 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
 
   render_gauge(oss, "tensorplate_serving_buffer_in_use_bytes",
                "Buffer plane in-use bytes at snapshot time.", snap.buffer_in_use_bytes, labels);
-  render_gauge(oss, "tensorplate_serving_buffer_active_count",
-               "Buffer plane active-buffer count.", snap.buffer_active_count, labels);
-  render_gauge(oss, "tensorplate_serving_buffer_high_water_bytes",
-               "Buffer plane high-water bytes.", snap.buffer_high_water_bytes, labels);
+  render_gauge(oss, "tensorplate_serving_buffer_active_count", "Buffer plane active-buffer count.",
+               snap.buffer_active_count, labels);
+  render_gauge(oss, "tensorplate_serving_buffer_high_water_bytes", "Buffer plane high-water bytes.",
+               snap.buffer_high_water_bytes, labels);
   render_gauge(oss, "tensorplate_serving_scheduler_queue_depth", "Scheduler queue depth.",
                snap.scheduler_queue_depth, labels);
   render_gauge(oss, "tensorplate_serving_scheduler_in_flight", "Scheduler in-flight count.",
                snap.scheduler_in_flight, labels);
   render_counter(oss, "tensorplate_serving_scheduler_admitted_total",
-                 "Scheduler admitted requests since process start.",
-                 snap.scheduler_admitted_total, labels);
+                 "Scheduler admitted requests since process start.", snap.scheduler_admitted_total,
+                 labels);
   render_counter(oss, "tensorplate_serving_scheduler_completed_success",
                  "Scheduler completions with success status.", snap.scheduler_completed_success,
                  labels);
@@ -250,10 +248,9 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
   render_histogram(oss, "tensorplate_serving_queue_wait_ms",
                    "Time spent waiting in the scheduler queue, ms.", snap.queue_wait, labels);
   render_histogram(oss, "tensorplate_serving_execution_latency_ms",
-                   "Time spent inside the adapter infer call, ms.", snap.execution_latency,
-                   labels);
-  render_histogram(oss, "tensorplate_serving_total_latency_ms",
-                   "End-to-end serving latency, ms.", snap.total_latency, labels);
+                   "Time spent inside the adapter infer call, ms.", snap.execution_latency, labels);
+  render_histogram(oss, "tensorplate_serving_total_latency_ms", "End-to-end serving latency, ms.",
+                   snap.total_latency, labels);
   return oss.str();
 }
 
@@ -302,7 +299,7 @@ std::string render_metrics_json(const ServingMetricsSnapshot& snap) {
     out["count"] = h.total_count;
     nlohmann::json buckets = nlohmann::json::array();
     for (std::size_t i = 0; i < kLatencyBucketsMs.size(); ++i) {
-      buckets.push_back({{"le_ms", kLatencyBucketsMs[i]}, {"count", h.bucket_counts[i]}});
+      buckets.push_back({{"le_ms", kLatencyBucketsMs.at(i)}, {"count", h.bucket_counts.at(i)}});
     }
     buckets.push_back({{"le_ms", "+Inf"}, {"count", h.bucket_counts.back()}});
     out["buckets"] = std::move(buckets);

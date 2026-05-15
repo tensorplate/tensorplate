@@ -44,14 +44,18 @@ bool ShutdownController::is_stopping() const noexcept {
   return phase_.load() != ShutdownPhase::Running;
 }
 
-ShutdownPhase ShutdownController::phase() const noexcept { return phase_.load(); }
+ShutdownPhase ShutdownController::phase() const noexcept {
+  return phase_.load();
+}
 
 void ShutdownController::enter_draining() noexcept {
   ShutdownPhase expected = ShutdownPhase::Stopping;
   phase_.compare_exchange_strong(expected, ShutdownPhase::Draining);
 }
 
-void ShutdownController::enter_stopped() noexcept { phase_.store(ShutdownPhase::Stopped); }
+void ShutdownController::enter_stopped() noexcept {
+  phase_.store(ShutdownPhase::Stopped);
+}
 
 std::optional<std::string> ShutdownController::reason() const {
   std::lock_guard<std::mutex> g(mutex_);
@@ -77,6 +81,8 @@ void ShutdownController::wait_for_request() noexcept {
   cv_.wait(g, [this] { return phase_.load() != ShutdownPhase::Running; });
 }
 
-void ShutdownController::notify_request() noexcept { cv_.notify_all(); }
+void ShutdownController::notify_request() noexcept {
+  cv_.notify_all();
+}
 
 }  // namespace tensorplate::serving

@@ -5,9 +5,8 @@
 #include <array>
 #include <chrono>
 #include <mutex>
-#include <utility>
-
 #include <nlohmann/json.hpp>
+#include <utility>
 
 #include "tensorplate/core/error.hpp"
 
@@ -57,10 +56,9 @@ void HealthState::set_state(ServingState next) noexcept {
   std::lock_guard<std::mutex> g(mutex_);
   if (snap_.state != next) {
     snap_.state = next;
-    snap_.state_since_steady_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count();
+    snap_.state_since_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now().time_since_epoch())
+                                      .count();
   }
 }
 

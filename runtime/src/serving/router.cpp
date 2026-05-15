@@ -5,13 +5,12 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <random>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/cleanup.hpp"
@@ -32,8 +31,7 @@ std::string generate_correlation_id() {
   // Small, low-entropy ID generator suitable for local-only serving
   // tracing. Not a cryptographic identifier.
   static thread_local std::mt19937_64 rng{
-      static_cast<std::uint64_t>(
-          std::chrono::steady_clock::now().time_since_epoch().count())};
+      static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
   std::uniform_int_distribution<std::uint64_t> dist;
   std::uint64_t v = dist(rng);
   std::string out = "cid-";
@@ -71,14 +69,20 @@ int http_status_for_error(Error::Code code) {
 RequestRouter::RequestRouter(RequestRouterDeps deps) : deps_(std::move(deps)) {}
 RequestRouter::~RequestRouter() = default;
 
-void RequestRouter::set_stopping(bool stopping) noexcept { stopping_.store(stopping); }
-bool RequestRouter::is_stopping() const noexcept { return stopping_.load(); }
-std::string_view RequestRouter::endpoint() const noexcept { return deps_.endpoint; }
+void RequestRouter::set_stopping(bool stopping) noexcept {
+  stopping_.store(stopping);
+}
+bool RequestRouter::is_stopping() const noexcept {
+  return stopping_.load();
+}
+std::string_view RequestRouter::endpoint() const noexcept {
+  return deps_.endpoint;
+}
 
 http::Response RequestRouter::make_error_response(int http_status, std::string_view request_id,
-                                                  std::string_view correlation_id,
-                                                  Error::Code code, std::string_view message,
-                                                  std::optional<std::string_view> detail) {
+                                                  std::string_view correlation_id, Error::Code code,
+                                                  std::string_view message,
+                                                  std::optional<std::string_view> detail) const {
   Error err{code, std::string{message},
             detail.has_value() ? std::optional<std::string>{std::string{*detail}} : std::nullopt};
   std::optional<std::string_view> cid_opt;
@@ -134,10 +138,9 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
     return make_error_response(http_status_for_error(inputs_r.error().code), decoded.request_id,
                                correlation_id, inputs_r.error().code, inputs_r.error().message);
   }
-  auto request_r =
-      InferRequest::create_with_relative_deadline(decoded.request_id, decoded.endpoint,
-                                                  std::move(inputs_r).value(), decoded.metadata,
-                                                  decoded.relative_deadline);
+  auto request_r = InferRequest::create_with_relative_deadline(
+      decoded.request_id, decoded.endpoint, std::move(inputs_r).value(), decoded.metadata,
+      decoded.relative_deadline);
   if (!request_r) {
     return make_error_response(http_status_for_error(request_r.error().code), decoded.request_id,
                                correlation_id, request_r.error().code, request_r.error().message);
@@ -158,7 +161,8 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   if (result.is_failure() && deps_.metrics != nullptr) {
     deps_.metrics->record_rejection(result.error().code);
   }
-  auto body = render_infer_response(result, *deps_.buffer_manager, std::string_view{correlation_id});
+  auto body =
+      render_infer_response(result, *deps_.buffer_manager, std::string_view{correlation_id});
   // Release output buffers now that we've serialized them.
   (void)release_partial_outputs(*deps_.buffer_manager, result.outputs());
   auto resp = http::Response::ok_json(std::move(body));
@@ -198,8 +202,8 @@ http::Response RequestRouter::handle_policy_infer(const http::Request& req) {
   // If the request marks a stale_after_sequence, kick the store +
   // scheduler before accepting the new request.
   if (decoded.metadata.stale_after_sequence.has_value() && deps_.scheduler != nullptr) {
-    auto staled = deps_.async_store->mark_stale_before_sequence(
-        *decoded.metadata.stale_after_sequence);
+    auto staled =
+        deps_.async_store->mark_stale_before_sequence(*decoded.metadata.stale_after_sequence);
     for (const auto& id : staled) {
       (void)deps_.scheduler->cancel(id, CancellationReason::StaleSequence);
     }
@@ -213,10 +217,9 @@ http::Response RequestRouter::handle_policy_infer(const http::Request& req) {
     return make_error_response(http_status_for_error(inputs_r.error().code), decoded.request_id,
                                correlation_id, inputs_r.error().code, inputs_r.error().message);
   }
-  auto request_r =
-      InferRequest::create_with_relative_deadline(decoded.request_id, decoded.endpoint,
-                                                  std::move(inputs_r).value(), decoded.metadata,
-                                                  decoded.relative_deadline);
+  auto request_r = InferRequest::create_with_relative_deadline(
+      decoded.request_id, decoded.endpoint, std::move(inputs_r).value(), decoded.metadata,
+      decoded.relative_deadline);
   if (!request_r) {
     return make_error_response(http_status_for_error(request_r.error().code), decoded.request_id,
                                correlation_id, request_r.error().code, request_r.error().message);
@@ -256,8 +259,8 @@ http::Response RequestRouter::handle_policy_result(const http::Request& req,
   }
   auto snap = deps_.async_store->snapshot(request_id);
   if (!snap.has_value()) {
-    return make_error_response(404, std::string{request_id}, correlation_id,
-                               Error::Code::NotReady, "result lookup: request_id not found");
+    return make_error_response(404, std::string{request_id}, correlation_id, Error::Code::NotReady,
+                               "result lookup: request_id not found");
   }
   nlohmann::json j;
   j["schema_version"] = "0.1";
@@ -271,8 +274,8 @@ http::Response RequestRouter::handle_policy_result(const http::Request& req,
     j["action_chunk_sequence"] = *snap->action_chunk_sequence;
   }
   if (snap->status == AsyncStatus::Completed && snap->result.has_value()) {
-    j["result"] = nlohmann::json::parse(
-        render_infer_response(*snap->result, *deps_.buffer_manager, std::string_view{correlation_id}));
+    j["result"] = nlohmann::json::parse(render_infer_response(*snap->result, *deps_.buffer_manager,
+                                                              std::string_view{correlation_id}));
     // After delivery, release the entry so buffers don't leak.
     deps_.async_store->release_completed(request_id);
   } else if (snap->status == AsyncStatus::Failed && snap->error.has_value()) {

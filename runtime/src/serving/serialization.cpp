@@ -6,13 +6,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
@@ -34,7 +33,13 @@ constexpr std::array<std::int8_t, 256> build_base64_decode_table() {
   std::array<std::int8_t, 256> t{};
   t.fill(-1);
   for (std::int8_t i = 0; i < 64; ++i) {
+    // constexpr-friendly indexing; .at() is not constexpr in C++20 on the
+    // string_view path. Indices come from the fixed 64-char alphabet and
+    // are statically known to fit. The corresponding clang-tidy check is
+    // intentionally suppressed inside this constexpr table builder.
+    // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index)
     t[static_cast<std::uint8_t>(kBase64Alphabet[static_cast<std::size_t>(i)])] = i;
+    // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index)
   }
   return t;
 }
@@ -57,7 +62,9 @@ Result<Layout> parse_layout(std::string_view name) {
                     std::string{"infer request: unknown layout "} + std::string(name));
 }
 
-std::string code_string(Error::Code code) { return std::string{to_string(code)}; }
+std::string code_string(Error::Code code) {
+  return std::string{to_string(code)};
+}
 
 }  // namespace
 
@@ -113,19 +120,19 @@ Result<std::vector<std::byte>> base64_decode(std::string_view text) {
   std::vector<std::byte> out;
   out.reserve((compacted.size() / 4) * 3);
   for (std::size_t i = 0; i < compacted.size(); i += 4) {
-    auto t0 = kBase64DecodeTable[static_cast<std::uint8_t>(compacted[i])];
-    auto t1 = kBase64DecodeTable[static_cast<std::uint8_t>(compacted[i + 1])];
+    auto t0 = kBase64DecodeTable.at(static_cast<std::uint8_t>(compacted[i]));
+    auto t1 = kBase64DecodeTable.at(static_cast<std::uint8_t>(compacted[i + 1]));
     auto t2 = compacted[i + 2] == '='
                   ? -2
-                  : kBase64DecodeTable[static_cast<std::uint8_t>(compacted[i + 2])];
+                  : kBase64DecodeTable.at(static_cast<std::uint8_t>(compacted[i + 2]));
     auto t3 = compacted[i + 3] == '='
                   ? -2
-                  : kBase64DecodeTable[static_cast<std::uint8_t>(compacted[i + 3])];
+                  : kBase64DecodeTable.at(static_cast<std::uint8_t>(compacted[i + 3]));
     if (t0 < 0 || t1 < 0 || (t2 < 0 && t2 != -2) || (t3 < 0 && t3 != -2)) {
       return unexpected(Error::Code::ConfigInvalid, "base64: invalid character");
     }
-    std::uint32_t v = (static_cast<std::uint32_t>(t0) << 18) |
-                      (static_cast<std::uint32_t>(t1) << 12);
+    std::uint32_t v =
+        (static_cast<std::uint32_t>(t0) << 18) | (static_cast<std::uint32_t>(t1) << 12);
     if (t2 >= 0) {
       v |= static_cast<std::uint32_t>(t2) << 6;
     }
@@ -143,6 +150,7 @@ Result<std::vector<std::byte>> base64_decode(std::string_view text) {
   return out;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
   json root;
   try {
@@ -163,14 +171,12 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
   DecodedInferRequest out;
   if (!root.contains("request_id") || !root["request_id"].is_string() ||
       root["request_id"].get<std::string>().empty()) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "infer request: request_id missing or empty");
+    return unexpected(Error::Code::ConfigInvalid, "infer request: request_id missing or empty");
   }
   out.request_id = root["request_id"].get<std::string>();
   if (!root.contains("endpoint") || !root["endpoint"].is_string() ||
       root["endpoint"].get<std::string>().empty()) {
-    return unexpected(Error::Code::ConfigInvalid,
-                      "infer request: endpoint missing or empty");
+    return unexpected(Error::Code::ConfigInvalid, "infer request: endpoint missing or empty");
   }
   out.endpoint = root["endpoint"].get<std::string>();
   if (!root.contains("inputs") || !root["inputs"].is_array() || root["inputs"].empty()) {
@@ -214,33 +220,27 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
   if (root.contains("deadline_ms") && root["deadline_ms"].is_number_integer()) {
     auto v = root["deadline_ms"].get<std::int64_t>();
     if (v <= 0) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: deadline_ms must be > 0");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: deadline_ms must be > 0");
     }
     out.relative_deadline = std::chrono::milliseconds{v};
   }
   for (const auto& item : root["inputs"]) {
     if (!item.is_object()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input must be an object");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input must be an object");
     }
     if (!item.contains("name") || !item["name"].is_string()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.name missing");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.name missing");
     }
     std::string name = item["name"].get<std::string>();
     if (name.empty()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.name empty");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.name empty");
     }
     if (!item.contains("tensor") || !item["tensor"].is_object()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.tensor missing");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.tensor missing");
     }
     const auto& t = item["tensor"];
     if (!t.contains("dtype") || !t["dtype"].is_string()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.tensor.dtype missing");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.tensor.dtype missing");
     }
     auto dt = parse_dtype(t["dtype"].get<std::string>());
     if (!dt) {
@@ -255,8 +255,7 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
       layout = l.value();
     }
     if (!t.contains("shape") || !t["shape"].is_array() || t["shape"].empty()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.tensor.shape missing");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.tensor.shape missing");
     }
     std::vector<std::int64_t> shape;
     for (const auto& s : t["shape"]) {
@@ -279,8 +278,7 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
       return unexpected(view.error());
     }
     if (!item.contains("payload_b64") || !item["payload_b64"].is_string()) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "infer request: input.payload_b64 missing");
+      return unexpected(Error::Code::ConfigInvalid, "infer request: input.payload_b64 missing");
     }
     auto bytes_r = base64_decode(item["payload_b64"].get<std::string>());
     if (!bytes_r) {
@@ -291,14 +289,13 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
     // least as large as offset + byte_size.
     const std::size_t expected = view.value().byte_offset() + view.value().byte_size();
     if (bytes.size() < expected) {
-      return unexpected(Error::Code::ShapeMismatch,
-                        std::string{"infer request: payload bytes ("} +
-                            std::to_string(bytes.size()) +
-                            ") shorter than declared tensor window (" +
-                            std::to_string(expected) + ")");
+      return unexpected(Error::Code::ShapeMismatch, std::string{"infer request: payload bytes ("} +
+                                                        std::to_string(bytes.size()) +
+                                                        ") shorter than declared tensor window (" +
+                                                        std::to_string(expected) + ")");
     }
-    out.inputs.push_back(DecodedInferRequest::DecodedInput{std::move(name), std::move(bytes),
-                                                            view.value()});
+    out.inputs.push_back(
+        DecodedInferRequest::DecodedInput{std::move(name), std::move(bytes), view.value()});
   }
   return out;
 }
