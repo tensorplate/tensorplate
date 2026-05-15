@@ -68,7 +68,7 @@ FifoScheduler::~FifoScheduler() {
   }
 }
 
-void FifoScheduler::emit_event_locked(SchedulerEvent event) {
+void FifoScheduler::emit_event_locked(const SchedulerEvent& event) {
   if (event_sink_ == nullptr) {
     return;
   }
@@ -508,7 +508,7 @@ std::size_t FifoScheduler::shutdown() {
   metrics_.queue_depth = 0;
 
   // Cancel in-flight ids by tombstoning them.
-  for (auto& id : in_flight_ids_) {
+  for (const auto& id : in_flight_ids_) {
     cancelled_in_flight_ids_.insert(id);
     ++metrics_.cancelled_in_flight;
     ++cancelled;

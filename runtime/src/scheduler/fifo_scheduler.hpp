@@ -103,7 +103,7 @@ class FifoScheduler final : public InferScheduler {
   FifoScheduler(SchedulerConfig config, SchedulerRuntimeHooks hooks);
 
   // Internal helpers; all callers must hold mutex_ unless noted.
-  void emit_event_locked(SchedulerEvent event);
+  void emit_event_locked(const SchedulerEvent& event);
   bool is_expired_locked(const SchedulerRequest& req) const;
   SchedulerClock::TimePoint now() const noexcept {
     return clock_ != nullptr ? clock_->now() : std::chrono::steady_clock::now();

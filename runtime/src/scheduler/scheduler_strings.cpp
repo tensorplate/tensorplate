@@ -30,22 +30,30 @@ std::string_view to_string(SchedulerEventKind kind) noexcept {
 }
 
 std::optional<SchedulerEventKind> scheduler_event_kind_from_string(std::string_view name) noexcept {
-  if (name == "admitted")
+  if (name == "admitted") {
     return SchedulerEventKind::Admitted;
-  if (name == "admission_rejected")
+  }
+  if (name == "admission_rejected") {
     return SchedulerEventKind::AdmissionRejected;
-  if (name == "dispatched")
+  }
+  if (name == "dispatched") {
     return SchedulerEventKind::Dispatched;
-  if (name == "completed")
+  }
+  if (name == "completed") {
     return SchedulerEventKind::Completed;
-  if (name == "cancelled")
+  }
+  if (name == "cancelled") {
     return SchedulerEventKind::Cancelled;
-  if (name == "expired")
+  }
+  if (name == "expired") {
     return SchedulerEventKind::Expired;
-  if (name == "memory_pressure")
+  }
+  if (name == "memory_pressure") {
     return SchedulerEventKind::MemoryPressure;
-  if (name == "thermal_pressure")
+  }
+  if (name == "thermal_pressure") {
     return SchedulerEventKind::ThermalPressure;
+  }
   return std::nullopt;
 }
 
@@ -84,10 +92,12 @@ std::string_view to_string(PressureSource source) noexcept {
 }
 
 std::optional<PressureSource> pressure_source_from_string(std::string_view name) noexcept {
-  if (name == "memory")
+  if (name == "memory") {
     return PressureSource::Memory;
-  if (name == "thermal")
+  }
+  if (name == "thermal") {
     return PressureSource::Thermal;
+  }
   return std::nullopt;
 }
 
@@ -104,12 +114,15 @@ std::string_view to_string(PressureSeverity severity) noexcept {
 }
 
 std::optional<PressureSeverity> pressure_severity_from_string(std::string_view name) noexcept {
-  if (name == "normal")
+  if (name == "normal") {
     return PressureSeverity::Normal;
-  if (name == "warning")
+  }
+  if (name == "warning") {
     return PressureSeverity::Warning;
-  if (name == "critical")
+  }
+  if (name == "critical") {
     return PressureSeverity::Critical;
+  }
   return std::nullopt;
 }
 

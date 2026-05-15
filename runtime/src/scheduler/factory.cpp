@@ -56,11 +56,10 @@ Result<void> SchedulerPolicyRegistry::register_policy(std::string policy_name,
     return unexpected(Error::Code::ConfigInvalid, "scheduler factory closure must not be null");
   }
   std::lock_guard<std::mutex> guard(mutex_);
-  auto [it, inserted] = factories_.try_emplace(std::move(policy_name), std::move(factory));
-  (void)it;
-  if (!inserted) {
+  if (factories_.find(policy_name) != factories_.end()) {
     return unexpected(Error::Code::Internal, "scheduler policy already registered");
   }
+  factories_.emplace(std::move(policy_name), std::move(factory));
   return {};
 }
 
