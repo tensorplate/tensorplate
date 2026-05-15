@@ -14,6 +14,7 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
@@ -36,6 +37,23 @@ class ThrowingSchedulerSink final : public SchedulerEventSink {
 
  private:
   std::size_t calls_ = 0;
+};
+
+class MetricsCallingSchedulerSink final : public SchedulerEventSink {
+ public:
+  void set_scheduler(InferScheduler* scheduler) noexcept { scheduler_ = scheduler; }
+  void on_event(const SchedulerEvent& /*event*/) override {
+    if (scheduler_ != nullptr) {
+      snapshots_.push_back(scheduler_->metrics());
+    }
+  }
+  [[nodiscard]] const std::vector<SchedulerMetrics>& snapshots() const noexcept {
+    return snapshots_;
+  }
+
+ private:
+  InferScheduler* scheduler_ = nullptr;
+  std::vector<SchedulerMetrics> snapshots_;
 };
 
 struct MetricsHarness {
@@ -167,7 +185,26 @@ TEST(SchedulerMetrics, EventLabelsAreBounded) {
   ASSERT_EQ(events.size(), 1u);
   EXPECT_EQ(events[0].endpoint, "vision/detector");
   EXPECT_EQ(events[0].backend_name, "tensorrt");
+  EXPECT_EQ(events[0].model_id, "model-detect");
   EXPECT_EQ(events[0].policy, "fifo");
+}
+
+TEST(SchedulerMetrics, CompletionEventCarriesRequestLabels) {
+  MetricsHarness h;
+  auto envelope = SchedulerRequest{
+      make_infer_request("a", "vision/detector"), "tensorrt", "model-detect", {}, h.clock->now()};
+  ASSERT_TRUE(h.scheduler->admit(std::move(envelope)));
+  ASSERT_TRUE(h.scheduler->next().has_value());
+  ASSERT_TRUE(h.scheduler->on_completion("a", CompletionStatus::Success, std::nullopt));
+
+  const auto events = h.sink.events();
+  ASSERT_GE(events.size(), 3u);
+  const auto& completed = events.back();
+  EXPECT_EQ(completed.kind, SchedulerEventKind::Completed);
+  EXPECT_EQ(completed.endpoint, "vision/detector");
+  EXPECT_EQ(completed.backend_name, "tensorrt");
+  EXPECT_EQ(completed.model_id, "model-detect");
+  EXPECT_EQ(completed.policy, "fifo");
 }
 
 TEST(SchedulerMetrics, ThrowingSinkDoesNotBreakScheduler) {
@@ -188,6 +225,22 @@ TEST(SchedulerMetrics, ThrowingSinkDoesNotBreakScheduler) {
   EXPECT_EQ(sched->metrics().admitted_total, 1u);
   EXPECT_EQ(sched->metrics().completed_success, 1u);
   EXPECT_GE(throwing.calls(), 3u);
+}
+
+TEST(SchedulerMetrics, EventSinkMayObserveMetricsWithoutDeadlock) {
+  MetricsCallingSchedulerSink observing;
+  SchedulerConfig scfg;
+  auto clock = std::make_unique<FakeSchedulerClock>();
+  SchedulerRuntimeHooks hooks;
+  hooks.event_sink = &observing;
+  hooks.clock = clock.get();
+  auto sched = make_scheduler(scfg, hooks).value();
+  observing.set_scheduler(sched.get());
+
+  ASSERT_TRUE(sched->admit(make_scheduler_request(make_infer_request("a"), *clock)));
+
+  ASSERT_EQ(observing.snapshots().size(), 1u);
+  EXPECT_EQ(observing.snapshots().back().admitted_total, 1u);
 }
 
 TEST(SchedulerMetrics, MetricsAvailableWhenSaturated) {

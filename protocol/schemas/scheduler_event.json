@@ -36,6 +36,10 @@
       "type": "string",
       "description": "Adapter that owns or would own the request. Stable, low-cardinality label."
     },
+    "model_id": {
+      "type": "string",
+      "description": "Model identifier from the request envelope. Empty for pressure events."
+    },
     "policy": {
       "type": "string",
       "enum": ["fifo"],

@@ -187,6 +187,24 @@ TEST(SchedulerDeadline, QueuedExpirySweepsBeforeDispatch) {
   EXPECT_EQ(h.scheduler->metrics().expired_total, 1u);
 }
 
+TEST(SchedulerDeadline, QueuedExpiryRechecksEstimatedCompletionBeforeDispatch) {
+  DeadlineHarness h{/*margin=*/std::chrono::milliseconds{0},
+                    /*default_estimate=*/std::chrono::milliseconds{10},
+                    /*queue_capacity=*/8,
+                    /*in_flight_capacity=*/1};
+  const auto deadline = h.clock->now() + std::chrono::milliseconds{15};
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a", "endpoint-a", deadline), "mock", "model", {}, h.clock->now()}));
+
+  // The request was feasible at admission: now + 10 ms <= deadline.
+  // After waiting 6 ms, dispatch would complete at now0 + 16 ms, which
+  // exceeds deadline + margin and must expire before reaching the executor.
+  h.clock->advance_ms(std::chrono::milliseconds{6});
+  EXPECT_FALSE(h.scheduler->next().has_value());
+  EXPECT_EQ(h.scheduler->metrics().expired_total, 1u);
+  EXPECT_EQ(h.scheduler->metrics().queue_depth, 0u);
+}
+
 TEST(SchedulerDeadline, DeadlineUsesMonotonicTimeNotWallTime) {
   DeadlineHarness h{std::chrono::milliseconds{0},
                     /*default_estimate=*/std::chrono::milliseconds{1}};

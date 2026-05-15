@@ -151,6 +151,9 @@ struct SchedulerEvent {
   /// Backend that owns or would own the request. Stable label.
   std::string backend_name;
 
+  /// Model identifier from the request envelope. Stable label.
+  std::string model_id;
+
   /// Stable policy label (e.g. "fifo"). Echoed on every event.
   std::string policy;
 
@@ -352,10 +355,10 @@ class InferScheduler {
   virtual Result<void> cancel(std::string_view request_id, CancellationReason reason) = 0;
 
   /// Sweep the queue and remove every request whose monotonic deadline
-  /// has expired against the current `clock.now()` plus configured
-  /// margin. Each removed request emits `Expired` with the wait time
-  /// populated and the request's input buffers are released through
-  /// the buffer manager when one is configured.
+  /// has passed or whose estimated completion now exceeds deadline plus
+  /// the configured margin. Each removed request emits `Expired` with
+  /// the wait time populated and the request's input buffers are
+  /// released through the buffer manager when one is configured.
   ///
   /// Returns the number of requests removed.
   virtual std::size_t expire_due() = 0;

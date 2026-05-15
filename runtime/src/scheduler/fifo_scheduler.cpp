@@ -68,7 +68,7 @@ FifoScheduler::~FifoScheduler() {
   }
 }
 
-void FifoScheduler::emit_event_locked(const SchedulerEvent& event) {
+void FifoScheduler::emit_event(const SchedulerEvent& event) noexcept {
   if (event_sink_ == nullptr) {
     return;
   }
@@ -81,16 +81,40 @@ void FifoScheduler::emit_event_locked(const SchedulerEvent& event) {
   }
 }
 
-bool FifoScheduler::is_expired_locked(const SchedulerRequest& req) const {
+bool FifoScheduler::request_id_active_locked(std::string_view request_id) const {
+  for (const auto& req : queue_) {
+    if (req.request_id() == request_id) {
+      return true;
+    }
+  }
+  if (in_flight_.contains(std::string{request_id})) {
+    return true;
+  }
+  return cancelled_in_flight_ids_.contains(std::string{request_id});
+}
+
+bool FifoScheduler::deadline_infeasible_locked(const SchedulerRequest& req,
+                                               std::size_t queued_ahead) const {
   const auto& deadline = req.request().deadline();
   if (!deadline.has_value()) {
     return false;
   }
   const auto now_tp = now();
-  // Past-deadline requests are always expired regardless of margin
-  // because no service estimate can rescue them. (Margin only widens
-  // admission; it cannot retroactively un-expire a request.)
-  return now_tp >= *deadline;
+  // Past-deadline requests are always expired regardless of margin because
+  // no service estimate can rescue them. Margin only widens admission; it
+  // cannot retroactively un-expire a request.
+  if (now_tp >= *deadline) {
+    return true;
+  }
+
+  const SchedulerClock::Duration default_est = as_nanos(config_.default_service_estimate);
+  const SchedulerClock::Duration service_est =
+      req.estimate().estimated_service_time.value_or(default_est);
+  const SchedulerClock::Duration queued_wait_est = default_est * queued_ahead;
+  const SchedulerClock::Duration in_flight_est = default_est * in_flight_.size();
+  const auto estimated_completion = now_tp + queued_wait_est + in_flight_est + service_est;
+  const auto allowed_completion = *deadline + as_nanos(config_.deadline_margin);
+  return estimated_completion > allowed_completion;
 }
 
 void FifoScheduler::release_request_buffers_safely(SchedulerRequest& req) noexcept {
@@ -129,301 +153,333 @@ PressureSeverity FifoScheduler::active_pressure_severity_locked() const {
 }
 
 Result<void> FifoScheduler::admit(SchedulerRequest request) {
-  std::lock_guard<std::mutex> guard(mutex_);
+  std::optional<SchedulerEvent> event;
+  std::optional<Error> rejection;
 
-  if (shutdown_called_) {
-    auto& req = request;
-    release_request_buffers_safely(req);
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::AdmissionRejected;
-    event.request_id = req.request_id();
-    event.endpoint = req.endpoint();
-    event.backend_name = req.backend_name();
-    event.policy = config_.policy;
-    event.error_code = Error::Code::NotReady;
-    event.timestamp = now();
-    emit_event_locked(event);
-    return unexpected(Error::Code::NotReady, "scheduler is shut down");
-  }
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
 
-  // Envelope validation. InferRequest::create already validates, but a
-  // future caller may build a SchedulerRequest by other means; the
-  // defensive check is cheap.
-  if (request.request_id().empty() || request.endpoint().empty()) {
-    auto& req = request;
-    release_request_buffers_safely(req);
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::AdmissionRejected;
-    event.request_id = req.request_id();
-    event.endpoint = req.endpoint();
-    event.backend_name = req.backend_name();
-    event.policy = config_.policy;
-    event.error_code = Error::Code::ConfigInvalid;
-    event.timestamp = now();
-    emit_event_locked(event);
-    return unexpected(Error::Code::ConfigInvalid,
-                      "scheduler request_id and endpoint must be non-empty");
-  }
-
-  // Pressure-aware rejection (F06). The most recent severity per
-  // source is consulted; v0.1.0 baseline never silently degrades.
-  if (pressure_rejects_locked()) {
-    ++metrics_.admission_rejected_pressure;
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::AdmissionRejected;
-    event.request_id = request.request_id();
-    event.endpoint = request.endpoint();
-    event.backend_name = request.backend_name();
-    event.policy = config_.policy;
-    event.error_code = Error::Code::OOMError;
-    event.pressure_severity = active_pressure_severity_locked();
-    event.timestamp = now();
-    release_request_buffers_safely(request);
-    emit_event_locked(event);
-    return unexpected(Error::Code::OOMError, "scheduler rejecting admission due to pressure");
-  }
-
-  // Capacity check (F02).
-  if (queue_.size() >= config_.queue_capacity) {
-    ++metrics_.admission_rejected_overload;
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::AdmissionRejected;
-    event.request_id = request.request_id();
-    event.endpoint = request.endpoint();
-    event.backend_name = request.backend_name();
-    event.policy = config_.policy;
-    event.error_code = Error::Code::OOMError;
-    event.timestamp = now();
-    release_request_buffers_safely(request);
-    emit_event_locked(event);
-    return unexpected(Error::Code::OOMError, "scheduler queue is at capacity");
-  }
-
-  // Deadline feasibility (F03). Three sub-checks:
-  //   1. Request already past its deadline.
-  //   2. Estimated completion exceeds deadline + margin.
-  //   3. Otherwise admitted.
-  const auto& deadline_opt = request.request().deadline();
-  if (deadline_opt.has_value()) {
-    const auto now_tp = now();
-    const auto deadline = *deadline_opt;
-    if (now_tp >= deadline) {
-      ++metrics_.admission_rejected_deadline;
-      SchedulerEvent event;
-      event.kind = SchedulerEventKind::AdmissionRejected;
-      event.request_id = request.request_id();
-      event.endpoint = request.endpoint();
-      event.backend_name = request.backend_name();
-      event.policy = config_.policy;
-      event.error_code = Error::Code::Timeout;
-      event.timestamp = now_tp;
+    if (shutdown_called_) {
       release_request_buffers_safely(request);
-      emit_event_locked(event);
-      return unexpected(Error::Code::Timeout, "scheduler rejecting admission: deadline passed");
-    }
-
-    // Estimated completion = now + queued wait estimate + in-flight
-    // estimate + per-request service estimate. Wait/in-flight
-    // estimates fall back to default_service_estimate when no
-    // per-request estimate is available, multiplied by current queue
-    // depth and in_flight count respectively. This is conservative
-    // for v0.1.0; finer-grained policies live in v0.2+.
-    const SchedulerClock::Duration default_est = as_nanos(config_.default_service_estimate);
-    const SchedulerClock::Duration service_est =
-        request.estimate().estimated_service_time.value_or(default_est);
-    const SchedulerClock::Duration queued_wait_est = default_est * queue_.size();
-    const SchedulerClock::Duration in_flight_est = default_est * in_flight_ids_.size();
-    const auto estimated_completion = now_tp + queued_wait_est + in_flight_est + service_est;
-    const auto allowed_completion = deadline + as_nanos(config_.deadline_margin);
-    if (estimated_completion > allowed_completion) {
-      ++metrics_.admission_rejected_deadline;
-      SchedulerEvent event;
-      event.kind = SchedulerEventKind::AdmissionRejected;
-      event.request_id = request.request_id();
-      event.endpoint = request.endpoint();
-      event.backend_name = request.backend_name();
-      event.policy = config_.policy;
-      event.error_code = Error::Code::Timeout;
-      event.timestamp = now_tp;
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::NotReady;
+      rejected.timestamp = now();
+      event = std::move(rejected);
+      rejection = Error::make(Error::Code::NotReady, "scheduler is shut down");
+    } else if (request.request_id().empty() || request.endpoint().empty() ||
+               (request.estimate().estimated_service_time.has_value() &&
+                request.estimate().estimated_service_time->count() < 0)) {
+      // Envelope validation. InferRequest::create already validates, but a
+      // future caller may build a SchedulerRequest by other means; the
+      // defensive check is cheap.
       release_request_buffers_safely(request);
-      emit_event_locked(event);
-      return unexpected(Error::Code::Timeout,
-                        "scheduler rejecting admission: deadline + margin exceeded by estimate");
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::ConfigInvalid;
+      rejected.timestamp = now();
+      event = std::move(rejected);
+      rejection = Error::make(Error::Code::ConfigInvalid,
+                              "scheduler request_id, endpoint, and service estimate must be valid");
+    } else if (request_id_active_locked(request.request_id())) {
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::ConfigInvalid;
+      rejected.timestamp = now();
+      release_request_buffers_safely(request);
+      event = std::move(rejected);
+      rejection = Error::make(Error::Code::ConfigInvalid, "scheduler request_id is already active");
+    } else if (pressure_rejects_locked()) {
+      // Pressure-aware rejection (F06). The most recent severity per
+      // source is consulted; v0.1.0 baseline never silently degrades.
+      ++metrics_.admission_rejected_pressure;
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::OOMError;
+      rejected.pressure_severity = active_pressure_severity_locked();
+      rejected.timestamp = now();
+      release_request_buffers_safely(request);
+      event = std::move(rejected);
+      rejection =
+          Error::make(Error::Code::OOMError, "scheduler rejecting admission due to pressure");
+    } else if (queue_.size() >= config_.queue_capacity) {
+      // Capacity check (F02).
+      ++metrics_.admission_rejected_overload;
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::OOMError;
+      rejected.timestamp = now();
+      release_request_buffers_safely(request);
+      event = std::move(rejected);
+      rejection = Error::make(Error::Code::OOMError, "scheduler queue is at capacity");
+    } else if (deadline_infeasible_locked(request, queue_.size())) {
+      ++metrics_.admission_rejected_deadline;
+      SchedulerEvent rejected;
+      rejected.kind = SchedulerEventKind::AdmissionRejected;
+      rejected.request_id = request.request_id();
+      rejected.endpoint = request.endpoint();
+      rejected.backend_name = request.backend_name();
+      rejected.model_id = request.model_id();
+      rejected.policy = config_.policy;
+      rejected.error_code = Error::Code::Timeout;
+      rejected.timestamp = now();
+      release_request_buffers_safely(request);
+      event = std::move(rejected);
+      rejection =
+          Error::make(Error::Code::Timeout,
+                      "scheduler rejecting admission: deadline + margin exceeded by estimate");
+    } else {
+      // Admit: enqueue, update accounting, and emit Admitted.
+      const auto now_tp = now();
+      // Re-stamp enqueue_time so wait_time is measured against the same
+      // clock the scheduler uses for everything else. Callers that
+      // pre-populate enqueue_time may carry monotonic timestamps from
+      // upstream, but the scheduler's wait accounting must be measured
+      // from admission, not from upstream.
+      SchedulerRequest accepted{InferRequest{request.request()},
+                                request.backend_name(),
+                                request.model_id(),
+                                request.estimate(),
+                                now_tp,
+                                request.priority()};
+      queue_.push_back(std::move(accepted));
+      ++metrics_.admitted_total;
+      metrics_.queue_depth = queue_.size();
+      if (queue_.size() > metrics_.queue_depth_high_water) {
+        metrics_.queue_depth_high_water = queue_.size();
+      }
+
+      SchedulerEvent admitted;
+      admitted.kind = SchedulerEventKind::Admitted;
+      admitted.request_id = request.request_id();
+      admitted.endpoint = request.endpoint();
+      admitted.backend_name = request.backend_name();
+      admitted.model_id = request.model_id();
+      admitted.policy = config_.policy;
+      admitted.timestamp = now_tp;
+      event = std::move(admitted);
     }
   }
 
-  // Admit: enqueue, update accounting, and emit Admitted.
-  const auto now_tp = now();
-  // Re-stamp enqueue_time so wait_time is measured against the same
-  // clock the scheduler uses for everything else. Callers that
-  // pre-populate enqueue_time may carry monotonic timestamps from
-  // upstream, but the scheduler's wait accounting must be measured
-  // from admission, not from upstream.
-  SchedulerRequest accepted{InferRequest{request.request()},
-                            request.backend_name(),
-                            request.model_id(),
-                            request.estimate(),
-                            now_tp,
-                            request.priority()};
-  queue_.push_back(std::move(accepted));
-  ++metrics_.admitted_total;
-  metrics_.queue_depth = queue_.size();
-  if (queue_.size() > metrics_.queue_depth_high_water) {
-    metrics_.queue_depth_high_water = queue_.size();
+  if (event.has_value()) {
+    emit_event(*event);
   }
-
-  SchedulerEvent event;
-  event.kind = SchedulerEventKind::Admitted;
-  event.request_id = request.request_id();
-  event.endpoint = request.endpoint();
-  event.backend_name = request.backend_name();
-  event.policy = config_.policy;
-  event.timestamp = now_tp;
-  emit_event_locked(event);
+  if (rejection.has_value()) {
+    return unexpected(std::move(*rejection));
+  }
   return {};
 }
 
 std::optional<SchedulerRequest> FifoScheduler::next() {
-  std::lock_guard<std::mutex> guard(mutex_);
+  std::vector<SchedulerEvent> events;
+  std::optional<SchedulerRequest> result;
 
-  // Sweep expired entries first so we never dispatch stale work.
-  (void)expire_due_locked();
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
 
-  if (queue_.empty()) {
-    return std::nullopt;
+    // Sweep expired/infeasible entries first so we never dispatch stale work.
+    (void)expire_due_locked(events);
+
+    if (!queue_.empty() && in_flight_.size() < config_.in_flight_capacity) {
+      SchedulerRequest head = std::move(queue_.front());
+      queue_.pop_front();
+      metrics_.queue_depth = queue_.size();
+
+      const auto now_tp = now();
+      const auto wait =
+          std::chrono::duration_cast<SchedulerClock::Duration>(now_tp - head.enqueue_time());
+      record_wait_locked(wait);
+
+      const std::string id = head.request_id();
+      in_flight_.emplace(id, InFlightRecord{head.endpoint(), head.backend_name(), head.model_id()});
+      if (in_flight_.size() > metrics_.in_flight_high_water) {
+        metrics_.in_flight_high_water = in_flight_.size();
+      }
+      metrics_.in_flight = in_flight_.size();
+
+      SchedulerEvent dispatched;
+      dispatched.kind = SchedulerEventKind::Dispatched;
+      dispatched.request_id = head.request_id();
+      dispatched.endpoint = head.endpoint();
+      dispatched.backend_name = head.backend_name();
+      dispatched.model_id = head.model_id();
+      dispatched.policy = config_.policy;
+      dispatched.wait_time = wait;
+      dispatched.timestamp = now_tp;
+      events.push_back(std::move(dispatched));
+      result.emplace(std::move(head));
+    }
   }
-  if (in_flight_ids_.size() >= config_.in_flight_capacity) {
-    return std::nullopt;
+
+  for (const auto& event : events) {
+    emit_event(event);
   }
-
-  SchedulerRequest head = std::move(queue_.front());
-  queue_.pop_front();
-  metrics_.queue_depth = queue_.size();
-
-  const auto now_tp = now();
-  const auto wait =
-      std::chrono::duration_cast<SchedulerClock::Duration>(now_tp - head.enqueue_time());
-  record_wait_locked(wait);
-
-  in_flight_ids_.insert(head.request_id());
-  if (in_flight_ids_.size() > metrics_.in_flight_high_water) {
-    metrics_.in_flight_high_water = in_flight_ids_.size();
-  }
-  metrics_.in_flight = in_flight_ids_.size();
-
-  SchedulerEvent event;
-  event.kind = SchedulerEventKind::Dispatched;
-  event.request_id = head.request_id();
-  event.endpoint = head.endpoint();
-  event.backend_name = head.backend_name();
-  event.policy = config_.policy;
-  event.wait_time = wait;
-  event.timestamp = now_tp;
-  emit_event_locked(event);
-  return std::optional<SchedulerRequest>{std::move(head)};
+  return result;
 }
 
 Result<void> FifoScheduler::on_completion(std::string_view request_id, CompletionStatus status,
                                           std::optional<Error::Code> error_code) {
-  std::lock_guard<std::mutex> guard(mutex_);
+  std::optional<SchedulerEvent> event;
+  std::optional<Error> error;
   const std::string id{request_id};
-  // If this request was cancelled while in-flight, the cancellation
-  // already cleared in_flight_ids_. The completion is a typed no-op
-  // for racing adapters.
-  if (auto cancel_it = cancelled_in_flight_ids_.find(id);
-      cancel_it != cancelled_in_flight_ids_.end()) {
-    cancelled_in_flight_ids_.erase(cancel_it);
-    return unexpected(Error::Code::Internal,
-                      "scheduler::on_completion: request was cancelled in-flight");
-  }
-  auto it = in_flight_ids_.find(id);
-  if (it == in_flight_ids_.end()) {
-    return unexpected(Error::Code::Internal,
-                      "scheduler::on_completion: unknown or duplicate request id");
-  }
-  in_flight_ids_.erase(it);
-  metrics_.in_flight = in_flight_ids_.size();
-  if (status == CompletionStatus::Success) {
-    ++metrics_.completed_success;
-  } else {
-    ++metrics_.completed_failure;
+
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    // If this request was cancelled while in-flight, the cancellation
+    // already cleared in_flight_. The completion is a typed no-op for
+    // racing adapters.
+    if (auto cancel_it = cancelled_in_flight_ids_.find(id);
+        cancel_it != cancelled_in_flight_ids_.end()) {
+      cancelled_in_flight_ids_.erase(cancel_it);
+      error = Error::make(Error::Code::Internal,
+                          "scheduler::on_completion: request was cancelled in-flight");
+    } else if (auto it = in_flight_.find(id); it == in_flight_.end()) {
+      error = Error::make(Error::Code::Internal,
+                          "scheduler::on_completion: unknown or duplicate request id");
+    } else {
+      InFlightRecord record = std::move(it->second);
+      in_flight_.erase(it);
+      metrics_.in_flight = in_flight_.size();
+      if (status == CompletionStatus::Success) {
+        ++metrics_.completed_success;
+      } else {
+        ++metrics_.completed_failure;
+      }
+
+      SchedulerEvent completed;
+      completed.kind = SchedulerEventKind::Completed;
+      completed.request_id = id;
+      completed.endpoint = record.endpoint;
+      completed.backend_name = record.backend_name;
+      completed.model_id = record.model_id;
+      completed.policy = config_.policy;
+      completed.completion_status = status;
+      completed.error_code = error_code;
+      completed.timestamp = now();
+      event = std::move(completed);
+    }
   }
 
-  SchedulerEvent event;
-  event.kind = SchedulerEventKind::Completed;
-  event.request_id = id;
-  event.policy = config_.policy;
-  event.completion_status = status;
-  event.error_code = error_code;
-  event.timestamp = now();
-  emit_event_locked(event);
+  if (event.has_value()) {
+    emit_event(*event);
+  }
+  if (error.has_value()) {
+    return unexpected(std::move(*error));
+  }
   return {};
 }
 
 Result<void> FifoScheduler::cancel(std::string_view request_id, CancellationReason reason) {
-  std::lock_guard<std::mutex> guard(mutex_);
+  std::optional<SchedulerEvent> event;
+  std::optional<Error> error;
   const std::string id{request_id};
 
-  // Queued path: find and remove from the queue, release buffers.
-  for (auto it = queue_.begin(); it != queue_.end(); ++it) {
-    if (it->request_id() == id) {
-      const auto wait =
-          std::chrono::duration_cast<SchedulerClock::Duration>(now() - it->enqueue_time());
-      record_wait_locked(wait);
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
 
-      SchedulerEvent event;
-      event.kind = SchedulerEventKind::Cancelled;
-      event.request_id = id;
-      event.endpoint = it->endpoint();
-      event.backend_name = it->backend_name();
-      event.policy = config_.policy;
-      event.cancellation_reason = reason;
-      event.wait_time = wait;
-      event.timestamp = now();
+    // Queued path: find and remove from the queue, release buffers.
+    for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+      if (it->request_id() == id) {
+        const auto wait =
+            std::chrono::duration_cast<SchedulerClock::Duration>(now() - it->enqueue_time());
+        record_wait_locked(wait);
 
-      release_request_buffers_safely(*it);
-      queue_.erase(it);
-      metrics_.queue_depth = queue_.size();
-      ++metrics_.cancelled_queued;
-      emit_event_locked(event);
-      return {};
+        SchedulerEvent cancelled;
+        cancelled.kind = SchedulerEventKind::Cancelled;
+        cancelled.request_id = id;
+        cancelled.endpoint = it->endpoint();
+        cancelled.backend_name = it->backend_name();
+        cancelled.model_id = it->model_id();
+        cancelled.policy = config_.policy;
+        cancelled.cancellation_reason = reason;
+        cancelled.wait_time = wait;
+        cancelled.timestamp = now();
+
+        release_request_buffers_safely(*it);
+        queue_.erase(it);
+        metrics_.queue_depth = queue_.size();
+        ++metrics_.cancelled_queued;
+        event = std::move(cancelled);
+        break;
+      }
+    }
+
+    // In-flight path: clear accounting and tombstone the id so a racing
+    // on_completion is a typed no-op. The executor still holds the
+    // SchedulerRequest, so buffer release is the executor's
+    // responsibility on the in-flight side.
+    if (!event.has_value()) {
+      if (auto in_it = in_flight_.find(id); in_it != in_flight_.end()) {
+        InFlightRecord record = std::move(in_it->second);
+        in_flight_.erase(in_it);
+        cancelled_in_flight_ids_.insert(id);
+        metrics_.in_flight = in_flight_.size();
+        ++metrics_.cancelled_in_flight;
+
+        SchedulerEvent cancelled;
+        cancelled.kind = SchedulerEventKind::Cancelled;
+        cancelled.request_id = id;
+        cancelled.endpoint = record.endpoint;
+        cancelled.backend_name = record.backend_name;
+        cancelled.model_id = record.model_id;
+        cancelled.policy = config_.policy;
+        cancelled.cancellation_reason = reason;
+        cancelled.timestamp = now();
+        event = std::move(cancelled);
+      }
+    }
+
+    if (!event.has_value()) {
+      if (auto cancel_it = cancelled_in_flight_ids_.find(id);
+          cancel_it != cancelled_in_flight_ids_.end()) {
+        error = Error::make(Error::Code::NotReady,
+                            "scheduler::cancel: request already cancelled in-flight");
+      } else {
+        error = Error::make(Error::Code::NotReady,
+                            "scheduler::cancel: unknown, completed, or never-admitted request id");
+      }
     }
   }
 
-  // In-flight path: clear accounting and tombstone the id so a racing
-  // on_completion is a typed no-op. The executor still holds the
-  // SchedulerRequest, so buffer release is the executor's
-  // responsibility on the in-flight side.
-  if (auto in_it = in_flight_ids_.find(id); in_it != in_flight_ids_.end()) {
-    in_flight_ids_.erase(in_it);
-    cancelled_in_flight_ids_.insert(id);
-    metrics_.in_flight = in_flight_ids_.size();
-    ++metrics_.cancelled_in_flight;
-
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::Cancelled;
-    event.request_id = id;
-    event.policy = config_.policy;
-    event.cancellation_reason = reason;
-    event.timestamp = now();
-    emit_event_locked(event);
-    return {};
+  if (event.has_value()) {
+    emit_event(*event);
   }
-
-  // Already cancelled or never known.
-  if (auto cancel_it = cancelled_in_flight_ids_.find(id);
-      cancel_it != cancelled_in_flight_ids_.end()) {
-    return unexpected(Error::Code::NotReady,
-                      "scheduler::cancel: request already cancelled in-flight");
+  if (error.has_value()) {
+    return unexpected(std::move(*error));
   }
-  return unexpected(Error::Code::NotReady,
-                    "scheduler::cancel: unknown, completed, or never-admitted request id");
+  return {};
 }
 
-std::size_t FifoScheduler::expire_due_locked() {
+std::size_t FifoScheduler::expire_due_locked(std::vector<SchedulerEvent>& events) {
   std::size_t removed = 0;
+  std::size_t queued_ahead = 0;
   for (auto it = queue_.begin(); it != queue_.end();) {
-    if (is_expired_locked(*it)) {
+    if (deadline_infeasible_locked(*it, queued_ahead)) {
       const auto wait =
           std::chrono::duration_cast<SchedulerClock::Duration>(now() - it->enqueue_time());
       record_wait_locked(wait);
@@ -433,6 +489,7 @@ std::size_t FifoScheduler::expire_due_locked() {
       event.request_id = it->request_id();
       event.endpoint = it->endpoint();
       event.backend_name = it->backend_name();
+      event.model_id = it->model_id();
       event.policy = config_.policy;
       event.error_code = Error::Code::Timeout;
       event.wait_time = wait;
@@ -442,8 +499,9 @@ std::size_t FifoScheduler::expire_due_locked() {
       it = queue_.erase(it);
       ++metrics_.expired_total;
       ++removed;
-      emit_event_locked(event);
+      events.push_back(std::move(event));
     } else {
+      ++queued_ahead;
       ++it;
     }
   }
@@ -452,76 +510,98 @@ std::size_t FifoScheduler::expire_due_locked() {
 }
 
 std::size_t FifoScheduler::expire_due() {
-  std::lock_guard<std::mutex> guard(mutex_);
-  return expire_due_locked();
+  std::vector<SchedulerEvent> events;
+  std::size_t removed = 0;
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    removed = expire_due_locked(events);
+  }
+  for (const auto& event : events) {
+    emit_event(event);
+  }
+  return removed;
 }
 
 void FifoScheduler::on_pressure(const PressureSignal& signal) {
-  std::lock_guard<std::mutex> guard(mutex_);
-  if (signal.source == PressureSource::Memory) {
-    metrics_.last_memory_severity = signal.severity;
-    ++metrics_.pressure_events_memory;
-  } else {
-    metrics_.last_thermal_severity = signal.severity;
-    ++metrics_.pressure_events_thermal;
-  }
-
   SchedulerEvent event;
-  event.kind = signal.source == PressureSource::Memory ? SchedulerEventKind::MemoryPressure
-                                                       : SchedulerEventKind::ThermalPressure;
-  event.policy = config_.policy;
-  event.pressure_source = signal.source;
-  event.pressure_severity = signal.severity;
-  // Timestamp prefers the signal's own monotonic stamp when populated.
-  event.timestamp = signal.timestamp.time_since_epoch().count() == 0 ? now() : signal.timestamp;
-  emit_event_locked(event);
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (signal.source == PressureSource::Memory) {
+      metrics_.last_memory_severity = signal.severity;
+      ++metrics_.pressure_events_memory;
+    } else {
+      metrics_.last_thermal_severity = signal.severity;
+      ++metrics_.pressure_events_thermal;
+    }
+
+    event.kind = signal.source == PressureSource::Memory ? SchedulerEventKind::MemoryPressure
+                                                         : SchedulerEventKind::ThermalPressure;
+    event.policy = config_.policy;
+    event.pressure_source = signal.source;
+    event.pressure_severity = signal.severity;
+    // Timestamp prefers the signal's own monotonic stamp when populated.
+    event.timestamp = signal.timestamp.time_since_epoch().count() == 0 ? now() : signal.timestamp;
+  }
+  emit_event(event);
 }
 
 std::size_t FifoScheduler::shutdown() {
-  std::lock_guard<std::mutex> guard(mutex_);
-  shutdown_called_ = true;
+  std::vector<SchedulerEvent> events;
   std::size_t cancelled = 0;
 
-  // Cancel everything queued.
-  while (!queue_.empty()) {
-    auto& head = queue_.front();
-    const auto wait =
-        std::chrono::duration_cast<SchedulerClock::Duration>(now() - head.enqueue_time());
-    record_wait_locked(wait);
+  {
+    std::lock_guard<std::mutex> guard(mutex_);
+    shutdown_called_ = true;
 
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::Cancelled;
-    event.request_id = head.request_id();
-    event.endpoint = head.endpoint();
-    event.backend_name = head.backend_name();
-    event.policy = config_.policy;
-    event.cancellation_reason = CancellationReason::Shutdown;
-    event.wait_time = wait;
-    event.timestamp = now();
+    // Cancel everything queued.
+    while (!queue_.empty()) {
+      auto& head = queue_.front();
+      const auto wait =
+          std::chrono::duration_cast<SchedulerClock::Duration>(now() - head.enqueue_time());
+      record_wait_locked(wait);
 
-    release_request_buffers_safely(head);
-    queue_.pop_front();
-    ++metrics_.cancelled_queued;
-    ++cancelled;
-    emit_event_locked(event);
+      SchedulerEvent event;
+      event.kind = SchedulerEventKind::Cancelled;
+      event.request_id = head.request_id();
+      event.endpoint = head.endpoint();
+      event.backend_name = head.backend_name();
+      event.model_id = head.model_id();
+      event.policy = config_.policy;
+      event.cancellation_reason = CancellationReason::Shutdown;
+      event.wait_time = wait;
+      event.timestamp = now();
+
+      release_request_buffers_safely(head);
+      queue_.pop_front();
+      ++metrics_.cancelled_queued;
+      ++cancelled;
+      events.push_back(std::move(event));
+    }
+    metrics_.queue_depth = 0;
+
+    // Cancel in-flight ids by tombstoning them.
+    for (const auto& [id, record] : in_flight_) {
+      cancelled_in_flight_ids_.insert(id);
+      ++metrics_.cancelled_in_flight;
+      ++cancelled;
+      SchedulerEvent event;
+      event.kind = SchedulerEventKind::Cancelled;
+      event.request_id = id;
+      event.endpoint = record.endpoint;
+      event.backend_name = record.backend_name;
+      event.model_id = record.model_id;
+      event.policy = config_.policy;
+      event.cancellation_reason = CancellationReason::Shutdown;
+      event.timestamp = now();
+      events.push_back(std::move(event));
+    }
+    in_flight_.clear();
+    metrics_.in_flight = 0;
   }
-  metrics_.queue_depth = 0;
 
-  // Cancel in-flight ids by tombstoning them.
-  for (const auto& id : in_flight_ids_) {
-    cancelled_in_flight_ids_.insert(id);
-    ++metrics_.cancelled_in_flight;
-    ++cancelled;
-    SchedulerEvent event;
-    event.kind = SchedulerEventKind::Cancelled;
-    event.request_id = id;
-    event.policy = config_.policy;
-    event.cancellation_reason = CancellationReason::Shutdown;
-    event.timestamp = now();
-    emit_event_locked(event);
+  for (const auto& event : events) {
+    emit_event(event);
   }
-  in_flight_ids_.clear();
-  metrics_.in_flight = 0;
   return cancelled;
 }
 

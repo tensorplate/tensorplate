@@ -94,6 +94,36 @@ TEST(SchedulerFifo, QueueCapacityRejectsWithOverloadError) {
   EXPECT_EQ(m.admission_rejected_overload, 1u);
 }
 
+TEST(SchedulerFifo, DuplicateQueuedRequestIdIsRejected) {
+  SchedulerHarness h{/*queue=*/4, /*in_flight=*/1};
+  ASSERT_TRUE(h.scheduler->admit(make_scheduler_request(make_infer_request("dup"), *h.clock)));
+
+  auto duplicate = h.scheduler->admit(make_scheduler_request(make_infer_request("dup"), *h.clock));
+  ASSERT_FALSE(duplicate);
+  EXPECT_EQ(duplicate.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(h.scheduler->metrics().queue_depth, 1u);
+
+  auto next = h.scheduler->next();
+  ASSERT_TRUE(next.has_value());
+  EXPECT_EQ(next->request_id(), "dup");
+  ASSERT_TRUE(h.scheduler->on_completion("dup", CompletionStatus::Success, std::nullopt));
+}
+
+TEST(SchedulerFifo, DuplicateInFlightRequestIdIsRejected) {
+  SchedulerHarness h{/*queue=*/4, /*in_flight=*/1};
+  ASSERT_TRUE(h.scheduler->admit(make_scheduler_request(make_infer_request("dup"), *h.clock)));
+  auto first = h.scheduler->next();
+  ASSERT_TRUE(first.has_value());
+
+  auto duplicate = h.scheduler->admit(make_scheduler_request(make_infer_request("dup"), *h.clock));
+  ASSERT_FALSE(duplicate);
+  EXPECT_EQ(duplicate.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(h.scheduler->metrics().in_flight, 1u);
+
+  ASSERT_TRUE(h.scheduler->on_completion("dup", CompletionStatus::Success, std::nullopt));
+  EXPECT_EQ(h.scheduler->metrics().completed_success, 1u);
+}
+
 TEST(SchedulerFifo, InFlightCapacityGatesDispatch) {
   SchedulerHarness h{/*queue=*/8, /*in_flight=*/2};
   for (auto id : {"a", "b", "c"}) {

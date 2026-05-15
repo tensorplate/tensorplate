@@ -21,8 +21,8 @@
 //     - otherwise enqueues in FIFO order.
 //
 //   next()
-//     - sweeps expired queued requests first (calls the same release
-//       path as the explicit expire_due()),
+//     - sweeps expired or deadline-infeasible queued requests first
+//       (calls the same release path as the explicit expire_due()),
 //     - returns std::nullopt if the queue is empty or in_flight is at
 //       capacity,
 //     - otherwise pops the head, records it as in-flight, and emits
@@ -44,8 +44,9 @@
 //     - unknown id: returns NotReady.
 //
 //   expire_due()
-//     - sweeps the queue once, releasing each expired request's input
-//       buffers and emitting Expired events.
+//     - sweeps the queue once, releasing each expired or
+//       deadline-infeasible request's input buffers and emitting
+//       Expired events.
 //
 //   on_pressure()
 //     - records the most recent severity per source and emits
@@ -64,7 +65,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "tensorplate/scheduler/scheduler.hpp"
 
@@ -103,8 +106,16 @@ class FifoScheduler final : public InferScheduler {
   FifoScheduler(SchedulerConfig config, SchedulerRuntimeHooks hooks);
 
   // Internal helpers; all callers must hold mutex_ unless noted.
-  void emit_event_locked(const SchedulerEvent& event);
-  bool is_expired_locked(const SchedulerRequest& req) const;
+  struct InFlightRecord {
+    std::string endpoint;
+    std::string backend_name;
+    std::string model_id;
+  };
+
+  void emit_event(const SchedulerEvent& event) noexcept;
+  [[nodiscard]] bool request_id_active_locked(std::string_view request_id) const;
+  [[nodiscard]] bool deadline_infeasible_locked(const SchedulerRequest& req,
+                                                std::size_t queued_ahead) const;
   SchedulerClock::TimePoint now() const noexcept {
     return clock_ != nullptr ? clock_->now() : std::chrono::steady_clock::now();
   }
@@ -113,7 +124,7 @@ class FifoScheduler final : public InferScheduler {
 
   // Sweep the queue removing every expired request. Returns the count
   // of removed requests. Callers must hold mutex_.
-  std::size_t expire_due_locked();
+  std::size_t expire_due_locked(std::vector<SchedulerEvent>& events);
 
   // Returns true if pressure rejection is currently active.
   bool pressure_rejects_locked() const;
@@ -130,12 +141,11 @@ class FifoScheduler final : public InferScheduler {
 
   mutable std::mutex mutex_;
   std::deque<SchedulerRequest> queue_;
-  // Tracks request ids that have been dispatched and not yet completed.
+  // Tracks requests that have been dispatched and not yet completed.
   // We don't keep the SchedulerRequest itself in-flight: it has been
-  // moved out to the executor on next(). The id set lets us detect
-  // duplicate completion, racing cancellation/completion, and lets
-  // cancel() target in-flight requests.
-  std::unordered_set<std::string> in_flight_ids_;
+  // moved out to the executor on next(). The metadata record lets
+  // completion/cancellation events retain bounded request labels.
+  std::unordered_map<std::string, InFlightRecord> in_flight_;
   // Ids cancelled while in-flight. The next on_completion for one of
   // these is a typed no-op so adapters that race cancellation with
   // completion observe deterministic behavior.

@@ -94,9 +94,11 @@ policy simple; finer-grained policies are deferred to v0.2+.
 
 ## Queued expiry
 
-`next()` sweeps expired queued requests before returning a dispatchable
-request. Callers may also drive the sweep explicitly via
-`expire_due()`. Each removed request:
+`next()` sweeps expired or no-longer-feasible queued requests before
+returning a dispatchable request. Callers may also drive the sweep
+explicitly via `expire_due()`. Feasibility uses the same
+`deadline + deadline_margin` estimate as admission, with the current
+queue position. Each removed request:
 
 - emits `SchedulerEventKind::Expired` with `error_code = Timeout` and
   the queued wait time populated,
@@ -149,9 +151,10 @@ wait-time aggregates. Wait time is monotonic.
 
 `SchedulerEventSink::on_event` receives one `SchedulerEvent` per
 state transition. Events carry bounded labels (`endpoint`,
-`backend_name`, `policy`) for downstream observability (V01-E12).
-The event sink is invoked inside a `try { … } catch (...) {}`; a
-throwing sink does not corrupt scheduler state.
+`backend_name`, `model_id`, `policy`) for downstream observability
+(V01-E12). The event sink is invoked after the scheduler state mutex
+has been released and inside a `try { … } catch (...) {}`; a throwing
+or reentrant sink does not corrupt scheduler state.
 
 ## SmolVLA-style async pattern
 
