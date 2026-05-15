@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/serving_metrics.json",
+  "title": "TensorPlate Serving Metrics (JSON mode)",
+  "description": "Structured-JSON `/metrics` body produced by the V01-E07 serving worker when `metrics_mode = json`. The Prometheus 0.0.4 text-format body is also accepted as the default exposition; this schema is for agent-side scrapers that prefer machine-friendly bodies. Labels are bounded: only the four documented dimensions appear.\n\nLatency histogram bucket boundaries (milliseconds, inclusive upper bound): 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "labels", "counters", "gauges", "latency_ms"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "model_class", "model_name", "backend"],
+      "properties": {
+        "endpoint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "model_name": {"type": "string"},
+        "backend": {"type": "string"}
+      }
+    },
+    "counters": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "gauges": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "latency_ms": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sum_ms", "count", "buckets"],
+        "properties": {
+          "sum_ms": {"type": "number", "minimum": 0},
+          "count": {"type": "integer", "minimum": 0},
+          "buckets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["le_ms", "count"],
+              "properties": {
+                "le_ms": {"oneOf": [{"type": "number"}, {"type": "string", "const": "+Inf"}]},
+                "count": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

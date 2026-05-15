@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/serving_health.json",
+  "title": "TensorPlate Serving Health",
+  "description": "Local serving-worker `/health` response. Mirrors `include/tensorplate/serving/health.hpp::HealthSnapshot` serialized by `serialize_health_json`.\n\nDiscriminator semantics:\n  - `starting`: components still wiring; HTTP 503.\n  - `ready`: active session is `ready`; HTTP 200.\n  - `degraded`: active session loaded but not yet primed, or non-fatal pressure / backlog observed; HTTP 200.\n  - `failed`: active session reported a fatal error; HTTP 503.\n  - `stopping` / `draining` / `stopped`: shutdown lifecycle; HTTP 503.\n\nAgents are expected to read `state` rather than just the HTTP status to distinguish ready from degraded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "endpoint", "backend"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "state": {
+      "type": "string",
+      "enum": ["starting", "ready", "degraded", "failed", "stopping", "draining", "stopped"]
+    },
+    "endpoint": {"type": "string"},
+    "backend": {"type": "string"},
+    "active_model_id": {"type": "string"},
+    "last_error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid", "load_failed", "not_ready", "shape_mismatch", "unsupported",
+        "oom_error", "timeout", "inference_failed", "internal"
+      ]
+    },
+    "last_error_message": {"type": "string"},
+    "queue_depth": {"type": "integer", "minimum": 0},
+    "in_flight": {"type": "integer", "minimum": 0},
+    "state_since_steady_ns": {"type": "integer"}
+  }
+}

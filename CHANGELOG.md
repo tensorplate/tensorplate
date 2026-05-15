@@ -8,6 +8,102 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate-serving` worker and loopback HTTP data-plane endpoint
+  (V01-E07). The composition root (`include/tensorplate/serving/
+  worker.hpp`, `runtime/src/serving/worker.cpp`) wires
+  `BufferManager`, the `BackendRegistry`-resolved `ExecutionSession`,
+  `make_scheduler`, the request router, the async-policy store, the
+  HTTP server, metrics, health, and the shutdown controller in a
+  single deterministic order. The new in-tree HTTP/1.1 server
+  (`runtime/src/http/http_server.cpp`) is loopback-only by default
+  and enforces `max_body_bytes`, `max_header_bytes`,
+  `request_timeout`, and a bounded accept-queue depth before any
+  buffer-plane allocation happens. Public route contract:
+  `POST /infer` (sync), `POST /policy/infer` + `GET /policy/result/
+  <id>` + `POST /policy/cancel/<id>` (LeRobot PolicyServer-compatible
+  async chunk pattern without a bridge), `GET /health`, and
+  `GET /metrics`. Every response carries `x-correlation-id`.
+- Serving worker config schema (V01-E07-F01). New file
+  `config/schemas/serving_worker.json` documents the JSON config
+  consumed by `tensorplate::ServingConfig::parse_json`. Validation
+  rejects non-loopback bind without an explicit opt-in, zero-byte
+  HTTP limits, missing model for non-mock deployments, and unknown
+  schema versions with typed `Error::Code` values. `--config <path>`,
+  `--config-json <inline>`, `--bind-host`, `--bind-port`, and
+  `--mock` CLI flags are wired into `serving_worker/src/main.cpp`,
+  along with SIGINT/SIGTERM graceful-shutdown signal handlers and
+  the documented exit-code matrix (Ok / ConfigError / LoadError /
+  ServeError / Internal).
+- LeRobot-compatible async-policy state store (V01-E07-F04). The
+  in-process `AsyncPolicyStore` (`include/tensorplate/serving/
+  async_policy.hpp`) records the lifecycle of every accepted async
+  request (`pending`, `in_flight`, `completed`, `cancelled`,
+  `stale`, `failed`, `expired`), enforces `max_pending` /
+  `max_completed` / `completed_ttl_ms` bounds, and runs the
+  stale-sequence cancellation that fans out to
+  `InferScheduler::cancel(StaleSequence)` when an incoming request
+  carries `metadata.stale_after_sequence`. The wire route contract
+  is documented in `protocol/schemas/serving_http_envelope.json`
+  alongside the rest of the v0.1.0 envelopes.
+- Serving pipeline (V01-E07-F05) connecting normalized requests to
+  scheduler admission, dispatch, completion, and buffer release.
+  The pipeline holds the scheduler and the session through their
+  public interfaces only; success and failure paths both release
+  request-owned buffers exactly once through `release_request_buffers`,
+  and partial outputs after suppressed delivery are released via
+  `release_partial_outputs`. The dispatcher thread drains the
+  scheduler for async requests and an evictor thread enforces async-
+  policy retention bounds; both stop cleanly during graceful
+  shutdown.
+- Health, metrics, and structured-log fan-out for the serving worker
+  (V01-E07-F06). `HealthState` (`protocol/schemas/serving_health.json`)
+  publishes `starting` / `ready` / `degraded` / `failed` /
+  `stopping` / `draining` / `stopped` with HTTP status mapping that
+  keeps `degraded` at 200 so agents read the discriminator field
+  instead of flapping liveness probes. `ServingMetrics` is a
+  thread-safe counter / histogram bag with four bounded labels
+  (`endpoint`, `model_class`, `model_name`, `backend`), the
+  Prometheus 0.0.4 text exposition body, and a JSON mirror
+  documented in `protocol/schemas/serving_metrics.json`. Latency
+  histograms use the v0.1.0 bucket layout
+  (`0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf` ms)
+  shared by V01-E12. Correlation IDs are generated at ingress when
+  the client does not supply one and echoed through metadata,
+  responses, and `x-correlation-id` headers.
+- Graceful shutdown controller for the serving worker
+  (V01-E07-F07). `ShutdownController` walks `Running` ->
+  `Stopping` -> `Draining` -> `Stopped`; the composition root stops
+  the HTTP listener, runs `InferScheduler::shutdown`, waits up to
+  the configured `drain_deadline_ms`, calls
+  `AsyncPolicyStore::cancel_all`, and unloads the active session
+  exactly once. The integration suite asserts
+  `BufferManager::accounting().active_count == 0` after teardown.
+- End-to-end serving worker integration tests (V01-E07-F08) at
+  `test/integration/serving_e2e_test.cpp`. Fourteen T2 cases cover
+  `/health`, `/metrics`, `/infer` happy-path, correlation-id
+  propagation through `metadata`, malformed / oversized / duplicate-
+  input rejection, the LeRobot-compatible async accept + result +
+  cancel cycle, 404 / 405 routing, shutdown-during-flight buffer
+  cleanup, and admission rejection while stopping. The
+  `test/mocks/serving_http_client.hpp` helper drives the worker
+  through real TCP loopback connections. Unit-level coverage at
+  `test/unit/serving_{config,serialization,health_metrics,
+  async_store}_test.cpp` (38 cases total) covers config validation,
+  base64 round-trip, request-decoder error paths, health-state
+  transitions, the rejection-code -> metric mapping, latency
+  histogram bucketing, the Prometheus and JSON exporters, and the
+  async-store stale-sequence + bounded-retention behavior. Tests
+  exercise the public `ServingWorker` interface, run against the
+  built-in mock session on host CI, and require no real backend.
+- Serving worker architecture documentation
+  (`docs/architecture/serving-worker.md`). Captures the composition
+  root, HTTP framework selection rationale (loopback by default,
+  request limits enforced before buffer allocation, graceful
+  shutdown, testability, no third-party server dependency beyond
+  `nlohmann::json` and POSIX sockets), route contract, typed-error
+  -> HTTP-status mapping, LeRobot-compatible async semantics,
+  health / metrics / correlation-id propagation, and the shutdown
+  state machine. Indexed from `docs/architecture/README.md`.
 - SmolVLA-style async chunk and stale-cancel scheduler fixtures
   (V01-E06-F07). New shared mocks at `test/mocks/vla_fixtures.hpp`
   (named multi-input payload `image_front` /`proprioception` /
