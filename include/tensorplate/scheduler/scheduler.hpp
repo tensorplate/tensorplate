@@ -392,20 +392,26 @@ class InferScheduler {
 /// their definition:
 ///
 ///   static_assert(InferSchedulerConcept<FifoScheduler>);
+// clang-format off
 template <typename T>
-concept InferSchedulerConcept =
-    requires(T t, SchedulerRequest req, std::string_view id, CompletionStatus status,
-             CancellationReason reason, std::optional<Error::Code> err, const PressureSignal& sig) {
-      { t.admit(std::move(req)) } -> std::same_as<Result<void>>;
-      { t.next() } -> std::same_as<std::optional<SchedulerRequest>>;
-      { t.on_completion(id, status, err) } -> std::same_as<Result<void>>;
-      { t.cancel(id, reason) } -> std::same_as<Result<void>>;
-      { t.expire_due() } -> std::same_as<std::size_t>;
-      { t.on_pressure(sig) } -> std::same_as<void>;
-      { t.shutdown() } -> std::same_as<std::size_t>;
-      { t.metrics() } -> std::same_as<SchedulerMetrics>;
-      { t.policy_name() } -> std::same_as<std::string_view>;
-    } &&
-    std::derived_from<T, InferScheduler>;
+concept InferSchedulerConcept = std::derived_from<T, InferScheduler> && requires(
+    T t,
+    SchedulerRequest req,
+    std::string_view id,
+    CompletionStatus status,
+    CancellationReason reason,
+    std::optional<Error::Code> err,
+    const PressureSignal& sig) {
+  { t.admit(std::move(req)) } -> std::same_as<Result<void>>;
+  { t.next() } -> std::same_as<std::optional<SchedulerRequest>>;
+  { t.on_completion(id, status, err) } -> std::same_as<Result<void>>;
+  { t.cancel(id, reason) } -> std::same_as<Result<void>>;
+  { t.expire_due() } -> std::same_as<std::size_t>;
+  { t.on_pressure(sig) } -> std::same_as<void>;
+  { t.shutdown() } -> std::same_as<std::size_t>;
+  { t.metrics() } -> std::same_as<SchedulerMetrics>;
+  { t.policy_name() } -> std::same_as<std::string_view>;
+};
+// clang-format on
 
 }  // namespace tensorplate
