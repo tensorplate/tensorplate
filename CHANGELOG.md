@@ -8,6 +8,120 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- SmolVLA-style async chunk and stale-cancel scheduler fixtures
+  (V01-E06-F07). New shared mocks at `test/mocks/vla_fixtures.hpp`
+  (named multi-input payload `image_front` /`proprioception` /
+  `instruction`, action-chunk identity, LeRobot
+  `stale_after_sequence` marker, helper that filters queued
+  envelopes by stale sequence, all backed by small fake buffers
+  through a real `BufferManager`). New T2 coverage at
+  `test/integration/scheduler_smolvla_test.cpp` (7 cases) covers
+  overlapping chunk admission and arrival-order dispatch, queued
+  stale-sequence cancellation with deterministic buffer release,
+  in-flight stale cancellation observability through the
+  `SchedulerEvent` (`cancellation_reason = stale_sequence`),
+  deadline-margin admission rejection under load, queued expiry
+  under overlapping requests, and a mixed admit/dispatch/complete
+  /expire/cancel flow that asserts metrics counts and
+  `BufferManager::accounting().active_count == 0` end-to-end.
+  Tests run against a mock executor / `InferScheduler*` pointer
+  and do not require SmolVLA weights.
+- Scheduler memory and thermal pressure-aware admission
+  (V01-E06-F06). New protocol schema at
+  `protocol/schemas/scheduler_pressure_signal.json` documents the
+  `PressureSignal` value object (`source`, `severity`,
+  `timestamp_unix_nanos`, optional bounded `detail`) without any
+  vendor SDK type. The scheduler records the most recent severity
+  per source; `SchedulerConfig::pressure_reject_threshold` selects
+  whether warning- or critical-level pressure rejects new admission
+  with `Error::Code::OOMError` (incrementing
+  `admission_rejected_pressure`) or runs in record-only mode.
+  Queued and in-flight work is never killed solely by a pressure
+  signal at v0.1.0 baseline. T1 coverage at
+  `test/unit/scheduler_pressure_test.cpp` (10 cases) including the
+  V01-E03 `BufferAccounting::pressure -> PressureSeverity` mapping
+  used to bridge buffer-plane accounting into the scheduler.
+- Scheduler metrics and event protocol schemas (V01-E06-F05) at
+  `protocol/schemas/scheduler_metrics.json` and
+  `protocol/schemas/scheduler_event.json`. The metrics snapshot
+  documents queue depth / in-flight count / accepted / rejected
+  (overload / deadline / pressure) / expired / cancelled / completed
+  (success / failure) / pressure-event counters, plus wait-time
+  aggregates (sum / samples / max) using monotonic
+  steady-clock nanoseconds. The event schema documents the bounded
+  event labels (`endpoint`, `backend_name`, `policy`,
+  `error_code`, `completion_status`, `cancellation_reason`,
+  `pressure_source`, `pressure_severity`, `wait_time_ns`,
+  `timestamp_unix_nanos`) emitted on every state transition. T1
+  coverage at `test/unit/scheduler_metrics_test.cpp` (10 cases)
+  asserts counter increments per state-transition path, event
+  ordering, bounded labels, and that a throwing event sink cannot
+  break the scheduler critical path or counter accuracy.
+- Scheduler completion, cancellation, and buffer-cleanup coverage
+  (V01-E06-F04) at `test/unit/scheduler_cancellation_test.cpp`.
+  `on_completion` removes in-flight accounting exactly once;
+  duplicate completion and completion of an unknown id return
+  typed `Error::Code::Internal` no-ops. `cancel` handles queued and
+  in-flight requests by id: queued cancellation removes from the
+  queue and releases input `BufferRef`s through the V01-E03 cleanup
+  helpers; in-flight cancellation clears accounting and tombstones
+  the id so a racing `on_completion` is a typed no-op. Double
+  cancel and cancel-after-completion surface
+  `Error::Code::NotReady`. `expire_due()` releases queued input
+  buffers on stale-deadline removal. `shutdown()` drains every
+  queued request (releasing buffers), tombstones every in-flight id,
+  and flips subsequent admits to `Error::Code::NotReady`. SmolVLA-
+  style async chunk requests (with `RequestMetadata::action_chunk_id`
+  /`action_chunk_sequence`) and synchronous vision requests share
+  the same cleanup path. 12 T1 cases.
+- Deadline-aware admission and queued-expiry coverage (V01-E06-F03)
+  at `test/unit/scheduler_deadline_test.cpp`. The `FifoScheduler`
+  uses the injected `SchedulerClock` (monotonic only) for every
+  deadline decision and rejects new admission with
+  `Error::Code::Timeout` when a request is already past its deadline
+  or when its estimated completion exceeds `deadline +
+  deadline_margin`. The estimate accounts for current queue depth
+  and in-flight count using the configured
+  `default_service_estimate`; per-request `ServiceEstimate` overrides
+  the default. `expire_due()` and `next()` both sweep stale queued
+  requests, releasing input buffers through `release_request_buffers`
+  when a `BufferManager` is wired into runtime hooks. 12 T1 cases
+  cover boundary admission, monotonic-time isolation from wall
+  clock, queue-depth-aware rejection, and deterministic
+  buffer release on rejection. The shared `FakeSchedulerClock`
+  default origin is now anchored to real `steady_clock` + 1 hour so
+  deadlines composed against the fake clock also satisfy
+  `InferRequest::create`'s validation gate.
+- FIFO scheduler ordering and capacity coverage (V01-E06-F02) at
+  `test/unit/scheduler_fifo_test.cpp`. The v0.1.0 default
+  `FifoScheduler` (registered under the stable `fifo` policy key)
+  preserves enqueue order among admitted requests, enforces
+  `queue_capacity` with `Error::Code::OOMError`, gates dispatch on
+  `in_flight_capacity`, increments in-flight on dispatch (not on
+  enqueue), and exposes queue depth / in-flight count / wait-time
+  high water through the `metrics()` snapshot without leaking the
+  internal `std::deque` to callers. 13 T1 cases assert the dispatch
+  order, capacity behavior, completion-frees-slot semantics, and
+  that mock executor code only holds `InferScheduler*` (not
+  `FifoScheduler*`).
+- `InferScheduler` public interface (V01-E06-F01) at
+  `include/tensorplate/scheduler/scheduler.hpp` plus the supporting
+  envelope (`SchedulerRequest`), monotonic clock abstraction
+  (`SchedulerClock` / `SystemSchedulerClock`), pressure value
+  objects (`PressureSignal`, `PressureSource`, `PressureSeverity`),
+  and the `SchedulerEvent` / `SchedulerEventSink` /
+  `SchedulerMetrics` types. Includes the `InferSchedulerConcept`
+  compile-time interface check. Strategy pattern is mediated by a
+  `SchedulerPolicyRegistry` and the `make_scheduler` /
+  `validate_scheduler_config` factory entry points in
+  `include/tensorplate/scheduler/factory.hpp`. v0.1.0 registers the
+  built-in `fifo` policy; unknown policies return
+  `Error::Code::Unsupported`. New config schema at
+  `config/schemas/scheduler.json`. Architecture doc at
+  `docs/architecture/scheduler.md`. T1 coverage at
+  `test/unit/scheduler_interface_test.cpp` plus shared mocks at
+  `test/mocks/fake_scheduler_clock.hpp` and
+  `test/mocks/scheduler_fixtures.hpp`.
 - Kria / Vitis AI adapter design-review document at
   `docs/architecture/kria-vitis-ai-review.md` (V01-E05-F07). Maps a
   future Xilinx/AMD Kria adapter using Vitis AI and DPU execution

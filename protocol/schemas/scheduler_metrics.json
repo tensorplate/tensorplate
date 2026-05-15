@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/scheduler_metrics.json",
+  "title": "TensorPlate Scheduler Metrics Snapshot",
+  "description": "Snapshot of scheduler counters and aggregates returned by InferScheduler::metrics(). Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerMetrics. Intended for the local /metrics endpoint (V01-E07), the local status command (V01-E11), and the observability service (V01-E12).\n\nCounters are monotonic (always increase). Wait-time aggregates use steady-clock nanoseconds so durations are comparable across snapshots within a single process; the snapshot itself does not carry timestamps.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy",
+    "queue_depth",
+    "queue_depth_high_water",
+    "in_flight",
+    "in_flight_high_water",
+    "admitted_total",
+    "admission_rejected_overload",
+    "admission_rejected_deadline",
+    "admission_rejected_pressure",
+    "expired_total",
+    "cancelled_queued",
+    "cancelled_in_flight",
+    "completed_success",
+    "completed_failure",
+    "pressure_events_memory",
+    "pressure_events_thermal",
+    "wait_time_sum_ns",
+    "wait_time_samples",
+    "wait_time_max_ns",
+    "last_memory_severity",
+    "last_thermal_severity"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "policy": {
+      "type": "string",
+      "enum": ["fifo"]
+    },
+    "queue_depth": {"type": "integer", "minimum": 0},
+    "queue_depth_high_water": {"type": "integer", "minimum": 0},
+    "in_flight": {"type": "integer", "minimum": 0},
+    "in_flight_high_water": {"type": "integer", "minimum": 0},
+    "admitted_total": {"type": "integer", "minimum": 0},
+    "admission_rejected_overload": {"type": "integer", "minimum": 0},
+    "admission_rejected_deadline": {"type": "integer", "minimum": 0},
+    "admission_rejected_pressure": {"type": "integer", "minimum": 0},
+    "expired_total": {"type": "integer", "minimum": 0},
+    "cancelled_queued": {"type": "integer", "minimum": 0},
+    "cancelled_in_flight": {"type": "integer", "minimum": 0},
+    "completed_success": {"type": "integer", "minimum": 0},
+    "completed_failure": {"type": "integer", "minimum": 0},
+    "pressure_events_memory": {"type": "integer", "minimum": 0},
+    "pressure_events_thermal": {"type": "integer", "minimum": 0},
+    "wait_time_sum_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sum of monotonic queue wait times across dispatched, cancelled, and expired requests."
+    },
+    "wait_time_samples": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of requests that contributed to wait_time_sum_ns. Mean wait = sum / samples when samples > 0."
+    },
+    "wait_time_max_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Largest monotonic queue wait observed since scheduler construction."
+    },
+    "last_memory_severity": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"]
+    },
+    "last_thermal_severity": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"]
+    }
+  }
+}

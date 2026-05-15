@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/scheduler_pressure_signal.json",
+  "title": "TensorPlate Scheduler Pressure Signal",
+  "description": "Memory- or thermal-pressure signal accepted by InferScheduler::on_pressure. Mirrors include/tensorplate/scheduler/pressure.hpp::PressureSignal.\n\nCarriers MUST NOT include CUDA, NVML, TensorRT, Jetson, Vitis, XRT, DPU, or any other vendor SDK type. Memory pressure can be derived from V01-E03 BufferAccounting; thermal pressure can be produced by a runtime/device collector. v0.1.0 baseline policy records the most recent severity per source and may reject new admission when severity is at or above the configured pressure_reject_threshold; queued and in-flight work is never killed solely by a pressure signal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "severity", "timestamp_unix_nanos"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["memory", "thermal"],
+      "description": "Pressure source. Memory is produced from buffer-plane accounting; thermal is produced from a device-temperature collector (placeholder in v0.1.0)."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["normal", "warning", "critical"],
+      "description": "Ordered severity. Normal < Warning < Critical."
+    },
+    "timestamp_unix_nanos": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic timestamp captured by the producer when the severity transitioned. Encoded as steady-clock time_since_epoch nanoseconds."
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Bounded human-readable detail (e.g. 'memory_manager:warning', 'thermal_zone:gpu:hot'). Optional."
+    }
+  }
+}
