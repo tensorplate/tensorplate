@@ -142,7 +142,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
     event.policy = config_.policy;
     event.error_code = Error::Code::NotReady;
     event.timestamp = now();
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
     return unexpected(Error::Code::NotReady, "scheduler is shut down");
   }
 
@@ -160,7 +160,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
     event.policy = config_.policy;
     event.error_code = Error::Code::ConfigInvalid;
     event.timestamp = now();
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
     return unexpected(Error::Code::ConfigInvalid,
                       "scheduler request_id and endpoint must be non-empty");
   }
@@ -179,7 +179,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
     event.pressure_severity = active_pressure_severity_locked();
     event.timestamp = now();
     release_request_buffers_safely(request);
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
     return unexpected(Error::Code::OOMError, "scheduler rejecting admission due to pressure");
   }
 
@@ -195,7 +195,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
     event.error_code = Error::Code::OOMError;
     event.timestamp = now();
     release_request_buffers_safely(request);
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
     return unexpected(Error::Code::OOMError, "scheduler queue is at capacity");
   }
 
@@ -218,7 +218,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
       event.error_code = Error::Code::Timeout;
       event.timestamp = now_tp;
       release_request_buffers_safely(request);
-      emit_event_locked(std::move(event));
+      emit_event_locked(event);
       return unexpected(Error::Code::Timeout, "scheduler rejecting admission: deadline passed");
     }
 
@@ -246,7 +246,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
       event.error_code = Error::Code::Timeout;
       event.timestamp = now_tp;
       release_request_buffers_safely(request);
-      emit_event_locked(std::move(event));
+      emit_event_locked(event);
       return unexpected(Error::Code::Timeout,
                         "scheduler rejecting admission: deadline + margin exceeded by estimate");
     }
@@ -279,7 +279,7 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
   event.backend_name = request.backend_name();
   event.policy = config_.policy;
   event.timestamp = now_tp;
-  emit_event_locked(std::move(event));
+  emit_event_locked(event);
   return {};
 }
 
@@ -319,7 +319,7 @@ std::optional<SchedulerRequest> FifoScheduler::next() {
   event.policy = config_.policy;
   event.wait_time = wait;
   event.timestamp = now_tp;
-  emit_event_locked(std::move(event));
+  emit_event_locked(event);
   return std::optional<SchedulerRequest>{std::move(head)};
 }
 
@@ -356,7 +356,7 @@ Result<void> FifoScheduler::on_completion(std::string_view request_id, Completio
   event.completion_status = status;
   event.error_code = error_code;
   event.timestamp = now();
-  emit_event_locked(std::move(event));
+  emit_event_locked(event);
   return {};
 }
 
@@ -385,7 +385,7 @@ Result<void> FifoScheduler::cancel(std::string_view request_id, CancellationReas
       queue_.erase(it);
       metrics_.queue_depth = queue_.size();
       ++metrics_.cancelled_queued;
-      emit_event_locked(std::move(event));
+      emit_event_locked(event);
       return {};
     }
   }
@@ -406,7 +406,7 @@ Result<void> FifoScheduler::cancel(std::string_view request_id, CancellationReas
     event.policy = config_.policy;
     event.cancellation_reason = reason;
     event.timestamp = now();
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
     return {};
   }
 
@@ -442,7 +442,7 @@ std::size_t FifoScheduler::expire_due_locked() {
       it = queue_.erase(it);
       ++metrics_.expired_total;
       ++removed;
-      emit_event_locked(std::move(event));
+      emit_event_locked(event);
     } else {
       ++it;
     }
@@ -474,7 +474,7 @@ void FifoScheduler::on_pressure(const PressureSignal& signal) {
   event.pressure_severity = signal.severity;
   // Timestamp prefers the signal's own monotonic stamp when populated.
   event.timestamp = signal.timestamp.time_since_epoch().count() == 0 ? now() : signal.timestamp;
-  emit_event_locked(std::move(event));
+  emit_event_locked(event);
 }
 
 std::size_t FifoScheduler::shutdown() {
@@ -503,7 +503,7 @@ std::size_t FifoScheduler::shutdown() {
     queue_.pop_front();
     ++metrics_.cancelled_queued;
     ++cancelled;
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
   }
   metrics_.queue_depth = 0;
 
@@ -518,7 +518,7 @@ std::size_t FifoScheduler::shutdown() {
     event.policy = config_.policy;
     event.cancellation_reason = CancellationReason::Shutdown;
     event.timestamp = now();
-    emit_event_locked(std::move(event));
+    emit_event_locked(event);
   }
   in_flight_ids_.clear();
   metrics_.in_flight = 0;
