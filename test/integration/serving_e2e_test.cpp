@@ -8,11 +8,17 @@
 // malformed/oversized payloads, deadline rejection, and graceful
 // shutdown. No real backend is required.
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -108,6 +114,40 @@ std::string make_infer_body(const std::string& request_id,
   return body.dump();
 }
 
+std::string send_raw_http(std::uint16_t port, const std::string& request) {
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    throw std::runtime_error(std::string{"socket: "} + std::strerror(errno));
+  }
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+    ::close(fd);
+    throw std::runtime_error("inet_pton failed");
+  }
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    ::close(fd);
+    throw std::runtime_error(std::string{"connect: "} + std::strerror(errno));
+  }
+  if (::send(fd, request.data(), request.size(), 0) < 0) {
+    ::close(fd);
+    throw std::runtime_error(std::string{"send: "} + std::strerror(errno));
+  }
+
+  std::string raw;
+  char buf[4096];
+  while (true) {
+    ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {
+      break;
+    }
+    raw.append(buf, static_cast<std::size_t>(n));
+  }
+  ::close(fd);
+  return raw;
+}
+
 TEST(ServingE2E, HealthRouteReportsReady) {
   auto h = ServingHarness::start(default_test_config());
   HttpClient client("127.0.0.1", h.port);
@@ -159,6 +199,33 @@ TEST(ServingE2E, InferPropagatesCorrelationIdFromHeader) {
   EXPECT_EQ(resp.header("x-correlation-id"), "header-cid");
   auto j = nlohmann::json::parse(resp.body);
   EXPECT_EQ(j["correlation_id"], "header-cid");
+}
+
+TEST(ServingE2E, InferAcceptsContentLengthAsFinalHeader) {
+  auto h = ServingHarness::start(default_test_config());
+  const auto body = make_infer_body("req-final-content-length");
+  std::string req;
+  req.reserve(256 + body.size());
+  req.append("POST /infer HTTP/1.1\r\n");
+  req.append("host: 127.0.0.1\r\n");
+  req.append("user-agent: curl/7.81.0\r\n");
+  req.append("accept: */*\r\n");
+  req.append("content-type: application/json\r\n");
+  req.append("x-correlation-id: final-header-cid\r\n");
+  req.append("Content-Length: ");
+  req.append(std::to_string(body.size()));
+  req.append("\r\n\r\n");
+  req.append(body);
+
+  auto raw = send_raw_http(h.port, req);
+  ASSERT_NE(raw.find("HTTP/1.1 200 OK"), std::string::npos) << raw;
+  ASSERT_NE(raw.find("x-correlation-id: final-header-cid"), std::string::npos) << raw;
+  const auto body_pos = raw.find("\r\n\r\n");
+  ASSERT_NE(body_pos, std::string::npos) << raw;
+  auto j = nlohmann::json::parse(raw.substr(body_pos + 4));
+  EXPECT_EQ(j["status"], "success");
+  EXPECT_EQ(j["request_id"], "req-final-content-length");
+  EXPECT_EQ(j["correlation_id"], "final-header-cid");
 }
 
 TEST(ServingE2E, InferRejectsUnsupportedContentType) {

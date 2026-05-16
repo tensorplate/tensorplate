@@ -206,8 +206,11 @@ Request parse_request_head(std::string_view raw, std::size_t header_end_pos) {
   std::size_t pos = sl_end + 2;
   while (pos < head.size()) {
     auto eol = head.find("\r\n", pos);
-    if (eol == std::string_view::npos || eol == pos) {
+    if (eol == pos) {
       break;
+    }
+    if (eol == std::string_view::npos) {
+      eol = head.size();
     }
     std::string_view line = head.substr(pos, eol - pos);
     auto colon = line.find(':');
@@ -222,6 +225,9 @@ Request parse_request_head(std::string_view raw, std::size_t header_end_pos) {
         value.remove_suffix(1);
       }
       req.headers.push_back(Header{std::move(name), std::string(value)});
+    }
+    if (eol == head.size()) {
+      break;
     }
     pos = eol + 2;
   }

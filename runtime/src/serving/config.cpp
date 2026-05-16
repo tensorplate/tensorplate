@@ -165,8 +165,9 @@ Result<PrecisionHint> parse_precision_hint(std::string_view name) {
 
 template <typename T>
 T value_or_default(const json& obj, std::string_view key, T fallback) {
-  if (obj.contains(key) && !obj[key].is_null()) {
-    return obj[key].get<T>();
+  const std::string key_string{key};
+  if (obj.contains(key_string) && !obj.at(key_string).is_null()) {
+    return obj.at(key_string).get<T>();
   }
   return fallback;
 }
