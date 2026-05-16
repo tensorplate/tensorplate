@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/agent.json",
+  "title": "TensorPlate Agent Config",
+  "description": "Runtime configuration for `tensorplate-agent` (V01-E08). The agent loads this file at startup, validates it before opening the local control transport, and refuses to mutate durable state until validation succeeds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Local control API transport. v0.1.0 default: Unix domain socket. Loopback HTTP is reserved for environments where UDS is unavailable; the agent records the decision rationale in logs at startup.",
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["unix_socket", "loopback_tcp"],
+          "default": "unix_socket"
+        },
+        "socket_path": {
+          "type": "string",
+          "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
+        },
+        "tcp_bind_host": {"type": "string", "default": "127.0.0.1"},
+        "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535}
+      }
+    },
+    "state_dir": {
+      "type": "string",
+      "description": "Absolute directory where the durable state file lives. Created if missing."
+    },
+    "staging_dir": {
+      "type": "string",
+      "description": "Absolute directory where deploy transactions stage verified bundles. Each deployment lives under `<staging_dir>/<deployment_id>/`."
+    },
+    "available_backends": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Backends the agent will accept in a bundle's `backend_hint`. The agent does not infer availability heuristically; this list is sourced from `tensorplate doctor` output in production.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "default": ["mock"]
+    },
+    "backend_capabilities": {
+      "type": "object",
+      "description": "Capability flags published by each available backend. The agent consults this map when a bundle declares `capability_requirements`. Missing entries are treated as no-capability-published.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "async": {"type": "boolean", "default": false},
+          "streaming": {"type": "boolean", "default": false},
+          "generation": {"type": "boolean", "default": false},
+          "kv_cache": {"type": "boolean", "default": false},
+          "fixed_shape": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "device_memory_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total device/system memory available to the runtime. Used by the capacity_checked phase to reject bundles whose memory estimate exceeds capacity."
+    },
+    "device_family": {
+      "type": "string",
+      "enum": ["any", "jetson-orin", "jetson-thor", "kria", "x86_64"],
+      "default": "any"
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warm_timeout_ms": {"type": "integer", "minimum": 1, "default": 30000},
+        "prepare_timeout_ms": {"type": "integer", "minimum": 1, "default": 60000},
+        "status_poll_interval_ms": {"type": "integer", "minimum": 1, "default": 250}
+      }
+    }
+  }
+}

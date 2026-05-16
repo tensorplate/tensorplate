@@ -25,6 +25,9 @@ respective components.
 - [Serving worker](serving-worker.md) — `tensorplate-serving` process,
   loopback HTTP route contract, LeRobot-compatible async policy routes,
   health/metrics, and graceful shutdown (V01-E07).
+- [Agent](agent.md) — `tensorplate-agent` desired state, durable store,
+  deploy transaction state machine, bundle verification, rollback, and
+  restart recovery (V01-E08).
 
 Additional architecture topics are added as the v0.1.0 epics land.
 

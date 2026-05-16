@@ -8,6 +8,100 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate-agent` desired state, deploy transaction, bundle
+  verification, rollback, and restart-recovery baseline (V01-E08).
+  The Rust agent now owns a durable desired-state store
+  (`protocol/schemas/agent_state.json`, `protocol/rust/src/agent_state.rs`)
+  that persists active / previous-active / candidate deployment records,
+  the in-flight transaction phase, the bounded quarantine list, and a
+  bounded `last_error` slot through atomic `tmp + rename(2)` writes with
+  a backup file refreshed after every successful primary commit. The
+  state schema is value-fixed to `schema_version: "0.1"`; decoders
+  reject unknown future versions with the typed `Unsupported` error.
+- Local control API (V01-E08-F01) speaks newline-delimited JSON over a
+  Unix domain socket by default (loopback TCP is an opt-in escape
+  hatch). The wire envelope is documented in
+  `protocol/schemas/agent_control.json` and mirrored as
+  `tensorplate_protocol::ControlRequest` / `ControlResponse`. Supported
+  operations: `deploy`, `status`, `rollback`, `health`, and `version`;
+  responses carry typed `agent_status`, `deploy_status`, and
+  `error.code` projections so the CLI (V01-E11) and observability
+  service (V01-E10) see stable error codes. Concurrent conflicting
+  mutating requests return `agent_busy`; rollback with no previous
+  active returns `unavailable`; unknown schema versions return a typed
+  `Unsupported` error before the request touches the state store.
+- Bundle verifier (V01-E08-F03) at `agent/src/bundle.rs` plus the new
+  `protocol/schemas/bundle_manifest.json` (`schema_version: 0.1`,
+  `format_version: MAJOR.MINOR`, role-tagged artifacts, optional
+  `manifest_digest`). Verification runs in a fixed order: bundle path
+  exists -> manifest schema/version -> per-artifact sha256 -> optional
+  self-digest -> format-version major -> runtime-compatibility window
+  -> hardware family / memory envelope -> declared `backend_hint`
+  availability -> `capability_requirements` vs configured
+  `backend_capabilities`. No heuristic backend fallback: bundles that
+  declare an unknown or unavailable backend are rejected with
+  `Error::Code::Unsupported` before any worker interaction. Unsafe
+  artifact paths (absolute, `..` segments) and duplicate artifact paths
+  are typed errors. Verified bundles return a `VerifiedBundle` carrying
+  the canonical manifest digest (sha256 of the manifest minus the
+  `manifest_digest` field) used as the persisted `bundle_digest`.
+- Deploy transaction coordinator (V01-E08-F04 / F05 / F06) at
+  `agent/src/coordinator.rs` walks the durable state machine
+  `received -> verified -> staged -> capacity_checked -> prepared ->
+  warmed -> promoted -> active`, persisting each phase before the next
+  begins. Phase classification at `agent/src/transaction.rs`
+  separates replayable phases (`received`/`verified`/`staged`/
+  `capacity_checked`) from worker-side phases (`prepared`/`warmed`/
+  `promoted`). Staging copies the manifest plus every declared artifact
+  into `<staging_dir>/<deployment_id>/` before the worker is contacted.
+  Promotion is the only transition that rotates the active deployment;
+  rollback uses the same prepare/warm/promote sequence on the
+  previous-active record and refuses with `Unavailable` when no
+  previous active exists or when the previous bundle's staged files
+  are missing. Failed candidates record the last-successful phase and
+  move into the bounded `quarantined` list with a typed error;
+  active deployment is preserved across every candidate failure.
+- Agent → serving-worker control surface (V01-E08-F05) at
+  `protocol/schemas/worker_control.json` and `agent/src/worker.rs`.
+  Worker IPC is modelled as the narrow `WorkerControl` trait
+  (`prepare`, `warm`, `promote`, `unload`, `active_deployment_id`)
+  so the coordinator depends on an interface, not on a concrete
+  process. v0.1.0 ships the deterministic `MockWorkerControl` used by
+  host CI; production wiring to the V01-E07 worker process lands in
+  V01-E09 and plugs into the same trait without revising the
+  coordinator code. Prepare/warm operations are bounded by
+  configurable timeouts (`worker.prepare_timeout_ms`,
+  `worker.warm_timeout_ms`) and surface `Error::Code::Timeout` on
+  expiry. `unload` of the previous active is best-effort and never
+  undoes a successful promotion.
+- Recovery planner (V01-E08-F07) at `agent/src/recovery.rs` computes a
+  typed `RecoveryAction` from durable state plus (best-effort) the
+  worker's actual active deployment id. Replayable phases recommend
+  `resume_verify` / `resume_stage` / `resume_prepare`; worker-side
+  phases recommend `quarantine_candidate`; agreement between desired
+  and actual returns `no_op`; disagreement returns `operator_required`.
+  Recovery is state-diff based and never replays commands solely
+  because they appeared in the original request order.
+- `tensorplate-agent` binary entrypoint (`agent/src/main.rs`) reads
+  `--config <path>` or `--config-json <inline>`, validates the agent
+  config against `config/schemas/agent.json`, opens the durable state
+  store, runs a startup recovery diagnosis, and starts the local
+  control API. v0.1.0 relies on systemd / supervisor to deliver
+  SIGTERM; durable mutations are atomic so termination at any point
+  leaves state consistent.
+- Integration test suite at `agent/tests/` (V01-E08-F08): a shared
+  `Harness` builder creates isolated `state_dir` + `staging_dir`
+  directories per test and wires the coordinator to a configurable
+  `MockWorkerControl`. Four test files cover the deploy happy path,
+  failure injection (corrupt artifact, unsupported backend, capacity
+  overflow, prepare failure, warm-not-ready), rollback and restart
+  recovery, and the full UDS round-trip through the local control API.
+- New protocol Rust modules `agent_control`, `agent_state`,
+  `bundle_manifest`, and `worker_control` (each a serde mirror with
+  validating constructors and `decode_with_version_check` semantic
+  validation). Architecture documentation lives in
+  `docs/architecture/agent.md`; the protocol schema index in
+  `protocol/schemas/README.md` lists the new envelopes.
 - `tensorplate-serving` worker and loopback HTTP data-plane endpoint
   (V01-E07). The composition root (`include/tensorplate/serving/
   worker.hpp`, `runtime/src/serving/worker.cpp`) wires

@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/agent_control.json",
+  "title": "TensorPlate Agent Local Control API",
+  "description": "Versioned request/response envelope spoken by `tensorplate-agent` on its local control transport (Unix domain socket by default; see `docs/architecture/agent-control-api.md`). The CLI (V01-E11) and any local operator tooling speak this contract — never the serving worker's data-plane HTTP directly. Wire encoding is newline-delimited JSON: one request object terminated by `\\n`, one response object terminated by `\\n`, on a freshly-connected socket. Concurrent conflicting mutating requests are rejected with `agent_busy`.",
+  "oneOf": [
+    {"$ref": "#/definitions/Request"},
+    {"$ref": "#/definitions/Response"}
+  ],
+  "definitions": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "op"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "correlation_id": {
+          "type": "string",
+          "description": "Optional caller-supplied correlation id. Echoed in the response and persisted with the transaction record. Auto-assigned when absent."
+        },
+        "op": {
+          "type": "string",
+          "enum": ["deploy", "status", "rollback", "health", "version"],
+          "description": "Operation discriminator."
+        },
+        "deploy": {"$ref": "#/definitions/DeployRequest"},
+        "rollback": {"$ref": "#/definitions/RollbackRequest"},
+        "status": {"$ref": "#/definitions/StatusRequest"}
+      }
+    },
+    "DeployRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_path", "deployment_id"],
+      "properties": {
+        "bundle_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Absolute path to the bundle directory on the local device. The agent verifies the manifest before any worker interaction."
+        },
+        "deployment_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operator-supplied identifier for this deployment intent. Reused by `status`, `rollback`, and CLI display."
+        },
+        "expected_bundle_digest": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$",
+          "description": "Optional caller-supplied expected bundle (manifest) digest. When present, the agent enforces digest equality before staging."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "description": "Operator labels copied into the desired-state record for observability/status filtering."
+        }
+      }
+    },
+    "RollbackRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "description": "Operator-supplied reason persisted with the rollback transaction."
+        }
+      }
+    },
+    "StatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include_quarantine": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "correlation_id": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["ok", "error", "busy", "not_found", "unavailable"],
+          "description": "Coarse outcome. `busy` is returned when a conflicting transaction is in progress; `unavailable` is returned when the requested operation (e.g., rollback with no previous active) cannot be served right now."
+        },
+        "transaction_id": {
+          "type": "string",
+          "description": "Transaction id assigned by the agent. Stable across reconnects until the transaction reaches a terminal state."
+        },
+        "deploy_status": {"$ref": "#/definitions/DeployStatus"},
+        "agent_status": {"$ref": "#/definitions/AgentStatus"},
+        "error": {"$ref": "#/definitions/Error"}
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "message": {"type": "string"},
+        "context": {"type": "string"}
+      }
+    },
+    "DeployStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "capacity_checked",
+            "prepared",
+            "warmed",
+            "promoted",
+            "active",
+            "failed",
+            "rolled_back"
+          ]
+        },
+        "transaction_id": {"type": "string"},
+        "deployment_id": {"type": "string"},
+        "bundle_digest": {"type": "string"},
+        "started_monotonic_ns": {"type": "integer", "minimum": 0},
+        "last_transition_monotonic_ns": {"type": "integer", "minimum": 0},
+        "failure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["error_code", "recoverable"],
+          "properties": {
+            "error_code": {
+              "type": "string",
+              "enum": [
+                "config_invalid",
+                "load_failed",
+                "not_ready",
+                "shape_mismatch",
+                "unsupported",
+                "oom_error",
+                "timeout",
+                "inference_failed",
+                "internal"
+              ]
+            },
+            "message": {"type": "string"},
+            "recoverable": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "AgentStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_state"],
+      "properties": {
+        "agent_state": {
+          "type": "string",
+          "enum": ["ready", "degraded", "failed", "unknown"]
+        },
+        "active": {"$ref": "#/definitions/DeploymentSummary"},
+        "previous_active": {"$ref": "#/definitions/DeploymentSummary"},
+        "candidate": {"$ref": "#/definitions/DeploymentSummary"},
+        "in_flight_transaction": {"$ref": "#/definitions/DeployStatus"},
+        "last_error": {"$ref": "#/definitions/Error"},
+        "quarantined": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/QuarantineRecord"}
+        },
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "no_op",
+                "resume_verify",
+                "resume_stage",
+                "resume_prepare",
+                "resume_warm",
+                "finalize_promotion",
+                "restore_active",
+                "quarantine_candidate",
+                "operator_required"
+              ]
+            },
+            "reason": {"type": "string"}
+          }
+        }
+      }
+    },
+    "DeploymentSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "bundle_digest"],
+      "properties": {
+        "deployment_id": {"type": "string", "minLength": 1},
+        "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+        "bundle_name": {"type": "string"},
+        "bundle_version": {"type": "string"},
+        "backend_hint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "staged_path": {"type": "string"},
+        "promoted_monotonic_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "QuarantineRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction_id", "deployment_id", "phase", "error_code"],
+      "properties": {
+        "transaction_id": {"type": "string"},
+        "deployment_id": {"type": "string"},
+        "bundle_digest": {"type": "string"},
+        "phase": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "capacity_checked",
+            "prepared",
+            "warmed",
+            "promoted"
+          ]
+        },
+        "error_code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "message": {"type": "string"},
+        "quarantined_monotonic_ns": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

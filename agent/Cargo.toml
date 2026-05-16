@@ -10,6 +10,10 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+name = "tensorplate_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tensorplate-agent"
 path = "src/main.rs"
@@ -19,6 +23,13 @@ tensorplate-protocol = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
