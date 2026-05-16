@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/serving_http_envelope.json",
+  "title": "TensorPlate Serving HTTP Envelope",
+  "description": "Wire-format request/response envelope used by `tensorplate-serving`'s `/infer`, `/policy/infer`, `/policy/result/<id>`, and `/policy/cancel/<id>` routes. Single-input vision requests and LeRobot-compatible async policy requests share the same `inputs` shape; the only difference between sync and async is the HTTP route and the response status.\n\nTensor payloads are base64-encoded raw bytes following RFC 4648 with the standard alphabet. The runtime derives a TensorView from `tensor.dtype`, `tensor.shape`, `tensor.layout`, `tensor.byte_offset`, and `tensor.byte_size`; the payload must contain at least `byte_offset + byte_size` bytes.",
+  "oneOf": [
+    {"$ref": "#/definitions/InferRequest"},
+    {"$ref": "#/definitions/InferResponseSuccess"},
+    {"$ref": "#/definitions/InferResponseFailure"},
+    {"$ref": "#/definitions/AsyncAccepted"},
+    {"$ref": "#/definitions/AsyncResult"},
+    {"$ref": "#/definitions/AsyncCancelResponse"}
+  ],
+  "definitions": {
+    "TensorMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dtype", "shape"],
+      "properties": {
+        "dtype": {
+          "type": "string",
+          "enum": ["float32", "float16", "bfloat16", "int64", "int32", "int16", "int8", "uint8", "bool"]
+        },
+        "layout": {"type": "string", "enum": ["row_major", "col_major"], "default": "row_major"},
+        "shape": {"type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1},
+        "byte_offset": {"type": "integer", "minimum": 0, "default": 0},
+        "byte_size": {"type": "integer", "minimum": 0}
+      }
+    },
+    "NamedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tensor", "payload_b64"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "tensor": {"$ref": "#/definitions/TensorMetadata"},
+        "payload_b64": {"type": "string"}
+      }
+    },
+    "NamedOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tensor", "payload_b64"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "tensor": {"$ref": "#/definitions/TensorMetadata"},
+        "payload_b64": {"type": "string"},
+        "semantic_tag": {"type": "string"}
+      }
+    },
+    "RequestMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": {"type": "string", "minLength": 1},
+        "action_chunk_id": {"type": "string", "minLength": 1},
+        "action_chunk_sequence": {"type": "integer"},
+        "stale_after_sequence": {"type": "integer"},
+        "extra": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "Timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "queue_latency_ns": {"type": "integer", "minimum": 0},
+        "execution_latency_ns": {"type": "integer", "minimum": 0},
+        "total_latency_ns": {"type": "integer", "minimum": 0}
+      }
+    },
+    "InferRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "endpoint", "inputs"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "request_id": {"type": "string", "minLength": 1},
+        "endpoint": {"type": "string", "minLength": 1},
+        "inputs": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/NamedInput"}},
+        "metadata": {"$ref": "#/definitions/RequestMetadata"},
+        "deadline_ms": {"type": "integer", "minimum": 1}
+      }
+    },
+    "InferResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "status", "outputs"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "request_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "status": {"type": "string", "const": "success"},
+        "outputs": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/NamedOutput"}},
+        "timing": {"$ref": "#/definitions/Timing"}
+      }
+    },
+    "InferResponseFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "status", "error"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "request_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "status": {"type": "string", "const": "failure"},
+        "error": {"$ref": "https://schemas.tensorplate.io/v0.1/error.json"},
+        "timing": {"$ref": "#/definitions/Timing"}
+      }
+    },
+    "AsyncAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "request_id", "result_url", "cancel_url"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "status": {"type": "string", "const": "accepted"},
+        "request_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "endpoint": {"type": "string"},
+        "result_url": {"type": "string"},
+        "cancel_url": {"type": "string"}
+      }
+    },
+    "AsyncResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "status"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "request_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_flight", "completed", "cancelled", "stale", "failed", "expired"]
+        },
+        "action_chunk_id": {"type": "string"},
+        "action_chunk_sequence": {"type": "integer"},
+        "result": {"oneOf": [{"$ref": "#/definitions/InferResponseSuccess"},
+                              {"$ref": "#/definitions/InferResponseFailure"}]},
+        "error": {"$ref": "https://schemas.tensorplate.io/v0.1/error.json"}
+      }
+    },
+    "AsyncCancelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "cancelled"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "request_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "cancelled": {"type": "boolean"}
+      }
+    }
+  }
+}

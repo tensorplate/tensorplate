@@ -43,6 +43,19 @@ set(_tp_runtime_sources
   src/scheduler/scheduler_strings.cpp
   src/scheduler/factory.cpp
   src/scheduler/fifo_scheduler.cpp
+  # V01-E07: serving worker, loopback HTTP, request router,
+  # async-policy store, metrics, health, shutdown.
+  src/http/http_message.cpp
+  src/http/http_server.cpp
+  src/serving/config.cpp
+  src/serving/health.cpp
+  src/serving/metrics.cpp
+  src/serving/shutdown.cpp
+  src/serving/serialization.cpp
+  src/serving/async_policy.cpp
+  src/serving/pipeline.cpp
+  src/serving/router.cpp
+  src/serving/worker.cpp
 )
 
 if(TP_ENABLE_TENSORRT)
@@ -77,6 +90,17 @@ target_include_directories(tp_runtime
 )
 
 target_compile_features(tp_runtime PUBLIC cxx_std_20)
+
+# V01-E07: nlohmann::json is required by the serving worker (HTTP
+# request/response serialization, config parser) and by the Python
+# sidecar adapter. Required unconditionally from v0.1.0 onward.
+find_package(nlohmann_json CONFIG REQUIRED)
+target_link_libraries(tp_runtime PUBLIC nlohmann_json::nlohmann_json)
+
+# V01-E07: threading primitives for the serving worker (HTTP accept
+# loop, async dispatcher, eviction sweeper).
+find_package(Threads REQUIRED)
+target_link_libraries(tp_runtime PUBLIC Threads::Threads)
 
 if(TP_ENABLE_TENSORRT)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_TENSORRT=1)
@@ -128,11 +152,8 @@ if(TP_ENABLE_LIBTORCH)
 endif()
 if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_PYTHON_PYTORCH_SIDECAR=1)
-  # The sidecar adapter parses JSON sidecar headers via nlohmann::json
-  # (header-only); v0.1.0 requires it via vcpkg. The link below is a
-  # header-only INTERFACE target, so no runtime libs are pulled in.
-  find_package(nlohmann_json CONFIG REQUIRED)
-  target_link_libraries(tp_runtime PUBLIC nlohmann_json::nlohmann_json)
+  # nlohmann::json is already linked above (V01-E07 dependency); the
+  # sidecar adapter reuses the same library for its JSON headers.
 endif()
 
 set_target_properties(tp_runtime PROPERTIES

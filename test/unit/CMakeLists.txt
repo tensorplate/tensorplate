@@ -33,6 +33,12 @@ add_executable(tp_test_unit
   scheduler_cancellation_test.cpp
   scheduler_metrics_test.cpp
   scheduler_pressure_test.cpp
+  # V01-E07: serving worker.
+  serving_config_test.cpp
+  serving_serialization_test.cpp
+  serving_pipeline_test.cpp
+  serving_health_metrics_test.cpp
+  serving_async_store_test.cpp
 )
 
 target_include_directories(tp_test_unit

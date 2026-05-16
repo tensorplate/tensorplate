@@ -22,6 +22,9 @@ respective components.
   v0.1.0 paper exercise confirming the V01-E04 contract is implementable
   by a future Kria/Vitis AI adapter without public interface revision
   (V01-E04-F07-T02).
+- [Serving worker](serving-worker.md) — `tensorplate-serving` process,
+  loopback HTTP route contract, LeRobot-compatible async policy routes,
+  health/metrics, and graceful shutdown (V01-E07).
 
 Additional architecture topics are added as the v0.1.0 epics land.
 

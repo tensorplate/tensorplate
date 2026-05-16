@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/serving_worker.json",
+  "title": "TensorPlate Serving Worker Config",
+  "description": "Runtime configuration consumed by the V01-E07 `tensorplate-serving` composition root. Mirrors `include/tensorplate/serving/config.hpp::ServingConfig`. Defaults are conservative and loopback-only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "bind": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {"type": "string", "default": "127.0.0.1"},
+        "port": {"type": "integer", "minimum": 0, "maximum": 65535, "default": 0},
+        "allow_non_loopback": {"type": "boolean", "default": false}
+      }
+    },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_body_bytes": {"type": "integer", "minimum": 1, "default": 16777216},
+        "max_header_bytes": {"type": "integer", "minimum": 1, "default": 32768},
+        "request_timeout_ms": {"type": "integer", "minimum": 1, "default": 8000},
+        "accept_thread_pool_size": {"type": "integer", "minimum": 1, "default": 16}
+      }
+    },
+    "scheduler": {"$ref": "https://schemas.tensorplate.io/v0.1/scheduler.json"},
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pool_name": {"type": "string", "default": "serving"},
+        "capacity_bytes": {"type": "integer", "minimum": 1, "default": 268435456},
+        "max_buffer_bytes": {"type": "integer", "minimum": 1, "default": 67108864}
+      }
+    },
+    "async_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_completed": {"type": "integer", "minimum": 1, "default": 64},
+        "max_pending": {"type": "integer", "minimum": 1, "default": 256},
+        "completed_ttl_ms": {"type": "integer", "minimum": 0, "default": 60000}
+      }
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drain_deadline_ms": {"type": "integer", "minimum": 0, "default": 5000},
+        "cancel_queued_immediately": {"type": "boolean", "default": true}
+      }
+    },
+    "health_mode": {"type": "string", "enum": ["local_json", "disabled"], "default": "local_json"},
+    "metrics_mode": {
+      "type": "string",
+      "enum": ["prometheus_text", "json", "disabled"],
+      "default": "prometheus_text"
+    },
+    "enable_stderr_logs": {"type": "boolean", "default": true},
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use_mock_session": {"type": "boolean", "default": true},
+        "endpoint": {"type": "string", "default": "default"},
+        "backend": {"type": "string", "default": "mock"},
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model_id", "model_class", "artifact_path", "backend_hint"],
+          "properties": {
+            "model_id": {"type": "string", "minLength": 1},
+            "model_class": {
+              "type": "string",
+              "enum": ["vision", "speech", "language", "vla", "embedding", "custom"]
+            },
+            "artifact_path": {"type": "string", "minLength": 1},
+            "backend_hint": {"type": "string", "minLength": 1},
+            "precision_hint": {
+              "type": "string",
+              "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"]
+            },
+            "profile_id": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    }
+  }
+}
