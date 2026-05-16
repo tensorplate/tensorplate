@@ -51,6 +51,7 @@ std::string_view ServingPipeline::backend_name() const noexcept {
   return deps_.backend_name;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 SyncOutcome ServingPipeline::run_sync(InferRequest request) {
   SyncOutcome out;
   if (stopping_.load()) {
@@ -179,6 +180,7 @@ Result<AsyncAcceptOutcome> ServingPipeline::run_async(InferRequest request,
   return out;
 }
 
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool ServingPipeline::dispatch_one(AsyncPolicyStore& store) {
   auto next = deps_.scheduler->next();
   if (!next.has_value()) {
