@@ -150,6 +150,27 @@ TEST(ServingE2E, InferPropagatesCorrelationIdFromMetadata) {
   EXPECT_EQ(j["correlation_id"], "custom-cid");
 }
 
+TEST(ServingE2E, InferPropagatesCorrelationIdFromHeader) {
+  auto h = ServingHarness::start(default_test_config());
+  HttpClient client("127.0.0.1", h.port);
+  auto resp = client.post("/infer", make_infer_body("req-header-cid"),
+                          {{"x-correlation-id", "header-cid"}});
+  ASSERT_EQ(resp.status, 200) << resp.body;
+  EXPECT_EQ(resp.header("x-correlation-id"), "header-cid");
+  auto j = nlohmann::json::parse(resp.body);
+  EXPECT_EQ(j["correlation_id"], "header-cid");
+}
+
+TEST(ServingE2E, InferRejectsUnsupportedContentType) {
+  auto h = ServingHarness::start(default_test_config());
+  HttpClient client("127.0.0.1", h.port);
+  auto resp =
+      client.post("/infer", make_infer_body("bad-content-type"), {{"content-type", "text/plain"}});
+  EXPECT_EQ(resp.status, 415);
+  auto j = nlohmann::json::parse(resp.body);
+  EXPECT_EQ(j["error"]["code"], "unsupported");
+}
+
 TEST(ServingE2E, InferRejectsMalformed) {
   auto h = ServingHarness::start(default_test_config());
   HttpClient client("127.0.0.1", h.port);

@@ -296,6 +296,32 @@ std::optional<AsyncEntrySnapshot> AsyncPolicyStore::snapshot(std::string_view re
   return out;
 }
 
+std::optional<InferResult> AsyncPolicyStore::take_completed_result(std::string_view request_id) {
+  std::lock_guard<std::mutex> g(mutex_);
+  auto it = by_id_.find(std::string(request_id));
+  if (it == by_id_.end()) {
+    return std::nullopt;
+  }
+  Entry* e = it->second;
+  if (e->status != AsyncStatus::Completed || !e->result.has_value()) {
+    return std::nullopt;
+  }
+
+  InferResult result = std::move(*e->result);
+  e->result.reset();
+  if (counts_.completed > 0) {
+    --counts_.completed;
+  }
+  by_id_.erase(it);
+  for (auto lit = entries_.begin(); lit != entries_.end(); ++lit) {
+    if (lit->get() == e) {
+      entries_.erase(lit);
+      break;
+    }
+  }
+  return result;
+}
+
 bool AsyncPolicyStore::release_completed(std::string_view request_id) {
   std::lock_guard<std::mutex> g(mutex_);
   auto it = by_id_.find(std::string(request_id));

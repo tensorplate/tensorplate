@@ -323,8 +323,9 @@ nlohmann::json tensor_to_json(const TensorView& tv) {
 
 }  // namespace
 
-std::string render_infer_response(const InferResult& result, BufferManager& buffer_manager,
-                                  std::optional<std::string_view> correlation_id) {
+Result<std::string> render_infer_response_checked(const InferResult& result,
+                                                  BufferManager& buffer_manager,
+                                                  std::optional<std::string_view> correlation_id) {
   nlohmann::json j;
   j["schema_version"] = "0.1";
   j["request_id"] = result.request_id();
@@ -336,11 +337,11 @@ std::string render_infer_response(const InferResult& result, BufferManager& buff
     nlohmann::json outs = nlohmann::json::array();
     for (const auto& out : result.outputs()) {
       auto span_r = buffer_manager.view(out.buffer, out.tensor);
-      std::string payload;
-      if (span_r) {
-        const auto& s = span_r.value();
-        payload = base64_encode(s.data(), s.size());
+      if (!span_r) {
+        return unexpected(span_r.error());
       }
+      const auto& s = span_r.value();
+      std::string payload = base64_encode(s.data(), s.size());
       nlohmann::json item;
       item["name"] = out.name;
       item["tensor"] = tensor_to_json(out.tensor);
@@ -378,6 +379,15 @@ std::string render_infer_response(const InferResult& result, BufferManager& buff
     j["timing"] = std::move(jt);
   }
   return j.dump();
+}
+
+std::string render_infer_response(const InferResult& result, BufferManager& buffer_manager,
+                                  std::optional<std::string_view> correlation_id) {
+  auto rendered = render_infer_response_checked(result, buffer_manager, correlation_id);
+  if (rendered) {
+    return std::move(rendered).value();
+  }
+  return render_error_response(result.request_id(), correlation_id, rendered.error());
 }
 
 std::string render_error_response(std::string_view request_id,

@@ -374,6 +374,9 @@ struct HttpServer::Impl {
       ::close(fd);
       return;
     }
+    if (auto cid = req.header("x-correlation-id"); cid.has_value()) {
+      req.correlation_id = std::string{*cid};
+    }
     // Peer string.
     {
       sockaddr_storage ss{};

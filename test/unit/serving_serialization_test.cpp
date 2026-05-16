@@ -6,6 +6,8 @@
 
 #include <string>
 
+#include "tensorplate/buffer/buffer_manager.hpp"
+#include "tensorplate/buffer/output.hpp"
 #include "tensorplate/serving/serialization.hpp"
 
 namespace {
@@ -108,6 +110,25 @@ TEST(ServingSerialization, DecodeInferRequestCarriesMetadataAndDeadline) {
   EXPECT_EQ(*d.metadata.action_chunk_sequence, 7);
   ASSERT_TRUE(d.relative_deadline.has_value());
   EXPECT_EQ(d.relative_deadline->count(), 100);
+}
+
+TEST(ServingSerialization, CheckedRenderFailsIfOutputBufferWasReleased) {
+  BufferManagerConfig cfg;
+  auto manager_r = BufferManager::create(cfg);
+  ASSERT_TRUE(manager_r);
+  auto manager = std::move(manager_r).value();
+
+  auto view = TensorView::create(DType::UInt8, {4}, Layout::RowMajor);
+  ASSERT_TRUE(view);
+  auto output = build_named_output(*manager, OutputDescriptor{"actions", view.value(), {}});
+  ASSERT_TRUE(output);
+  auto result = InferResult::create_success("req-released", {std::move(output).value()});
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(manager->release(result.value().outputs()[0].buffer));
+
+  auto rendered = render_infer_response_checked(result.value(), *manager, "cid-released");
+  ASSERT_FALSE(rendered);
+  EXPECT_EQ(rendered.error().code, Error::Code::Internal);
 }
 
 }  // namespace

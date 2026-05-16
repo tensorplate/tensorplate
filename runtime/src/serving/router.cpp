@@ -64,6 +64,15 @@ int http_status_for_error(Error::Code code) {
   }
 }
 
+bool has_json_content_type(const http::Request& req) {
+  auto value = req.header("content-type");
+  if (!value.has_value()) {
+    return false;
+  }
+  const std::string lower = http::lower_ascii(*value);
+  return lower == "application/json" || lower.starts_with("application/json;");
+}
+
 }  // namespace
 
 RequestRouter::RequestRouter(RequestRouterDeps deps) : deps_(std::move(deps)) {}
@@ -110,6 +119,10 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   if (stopping_.load()) {
     return make_error_response(503, "", correlation_id, Error::Code::NotReady,
                                "serving worker stopping; not accepting new requests");
+  }
+  if (!has_json_content_type(req)) {
+    return make_error_response(415, "", correlation_id, Error::Code::Unsupported,
+                               "content-type must be application/json");
   }
   if (req.body.size() > deps_.max_body_bytes) {
     if (deps_.metrics != nullptr) {
@@ -161,10 +174,15 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   if (result.is_failure() && deps_.metrics != nullptr) {
     deps_.metrics->record_rejection(result.error().code);
   }
-  auto body =
-      render_infer_response(result, *deps_.buffer_manager, std::string_view{correlation_id});
-  // Release output buffers now that we've serialized them.
+  auto body_r = render_infer_response_checked(result, *deps_.buffer_manager,
+                                              std::string_view{correlation_id});
   (void)release_partial_outputs(*deps_.buffer_manager, result.outputs());
+  if (!body_r) {
+    return make_error_response(http_status_for_error(body_r.error().code), decoded.request_id,
+                               correlation_id, body_r.error().code, "response serialization failed",
+                               body_r.error().message);
+  }
+  auto body = std::move(body_r).value();
   auto resp = http::Response::ok_json(std::move(body));
   resp.set_header("x-correlation-id", correlation_id);
   return resp;
@@ -180,6 +198,10 @@ http::Response RequestRouter::handle_policy_infer(const http::Request& req) {
   if (stopping_.load()) {
     return make_error_response(503, "", correlation_id, Error::Code::NotReady,
                                "serving worker stopping; not accepting new async requests");
+  }
+  if (!has_json_content_type(req)) {
+    return make_error_response(415, "", correlation_id, Error::Code::Unsupported,
+                               "content-type must be application/json");
   }
   if (req.body.size() > deps_.max_body_bytes) {
     if (deps_.metrics != nullptr) {
@@ -274,10 +296,20 @@ http::Response RequestRouter::handle_policy_result(const http::Request& req,
     j["action_chunk_sequence"] = *snap->action_chunk_sequence;
   }
   if (snap->status == AsyncStatus::Completed && snap->result.has_value()) {
-    j["result"] = nlohmann::json::parse(render_infer_response(*snap->result, *deps_.buffer_manager,
-                                                              std::string_view{correlation_id}));
-    // After delivery, release the entry so buffers don't leak.
-    deps_.async_store->release_completed(request_id);
+    auto result = deps_.async_store->take_completed_result(request_id);
+    if (!result.has_value()) {
+      return make_error_response(404, snap->request_id, correlation_id, Error::Code::NotReady,
+                                 "result lookup: completed result was already delivered");
+    }
+    auto body_r = render_infer_response_checked(*result, *deps_.buffer_manager,
+                                                std::string_view{correlation_id});
+    (void)release_partial_outputs(*deps_.buffer_manager, result->outputs());
+    if (!body_r) {
+      return make_error_response(http_status_for_error(body_r.error().code), snap->request_id,
+                                 correlation_id, body_r.error().code,
+                                 "response serialization failed", body_r.error().message);
+    }
+    j["result"] = nlohmann::json::parse(std::move(body_r).value());
   } else if (snap->status == AsyncStatus::Failed && snap->error.has_value()) {
     j["error"] = {
         {"schema_version", "0.1"},

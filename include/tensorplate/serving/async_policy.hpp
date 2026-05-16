@@ -136,6 +136,12 @@ class AsyncPolicyStore {
   /// Snapshot of one entry. Returns std::nullopt if not present.
   [[nodiscard]] std::optional<AsyncEntrySnapshot> snapshot(std::string_view request_id) const;
 
+  /// Move a completed result out of the store and erase its entry.
+  /// The caller becomes responsible for serializing and releasing the
+  /// result buffers. Returns std::nullopt when the id is missing or
+  /// not in Completed state.
+  [[nodiscard]] std::optional<InferResult> take_completed_result(std::string_view request_id);
+
   /// Release the entry. If a result is stored, its buffers are
   /// released through the buffer manager. Returns true if the entry
   /// existed.

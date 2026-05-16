@@ -36,6 +36,7 @@ add_executable(tp_test_unit
   # V01-E07: serving worker.
   serving_config_test.cpp
   serving_serialization_test.cpp
+  serving_pipeline_test.cpp
   serving_health_metrics_test.cpp
   serving_async_store_test.cpp
 )

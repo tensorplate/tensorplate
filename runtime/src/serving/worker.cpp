@@ -376,6 +376,7 @@ void ServingWorker::Impl::run_drain() {
   health.set_state(ServingState::Draining);
   if (config.shutdown.cancel_queued_immediately) {
     (void)scheduler->shutdown();
+    async_store->cancel_all();
   }
   // Wait up to drain_deadline for in-flight to settle.
   const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
@@ -389,6 +390,13 @@ void ServingWorker::Impl::run_drain() {
   // Final cleanup.
   (void)scheduler->shutdown();
   async_store->cancel_all();
+  stop_workers.store(true);
+  if (dispatcher.joinable()) {
+    dispatcher.join();
+  }
+  if (evictor.joinable()) {
+    evictor.join();
+  }
   // Unload session.
   if (session) {
     (void)session->unload();
@@ -514,14 +522,6 @@ ServingExitCode ServingWorker::stop() {
   }
   // Drain + cleanup.
   impl_->run_drain();
-  // Stop worker threads.
-  impl_->stop_workers.store(true);
-  if (impl_->dispatcher.joinable()) {
-    impl_->dispatcher.join();
-  }
-  if (impl_->evictor.joinable()) {
-    impl_->evictor.join();
-  }
   // Release async-store entries.
   impl_->async_store->cancel_all();
   log_stderr(impl_->config, "info", "shutdown complete", {});

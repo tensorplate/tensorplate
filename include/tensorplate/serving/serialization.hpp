@@ -73,6 +73,13 @@ struct DecodedInferRequest {
                                                 BufferManager& buffer_manager,
                                                 std::optional<std::string_view> correlation_id);
 
+/// Fallible variant used by HTTP routes. Returns a typed error if an
+/// output buffer cannot be viewed while serializing a successful
+/// result.
+[[nodiscard]] Result<std::string> render_infer_response_checked(
+    const InferResult& result, BufferManager& buffer_manager,
+    std::optional<std::string_view> correlation_id);
+
 /// Render a typed `Error` to the canonical error-response JSON shape.
 /// Used for both `/infer` failures and async-policy errors.
 [[nodiscard]] std::string render_error_response(std::string_view request_id,

@@ -20,7 +20,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_set>
+#include <unordered_map>
 
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/infer_request.hpp"
@@ -114,14 +114,13 @@ class ServingPipeline {
   [[nodiscard]] std::string_view backend_name() const noexcept;
 
  private:
+  struct SyncWaiter;
+
   ServingPipelineDeps deps_;
   std::atomic<bool> stopping_{false};
 
-  // Cancellation tombstones: a sync executor cannot `on_completion`
-  // for a request that was cancelled while dispatched. The pipeline
-  // checks the set under a mutex before completing.
-  std::mutex cancelled_mutex_;
-  std::unordered_set<std::string> cancelled_inflight_;
+  std::mutex sync_waiters_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<SyncWaiter>> sync_waiters_;
 };
 
 }  // namespace serving
