@@ -66,6 +66,33 @@ impl VerifiedBundle {
     }
 }
 
+/// Read the staged bundle manifest and return its model artifact path
+/// relative to the bundle root.
+///
+/// Rollback and startup recovery rebuild worker candidates from durable
+/// deployment records. Those records store the staged bundle root, while
+/// real workers need the model artifact inside that root.
+///
+/// # Errors
+///
+/// Returns [`AgentError::BundleManifest`] when the manifest is missing,
+/// malformed, or does not validate.
+pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<String> {
+    let manifest_path = bundle_path.join("manifest.json");
+    if !manifest_path.is_file() {
+        return Err(AgentError::BundleManifest(format!(
+            "manifest.json missing at {}",
+            manifest_path.display()
+        )));
+    }
+    let raw = fs::read_to_string(&manifest_path)?;
+    let manifest = decode_manifest(&raw)?;
+    manifest
+        .model_artifact()
+        .map(|artifact| artifact.path.clone())
+        .ok_or_else(|| AgentError::BundleManifest("manifest missing model artifact".into()))
+}
+
 /// Verify the bundle at `bundle_path` against the agent config.
 ///
 /// # Errors

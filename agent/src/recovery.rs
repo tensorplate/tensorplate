@@ -20,12 +20,15 @@
 // loop applies the action and reports the outcome through the status
 // API.
 
+use std::path::Path;
+
 use tensorplate_protocol::agent_control::{RecoveryAction, RecoverySummary};
 use tensorplate_protocol::agent_state::{DeploymentRecord, ErrorRecord, TransactionKind};
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::worker_control::CandidateRef;
 use tensorplate_protocol::ErrorCode;
 
+use crate::bundle::model_artifact_relative_path;
 use crate::coordinator::{now_monotonic_ns, Coordinator};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
@@ -258,7 +261,13 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         .snapshot()?
         .active
         .ok_or_else(|| AgentError::Unavailable("no active deployment to restore".into()))?;
-    let candidate = candidate_from_record(&active);
+    let candidate = match candidate_from_record(&active) {
+        Ok(candidate) => candidate,
+        Err(err) => {
+            coordinator.state().set_last_error(Some(err.to_record()))?;
+            return Err(err);
+        }
+    };
     let tx = format!("recovery-restore-{}", active.deployment_id);
     let prepare_timeout =
         std::time::Duration::from_millis(coordinator.config().worker.prepare_timeout_ms);
@@ -328,8 +337,9 @@ fn resume_replayable(coordinator: &Coordinator) -> AgentResult<()> {
     Ok(())
 }
 
-fn candidate_from_record(record: &DeploymentRecord) -> CandidateRef {
-    CandidateRef {
+fn candidate_from_record(record: &DeploymentRecord) -> AgentResult<CandidateRef> {
+    let artifact_relative_path = model_artifact_relative_path(Path::new(&record.staged_path))?;
+    Ok(CandidateRef {
         deployment_id: record.deployment_id.clone(),
         staged_path: record.staged_path.clone(),
         bundle_digest: record.bundle_digest.clone(),
@@ -337,8 +347,8 @@ fn candidate_from_record(record: &DeploymentRecord) -> CandidateRef {
         model_class: record.model_class.clone(),
         bundle_name: Some(record.bundle_name.clone()),
         bundle_version: Some(record.bundle_version.clone()),
-        artifact_relative_path: None,
-    }
+        artifact_relative_path: Some(artifact_relative_path),
+    })
 }
 
 fn action(a: RecoveryAction, reason: impl Into<String>) -> RecoverySummary {
@@ -356,7 +366,7 @@ mod tests {
         clippy::unwrap_used,
         clippy::default_trait_access
     )]
-    use super::{apply_startup, plan, plan_with_worker};
+    use super::{apply_startup, candidate_from_record, plan, plan_with_worker};
     use crate::config::AgentConfig;
     use crate::coordinator::Coordinator;
     use crate::state::StateStore;
@@ -379,6 +389,24 @@ mod tests {
             promoted_monotonic_ns: Some(1),
             labels: Default::default(),
         }
+    }
+
+    fn staged_bundle(root: &std::path::Path, id: &str) -> String {
+        use sha2::Digest;
+
+        let dir = root.join(format!("staged-{id}"));
+        std::fs::create_dir_all(&dir).expect("mkdir staged bundle");
+        let body = b"engine-bytes";
+        std::fs::write(dir.join("model.engine"), body).expect("write model");
+        let mut h = sha2::Sha256::new();
+        h.update(body);
+        let digest = format!("sha256:{}", hex::encode(h.finalize()));
+        let manifest = format!(
+            r#"{{"schema_version":"{}","name":"n","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#,
+            tensorplate_protocol::SCHEMA_VERSION
+        );
+        std::fs::write(dir.join("manifest.json"), manifest).expect("write manifest");
+        dir.display().to_string()
     }
 
     fn tx(id: &str, phase: DeployState) -> TransactionRecord {
@@ -414,6 +442,20 @@ mod tests {
         }
         .validate()
         .expect("valid")
+    }
+
+    #[test]
+    fn candidate_from_record_reads_model_artifact_from_manifest() {
+        let td = TempDir::new().expect("td");
+        let mut record = record("d-active");
+        record.staged_path = staged_bundle(td.path(), "d-active");
+
+        let candidate = candidate_from_record(&record).expect("candidate");
+
+        assert_eq!(
+            candidate.artifact_relative_path.as_deref(),
+            Some("model.engine")
+        );
     }
 
     #[test]

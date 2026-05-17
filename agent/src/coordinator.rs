@@ -35,7 +35,7 @@ use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, Trans
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::worker_control::CandidateRef;
 
-use crate::bundle::{capacity_check, verify, VerifiedBundle};
+use crate::bundle::{capacity_check, model_artifact_relative_path, verify, VerifiedBundle};
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
@@ -356,6 +356,12 @@ impl Coordinator {
                 manifest_path.display()
             )));
         }
+        let artifact_relative_path = model_artifact_relative_path(&staged).map_err(|err| {
+            AgentError::Unavailable(format!(
+                "previous active manifest invalid at `{}`: {err}",
+                manifest_path.display()
+            ))
+        })?;
 
         let transaction_id = new_transaction_id();
         let tx_record = TransactionRecord {
@@ -392,7 +398,7 @@ impl Coordinator {
             model_class: prev.model_class.clone(),
             bundle_name: Some(prev.bundle_name.clone()),
             bundle_version: Some(prev.bundle_version.clone()),
-            artifact_relative_path: None,
+            artifact_relative_path: Some(artifact_relative_path),
         };
 
         self.emit(&WorkerEvent::PrepareStart {
