@@ -94,6 +94,12 @@ impl Coordinator {
         &self.store
     }
 
+    /// Read-only handle on the validated agent config.
+    #[must_use]
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
     /// Read-only handle on the worker client. Reserved for tests.
     #[must_use]
     pub fn worker_client(&self) -> &Arc<dyn WorkerControl> {

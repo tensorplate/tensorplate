@@ -49,7 +49,9 @@ Architecture and on-the-wire details live in
   last persisted phase.
 - The agent never mutates the serving worker's data plane directly; it
   stages a verified bundle and asks the worker to prepare/warm/promote
-  through the typed `WorkerControl` trait.
+  through the typed `WorkerControl` trait. `worker.mode=mock` uses the
+  deterministic test implementation; `worker.mode=process` spawns and
+  health-checks `tensorplate-serving`.
 - Bundle verification rejects unknown / unavailable backends; the runtime
   never falls back heuristically.
 - Failed candidates are quarantined; the active deployment is preserved.
@@ -60,9 +62,9 @@ Architecture and on-the-wire details live in
 cargo run -p tensorplate-agent -- --config /etc/tensorplate/agent.json
 ```
 
-The agent prints its bound address on stderr and runs until killed. v0.1.0
-relies on systemd / supervisor to deliver SIGTERM for shutdown
-(V01-E14 ships the systemd unit).
+The agent applies startup recovery before opening the control socket, prints
+its bound address on stderr, and runs until killed. v0.1.0 relies on systemd
+/ supervisor to deliver SIGTERM for shutdown (V01-E14 ships the systemd unit).
 
 ## Tests
 

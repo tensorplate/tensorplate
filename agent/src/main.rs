@@ -9,10 +9,9 @@
 //! The agent is the only management-plane entry point for deploy and
 //! rollback operations; the CLI (V01-E11) talks to this binary, never to
 //! the serving worker directly. The serving worker's data plane is
-//! supervised through the `worker::WorkerControl` interface; in v0.1.0
-//! the in-tree mock implementation is wired by default. Real-worker
-//! supervision (process spawn, /health polling, /metrics readback) lands
-//! in V01-E09 and is plugged in here via dependency injection.
+//! supervised through the `worker::WorkerControl` interface; v0.1.0 can
+//! run either the deterministic in-tree mock worker or the process-backed
+//! V01-E07 `tensorplate-serving` client selected by config.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stderr, clippy::print_stdout)]
@@ -24,7 +23,7 @@ use std::sync::Arc;
 
 use tensorplate_agent::{
     config::AgentConfig, coordinator::Coordinator, recovery, server::Server, state::StateStore,
-    worker::MockWorkerControl,
+    worker,
 };
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -94,27 +93,37 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let worker = Arc::new(MockWorkerControl::new());
+    let worker = match worker::from_config(&cfg) {
+        Ok(w) => w,
+        Err(err) => {
+            eprintln!("worker control error: {err}");
+            return ExitCode::from(4);
+        }
+    };
+    let coordinator = Arc::new(Coordinator::new(cfg.clone(), store, worker));
 
-    // Best-effort startup recovery diagnosis. The agent does not auto-
-    // resume worker-side phases; it surfaces the plan through status.
-    match recovery::plan_with_worker(&store, worker.as_ref()) {
+    // Startup recovery runs before the control socket opens so replayable
+    // transactions are resumed and unsafe candidates are quarantined
+    // before new mutating requests can arrive.
+    match recovery::apply_startup(coordinator.as_ref()) {
         Ok(plan) => {
             eprintln!(
-                "recovery plan: {:?} ({})",
+                "startup recovery: {:?} ({})",
                 plan.action,
                 plan.reason.as_deref().unwrap_or("")
             );
         }
-        Err(err) => eprintln!("recovery planner failed: {err}"),
+        Err(err) => {
+            eprintln!("startup recovery failed: {err}");
+            return ExitCode::from(5);
+        }
     }
 
-    let coordinator = Arc::new(Coordinator::new(cfg.clone(), store, worker));
     let mut server = match Server::start(&cfg, coordinator) {
         Ok(s) => s,
         Err(err) => {
             eprintln!("agent listener failed to start: {err}");
-            return ExitCode::from(4);
+            return ExitCode::from(6);
         }
     };
     eprintln!("tensorplate-agent listening on {}", server.address);

@@ -73,6 +73,44 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["mock", "process"],
+          "default": "mock",
+          "description": "`mock` uses the deterministic in-process worker for host CI. `process` spawns and supervises the V01-E07 tensorplate-serving binary."
+        },
+        "serving_binary_path": {
+          "type": "string",
+          "description": "Absolute path to tensorplate-serving. Required when worker.mode=process."
+        },
+        "serving_bind_host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Loopback host used for process-backed serving workers."
+        },
+        "serving_bind_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 18080,
+          "description": "Primary loopback port used by the process-backed worker."
+        },
+        "serving_candidate_bind_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 18081,
+          "description": "Alternate loopback port used while warming a replacement candidate."
+        },
+        "serving_use_mock_session": {
+          "type": "boolean",
+          "default": false,
+          "description": "Pass deployment.use_mock_session=true to tensorplate-serving while still exercising the process boundary."
+        },
+        "serving_config_dir": {
+          "type": "string",
+          "description": "Absolute directory where agent-rendered serving-worker configs are written. Defaults to state_dir/worker-configs."
+        },
         "warm_timeout_ms": {"type": "integer", "minimum": 1, "default": 30000},
         "prepare_timeout_ms": {"type": "integer", "minimum": 1, "default": 60000},
         "status_poll_interval_ms": {"type": "integer", "minimum": 1, "default": 250}

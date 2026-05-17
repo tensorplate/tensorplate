@@ -21,9 +21,13 @@
 // API.
 
 use tensorplate_protocol::agent_control::{RecoveryAction, RecoverySummary};
+use tensorplate_protocol::agent_state::{DeploymentRecord, ErrorRecord, TransactionKind};
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::worker_control::CandidateRef;
+use tensorplate_protocol::ErrorCode;
 
-use crate::error::AgentResult;
+use crate::coordinator::{now_monotonic_ns, Coordinator};
+use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::transaction::{classify, PhaseClass};
 use crate::worker::WorkerControl;
@@ -46,10 +50,25 @@ pub fn plan(
     let desired_active = state.active.as_ref().map(|a| a.deployment_id.clone());
 
     if let Some(tx) = state.in_flight_transaction.as_ref() {
+        let actual_matches_transaction =
+            worker_active_deployment_id == Some(tx.deployment_id.as_str());
         if tx.phase.is_terminal() {
             return Ok(action(
                 RecoveryAction::NoOp,
                 "in-flight transaction is terminal",
+            ));
+        }
+        if matches!(
+            tx.phase,
+            DeployState::Prepared | DeployState::Warmed | DeployState::Promoted
+        ) && actual_matches_transaction
+        {
+            return Ok(action(
+                RecoveryAction::FinalizePromotion,
+                format!(
+                    "{:?} transaction reached worker active deployment `{}`; finalizing durable state",
+                    tx.kind, tx.deployment_id
+                ),
             ));
         }
         return Ok(match classify(tx.phase) {
@@ -123,6 +142,205 @@ pub fn plan_with_worker(
     plan(store, actual.as_deref())
 }
 
+/// Apply the startup recovery action before the agent accepts mutating
+/// requests. The action is computed from durable state plus worker actual
+/// state; replayable actions are driven through the coordinator so the
+/// normal deploy/rollback safety gates still apply.
+///
+/// # Errors
+///
+/// Returns the first recovery error. The process entrypoint treats this
+/// as a startup failure instead of opening the control socket with a
+/// half-recovered transaction.
+pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> {
+    let summary = plan_with_worker(
+        coordinator.state().as_ref(),
+        coordinator.worker_client().as_ref(),
+    )?;
+    match summary.action {
+        RecoveryAction::NoOp | RecoveryAction::OperatorRequired => Ok(summary),
+        RecoveryAction::QuarantineCandidate => {
+            quarantine_in_flight(coordinator.state().as_ref(), summary.reason.clone())?;
+            Ok(summary)
+        }
+        RecoveryAction::FinalizePromotion => {
+            finalize_promoted(coordinator)?;
+            Ok(summary)
+        }
+        RecoveryAction::RestoreActive => {
+            restore_active(coordinator)?;
+            Ok(summary)
+        }
+        RecoveryAction::ResumeVerify
+        | RecoveryAction::ResumeStage
+        | RecoveryAction::ResumePrepare
+        | RecoveryAction::ResumeWarm => {
+            resume_replayable(coordinator)?;
+            Ok(summary)
+        }
+    }
+}
+
+fn quarantine_in_flight(store: &StateStore, reason: Option<String>) -> AgentResult<()> {
+    let snapshot = store.snapshot()?;
+    if snapshot.in_flight_transaction.is_none() {
+        return Ok(());
+    }
+    let record = ErrorRecord::new(
+        ErrorCode::Internal,
+        reason.unwrap_or_else(|| "startup recovery quarantined candidate".into()),
+    )
+    .with_context("startup_recovery");
+    store.quarantine_in_flight(record, now_monotonic_ns())
+}
+
+fn finalize_promoted(coordinator: &Coordinator) -> AgentResult<()> {
+    let store = coordinator.state();
+    let snapshot = store.snapshot()?;
+    let tx = snapshot.in_flight_transaction.ok_or_else(|| {
+        AgentError::Internal("finalize_promoted called without in-flight transaction".into())
+    })?;
+    match tx.kind {
+        TransactionKind::Deploy => {
+            if snapshot
+                .active
+                .as_ref()
+                .is_some_and(|active| active.deployment_id == tx.deployment_id)
+            {
+                store.clear_transaction()?;
+                store.set_last_error(None)?;
+                return Ok(());
+            }
+            let Some(candidate) = snapshot.candidate.as_ref() else {
+                return Err(AgentError::Internal(
+                    "cannot finalize promoted deploy without candidate record".into(),
+                ));
+            };
+            if candidate.deployment_id != tx.deployment_id {
+                return Err(AgentError::Internal(format!(
+                    "candidate `{}` does not match transaction `{}`",
+                    candidate.deployment_id, tx.deployment_id
+                )));
+            }
+            store.promote_candidate(now_monotonic_ns())?;
+        }
+        TransactionKind::Rollback => {
+            if snapshot
+                .active
+                .as_ref()
+                .is_some_and(|active| active.deployment_id == tx.deployment_id)
+            {
+                store.clear_transaction()?;
+                store.set_last_error(None)?;
+                return Ok(());
+            }
+            let Some(previous) = snapshot.previous_active.as_ref() else {
+                return Err(AgentError::Unavailable(
+                    "cannot finalize rollback without previous active deployment".into(),
+                ));
+            };
+            if previous.deployment_id != tx.deployment_id {
+                return Err(AgentError::Internal(format!(
+                    "previous active `{}` does not match rollback transaction `{}`",
+                    previous.deployment_id, tx.deployment_id
+                )));
+            }
+            store.swap_active_with_previous(now_monotonic_ns())?;
+        }
+    }
+    store.clear_transaction()?;
+    store.set_last_error(None)
+}
+
+fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
+    let active = coordinator
+        .state()
+        .snapshot()?
+        .active
+        .ok_or_else(|| AgentError::Unavailable("no active deployment to restore".into()))?;
+    let candidate = candidate_from_record(&active);
+    let tx = format!("recovery-restore-{}", active.deployment_id);
+    let prepare_timeout =
+        std::time::Duration::from_millis(coordinator.config().worker.prepare_timeout_ms);
+    let warm_timeout =
+        std::time::Duration::from_millis(coordinator.config().worker.warm_timeout_ms);
+    if let Err(err) = coordinator
+        .worker_client()
+        .prepare(&tx, &candidate, prepare_timeout)
+    {
+        coordinator.state().set_last_error(Some(err.to_record()))?;
+        return Err(err);
+    }
+    match coordinator
+        .worker_client()
+        .warm(&tx, &candidate, warm_timeout)
+    {
+        Ok(readiness) if readiness.ready => {}
+        Ok(_) => {
+            let err = AgentError::WorkerNotReady;
+            coordinator.state().set_last_error(Some(err.to_record()))?;
+            return Err(err);
+        }
+        Err(err) => {
+            coordinator.state().set_last_error(Some(err.to_record()))?;
+            return Err(err);
+        }
+    }
+    if let Err(err) = coordinator.worker_client().promote(&tx, &candidate) {
+        coordinator.state().set_last_error(Some(err.to_record()))?;
+        return Err(err);
+    }
+    coordinator.state().set_last_error(None)
+}
+
+fn resume_replayable(coordinator: &Coordinator) -> AgentResult<()> {
+    let snapshot = coordinator.state().snapshot()?;
+    let tx = snapshot.in_flight_transaction.ok_or_else(|| {
+        AgentError::Internal("resume_replayable called without in-flight transaction".into())
+    })?;
+    let labels = snapshot
+        .candidate
+        .as_ref()
+        .map(|candidate| candidate.labels.clone())
+        .unwrap_or_default();
+    coordinator.state().update(|state| {
+        state.candidate = None;
+        state.in_flight_transaction = None;
+        Ok(())
+    })?;
+    match tx.kind {
+        TransactionKind::Deploy => {
+            let path = tx.bundle_path.ok_or_else(|| {
+                AgentError::Unavailable("cannot resume deploy without bundle_path".into())
+            })?;
+            coordinator.deploy(
+                &tx.deployment_id,
+                std::path::Path::new(&path),
+                labels,
+                tx.correlation_id,
+                None,
+            )?;
+        }
+        TransactionKind::Rollback => {
+            coordinator.rollback(tx.correlation_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn candidate_from_record(record: &DeploymentRecord) -> CandidateRef {
+    CandidateRef {
+        deployment_id: record.deployment_id.clone(),
+        staged_path: record.staged_path.clone(),
+        bundle_digest: record.bundle_digest.clone(),
+        backend_hint: record.backend_hint.clone(),
+        model_class: record.model_class.clone(),
+        bundle_name: Some(record.bundle_name.clone()),
+        bundle_version: Some(record.bundle_version.clone()),
+        artifact_relative_path: None,
+    }
+}
+
 fn action(a: RecoveryAction, reason: impl Into<String>) -> RecoverySummary {
     RecoverySummary {
         action: a,
@@ -138,9 +356,12 @@ mod tests {
         clippy::unwrap_used,
         clippy::default_trait_access
     )]
-    use super::{plan, plan_with_worker};
+    use super::{apply_startup, plan, plan_with_worker};
+    use crate::config::AgentConfig;
+    use crate::coordinator::Coordinator;
     use crate::state::StateStore;
     use crate::worker::{MockBehavior, MockWorkerControl};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tensorplate_protocol::agent_control::RecoveryAction;
     use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, TransactionRecord};
@@ -173,6 +394,26 @@ mod tests {
             last_transition_monotonic_ns: Some(1),
             failure: None,
         }
+    }
+
+    fn config(td: &std::path::Path) -> AgentConfig {
+        AgentConfig {
+            schema_version: tensorplate_protocol::SCHEMA_VERSION.to_string(),
+            transport: crate::config::ControlTransport::UnixSocket,
+            socket_path: Some(td.join("agent.sock")),
+            tcp_bind_host: "127.0.0.1".into(),
+            tcp_bind_port: 0,
+            state_dir: td.join("state"),
+            staging_dir: td.join("staging"),
+            available_backends: vec!["mock".into()],
+            backend_capabilities: Default::default(),
+            device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+            device_family: Default::default(),
+            worker: Default::default(),
+            runtime_version: Some("0.1.0".into()),
+        }
+        .validate()
+        .expect("valid")
     }
 
     #[test]
@@ -223,6 +464,102 @@ mod tests {
             let p = plan(&store, None).expect("plan");
             assert_eq!(p.action, RecoveryAction::QuarantineCandidate);
         }
+    }
+
+    #[test]
+    fn promoted_worker_actual_finalizes_deploy_state() {
+        let td = TempDir::new().expect("td");
+        let cfg = config(td.path());
+        let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+        let mut tx_record = tx("tx", DeployState::Promoted);
+        tx_record.deployment_id = "d-new".into();
+        store
+            .update(|s| {
+                s.candidate = Some(record("d-new"));
+                s.in_flight_transaction = Some(tx_record);
+                Ok(())
+            })
+            .expect("update");
+        let worker = Arc::new(MockWorkerControl::with_behavior(MockBehavior {
+            active_deployment_id: Some("d-new".into()),
+            ..Default::default()
+        }));
+        let coordinator = Coordinator::new(cfg, store.clone(), worker);
+
+        let summary = apply_startup(&coordinator).expect("apply");
+        assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
+        let snap = store.snapshot().expect("snap");
+        assert_eq!(snap.active.as_ref().expect("active").deployment_id, "d-new");
+        assert!(snap.in_flight_transaction.is_none());
+    }
+
+    #[test]
+    fn promoted_worker_actual_finalizes_rollback_state() {
+        let td = TempDir::new().expect("td");
+        let cfg = config(td.path());
+        let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+        let mut tx_record = tx("tx", DeployState::Promoted);
+        tx_record.kind = TransactionKind::Rollback;
+        tx_record.deployment_id = "d-prev".into();
+        store
+            .update(|s| {
+                s.active = Some(record("d-current"));
+                s.previous_active = Some(record("d-prev"));
+                s.in_flight_transaction = Some(tx_record);
+                Ok(())
+            })
+            .expect("update");
+        let worker = Arc::new(MockWorkerControl::with_behavior(MockBehavior {
+            active_deployment_id: Some("d-prev".into()),
+            ..Default::default()
+        }));
+        let coordinator = Coordinator::new(cfg, store.clone(), worker);
+
+        let summary = apply_startup(&coordinator).expect("apply");
+        assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
+        let snap = store.snapshot().expect("snap");
+        assert_eq!(
+            snap.active.as_ref().expect("active").deployment_id,
+            "d-prev"
+        );
+        assert_eq!(
+            snap.previous_active.as_ref().expect("prev").deployment_id,
+            "d-current"
+        );
+        assert!(snap.in_flight_transaction.is_none());
+    }
+
+    #[test]
+    fn startup_quarantine_applies_unsafe_worker_phase() {
+        let td = TempDir::new().expect("td");
+        let cfg = config(td.path());
+        let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+        let mut tx_record = tx("tx", DeployState::Prepared);
+        tx_record.deployment_id = "d-new".into();
+        store
+            .update(|s| {
+                s.active = Some(record("d-active"));
+                s.candidate = Some(record("d-new"));
+                s.in_flight_transaction = Some(tx_record);
+                Ok(())
+            })
+            .expect("update");
+        let worker = Arc::new(MockWorkerControl::with_behavior(MockBehavior {
+            active_deployment_id: Some("d-active".into()),
+            ..Default::default()
+        }));
+        let coordinator = Coordinator::new(cfg, store.clone(), worker);
+
+        let summary = apply_startup(&coordinator).expect("apply");
+        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+        let snap = store.snapshot().expect("snap");
+        assert_eq!(
+            snap.active.as_ref().expect("active").deployment_id,
+            "d-active"
+        );
+        assert!(snap.candidate.is_none());
+        assert!(snap.in_flight_transaction.is_none());
+        assert_eq!(snap.quarantined.len(), 1);
     }
 
     #[test]

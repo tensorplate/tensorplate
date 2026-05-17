@@ -31,6 +31,17 @@ impl Default for ControlTransport {
     }
 }
 
+/// Serving-worker control implementation used by the agent.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerControlMode {
+    /// Deterministic in-process worker used by host CI and unit tests.
+    #[default]
+    Mock,
+    /// Spawn and supervise the V01-E07 `tensorplate-serving` binary.
+    Process,
+}
+
 /// Capability flags published by an available backend. The verifier checks
 /// these against the bundle's `capability_requirements`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -49,8 +60,22 @@ pub struct BackendCapability {
 }
 
 /// Worker-control bounded-timeout knobs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WorkerConfig {
+    #[serde(default)]
+    pub mode: WorkerControlMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_binary_path: Option<PathBuf>,
+    #[serde(default = "default_serving_bind_host")]
+    pub serving_bind_host: String,
+    #[serde(default = "default_serving_bind_port")]
+    pub serving_bind_port: u16,
+    #[serde(default = "default_serving_candidate_bind_port")]
+    pub serving_candidate_bind_port: u16,
+    #[serde(default)]
+    pub serving_use_mock_session: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_config_dir: Option<PathBuf>,
     #[serde(default = "default_warm_timeout_ms")]
     pub warm_timeout_ms: u64,
     #[serde(default = "default_prepare_timeout_ms")]
@@ -62,6 +87,13 @@ pub struct WorkerConfig {
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
+            mode: WorkerControlMode::Mock,
+            serving_binary_path: None,
+            serving_bind_host: default_serving_bind_host(),
+            serving_bind_port: default_serving_bind_port(),
+            serving_candidate_bind_port: default_serving_candidate_bind_port(),
+            serving_use_mock_session: false,
+            serving_config_dir: None,
             warm_timeout_ms: default_warm_timeout_ms(),
             prepare_timeout_ms: default_prepare_timeout_ms(),
             status_poll_interval_ms: default_status_poll_interval_ms(),
@@ -77,6 +109,15 @@ const fn default_prepare_timeout_ms() -> u64 {
 }
 const fn default_status_poll_interval_ms() -> u64 {
     250
+}
+fn default_serving_bind_host() -> String {
+    "127.0.0.1".to_string()
+}
+const fn default_serving_bind_port() -> u16 {
+    18080
+}
+const fn default_serving_candidate_bind_port() -> u16 {
+    18081
 }
 
 /// V01-E08 agent configuration. Mirrors `config/schemas/agent.json`.
@@ -200,6 +241,7 @@ impl AgentConfig {
                 "worker timeouts and poll interval must be > 0".into(),
             ));
         }
+        validate_process_worker_config(&mut self.worker, &self.state_dir)?;
         if self.runtime_version.is_none() {
             self.runtime_version = Some(tensorplate_protocol::version().to_string());
         }
@@ -232,6 +274,57 @@ impl AgentConfig {
     }
 }
 
+fn validate_process_worker_config(
+    worker: &mut WorkerConfig,
+    state_dir: &std::path::Path,
+) -> AgentResult<()> {
+    if !matches!(worker.mode, WorkerControlMode::Process) {
+        return Ok(());
+    }
+    let Some(path) = worker.serving_binary_path.as_deref() else {
+        return Err(AgentError::Config(
+            "worker.serving_binary_path required for worker.mode=process".into(),
+        ));
+    };
+    if !path.is_absolute() {
+        return Err(AgentError::Config(format!(
+            "worker.serving_binary_path `{}` must be absolute",
+            path.display()
+        )));
+    }
+    if !matches!(
+        worker.serving_bind_host.as_str(),
+        "127.0.0.1" | "::1" | "localhost"
+    ) {
+        return Err(AgentError::Config(format!(
+            "worker.serving_bind_host `{}` must be loopback",
+            worker.serving_bind_host
+        )));
+    }
+    if worker.serving_bind_port == 0 || worker.serving_candidate_bind_port == 0 {
+        return Err(AgentError::Config(
+            "worker serving ports must be fixed and > 0 in process mode".into(),
+        ));
+    }
+    if worker.serving_bind_port == worker.serving_candidate_bind_port {
+        return Err(AgentError::Config(
+            "worker serving active and candidate ports must differ".into(),
+        ));
+    }
+    if worker.serving_config_dir.is_none() {
+        worker.serving_config_dir = Some(state_dir.join("worker-configs"));
+    }
+    if let Some(dir) = worker.serving_config_dir.as_deref() {
+        if !dir.is_absolute() {
+            return Err(AgentError::Config(format!(
+                "worker.serving_config_dir `{}` must be absolute",
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -240,7 +333,7 @@ mod tests {
         clippy::unwrap_used,
         clippy::default_trait_access
     )]
-    use super::{AgentConfig, ControlTransport};
+    use super::{AgentConfig, ControlTransport, WorkerControlMode};
     use std::path::PathBuf;
 
     fn minimal() -> AgentConfig {
@@ -296,6 +389,26 @@ mod tests {
         let mut c = minimal();
         c.state_dir = PathBuf::from("relative/path");
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn process_worker_requires_absolute_binary_path() {
+        let mut c = minimal();
+        c.worker.mode = WorkerControlMode::Process;
+        c.worker.serving_binary_path = Some(PathBuf::from("tensorplate-serving"));
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn process_worker_defaults_config_dir() {
+        let mut c = minimal();
+        c.worker.mode = WorkerControlMode::Process;
+        c.worker.serving_binary_path = Some(PathBuf::from("/usr/local/bin/tensorplate-serving"));
+        let cfg = c.validate().expect("valid");
+        assert_eq!(
+            cfg.worker.serving_config_dir.as_deref(),
+            Some(PathBuf::from("/var/lib/tensorplate/worker-configs").as_path())
+        );
     }
 
     #[test]

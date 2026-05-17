@@ -63,10 +63,11 @@ Layer rules:
 
 - The agent never links against the C++ runtime or the serving worker.
 - The serving worker is supervised through the typed
-  `WorkerControl` trait. v0.1.0 ships the deterministic `MockWorkerControl`
-  used by host CI; the production client that drives the V01-E07 process
-  lands in V01-E09 and plugs into the same trait without revising the
-  coordinator code.
+  `WorkerControl` trait. v0.1.0 ships both the deterministic
+  `MockWorkerControl` used by host CI and a process-backed
+  `ProcessWorkerControl` that renders a V01-E07 serving config, starts
+  `tensorplate-serving`, polls `/health`, and promotes only warmed
+  candidates.
 - The CLI never speaks to the serving worker directly; every mutating
   operation flows through the agent.
 
@@ -211,6 +212,15 @@ pub trait WorkerControl: Send + Sync {
 `unload` is best-effort (failure is logged but never undoes a successful
 promotion).
 
+The process-backed implementation is selected with
+`worker.mode = "process"` and requires an absolute
+`worker.serving_binary_path`. The agent writes per-candidate serving
+configs under `worker.serving_config_dir` (default:
+`<state_dir>/worker-configs`), starts the worker on loopback, and polls
+`/health` until the candidate reports `ready`. Host CI and unit tests use
+`worker.mode = "mock"` so the transaction coordinator is tested without
+requiring hardware backends.
+
 ## Rollback (V01-E08-F06)
 
 Rollback is a transaction, not a file-pointer swap:
@@ -241,6 +251,12 @@ actual active deployment, and returns one of:
 - `operator_required` — desired and actual disagree in a way recovery
   can't reason about (e.g., the worker is running a deployment that is
   not the recorded active).
+
+On process startup, the agent applies the recovery action before binding
+the local control socket. Replayable transactions are resumed through the
+normal coordinator path, unsafe worker-side candidates are quarantined,
+and promoted-but-not-finalized transactions are finalized only when the
+worker-reported active deployment matches the transaction target.
 
 Recovery is **state-diff based**; the planner never replays commands
 just because they appeared in the original request order.

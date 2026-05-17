@@ -67,9 +67,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (`prepare`, `warm`, `promote`, `unload`, `active_deployment_id`)
   so the coordinator depends on an interface, not on a concrete
   process. v0.1.0 ships the deterministic `MockWorkerControl` used by
-  host CI; production wiring to the V01-E07 worker process lands in
-  V01-E09 and plugs into the same trait without revising the
-  coordinator code. Prepare/warm operations are bounded by
+  host CI and a process-backed `ProcessWorkerControl` selected with
+  `worker.mode=process`; process mode renders a V01-E07 serving config,
+  starts `tensorplate-serving`, polls `/health`, and promotes only
+  warmed candidates. Prepare/warm operations are bounded by
   configurable timeouts (`worker.prepare_timeout_ms`,
   `worker.warm_timeout_ms`) and surface `Error::Code::Timeout` on
   expiry. `unload` of the previous active is best-effort and never
@@ -78,17 +79,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   typed `RecoveryAction` from durable state plus (best-effort) the
   worker's actual active deployment id. Replayable phases recommend
   `resume_verify` / `resume_stage` / `resume_prepare`; worker-side
-  phases recommend `quarantine_candidate`; agreement between desired
-  and actual returns `no_op`; disagreement returns `operator_required`.
-  Recovery is state-diff based and never replays commands solely
-  because they appeared in the original request order.
+  phases recommend `quarantine_candidate`; promoted-but-not-finalized
+  states return `finalize_promotion` only when the worker-reported
+  active deployment matches the transaction target; agreement between
+  desired and actual returns `no_op`; disagreement returns
+  `operator_required`. Recovery is state-diff based and never replays
+  commands solely because they appeared in the original request order.
 - `tensorplate-agent` binary entrypoint (`agent/src/main.rs`) reads
   `--config <path>` or `--config-json <inline>`, validates the agent
   config against `config/schemas/agent.json`, opens the durable state
-  store, runs a startup recovery diagnosis, and starts the local
-  control API. v0.1.0 relies on systemd / supervisor to deliver
-  SIGTERM; durable mutations are atomic so termination at any point
-  leaves state consistent.
+  store, applies startup recovery before binding the local control
+  socket, and starts the local control API. v0.1.0 relies on systemd /
+  supervisor to deliver SIGTERM; durable mutations are atomic so
+  termination at any point leaves state consistent.
 - Integration test suite at `agent/tests/` (V01-E08-F08): a shared
   `Harness` builder creates isolated `state_dir` + `staging_dir`
   directories per test and wires the coordinator to a configurable
