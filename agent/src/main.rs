@@ -22,7 +22,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tensorplate_agent::{
-    config::AgentConfig, coordinator::Coordinator, recovery, server::Server, state::StateStore,
+    config::AgentConfig,
+    coordinator::Coordinator,
+    recovery,
+    server::Server,
+    state::StateStore,
+    supervision::{
+        ensure_supervisor_directories, DesiredWorker, HttpReadinessProbe, MonotonicClock,
+        RingEventSink, SystemMonotonicClock, SystemWorkerProcess, TickOutcome, WorkerSupervisor,
+    },
     worker,
 };
 
@@ -69,6 +77,35 @@ fn load_config(args: &[String]) -> Result<AgentConfig, String> {
     Err("--config <path> or --config-json <inline> is required".into())
 }
 
+fn build_supervisor(cfg: &AgentConfig) -> Result<Option<Arc<WorkerSupervisor>>, String> {
+    let Some(supervisor_cfg) = cfg.supervision.clone() else {
+        return Ok(None);
+    };
+    ensure_supervisor_directories(&supervisor_cfg).map_err(|e| e.to_string())?;
+    let process = Arc::new(SystemWorkerProcess::new(supervisor_cfg.clone()));
+    let probe = Arc::new(HttpReadinessProbe::from_config(&supervisor_cfg));
+    let clock: Arc<dyn MonotonicClock> = Arc::new(SystemMonotonicClock);
+    let sink = Arc::new(RingEventSink::new(&supervisor_cfg.event_sink));
+    let supervisor = WorkerSupervisor::new(supervisor_cfg, process, probe, clock)
+        .map_err(|e| e.to_string())?
+        .with_event_sink(sink);
+    Ok(Some(Arc::new(supervisor)))
+}
+
+fn seed_supervisor_from_state(
+    supervisor: &WorkerSupervisor,
+    store: &StateStore,
+) -> Result<(), String> {
+    let snapshot = store.snapshot().map_err(|e| e.to_string())?;
+    let desired = snapshot.active.as_ref().map(|active| DesiredWorker {
+        deployment_id: active.deployment_id.clone(),
+        backend: active.backend_hint.clone(),
+    });
+    supervisor
+        .set_desired_active(desired)
+        .map_err(|e| e.to_string())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -100,7 +137,18 @@ fn main() -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    let coordinator = Arc::new(Coordinator::new(cfg.clone(), store, worker));
+    let supervisor = match build_supervisor(&cfg) {
+        Ok(s) => s,
+        Err(err) => {
+            eprintln!("worker supervision error: {err}");
+            return ExitCode::from(4);
+        }
+    };
+    let mut coordinator = Coordinator::new(cfg.clone(), store.clone(), worker);
+    if let Some(supervisor) = supervisor.as_ref() {
+        coordinator = coordinator.with_supervisor(supervisor.clone());
+    }
+    let coordinator = Arc::new(coordinator);
 
     // Startup recovery runs before the control socket opens so replayable
     // transactions are resumed and unsafe candidates are quarantined
@@ -118,6 +166,12 @@ fn main() -> ExitCode {
             return ExitCode::from(5);
         }
     }
+    if let Some(supervisor) = supervisor.as_ref() {
+        if let Err(err) = seed_supervisor_from_state(supervisor, &store) {
+            eprintln!("worker supervision recovery failed: {err}");
+            return ExitCode::from(5);
+        }
+    }
 
     let mut server = match Server::start(&cfg, coordinator) {
         Ok(s) => s,
@@ -132,11 +186,28 @@ fn main() -> ExitCode {
     // SIGTERM. Without an installed handler the default action is process
     // termination, which is safe because every durable mutation lands
     // through `StateStore::update`'s atomic-replace path before each
-    // phase advances. The `stop` flag below is reserved for the future
-    // V01-E09 supervisor integration that does install handlers; today
-    // it lets test harnesses ask the binary to exit cleanly.
+    // phase advances. The `stop` flag below lets test harnesses ask the
+    // binary to exit cleanly; production termination is still owned by
+    // the process manager in v0.1.0.
     let stop = Arc::new(AtomicBool::new(false));
     while !stop.load(Ordering::Relaxed) {
+        if let Some(supervisor) = supervisor.as_ref() {
+            match supervisor.tick() {
+                Ok(TickOutcome::Continue) => {}
+                Ok(TickOutcome::Fault(fault)) => {
+                    eprintln!(
+                        "worker supervision fault: deployment={:?} class={:?} code={:?} message={}",
+                        fault.deployment_id, fault.class, fault.error_code, fault.message
+                    );
+                }
+                Ok(TickOutcome::Terminal(phase)) => {
+                    eprintln!("worker supervision terminal state: {phase:?}");
+                }
+                Err(err) => {
+                    eprintln!("worker supervision tick failed: {err}");
+                }
+            }
+        }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     server.shutdown();

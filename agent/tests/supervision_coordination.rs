@@ -99,6 +99,14 @@ fn successful_deploy_promotes_supervisor_desired_active() {
         .expect("deploy ok");
     let status = supervisor.status();
     assert_eq!(status.desired_active.as_deref(), Some("deploy-1"));
+    let agent_status = coord.status().expect("status");
+    assert_eq!(
+        agent_status
+            .supervision
+            .as_ref()
+            .and_then(|s| s.desired_active.as_deref()),
+        Some("deploy-1")
+    );
 }
 
 #[test]

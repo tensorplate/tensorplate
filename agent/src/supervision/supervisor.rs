@@ -104,6 +104,7 @@ struct Inner {
     after_ready: bool,
     pending_faults: VecDeque<SupervisionFault>,
     stop_requested: bool,
+    stop_hold: bool,
     stop_started_at: Option<Instant>,
     force_terminate_at: Option<Instant>,
     next_sequence: u64,
@@ -136,6 +137,7 @@ impl WorkerSupervisor {
                 after_ready: false,
                 pending_faults: VecDeque::new(),
                 stop_requested: false,
+                stop_hold: false,
                 stop_started_at: None,
                 force_terminate_at: None,
                 next_sequence: 0,
@@ -180,15 +182,28 @@ impl WorkerSupervisor {
             .inner
             .lock()
             .map_err(|e| AgentError::Internal(format!("supervisor mutex poisoned: {e}")))?;
+        let next_id = desired.as_ref().map(|d| d.deployment_id.as_str());
+        let current_id = inner.handle.as_ref().map(|h| h.deployment_id.as_str());
+        if inner.handle.is_some() && current_id != next_id {
+            inner.stop_requested = true;
+            inner.stop_hold = false;
+        }
+        if desired.is_some() {
+            inner.stop_hold = false;
+        }
         inner.desired.clone_from(&desired);
         inner.state.set_desired_active(
             desired.as_ref().map(|d| d.deployment_id.clone()),
             desired.as_ref().map(|d| d.backend.clone()),
         );
         if desired.is_none() {
-            // Drop any in-flight backoff schedule. Stopping is requested
-            // explicitly through `request_stop`.
+            // Drop any in-flight backoff schedule; with no desired active
+            // deployment the current worker should drain and stay down.
             inner.state.next_restart_at = None;
+            if inner.handle.is_some() {
+                inner.stop_requested = true;
+                inner.stop_hold = false;
+            }
         }
         Ok(())
     }
@@ -207,6 +222,7 @@ impl WorkerSupervisor {
             .map_err(|e| AgentError::Internal(format!("supervisor mutex poisoned: {e}")))?;
         if inner.handle.is_some() {
             inner.stop_requested = true;
+            inner.stop_hold = true;
         }
         Ok(())
     }
@@ -225,6 +241,7 @@ impl WorkerSupervisor {
             .lock()
             .map_err(|e| AgentError::Internal(format!("supervisor mutex poisoned: {e}")))?;
         inner.backoff.reset();
+        inner.stop_hold = false;
         inner.state.counters = inner.backoff.counters(self.clock.now());
         inner.state.last_failure = None;
         inner.state.next_restart_at = None;
@@ -293,7 +310,7 @@ impl WorkerSupervisor {
         }
 
         // Step 4: launch when desired-state requires a worker.
-        if inner.handle.is_none() && inner.desired.is_some() {
+        if inner.handle.is_none() && inner.desired.is_some() && !inner.stop_hold {
             // Honor backoff if we have a scheduled restart in the future.
             if let Some(next) = inner.state.next_restart_at {
                 if now < next {
@@ -983,6 +1000,77 @@ mod tests {
         let kinds: Vec<_> = sink.drain().into_iter().map(|p| p.kind).collect();
         assert!(kinds.contains(&SupervisionEventKind::WorkerStopping));
         assert!(kinds.contains(&SupervisionEventKind::WorkerStopped));
+    }
+
+    #[test]
+    fn explicit_stop_holds_worker_stopped_until_desired_changes() {
+        let process = Arc::new(MockWorkerProcess::new());
+        let probe = Arc::new(MockReadinessProbe::new());
+        probe.script(vec![ready_sample("d-1")]);
+        let clock = Arc::new(FakeClock::new());
+        let sink = Arc::new(RingEventSink::new(&EventSinkConfig::default()));
+        let supervisor =
+            build_supervisor(process.clone(), probe.clone(), clock.clone(), sink.clone());
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+            }))
+            .expect("set desired");
+        let _ = supervisor.tick().expect("launch");
+        let _ = supervisor.tick().expect("ready");
+        supervisor.request_stop().expect("stop");
+        let _ = supervisor.tick().expect("stopping");
+        let _ = supervisor.tick().expect("stopped");
+        for _ in 0..3 {
+            let _ = supervisor.tick().expect("held stopped");
+        }
+        let launches = process
+            .history()
+            .into_iter()
+            .filter(|call| call.op == "launch")
+            .count();
+        assert_eq!(launches, 1);
+        assert!(matches!(
+            supervisor.status().serving_state,
+            tensorplate_protocol::supervision_event::SupervisionServingState::Stopped
+        ));
+    }
+
+    #[test]
+    fn desired_active_change_restarts_worker_for_new_deployment() {
+        let process = Arc::new(MockWorkerProcess::new());
+        let probe = Arc::new(MockReadinessProbe::new());
+        probe.script(vec![ready_sample("d-1"), ready_sample("d-2")]);
+        let clock = Arc::new(FakeClock::new());
+        let sink = Arc::new(RingEventSink::new(&EventSinkConfig::default()));
+        let supervisor =
+            build_supervisor(process.clone(), probe.clone(), clock.clone(), sink.clone());
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+            }))
+            .expect("set d-1");
+        let _ = supervisor.tick().expect("launch d-1");
+        let _ = supervisor.tick().expect("ready d-1");
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-2".into(),
+                backend: "mock".into(),
+            }))
+            .expect("set d-2");
+        let _ = supervisor.tick().expect("stop d-1");
+        let _ = supervisor.tick().expect("observe stopped d-1");
+        let _ = supervisor.tick().expect("launch d-2");
+        let history = process.history();
+        let launches: Vec<_> = history
+            .iter()
+            .filter(|call| call.op == "launch")
+            .filter_map(|call| call.deployment_id.as_deref())
+            .collect();
+        assert_eq!(launches, vec!["d-1", "d-2"]);
+        assert_eq!(supervisor.status().desired_active.as_deref(), Some("d-2"));
     }
 
     #[test]

@@ -207,7 +207,66 @@
             },
             "reason": {"type": "string"}
           }
-        }
+        },
+        "supervision": {"$ref": "#/definitions/SupervisionStatus"}
+      }
+    },
+    "SupervisionStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "serving_state",
+        "agent_state",
+        "restart_count",
+        "crash_loop_threshold",
+        "crash_loop",
+        "launch_sequence",
+        "stable_uptime_ms"
+      ],
+      "properties": {
+        "serving_state": {
+          "type": "string",
+          "enum": [
+            "no_active_deployment",
+            "starting",
+            "running",
+            "ready",
+            "degraded",
+            "failed",
+            "stopping",
+            "stopped",
+            "awaiting_restart",
+            "crash_loop"
+          ]
+        },
+        "agent_state": {
+          "type": "string",
+          "enum": ["ready", "degraded", "failed", "unknown"]
+        },
+        "desired_active": {"type": "string"},
+        "actual_active": {"type": "string"},
+        "backend": {"type": "string"},
+        "restart_count": {"type": "integer", "minimum": 0},
+        "crash_loop_threshold": {"type": "integer", "minimum": 0},
+        "crash_loop": {"type": "boolean"},
+        "launch_sequence": {"type": "integer", "minimum": 0},
+        "last_failure_code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "last_failure_message": {"type": "string"},
+        "next_restart_delay_ms": {"type": "integer", "minimum": 0},
+        "stable_uptime_ms": {"type": "integer", "minimum": 0}
       }
     },
     "DeploymentSummary": {

@@ -29,10 +29,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, DeployFailureSummary, DeployStatus, DeploymentSummary,
-    QuarantineSummary, ResponseError,
+    QuarantineSummary, ResponseError, SupervisionStatusSummary,
 };
 use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, TransactionRecord};
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::supervision_event::SupervisionAgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
 
 use crate::bundle::{capacity_check, model_artifact_relative_path, verify, VerifiedBundle};
@@ -513,7 +514,7 @@ impl Coordinator {
     /// Propagates errors from the underlying state store.
     pub fn status(&self) -> AgentResult<AgentStatus> {
         let s = self.store.snapshot()?;
-        let agent_state = if s.last_error.is_some() {
+        let mut agent_state = if s.last_error.is_some() {
             AgentRunState::Degraded
         } else {
             AgentRunState::Ready
@@ -562,6 +563,25 @@ impl Coordinator {
                 quarantined_monotonic_ns: q.quarantined_monotonic_ns,
             })
             .collect();
+        let supervision = self.supervisor.as_ref().map(|sup| {
+            let status = sup.status();
+            agent_state = merge_agent_state(agent_state, status.agent_state);
+            SupervisionStatusSummary {
+                serving_state: status.serving_state,
+                agent_state: status.agent_state,
+                desired_active: status.desired_active,
+                actual_active: status.actual_active,
+                backend: status.backend,
+                restart_count: u64::from(status.restart_count),
+                crash_loop_threshold: u64::from(status.crash_loop_threshold),
+                crash_loop: status.crash_loop,
+                launch_sequence: status.launch_sequence,
+                last_failure_code: status.last_failure_code,
+                last_failure_message: status.last_failure_message,
+                next_restart_delay_ms: status.next_restart_delay_ms,
+                stable_uptime_ms: status.stable_uptime_ms,
+            }
+        });
         Ok(AgentStatus {
             agent_state,
             active,
@@ -571,6 +591,7 @@ impl Coordinator {
             last_error,
             quarantined,
             recovery: None,
+            supervision,
         })
     }
 
@@ -678,6 +699,20 @@ impl Coordinator {
         };
         let _ = sup.set_desired_active(Some(desired));
         let _ = sup.recover_after_operator_action();
+    }
+}
+
+fn merge_agent_state(base: AgentRunState, supervision: SupervisionAgentState) -> AgentRunState {
+    match supervision {
+        SupervisionAgentState::Failed => AgentRunState::Failed,
+        SupervisionAgentState::Degraded => {
+            if matches!(base, AgentRunState::Failed) {
+                AgentRunState::Failed
+            } else {
+                AgentRunState::Degraded
+            }
+        }
+        SupervisionAgentState::Ready | SupervisionAgentState::Unknown => base,
     }
 }
 

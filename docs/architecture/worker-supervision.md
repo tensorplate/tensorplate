@@ -195,9 +195,10 @@ observability service. Fields:
   `worker_ready` transition.
 
 `SupervisionStatus` is exposed as
-`tensorplate_agent::supervision::SupervisionStatus` for unit / CLI
-consumers; the V01-E11 wire envelope projects these fields onto
-`AgentStatus` once that feature lands.
+`tensorplate_agent::supervision::SupervisionStatus` internally and is
+projected onto `AgentStatus.supervision` in
+`protocol/schemas/agent_control.json` so CLI, health, and status callers
+can report crash-loop state without reaching into the supervisor directly.
 
 ## Testing
 

@@ -48,6 +48,7 @@ pub use agent_control::{
     AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse, DeployFailureSummary,
     DeployRequest, DeployStatus, DeploymentSummary, QuarantineSummary, RecoveryAction,
     RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
+    SupervisionStatusSummary,
 };
 pub use agent_state::{
     AgentState, AgentStateError, DeploymentRecord, ErrorRecord, QuarantineRecord, TransactionKind,
