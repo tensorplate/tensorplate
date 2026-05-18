@@ -42,6 +42,7 @@ pub mod recovery;
 pub mod rollback;
 pub mod server;
 pub mod state;
+pub mod supervision;
 pub mod transaction;
 pub mod worker;
 
@@ -50,4 +51,8 @@ pub use coordinator::Coordinator;
 pub use error::{AgentError, AgentResult};
 pub use server::Server;
 pub use state::{StateStore, StateUpdate};
+pub use supervision::{
+    DesiredWorker, SupervisionFault, SupervisionPhase, SupervisionStatus, SupervisorConfig,
+    TickOutcome, WorkerSupervisor,
+};
 pub use worker::{MockWorkerControl, WorkerControl, WorkerEvent};

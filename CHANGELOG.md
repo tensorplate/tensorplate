@@ -8,6 +8,94 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Agent worker supervision (V01-E09). `tensorplate-agent` now owns the
+  full lifecycle of the V01-E07 `tensorplate-serving` worker. A new
+  `tensorplate_agent::supervision` module ships:
+    - `supervision::config::SupervisorConfig` (V01-E09-F01) — validated
+      schema covering binary path, args, environment allowlist, working
+      directory, serving-config reference, loopback control endpoint,
+      stdio mode, startup / graceful-stop / kill / status-poll
+      timeouts, restart policy, and bounded supervision-event sink.
+      Validation enforces absolute paths, loopback-only control host,
+      and non-zero timeouts before durable state is touched. Schema
+      mirrored under `config/schemas/agent.json` (`supervision` block).
+    - `supervision::process::{WorkerProcess, SystemWorkerProcess,
+      MockWorkerProcess}` (V01-E09-F01-T02) — narrow process trait with
+      a production unix-only implementation plus a deterministic
+      in-process mock used by tests; tracks PID, monotonic start
+      instant, command digest, and `launch_sequence`; supports graceful
+      stop, escalated force-terminate, and idempotent re-stops.
+    - `supervision::readiness::{ReadinessProbe, HttpReadinessProbe,
+      MockReadinessProbe}` (V01-E09-F02) — readiness watcher that
+      separates process liveness from serving readiness, polls the
+      worker's `/health` endpoint over loopback, surfaces `failed` /
+      `degraded` / `ready` plus active deployment id, queue depth, and
+      last-error code.
+    - `supervision::policy::{BackoffScheduler, FailureClass,
+      BackoffDecision}` (V01-E09-F03) — bounded exponential backoff
+      with a rolling-window crash-loop detector. All timing uses
+      monotonic `Instant`; stable ready uptime decays the rolling
+      counter; the threshold transitions to a terminal `crash_loop`
+      state instead of restarting indefinitely.
+    - `supervision::state::{SupervisionPhase, SupervisionState,
+      SupervisionStatus, SupervisionReconcileAction}` (V01-E09-F04) —
+      agent-local supervision state plus a stable status projection
+      consumed by V01-E10 observability and V01-E11 CLI. Phase names
+      (`no_active_deployment`, `starting`, `running`, `ready`,
+      `degraded`, `failed`, `stopping`, `stopped`, `awaiting_restart`,
+      `crash_loop`) are wire-stable and mirrored in
+      `tensorplate_protocol::supervision_event`. Startup
+      reconciliation produces a typed action from durable desired
+      state, actual worker state, and the last terminal phase.
+    - `supervision::event::{SupervisionEventSink, RingEventSink,
+      NoopEventSink, SupervisionEventPayload}` (V01-E09-F05) — bounded
+      ring-buffer event sink for supervision transitions. The sink
+      drops the oldest pending event when its queue is full, bumps a
+      typed drop counter, and never blocks `tick`; a missing or absent
+      observability consumer cannot stall supervision decisions.
+    - `supervision::supervisor::{WorkerSupervisor, DesiredWorker,
+      TickOutcome, SupervisionFault}` (V01-E09-F04 / F06 / F07) — the
+      `tick(now)`-driven state machine that owns process lifecycle,
+      readiness watching, backoff scheduling, graceful stop, force-kill
+      escalation, and supervision-event emission. `tick` is idempotent
+      and uses a monotonic clock injected via the `MonotonicClock`
+      trait so tests drive backoff windows deterministically through
+      `FakeClock`. The supervisor never promotes a candidate;
+      promotion remains the V01-E08 coordinator's responsibility.
+- Cross-process supervision event schema (V01-E09-F05-T01) at
+  `protocol/schemas/supervision_event.json` and
+  `protocol/rust/src/supervision_event.rs`. Event kinds:
+  `worker_started`, `worker_ready`, `worker_exit`, `worker_not_ready`,
+  `restart_scheduled`, `worker_degraded`, `worker_failed`,
+  `crash_loop_entered`, `worker_stopping`, `worker_stopped`. Each event
+  carries a per-process sequence, monotonic timestamp, agent / serving
+  state names, active deployment, backend, restart count, optional
+  next-restart delay, exit code / signal, after-ready flag, and a
+  bounded diagnostic message (truncated at 512 UTF-8 bytes by
+  producers). Schema is version-fixed at `0.1`; decoders reject unknown
+  versions through the existing `decode_with_version_check` path.
+- Coordinator-supervisor coordination (V01-E09-F06-T02).
+  `Coordinator::with_supervisor(Arc<WorkerSupervisor>)` attaches a
+  supervisor; the coordinator now installs the new active deployment as
+  the supervisor's desired state on every successful promote and
+  invokes `recover_after_operator_action` so a fresh deploy or rollback
+  is the documented exit from `crash_loop` terminal state. The
+  supervisor never mutates the durable state store; promotion remains
+  the coordinator's sole responsibility.
+- Supervision integration / failure-injection tests (V01-E09-F07) at
+  `agent/tests/supervision_failure_injection.rs` and
+  `agent/tests/supervision_coordination.rs`. Coverage includes launch
+  -> ready, exit before ready, single backoff restart, repeated
+  crash-loop, not-ready timeout, graceful stop with `worker_stopping`
+  / `worker_stopped` events, ignored stop escalating to force kill,
+  exit-after-ready flag propagation, absent observability consumer,
+  bounded sink drop behavior, deploy + rollback promoting supervisor
+  desired state, and crash-loop recovery through deploy.
+- Supervision architecture doc at
+  `docs/architecture/worker-supervision.md` covering the state
+  machine, failure classes, restart policy, supervision events, and
+  the V01-E08 coordinator integration contract.
+
 - `tensorplate-agent` desired state, deploy transaction, bundle
   verification, rollback, and restart-recovery baseline (V01-E08).
   The Rust agent now owns a durable desired-state store

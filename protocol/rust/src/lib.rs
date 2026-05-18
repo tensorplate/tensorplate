@@ -39,6 +39,7 @@ pub mod infer_request;
 pub mod infer_result;
 pub mod model_spec;
 pub mod python_pytorch_ipc;
+pub mod supervision_event;
 pub mod tensor_view;
 pub mod worker_control;
 pub mod worker_status;
@@ -71,6 +72,10 @@ pub use infer_result::{
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 pub use python_pytorch_ipc::{
     IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
+};
+pub use supervision_event::{
+    SupervisionAgentState, SupervisionEvent, SupervisionEventKind, SupervisionServingState,
+    MAX_SUPERVISION_MESSAGE_BYTES,
 };
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
 pub use worker_control::{

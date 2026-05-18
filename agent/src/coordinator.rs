@@ -39,6 +39,7 @@ use crate::bundle::{capacity_check, model_artifact_relative_path, verify, Verifi
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
+use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
 use crate::worker::{WorkerControl, WorkerEvent};
 
@@ -47,12 +48,17 @@ use crate::worker::{WorkerControl, WorkerEvent};
 /// logs and (in V01-E10) the observability service.
 pub type EventSink = dyn Fn(&WorkerEvent) + Send + Sync;
 
-/// V01-E08 coordinator.
+/// V01-E08 coordinator. Optionally extended by V01-E09 with a worker
+/// supervisor; when a supervisor is attached the coordinator forwards
+/// desired-active changes to it on every successful promote/rollback and
+/// asks it to reset crash-loop state after a deploy or rollback (the
+/// documented recovery trigger in V01-E09-F06-T02).
 pub struct Coordinator {
     config: AgentConfig,
     store: Arc<StateStore>,
     worker: Arc<dyn WorkerControl>,
     sink: Option<Arc<EventSink>>,
+    supervisor: Option<Arc<WorkerSupervisor>>,
 }
 
 /// Result of a successful deploy/rollback.
@@ -77,6 +83,7 @@ impl Coordinator {
             store,
             worker,
             sink: None,
+            supervisor: None,
         }
     }
 
@@ -85,6 +92,23 @@ impl Coordinator {
     #[must_use]
     pub fn with_event_sink(mut self, sink: Arc<EventSink>) -> Self {
         self.sink = Some(sink);
+        self
+    }
+
+    /// Attach a V01-E09 supervisor. The coordinator will:
+    ///
+    ///   - install the new active deployment as the supervisor's desired
+    ///     state after every successful promote
+    ///   - reset crash-loop counters through
+    ///     [`WorkerSupervisor::recover_after_operator_action`] on every
+    ///     successful deploy or rollback (the documented operator-action
+    ///     recovery trigger from V01-E09-F06-T02)
+    ///
+    /// The supervisor itself never promotes a candidate; the coordinator
+    /// remains the only mutator of durable state.
+    #[must_use]
+    pub fn with_supervisor(mut self, supervisor: Arc<WorkerSupervisor>) -> Self {
+        self.supervisor = Some(supervisor);
         self
     }
 
@@ -317,6 +341,11 @@ impl Coordinator {
         self.store.clear_transaction()?;
         self.store.set_last_error(None)?;
 
+        // V01-E09-F06-T02: hand the new active over to the supervisor.
+        // A successful deploy is also the documented recovery trigger
+        // that exits crash-loop state.
+        self.notify_supervisor_promotion(deployment_id, verified.manifest.backend_hint.as_str());
+
         Ok(DeployOutcome {
             transaction_id,
             deployment_id: deployment_id.to_string(),
@@ -465,6 +494,10 @@ impl Coordinator {
         });
         self.store.clear_transaction()?;
         self.store.set_last_error(None)?;
+
+        // V01-E09-F06-T02: hand the rolled-back active over to the
+        // supervisor and reset crash-loop state.
+        self.notify_supervisor_promotion(prev.deployment_id.as_str(), prev.backend_hint.as_str());
 
         Ok(DeployOutcome {
             transaction_id,
@@ -629,6 +662,22 @@ impl Coordinator {
         if let Some(sink) = self.sink.as_ref() {
             sink(event);
         }
+    }
+
+    /// Forward the new active deployment to the attached supervisor and
+    /// reset crash-loop counters. Best-effort: a poisoned supervisor
+    /// mutex never blocks deploy progress because the coordinator owns
+    /// the source of truth (the durable state store).
+    fn notify_supervisor_promotion(&self, deployment_id: &str, backend_hint: &str) {
+        let Some(sup) = self.supervisor.as_ref() else {
+            return;
+        };
+        let desired = DesiredWorker {
+            deployment_id: deployment_id.to_string(),
+            backend: backend_hint.to_string(),
+        };
+        let _ = sup.set_desired_active(Some(desired));
+        let _ = sup.recover_after_operator_action();
     }
 }
 
