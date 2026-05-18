@@ -878,7 +878,7 @@ mod tests {
         let outcome = supervisor.tick().expect("tick2");
         match outcome {
             TickOutcome::Fault(f) => {
-                assert_eq!(f.class, super::super::policy::FailureClass::ExitBeforeReady)
+                assert_eq!(f.class, super::super::policy::FailureClass::ExitBeforeReady);
             }
             other => panic!("expected fault, got {other:?}"),
         }
@@ -1060,7 +1060,7 @@ mod tests {
         });
         match supervisor.tick().expect("post-exit tick") {
             TickOutcome::Fault(f) => {
-                assert_eq!(f.class, super::super::policy::FailureClass::ExitAfterReady)
+                assert_eq!(f.class, super::super::policy::FailureClass::ExitAfterReady);
             }
             other => panic!("expected fault, got {other:?}"),
         }
