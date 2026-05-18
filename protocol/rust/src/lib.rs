@@ -26,8 +26,11 @@
 
 use serde::de::DeserializeOwned;
 
+pub mod agent_control;
+pub mod agent_state;
 pub mod buffer_pressure_event;
 pub mod buffer_ref;
+pub mod bundle_manifest;
 pub mod deploy_transaction;
 pub mod desired_state;
 pub mod error;
@@ -37,10 +40,24 @@ pub mod infer_result;
 pub mod model_spec;
 pub mod python_pytorch_ipc;
 pub mod tensor_view;
+pub mod worker_control;
 pub mod worker_status;
 
+pub use agent_control::{
+    AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse, DeployFailureSummary,
+    DeployRequest, DeployStatus, DeploymentSummary, QuarantineSummary, RecoveryAction,
+    RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
+};
+pub use agent_state::{
+    AgentState, AgentStateError, DeploymentRecord, ErrorRecord, QuarantineRecord, TransactionKind,
+    TransactionRecord,
+};
 pub use buffer_pressure_event::{BufferPressureEvent, BufferPressureEventError, MemoryPressure};
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
+pub use bundle_manifest::{
+    ArtifactRole, BundleArtifact, BundleManifest, BundleManifestError, CapabilityRequirements,
+    DeviceFamily, RuntimeCompatibility, TargetHardware,
+};
 pub use deploy_transaction::{
     DeployFailure, DeployState, DeployTransaction, DeployTransactionError,
 };
@@ -56,6 +73,10 @@ pub use python_pytorch_ipc::{
     IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
 };
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
+pub use worker_control::{
+    CandidateRef, WorkerControlRequest, WorkerControlRequestError, WorkerControlResponse,
+    WorkerError, WorkerOp, WorkerStatusOutcome,
+};
 pub use worker_status::{ComponentState, WorkerStatus, WorkerStatusError};
 
 /// Cross-process protocol major version. Bumping this is a breaking change

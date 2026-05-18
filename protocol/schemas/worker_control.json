@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/worker_control.json",
+  "title": "TensorPlate Agent -> Serving Worker Control Contract (V01-E08-F05)",
+  "description": "Versioned local control messages the V01-E08 agent uses to prepare, warm, promote, inspect, and unload a candidate deployment on the V01-E07 serving worker. v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. This schema documents the JSON shape used when the contract is serialized across the agent <-> worker process boundary so a future cross-process control transport (e.g. an authenticated worker control socket) can reuse the same field names.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
+  "oneOf": [
+    {"$ref": "#/definitions/Request"},
+    {"$ref": "#/definitions/Response"}
+  ],
+  "definitions": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "op", "transaction_id"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "transaction_id": {"type": "string", "minLength": 1},
+        "correlation_id": {"type": "string"},
+        "candidate_deployment_id": {"type": "string"},
+        "op": {
+          "type": "string",
+          "enum": ["prepare", "capacity_check", "warm", "promote", "active_status", "unload"],
+          "description": "Stage in the agent's prepare/warm/promote sequence. v0.1.0 collapses prepare+load into a single `prepare` call; `warm` is the readiness/health probe; `promote` switches the worker's active deployment after `warm` succeeds; `unload` releases the previous active when policy requires it."
+        },
+        "candidate": {"$ref": "#/definitions/CandidateRef"},
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Bounded operation timeout enforced by the agent's worker client."
+        }
+      }
+    },
+    "CandidateRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "staged_path", "bundle_digest", "backend_hint", "model_class"],
+      "properties": {
+        "deployment_id": {"type": "string", "minLength": 1},
+        "staged_path": {"type": "string", "minLength": 1},
+        "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+        "backend_hint": {"type": "string", "minLength": 1},
+        "model_class": {"type": "string"},
+        "bundle_name": {"type": "string"},
+        "bundle_version": {"type": "string"},
+        "artifact_relative_path": {"type": "string"}
+      }
+    },
+    "Response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status"],
+      "properties": {
+        "schema_version": {"type": "string", "const": "0.1"},
+        "transaction_id": {"type": "string"},
+        "correlation_id": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["ok", "error", "not_ready", "timeout", "unsupported"],
+          "description": "Outcome discriminator. `not_ready` is returned by `warm` while the candidate is still loading. `unsupported` maps to declared-but-unavailable backend or capability."
+        },
+        "active_deployment_id": {
+          "type": "string",
+          "description": "Deployment id currently serving traffic on the worker. Empty when no deployment has been promoted."
+        },
+        "candidate_deployment_id": {
+          "type": "string",
+          "description": "Deployment id of the most-recently-prepared candidate, if any."
+        },
+        "ready": {
+          "type": "boolean",
+          "description": "True when the worker reports the candidate (or current active, for `active_status`) as ready to serve."
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "enum": [
+                "config_invalid",
+                "load_failed",
+                "not_ready",
+                "shape_mismatch",
+                "unsupported",
+                "oom_error",
+                "timeout",
+                "inference_failed",
+                "internal"
+              ]
+            },
+            "message": {"type": "string"},
+            "context": {"type": "string"}
+          }
+        }
+      }
+    }
+  }
+}

@@ -81,4 +81,15 @@ the V01-E07 / V01-E05 bindings land.
 | `health_event.json`        | V01-E02-F07     |
 | `deploy_transaction.json`  | V01-E02-F07     |
 | `python_pytorch_ipc.json`  | V01-E02-F07     |
-| `bundle_manifest.json`     | V01-E13 (later) |
+| `bundle_manifest.json`     | V01-E08-F03     |
+| `agent_control.json`       | V01-E08-F01     |
+| `agent_state.json`         | V01-E08-F02     |
+| `worker_control.json`      | V01-E08-F05     |
+| `serving_http_envelope.json` | V01-E07       |
+| `serving_health.json`      | V01-E07         |
+| `serving_metrics.json`     | V01-E07         |
+| `scheduler_metrics.json`   | V01-E06         |
+| `scheduler_event.json`     | V01-E06         |
+| `scheduler_pressure_signal.json` | V01-E06   |
+| `buffer_pressure_event.json` | V01-E03       |
+| `backend_capability.json`  | V01-E05         |

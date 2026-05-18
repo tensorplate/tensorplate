@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/agent_state.json",
+  "title": "TensorPlate Agent Durable State",
+  "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`; partial-write recovery falls back to the last known-good copy. The state file is the only durable record of the active deployment, the previous active deployment, the candidate deployment, the in-flight transaction phase, and the quarantine list. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nMigration policy: the agent rejects unknown future `schema_version` values without mutation. Older versions are migrated forward by an explicit migration step when one ships; v0.1 ships no migrations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "store_version"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "store_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonically incremented every persisted update. Useful for diagnostics and as a tie-breaker between a stale primary file and a fresher backup."
+    },
+    "active": {"$ref": "#/definitions/DeploymentRecord"},
+    "previous_active": {"$ref": "#/definitions/DeploymentRecord"},
+    "candidate": {"$ref": "#/definitions/DeploymentRecord"},
+    "in_flight_transaction": {"$ref": "#/definitions/TransactionRecord"},
+    "last_error": {"$ref": "#/definitions/ErrorRecord"},
+    "quarantined": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/QuarantineRecord"}
+    }
+  },
+  "definitions": {
+    "DeploymentRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "bundle_digest", "staged_path", "bundle_name", "bundle_version", "backend_hint", "model_class"],
+      "properties": {
+        "deployment_id": {"type": "string", "minLength": 1},
+        "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+        "bundle_name": {"type": "string"},
+        "bundle_version": {"type": "string"},
+        "backend_hint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "staged_path": {"type": "string", "description": "Absolute path to the staged bundle directory under the agent state root."},
+        "promoted_monotonic_ns": {"type": "integer", "minimum": 0},
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "TransactionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction_id", "deployment_id", "phase", "kind"],
+      "properties": {
+        "transaction_id": {"type": "string", "minLength": 1},
+        "deployment_id": {"type": "string", "minLength": 1},
+        "phase": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "capacity_checked",
+            "prepared",
+            "warmed",
+            "promoted",
+            "active",
+            "failed",
+            "rolled_back"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["deploy", "rollback"]
+        },
+        "bundle_digest": {"type": "string"},
+        "bundle_path": {"type": "string", "description": "Original bundle path supplied by the deploy request; used by recovery to revalidate before resuming."},
+        "correlation_id": {"type": "string"},
+        "started_monotonic_ns": {"type": "integer", "minimum": 0},
+        "last_transition_monotonic_ns": {"type": "integer", "minimum": 0},
+        "failure": {"$ref": "#/definitions/ErrorRecord"}
+      }
+    },
+    "ErrorRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "message": {"type": "string"},
+        "recoverable": {"type": "boolean", "default": false},
+        "context": {"type": "string"}
+      }
+    },
+    "QuarantineRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction_id", "deployment_id", "phase", "error"],
+      "properties": {
+        "transaction_id": {"type": "string"},
+        "deployment_id": {"type": "string"},
+        "bundle_digest": {"type": "string"},
+        "phase": {
+          "type": "string",
+          "enum": [
+            "received",
+            "verified",
+            "staged",
+            "capacity_checked",
+            "prepared",
+            "warmed",
+            "promoted"
+          ]
+        },
+        "error": {"$ref": "#/definitions/ErrorRecord"},
+        "quarantined_monotonic_ns": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}
