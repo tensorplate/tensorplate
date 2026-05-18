@@ -438,6 +438,7 @@ mod tests {
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
             worker: Default::default(),
+            supervision: None,
             runtime_version: Some("0.1.0".into()),
         }
         .validate()

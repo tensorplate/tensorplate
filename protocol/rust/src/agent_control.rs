@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::deploy_transaction::DeployState;
 use crate::error::ErrorCode;
+use crate::supervision_event::{SupervisionAgentState, SupervisionServingState};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Operation discriminator.
@@ -326,6 +327,29 @@ pub struct RecoverySummary {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SupervisionStatusSummary {
+    pub serving_state: SupervisionServingState,
+    pub agent_state: SupervisionAgentState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_active: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_active: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    pub restart_count: u64,
+    pub crash_loop_threshold: u64,
+    pub crash_loop: bool,
+    pub launch_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_code: Option<ErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_restart_delay_ms: Option<u64>,
+    pub stable_uptime_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunState {
@@ -354,6 +378,8 @@ pub struct AgentStatus {
     pub quarantined: Vec<QuarantineSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RecoverySummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision: Option<SupervisionStatusSummary>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -438,10 +464,12 @@ mod tests {
 
     use super::{
         AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse, DeployRequest,
-        DeployStatus, ResponseError, ResponseStatus, RollbackRequest, SCHEMA_VERSION,
+        DeployStatus, ResponseError, ResponseStatus, RollbackRequest, SupervisionStatusSummary,
+        SCHEMA_VERSION,
     };
     use crate::deploy_transaction::DeployState;
     use crate::error::ErrorCode;
+    use crate::supervision_event::{SupervisionAgentState, SupervisionServingState};
     use crate::{decode_with_version_check, DecodeError};
 
     #[test]
@@ -530,11 +558,44 @@ mod tests {
                 last_error: None,
                 quarantined: vec![],
                 recovery: None,
+                supervision: None,
             }),
             error: None,
         };
         let raw = serde_json::to_string(&resp).expect("serialize");
         let back: ControlResponse = serde_json::from_str(&raw).expect("deserialize");
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn agent_status_with_supervision_round_trips() {
+        let status = AgentStatus {
+            agent_state: AgentRunState::Failed,
+            active: None,
+            previous_active: None,
+            candidate: None,
+            in_flight_transaction: None,
+            last_error: None,
+            quarantined: vec![],
+            recovery: None,
+            supervision: Some(SupervisionStatusSummary {
+                serving_state: SupervisionServingState::CrashLoop,
+                agent_state: SupervisionAgentState::Failed,
+                desired_active: Some("d-1".into()),
+                actual_active: None,
+                backend: Some("mock".into()),
+                restart_count: 5,
+                crash_loop_threshold: 5,
+                crash_loop: true,
+                launch_sequence: 7,
+                last_failure_code: Some(ErrorCode::InferenceFailed),
+                last_failure_message: Some("worker exited".into()),
+                next_restart_delay_ms: None,
+                stable_uptime_ms: 0,
+            }),
+        };
+        let raw = serde_json::to_string(&status).expect("serialize");
+        let back: AgentStatus = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(status, back);
     }
 }

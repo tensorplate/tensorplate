@@ -115,6 +115,108 @@
         "prepare_timeout_ms": {"type": "integer", "minimum": 1, "default": 60000},
         "status_poll_interval_ms": {"type": "integer", "minimum": 1, "default": 250}
       }
+    },
+    "supervision": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E09 worker supervisor config. Independent of `worker.*`: `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the agent-owned worker process lifecycle (launch, stop, restart backoff, crash-loop policy).",
+      "properties": {
+        "binary_path": {
+          "type": "string",
+          "description": "Absolute path to the tensorplate-serving binary the supervisor launches. Validated before any process start."
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": []
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": [],
+          "description": "Names of environment variables forwarded from the agent's environment. Empty disables env forwarding."
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Absolute working directory the launched process inherits."
+        },
+        "serving_config_path": {
+          "type": "string",
+          "description": "Absolute serving config the supervisor passes via `--config`."
+        },
+        "control_host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Loopback host the worker binds its data plane to."
+        },
+        "control_port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 18080
+        },
+        "stdio_mode": {
+          "type": "string",
+          "enum": ["inherit", "discard", "capture_to_file"],
+          "default": "inherit"
+        },
+        "startup_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 30000
+        },
+        "graceful_stop_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 5000
+        },
+        "kill_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2000
+        },
+        "status_poll_interval_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1000
+        },
+        "restart_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["disabled", "bounded_backoff"],
+              "default": "bounded_backoff"
+            },
+            "backoff": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Bounded exponential-backoff parameters with a rolling-window crash-loop detector. All timing uses monotonic time.",
+              "properties": {
+                "initial_delay_ms": {"type": "integer", "minimum": 1, "default": 500},
+                "multiplier_hundredths": {"type": "integer", "minimum": 100, "default": 200, "description": "Geometric multiplier x100. 200 means 2.0x."},
+                "max_delay_ms": {"type": "integer", "minimum": 1, "default": 30000},
+                "window_ms": {"type": "integer", "minimum": 1, "default": 300000},
+                "threshold": {"type": "integer", "minimum": 1, "default": 5},
+                "stable_reset_ms": {"type": "integer", "minimum": 1, "default": 120000}
+              }
+            }
+          }
+        },
+        "event_sink": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Bounded supervision-event sink config (V01-E09-F05). The sink never blocks the supervisor; events drop oldest-first when the queue is full.",
+          "properties": {
+            "queue_capacity": {"type": "integer", "minimum": 1, "default": 256},
+            "uds_path": {
+              "type": "string",
+              "description": "Optional Unix domain socket the observability service listens on. v0.1.0 default is in-process only; V01-E10 lights up the UDS path."
+            }
+          }
+        }
+      }
     }
   }
 }

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tensorplate_protocol::bundle_manifest::DeviceFamily;
 
 use crate::error::{AgentError, AgentResult};
+use crate::supervision::SupervisorConfig;
 
 /// Local control API transport. v0.1.0 default: Unix domain socket. The
 /// architecture decision is recorded in `docs/architecture/agent-control-api.md`.
@@ -144,6 +145,8 @@ pub struct AgentConfig {
     pub device_family: DeviceFamily,
     #[serde(default)]
     pub worker: WorkerConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision: Option<SupervisorConfig>,
     /// Optional runtime version override. Falls back to the protocol crate
     /// version at validation time. Reserved for tests that need to drive
     /// runtime-compatibility rejection paths.
@@ -242,6 +245,9 @@ impl AgentConfig {
             ));
         }
         validate_process_worker_config(&mut self.worker, &self.state_dir)?;
+        if let Some(supervision) = self.supervision.take() {
+            self.supervision = Some(supervision.validate()?);
+        }
         if self.runtime_version.is_none() {
             self.runtime_version = Some(tensorplate_protocol::version().to_string());
         }
@@ -350,6 +356,7 @@ mod tests {
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
             worker: Default::default(),
+            supervision: None,
             runtime_version: None,
         }
     }
@@ -417,5 +424,27 @@ mod tests {
         let raw = serde_json::to_string(&cfg).expect("serialize");
         let back = AgentConfig::parse_json(&raw).expect("parse");
         assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn parses_and_validates_supervision_block() {
+        let raw = format!(
+            r#"{{
+                "schema_version":"{}",
+                "transport":"unix_socket",
+                "socket_path":"/tmp/tensorplate-agent.sock",
+                "state_dir":"/var/lib/tensorplate",
+                "staging_dir":"/var/lib/tensorplate/staging",
+                "supervision":{{
+                    "binary_path":"/usr/local/bin/tensorplate-serving",
+                    "working_dir":"/var/lib/tensorplate",
+                    "serving_config_path":"/var/lib/tensorplate/serving.json",
+                    "control_port":18080
+                }}
+            }}"#,
+            tensorplate_protocol::SCHEMA_VERSION
+        );
+        let cfg = AgentConfig::parse_json(&raw).expect("parse");
+        assert!(cfg.supervision.is_some());
     }
 }

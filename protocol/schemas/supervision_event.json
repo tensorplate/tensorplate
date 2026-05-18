@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/supervision_event.json",
+  "title": "TensorPlate Supervision Event",
+  "description": "Discrete agent-owned worker-supervision event (V01-E09-F05). Emitted by `tensorplate-agent` at every supervision state transition and consumed by the V01-E10 observability service plus V01-E11 status/log views. Events carry monotonic timing, bounded context, and per-process sequence numbers; the sink is non-blocking and may drop events when its bounded queue is full.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "sequence", "monotonic_timestamp_ns"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "worker_started",
+        "worker_ready",
+        "worker_exit",
+        "worker_not_ready",
+        "restart_scheduled",
+        "worker_degraded",
+        "worker_failed",
+        "crash_loop_entered",
+        "worker_stopping",
+        "worker_stopped"
+      ],
+      "description": "Discrete supervision event kind. The set is union-stable: post-v0.1.0 additions append rather than rename."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Per-agent-process monotonically increasing sequence number. The supervisor never reuses a sequence within one process lifetime; consumers order events by `sequence` and detect drops by gaps."
+    },
+    "monotonic_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp in nanoseconds. Sampled from `std::time::Instant`. NEVER wall-clock."
+    },
+    "agent_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"]
+    },
+    "serving_state": {
+      "type": "string",
+      "enum": [
+        "no_active_deployment",
+        "starting",
+        "running",
+        "ready",
+        "degraded",
+        "failed",
+        "stopping",
+        "stopped",
+        "awaiting_restart",
+        "crash_loop"
+      ],
+      "description": "Stable supervision-state name shared with V01-E10 and V01-E11. Matches `SupervisionPhase` in `tensorplate_agent::supervision`."
+    },
+    "active_deployment": {
+      "type": "string",
+      "description": "Desired active deployment id; empty when no deployment is configured."
+    },
+    "backend": {
+      "type": "string",
+      "description": "Backend hint published by the bundle this worker is serving."
+    },
+    "restart_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Rolling count of unexpected exits + not-ready failures inside the configured window."
+    },
+    "missed_heartbeat_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "next_restart_delay_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Computed backoff delay for the next launch attempt, populated on `restart_scheduled`."
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "Worker process exit code, when known."
+    },
+    "exit_signal": {
+      "type": "integer",
+      "description": "Worker termination signal, when known."
+    },
+    "after_ready": {
+      "type": "boolean",
+      "description": "True when the worker reached the ready state before this exit."
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Typed error code accompanying `worker_not_ready`, `worker_failed`, and `worker_exit` events."
+    },
+    "message": {
+      "type": "string",
+      "description": "Optional bounded diagnostic context. Implementations truncate to <= 512 bytes."
+    }
+  }
+}
