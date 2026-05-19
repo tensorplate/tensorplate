@@ -21,7 +21,8 @@
         "transport": {
           "type": "string",
           "enum": ["in_process", "unix_socket"],
-          "default": "in_process"
+          "default": "in_process",
+          "description": "v0.1.0 supports `in_process`. `unix_socket` is reserved and returns a typed config error until the external socket listener lands."
         },
         "queue_capacity": {
           "type": "integer",

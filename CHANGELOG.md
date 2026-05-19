@@ -28,12 +28,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       hook so every freshness decision is deterministic.
     - `observability::listener::{EventListener, HealthInput,
       ListenerCounters}` (V01-E10-F02) — bounded local listener that
-      ingests `HealthEvent` heartbeats and `SupervisionEvent`
-      transitions, normalises both into one `HealthInput` type, and
-      tracks accepted / dropped / malformed / duplicate /
+      ingests serving-worker `HealthEvent` heartbeats,
+      `WorkerStatus` snapshots, and `SupervisionEvent` transitions,
+      normalises them into one `HealthInput` type, and tracks
+      accepted / dropped / malformed / duplicate /
       out-of-order / unknown-version counters. A bounded VecDeque
       drops the oldest event when full so a slow consumer never
-      blocks the producer.
+      blocks the producer. `unix_socket` is reserved in v0.1.0 and
+      fails startup with a typed config error rather than silently
+      starting without a socket listener.
     - `observability::heartbeat::{HeartbeatEvaluator,
       HeartbeatHealth, SourceState}` (V01-E10-F03) — per-source
       heartbeat freshness using monotonic time. Missed beats
@@ -82,9 +85,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       heartbeat evaluator, updates the aggregator, emits any
       safe-state events, refreshes the snapshot, and publishes the
       ROS 2 health topic when enabled. The binary main loop calls
-      `tick` on the configured heartbeat cadence; tests drive the
-      same pipeline through a `FakeClock`.
+      `tick` on the configured heartbeat cadence without synthesizing
+      serving-worker heartbeats; internal self-heartbeats are only
+      emitted when `primary_source=internal`. Tests drive the same
+      pipeline through a `FakeClock`.
 - Observability protocol schemas:
+    - `protocol/schemas/health_event.json` — serving-worker health
+      events now optionally carry sequence/source metadata, serving
+      state, active deployment, backend, queue depth, and
+      missed-deadline rate so observability status and ROS 2 key-values
+      can be populated without a schema extension.
     - `protocol/schemas/safe_state_event.json` — discrete safe-state
       event payload with version-fixed schema; documents the v0.1.0
       state names, transition reasons, and bounded diagnostic

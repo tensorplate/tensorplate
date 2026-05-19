@@ -145,12 +145,11 @@ impl Service {
         self.primary_source
     }
 
-    /// Minimal serving-worker heartbeat emitter. The composition root
-    /// satisfies V01-E10-F02's "wire a minimal heartbeat source where
-    /// E07 did not already provide one" requirement by feeding the
-    /// listener directly with a synthetic heartbeat input at the
-    /// configured expected interval. Production deployments override
-    /// this with the V01-E07 heartbeat producer once that lands.
+    /// Minimal in-process heartbeat emitter. Tests and deliberately
+    /// internal deployments can feed the listener directly with a
+    /// synthetic heartbeat input, but the production binary only calls
+    /// this when `primary_source=internal` so the default
+    /// `serving_worker` source cannot be masked by self-heartbeats.
     pub fn emit_internal_heartbeat(&self) {
         let input = HealthInput::heartbeat(self.primary_source, self.clock.now());
         self.listener.submit_input(input);
@@ -387,6 +386,21 @@ mod tests {
             matches!(e.state, ObservabilityState::NoHeartbeat)
                 || matches!(e.state, ObservabilityState::Degraded)
         }));
+    }
+
+    #[test]
+    fn registered_source_without_initial_heartbeat_transitions_to_no_heartbeat() {
+        let clock = Arc::new(FakeClock::new());
+        let (svc, sink) = service_with_sinks(clock.clone());
+        svc.tick();
+        assert_eq!(svc.snapshot().observability_state, "degraded");
+        clock.advance(Duration::from_millis(500));
+        svc.tick();
+        assert_eq!(svc.snapshot().observability_state, "no_heartbeat");
+        assert!(sink
+            .drain()
+            .iter()
+            .any(|e| matches!(e.state, ObservabilityState::NoHeartbeat)));
     }
 
     #[test]

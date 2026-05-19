@@ -29,6 +29,39 @@
       "minimum": 0,
       "description": "Receiver-monotonic timestamp in nanoseconds. Sampled from `std::chrono::steady_clock` (C++) or `std::time::Instant` (Rust). NEVER wall-clock."
     },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional per-source monotonically increasing sequence number. Consumers use this to detect duplicate or out-of-order events when the producer supplies it."
+    },
+    "source_id": {
+      "type": "string",
+      "description": "Optional stable producer identifier, for example `serving_worker` or a worker process id label."
+    },
+    "serving_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"],
+      "description": "Optional coarse serving-worker state carried with heartbeat or health events."
+    },
+    "active_deployment": {
+      "type": "string",
+      "description": "Optional active deployment identifier known to the serving worker."
+    },
+    "backend": {
+      "type": "string",
+      "description": "Optional active backend name known to the serving worker."
+    },
+    "missed_deadline_rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Optional bounded missed-deadline ratio for the current serving window."
+    },
+    "queue_depth": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional current serving queue depth."
+    },
     "correlation_id": {
       "type": "string",
       "description": "Optional request correlation id (for `missed_deadline` / `overload` events tied to a specific request)."

@@ -206,6 +206,9 @@ impl Aggregator {
         let mut guard = self.state.lock().expect("aggregator state poisoned");
 
         let mut events = Vec::new();
+        let explicit_no_heartbeat = inputs
+            .iter()
+            .any(|input| matches!(input.kind, InputKind::NoHeartbeat));
 
         // 1. Fold inputs into the running aggregate. The listener
         //    drained inputs in arrival order so the latest serving /
@@ -227,7 +230,7 @@ impl Aggregator {
         });
 
         // 3. Apply the precedence table.
-        let next = compute_state(&guard, primary_health);
+        let next = compute_state(&guard, primary_health, explicit_no_heartbeat);
         if next != guard.state {
             let reason = transition_reason(next, primary_health, &guard);
             let event = build_event(&guard, next, reason, now);
@@ -277,11 +280,11 @@ fn absorb_input(state: &mut AggregateState, input: &HealthInput) {
     if !input.backend.is_empty() {
         state.backend.clone_from(&input.backend);
     }
-    if input.queue_depth != 0 {
-        state.queue_depth = input.queue_depth;
+    if let Some(queue_depth) = input.queue_depth {
+        state.queue_depth = queue_depth;
     }
-    if input.missed_deadline_rate > 0.0 {
-        state.missed_deadline_rate = input.missed_deadline_rate;
+    if let Some(missed_deadline_rate) = input.missed_deadline_rate {
+        state.missed_deadline_rate = missed_deadline_rate;
     }
     if let Some(code) = input.error_code {
         state.last_error_code = Some(code);
@@ -298,6 +301,7 @@ fn absorb_input(state: &mut AggregateState, input: &HealthInput) {
                 state.last_error_code = None;
             }
         }
+        InputKind::NoHeartbeat | InputKind::Heartbeat => {}
         InputKind::CrashLoop | InputKind::WorkerExit | InputKind::Failed => {
             state.serving_state = ComponentState::Failed;
         }
@@ -312,12 +316,15 @@ fn absorb_input(state: &mut AggregateState, input: &HealthInput) {
                 state.serving_state = ComponentState::Degraded;
             }
         }
-        InputKind::Heartbeat => {}
     }
 }
 
-fn compute_state(state: &AggregateState, heartbeat: HeartbeatHealth) -> ObservabilityState {
-    if matches!(heartbeat, HeartbeatHealth::NoHeartbeat) {
+fn compute_state(
+    state: &AggregateState,
+    heartbeat: HeartbeatHealth,
+    explicit_no_heartbeat: bool,
+) -> ObservabilityState {
+    if explicit_no_heartbeat || matches!(heartbeat, HeartbeatHealth::NoHeartbeat) {
         return ObservabilityState::NoHeartbeat;
     }
     if matches!(state.serving_state, ComponentState::Failed)
@@ -416,6 +423,7 @@ mod tests {
 
     fn source_state(health: HeartbeatHealth, missed: u32, now: Instant) -> SourceState {
         SourceState {
+            registered_at: now,
             last_heartbeat_at: Some(now),
             missed_count: missed,
             consecutive_recovery_heartbeats: 0,
@@ -452,6 +460,22 @@ mod tests {
         assert_eq!(events[0].state, ObservabilityState::NoHeartbeat);
         assert_eq!(events[0].reason, SafeStateReason::HeartbeatMissing);
         assert_eq!(events[0].missed_heartbeat_count, 5);
+    }
+
+    #[test]
+    fn explicit_no_heartbeat_input_emits_no_heartbeat_state() {
+        let agg = Aggregator::new(policy(), InputSource::ServingWorker);
+        let now = Instant::now();
+        let mut input = HealthInput::heartbeat(InputSource::ServingWorker, now);
+        input.kind = InputKind::NoHeartbeat;
+        let hb = vec![(
+            InputSource::ServingWorker,
+            source_state(HeartbeatHealth::Fresh, 0, now),
+        )];
+        let events = agg.apply(&[input], &hb, now, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, ObservabilityState::NoHeartbeat);
+        assert_eq!(events[0].reason, SafeStateReason::HeartbeatMissing);
     }
 
     #[test]
@@ -561,7 +585,7 @@ mod tests {
         let now = Instant::now();
         let mut overload = HealthInput::heartbeat(InputSource::ServingWorker, now);
         overload.kind = InputKind::Overload;
-        overload.missed_deadline_rate = 0.1;
+        overload.missed_deadline_rate = Some(0.1);
         let hb = vec![(
             InputSource::ServingWorker,
             source_state(HeartbeatHealth::Fresh, 0, now),

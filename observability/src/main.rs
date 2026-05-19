@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tensorplate_observability::{ObservabilityConfig, Service};
+use tensorplate_observability::{InputSource, ObservabilityConfig, Service};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -113,12 +113,13 @@ fn main() -> ExitCode {
     // sink before the next tick begins.
     let stop = Arc::new(AtomicBool::new(false));
     while !stop.load(Ordering::Relaxed) {
-        // The composition root provides a minimal in-process heartbeat
-        // source so the baseline monitor can run on a fresh Jetson
-        // before the V01-E07 serving worker is wired in. Production
-        // deployments connect the worker through the listener, which
-        // overrides this internal source.
-        service.emit_internal_heartbeat();
+        // Only explicitly internal deployments self-heartbeat. The
+        // default `serving_worker` source must be refreshed by worker
+        // events so a wedged or absent worker can transition to
+        // no_heartbeat.
+        if matches!(service.primary_source(), InputSource::Internal) {
+            service.emit_internal_heartbeat();
+        }
         let _events = service.tick();
         if let Err(err) = service.flush_snapshot() {
             eprintln!("snapshot flush failed: {err}");

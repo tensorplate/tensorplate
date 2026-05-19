@@ -1,8 +1,8 @@
 # `observability/`
 
 `tensorplate-observability` — the Rust independent health monitor. The
-service ingests `HealthEvent` heartbeats from the serving worker and
-`SupervisionEvent` transitions from `tensorplate-agent`, evaluates
+service ingests serving-worker `HealthEvent` / `WorkerStatus` payloads
+and `SupervisionEvent` transitions from `tensorplate-agent`, evaluates
 heartbeat freshness against a monotonic clock, and emits a local
 safe-state event whenever the aggregate state becomes
 `degraded` / `failed` / `no_heartbeat`. When configured, it also
@@ -28,6 +28,10 @@ The observability service does not depend on the serving worker's
 request path and must not block inference. It receives events through
 the `protocol/` contracts only and never reaches into the agent's
 durable state.
+
+The binary does not emit synthetic serving-worker heartbeats. Internal
+heartbeats are available only when `primary_source=internal`, which is
+intended for tests and explicitly in-process deployments.
 
 ## Rules
 
@@ -64,6 +68,10 @@ tensorplate-observability --config /etc/tensorplate/observability.json
 The default config is local-only and never binds a socket, so
 `tensorplate-observability --version` is safe to invoke from CI without
 any side effects.
+
+In v0.1.0 the active listener mode is `in_process`; selecting
+`listener.transport=unix_socket` fails startup with a typed config error
+until the external socket listener lands.
 
 ## Documentation
 

@@ -22,7 +22,7 @@
 // Unix-domain-socket path is reserved in config so the V01-E07 external
 // heartbeat producer can wire it up without a schema bump.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -32,7 +32,7 @@ use tensorplate_protocol::health_event::HealthEventKind;
 use tensorplate_protocol::supervision_event::{
     SupervisionAgentState, SupervisionEventKind, SupervisionServingState,
 };
-use tensorplate_protocol::worker_status::ComponentState;
+use tensorplate_protocol::worker_status::{ComponentState, WorkerStatus};
 use tensorplate_protocol::{
     decode_with_version_check, DecodeError, HealthEvent, SupervisionEvent, SCHEMA_VERSION,
 };
@@ -73,6 +73,7 @@ pub enum InputKind {
     Ready,
     Degraded,
     Failed,
+    NoHeartbeat,
     MissedDeadline,
     Overload,
     WorkerExit,
@@ -89,6 +90,7 @@ impl InputKind {
             InputKind::Ready => "ready",
             InputKind::Degraded => "degraded",
             InputKind::Failed => "failed",
+            InputKind::NoHeartbeat => "no_heartbeat",
             InputKind::MissedDeadline => "missed_deadline",
             InputKind::Overload => "overload",
             InputKind::WorkerExit => "worker_exit",
@@ -118,8 +120,8 @@ pub struct HealthInput {
     pub serving_state: Option<ComponentState>,
     pub active_deployment: String,
     pub backend: String,
-    pub queue_depth: u64,
-    pub missed_deadline_rate: f64,
+    pub queue_depth: Option<u64>,
+    pub missed_deadline_rate: Option<f64>,
     pub error_code: Option<ErrorCode>,
 }
 
@@ -137,8 +139,8 @@ impl HealthInput {
             serving_state: None,
             active_deployment: String::new(),
             backend: String::new(),
-            queue_depth: 0,
-            missed_deadline_rate: 0.0,
+            queue_depth: None,
+            missed_deadline_rate: None,
             error_code: None,
         }
     }
@@ -189,7 +191,7 @@ pub struct ListenerCountersSnapshot {
 pub struct EventListener {
     capacity: usize,
     queue: Mutex<VecDeque<HealthInput>>,
-    last_sequence: Mutex<u64>,
+    last_sequence_by_source: Mutex<HashMap<&'static str, u64>>,
     pub counters: Arc<ListenerCounters>,
     clock: Arc<dyn MonotonicClock>,
 }
@@ -201,7 +203,7 @@ impl EventListener {
         Self {
             capacity: cap,
             queue: Mutex::new(VecDeque::with_capacity(cap)),
-            last_sequence: Mutex::new(0),
+            last_sequence_by_source: Mutex::new(HashMap::new()),
             counters: Arc::new(ListenerCounters::default()),
             clock,
         }
@@ -229,28 +231,65 @@ impl EventListener {
             HealthEventKind::Heartbeat => InputKind::Heartbeat,
             HealthEventKind::Ready => InputKind::Ready,
             HealthEventKind::Degraded => InputKind::Degraded,
-            HealthEventKind::Failed | HealthEventKind::NoHeartbeat => InputKind::Failed,
+            HealthEventKind::Failed => InputKind::Failed,
+            HealthEventKind::NoHeartbeat => InputKind::NoHeartbeat,
             HealthEventKind::MissedDeadline => InputKind::MissedDeadline,
             HealthEventKind::Overload => InputKind::Overload,
         };
-        let serving_state = match event.kind {
+        let serving_state = event.serving_state.or(match event.kind {
             HealthEventKind::Ready => Some(ComponentState::Ready),
             HealthEventKind::Degraded | HealthEventKind::Overload => Some(ComponentState::Degraded),
-            HealthEventKind::Failed | HealthEventKind::NoHeartbeat => Some(ComponentState::Failed),
+            HealthEventKind::Failed => Some(ComponentState::Failed),
             _ => None,
-        };
+        });
+        self.record_sequence(InputSource::ServingWorker, event.sequence);
         let input = HealthInput {
             source: InputSource::ServingWorker,
             kind,
             received_at: self.clock.now(),
-            sequence: None,
+            sequence: event.sequence,
             agent_state: None,
             serving_state,
-            active_deployment: String::new(),
-            backend: String::new(),
-            queue_depth: 0,
-            missed_deadline_rate: 0.0,
+            active_deployment: event.active_deployment.clone(),
+            backend: event.backend.clone(),
+            queue_depth: event.queue_depth,
+            missed_deadline_rate: event.missed_deadline_rate,
             error_code: event.error_code,
+        };
+        self.push(input);
+        Ok(())
+    }
+
+    /// Submit a wire-form [`WorkerStatus`]. This is the status snapshot
+    /// surface produced by the serving path and contains the fields the
+    /// observability snapshot and ROS 2 health mapping must preserve.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservabilityError::InvalidEvent`] for unknown schema
+    /// versions.
+    pub fn submit_worker_status(&self, status: &WorkerStatus) -> ObservabilityResult<()> {
+        if status.schema_version != SCHEMA_VERSION {
+            self.counters
+                .unknown_version
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ObservabilityError::InvalidEvent(format!(
+                "unsupported WorkerStatus.schema_version `{}` (expected `{}`)",
+                status.schema_version, SCHEMA_VERSION
+            )));
+        }
+        let input = HealthInput {
+            source: InputSource::ServingWorker,
+            kind: classify_component_status(status.serving_state),
+            received_at: self.clock.now(),
+            sequence: None,
+            agent_state: Some(status.agent_state),
+            serving_state: Some(status.serving_state),
+            active_deployment: status.active_deployment.clone(),
+            backend: status.backend.clone(),
+            queue_depth: Some(status.queue_depth),
+            missed_deadline_rate: Some(status.missed_deadline_rate),
+            error_code: status.last_error_code,
         };
         self.push(input);
         Ok(())
@@ -275,20 +314,7 @@ impl EventListener {
                 event.schema_version, SCHEMA_VERSION
             )));
         }
-        {
-            #[allow(clippy::expect_used)]
-            let mut last = self
-                .last_sequence
-                .lock()
-                .expect("listener sequence mutex poisoned");
-            if event.sequence == *last && event.sequence != 0 {
-                self.counters.duplicates.fetch_add(1, Ordering::Relaxed);
-            } else if event.sequence < *last {
-                self.counters.out_of_order.fetch_add(1, Ordering::Relaxed);
-            } else {
-                *last = event.sequence;
-            }
-        }
+        self.record_sequence(InputSource::AgentSupervisor, Some(event.sequence));
         let input = HealthInput {
             source: InputSource::AgentSupervisor,
             kind: classify_supervision(event.kind),
@@ -298,8 +324,8 @@ impl EventListener {
             serving_state: event.serving_state.map(map_serving_state),
             active_deployment: event.active_deployment.clone(),
             backend: event.backend.clone(),
-            queue_depth: 0,
-            missed_deadline_rate: 0.0,
+            queue_depth: None,
+            missed_deadline_rate: None,
             error_code: event.error_code,
         };
         self.push(input);
@@ -330,7 +356,19 @@ impl EventListener {
             Err(_) => {}
         }
         match decode_with_version_check::<SupervisionEvent>(raw) {
-            Ok(event) => self.submit_supervision_event(&event),
+            Ok(event) => return self.submit_supervision_event(&event),
+            Err(DecodeError::UnsupportedSchemaVersion { got, expected }) => {
+                self.counters
+                    .unknown_version
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(ObservabilityError::InvalidEvent(format!(
+                    "unsupported schema_version `{got}` (expected `{expected}`)"
+                )));
+            }
+            Err(_) => {}
+        }
+        match decode_with_version_check::<WorkerStatus>(raw) {
+            Ok(status) => self.submit_worker_status(&status),
             Err(DecodeError::UnsupportedSchemaVersion { got, expected }) => {
                 self.counters
                     .unknown_version
@@ -364,6 +402,25 @@ impl EventListener {
         }
         queue.push_back(input);
         self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_sequence(&self, source: InputSource, sequence: Option<u64>) {
+        let Some(sequence) = sequence else {
+            return;
+        };
+        #[allow(clippy::expect_used)]
+        let mut last_by_source = self
+            .last_sequence_by_source
+            .lock()
+            .expect("listener sequence mutex poisoned");
+        let last = last_by_source.entry(source.as_str()).or_insert(0);
+        if sequence == *last && sequence != 0 {
+            self.counters.duplicates.fetch_add(1, Ordering::Relaxed);
+        } else if sequence < *last {
+            self.counters.out_of_order.fetch_add(1, Ordering::Relaxed);
+        } else {
+            *last = sequence;
+        }
     }
 
     /// Drain all queued inputs. The aggregator calls this once per
@@ -403,6 +460,14 @@ fn classify_supervision(kind: SupervisionEventKind) -> InputKind {
     }
 }
 
+fn classify_component_status(state: ComponentState) -> InputKind {
+    match state {
+        ComponentState::Ready => InputKind::Ready,
+        ComponentState::Degraded | ComponentState::Unknown => InputKind::Degraded,
+        ComponentState::Failed => InputKind::Failed,
+    }
+}
+
 fn map_agent_state(state: SupervisionAgentState) -> ComponentState {
     match state {
         SupervisionAgentState::Ready => ComponentState::Ready,
@@ -436,6 +501,7 @@ mod tests {
     use crate::config::ListenerConfig;
     use std::sync::Arc;
     use tensorplate_protocol::supervision_event::{SupervisionEvent, SupervisionEventKind};
+    use tensorplate_protocol::worker_status::{ComponentState, WorkerStatus};
     use tensorplate_protocol::{HealthEvent, SCHEMA_VERSION};
 
     fn listener_with_capacity(cap: u32) -> EventListener {
@@ -457,6 +523,69 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].kind, InputKind::Heartbeat);
         assert_eq!(drained[0].source, InputSource::ServingWorker);
+    }
+
+    #[test]
+    fn health_event_status_fields_are_preserved() {
+        let l = listener_with_capacity(4);
+        let mut event = HealthEvent::state(
+            tensorplate_protocol::health_event::HealthEventKind::Overload,
+            0,
+        );
+        event.sequence = Some(9);
+        event.serving_state = Some(ComponentState::Degraded);
+        event.active_deployment = "deploy-1".into();
+        event.backend = "tensorrt".into();
+        event.queue_depth = Some(4);
+        event.missed_deadline_rate = Some(0.2);
+        l.submit_health_event(&event).unwrap();
+        let drained = l.try_drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].sequence, Some(9));
+        assert_eq!(drained[0].serving_state, Some(ComponentState::Degraded));
+        assert_eq!(drained[0].active_deployment, "deploy-1");
+        assert_eq!(drained[0].backend, "tensorrt");
+        assert_eq!(drained[0].queue_depth, Some(4));
+        assert_eq!(drained[0].missed_deadline_rate, Some(0.2));
+    }
+
+    #[test]
+    fn no_heartbeat_event_stays_distinct_from_failed() {
+        let l = listener_with_capacity(4);
+        l.submit_health_event(&HealthEvent::state(
+            tensorplate_protocol::health_event::HealthEventKind::NoHeartbeat,
+            0,
+        ))
+        .unwrap();
+        let drained = l.try_drain();
+        assert_eq!(drained[0].kind, InputKind::NoHeartbeat);
+        assert_eq!(drained[0].serving_state, None);
+    }
+
+    #[test]
+    fn submit_worker_status_preserves_required_snapshot_fields() {
+        let l = listener_with_capacity(4);
+        let status = WorkerStatus::new(
+            ComponentState::Ready,
+            ComponentState::Ready,
+            ComponentState::Ready,
+            "deploy-2",
+            "python_pytorch",
+            0,
+            0.0,
+            0,
+            None,
+        )
+        .unwrap();
+        l.submit_worker_status(&status).unwrap();
+        let drained = l.try_drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].agent_state, Some(ComponentState::Ready));
+        assert_eq!(drained[0].serving_state, Some(ComponentState::Ready));
+        assert_eq!(drained[0].active_deployment, "deploy-2");
+        assert_eq!(drained[0].backend, "python_pytorch");
+        assert_eq!(drained[0].queue_depth, Some(0));
+        assert_eq!(drained[0].missed_deadline_rate, Some(0.0));
     }
 
     #[test]
@@ -489,6 +618,24 @@ mod tests {
         l.submit_supervision_event(&a).unwrap();
         l.submit_supervision_event(&b).unwrap();
         assert_eq!(l.counters.snapshot().out_of_order, 1);
+    }
+
+    #[test]
+    fn health_event_sequence_is_counted_per_source() {
+        let l = listener_with_capacity(4);
+        let mut first = HealthEvent::heartbeat(0);
+        first.sequence = Some(5);
+        let mut duplicate = HealthEvent::heartbeat(1);
+        duplicate.sequence = Some(5);
+        l.submit_health_event(&first).unwrap();
+        l.submit_health_event(&duplicate).unwrap();
+
+        let supervision = SupervisionEvent::new(SupervisionEventKind::WorkerReady, 1, 0);
+        l.submit_supervision_event(&supervision).unwrap();
+
+        let counters = l.counters.snapshot();
+        assert_eq!(counters.duplicates, 1);
+        assert_eq!(counters.out_of_order, 0);
     }
 
     #[test]
@@ -535,6 +682,19 @@ mod tests {
         );
         l.submit_json(&raw).unwrap();
         assert_eq!(l.counters.snapshot().accepted, 1);
+    }
+
+    #[test]
+    fn submit_json_accepts_worker_status() {
+        let l = listener_with_capacity(4);
+        let raw = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","agent_state":"ready","serving_state":"ready","observability_state":"ready","active_deployment":"deploy-3","backend":"tensorrt","queue_depth":2}}"#
+        );
+        l.submit_json(&raw).unwrap();
+        let drained = l.try_drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].active_deployment, "deploy-3");
+        assert_eq!(drained[0].queue_depth, Some(2));
     }
 
     #[test]

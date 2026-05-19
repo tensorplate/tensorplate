@@ -47,7 +47,7 @@ use tensorplate_observability::{
 };
 use tensorplate_protocol::health_event::HealthEventKind;
 use tensorplate_protocol::supervision_event::{SupervisionEvent, SupervisionEventKind};
-use tensorplate_protocol::worker_status::ComponentState;
+use tensorplate_protocol::worker_status::{ComponentState, WorkerStatus};
 use tensorplate_protocol::{ErrorCode, HealthEvent, SCHEMA_VERSION};
 
 fn tight_heartbeat() -> HeartbeatPolicy {
@@ -180,6 +180,75 @@ fn explicit_failed_event_drives_failed_state() {
 }
 
 #[test]
+fn explicit_no_heartbeat_health_event_drives_no_heartbeat_state() {
+    let h = Harness::build(base_config());
+    h.service.emit_internal_heartbeat();
+    h.service.tick();
+    h.service
+        .listener()
+        .submit_health_event(&HealthEvent::state(HealthEventKind::NoHeartbeat, 0))
+        .expect("submit");
+    h.service.tick();
+    let snap = h.service.snapshot();
+    assert_eq!(snap.observability_state, "no_heartbeat");
+    let drained = h.drain_sink();
+    assert!(drained
+        .iter()
+        .any(|e| matches!(e.state, ObservabilityState::NoHeartbeat)));
+}
+
+#[test]
+fn worker_status_updates_required_snapshot_fields_and_can_clear_zero_metrics() {
+    let h = Harness::build(base_config());
+    h.service.emit_internal_heartbeat();
+    h.service.tick();
+    let overloaded = WorkerStatus::new(
+        ComponentState::Ready,
+        ComponentState::Degraded,
+        ComponentState::Degraded,
+        "deploy-status",
+        "tensorrt",
+        0,
+        0.4,
+        7,
+        None,
+    )
+    .expect("status");
+    h.service
+        .listener()
+        .submit_worker_status(&overloaded)
+        .expect("submit");
+    h.service.tick();
+    let snap = h.service.snapshot();
+    assert_eq!(snap.active_deployment, "deploy-status");
+    assert_eq!(snap.backend, "tensorrt");
+    assert_eq!(snap.queue_depth, 7);
+    assert!((snap.missed_deadline_rate - 0.4).abs() < f64::EPSILON);
+
+    let ready = WorkerStatus::new(
+        ComponentState::Ready,
+        ComponentState::Ready,
+        ComponentState::Ready,
+        "deploy-status",
+        "tensorrt",
+        0,
+        0.0,
+        0,
+        None,
+    )
+    .expect("status");
+    h.service
+        .listener()
+        .submit_worker_status(&ready)
+        .expect("submit");
+    h.service.tick();
+    let snap = h.service.snapshot();
+    assert_eq!(snap.observability_state, "ready");
+    assert_eq!(snap.queue_depth, 0);
+    assert!(snap.missed_deadline_rate.abs() < f64::EPSILON);
+}
+
+#[test]
 fn crash_loop_supervision_event_drives_failed_state() {
     let h = Harness::build(base_config());
     h.service.emit_internal_heartbeat();
@@ -242,8 +311,8 @@ fn overload_event_drives_degraded_state_with_overload_reason() {
     let mut input = HealthInput::heartbeat(InputSource::ServingWorker, h.clock.now());
     input.kind = InputKind::Overload;
     input.serving_state = Some(ComponentState::Degraded);
-    input.missed_deadline_rate = 0.1;
-    input.queue_depth = 12;
+    input.missed_deadline_rate = Some(0.1);
+    input.queue_depth = Some(12);
     h.service.listener().submit_input(input);
     h.service.tick();
     let snap = h.service.snapshot();

@@ -24,16 +24,17 @@ downstream consumer.
 ```
    serving worker (V01-E07)        agent (V01-E08 / V01-E09)
         │                                 │
-        │ HealthEvent                     │ SupervisionEvent
+        │ HealthEvent / WorkerStatus      │ SupervisionEvent
         │ (heartbeat / ready /            │ (worker_started / worker_ready /
         │  degraded / failed /            │  worker_exit / worker_failed /
-        │  missed_deadline / overload)    │  crash_loop_entered / ...)
+        │  missed_deadline / overload /   │  crash_loop_entered / ...)
+        │  status metrics)                │
         ▼                                 ▼
    ┌─────────────────────────────────────────────────────────┐
    │   tensorplate-observability process                     │
    │                                                         │
    │   EventListener  ─►  HeartbeatEvaluator                 │
-   │   (bounded UDS / in-process)        │                   │
+   │   (bounded in-process; UDS reserved)│                   │
    │                                     ▼                   │
    │                              Aggregator (state) ─►      │
    │                                 │                       │
@@ -99,6 +100,12 @@ All freshness decisions use a `MonotonicClock`:
 
 Wall-clock changes never feed the evaluator; tests inject a `FakeClock`
 to drive every threshold deterministically.
+
+The production binary does not synthesize serving-worker heartbeats.
+`Service::emit_internal_heartbeat()` is only for tests and deployments
+that explicitly set `primary_source=internal`; the default
+`primary_source=serving_worker` must be refreshed by worker events so an
+absent or wedged worker can transition to `no_heartbeat`.
 
 ## Safe-state events
 

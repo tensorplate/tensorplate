@@ -30,10 +30,9 @@ pub enum ListenerTransport {
     /// in-process with the monitor.
     #[default]
     InProcess,
-    /// Events arrive as JSON lines on the configured Unix domain
-    /// socket. The V01-E10 baseline ships the schema and the validation
-    /// surface; full UDS plumbing lands alongside V01-E07's external
-    /// heartbeat producer.
+    /// Reserved for JSON lines on the configured Unix domain socket.
+    /// Selecting this in v0.1.0 returns a typed config error so the
+    /// service never starts with a configured-but-unbound transport.
     UnixSocket,
 }
 
@@ -323,11 +322,6 @@ fn validate_schema_version(version: &str) -> ObservabilityResult<()> {
 }
 
 fn validate_listener(cfg: &ListenerConfig) -> ObservabilityResult<()> {
-    if matches!(cfg.transport, ListenerTransport::UnixSocket) && cfg.uds_path.is_none() {
-        return Err(ObservabilityError::Config(
-            "listener.uds_path required for transport=unix_socket".into(),
-        ));
-    }
     if let Some(path) = cfg.uds_path.as_deref() {
         if !path.is_absolute() {
             return Err(ObservabilityError::Config(format!(
@@ -335,6 +329,18 @@ fn validate_listener(cfg: &ListenerConfig) -> ObservabilityResult<()> {
                 path.display()
             )));
         }
+    }
+    if matches!(cfg.transport, ListenerTransport::UnixSocket) {
+        if cfg.uds_path.is_none() {
+            return Err(ObservabilityError::Config(
+                "listener.uds_path required for transport=unix_socket".into(),
+            ));
+        }
+        return Err(ObservabilityError::Config(
+            "listener.transport=unix_socket is reserved until the external socket listener lands; \
+             use `in_process` in v0.1.0"
+                .into(),
+        ));
     }
     if cfg.queue_capacity == 0 {
         return Err(ObservabilityError::Config(
@@ -429,6 +435,15 @@ impl ObservabilityConfig {
                 "primary_source must be non-empty".into(),
             ));
         }
+        if !matches!(
+            self.primary_source.as_str(),
+            "serving_worker" | "agent_supervisor" | "internal"
+        ) {
+            return Err(ObservabilityError::Config(format!(
+                "primary_source `{}` must be one of serving_worker, agent_supervisor, internal",
+                self.primary_source
+            )));
+        }
         validate_listener(&self.listener)?;
         validate_heartbeat(&self.heartbeat)?;
         validate_safe_state(&self.safe_state)?;
@@ -502,10 +517,13 @@ mod tests {
         let mut c = minimal();
         c.primary_source = String::new();
         assert!(c.validate().is_err());
+        let mut c = minimal();
+        c.primary_source = "made_up_source".into();
+        assert!(c.validate().is_err());
     }
 
     #[test]
-    fn uds_transport_requires_absolute_path() {
+    fn uds_transport_is_reserved_and_requires_absolute_path() {
         let mut c = minimal();
         c.listener.transport = ListenerTransport::UnixSocket;
         c.listener.uds_path = Some(PathBuf::from("relative/path"));
@@ -513,7 +531,7 @@ mod tests {
         c.listener.uds_path = None;
         assert!(c.clone().validate().is_err());
         c.listener.uds_path = Some(PathBuf::from("/run/tensorplate/observability.sock"));
-        assert!(c.validate().is_ok());
+        assert!(c.validate().is_err());
     }
 
     #[test]

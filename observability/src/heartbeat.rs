@@ -42,6 +42,7 @@ pub enum HeartbeatHealth {
 /// Per-source bookkeeping. Sources are added on first observation.
 #[derive(Debug, Clone)]
 pub struct SourceState {
+    pub registered_at: Instant,
     pub last_heartbeat_at: Option<Instant>,
     pub missed_count: u32,
     pub consecutive_recovery_heartbeats: u32,
@@ -49,8 +50,9 @@ pub struct SourceState {
 }
 
 impl SourceState {
-    fn new() -> Self {
+    fn new(registered_at: Instant) -> Self {
         Self {
+            registered_at,
             last_heartbeat_at: None,
             missed_count: 0,
             consecutive_recovery_heartbeats: 0,
@@ -87,7 +89,7 @@ impl HeartbeatEvaluator {
         let mut state = self.state.lock().expect("heartbeat state poisoned");
         let entry = state
             .entry(source.as_str())
-            .or_insert_with(SourceState::new);
+            .or_insert_with(|| SourceState::new(received_at));
         entry.last_heartbeat_at = Some(received_at);
         if entry.health == HeartbeatHealth::NoHeartbeat {
             entry.consecutive_recovery_heartbeats =
@@ -133,7 +135,7 @@ impl HeartbeatEvaluator {
         let mut state = self.state.lock().expect("heartbeat state poisoned");
         state
             .entry(source.as_str())
-            .or_insert_with(SourceState::new);
+            .or_insert_with(|| SourceState::new(self.clock.now()));
     }
 
     /// Read-only view of the source bookkeeping. Used by the status
@@ -162,24 +164,31 @@ impl HeartbeatEvaluator {
         state
             .get(source.as_str())
             .cloned()
-            .unwrap_or_else(SourceState::new)
+            .unwrap_or_else(|| SourceState::new(self.clock.now()))
     }
 
     fn recompute_in_place(&self, entry: &mut SourceState, now: Instant) {
+        let expected = Duration::from_millis(self.policy.expected_interval_ms);
+        let grace = Duration::from_millis(self.policy.grace_ms);
         let Some(last) = entry.last_heartbeat_at else {
-            // No heartbeat has been seen yet. After `missed_threshold`
-            // expected intervals elapse from "now" we stay in
-            // `NoHeartbeat` so the aggregator can drive the no-
-            // heartbeat state without any input arriving at all. The
-            // `NoneYet -> NoHeartbeat` transition uses the configured
-            // interval to gate the initial-no-heartbeat decision so
-            // unit tests don't fire instantly.
-            entry.health = HeartbeatHealth::NoneYet;
+            // No heartbeat has been seen yet. Use the source
+            // registration time as the monotonic anchor so a configured
+            // source that never emits can still transition through
+            // stale to no-heartbeat without agent input.
+            let elapsed = now.saturating_duration_since(entry.registered_at);
+            let missed = missed_full_windows(elapsed, expected, grace)
+                .min(self.policy.missed_threshold.saturating_mul(4));
+            entry.missed_count = missed;
+            entry.health = if missed >= self.policy.missed_threshold {
+                HeartbeatHealth::NoHeartbeat
+            } else if missed > 0 {
+                HeartbeatHealth::Stale
+            } else {
+                HeartbeatHealth::NoneYet
+            };
             return;
         };
         let elapsed = now.saturating_duration_since(last);
-        let expected = Duration::from_millis(self.policy.expected_interval_ms);
-        let grace = Duration::from_millis(self.policy.grace_ms);
         let one_window = expected + grace;
         if elapsed < one_window {
             // Last heartbeat is still inside the expected interval.
@@ -191,23 +200,7 @@ impl HeartbeatEvaluator {
         // Count how many full windows have elapsed since the last
         // heartbeat. Subtracting one full window from the elapsed
         // gives the number of missed beats.
-        let missed_full = if expected.is_zero() {
-            entry.missed_count.saturating_add(1)
-        } else {
-            // (elapsed_ms - grace_ms) / expected_ms, saturating at
-            // missed_threshold so the counter stops growing unbounded
-            // while the source is down.
-            let elapsed_ms = duration_to_u64_ms(elapsed);
-            let grace_ms = duration_to_u64_ms(grace);
-            let expected_ms = duration_to_u64_ms(expected);
-            let usable = elapsed_ms.saturating_sub(grace_ms);
-            let estimate = if expected_ms == 0 {
-                1
-            } else {
-                usable / expected_ms
-            };
-            u32::try_from(estimate).unwrap_or(u32::MAX)
-        };
+        let missed_full = missed_full_windows(elapsed, expected, grace);
         entry.missed_count = missed_full.min(self.policy.missed_threshold.saturating_mul(4));
         entry.consecutive_recovery_heartbeats = 0;
         if entry.missed_count >= self.policy.missed_threshold {
@@ -216,6 +209,24 @@ impl HeartbeatEvaluator {
             entry.health = HeartbeatHealth::Stale;
         }
     }
+}
+
+fn missed_full_windows(elapsed: Duration, expected: Duration, grace: Duration) -> u32 {
+    if expected.is_zero() {
+        return 1;
+    }
+    // (elapsed_ms - grace_ms) / expected_ms, saturating at
+    // missed_threshold so callers can apply their own bounded cap.
+    let elapsed_ms = duration_to_u64_ms(elapsed);
+    let grace_ms = duration_to_u64_ms(grace);
+    let expected_ms = duration_to_u64_ms(expected);
+    let usable = elapsed_ms.saturating_sub(grace_ms);
+    let estimate = if expected_ms == 0 {
+        1
+    } else {
+        usable / expected_ms
+    };
+    u32::try_from(estimate).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -284,14 +295,18 @@ mod tests {
     }
 
     #[test]
-    fn initial_no_heartbeat_does_not_flip_until_observation() {
+    fn initial_no_heartbeat_uses_registration_time() {
         let clock = Arc::new(FakeClock::new());
         let e = HeartbeatEvaluator::new(policy(), clock.clone());
         e.register_source(InputSource::ServingWorker);
+        clock.advance(Duration::from_millis(150));
+        let s = e.evaluate();
+        assert_eq!(s.len(), 1);
+        assert!(matches!(s[0].1.health, HeartbeatHealth::Stale));
         clock.advance(Duration::from_millis(10_000));
         let s = e.evaluate();
         assert_eq!(s.len(), 1);
-        assert!(matches!(s[0].1.health, HeartbeatHealth::NoneYet));
+        assert!(matches!(s[0].1.health, HeartbeatHealth::NoHeartbeat));
     }
 
     #[test]
