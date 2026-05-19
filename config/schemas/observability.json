@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/observability.json",
+  "title": "TensorPlate Observability Config",
+  "description": "Runtime configuration for `tensorplate-observability` (V01-E10). The service loads this file at startup, validates it before binding any local transport, and refuses to publish or write snapshots until validation succeeds. Defaults are local-only and never require hosted-platform connectivity. The observability service is independent from `tensorplate-agent` and `tensorplate-serving`: heartbeat freshness is evaluated against a monotonic clock and missing-heartbeat detection works without agent cooperation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "primary_source": {
+      "type": "string",
+      "default": "serving_worker",
+      "description": "Stable identifier for the source the in-process minimal heartbeat producer labels itself with. v0.1.0 default `serving_worker` lets the V01-E07 producer wire up without a schema bump."
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Bounded local event listener. Producers push HealthEvent / SupervisionEvent payloads; the listener normalises both into one internal health-input type.",
+      "properties": {
+        "transport": {
+          "type": "string",
+          "enum": ["in_process", "unix_socket"],
+          "default": "in_process",
+          "description": "v0.1.0 supports `in_process`. `unix_socket` is reserved and returns a typed config error until the external socket listener lands."
+        },
+        "queue_capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1024,
+          "description": "Bounded incoming-event queue capacity. The listener drops the oldest event when the queue is full and bumps a typed `dropped` counter."
+        },
+        "uds_path": {
+          "type": "string",
+          "description": "Absolute Unix-domain-socket path for `transport=unix_socket`."
+        }
+      }
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Monotonic heartbeat policy. All timing uses monotonic time so wall-clock changes never affect freshness decisions.",
+      "properties": {
+        "expected_interval_ms": {"type": "integer", "minimum": 1, "default": 1000},
+        "grace_ms": {"type": "integer", "minimum": 0, "default": 250},
+        "missed_threshold": {"type": "integer", "minimum": 1, "default": 3},
+        "recovery_heartbeats": {"type": "integer", "minimum": 1, "default": 1}
+      }
+    },
+    "safe_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Local safe-state event sink. Bounded; a slow consumer never blocks heartbeat evaluation.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["in_memory", "file"],
+          "default": "in_memory"
+        },
+        "queue_capacity": {"type": "integer", "minimum": 1, "default": 128},
+        "path": {
+          "type": "string",
+          "description": "Absolute file path for `kind=file`."
+        },
+        "periodic_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional periodic emission interval. When set, the aggregator emits a safe-state event on every transition AND on every `periodic_ms` tick the current state is not `ready`."
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E10-F06 minimal status snapshot. Includes the v0.1.0 required fields plus bookkeeping the V01-E11 CLI and V01-E15 validation harness need.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["in_memory", "file"],
+          "default": "in_memory"
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute file path for `kind=file`. Writes use atomic-replace so readers never observe partial records."
+        },
+        "diagnostics_capacity": {"type": "integer", "minimum": 1, "default": 64}
+      }
+    },
+    "ros2_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E10-F05 ROS 2 health topic stub. Optional; disabled by default so the baseline service runs in headless CI. When enabled the stub publishes diagnostic_msgs/msg/DiagnosticArray on `/tensorplate/health` with one DiagnosticStatus named `tensorplate/runtime`.",
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "topic": {
+          "type": "string",
+          "default": "/tensorplate/health",
+          "description": "ROS 2 topic name. Must start with `/`."
+        },
+        "interval_ms": {"type": "integer", "minimum": 1, "default": 1000},
+        "runtime": {
+          "type": "string",
+          "enum": ["mock", "native"],
+          "default": "mock",
+          "description": "v0.1.0 ships the `mock` in-process publisher. `native` is reserved for the post-v0.1.0 `rclrs`-backed transport; selecting it today returns a typed config error."
+        }
+      }
+    }
+  }
+}

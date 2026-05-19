@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/safe_state_event.json",
+  "title": "TensorPlate Safe-State Event",
+  "description": "Discrete safe-state event emitted by `tensorplate-observability` (V01-E10-F04) on transitions into degraded / failed / no-heartbeat states and, optionally, on a configured periodic interval. Consumers (V01-E11 status / log views, V01-E15 validation harness, future safe-state actuators) MUST NOT assume the producer is alive between emissions; the event captures the full diagnostic context required to decide next steps without a follow-up query.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "previous_state",
+    "reason",
+    "agent_state",
+    "serving_state"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "no_heartbeat"],
+      "description": "Aggregated observability state at the time the event was emitted."
+    },
+    "previous_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "no_heartbeat"]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "transition",
+        "periodic",
+        "heartbeat_missing",
+        "serving_failed",
+        "serving_degraded",
+        "crash_loop",
+        "worker_exit",
+        "overload",
+        "recovery"
+      ],
+      "description": "Discrete reason for the event. Consumers filter without parsing free-text messages."
+    },
+    "agent_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"]
+    },
+    "serving_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"]
+    },
+    "active_deployment": {"type": "string"},
+    "backend": {"type": "string"},
+    "missed_heartbeat_count": {"type": "integer", "minimum": 0},
+    "missed_deadline_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "queue_depth": {"type": "integer", "minimum": 0},
+    "last_error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ]
+    },
+    "monotonic_age_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic milliseconds since the most recent transition the aggregator observed."
+    }
+  }
+}

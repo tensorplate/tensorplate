@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::ErrorCode;
+use crate::worker_status::ComponentState;
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Discrete health-event kind. The set is union-stable: post-v0.1.0
@@ -63,6 +64,20 @@ pub struct HealthEvent {
     /// (C++). NEVER wall-clock.
     pub monotonic_timestamp_ns: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_state: Option<ComponentState>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active_deployment: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed_deadline_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_depth: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
     #[serde(default, skip_serializing_if = "ControlLoopMetrics::is_empty")]
     pub control_loop_metrics: ControlLoopMetrics,
@@ -82,6 +97,13 @@ impl HealthEvent {
             schema_version: SCHEMA_VERSION.to_string(),
             kind: HealthEventKind::Heartbeat,
             monotonic_timestamp_ns,
+            sequence: None,
+            source_id: String::new(),
+            serving_state: None,
+            active_deployment: String::new(),
+            backend: String::new(),
+            missed_deadline_rate: None,
+            queue_depth: None,
             correlation_id: None,
             control_loop_metrics: ControlLoopMetrics::default(),
             error_code: None,
@@ -96,6 +118,13 @@ impl HealthEvent {
             schema_version: SCHEMA_VERSION.to_string(),
             kind,
             monotonic_timestamp_ns,
+            sequence: None,
+            source_id: String::new(),
+            serving_state: None,
+            active_deployment: String::new(),
+            backend: String::new(),
+            missed_deadline_rate: None,
+            queue_depth: None,
             correlation_id: None,
             control_loop_metrics: ControlLoopMetrics::default(),
             error_code: None,
@@ -115,6 +144,11 @@ fn validate_non_negative_metric(name: &str, value: Option<f64>) -> Result<(), De
 
 impl ValidatePayload for HealthEvent {
     fn validate_payload(self) -> Result<Self, DecodeError> {
+        if matches!(self.missed_deadline_rate, Some(v) if !(0.0..=1.0).contains(&v) || v.is_nan()) {
+            return Err(DecodeError::InvalidPayload(
+                "HealthEvent.missed_deadline_rate must be finite and in [0, 1]".into(),
+            ));
+        }
         validate_non_negative_metric("jitter_p50_ms", self.control_loop_metrics.jitter_p50_ms)?;
         validate_non_negative_metric("jitter_p95_ms", self.control_loop_metrics.jitter_p95_ms)?;
         validate_non_negative_metric("jitter_p99_ms", self.control_loop_metrics.jitter_p99_ms)?;
@@ -173,6 +207,13 @@ mod tests {
             schema_version: SCHEMA_VERSION.to_string(),
             kind: HealthEventKind::MissedDeadline,
             monotonic_timestamp_ns: 9_999,
+            sequence: Some(42),
+            source_id: "serving-worker-1".into(),
+            serving_state: Some(crate::worker_status::ComponentState::Degraded),
+            active_deployment: "deploy-1".into(),
+            backend: "tensorrt".into(),
+            missed_deadline_rate: Some(0.25),
+            queue_depth: Some(3),
             correlation_id: Some("req-3".into()),
             control_loop_metrics: metrics,
             error_code: Some(ErrorCode::Timeout),
@@ -182,6 +223,8 @@ mod tests {
         let back: HealthEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(e, back);
         assert_eq!(back.control_loop_metrics, metrics);
+        assert_eq!(back.queue_depth, Some(3));
+        assert_eq!(back.missed_deadline_rate, Some(0.25));
     }
 
     #[test]
@@ -214,6 +257,15 @@ mod tests {
     fn version_check_decoder_rejects_current_schema_negative_metric() {
         let json = format!(
             r#"{{"schema_version":"{SCHEMA_VERSION}","kind":"missed_deadline","monotonic_timestamp_ns":1,"control_loop_metrics":{{"jitter_p95_ms":-1.0}}}}"#
+        );
+        let err = decode_with_version_check::<HealthEvent>(&json).expect_err("rejected");
+        assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn version_check_decoder_rejects_out_of_range_missed_deadline_rate() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","kind":"overload","monotonic_timestamp_ns":1,"missed_deadline_rate":1.5}}"#
         );
         let err = decode_with_version_check::<HealthEvent>(&json).expect_err("rejected");
         assert!(matches!(err, crate::DecodeError::InvalidPayload(_)));

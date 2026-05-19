@@ -10,6 +10,10 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+name = "tensorplate_observability"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tensorplate-observability"
 path = "src/main.rs"
@@ -18,6 +22,11 @@ path = "src/main.rs"
 tensorplate-protocol = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

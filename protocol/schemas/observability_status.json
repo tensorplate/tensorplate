@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/observability_status.json",
+  "title": "TensorPlate Observability Status Snapshot",
+  "description": "V01-E10-F06 minimal status snapshot exposed by `tensorplate-observability`. Surfaces the v0.1.0 required fields plus bookkeeping required by the V01-E11 CLI (`tensorplate status`) and the V01-E15 validation harness. Snapshot writes are atomic so readers never observe partial records; the schema is versioned and rejects unknown versions through the V01-E02 `decode_with_version_check` path.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observability_state",
+    "agent_state",
+    "serving_state",
+    "missed_heartbeat_count",
+    "missed_deadline_rate",
+    "queue_depth"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "observability_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "no_heartbeat"]
+    },
+    "agent_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"]
+    },
+    "serving_state": {
+      "type": "string",
+      "enum": ["ready", "degraded", "failed", "unknown"]
+    },
+    "active_deployment": {"type": "string"},
+    "backend": {"type": "string"},
+    "missed_heartbeat_count": {"type": "integer", "minimum": 0},
+    "missed_deadline_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "queue_depth": {"type": "integer", "minimum": 0},
+    "last_error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ]
+    },
+    "last_event_sequence": {"type": "integer", "minimum": 0},
+    "last_heartbeat_age_ms": {"type": "integer", "minimum": 0},
+    "safe_state_sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "dropped", "errors"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "dropped": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ros2_publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "published", "errors"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "topic": {"type": "string"},
+        "published": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0}
+      }
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "dropped",
+        "malformed",
+        "duplicates",
+        "out_of_order",
+        "unknown_version"
+      ],
+      "properties": {
+        "accepted": {"type": "integer", "minimum": 0},
+        "dropped": {"type": "integer", "minimum": 0},
+        "malformed": {"type": "integer", "minimum": 0},
+        "duplicates": {"type": "integer", "minimum": 0},
+        "out_of_order": {"type": "integer", "minimum": 0},
+        "unknown_version": {"type": "integer", "minimum": 0}
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity", "recent_transitions", "recent_errors"],
+      "properties": {
+        "capacity": {"type": "integer", "minimum": 1},
+        "recent_transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["previous_state", "state", "reason", "monotonic_age_ms"],
+            "properties": {
+              "previous_state": {"type": "string"},
+              "state": {"type": "string"},
+              "reason": {"type": "string"},
+              "monotonic_age_ms": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "recent_errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["component", "code", "message"],
+            "properties": {
+              "component": {"type": "string"},
+              "code": {"type": "string"},
+              "message": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
