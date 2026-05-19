@@ -8,6 +8,112 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Observability service baseline (V01-E10). `tensorplate-observability`
+  is now a working independent health monitor that runs without
+  depending on the serving request path or the V01-E08 deploy
+  transaction. The crate ships a library + binary with the following
+  modules:
+    - `observability::config::ObservabilityConfig` (V01-E10-F01) —
+      validated schema covering listener transport, heartbeat policy
+      (`expected_interval_ms`, `grace_ms`, `missed_threshold`,
+      `recovery_heartbeats`), safe-state sink, snapshot writer, ROS 2
+      health stub. Defaults are local-only; the ROS 2 publisher is
+      disabled unless explicitly enabled. Schema mirrored at
+      `config/schemas/observability.json`.
+    - `observability::error::ObservabilityError` — typed errors mapped
+      to stable `tensorplate_protocol::ErrorCode` values so consumers
+      see the same codes as the rest of the runtime.
+    - `observability::clock::{MonotonicClock, SystemMonotonicClock,
+      FakeClock}` — monotonic clock abstraction with a fake-clock test
+      hook so every freshness decision is deterministic.
+    - `observability::listener::{EventListener, HealthInput,
+      ListenerCounters}` (V01-E10-F02) — bounded local listener that
+      ingests `HealthEvent` heartbeats and `SupervisionEvent`
+      transitions, normalises both into one `HealthInput` type, and
+      tracks accepted / dropped / malformed / duplicate /
+      out-of-order / unknown-version counters. A bounded VecDeque
+      drops the oldest event when full so a slow consumer never
+      blocks the producer.
+    - `observability::heartbeat::{HeartbeatEvaluator,
+      HeartbeatHealth, SourceState}` (V01-E10-F03) — per-source
+      heartbeat freshness using monotonic time. Missed beats
+      increment a bounded counter; the source flips to `NoHeartbeat`
+      after `missed_threshold`; recovery requires
+      `recovery_heartbeats` consecutive fresh heartbeats and resets
+      the counter. Wall-clock changes never influence freshness.
+    - `observability::state::{Aggregator, ObservabilityState,
+      SafeStateEvent, SafeStateReason}` (V01-E10-F04) — aggregator
+      that combines heartbeat freshness, serving state, agent state,
+      overload, and last-error code into one `ready` /
+      `degraded` / `failed` / `no_heartbeat` state. Emits a
+      `SafeStateEvent` on every transition AND, when configured, on
+      every `safe_state.periodic_ms` tick the state is not `ready`.
+      Precedence table: `no_heartbeat > failed > degraded > ready`.
+    - `observability::sink::{SafeStateSink, InMemorySafeStateSink,
+      FileSafeStateSink, NoopSafeStateSink, WireSafeStateEvent}`
+      (V01-E10-F04) — bounded sinks. The in-memory ring drops oldest
+      when full and tallies the bounded drop counter; the file sink
+      appends JSON lines and tallies write failures; neither blocks
+      heartbeat evaluation.
+    - `observability::ros2::{Ros2HealthPublisher, MockHealthPublisher,
+      DiagnosticArray, DiagnosticStatus, DiagnosticLevel,
+      DiagnosticKeyValue, build_diagnostic_array}` (V01-E10-F05) —
+      optional ROS 2 health topic stub. When enabled, the publisher
+      emits `diagnostic_msgs/msg/DiagnosticArray` on
+      `/tensorplate/health` (configurable) with one `DiagnosticStatus`
+      named `tensorplate/runtime`. Level mapping
+      `ready -> OK / degraded -> WARN / failed -> ERROR /
+      no_heartbeat -> STALE`. Key-values include `agent_state`,
+      `serving_state`, `observability_state`, `active_deployment`,
+      `backend`, `missed_heartbeat_count`, `missed_deadline_rate`,
+      `queue_depth`, `last_error_code`. The v0.1.0 stub ships a
+      mock-backed implementation so it runs in CI without a ROS 2
+      distribution; the native publisher is reserved for a
+      post-v0.1.0 release.
+    - `observability::snapshot::{SnapshotWriter, StatusSnapshot,
+      SinkStatus, PublisherStatus, ListenerStatus,
+      BoundedDiagnostics, RecentTransition, RecentError}`
+      (V01-E10-F06) — versioned status snapshot that surfaces every
+      v0.1.0 required field plus the diagnostics ring V01-E11 / V01-E15
+      consume. File-backed snapshots use atomic-replace
+      (`*.partial` -> rename) so readers never observe partial records.
+    - `observability::service::Service` (V01-E10-F01) — composition
+      root. `Service::tick(now)` drains the listener, advances the
+      heartbeat evaluator, updates the aggregator, emits any
+      safe-state events, refreshes the snapshot, and publishes the
+      ROS 2 health topic when enabled. The binary main loop calls
+      `tick` on the configured heartbeat cadence; tests drive the
+      same pipeline through a `FakeClock`.
+- Observability protocol schemas:
+    - `protocol/schemas/safe_state_event.json` — discrete safe-state
+      event payload with version-fixed schema; documents the v0.1.0
+      state names, transition reasons, and bounded diagnostic
+      context.
+    - `protocol/schemas/observability_status.json` — versioned status
+      snapshot schema consumed by the V01-E11 CLI (`tensorplate
+      status`) and the V01-E15 validation harness. Includes
+      sink / publisher / listener counters and the bounded
+      `diagnostics` ring.
+- Observability integration / failure-injection tests
+  (V01-E10-F07) at
+  `observability/tests/observability_failure_injection.rs`. Coverage
+  includes healthy heartbeat, missing heartbeat without agent input
+  (proves independent detection), heartbeat recovery, explicit failed
+  state, crash-loop supervision event, worker-exit supervision event,
+  worker-not-ready supervision event, overload event with `Overload`
+  reason, malformed payload counter, unknown schema version typed
+  rejection, event storm bounded-drop behaviour, duplicate / out-of-
+  order sequence counters, periodic safe-state emission until
+  recovery, ROS 2 DiagnosticArray mapping (level + required
+  key-values), disabled ROS 2 publisher, file-backed snapshot
+  atomic-replace, bounded diagnostics ring, agent supervision event
+  enrichment, and the V01-E10 "no agent input" acceptance criterion.
+- Observability architecture doc at
+  `docs/architecture/observability.md` covering the state model,
+  precedence table, monotonic heartbeat semantics, safe-state event
+  shape, ROS 2 health topic mapping, snapshot schema, and the
+  independence-from-agent contract.
+
 - Agent worker supervision (V01-E09). `tensorplate-agent` now owns the
   full lifecycle of the V01-E07 `tensorplate-serving` worker. A new
   `tensorplate_agent::supervision` module ships:
