@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bundle_manifest::{ArtifactRole, BundleManifest, BundleManifestError, DeviceFamily};
+use crate::bundle_manifest::{
+    ArtifactKind, ArtifactRole, BundleManifest, BundleManifestError, DeviceFamily,
+};
 use crate::SCHEMA_VERSION;
 
 /// Stable name of the manifest file inside a bundle root.
@@ -269,6 +271,8 @@ pub struct BackendCapabilityView {
     pub generation: bool,
     pub kv_cache: bool,
     pub fixed_shape: bool,
+    pub deterministic_latency: bool,
+    pub control_loop_integration: bool,
 }
 
 /// Backend publication record consumed by [`evaluate_compatibility`].
@@ -497,6 +501,16 @@ pub fn evaluate_compatibility(
                     (req.generation, cap.generation, "generation"),
                     (req.kv_cache, cap.kv_cache, "kv_cache"),
                     (req.fixed_shape, cap.fixed_shape, "fixed_shape"),
+                    (
+                        req.deterministic_latency,
+                        cap.deterministic_latency,
+                        "deterministic_latency",
+                    ),
+                    (
+                        req.control_loop_integration,
+                        cap.control_loop_integration,
+                        "control_loop_integration",
+                    ),
                 ];
                 for (need, have, name) in pairs {
                     if *need && !*have {
@@ -521,7 +535,11 @@ pub fn evaluate_compatibility(
                 }
                 if !profile.supported_artifact_kinds.is_empty() {
                     if let Some(art) = m.artifacts.iter().find(|a| a.role == ArtifactRole::Model) {
-                        if let Some(kind) = artifact_kind_for_path(&art.path) {
+                        if let Some(kind) = art
+                            .kind
+                            .map(ArtifactKind::as_str)
+                            .or_else(|| artifact_kind_for_path(&art.path))
+                        {
                             if !profile
                                 .supported_artifact_kinds
                                 .iter()
@@ -931,6 +949,37 @@ mod tests {
     }
 
     #[test]
+    fn compatibility_rejects_new_capability_requirements() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"x","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"tensorrt","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}],"capability_requirements":{{"deterministic_latency":true,"control_loop_integration":true}}}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let d = parse_bundle(bundle.path()).expect("parse");
+        let device = DeviceContext {
+            backends: vec![BackendProfile {
+                backend: "tensorrt".into(),
+                capabilities: BackendCapabilityView::default(),
+                ..BackendProfile::default()
+            }],
+            ..DeviceContext::default()
+        };
+        let r = evaluate_compatibility(&d, &device);
+        assert!(!r.ok);
+        assert!(r.violations.iter().any(|v| matches!(
+            v,
+            CompatibilityViolation::UnsupportedCapability { capability, .. }
+                if capability == "deterministic_latency"
+        )));
+        assert!(r.violations.iter().any(|v| matches!(
+            v,
+            CompatibilityViolation::UnsupportedCapability { capability, .. }
+                if capability == "control_loop_integration"
+        )));
+    }
+
+    #[test]
     fn compatibility_rejects_artifact_kind_mismatch() {
         let bundle = TempDir::new().expect("td");
         let body = vision_manifest(bundle.path());
@@ -950,5 +999,31 @@ mod tests {
             .violations
             .iter()
             .any(|v| matches!(v, CompatibilityViolation::BackendArtifactMismatch { .. })));
+    }
+
+    #[test]
+    fn compatibility_prefers_explicit_artifact_kind_over_extension() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"x","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"tensorrt","artifacts":[{{"role":"model","kind":"vitis_xmodel","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let d = parse_bundle(bundle.path()).expect("parse");
+        let device = DeviceContext {
+            backends: vec![BackendProfile {
+                backend: "tensorrt".into(),
+                supported_artifact_kinds: vec!["tensorrt_engine".into()],
+                ..BackendProfile::default()
+            }],
+            ..DeviceContext::default()
+        };
+        let r = evaluate_compatibility(&d, &device);
+        assert!(!r.ok);
+        assert!(r.violations.iter().any(|v| matches!(
+            v,
+            CompatibilityViolation::BackendArtifactMismatch { artifact_kind, .. }
+                if artifact_kind == "vitis_xmodel"
+        )));
     }
 }

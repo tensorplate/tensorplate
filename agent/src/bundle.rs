@@ -280,9 +280,9 @@ fn device_context_from_config(config: &AgentConfig) -> AgentResult<DeviceContext
             let cap = config.capability_for(backend);
             BackendProfile {
                 backend: backend.clone(),
-                capabilities: capability_view(cap),
-                supported_precision: Vec::new(),
-                supported_artifact_kinds: Vec::new(),
+                capabilities: capability_view(&cap),
+                supported_precision: cap.supported_precision,
+                supported_artifact_kinds: cap.supported_artifact_kinds,
             }
         })
         .collect();
@@ -294,13 +294,15 @@ fn device_context_from_config(config: &AgentConfig) -> AgentResult<DeviceContext
     })
 }
 
-fn capability_view(c: BackendCapability) -> BackendCapabilityView {
+fn capability_view(c: &BackendCapability) -> BackendCapabilityView {
     BackendCapabilityView {
         async_: c.async_,
         streaming: c.streaming,
         generation: c.generation,
         kv_cache: c.kv_cache,
         fixed_shape: c.fixed_shape,
+        deterministic_latency: c.deterministic_latency,
+        control_loop_integration: c.control_loop_integration,
     }
 }
 
@@ -487,6 +489,62 @@ mod tests {
             },
         );
         verify(bundle.path(), &cfg).expect("ok");
+    }
+
+    #[test]
+    fn rejects_unpublished_e13_capabilities() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vla","backend_hint":"mock","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}],"capability_requirements":{{"deterministic_latency":true,"control_loop_integration":true}}}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let cfg = config(td.path().join("s"), td.path().join("st"));
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::UnsupportedCapability(_, _)));
+    }
+
+    #[test]
+    fn rejects_unsupported_precision_from_agent_profile() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","precision_hint":"fp16","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.backend_capabilities.insert(
+            "mock".into(),
+            BackendCapability {
+                supported_precision: vec!["int8".into()],
+                ..BackendCapability::default()
+            },
+        );
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::Unavailable(_)));
+    }
+
+    #[test]
+    fn rejects_explicit_artifact_kind_mismatch_from_agent_profile() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","artifacts":[{{"role":"model","kind":"vitis_xmodel","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.backend_capabilities.insert(
+            "mock".into(),
+            BackendCapability {
+                supported_artifact_kinds: vec!["tensorrt_engine".into()],
+                ..BackendCapability::default()
+            },
+        );
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::Unavailable(_)));
     }
 
     #[test]

@@ -110,6 +110,8 @@ The structured block carries vendor metadata under `precision.jetson`
 and `precision.vitis_ai`. Backends publish their supported precision
 profiles through `BackendProfile::supported_precision`; the compat
 evaluator rejects a bundle whose declared profile is not in that list.
+The agent fills this profile from `backend_capabilities[*].supported_precision`
+in its runtime config.
 
 ---
 

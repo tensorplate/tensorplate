@@ -65,6 +65,7 @@ fn vision_tensorrt_parses_and_passes_compatibility_on_jetson() {
         "tensorrt",
         BackendCapabilityView {
             fixed_shape: true,
+            deterministic_latency: true,
             ..BackendCapabilityView::default()
         },
         &["tensorrt_engine"],
@@ -93,6 +94,8 @@ fn smolvla_python_pytorch_uses_named_multi_input_and_action_output() {
         "python_pytorch",
         BackendCapabilityView {
             async_: true,
+            deterministic_latency: true,
+            control_loop_integration: true,
             ..BackendCapabilityView::default()
         },
         &["python_pytorch_entry"],

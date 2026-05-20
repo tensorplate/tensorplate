@@ -80,6 +80,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   by reference (one in-tree call site updated;
   `agent::check_capabilities` signature is unchanged at the public
   shape).
+- `tensorplate_agent::config::BackendCapability` now carries the E13
+  capability flags plus `supported_precision` and
+  `supported_artifact_kinds` so deploy validation can reject unsupported
+  precision profiles and backend/artifact mismatches before staging.
 - `BundleManifest` and `BundleDescriptor` lose `Eq` because `f64`
   fields (VLA control frequency, vision normalization) participate in
   equality. `PartialEq` is still derived; tests that need stable

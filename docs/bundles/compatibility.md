@@ -43,6 +43,9 @@ The agent calls `parse_bundle` once, builds a `DeviceContext` from
 violation onto its typed `AgentError`. Callers that want every violation
 (CLI deploy/doctor rendering) use `parse_and_check` instead — it returns
 the full `CompatibilityResult` without short-circuiting.
+`AgentConfig.backend_capabilities` carries backend capability flags,
+supported precision profiles, and accepted artifact kinds into that
+`DeviceContext`.
 
 ---
 
