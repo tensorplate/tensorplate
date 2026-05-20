@@ -93,3 +93,11 @@ the V01-E07 / V01-E05 bindings land.
 | `scheduler_pressure_signal.json` | V01-E06   |
 | `buffer_pressure_event.json` | V01-E03       |
 | `backend_capability.json`  | V01-E05         |
+| `supervision_event.json`   | V01-E09         |
+| `safe_state_event.json`    | V01-E10-F04     |
+| `observability_status.json` | V01-E10-F06 (extended in V01-E12-F07) |
+| `cli_output.json`          | V01-E11-F01     |
+| `log_event.json`           | V01-E12-F01     |
+| `failure_reason.json`      | V01-E12-F03     |
+| `metric_event.json`        | V01-E12-F04     |
+| `control_loop_metrics.json` | V01-E12-F05    |

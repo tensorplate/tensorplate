@@ -30,9 +30,13 @@
 
 pub mod clock;
 pub mod config;
+pub mod control_loop;
 pub mod error;
 pub mod heartbeat;
 pub mod listener;
+pub mod log_emitter;
+pub mod metrics;
+pub mod retention;
 pub mod ros2;
 pub mod service;
 pub mod sink;
@@ -41,13 +45,23 @@ pub mod state;
 
 pub use clock::{FakeClock, MonotonicClock, SystemMonotonicClock};
 pub use config::{
-    HeartbeatPolicy, ListenerConfig, ListenerTransport, ObservabilityConfig, Ros2HealthConfig,
-    Ros2Runtime, SafeStateSinkConfig, SafeStateSinkKind, StatusSnapshotConfig, StatusSnapshotKind,
+    ControlLoopTelemetryConfig, HeartbeatPolicy, ListenerConfig, ListenerTransport,
+    ObservabilityConfig, Ros2HealthConfig, Ros2Runtime, SafeStateSinkConfig, SafeStateSinkKind,
+    StatusSnapshotConfig, StatusSnapshotKind,
 };
+pub use control_loop::{ControlLoopAggregator, ControlLoopAggregatorConfig};
 pub use error::{ObservabilityError, ObservabilityResult};
 pub use heartbeat::{HeartbeatEvaluator, HeartbeatHealth, SourceState};
 pub use listener::{
     EventListener, HealthInput, InputKind, InputSource, ListenerCounters, ListenerCountersSnapshot,
+};
+pub use log_emitter::{LogEmitter, LogEmitterCounters};
+pub use metrics::{
+    default_latency_buckets_ms, endpoint_backend_labels, MetricSinkConfig, MetricsCounters,
+    MetricsExportConfig, MetricsRegistry, SeriesId, SinkBackpressurePolicy,
+};
+pub use retention::{
+    DiagnosticsRetention, RetentionConfig, RetentionCounters, RetentionDropPolicy,
 };
 pub use ros2::{
     build_diagnostic_array, DiagnosticArray, DiagnosticKeyValue, DiagnosticLevel, DiagnosticStatus,
@@ -59,7 +73,8 @@ pub use sink::{
     SafeStateSink, WireSafeStateEvent,
 };
 pub use snapshot::{
-    BoundedDiagnostics, ListenerStatus, PublisherStatus, RecentError, RecentTransition, SinkStatus,
+    BoundedDiagnostics, ControlLoopStatus, DiagnosticsSinkStatus, ListenerStatus,
+    MetricsExportStatus, PublisherStatus, RecentError, RecentTransition, SinkStatus,
     SnapshotWriter, StatusSnapshot,
 };
 pub use state::{AggregateState, Aggregator, ObservabilityState, SafeStateEvent, SafeStateReason};

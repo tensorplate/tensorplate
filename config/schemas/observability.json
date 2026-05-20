@@ -105,6 +105,74 @@
           "description": "v0.1.0 ships the `mock` in-process publisher. `native` is reserved for the post-v0.1.0 `rclrs`-backed transport; selecting it today returns a typed config error."
         }
       }
+    },
+    "diagnostics_retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12 bounded structured-log retention and optional local file sink. Producers never block on this sink.",
+      "properties": {
+        "queue_capacity": {"type": "integer", "minimum": 1, "default": 1024},
+        "drop_policy": {
+          "type": "string",
+          "enum": ["drop_oldest", "drop_incoming"],
+          "default": "drop_oldest"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Absolute JSON-lines log file path. Omit for in-memory-only retention."
+        },
+        "rotate_bytes": {"type": "integer", "minimum": 1, "default": 1048576}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12 local-only metrics registry and export hook.",
+      "properties": {
+        "max_series": {"type": "integer", "minimum": 1, "default": 256},
+        "queue_capacity": {"type": "integer", "minimum": 1, "default": 1024},
+        "backpressure": {
+          "type": "string",
+          "enum": ["drop", "drop_with_warning"],
+          "default": "drop"
+        },
+        "sink": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Local metrics sink. `file.path` must be absolute.",
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["noop", "file", "stdout", "in_memory"],
+              "default": "in_memory"
+            },
+            "path": {
+              "type": "string",
+              "description": "Absolute JSON-lines metrics file path when kind=file."
+            }
+          }
+        }
+      }
+    },
+    "control_loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12 optional VLA control-loop jitter and frequency-stability metrics.",
+      "properties": {
+        "enabled": {"type": "boolean", "default": false},
+        "control_frequency_hz": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Required when enabled."
+        },
+        "window_seconds": {"type": "integer", "minimum": 1, "default": 60},
+        "grace_ms": {"type": "number", "minimum": 0},
+        "endpoint": {"type": "string", "minLength": 1, "maxLength": 64, "default": "/v1/act"},
+        "model_class": {"type": "string", "minLength": 1, "maxLength": 64, "default": "vla"},
+        "model_name": {"type": "string", "minLength": 1, "maxLength": 64, "default": "unknown"},
+        "backend": {"type": "string", "minLength": 1, "maxLength": 64, "default": "unknown"}
+      }
     }
   }
 }

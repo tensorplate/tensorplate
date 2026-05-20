@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/log_event.json",
+  "title": "TensorPlate Structured Log Event",
+  "description": "Shared structured log envelope emitted by the agent, serving worker, runtime/adapters, Python/PyTorch sidecar, and observability service (V01-E12-F01). The schema is the canonical log shape consumed by the V01-E11 `tensorplate logs` reader, the V01-E12-F07 status projection, and the V01-E15 validation harness. Logging failures must never panic or block the inference path; readers reject unknown `schema_version` strings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "component",
+    "event",
+    "level",
+    "monotonic_timestamp_ns"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "Pinned to the v0.1 protocol; decoders reject other values via `tensorplate_protocol::decode_with_version_check`."
+    },
+    "component": {
+      "type": "string",
+      "enum": [
+        "agent",
+        "serving_worker",
+        "runtime",
+        "adapter",
+        "python_pytorch_sidecar",
+        "observability",
+        "cli"
+      ],
+      "description": "Producer component. Adapters tag the `adapter` value and embed adapter detail under `context.backend`. Backend-specific producers do not leak vendor SDK types into the top-level enum."
+    },
+    "event": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$",
+      "description": "Stable dot-separated event name in lower snake_case (for example `deploy.warmup_complete`). The catalog is documented in `docs/observability/log-schema.md`."
+    },
+    "level": {
+      "type": "string",
+      "enum": ["trace", "debug", "info", "warn", "error"],
+      "description": "Severity level. Bounded to the v0.1 set; `trace` is filtered out of bounded sinks by default."
+    },
+    "monotonic_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp in nanoseconds (`std::chrono::steady_clock` in C++, `std::time::Instant` in Rust). NEVER wall-clock."
+    },
+    "wall_time_iso8601": {
+      "type": "string",
+      "description": "Optional wall-clock annotation for the operator. Sinks must not derive freshness or ordering from this field; the producer may omit it on devices without RTC."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Optional bounded correlation identifier joining logs, metrics, and errors. Format is enforced by V01-E12-F02; readers reject unbounded external IDs."
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Optional per-request identifier (serving ingress)."
+    },
+    "transaction_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Optional deploy transaction identifier produced by the agent."
+    },
+    "deployment_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Optional active or candidate deployment identifier (matches agent state-store keys)."
+    },
+    "model_name": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Optional active model name (from the bundle manifest)."
+    },
+    "model_class": {
+      "type": "string",
+      "enum": ["vision", "speech", "language", "vla", "embedding", "custom"],
+      "description": "Optional model class. Bounded to the V01-E02 `ModelClass` value object (`protocol/schemas/model_spec.json`)."
+    },
+    "backend": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[a-z0-9_]+$",
+      "description": "Optional backend label. Producers must use the bounded names from the backend registry (`python_pytorch`, `libtorch`, `tensorrt`, `mock`, ...). Vendor SDK build flavours are carried inside `context` as bounded strings."
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Optional protocol error code (`protocol/schemas/error.json`)."
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "Optional operator-visible failure reason code from `protocol/schemas/failure_reason.json` (V01-E12-F03). The reason classifies the typed error and unlocks CLI rendering without parsing free-form messages."
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Optional monotonic duration (milliseconds) covered by this event. Always derived from monotonic deltas."
+    },
+    "context": {
+      "type": "object",
+      "description": "Bounded structured context. Producers MUST NOT include tensor payloads, request payloads, image bytes, base64 blobs, environment dumps, or secrets. Sanitisers drop unknown keys, truncate strings to 256 bytes, and reject nested objects deeper than one level (V01-E12-F01).",
+      "additionalProperties": {
+        "anyOf": [
+          { "type": "string", "maxLength": 256 },
+          { "type": "integer" },
+          { "type": "number" },
+          { "type": "boolean" },
+          { "type": "null" }
+        ]
+      }
+    }
+  }
+}

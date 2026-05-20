@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/failure_reason.json",
+  "title": "TensorPlate Failure Reason Taxonomy",
+  "description": "Operator-visible failure reason taxonomy (V01-E12-F03). Normalises local failure reasons across the agent transaction status, serving worker inference errors, backend/adapter failures, Python/PyTorch sidecar lifecycle, worker supervision, and observability heartbeat. Failure reasons classify typed `error_code` values so CLI consumers can render explanations without parsing free-form messages. Each reason maps to exactly one `error_code`; new reasons append rather than rename to keep the wire format stable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "reason", "category", "error_code"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "bundle_schema_invalid",
+        "bundle_integrity_failed",
+        "unsupported_runtime",
+        "unsupported_hardware",
+        "backend_unavailable",
+        "backend_unsupported_capability",
+        "shape_mismatch",
+        "oom",
+        "timeout",
+        "deadline_missed",
+        "sidecar_startup_failed",
+        "sidecar_malformed_response",
+        "sidecar_process_exit",
+        "worker_not_ready",
+        "worker_exit",
+        "worker_crash_loop",
+        "no_heartbeat",
+        "permission_denied",
+        "internal"
+      ],
+      "description": "Stable failure reason code. The set is union-stable; post-v0.1.0 additions append."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "config",
+        "bundle",
+        "platform",
+        "backend",
+        "sidecar",
+        "supervision",
+        "heartbeat",
+        "permission",
+        "internal"
+      ],
+      "description": "Coarse grouping used by CLI rendering and metric aggregation. Bounded to keep label cardinality finite."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["warning", "error", "critical"],
+      "description": "Severity hint for CLI rendering. Sinks may downsample lower severities under backpressure (V01-E12-F06)."
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "Coarse hint to operators and agent retry logic. The agent does not auto-retry permission or bundle-integrity failures."
+    },
+    "error_code": {
+      "type": "string",
+      "enum": [
+        "config_invalid",
+        "load_failed",
+        "not_ready",
+        "shape_mismatch",
+        "unsupported",
+        "oom_error",
+        "timeout",
+        "inference_failed",
+        "internal"
+      ],
+      "description": "Mapping to the existing `protocol/schemas/error.json` taxonomy. Each reason maps to exactly one code; CLI consumers can render the reason and still surface the code for V01-E15 grep assertions."
+    },
+    "detail": {
+      "type": "string",
+      "maxLength": 512,
+      "description": "Optional bounded human-readable detail. Producers MUST redact absolute paths, environment values, and credentials before emitting."
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Optional correlation id (V01-E12-F02) tying the failure to logs and metrics."
+    }
+  }
+}

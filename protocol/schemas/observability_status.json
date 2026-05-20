@@ -124,6 +124,69 @@
           }
         }
       }
+    },
+    "diagnostics_sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12-F06 retention sink health surfaced through `tensorplate doctor` and `tensorplate status`.",
+      "required": ["enqueued", "dropped_queue_full", "file_write_errors", "file_rotations"],
+      "properties": {
+        "enqueued": {"type": "integer", "minimum": 0},
+        "dropped_queue_full": {"type": "integer", "minimum": 0},
+        "dropped_redacted": {"type": "integer", "minimum": 0},
+        "file_write_errors": {"type": "integer", "minimum": 0},
+        "file_rotations": {"type": "integer", "minimum": 0},
+        "drains": {"type": "integer", "minimum": 0}
+      }
+    },
+    "metrics_export": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12-F04 metrics registry health.",
+      "required": ["series_registered", "samples_recorded", "sink_write_errors"],
+      "properties": {
+        "series_registered": {"type": "integer", "minimum": 0},
+        "samples_recorded": {"type": "integer", "minimum": 0},
+        "series_rejected_unknown_label": {"type": "integer", "minimum": 0},
+        "series_rejected_bounded_label": {"type": "integer", "minimum": 0},
+        "series_rejected_full": {"type": "integer", "minimum": 0},
+        "samples_dropped_queue_full": {"type": "integer", "minimum": 0},
+        "sink_write_errors": {"type": "integer", "minimum": 0}
+      }
+    },
+    "control_loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "V01-E12-F05 rolling control-loop summary. Present when the serving worker emits action outputs for a VLA validation endpoint; absent otherwise.",
+      "required": ["control_frequency_hz", "samples", "missed_deadline_rate"],
+      "properties": {
+        "control_frequency_hz": {"type": "number", "exclusiveMinimum": 0},
+        "rolling_window_seconds": {"type": "integer", "minimum": 1, "default": 60},
+        "samples": {"type": "integer", "minimum": 0},
+        "missed_deadlines": {"type": "integer", "minimum": 0},
+        "missed_deadline_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "jitter_p50_ms": {"type": "number", "minimum": 0},
+        "jitter_p95_ms": {"type": "number", "minimum": 0},
+        "jitter_p99_ms": {"type": "number", "minimum": 0},
+        "jitter_max_ms": {"type": "number", "minimum": 0},
+        "mean_frequency_hz": {"type": "number", "minimum": 0},
+        "frequency_stddev_hz": {"type": "number", "minimum": 0},
+        "frequency_error_pct": {"type": "number", "minimum": 0},
+        "endpoint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "model_name": {"type": "string"},
+        "backend": {"type": "string"}
+      }
+    },
+    "last_correlation_id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "V01-E12-F02 last correlation id observed by the snapshot writer (deploy or inference). Useful for the operator to join `tensorplate logs` output with the current status."
+    },
+    "last_failure_reason": {
+      "type": "string",
+      "description": "V01-E12-F03 last operator-visible failure reason recorded by the snapshot writer. Bounded to the failure_reason.json taxonomy."
     }
   }
 }

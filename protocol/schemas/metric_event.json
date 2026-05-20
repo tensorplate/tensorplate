@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/metric_event.json",
+  "title": "TensorPlate Metric Event",
+  "description": "Local metric sample envelope (V01-E12-F04). The v0.1 registry supports counters, gauges, and histograms; the wire form is the same for every kind so the local scrape/file/stdout sink can stream samples without per-kind branching. Label sets are bounded to keep cardinality finite on constrained devices.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "kind",
+    "unit",
+    "monotonic_timestamp_ns",
+    "sample"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^tp_[a-z][a-z0-9_]*$",
+      "description": "Metric name. The `tp_` prefix is mandatory so an external scrape endpoint can distinguish TensorPlate metrics from host metrics without explicit namespacing."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["counter", "gauge", "histogram"],
+      "description": "Aggregation kind. Counters are non-decreasing; gauges may go up and down; histograms carry a bounded list of bucket counts plus sum and count."
+    },
+    "unit": {
+      "type": "string",
+      "enum": [
+        "count",
+        "milliseconds",
+        "seconds",
+        "hertz",
+        "percent",
+        "bytes",
+        "ratio"
+      ],
+      "description": "Explicit unit. Producers MUST NOT use the same metric name with different units."
+    },
+    "monotonic_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp in nanoseconds. NEVER wall-clock."
+    },
+    "labels": {
+      "type": "object",
+      "description": "Bounded label set. v0.1 allows the keys `endpoint`, `model_class`, `model_name`, `backend`, `component`, `status`. Values are bounded to 64 bytes. Unknown keys are rejected by the registry to keep cardinality finite.",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 64
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Sample payload. Counters and gauges set `value`; histograms set `bucket_upper_bounds`, `bucket_counts`, `count`, `sum`.",
+      "properties": {
+        "value": {
+          "type": "number"
+        },
+        "bucket_upper_bounds": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 32,
+          "description": "Strictly increasing upper bounds in the metric's unit. The last bucket is implicit `+Inf`."
+        },
+        "bucket_counts": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxItems": 33,
+          "description": "Cumulative counts per bucket (matches the Prometheus exposition shape). Length must equal `len(bucket_upper_bounds) + 1`."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total observation count (histograms only). Must match the final implicit +Inf bucket count."
+        },
+        "sum": {
+          "type": "number",
+          "description": "Sum of observations (histograms only)."
+        }
+      }
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Optional bounded correlation id carried as a sample-level exemplar."
+    }
+  }
+}
