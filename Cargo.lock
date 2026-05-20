@@ -277,8 +277,11 @@ dependencies = [
 name = "tensorplate-protocol"
 version = "0.1.0-dev"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror",
 ]
 

@@ -30,6 +30,7 @@ pub mod agent_control;
 pub mod agent_state;
 pub mod buffer_pressure_event;
 pub mod buffer_ref;
+pub mod bundle;
 pub mod bundle_manifest;
 pub mod control_loop_metrics;
 pub mod correlation_id;
@@ -61,6 +62,13 @@ pub use agent_state::{
 };
 pub use buffer_pressure_event::{BufferPressureEvent, BufferPressureEventError, MemoryPressure};
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
+pub use bundle::{
+    artifact_kind_for_path, compute_artifact_digest, compute_canonical_manifest_digest,
+    digests_equal, evaluate_compatibility, parse_bundle, parse_bundle_with, ArtifactDescriptor,
+    BackendCapabilityView, BackendProfile, BundleDescriptor, CompatibilityResult,
+    CompatibilityViolation, DeviceContext, ParseError, ParseOptions, MANIFEST_FILENAME,
+    SBOM_FILENAME, SIGNATURE_FILENAME,
+};
 pub use bundle_manifest::{
     ArtifactRole, BundleArtifact, BundleManifest, BundleManifestError, CapabilityRequirements,
     DeviceFamily, RuntimeCompatibility, TargetHardware,
