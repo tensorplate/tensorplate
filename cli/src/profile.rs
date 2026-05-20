@@ -50,6 +50,7 @@ pub fn resolve(
     cfg: &CliConfig,
     profile_override: Option<&str>,
     agent_url_override: Option<&str>,
+    timeout_override_ms: Option<u64>,
 ) -> CliResult<ResolvedProfile> {
     if let Some(url) = agent_url_override {
         let (host, port) = parse_host_port(url)?;
@@ -59,7 +60,7 @@ pub fn resolve(
             display_name: Some(format!("explicit agent url {url}")),
             transport: Transport::LoopbackTcp { host, port },
             serving_url: None,
-            timeout: Duration::from_millis(cfg.timeout_ms),
+            timeout: Duration::from_millis(timeout_override_ms.unwrap_or(cfg.timeout_ms)),
         });
     }
     let name = profile_override.unwrap_or(&cfg.default_profile).to_string();
@@ -70,7 +71,8 @@ pub fn resolve(
         });
     }
     let transport = transport_for_profile(&name, profile)?;
-    let timeout_ms = profile.timeout_ms.unwrap_or(cfg.timeout_ms);
+    let timeout_ms =
+        timeout_override_ms.unwrap_or_else(|| profile.timeout_ms.unwrap_or(cfg.timeout_ms));
     Ok(ResolvedProfile {
         name,
         mode: profile.mode,
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn explicit_agent_url_wins() {
         let cfg = CliConfig::default().validate().unwrap();
-        let r = resolve(&cfg, Some("local"), Some("10.0.0.5:18080")).unwrap();
+        let r = resolve(&cfg, Some("local"), Some("10.0.0.5:18080"), None).unwrap();
         assert!(matches!(
             r.transport,
             Transport::LoopbackTcp { ref host, port } if host == "10.0.0.5" && port == 18080
@@ -155,7 +157,7 @@ mod tests {
     #[test]
     fn default_profile_resolves_to_unix_socket() {
         let cfg = CliConfig::default().validate().unwrap();
-        let r = resolve(&cfg, None, None).unwrap();
+        let r = resolve(&cfg, None, None, None).unwrap();
         assert!(matches!(r.transport, Transport::UnixSocket { .. }));
         assert_eq!(r.mode, ProfileMode::Local);
     }
@@ -164,7 +166,7 @@ mod tests {
     fn reserved_modes_return_typed_unsupported() {
         let raw = r#"{"schema_version":"0.1","default_profile":"jump","profiles":{"jump":{"mode":"relay"}}}"#;
         let cfg = CliConfig::parse_json(raw).unwrap();
-        let err = resolve(&cfg, None, None).unwrap_err();
+        let err = resolve(&cfg, None, None, None).unwrap_err();
         assert!(matches!(err, CliError::UnsupportedProfile { ref mode } if mode == "relay"));
     }
 
@@ -184,7 +186,15 @@ mod tests {
     fn url_profile_resolves_with_global_timeout() {
         let raw = r#"{"schema_version":"0.1","timeout_ms":12000,"default_profile":"r","profiles":{"r":{"mode":"url","agent_url":"10.0.0.5:18000"}}}"#;
         let cfg = CliConfig::parse_json(raw).unwrap();
-        let r = resolve(&cfg, None, None).unwrap();
+        let r = resolve(&cfg, None, None, None).unwrap();
         assert_eq!(r.timeout, std::time::Duration::from_millis(12_000));
+    }
+
+    #[test]
+    fn global_timeout_override_wins_over_profile_and_config() {
+        let raw = r#"{"schema_version":"0.1","timeout_ms":12000,"default_profile":"r","profiles":{"r":{"mode":"url","agent_url":"10.0.0.5:18000","timeout_ms":8000}}}"#;
+        let cfg = CliConfig::parse_json(raw).unwrap();
+        let r = resolve(&cfg, None, None, Some(500)).unwrap();
+        assert_eq!(r.timeout, std::time::Duration::from_millis(500));
     }
 }

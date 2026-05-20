@@ -86,8 +86,9 @@ where
         &cfg,
         parsed.global.profile.as_deref(),
         parsed.global.agent_url.as_deref(),
+        parsed.global.timeout_ms,
     )?;
-    let renderer = Renderer::new(parsed.global.output);
+    let renderer = Renderer::new(effective_output_mode(&parsed.global, &cfg));
     match parsed.subcommand {
         Subcommand::Version => commands::version::run(&renderer, stdout),
         Subcommand::Doctor(opts) => {
@@ -116,9 +117,43 @@ where
     }
 }
 
+/// Resolve the output mode for a command invocation. Explicit argv wins;
+/// otherwise use the validated CLI config default.
+#[must_use]
+pub fn effective_output_mode(global: &GlobalArgs, cfg: &CliConfig) -> OutputMode {
+    global.output.unwrap_or(match cfg.output.mode.as_str() {
+        "json" => OutputMode::Json,
+        _ => OutputMode::Human,
+    })
+}
+
 /// Generate a correlation id stamped on every agent request. Format is
 /// `cli-<random uuidv4>` so server-side logs can grep for CLI traffic.
 #[must_use]
 pub fn new_correlation_id() -> String {
     format!("cli-{}", uuid::Uuid::new_v4())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_output_mode_uses_config_default_when_unspecified() {
+        let global = GlobalArgs::default();
+        let mut cfg = CliConfig::default();
+        cfg.output.mode = "json".into();
+        assert_eq!(effective_output_mode(&global, &cfg), OutputMode::Json);
+    }
+
+    #[test]
+    fn effective_output_mode_prefers_argv_override() {
+        let global = GlobalArgs {
+            output: Some(OutputMode::Human),
+            ..GlobalArgs::default()
+        };
+        let mut cfg = CliConfig::default();
+        cfg.output.mode = "json".into();
+        assert_eq!(effective_output_mode(&global, &cfg), OutputMode::Human);
+    }
 }

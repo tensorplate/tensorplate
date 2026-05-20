@@ -11,10 +11,10 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use tensorplate_cli::args::{self, ParseOutcome};
+use tensorplate_cli::args::{self, OutputMode, ParseOutcome, Subcommand};
 use tensorplate_cli::client::{AgentClient, NetAgentClient};
 use tensorplate_cli::config::CliConfig;
-use tensorplate_cli::error::CliResult;
+use tensorplate_cli::error::{CliError, CliResult};
 use tensorplate_cli::output::Renderer;
 
 fn main() -> ExitCode {
@@ -25,11 +25,11 @@ fn main() -> ExitCode {
     let exit = match drive(&argv, &mut stdout, &mut stderr_lock) {
         Ok(()) => 0u8,
         Err(err) => {
-            let renderer = Renderer::new(args::OutputMode::Human);
+            let renderer = Renderer::new(err.output_mode);
             // Best-effort: ignore renderer IO errors. If stderr is closed
             // the OS will signal SIGPIPE before this returns anyway.
-            let _ = renderer.render_error(&mut stderr_lock, command_of(&argv), &err);
-            err.exit_code().as_u8()
+            let _ = renderer.render_error(&mut stderr_lock, err.command, &err.error);
+            err.error.exit_code().as_u8()
         }
     };
     let _ = stdout.flush();
@@ -48,11 +48,31 @@ fn command_of(argv: &[String]) -> &'static str {
     "tensorplate"
 }
 
-fn drive<O: Write, E: Write>(argv: &[String], stdout: &mut O, stderr: &mut E) -> CliResult<()> {
-    let outcome = args::parse(argv)?;
+#[derive(Debug)]
+struct DriveError {
+    error: CliError,
+    output_mode: OutputMode,
+    command: &'static str,
+}
+
+fn drive<O: Write, E: Write>(
+    argv: &[String],
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<(), DriveError> {
+    let fallback_mode = explicit_output_mode(argv).unwrap_or(OutputMode::Human);
+    let outcome = args::parse(argv).map_err(|error| DriveError {
+        error,
+        output_mode: fallback_mode,
+        command: command_of(argv),
+    })?;
     let parsed = match outcome {
         ParseOutcome::Help => {
-            writeln!(stdout, "{}", args::usage_text())?;
+            writeln!(stdout, "{}", args::usage_text()).map_err(|error| DriveError {
+                error: CliError::from(error),
+                output_mode: fallback_mode,
+                command: "tensorplate",
+            })?;
             return Ok(());
         }
         ParseOutcome::Version => {
@@ -61,16 +81,73 @@ fn drive<O: Write, E: Write>(argv: &[String], stdout: &mut O, stderr: &mut E) ->
                 "tensorplate {} (protocol {})",
                 tensorplate_cli::version(),
                 tensorplate_protocol::PROTOCOL_VERSION
-            )?;
+            )
+            .map_err(|error| DriveError {
+                error: CliError::from(error),
+                output_mode: fallback_mode,
+                command: "version",
+            })?;
             return Ok(());
         }
         ParseOutcome::Run(parsed) => parsed,
     };
-    let cfg = CliConfig::load_or_default(parsed.global.config_path.as_deref())?;
+    let command = command_label(&parsed.subcommand);
+    let cfg =
+        CliConfig::load_or_default(parsed.global.config_path.as_deref()).map_err(|error| {
+            DriveError {
+                error,
+                output_mode: fallback_mode,
+                command,
+            }
+        })?;
+    let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
     };
-    tensorplate_cli::run(parsed, cfg, factory, stdout, stderr)
+    tensorplate_cli::run(parsed, cfg, factory, stdout, stderr).map_err(|error| DriveError {
+        error,
+        output_mode,
+        command,
+    })
+}
+
+fn command_label(command: &Subcommand) -> &'static str {
+    match command {
+        Subcommand::Doctor(_) => "doctor",
+        Subcommand::Deploy(_) => "deploy",
+        Subcommand::Rollback(_) => "rollback",
+        Subcommand::Status(_) => "status",
+        Subcommand::Infer(_) => "infer",
+        Subcommand::Logs(_) => "logs",
+        Subcommand::Version => "version",
+    }
+}
+
+fn explicit_output_mode(argv: &[String]) -> Option<OutputMode> {
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--output" => {
+                let value = argv.get(i + 1)?;
+                return match value.as_str() {
+                    "human" => Some(OutputMode::Human),
+                    "json" => Some(OutputMode::Json),
+                    _ => None,
+                };
+            }
+            s if s.starts_with("--output=") => {
+                return match &s["--output=".len()..] {
+                    "human" => Some(OutputMode::Human),
+                    "json" => Some(OutputMode::Json),
+                    _ => None,
+                };
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

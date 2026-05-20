@@ -42,7 +42,7 @@ pub struct GlobalArgs {
     pub config_path: Option<PathBuf>,
     pub profile: Option<String>,
     pub agent_url: Option<String>,
-    pub output: OutputMode,
+    pub output: Option<OutputMode>,
     pub timeout_ms: Option<u64>,
     pub no_color: bool,
     pub verbosity: Verbosity,
@@ -129,14 +129,15 @@ Global flags:
   --config <path>           CLI config file (default: $TENSORPLATE_CLI_CONFIG or none).
   --profile <name>          Named profile from the CLI config.
   --agent-url <host:port>   Override profile and target a loopback agent URL.
-  --output <human|json>     Output mode (default: human).
+  --output <human|json>     Output mode (default: config output.mode or human).
   --timeout-ms <n>          Per-call agent timeout override.
   --no-color                Disable color in human output.
   --quiet / --verbose       Suppress / expand informational stderr.
   -h, --help                Print usage and exit.
   -V, --version             Print CLI version and exit.
 
-For per-command help, run `tensorplate <command> --help`.";
+Global flags may appear before or after the subcommand. For per-command help,
+run `tensorplate <command> --help`.";
 
 /// Parse `argv` (excluding the program name).
 ///
@@ -154,54 +155,7 @@ pub fn parse(argv: &[String]) -> CliResult<ParseOutcome> {
         match arg.as_str() {
             "-h" | "--help" => return Ok(ParseOutcome::Help),
             "-V" | "--version" => return Ok(ParseOutcome::Version),
-            "--config" => {
-                let value = require_value(argv, &mut i, "--config")?;
-                global.config_path = Some(PathBuf::from(value));
-            }
-            s if s.starts_with("--config=") => {
-                global.config_path = Some(PathBuf::from(&s["--config=".len()..]));
-                i += 1;
-            }
-            "--profile" => {
-                let value = require_value(argv, &mut i, "--profile")?;
-                global.profile = Some(value);
-            }
-            s if s.starts_with("--profile=") => {
-                global.profile = Some(s["--profile=".len()..].to_string());
-                i += 1;
-            }
-            "--agent-url" => {
-                let value = require_value(argv, &mut i, "--agent-url")?;
-                global.agent_url = Some(value);
-            }
-            s if s.starts_with("--agent-url=") => {
-                global.agent_url = Some(s["--agent-url=".len()..].to_string());
-                i += 1;
-            }
-            "--output" => {
-                let value = require_value(argv, &mut i, "--output")?;
-                global.output = parse_output(&value)?;
-            }
-            s if s.starts_with("--output=") => {
-                global.output = parse_output(&s["--output=".len()..])?;
-                i += 1;
-            }
-            "--timeout-ms" => {
-                let value = require_value(argv, &mut i, "--timeout-ms")?;
-                global.timeout_ms = Some(parse_u64(&value, "--timeout-ms")?);
-            }
-            "--no-color" => {
-                global.no_color = true;
-                i += 1;
-            }
-            "--quiet" => {
-                global.verbosity = Verbosity::Quiet;
-                i += 1;
-            }
-            "--verbose" => {
-                global.verbosity = Verbosity::Verbose;
-                i += 1;
-            }
+            _ if parse_global_flag(argv, &mut i, &mut global, true)? => {}
             s if s.starts_with("--") => {
                 return Err(CliError::Usage(format!("unknown global flag `{s}`")));
             }
@@ -215,13 +169,16 @@ pub fn parse(argv: &[String]) -> CliResult<ParseOutcome> {
     let cmd = &argv[i];
     let rest = &argv[i + 1..];
     let subcommand = match cmd.as_str() {
-        "version" => Subcommand::Version,
-        "doctor" => Subcommand::Doctor(parse_doctor(rest)?),
-        "deploy" => Subcommand::Deploy(parse_deploy(rest)?),
-        "rollback" => Subcommand::Rollback(parse_rollback(rest)?),
-        "status" => Subcommand::Status(parse_status(rest)?),
-        "infer" => Subcommand::Infer(parse_infer(rest)?),
-        "logs" => Subcommand::Logs(parse_logs(rest)?),
+        "version" => {
+            parse_version(rest, &mut global)?;
+            Subcommand::Version
+        }
+        "doctor" => Subcommand::Doctor(parse_doctor(rest, &mut global)?),
+        "deploy" => Subcommand::Deploy(parse_deploy(rest, &mut global)?),
+        "rollback" => Subcommand::Rollback(parse_rollback(rest, &mut global)?),
+        "status" => Subcommand::Status(parse_status(rest, &mut global)?),
+        "infer" => Subcommand::Infer(parse_infer(rest, &mut global)?),
+        "logs" => Subcommand::Logs(parse_logs(rest, &mut global)?),
         other => return Err(CliError::Usage(format!("unknown command `{other}`"))),
     };
     Ok(ParseOutcome::Run(ParsedArgs { global, subcommand }))
@@ -259,16 +216,91 @@ fn parse_output(value: &str) -> CliResult<OutputMode> {
     }
 }
 
+fn parse_global_flag(
+    argv: &[String],
+    cursor: &mut usize,
+    global: &mut GlobalArgs,
+    allow_timeout: bool,
+) -> CliResult<bool> {
+    let arg = argv[*cursor].as_str();
+    match arg {
+        "--config" => {
+            let value = require_value(argv, cursor, "--config")?;
+            global.config_path = Some(PathBuf::from(value));
+            Ok(true)
+        }
+        s if s.starts_with("--config=") => {
+            global.config_path = Some(PathBuf::from(&s["--config=".len()..]));
+            *cursor += 1;
+            Ok(true)
+        }
+        "--profile" => {
+            let value = require_value(argv, cursor, "--profile")?;
+            global.profile = Some(value);
+            Ok(true)
+        }
+        s if s.starts_with("--profile=") => {
+            global.profile = Some(s["--profile=".len()..].to_string());
+            *cursor += 1;
+            Ok(true)
+        }
+        "--agent-url" => {
+            let value = require_value(argv, cursor, "--agent-url")?;
+            global.agent_url = Some(value);
+            Ok(true)
+        }
+        s if s.starts_with("--agent-url=") => {
+            global.agent_url = Some(s["--agent-url=".len()..].to_string());
+            *cursor += 1;
+            Ok(true)
+        }
+        "--output" => {
+            let value = require_value(argv, cursor, "--output")?;
+            global.output = Some(parse_output(&value)?);
+            Ok(true)
+        }
+        s if s.starts_with("--output=") => {
+            global.output = Some(parse_output(&s["--output=".len()..])?);
+            *cursor += 1;
+            Ok(true)
+        }
+        "--timeout-ms" if allow_timeout => {
+            let value = require_value(argv, cursor, "--timeout-ms")?;
+            global.timeout_ms = Some(parse_u64(&value, "--timeout-ms")?);
+            Ok(true)
+        }
+        "--no-color" => {
+            global.no_color = true;
+            *cursor += 1;
+            Ok(true)
+        }
+        "--quiet" => {
+            global.verbosity = Verbosity::Quiet;
+            *cursor += 1;
+            Ok(true)
+        }
+        "--verbose" => {
+            global.verbosity = Verbosity::Verbose;
+            *cursor += 1;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn parse_u64(value: &str, flag: &str) -> CliResult<u64> {
     value
         .parse::<u64>()
         .map_err(|_| CliError::Usage(format!("{flag} requires a non-negative integer")))
 }
 
-fn parse_doctor(rest: &[String]) -> CliResult<DoctorArgs> {
+fn parse_doctor(rest: &[String], global: &mut GlobalArgs) -> CliResult<DoctorArgs> {
     let mut args = DoctorArgs::default();
     let mut i = 0;
     while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
         match rest[i].as_str() {
             "--skip-agent" => {
                 args.skip_agent = true;
@@ -289,7 +321,25 @@ fn parse_doctor(rest: &[String]) -> CliResult<DoctorArgs> {
     Ok(args)
 }
 
-fn parse_deploy(rest: &[String]) -> CliResult<DeployArgs> {
+fn parse_version(rest: &[String], global: &mut GlobalArgs) -> CliResult<()> {
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        match rest[i].as_str() {
+            "-h" | "--help" => return Err(CliError::Usage("version".into())),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `version`: {other}"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArgs> {
     let mut bundle_path: Option<PathBuf> = None;
     let mut deployment_id: Option<String> = None;
     let mut expected_digest: Option<String> = None;
@@ -298,6 +348,9 @@ fn parse_deploy(rest: &[String]) -> CliResult<DeployArgs> {
     let mut labels = Vec::new();
     let mut i = 0;
     while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
         let a = &rest[i];
         match a.as_str() {
             "--deployment-id" => deployment_id = Some(require_value(rest, &mut i, a)?),
@@ -349,10 +402,13 @@ fn parse_deploy(rest: &[String]) -> CliResult<DeployArgs> {
     })
 }
 
-fn parse_rollback(rest: &[String]) -> CliResult<RollbackArgs> {
+fn parse_rollback(rest: &[String], global: &mut GlobalArgs) -> CliResult<RollbackArgs> {
     let mut args = RollbackArgs::default();
     let mut i = 0;
     while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
         let a = &rest[i];
         match a.as_str() {
             "--reason" => args.reason = Some(require_value(rest, &mut i, a)?),
@@ -369,13 +425,16 @@ fn parse_rollback(rest: &[String]) -> CliResult<RollbackArgs> {
     Ok(args)
 }
 
-fn parse_status(rest: &[String]) -> CliResult<StatusArgs> {
+fn parse_status(rest: &[String], global: &mut GlobalArgs) -> CliResult<StatusArgs> {
     let mut args = StatusArgs {
         observability_snapshot: None,
         include_quarantine: true,
     };
     let mut i = 0;
     while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
         let a = &rest[i];
         match a.as_str() {
             "--observability-snapshot" => {
@@ -400,7 +459,7 @@ fn parse_status(rest: &[String]) -> CliResult<StatusArgs> {
     Ok(args)
 }
 
-fn parse_infer(rest: &[String]) -> CliResult<InferArgs> {
+fn parse_infer(rest: &[String], global: &mut GlobalArgs) -> CliResult<InferArgs> {
     let mut input_path = None;
     let mut from_stdin = false;
     let mut serving_url = None;
@@ -420,6 +479,7 @@ fn parse_infer(rest: &[String]) -> CliResult<InferArgs> {
                 timeout_ms = Some(parse_u64(&require_value(rest, &mut i, a)?, "--timeout-ms")?);
             }
             "--output-file" => output_path = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
+            _ if parse_global_flag(rest, &mut i, global, false)? => {}
             "-h" | "--help" => {
                 return Err(CliError::Usage(
                     "infer (--input <path> | --stdin) [--serving-url <url>] [--timeout-ms <n>] [--output-file <path>]"
@@ -452,7 +512,7 @@ fn parse_infer(rest: &[String]) -> CliResult<InferArgs> {
     })
 }
 
-fn parse_logs(rest: &[String]) -> CliResult<LogsArgs> {
+fn parse_logs(rest: &[String], global: &mut GlobalArgs) -> CliResult<LogsArgs> {
     let mut args = LogsArgs {
         component: None,
         level: None,
@@ -464,6 +524,9 @@ fn parse_logs(rest: &[String]) -> CliResult<LogsArgs> {
     };
     let mut i = 0;
     while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
         let a = &rest[i];
         match a.as_str() {
             "--component" => args.component = Some(require_value(rest, &mut i, a)?),
@@ -553,7 +616,7 @@ mod tests {
             panic!("expected Run");
         };
         assert_eq!(parsed.global.profile.as_deref(), Some("remote-dev"));
-        assert_eq!(parsed.global.output, OutputMode::Json);
+        assert_eq!(parsed.global.output, Some(OutputMode::Json));
         assert!(parsed.global.no_color);
         let Subcommand::Deploy(d) = parsed.subcommand else {
             panic!("expected Deploy");
@@ -617,5 +680,37 @@ mod tests {
         assert_eq!(l.level.as_deref(), Some("warn"));
         assert_eq!(l.tail, Some(50));
         assert!(l.follow);
+    }
+
+    #[test]
+    fn output_flag_is_accepted_after_subcommand() {
+        let out = parse(&argv(&["doctor", "--skip-agent", "--output", "json"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert_eq!(parsed.global.output, Some(OutputMode::Json));
+        let Subcommand::Doctor(d) = parsed.subcommand else {
+            panic!("expected Doctor");
+        };
+        assert!(d.skip_agent);
+    }
+
+    #[test]
+    fn global_timeout_is_accepted_after_subcommand() {
+        let out = parse(&argv(&["status", "--timeout-ms", "250"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert_eq!(parsed.global.timeout_ms, Some(250));
+    }
+
+    #[test]
+    fn version_accepts_output_after_subcommand() {
+        let out = parse(&argv(&["version", "--output=json"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert_eq!(parsed.global.output, Some(OutputMode::Json));
+        assert!(matches!(parsed.subcommand, Subcommand::Version));
     }
 }
