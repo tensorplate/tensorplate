@@ -8,6 +8,86 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Model bundle format (V01-E13). The v0.1.0 bundle authoring surface
+  lands as the shared `tensorplate_protocol::bundle` module that the
+  agent verifier, CLI, and fixture tooling consume. The same module
+  owns the deployable artifact contract: envelope, manifest schema,
+  named input/output schema, model-class blocks, runtime capability
+  declarations, precision metadata, integrity verification, and
+  compatibility evaluation.
+    - `protocol/rust/src/bundle.rs` (V01-E13-F01 / -F02 / -F06) — the
+      single shared parser entrypoint. `parse_bundle` reads a bundle
+      directory, validates the manifest semantically, streams sha256
+      digests over every artifact, verifies the optional canonical
+      manifest digest, and emits a `BundleDescriptor` value object.
+      `evaluate_compatibility` consumes the descriptor plus a
+      `DeviceContext` and returns a typed `CompatibilityResult` whose
+      violations cover runtime range, hardware family, memory,
+      backend availability, capability gaps, precision support, and
+      backend / artifact-kind cross-checks.
+    - `protocol/schemas/bundle_manifest.json` (V01-E13-F02 / -F03 /
+      -F04 / -F05) — full v0.1.0 manifest authoring surface. Adds
+      named `inputs[]` / `outputs[]` (vision is the n=1 case;
+      SmolVLA uses named multi-input + named action chunk output),
+      `model_blocks` for every class with consistency validation,
+      the reserved `language` block (tokenizer reference / kind /
+      revision_or_digest, context_length_tokens, and default/empty
+      generation_config), `precision` with Jetson FP32/FP16/INT8
+      profiles and Vitis AI quantization / calibration metadata, an
+      extended `capability_requirements` (deterministic_latency,
+      control_loop_integration, op_coverage_limits,
+      memory_estimate_bytes), and optional `signature` / `provenance`
+      / `sbom` fields. Unknown / typoed `backend_hint` values are
+      rejected at parse time. v0.1.0 recognizes `tensorrt`,
+      `libtorch`, `python_pytorch`; `vitis_ai` and `onnxruntime` are
+      reserved schema slots.
+    - Agent deploy integration (V01-E13-F06). `agent/src/bundle.rs`
+      is now a thin wrapper around the shared parser + evaluator;
+      the duplicate V01-E08 verifier was removed in favor of the
+      shared path. `parse_and_check` exposes the full violation list
+      to CLI deploy/doctor rendering; `verify` preserves the typed
+      single-error short-circuit for the deploy transaction.
+    - Example bundle fixtures (V01-E13-F07) under
+      `test/models/bundles/v01_e13/`: vision_tensorrt,
+      smolvla_python_pytorch, language_reserved, and the synthetic
+      Vitis-shaped fixture with a fake `.xmodel` and Vitis-style
+      INT8 calibration metadata. Invalid variants cover corrupted
+      artifact, unsafe path, missing artifact, duplicate IO names,
+      and a language block on a non-language class.
+    - `tools/bundle/` (`tensorplate-bundle-tool`) — deterministic
+      fixture digest helper. Re-uses the shared canonicalization so
+      stale digests fail conformance tests rather than silently
+      drifting.
+    - Bundle conformance suite (V01-E13-F08) at
+      `protocol/rust/tests/bundle_conformance.rs` — 13 tests asserting
+      parser, schema, integrity, compatibility, backend hint, precision,
+      and model-class block behavior, including that the runtime does
+      not attempt heuristic backend fallback when the declared backend
+      is unavailable.
+    - Documentation under `docs/bundles/` (layout, manifest,
+      model_classes, backends, integrity, compatibility) and the V01-E13
+      schema review addendum in
+      `docs/architecture/kria-vitis-ai-review.md`.
+
+### Behavior changes
+
+- `tensorplate_protocol::bundle_manifest::CapabilityRequirements`
+  picks up new optional fields (`deterministic_latency`,
+  `control_loop_integration`, `op_coverage_limits`,
+  `memory_estimate_bytes`). All default to `false` / empty so existing
+  bundles continue to parse without modification. The struct is no
+  longer `Copy`; callers that previously passed it by value now pass
+  by reference (one in-tree call site updated;
+  `agent::check_capabilities` signature is unchanged at the public
+  shape).
+- `BundleManifest` and `BundleDescriptor` lose `Eq` because `f64`
+  fields (VLA control frequency, vision normalization) participate in
+  equality. `PartialEq` is still derived; tests that need stable
+  comparison round-trip through JSON.
+- The agent's `bundle::verify` is now a thin wrapper around the shared
+  parser/evaluator; behavior is preserved across every existing
+  V01-E08 test.
+
 - Observability baseline (V01-E12). The v0.1 telemetry surface lands as
   a coordinated extension of `tensorplate-protocol` and
   `tensorplate-observability`. It makes a single device diagnosable

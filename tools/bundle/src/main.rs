@@ -72,6 +72,9 @@ fn main() -> ExitCode {
         "artifacts": artifacts,
         "manifest_digest": manifest_digest,
     });
-    println!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&report).unwrap_or_default()
+    );
     ExitCode::SUCCESS
 }
