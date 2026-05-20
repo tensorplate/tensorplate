@@ -12,8 +12,9 @@ Implementation:
 
 ## Configuration
 
-Each control loop carries a fixed target frequency `control_frequency_hz`
-and a bounded label set:
+`observability.json` exposes `control_loop`. It is disabled by default;
+when `enabled=true`, each control loop carries a fixed target frequency
+`control_frequency_hz` and a bounded label set:
 
 ```
 endpoint     = serving HTTP path (e.g. `/v1/act`)

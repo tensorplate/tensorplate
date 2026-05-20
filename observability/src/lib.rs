@@ -45,8 +45,9 @@ pub mod state;
 
 pub use clock::{FakeClock, MonotonicClock, SystemMonotonicClock};
 pub use config::{
-    HeartbeatPolicy, ListenerConfig, ListenerTransport, ObservabilityConfig, Ros2HealthConfig,
-    Ros2Runtime, SafeStateSinkConfig, SafeStateSinkKind, StatusSnapshotConfig, StatusSnapshotKind,
+    ControlLoopTelemetryConfig, HeartbeatPolicy, ListenerConfig, ListenerTransport,
+    ObservabilityConfig, Ros2HealthConfig, Ros2Runtime, SafeStateSinkConfig, SafeStateSinkKind,
+    StatusSnapshotConfig, StatusSnapshotKind,
 };
 pub use control_loop::{ControlLoopAggregator, ControlLoopAggregatorConfig};
 pub use error::{ObservabilityError, ObservabilityResult};

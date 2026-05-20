@@ -171,7 +171,9 @@ impl HistogramSeries {
             .iter()
             .position(|b| value <= *b)
             .unwrap_or(self.bounds.len());
-        self.counts[idx] = self.counts[idx].saturating_add(1);
+        for bucket in &mut self.counts[idx..] {
+            *bucket = bucket.saturating_add(1);
+        }
         self.count = self.count.saturating_add(1);
         self.sum += value;
     }
@@ -547,6 +549,7 @@ impl MetricsRegistry {
                     .append(true)
                     .open(path)
                     .map_err(|e| {
+                        self.bump_sink_write_error();
                         ObservabilityError::SnapshotSink(format!("open {}: {e}", path.display()))
                     })?;
                 self.write_lines(snapshot, |line| {
@@ -558,6 +561,12 @@ impl MetricsRegistry {
         }
     }
 
+    fn bump_sink_write_error(&self) {
+        if let Ok(mut c) = self.counters.lock() {
+            c.sink_write_errors += 1;
+        }
+    }
+
     fn write_lines<F>(&self, events: Vec<MetricEvent>, mut emit: F) -> ObservabilityResult<()>
     where
         F: FnMut(&str) -> ObservabilityResult<()>,
@@ -566,9 +575,7 @@ impl MetricsRegistry {
             let line = serde_json::to_string(&event)
                 .map_err(|e| ObservabilityError::SnapshotSink(format!("serialise metric: {e}")))?;
             if let Err(e) = emit(&line) {
-                if let Ok(mut c) = self.counters.lock() {
-                    c.sink_write_errors += 1;
-                }
+                self.bump_sink_write_error();
                 return Err(e);
             }
         }
@@ -710,15 +717,10 @@ mod tests {
         let snapshot = registry.take_snapshot(&clock);
         let sample = &snapshot[0].sample;
         let counts = sample.bucket_counts.as_ref().expect("counts");
-        let bounds = sample.bucket_upper_bounds.as_ref().expect("bounds");
-        // bounds: [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]
-        // observations: 2 -> bound 5 (idx 1), 7 -> bound 10 (idx 2),
-        // 20 -> bound 25 (idx 3), 200 -> bound 250 (idx 6)
-        let mut expected = vec![0u64; bounds.len() + 1];
-        expected[1] = 1;
-        expected[2] = 1;
-        expected[3] = 1;
-        expected[6] = 1;
+        // Cumulative Prometheus-style counts:
+        // <=1:0, <=5:1, <=10:2, <=25:3, <=50:3, <=100:3,
+        // <=250:4, and every larger bucket including +Inf:4.
+        let expected = vec![0, 1, 2, 3, 3, 3, 4, 4, 4, 4, 4];
         assert_eq!(counts, &expected);
         assert_eq!(sample.count, Some(4));
         assert!((sample.sum.unwrap() - 229.0).abs() < 1e-9);

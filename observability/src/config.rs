@@ -15,7 +15,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use tensorplate_protocol::MAX_CONTROL_LOOP_LABEL_BYTES;
+
 use crate::error::{ObservabilityError, ObservabilityResult};
+use crate::metrics::{MetricSinkConfig, MetricsExportConfig};
+use crate::retention::RetentionConfig;
 
 /// Local event-listener transport. v0.1.0 defaults to an in-process
 /// channel so the service can run in CI without any local sockets;
@@ -235,6 +239,65 @@ pub enum Ros2Runtime {
     Native,
 }
 
+/// Optional V01-E12 control-loop timing configuration.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ControlLoopTelemetryConfig {
+    /// Disabled by default because not every deployment is a VLA
+    /// control loop.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target control frequency for jitter / frequency-stability
+    /// metrics. Required and must be > 0 when enabled.
+    #[serde(default)]
+    pub control_frequency_hz: f64,
+    /// Rolling window length. v0.1.0 default is 60s.
+    #[serde(default = "default_control_loop_window_seconds")]
+    pub window_seconds: u32,
+    /// Optional grace window added to target period before a deadline
+    /// is counted as missed. Defaults to 25% of target period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grace_ms: Option<f64>,
+    #[serde(default = "default_control_loop_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_control_loop_model_class")]
+    pub model_class: String,
+    #[serde(default = "default_control_loop_model_name")]
+    pub model_name: String,
+    #[serde(default = "default_control_loop_backend")]
+    pub backend: String,
+}
+
+impl Default for ControlLoopTelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            control_frequency_hz: 0.0,
+            window_seconds: default_control_loop_window_seconds(),
+            grace_ms: None,
+            endpoint: default_control_loop_endpoint(),
+            model_class: default_control_loop_model_class(),
+            model_name: default_control_loop_model_name(),
+            backend: default_control_loop_backend(),
+        }
+    }
+}
+
+const fn default_control_loop_window_seconds() -> u32 {
+    60
+}
+fn default_control_loop_endpoint() -> String {
+    "/v1/act".to_string()
+}
+fn default_control_loop_model_class() -> String {
+    "vla".to_string()
+}
+fn default_control_loop_model_name() -> String {
+    "unknown".to_string()
+}
+fn default_control_loop_backend() -> String {
+    "unknown".to_string()
+}
+
 /// Listener transport config.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ListenerConfig {
@@ -267,7 +330,7 @@ const fn default_listener_queue_capacity() -> u32 {
 
 /// V01-E10 observability service config. Mirrors
 /// `config/schemas/observability.json`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
@@ -286,6 +349,15 @@ pub struct ObservabilityConfig {
     pub snapshot: StatusSnapshotConfig,
     #[serde(default)]
     pub ros2_health: Ros2HealthConfig,
+    /// V01-E12 bounded structured-log retention and optional file sink.
+    #[serde(default)]
+    pub diagnostics_retention: RetentionConfig,
+    /// V01-E12 local metrics registry and file/stdout/in-memory export.
+    #[serde(default)]
+    pub metrics: MetricsExportConfig,
+    /// V01-E12 VLA control-loop timing metrics.
+    #[serde(default)]
+    pub control_loop: ControlLoopTelemetryConfig,
 }
 
 impl Default for ObservabilityConfig {
@@ -298,6 +370,9 @@ impl Default for ObservabilityConfig {
             safe_state: SafeStateSinkConfig::default(),
             snapshot: StatusSnapshotConfig::default(),
             ros2_health: Ros2HealthConfig::default(),
+            diagnostics_retention: RetentionConfig::default(),
+            metrics: MetricsExportConfig::default(),
+            control_loop: ControlLoopTelemetryConfig::default(),
         }
     }
 }
@@ -420,6 +495,84 @@ fn validate_snapshot(cfg: &StatusSnapshotConfig) -> ObservabilityResult<()> {
     Ok(())
 }
 
+fn validate_diagnostics_retention(cfg: &RetentionConfig) -> ObservabilityResult<()> {
+    if cfg.queue_capacity == 0 {
+        return Err(ObservabilityError::Config(
+            "diagnostics_retention.queue_capacity must be > 0".into(),
+        ));
+    }
+    if cfg.rotate_bytes == 0 {
+        return Err(ObservabilityError::Config(
+            "diagnostics_retention.rotate_bytes must be > 0".into(),
+        ));
+    }
+    if let Some(path) = cfg.file_path.as_deref() {
+        if !path.is_absolute() {
+            return Err(ObservabilityError::Config(format!(
+                "diagnostics_retention.file_path `{}` must be absolute",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_metrics_export(cfg: &MetricsExportConfig) -> ObservabilityResult<()> {
+    if cfg.max_series == 0 {
+        return Err(ObservabilityError::Config(
+            "metrics.max_series must be > 0".into(),
+        ));
+    }
+    if cfg.queue_capacity == 0 {
+        return Err(ObservabilityError::Config(
+            "metrics.queue_capacity must be > 0".into(),
+        ));
+    }
+    if let MetricSinkConfig::File { path } = &cfg.sink {
+        if !path.is_absolute() {
+            return Err(ObservabilityError::Config(format!(
+                "metrics.sink.path `{}` must be absolute",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_control_loop(cfg: &ControlLoopTelemetryConfig) -> ObservabilityResult<()> {
+    if !cfg.enabled {
+        return Ok(());
+    }
+    if !cfg.control_frequency_hz.is_finite() || cfg.control_frequency_hz <= 0.0 {
+        return Err(ObservabilityError::Config(
+            "control_loop.control_frequency_hz must be finite and > 0 when enabled".into(),
+        ));
+    }
+    if cfg.window_seconds == 0 {
+        return Err(ObservabilityError::Config(
+            "control_loop.window_seconds must be > 0".into(),
+        ));
+    }
+    if matches!(cfg.grace_ms, Some(v) if !v.is_finite() || v < 0.0) {
+        return Err(ObservabilityError::Config(
+            "control_loop.grace_ms must be finite and >= 0 when set".into(),
+        ));
+    }
+    for (name, value) in [
+        ("endpoint", cfg.endpoint.as_str()),
+        ("model_class", cfg.model_class.as_str()),
+        ("model_name", cfg.model_name.as_str()),
+        ("backend", cfg.backend.as_str()),
+    ] {
+        if value.is_empty() || value.len() > MAX_CONTROL_LOOP_LABEL_BYTES {
+            return Err(ObservabilityError::Config(format!(
+                "control_loop.{name} must be 1..={MAX_CONTROL_LOOP_LABEL_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl ObservabilityConfig {
     /// Validate the config. Returns the canonicalised value on success.
     ///
@@ -448,6 +601,9 @@ impl ObservabilityConfig {
         validate_heartbeat(&self.heartbeat)?;
         validate_safe_state(&self.safe_state)?;
         validate_snapshot(&self.snapshot)?;
+        validate_diagnostics_retention(&self.diagnostics_retention)?;
+        validate_metrics_export(&self.metrics)?;
+        validate_control_loop(&self.control_loop)?;
         if self.ros2_health.enabled {
             if !self.ros2_health.topic.starts_with('/') {
                 return Err(ObservabilityError::Config(format!(
@@ -489,7 +645,9 @@ mod tests {
 
     use super::{
         ListenerTransport, ObservabilityConfig, Ros2Runtime, SafeStateSinkKind, StatusSnapshotKind,
+        MAX_CONTROL_LOOP_LABEL_BYTES,
     };
+    use crate::metrics::MetricSinkConfig;
     use std::path::PathBuf;
 
     fn minimal() -> ObservabilityConfig {
@@ -607,6 +765,36 @@ mod tests {
     fn listener_queue_capacity_must_be_positive() {
         let mut c = minimal();
         c.listener.queue_capacity = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn e12_file_sinks_require_absolute_paths() {
+        let mut c = minimal();
+        c.diagnostics_retention.file_path = Some(PathBuf::from("relative/logs.jsonl"));
+        assert!(c.clone().validate().is_err());
+        c.diagnostics_retention.file_path =
+            Some(PathBuf::from("/var/log/tensorplate/diagnostics.jsonl"));
+        assert!(c.clone().validate().is_ok());
+
+        c.metrics.sink = MetricSinkConfig::File {
+            path: PathBuf::from("relative/metrics.jsonl"),
+        };
+        assert!(c.clone().validate().is_err());
+        c.metrics.sink = MetricSinkConfig::File {
+            path: PathBuf::from("/var/log/tensorplate/metrics.jsonl"),
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn control_loop_enabled_requires_frequency_and_bounded_labels() {
+        let mut c = minimal();
+        c.control_loop.enabled = true;
+        assert!(c.clone().validate().is_err());
+        c.control_loop.control_frequency_hz = 30.0;
+        assert!(c.clone().validate().is_ok());
+        c.control_loop.model_name = "x".repeat(MAX_CONTROL_LOOP_LABEL_BYTES + 1);
         assert!(c.validate().is_err());
     }
 }

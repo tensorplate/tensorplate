@@ -59,6 +59,9 @@ appending; existing names are stable for the life of v0.1.
 | `tp_memory_pressure_ratio`      | gauge     | ratio        | `component`                                    |
 | `tp_sidecar_health`             | gauge     | count        | `component`                                    |
 | `tp_worker_health`              | gauge     | count        | `component`                                    |
+| `tp_observability_queue_depth`  | gauge     | count        | `component`                                    |
+| `tp_observability_state`        | gauge     | count        | `component` (`ready=0`, `degraded=1`, `failed=2`, `no_heartbeat=3`) |
+| `tp_listener_malformed`         | gauge     | count        | `component`                                    |
 | `tp_export_failures_total`      | counter   | count        | `component`                                    |
 
 The Jetson Orin Nano 8GB default histogram buckets for latency are
@@ -66,9 +69,13 @@ defined by
 [`default_latency_buckets_ms`](../../observability/src/metrics.rs):
 `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]` ms.
 
+Histogram `bucket_counts` are cumulative Prometheus-style counts. The
+last bucket is the implicit `+Inf` bucket and must equal `count`.
+
 ## Local export sinks
 
-Configured through `MetricSinkConfig`:
+Configured through `observability.json` at `metrics.sink` and represented
+in Rust by `MetricSinkConfig`:
 
 | Sink       | Purpose                                                          |
 | ---------- | ---------------------------------------------------------------- |

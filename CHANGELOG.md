@@ -95,6 +95,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       with `diagnostics_sink`, `metrics_export`, `control_loop`,
       `last_correlation_id`, `last_failure_reason`); empty fields skip
       serialisation so older parsers continue to round-trip.
+    - `tensorplate_observability::Service` now owns the V01-E12
+      retention store, structured log emitter, metrics registry, and
+      optional control-loop aggregator from production configuration.
+      Every tick logs accepted health inputs and state transitions,
+      updates the V01-E12 status projection, and exports configured
+      local metrics / diagnostics sinks without introducing hosted
+      platform dependencies.
     - Documentation: `docs/observability/README.md`,
       `log-schema.md`, `correlation-ids.md`, `failure-reasons.md`,
       `metrics.md`, `control-loop.md`, `retention.md`, and

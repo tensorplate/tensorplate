@@ -116,11 +116,13 @@ impl ControlLoopAggregator {
     /// previous sample increment the invalid counter and are ignored.
     pub fn record_output(&mut self, at: Instant) {
         if let Some(prev) = self.last {
-            let interval = at.saturating_duration_since(prev);
+            let Some(interval) = at.checked_duration_since(prev) else {
+                self.invalid_intervals = self.invalid_intervals.saturating_add(1);
+                return;
+            };
             let interval_ms = duration_to_ms(interval);
             if !interval_ms.is_finite() || interval_ms <= 0.0 {
                 self.invalid_intervals = self.invalid_intervals.saturating_add(1);
-                self.last = Some(at);
                 return;
             }
             let jitter_ms = (interval_ms - self.target_period_ms).abs();
@@ -397,5 +399,11 @@ mod tests {
         agg.record_output(clock.now());
         assert_eq!(agg.invalid_intervals(), 1);
         assert_eq!(agg.samples_in_window(), 0);
+        clock.advance(Duration::from_micros(33_333));
+        agg.record_output(clock.now());
+        assert_eq!(agg.samples_in_window(), 1);
+        let summary = agg.summary(&clock);
+        assert_eq!(summary.samples, 1);
+        assert!(summary.jitter_max_ms.unwrap() < 0.001);
     }
 }

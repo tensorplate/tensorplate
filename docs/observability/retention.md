@@ -10,6 +10,8 @@ Implementation:
 
 ## Config
 
+Configured through `observability.json` at `diagnostics_retention`.
+
 | Field            | Default     | Purpose                                                              |
 | ---------------- | ----------- | -------------------------------------------------------------------- |
 | `queue_capacity` | `1024`      | Maximum buffered events; capped at `MAX_QUEUE_CAPACITY` (`8192`).    |

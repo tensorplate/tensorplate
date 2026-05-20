@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use tensorplate_protocol::LogEvent;
+use tensorplate_protocol::{LogEvent, ValidatePayload};
 
 use crate::error::{ObservabilityError, ObservabilityResult};
 
@@ -149,6 +149,12 @@ impl DiagnosticsRetention {
     /// `false` when it was dropped under the configured policy. The
     /// producer never blocks; counters bump regardless.
     pub fn enqueue(&self, event: LogEvent) -> bool {
+        let Ok(event) = event.validate_payload() else {
+            if let Ok(mut state) = self.state.lock() {
+                state.counters.dropped_redacted = state.counters.dropped_redacted.saturating_add(1);
+            }
+            return false;
+        };
         #[allow(clippy::expect_used)]
         let mut state = self.state.lock().expect("retention poisoned");
         state.counters.enqueued += 1;
@@ -274,7 +280,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{DiagnosticsRetention, RetentionConfig, RetentionDropPolicy};
-    use tensorplate_protocol::{LogComponent, LogEvent, LogLevel};
+    use std::collections::BTreeMap;
+    use tensorplate_protocol::{LogComponent, LogContextValue, LogEvent, LogLevel};
 
     fn make_event(seq: u64) -> LogEvent {
         LogEvent::new(
@@ -330,6 +337,20 @@ mod tests {
         let drained = retention.drain();
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].monotonic_timestamp_ns, 0);
+    }
+
+    #[test]
+    fn direct_invalid_event_is_dropped_and_counted() {
+        let retention = DiagnosticsRetention::new(RetentionConfig::default());
+        let mut context = BTreeMap::new();
+        context.insert("bad key".into(), LogContextValue::String("v".into()));
+        let event = LogEvent {
+            context,
+            ..make_event(1)
+        };
+        assert!(!retention.enqueue(event));
+        assert_eq!(retention.counters().dropped_redacted, 1);
+        assert!(retention.drain().is_empty());
     }
 
     #[test]

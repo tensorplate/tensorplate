@@ -84,7 +84,7 @@
         "count": {
           "type": "integer",
           "minimum": 0,
-          "description": "Total observation count (histograms only)."
+          "description": "Total observation count (histograms only). Must match the final implicit +Inf bucket count."
         },
         "sum": {
           "type": "number",

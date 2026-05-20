@@ -320,10 +320,14 @@ fn validate_sample(kind: MetricKind, sample: &MetricSample) -> Result<(), Decode
                     "histogram MetricEvent.sample.sum must be finite".into(),
                 ));
             }
-            let total: u64 = counts.iter().sum();
-            if total != count {
+            if counts.windows(2).any(|pair| pair[1] < pair[0]) {
                 return Err(DecodeError::InvalidPayload(
-                    "histogram bucket_counts sum must equal MetricEvent.sample.count".into(),
+                    "histogram bucket_counts must be cumulative and non-decreasing".into(),
+                ));
+            }
+            if counts.last().copied() != Some(count) {
+                return Err(DecodeError::InvalidPayload(
+                    "histogram +Inf bucket_count must equal MetricEvent.sample.count".into(),
                 ));
             }
             if sample.value.is_some() {
@@ -383,7 +387,7 @@ mod tests {
             MetricKind::Histogram,
             MetricUnit::Milliseconds,
             42,
-            MetricSample::histogram(vec![5.0, 10.0, 25.0], vec![1, 2, 3, 4], 10, 75.0),
+            MetricSample::histogram(vec![5.0, 10.0, 25.0], vec![1, 3, 6, 10], 10, 75.0),
         );
         let json = serde_json::to_string(&event).expect("ser");
         let back: MetricEvent = decode_with_version_check::<MetricEvent>(&json).expect("decode");
@@ -423,9 +427,18 @@ mod tests {
 
     #[test]
     fn decode_rejects_histogram_with_mismatched_count() {
-        // bucket_counts sum (1+2+3+0 = 6) != count (5).
+        // +Inf bucket (4) != count (5).
         let json = format!(
-            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"tp_x_ms","kind":"histogram","unit":"milliseconds","monotonic_timestamp_ns":1,"sample":{{"bucket_upper_bounds":[1.0,2.0,3.0],"bucket_counts":[1,2,3,0],"count":5,"sum":6.0}}}}"#
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"tp_x_ms","kind":"histogram","unit":"milliseconds","monotonic_timestamp_ns":1,"sample":{{"bucket_upper_bounds":[1.0,2.0,3.0],"bucket_counts":[1,2,3,4],"count":5,"sum":6.0}}}}"#
+        );
+        let err = decode_with_version_check::<MetricEvent>(&json).expect_err("rejected");
+        assert!(matches!(err, DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn decode_rejects_histogram_with_non_cumulative_counts() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"tp_x_ms","kind":"histogram","unit":"milliseconds","monotonic_timestamp_ns":1,"sample":{{"bucket_upper_bounds":[1.0,2.0,3.0],"bucket_counts":[1,3,2,4],"count":4,"sum":6.0}}}}"#
         );
         let err = decode_with_version_check::<MetricEvent>(&json).expect_err("rejected");
         assert!(matches!(err, DecodeError::InvalidPayload(_)));
