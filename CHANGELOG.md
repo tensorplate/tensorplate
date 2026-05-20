@@ -8,6 +8,109 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Observability baseline (V01-E12). The v0.1 telemetry surface lands as
+  a coordinated extension of `tensorplate-protocol` and
+  `tensorplate-observability`. It makes a single device diagnosable
+  without a hosted-platform connection: structured logs, correlation
+  IDs, typed failure reasons, a bounded local metrics registry,
+  control-loop jitter/frequency metrics, retention with non-blocking
+  sinks, and an extended status projection that the V01-E11 CLI
+  consumes through the same observability snapshot file.
+    - `protocol/schemas/log_event.json` + `tensorplate_protocol::log_event`
+      (V01-E12-F01) — shared structured log envelope with bounded
+      component, level, and context. `LogContextValue` accepts
+      strings/integers/floats/bools/null; the sanitiser drops NUL
+      bytes, control bytes, oversize entries, and unknown context
+      keys at insert time. Catalog and producer contract documented in
+      `docs/observability/log-schema.md`.
+    - `protocol/schemas/failure_reason.json` +
+      `tensorplate_protocol::failure_reason` (V01-E12-F03) —
+      operator-visible failure reason taxonomy mapping each reason to
+      a stable category, severity hint, retry hint, and canonical
+      `ErrorCode`. `FailureReasonRecord::validate_payload` rejects
+      records that drift from the canonical mapping. Catalog in
+      `docs/observability/failure-reasons.md`.
+    - `tensorplate_protocol::correlation_id::CorrelationId`
+      (V01-E12-F02) — bounded `[A-Za-z0-9_-]{1,64}` identifier shared
+      across request, transaction, and correlation ids.
+      `CorrelationId::from_seed` and `sanitise_or_generate` keep
+      label/log cardinality bounded for externally-supplied values.
+      Propagation policy in `docs/observability/correlation-ids.md`.
+    - `protocol/schemas/metric_event.json` +
+      `tensorplate_protocol::metric_event` (V01-E12-F04) — wire-format
+      sample envelope for counters, gauges, and histograms. Names must
+      start with `tp_`; labels are restricted to the bounded v0.1 set
+      (`endpoint`, `model_class`, `model_name`, `backend`, `component`,
+      `status`); units are explicit. Histogram samples use
+      Prometheus-style cumulative bucket counts (length = bounds + 1).
+    - `protocol/schemas/control_loop_metrics.json` +
+      `tensorplate_protocol::control_loop_metrics` (V01-E12-F05) —
+      rolling-window summary event for VLA validation. Formulas
+      `target_period_ms = 1000 / control_frequency_hz`,
+      `jitter_ms = abs(interval_ms - target_period_ms)`,
+      `instant_frequency_hz = 1000 / interval_ms`, and
+      `frequency_error_pct = abs(mean_frequency_hz -
+      control_frequency_hz) / control_frequency_hz * 100` are pinned to
+      the roadmap. Bounded label set `(endpoint, model_class,
+      model_name, backend)`. Truncation in `ControlLoopLabels::new`
+      keeps every label inside `MAX_CONTROL_LOOP_LABEL_BYTES = 64`.
+    - `tensorplate_observability::metrics` (V01-E12-F04) — local
+      metrics registry. `MetricsRegistry::register_counter` /
+      `register_gauge` / `register_histogram` enforce the bounded label
+      policy at registration time, return a typed `SeriesId`, and bump
+      typed counters (`series_rejected_unknown_label`,
+      `series_rejected_bounded_label`, `series_rejected_full`) on
+      rejection. The exporter ships `noop`, `in_memory`, `file`
+      (JSON-lines append), and `stdout` sinks. `take_snapshot` returns
+      wire-format `MetricEvent` payloads so an HTTP scrape consumer can
+      stream them. Canonical Jetson Orin Nano latency buckets exposed
+      via `default_latency_buckets_ms`.
+    - `tensorplate_observability::control_loop` (V01-E12-F05) — rolling
+      60s control-loop aggregator with deterministic
+      `FakeClock`-driven percentiles, mean frequency, frequency
+      standard deviation, frequency error percent, and
+      missed-deadline rate. Invalid intervals (zero/negative) bump a
+      bounded counter; the rolling-window eviction is bounded by
+      `MAX_CONTROL_LOOP_SAMPLES = 4096`. Default grace window is 25%
+      of `target_period_ms`.
+    - `tensorplate_observability::retention` (V01-E12-F06) — bounded
+      diagnostics retention with `drop_oldest` (default) or
+      `drop_incoming` policies, file rotation at a configurable
+      threshold (`1 MiB` default; the file is renamed to `<file>.1`
+      before further writes), and bounded counters surfaced through
+      the status projection. Shutdown flush is bounded.
+    - `tensorplate_observability::log_emitter` (V01-E12-F01) — bounded,
+      non-blocking emitter wrapper that stamps every event with a
+      monotonic timestamp, runs the bounded-context sanitiser, and
+      forwards into `DiagnosticsRetention`. `emit_failure` carries the
+      canonical `FailureReason -> ErrorCode` mapping; `emit_with`
+      exposes a builder callback for bounded context.
+    - `tensorplate_observability::snapshot` extended (V01-E12-F07) —
+      `StatusSnapshot` now carries `diagnostics_sink`,
+      `metrics_export`, `control_loop`, `last_correlation_id`, and
+      `last_failure_reason` fields. `SnapshotWriter::update_v12` and
+      `update_last_failure` keep V01-E10 callers untouched while
+      letting V01-E11 / V01-E15 consumers read the new fields. Schema
+      mirror at `protocol/schemas/observability_status.json` (extended
+      with `diagnostics_sink`, `metrics_export`, `control_loop`,
+      `last_correlation_id`, `last_failure_reason`); empty fields skip
+      serialisation so older parsers continue to round-trip.
+    - Documentation: `docs/observability/README.md`,
+      `log-schema.md`, `correlation-ids.md`, `failure-reasons.md`,
+      `metrics.md`, `control-loop.md`, `retention.md`, and
+      `status-projection.md`.
+    - Integration tests
+      (`observability/tests/observability_baseline_integration.rs`)
+      cover failed-deploy correlation, failed-inference typed
+      error+metric+log, file-sink export without platform
+      connectivity, retention event storm with bounded drops, invalid
+      metric label rejection, unknown log-schema-version rejection, no
+      payload/secret leakage, stable control-loop formulas under a
+      fake clock, and the V01-E12 snapshot projection. The full
+      workspace test suite (`cargo test --workspace`) covers 410 tests
+      including the 96 observability unit tests and the 152 protocol
+      unit tests.
+
 - CLI and device access profiles (V01-E11). `tensorplate-cli` is now a
   working single-device operator client wired against the V01-E08 agent
   control API. The crate ships a library + binary with the following

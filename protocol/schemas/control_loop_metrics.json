@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/control_loop_metrics.json",
+  "title": "TensorPlate Control-Loop Metrics",
+  "description": "Control-loop jitter and frequency stability event (V01-E12-F05). Consumed by the V01-E15 SmolVLA validation harness and the V01-E11 CLI status projection. Formulas are pinned to the v0.1 roadmap: `target_period_ms = 1000 / control_frequency_hz`; `jitter_ms = abs(interval_ms - target_period_ms)`; `instant_frequency_hz = 1000 / interval_ms`; `frequency_error_pct = abs(mean_frequency_hz - control_frequency_hz) / control_frequency_hz * 100`. All timing is monotonic; events derive from successful action outputs only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "monotonic_timestamp_ns",
+    "labels",
+    "control_frequency_hz",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "monotonic_timestamp_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Receiver-monotonic timestamp in nanoseconds for the end of the rolling window."
+    },
+    "rolling_window_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 60,
+      "description": "Length of the rolling window in seconds. v0.1.0 default is 60s; producers may shorten the window for fast feedback during early VLA validation."
+    },
+    "control_frequency_hz": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Configured target control frequency. Missing or non-positive values disable control-loop metrics with a typed config warning."
+    },
+    "target_period_ms": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Derived target inter-output period (`1000 / control_frequency_hz`)."
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Bounded label set (V01-E12-F05). Only the keys below are allowed; producers must drop or normalise out-of-policy values before emission.",
+      "required": ["endpoint", "model_class", "model_name", "backend"],
+      "properties": {
+        "endpoint": { "type": "string", "maxLength": 64 },
+        "model_class": { "type": "string", "maxLength": 32 },
+        "model_name": { "type": "string", "maxLength": 64 },
+        "backend": { "type": "string", "maxLength": 32 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "samples",
+        "missed_deadlines",
+        "missed_deadline_rate"
+      ],
+      "properties": {
+        "samples": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of inter-output intervals in the rolling window."
+        },
+        "missed_deadlines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of intervals where `interval_ms > target_period_ms + grace_ms`."
+        },
+        "missed_deadline_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "jitter_p50_ms": { "type": "number", "minimum": 0 },
+        "jitter_p95_ms": { "type": "number", "minimum": 0 },
+        "jitter_p99_ms": { "type": "number", "minimum": 0 },
+        "jitter_max_ms": { "type": "number", "minimum": 0 },
+        "mean_frequency_hz": { "type": "number", "minimum": 0 },
+        "frequency_stddev_hz": { "type": "number", "minimum": 0 },
+        "frequency_error_pct": { "type": "number", "minimum": 0 }
+      }
+    },
+    "correlation_id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  }
+}

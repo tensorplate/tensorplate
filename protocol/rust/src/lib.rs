@@ -31,12 +31,17 @@ pub mod agent_state;
 pub mod buffer_pressure_event;
 pub mod buffer_ref;
 pub mod bundle_manifest;
+pub mod control_loop_metrics;
+pub mod correlation_id;
 pub mod deploy_transaction;
 pub mod desired_state;
 pub mod error;
+pub mod failure_reason;
 pub mod health_event;
 pub mod infer_request;
 pub mod infer_result;
+pub mod log_event;
+pub mod metric_event;
 pub mod model_spec;
 pub mod python_pytorch_ipc;
 pub mod supervision_event;
@@ -60,15 +65,32 @@ pub use bundle_manifest::{
     ArtifactRole, BundleArtifact, BundleManifest, BundleManifestError, CapabilityRequirements,
     DeviceFamily, RuntimeCompatibility, TargetHardware,
 };
+pub use control_loop_metrics::{
+    ControlLoopEvent, ControlLoopLabels, ControlLoopSummary, MAX_CONTROL_LOOP_LABEL_BYTES,
+};
+pub use correlation_id::{
+    sanitise_or_generate, validate_correlation_id, CorrelationId, GENERATED_CORRELATION_ID_LEN,
+    MAX_CORRELATION_ID_BYTES, MIN_CORRELATION_ID_BYTES,
+};
 pub use deploy_transaction::{
     DeployFailure, DeployState, DeployTransaction, DeployTransactionError,
 };
 pub use desired_state::{DesiredState, DesiredStateError, Rollout, RolloutStrategy};
 pub use error::{ErrorCode, ProtocolError};
+pub use failure_reason::{
+    FailureCategory, FailureReason, FailureReasonRecord, FailureSeverity, MAX_FAILURE_DETAIL_BYTES,
+};
 pub use health_event::{ControlLoopMetrics, HealthEvent, HealthEventKind};
 pub use infer_request::{InferRequest, InferRequestError, NamedInput, RequestMetadata};
 pub use infer_result::{
     InferResult, InferResultError, InferResultStatus, InferenceTiming, NamedOutput,
+};
+pub use log_event::{
+    LogComponent, LogContextValue, LogEvent, LogLevel, MAX_LOG_CONTEXT_ENTRIES,
+    MAX_LOG_CONTEXT_STRING_BYTES,
+};
+pub use metric_event::{
+    MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,
 };
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
 pub use python_pytorch_ipc::{
