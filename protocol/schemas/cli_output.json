@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/cli_output.json",
+  "title": "TensorPlate CLI JSON Output Envelope",
+  "description": "Stable machine-readable output envelope used by `tensorplate` subcommands when `--output json` is selected. The envelope is intentionally narrow: a coarse `status`, an optional typed `error`, the active correlation/transaction id, and a command-specific `payload` whose shape is documented by each subcommand. The envelope is versioned so V01-E15 validation scripts can rely on stable field names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command", "status"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "command": {
+      "type": "string",
+      "enum": ["doctor", "deploy", "status", "infer", "logs", "rollback", "version"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error", "busy", "unavailable", "not_found"]
+    },
+    "correlation_id": {"type": "string"},
+    "transaction_id": {"type": "string"},
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "config_invalid",
+            "load_failed",
+            "not_ready",
+            "shape_mismatch",
+            "unsupported",
+            "oom_error",
+            "timeout",
+            "inference_failed",
+            "internal"
+          ]
+        },
+        "message": {"type": "string"},
+        "hint": {"type": "string"},
+        "context": {"type": "string"}
+      }
+    },
+    "payload": {
+      "description": "Command-specific payload. See per-command docs in `docs/cli/`. Always present on `status=ok` results; absent or null on errors."
+    }
+  }
+}
