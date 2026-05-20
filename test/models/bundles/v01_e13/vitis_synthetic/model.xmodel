@@ -1,0 +1,7 @@
+; tensorplate v0.1 synthetic Vitis AI .xmodel placeholder.
+;
+; This is NOT a Vitis AI .xmodel. v0.1.0 has no Vitis adapter; the parser
+; accepts this fixture to prove the bundle envelope can carry an .xmodel
+; artifact without schema revision. Compatibility validation rejects the
+; declared backend `vitis_ai` on any device whose `available_backends`
+; does not publish it (i.e., every Jetson device in v0.1.0).

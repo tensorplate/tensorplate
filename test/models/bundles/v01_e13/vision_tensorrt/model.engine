@@ -1,0 +1,5 @@
+; tensorplate v0.1 synthetic TensorRT engine placeholder.
+;
+; This is NOT a real TensorRT engine. The on-device runtime path uses real
+; engines built by the bundle author; this fixture exists for parser /
+; verifier conformance only and ships with a deterministic digest.

@@ -249,6 +249,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tensorplate-bundle-tool"
+version = "0.1.0-dev"
+dependencies = [
+ "serde_json",
+ "tensorplate-protocol",
+]
+
+[[package]]
 name = "tensorplate-cli"
 version = "0.1.0-dev"
 dependencies = [

@@ -1,0 +1,3 @@
+; This artifact body deliberately does NOT match the digest declared in
+; manifest.json — the bundle is the canonical "corrupted artifact"
+; conformance fixture. The parser must raise ArtifactDigestMismatch.
