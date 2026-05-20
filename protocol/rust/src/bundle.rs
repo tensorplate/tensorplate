@@ -55,7 +55,7 @@ impl Default for ParseOptions {
 /// One artifact descriptor exposed to verifier and agent code. Path is
 /// absolute; relative `path` from the manifest is preserved for logging
 /// and error messages.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactDescriptor {
     pub role: ArtifactRole,
     pub relative_path: String,
@@ -68,7 +68,7 @@ pub struct ArtifactDescriptor {
 /// value object with no SDK or worker dependencies — it can flow through
 /// the agent's deploy transaction, be persisted, or be re-validated
 /// without touching the host filesystem again.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BundleDescriptor {
     /// Absolute, canonicalized bundle root.
     pub root_path: PathBuf,
@@ -489,7 +489,7 @@ pub fn evaluate_compatibility(
                 violations.push(CompatibilityViolation::UnavailableBackend { backend });
             }
             Some(profile) => {
-                let req = m.capability_requirements;
+                let req = &m.capability_requirements;
                 let cap = profile.capabilities;
                 let pairs: &[(bool, bool, &str)] = &[
                     (req.async_, cap.async_, "async"),

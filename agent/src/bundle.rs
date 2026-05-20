@@ -219,7 +219,7 @@ pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedB
     // capabilities are rejected; the agent does not infer them.
     check_capabilities(
         &manifest.backend_hint,
-        manifest.capability_requirements,
+        &manifest.capability_requirements,
         config.capability_for(&manifest.backend_hint),
     )?;
 
@@ -403,7 +403,7 @@ fn compute_canonical_manifest_digest(raw: &str) -> AgentResult<String> {
 
 fn check_capabilities(
     backend: &str,
-    required: CapabilityRequirements,
+    required: &CapabilityRequirements,
     published: BackendCapability,
 ) -> AgentResult<()> {
     let pairs: &[(bool, bool, &str)] = &[

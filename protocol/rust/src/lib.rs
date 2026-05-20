@@ -70,8 +70,13 @@ pub use bundle::{
     SBOM_FILENAME, SIGNATURE_FILENAME,
 };
 pub use bundle_manifest::{
-    ArtifactRole, BundleArtifact, BundleManifest, BundleManifestError, CapabilityRequirements,
-    DeviceFamily, RuntimeCompatibility, TargetHardware,
+    ArtifactKind, ArtifactRole, BundleArtifact, BundleInput, BundleManifest, BundleManifestError,
+    BundleOutput, CapabilityRequirements, DeviceFamily, EmbeddingBlock, GenerationConfig,
+    InputModality, JetsonPrecision, LanguageBlock, LanguageTokenizer, ManifestSignature,
+    ModelBlocks, PrecisionMetadata, ProvenanceMetadata, RuntimeCompatibility, SbomReference,
+    SpeechBlock, TargetHardware, TokenizerKind, VisionBlock, VisionInputSize, VisionNormalization,
+    VitisAiPrecision, VitisQuantizeStrategy, VlaBlock, MAX_ARTIFACT_DESCRIPTION_BYTES,
+    MAX_IO_LABEL_BYTES, RECOGNIZED_BACKEND_HINTS,
 };
 pub use control_loop_metrics::{
     ControlLoopEvent, ControlLoopLabels, ControlLoopSummary, MAX_CONTROL_LOOP_LABEL_BYTES,

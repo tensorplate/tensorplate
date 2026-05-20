@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://schemas.tensorplate.io/v0.1/bundle_manifest.json",
-  "title": "TensorPlate Bundle Manifest (V01-E08 verification subset)",
-  "description": "Minimal manifest envelope consumed by the V01-E08 deploy-time bundle verifier. The full authoring surface for every model class lands in V01-E13; this subset captures only the fields the agent needs to verify integrity, format compatibility, runtime/hardware compatibility, declared backend availability, and capability requirements before staging. V01-E13 is free to add fields without bumping the bundle format version as long as it keeps the listed fields stable.",
+  "title": "TensorPlate Bundle Manifest",
+  "description": "Full v0.1.0 bundle manifest envelope. V01-E08 ships the deploy-time verification subset; V01-E13 owns the complete authoring surface (named inputs/outputs, model-class blocks, runtime capability declarations, precision schema, and reserved language/Vitis fields). All new fields land as optional so prior bundles remain valid; the v0.1 bundle format version covers the additions without a major bump.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -41,17 +41,18 @@
     "backend_hint": {
       "type": "string",
       "minLength": 1,
-      "description": "Declared execution backend. The runtime rejects unknown or unavailable backends with `Error::Code::Unsupported`; it does not fall back heuristically."
+      "description": "Declared execution backend. v0.1.0 recognizes `tensorrt`, `libtorch`, and `python_pytorch`; `vitis_ai` and `onnxruntime` are reserved extension slots. The runtime rejects unavailable backends with `Error::Code::Unsupported`; it does not fall back heuristically."
     },
     "precision_hint": {
       "type": "string",
       "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"],
-      "default": "auto"
+      "default": "auto",
+      "description": "Coarse precision profile. Use `precision` for vendor-shaped metadata."
     },
     "artifacts": {
       "type": "array",
       "minItems": 1,
-      "description": "Files inside the bundle the runtime needs to load. v0.1.0 always expects exactly one `model` artifact; additional roles (`tokenizer`, `calibration`, `vitis_calibration`, etc.) are reserved.",
+      "description": "Files inside the bundle the runtime needs to load. Exactly one entry must have role `model`; other roles supply tokenizer files, calibration data, precompiled assets, or auxiliary metadata.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -59,7 +60,30 @@
         "properties": {
           "role": {
             "type": "string",
-            "enum": ["model", "tokenizer", "calibration", "vitis_calibration", "precompiled", "auxiliary"]
+            "enum": [
+              "model",
+              "tokenizer",
+              "calibration",
+              "vitis_calibration",
+              "precompiled",
+              "auxiliary",
+              "weights"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "tensorrt_engine",
+              "libtorch_state",
+              "python_pytorch_entry",
+              "onnx",
+              "vitis_xmodel",
+              "weights",
+              "tokenizer",
+              "calibration",
+              "auxiliary"
+            ],
+            "description": "Concrete artifact representation. Optional; the parser falls back to filename-extension heuristics when omitted but the bundle author should set this explicitly for non-NVIDIA backends."
           },
           "path": {
             "type": "string",
@@ -75,6 +99,119 @@
             "type": "integer",
             "minimum": 0,
             "description": "Optional byte size of the artifact for diagnostics."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Optional free-form description preserved as bounded diagnostic metadata."
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "description": "Named inputs the bundle expects. Single-input vision is the `n = 1` case; SmolVLA declares multiple named inputs.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "dtype", "shape"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "modality": {
+            "type": "string",
+            "enum": [
+              "image",
+              "video",
+              "audio",
+              "text",
+              "tokens",
+              "tensor",
+              "state",
+              "control",
+              "custom"
+            ],
+            "default": "tensor"
+          },
+          "dtype": {
+            "type": "string",
+            "enum": [
+              "float32",
+              "float16",
+              "bfloat16",
+              "int64",
+              "int32",
+              "int16",
+              "int8",
+              "uint8",
+              "bool"
+            ]
+          },
+          "shape": {
+            "type": "array",
+            "minItems": 0,
+            "items": {"type": "integer"},
+            "description": "Per-axis extents. `-1` marks a dynamic axis."
+          },
+          "layout": {
+            "type": "string",
+            "enum": ["row_major", "col_major"],
+            "default": "row_major"
+          },
+          "encoding": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Optional encoding metadata (e.g., `rgb24`, `bgr_chw`, `pcm_s16le`, `utf8`). Bounded length so parse errors stay diagnostic-friendly."
+          },
+          "optional": {"type": "boolean", "default": false},
+          "semantics": {
+            "type": "string",
+            "maxLength": 64,
+            "description": "Bounded free-form semantic label (e.g., `observation.state`, `prompt`)."
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "Named outputs. VLA action chunks are represented as one named output with a `chunk` semantic.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "dtype", "shape"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "dtype": {
+            "type": "string",
+            "enum": [
+              "float32",
+              "float16",
+              "bfloat16",
+              "int64",
+              "int32",
+              "int16",
+              "int8",
+              "uint8",
+              "bool"
+            ]
+          },
+          "shape": {
+            "type": "array",
+            "minItems": 0,
+            "items": {"type": "integer"}
+          },
+          "layout": {
+            "type": "string",
+            "enum": ["row_major", "col_major"],
+            "default": "row_major"
+          },
+          "semantics": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "control_loop": {
+            "type": "boolean",
+            "default": false,
+            "description": "True if this output feeds a control loop. VLA action chunks set this to true so telemetry can label control-loop jitter."
           }
         }
       }
@@ -82,7 +219,7 @@
     "target_hardware": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Hardware compatibility envelope. v0.1.0 honors `device_family` and `memory_estimate_bytes`; further fields are reserved for V01-E13.",
+      "description": "Hardware compatibility envelope. v0.1.0 honors `device_family`, `min_memory_bytes`, and `memory_estimate_bytes`.",
       "properties": {
         "device_family": {
           "type": "string",
@@ -119,19 +256,236 @@
     "capability_requirements": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Backend capability flags the bundle requires. Reserved boolean shape; the agent checks against the configured backend capability map (V01-E05).",
+      "description": "Backend capability flags the bundle requires. The agent checks each `true` flag against the configured backend capability map (V01-E05). `op_coverage_limits` and `memory_estimate_bytes` are reserved diagnostic fields the verifier records but does not reject on in v0.1.0.",
       "properties": {
         "async": {"type": "boolean", "default": false},
         "streaming": {"type": "boolean", "default": false},
         "generation": {"type": "boolean", "default": false},
         "kv_cache": {"type": "boolean", "default": false},
-        "fixed_shape": {"type": "boolean", "default": false}
+        "fixed_shape": {"type": "boolean", "default": false},
+        "deterministic_latency": {"type": "boolean", "default": false},
+        "control_loop_integration": {"type": "boolean", "default": false},
+        "op_coverage_limits": {
+          "type": "array",
+          "items": {"type": "string", "maxLength": 64}
+        },
+        "memory_estimate_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "precision": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Backend-specific precision/quantization metadata. The bundle declares its profile through `profile`; `jetson` and `vitis_ai` subobjects carry vendor-shaped detail without leaking SDK types into the public schema.",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"]
+        },
+        "jetson": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "supported_profiles": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["fp32", "fp16", "int8", "int4"]
+              }
+            },
+            "tensorrt_engine_profile": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Optional engine-build profile label (e.g., `orin-nano-fp16`)."
+            }
+          }
+        },
+        "vitis_ai": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "quantize_strategy": {
+              "type": "string",
+              "enum": ["post_training", "calibration", "qat"]
+            },
+            "calibration_dataset_digest": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"
+            },
+            "calibration_sample_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dpu_arch": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Bounded DPU architecture identifier (e.g., `DPUCZDX8G_ISA0`). Treated as opaque metadata; no Xilinx SDK type leaks into the schema."
+            }
+          }
+        }
+      }
+    },
+    "model_blocks": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-model-class metadata. Each block is parsed only when the bundle's `model_class` matches; mismatches raise typed validation errors.",
+      "properties": {
+        "vision": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "type": "string",
+              "enum": ["classification", "detection", "segmentation", "keypoints", "feature_extraction", "custom"]
+            },
+            "input_size": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["height", "width"],
+              "properties": {
+                "height": {"type": "integer", "minimum": 1},
+                "width": {"type": "integer", "minimum": 1}
+              }
+            },
+            "color_space": {
+              "type": "string",
+              "enum": ["rgb", "bgr", "grayscale", "yuv", "custom"]
+            },
+            "normalization": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mean": {"type": "array", "items": {"type": "number"}},
+                "std": {"type": "array", "items": {"type": "number"}}
+              }
+            }
+          }
+        },
+        "speech": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "type": "string",
+              "enum": ["asr", "tts", "diarization", "vad", "custom"]
+            },
+            "sample_rate_hz": {"type": "integer", "minimum": 0},
+            "feature_extractor": {"type": "string", "maxLength": 64}
+          }
+        },
+        "language": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Reserved language-class fields. v0.1.0 parses these without exercising generation runtime.",
+          "properties": {
+            "tokenizer": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reference", "kind"],
+              "properties": {
+                "reference": {"type": "string", "minLength": 1, "description": "Tokenizer identity (local path or registry reference)."},
+                "kind": {
+                  "type": "string",
+                  "enum": ["sentencepiece", "tiktoken", "huggingface", "byte_level_bpe", "custom"]
+                },
+                "revision_or_digest": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "description": "Optional content-addressed digest or revision tag."
+                }
+              }
+            },
+            "context_length_tokens": {"type": "integer", "minimum": 0},
+            "generation_config": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Reserved generation parameters. Parsed but not exercised in v0.1.0.",
+              "properties": {
+                "max_new_tokens": {"type": "integer", "minimum": 0},
+                "temperature": {"type": "number"},
+                "top_p": {"type": "number"},
+                "top_k": {"type": "integer"},
+                "stop_sequences": {
+                  "type": "array",
+                  "items": {"type": "string", "maxLength": 64}
+                },
+                "seed": {"type": "integer"},
+                "streaming": {"type": "boolean", "default": false}
+              }
+            }
+          }
+        },
+        "vla": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "VLA control-loop metadata consumed by V01-E12 telemetry and V01-E15 validation.",
+          "properties": {
+            "control_frequency_hz": {"type": "number", "minimum": 0},
+            "action_horizon_steps": {"type": "integer", "minimum": 0},
+            "action_chunk_size": {"type": "integer", "minimum": 0},
+            "input_modalities": {
+              "type": "array",
+              "items": {"type": "string", "maxLength": 32}
+            },
+            "action_dim": {"type": "integer", "minimum": 0}
+          }
+        },
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dim": {"type": "integer", "minimum": 1},
+            "metric": {
+              "type": "string",
+              "enum": ["cosine", "dot", "l2", "custom"]
+            },
+            "normalize": {"type": "boolean"}
+          }
+        },
+        "custom": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Free-form per-bundle metadata for the `custom` model class. Bounded by manifest size; not interpreted by the runtime."
+        }
       }
     },
     "manifest_digest": {
       "type": "string",
       "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$",
       "description": "Optional self-digest. When present, the agent computes the digest of the canonical manifest with this field stripped and compares them. Bundles that omit this field are accepted only when the deploy request supplies an out-of-band expected digest."
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional cryptographic signature over the canonical manifest digest. v0.1.0 parses but does not verify the signature; the field is reserved for hosted provenance verification.",
+      "required": ["algorithm", "value"],
+      "properties": {
+        "algorithm": {"type": "string", "maxLength": 32},
+        "key_id": {"type": "string", "maxLength": 128},
+        "value": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional provenance metadata. v0.1.0 parses without enforcing.",
+      "properties": {
+        "builder": {"type": "string", "maxLength": 128},
+        "build_url": {"type": "string", "maxLength": 256},
+        "source_commit": {"type": "string", "maxLength": 64},
+        "build_timestamp": {"type": "string", "maxLength": 32},
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "format": {"type": "string", "enum": ["spdx", "cyclonedx", "custom"]},
+            "path": {"type": "string", "maxLength": 256, "description": "Path inside the bundle to the SBOM file (typically `provenance/sbom.json`)."},
+            "digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"}
+          }
+        }
+      }
     }
   }
 }
