@@ -8,6 +8,91 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- CLI and device access profiles (V01-E11). `tensorplate-cli` is now a
+  working single-device operator client wired against the V01-E08 agent
+  control API. The crate ships a library + binary with the following
+  modules:
+    - `tensorplate_cli::args` (V01-E11-F01) — hand-rolled argv parser
+      for global flags (`--config`, `--profile`, `--agent-url`,
+      `--output`, `--timeout-ms`, `--no-color`, `--quiet`/`--verbose`)
+      and per-subcommand flags. `tensorplate --help` and
+      `tensorplate <cmd> --help` render stable text suitable for E15
+      validation logs.
+    - `tensorplate_cli::config::CliConfig` (V01-E11-F01-T01) —
+      versioned schema for the CLI config file mirrored at
+      `config/schemas/cli.json`. Unknown schema versions are rejected
+      with typed `config_invalid` errors. The default config seeds a
+      `local` profile pointing at `/var/run/tensorplate/agent.sock`,
+      so the CLI is operable without a config file on the device.
+    - `tensorplate_cli::profile` (V01-E11-F02-T01) — profile resolver.
+      v0.1.0 implements the `local` and explicit `url` modes;
+      `ssh_tunnel`, `overlay`, and `relay` parse but fail with a
+      typed `Unsupported` error at command execution.
+    - `tensorplate_cli::client::{AgentClient, NetAgentClient,
+      MockAgentClient}` (V01-E11-F02-T02) — Unix-domain-socket and
+      loopback-TCP transport for the agent's newline-delimited JSON
+      control API. The client decodes typed agent errors and maps
+      them to CLI errors without losing the protocol error code; a
+      `MockAgentClient` is provided for tests.
+    - `tensorplate_cli::error::{CliError, ExitCode}` (V01-E11-F01-T02)
+      — typed error taxonomy with stable documented exit codes
+      (`0` success, `2` usage, `3` agent_error, `4` transport, `5`
+      busy, `6` unavailable, `10` doctor_findings, `11`
+      inference_failed). The mapping lives in `docs/cli/exit-codes.md`.
+    - `tensorplate_cli::output::Renderer` (V01-E11-F01-T02) — shared
+      human + JSON renderer. JSON envelopes follow
+      `protocol/schemas/cli_output.json` so V01-E15 validation can
+      grep on stable field names.
+    - `tensorplate doctor` (V01-E11-F03) — read-only validation pass
+      with a stable finding taxonomy
+      (`cli_version`, `profile_mode`, `agent_socket`,
+      `agent_reachable`, `agent_status_shape`, `agent_state`,
+      `active_deployment`, `worker_state`, `worker_crash_loop`,
+      `host_facts`, `host_os`, `python_pytorch_backend`,
+      `tensorrt_runtime`, `libtorch_runtime`, `ros2_health_stub`).
+      Each finding carries `status` (`ok` / `fail` / `missing` /
+      `unsupported` / `skipped` / `warning`), `severity`, message,
+      and hint. Exit code `10` when any check fails.
+    - `tensorplate deploy <bundle>` (V01-E11-F04-T01) — validates the
+      local bundle path (directory + `manifest.json`), submits the
+      canonicalised path through the agent deploy transaction API,
+      and either returns the transaction id (with `--no-wait`) or
+      polls until `active` / `failed` / `rolled_back` (`--wait`,
+      default). Transaction phases render through stable labels
+      (`received`, `verified`, `staged`, `capacity_checked`,
+      `prepared`, `warmed`, `promoted`, `active`, `failed`,
+      `rolled_back`).
+    - `tensorplate rollback` (V01-E11-F04-T02) — calls the agent
+      rollback API; surfaces typed `unavailable` (exit `6`) when
+      there is no previous active deployment.
+    - `tensorplate status` (V01-E11-F05) — projects the agent's
+      `AgentStatus` and supervision summary plus an optional
+      observability snapshot (`--observability-snapshot <path>`,
+      mirroring V01-E10). Severity ordering
+      (`ready < degraded < no_heartbeat < crash_loop < failed`) is
+      stable for V01-E15 grep assertions.
+    - `tensorplate infer` (V01-E11-F06) — convenience inference call
+      against the v0.1.0 serving HTTP envelope. Endpoint resolution
+      order: `--serving-url` flag, profile `serving_url`,
+      agent-discovered loopback default. Typed failures from the
+      serving worker map to exit `11` with a backend-specific
+      message.
+    - `tensorplate logs` (V01-E11-F07) — bounded NDJSON reader over
+      the configured `log_source.path`. Supports `--component`,
+      `--level` (ordered), `--correlation-id`, `--since-ms`,
+      `--tail` (capped at 10,000), and `--follow` against a single
+      file. Remote profiles return typed `unavailable` until the
+      V01-E12 agent log API lands.
+    - Output schema mirror: `protocol/schemas/cli_output.json`.
+    - Docs: `docs/cli/README.md`, `doctor.md`, `deploy-rollback.md`,
+      `status.md`, `infer.md`, `logs.md`, `profiles.md`,
+      `exit-codes.md`.
+    - Integration tests (V01-E11-F08): `cli_local_profile.rs`,
+      `cli_infer_workflow.rs`, `cli_logs_and_remote.rs` exercise the
+      binary against a stub UDS agent server, a stub serving HTTP
+      worker, and a local NDJSON log fixture; assert stable exit
+      codes and JSON envelopes.
+
 - Observability service baseline (V01-E10). `tensorplate-observability`
   is now a working independent health monitor that runs without
   depending on the serving request path or the V01-E08 deploy

@@ -254,7 +254,11 @@ version = "0.1.0-dev"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
+ "tempfile",
  "tensorplate-protocol",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

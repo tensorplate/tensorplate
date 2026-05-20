@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/cli.json",
+  "title": "TensorPlate CLI Config",
+  "description": "Versioned configuration for `tensorplate-cli` (V01-E11). The CLI loads this file at startup, validates it before any command runs, and refuses to call the agent until validation succeeds. v0.1.0 implements `local` and explicit `url` modes; `ssh-tunnel`, `overlay`, and `relay` are reserved in the schema and fail at command execution with a typed `Unsupported` error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "Independent versioning track for the CLI config. Unknown versions return a typed `config_invalid` error."
+    },
+    "default_profile": {
+      "type": "string",
+      "default": "local",
+      "description": "Profile selected when neither `--profile` nor `--agent-url` is supplied."
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Output defaults. Per-command flags override these.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["human", "json"],
+          "default": "human"
+        },
+        "color": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "default": "auto"
+        }
+      }
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 30000,
+      "description": "Default request timeout for agent calls. Per-command flags override."
+    },
+    "log_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Where `tensorplate logs` reads structured log entries when the active profile is `local`.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file", "directory"],
+          "default": "file"
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path to a structured log file (NDJSON) or a directory containing per-component NDJSON logs."
+        },
+        "tail_default": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100,
+          "description": "Default number of trailing entries returned when `--tail` is not supplied."
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Named device access profiles. Keys are profile names; values describe how to reach one agent. Profiles never refer to more than one agent; multi-device orchestration belongs to the hosted platform.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["mode"],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["local", "url", "ssh_tunnel", "overlay", "relay"],
+            "description": "v0.1.0 implements `local` and `url`. The remaining modes are reserved and return typed `Unsupported` errors at command execution."
+          },
+          "display_name": {"type": "string"},
+          "description": {"type": "string"},
+          "socket_path": {
+            "type": "string",
+            "description": "Absolute path to the agent's Unix domain socket. Required for `local` mode."
+          },
+          "agent_url": {
+            "type": "string",
+            "description": "`host:port` of the agent's loopback TCP endpoint reachable over SSH/VPN/overlay. Required for `url` mode."
+          },
+          "serving_url": {
+            "type": "string",
+            "description": "Optional override for `tensorplate infer`. Format: `http://host:port`. When absent, the CLI discovers the serving endpoint from the active deployment in agent status."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Per-profile override of the global `timeout_ms`."
+          }
+        }
+      }
+    }
+  }
+}
