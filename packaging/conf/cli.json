@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "default_profile": "local",
+  "output": {
+    "mode": "human",
+    "color": "auto"
+  },
+  "timeout_ms": 30000,
+  "log_source": {
+    "kind": "file",
+    "path": "/var/log/tensorplate/tensorplate-agent.log",
+    "tail_default": 100
+  },
+  "profiles": {
+    "local": {
+      "mode": "local",
+      "display_name": "this device",
+      "description": "Default profile for the locally installed tensorplate-agent. Uses the agent's Unix domain socket.",
+      "socket_path": "/run/tensorplate/agent.sock"
+    }
+  }
+}

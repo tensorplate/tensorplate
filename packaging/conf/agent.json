@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "transport": "unix_socket",
+  "socket_path": "/run/tensorplate/agent.sock",
+  "state_dir": "/var/lib/tensorplate/state",
+  "staging_dir": "/var/lib/tensorplate/bundles/staging",
+  "available_backends": ["mock"],
+  "backend_capabilities": {},
+  "device_family": "any",
+  "worker": {
+    "mode": "mock",
+    "serving_bind_host": "127.0.0.1",
+    "serving_bind_port": 18080,
+    "serving_candidate_bind_port": 18081
+  }
+}

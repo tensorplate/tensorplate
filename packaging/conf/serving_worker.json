@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "bind": {
+    "host": "127.0.0.1",
+    "port": 18080,
+    "allow_non_loopback": false
+  },
+  "http": {
+    "max_body_bytes": 16777216,
+    "max_header_bytes": 32768,
+    "request_timeout_ms": 8000,
+    "accept_thread_pool_size": 16
+  },
+  "buffer": {
+    "pool_name": "serving",
+    "capacity_bytes": 268435456,
+    "max_buffer_bytes": 67108864
+  },
+  "async_policy": {
+    "max_completed": 64,
+    "max_pending": 256,
+    "completed_ttl_ms": 60000
+  },
+  "shutdown": {
+    "drain_deadline_ms": 5000,
+    "cancel_queued_immediately": true
+  },
+  "health_mode": "local_json",
+  "metrics_mode": "prometheus_text",
+  "enable_stderr_logs": true,
+  "deployment": {
+    "use_mock_session": true,
+    "endpoint": "default",
+    "backend": "mock"
+  }
+}
