@@ -73,7 +73,9 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate
 ProtectHome=true
 PrivateTmp=true
-PrivateDevices=true
+# The agent supervises tensorplate-serving as a child process, so the
+# service namespace must expose Jetson CUDA/TensorRT device nodes.
+PrivateDevices=false
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

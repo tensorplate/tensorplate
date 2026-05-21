@@ -41,7 +41,8 @@ What this does (the F01-F07 contract):
   `tensorplate-observability` but does **not** start them.
 - Installs the serving worker binary at
   `/usr/lib/tensorplate/tensorplate-serving`. No serving systemd
-  unit is registered (V01-E09).
+  unit is registered (V01-E09); the agent launches it in process-backed
+  worker mode during deploy.
 
 ## 2. Run `tensorplate doctor`
 
@@ -88,13 +89,14 @@ should be `ok`.
 ## 4. Deploy a vision bundle (V01-E15 happy path)
 
 ```bash
-# An example detector bundle is staged in test/models/bundles/v01_e13/.
-sudo cp -r /path/to/yolov8n_tensorrt /var/lib/tensorplate/bundles/staging/
-sudo chown -R tensorplate:tensorplate /var/lib/tensorplate/bundles/staging/yolov8n_tensorrt
+# Build or copy a real TensorRT engine bundle for this Jetson. The
+# checked-in v01_e13 vision fixture is parser-only and must not be used
+# as E15 functional evidence.
+./tools/validation/create_trt_identity_bundle.sh /tmp/tp-trt-identity
 
-tensorplate deploy /var/lib/tensorplate/bundles/staging/yolov8n_tensorrt
+tensorplate deploy /tmp/tp-trt-identity
 tensorplate status
-tensorplate infer --input /path/to/sample.json
+tensorplate infer --input /tmp/tp-trt-identity/sample_infer.json
 ```
 
 ## 5. (Optional) Install the Python/PyTorch backend for SmolVLA

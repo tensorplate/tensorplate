@@ -13,6 +13,9 @@ set -e
 
 case "$1" in
     remove|upgrade|deconfigure)
+        if [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke stop tensorplate-agent.service >/dev/null || true
+        fi
         ;;
     failed-upgrade)
         ;;

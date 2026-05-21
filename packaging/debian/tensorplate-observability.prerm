@@ -7,6 +7,9 @@ set -e
 
 case "$1" in
     remove|upgrade|deconfigure|failed-upgrade)
+        if [ "$1" != "failed-upgrade" ] && [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke stop tensorplate-observability.service >/dev/null || true
+        fi
         ;;
     *)
         echo "tensorplate-observability.prerm: unknown argument: $1" >&2

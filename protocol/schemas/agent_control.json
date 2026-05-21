@@ -281,7 +281,12 @@
         "backend_hint": {"type": "string"},
         "model_class": {"type": "string"},
         "staged_path": {"type": "string"},
-        "promoted_monotonic_ns": {"type": "integer", "minimum": 0}
+        "promoted_monotonic_ns": {"type": "integer", "minimum": 0},
+        "serving_url": {
+          "type": "string",
+          "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]+(/.*)?$",
+          "description": "Loopback data-plane URL for the active worker. Present only for the active deployment when the agent owns a concrete serving process."
+        }
       }
     },
     "QuarantineRecord": {

@@ -51,6 +51,12 @@ for unit in "${debian}/tensorplate-agent.service" "${debian}/tensorplate-observa
   forbid_line "${unit}" '^Restart=always$'
 done
 
+# The agent supervises the TensorRT/CUDA serving worker; hiding /dev from the
+# agent service also hides GPU device nodes from the worker it spawns.
+require_line "${debian}/tensorplate-agent.service" '^PrivateDevices=false$'
+forbid_line "${debian}/tensorplate-agent.service" '^PrivateDevices=true$'
+require_line "${debian}/tensorplate-observability.service" '^PrivateDevices=true$'
+
 # Observability must NOT order itself after the agent.
 forbid_line "${debian}/tensorplate-observability.service" '(After|Requires|Wants|BindsTo)=tensorplate-agent'
 

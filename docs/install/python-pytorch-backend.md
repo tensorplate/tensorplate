@@ -49,12 +49,30 @@ the platform:
 ```bash
 # Jetson Orin (aarch64, CUDA): use NVIDIA's PyTorch wheel matrix.
 # See https://forums.developer.nvidia.com/t/pytorch-for-jetson/72048.
+sudo apt install \
+  libcudnn9-cuda-12 \
+  libcufile-12-6 \
+  cuda-cupti-12-6 \
+  cuda-libraries-12-6
 sudo /usr/bin/python3 -m pip install --upgrade pip wheel
 sudo /usr/bin/python3 -m pip install <jetson torch wheel URL>
 
 # x86_64 CPU host (development):
 sudo /usr/bin/python3 -m pip install torch>=2.1
 ```
+
+For the JetPack 6.2 / CUDA 12.6 E15 validation target, the tested wheel
+source was the Jetson AI Lab JP6 CUDA 12.6 index:
+
+```bash
+sudo /usr/bin/python3 -m pip install --no-cache-dir \
+  --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+  torch==2.8.0
+```
+
+If `import torch` fails with a missing CUDA shared library
+(`libcudnn.so.9`, `libcufile.so.0`, `libcupti.so.12`, `libcusparse.so.12`,
+etc.), install the apt packages above and rerun `tensorplate doctor`.
 
 The descriptor's `pytorch.minimum_version` field is what `doctor` and
 the agent compare against. Override the descriptor if the wheel you

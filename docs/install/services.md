@@ -50,9 +50,14 @@ The unit files apply the same default sandbox to both services:
 - `RuntimeDirectory=tensorplate` so systemd recreates `/run/tensorplate`
   on every boot (no stale-socket cleanup required)
 - `NoNewPrivileges=true`, `ProtectHome=true`, `PrivateTmp=true`,
-  `PrivateDevices=true`, `ProtectKernel*=true`
+  `ProtectKernel*=true`
 - `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`
 - `LockPersonality=true`, `RestrictRealtime=true`, `RestrictSUIDSGID=true`
+
+`tensorplate-agent.service` explicitly keeps `PrivateDevices=false`
+because it supervises `tensorplate-serving` as a child process and the
+worker must see Jetson CUDA/TensorRT device nodes. Observability does
+not need device access and keeps `PrivateDevices=true`.
 
 These are starting points. Sites can tighten further with drop-in
 files at `/etc/systemd/system/tensorplate-agent.service.d/*.conf`

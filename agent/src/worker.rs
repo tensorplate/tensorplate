@@ -126,6 +126,16 @@ pub trait WorkerControl: Send + Sync {
     ///
     /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures.
     fn active_deployment_id(&self) -> AgentResult<Option<String>>;
+
+    /// Data-plane endpoint for the active worker, when this control
+    /// implementation owns a concrete serving process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::WorkerControl`] for process inspection failures.
+    fn active_serving_url(&self) -> AgentResult<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Build the configured worker-control implementation.
@@ -456,6 +466,22 @@ impl WorkerControl for ProcessWorkerControl {
             }
         }
         Ok(state.active.as_ref().map(|w| w.deployment_id.clone()))
+    }
+
+    fn active_serving_url(&self) -> AgentResult<Option<String>> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
+        if let Some(active) = state.active.as_mut() {
+            if active.child.try_wait()?.is_some() {
+                state.active = None;
+            }
+        }
+        Ok(state
+            .active
+            .as_ref()
+            .map(|w| format!("http://{}:{}/infer", self.config.bind_host, w.port)))
     }
 }
 

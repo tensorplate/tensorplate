@@ -834,21 +834,39 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
     }
 }
 
-fn probe_optional_runtimes(_opts: &InstallProbeOptions) -> Vec<Finding> {
+fn probe_optional_runtimes(opts: &InstallProbeOptions) -> Vec<Finding> {
     // CUDA / TensorRT / LibTorch live outside the package manifest. We
     // probe well-known absolute paths but never run vendor SDK
     // binaries: a positive result means "the file is on disk", not
     // "this runtime works". Real validation belongs to V01-E15.
-    let cuda = path_exists("/usr/local/cuda/version.txt")
-        || path_exists("/usr/local/cuda/version.json")
-        || path_exists("/usr/lib/x86_64-linux-gnu/libcudart.so")
-        || path_exists("/usr/lib/aarch64-linux-gnu/libcudart.so");
-    let tensorrt = path_exists("/usr/include/NvInferVersion.h")
-        || path_exists("/usr/lib/x86_64-linux-gnu/libnvinfer.so")
-        || path_exists("/usr/lib/aarch64-linux-gnu/libnvinfer.so");
-    let libtorch = path_exists("/usr/local/libtorch")
-        || path_exists("/opt/libtorch")
-        || path_exists("/usr/lib/libtorch.so");
+    let cuda = any_runtime_artifact_exists(
+        opts,
+        &[
+            "/usr/local/cuda/version.txt",
+            "/usr/local/cuda/version.json",
+            "/usr/local/cuda/lib64/libcudart.so",
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+            "/usr/lib/x86_64-linux-gnu/libcudart.so",
+            "/usr/lib/aarch64-linux-gnu/libcudart.so",
+            "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so",
+        ],
+    );
+    let tensorrt = any_runtime_artifact_exists(
+        opts,
+        &[
+            "/usr/include/NvInferVersion.h",
+            "/usr/lib/x86_64-linux-gnu/libnvinfer.so",
+            "/usr/lib/aarch64-linux-gnu/libnvinfer.so",
+        ],
+    );
+    let libtorch = any_runtime_artifact_exists(
+        opts,
+        &[
+            "/usr/local/libtorch",
+            "/opt/libtorch",
+            "/usr/lib/libtorch.so",
+        ],
+    );
 
     vec![
         runtime_finding_simple(
@@ -882,6 +900,15 @@ fn runtime_finding_simple(id: FindingId, present: bool, ok_msg: &str, miss_msg: 
 
 fn path_exists(p: &str) -> bool {
     Path::new(p).exists()
+}
+
+fn any_runtime_artifact_exists(opts: &InstallProbeOptions, paths: &[&str]) -> bool {
+    paths.iter().any(|path| {
+        opts.prefix.as_ref().map_or_else(
+            || path_exists(path),
+            |prefix| prefix.join(path.trim_start_matches('/')).exists(),
+        )
+    })
 }
 
 #[cfg(unix)]
@@ -1186,5 +1213,26 @@ mod tests {
             .find(|f| matches!(f.id, FindingId::PathLayout))
             .unwrap();
         assert_eq!(layout.status_label(), "missing");
+    }
+
+    #[test]
+    fn jetpack_cuda_runtime_layout_is_detected() {
+        let td = TempDir::new().unwrap();
+        let cudart = td
+            .path()
+            .join("usr/local/cuda/targets/aarch64-linux/lib/libcudart.so");
+        fs::create_dir_all(cudart.parent().unwrap()).unwrap();
+        fs::write(&cudart, b"").unwrap();
+        let opts = InstallProbeOptions {
+            prefix: Some(td.path().to_path_buf()),
+            probe_backends: false,
+            skip_systemd: true,
+        };
+        let findings = probe_optional_runtimes(&opts);
+        let cuda = findings
+            .iter()
+            .find(|f| matches!(f.id, FindingId::CudaRuntime))
+            .unwrap();
+        assert_eq!(cuda.status_label(), "ok");
     }
 }

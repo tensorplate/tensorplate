@@ -176,6 +176,7 @@ fn summary_block(d: &DeploymentSummary) -> Value {
         "bundle_version": d.bundle_version,
         "backend": d.backend_hint,
         "model_class": d.model_class,
+        "serving_url": d.serving_url,
     })
 }
 
@@ -331,6 +332,9 @@ fn render_human(
                     .map(|n| format!("{n}@{}", active.bundle_version.as_deref().unwrap_or("?")))
                     .unwrap_or_else(|| active.bundle_digest.clone()),
             ));
+            if let Some(url) = active.serving_url.as_deref() {
+                out.push_str(&format!("  serving_url={url}\n"));
+            }
         } else {
             out.push_str("active: <no active deployment>\n");
         }
@@ -526,6 +530,7 @@ mod tests {
                 model_class: Some("vision".into()),
                 staged_path: None,
                 promoted_monotonic_ns: Some(1),
+                serving_url: None,
             }),
             previous_active: None,
             candidate: None,

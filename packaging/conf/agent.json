@@ -4,11 +4,27 @@
   "socket_path": "/run/tensorplate/agent.sock",
   "state_dir": "/var/lib/tensorplate/state",
   "staging_dir": "/var/lib/tensorplate/bundles/staging",
-  "available_backends": ["mock", "python_pytorch"],
-  "backend_capabilities": {},
-  "device_family": "any",
+  "available_backends": ["tensorrt", "python_pytorch"],
+  "backend_capabilities": {
+    "tensorrt": {
+      "fixed_shape": true,
+      "deterministic_latency": true,
+      "supported_precision": ["fp32", "fp16", "int8"],
+      "supported_artifact_kinds": ["tensorrt_engine"]
+    },
+    "python_pytorch": {
+      "async": true,
+      "deterministic_latency": true,
+      "control_loop_integration": true,
+      "supported_precision": ["auto", "fp32", "fp16", "bfloat16"],
+      "supported_artifact_kinds": ["python_pytorch_entry", "weights", "tokenizer"]
+    }
+  },
+  "device_family": "jetson-orin",
   "worker": {
-    "mode": "mock",
+    "mode": "process",
+    "serving_binary_path": "/usr/lib/tensorplate/tensorplate-serving",
+    "serving_config_dir": "/var/lib/tensorplate/worker-configs",
     "serving_bind_host": "127.0.0.1",
     "serving_bind_port": 18080,
     "serving_candidate_bind_port": 18081

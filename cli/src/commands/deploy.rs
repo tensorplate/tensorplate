@@ -467,6 +467,7 @@ mod tests {
             model_class: None,
             staged_path: None,
             promoted_monotonic_ns: Some(3),
+            serving_url: None,
         };
         let agent_status = AgentStatus {
             agent_state: AgentRunState::Ready,

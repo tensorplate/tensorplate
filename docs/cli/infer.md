@@ -19,8 +19,11 @@ Order of precedence:
 1. `--serving-url <url>` flag.
 2. `serving_url` field on the active profile.
 3. Agent-discovered active deployment: the CLI asks the agent for status,
-   confirms an active deployment exists, and uses the v0.1.0 default loopback
-   serving endpoint (`http://127.0.0.1:18080/infer`).
+   confirms an active deployment exists, and uses
+   `AgentStatus.active.serving_url` when the agent reports one.
+4. If older agents do not report `serving_url`, the CLI falls back to the
+   v0.1.0 default loopback serving endpoint
+   (`http://127.0.0.1:18080/infer`).
 
 Local profile (default) reaches loopback after a successful deploy. Explicit
 `url` profiles require either a manual SSH tunnel to the serving endpoint or

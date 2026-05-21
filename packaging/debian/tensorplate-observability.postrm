@@ -23,4 +23,8 @@ esac
 
 #DEBHELPER#
 
+if [ "$1" = "purge" ]; then
+    rmdir /var/log/tensorplate 2>/dev/null || true
+fi
+
 exit 0
