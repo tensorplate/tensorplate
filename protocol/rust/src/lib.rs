@@ -41,6 +41,7 @@ pub mod failure_reason;
 pub mod health_event;
 pub mod infer_request;
 pub mod infer_result;
+pub mod install_paths;
 pub mod log_event;
 pub mod metric_event;
 pub mod model_spec;

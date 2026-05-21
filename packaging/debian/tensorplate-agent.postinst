@@ -1,0 +1,34 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F02/F07: tensorplate-agent post-install.
+#
+# Creates the system user/group, lays down the v0.1.0 install
+# directories, and asserts permissions. Idempotent: a reinstall does
+# not overwrite operator-edited configs (those are conffiles) and
+# does not destroy /var/lib/tensorplate state.
+#
+# We deliberately do NOT start the agent here. Operators run
+# `tensorplate doctor` then `systemctl enable --now tensorplate-agent`
+# after a green pass.
+
+set -e
+
+case "$1" in
+    configure)
+        /usr/share/tensorplate/packaging/scripts/create-users.sh
+        /usr/share/tensorplate/packaging/scripts/install-paths.sh
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "tensorplate-agent.postinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

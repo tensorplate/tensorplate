@@ -1,0 +1,19 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F07: tensorplate-observability pre-remove.
+
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure|failed-upgrade)
+        ;;
+    *)
+        echo "tensorplate-observability.prerm: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

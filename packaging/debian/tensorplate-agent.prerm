@@ -1,0 +1,27 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F07: tensorplate-agent pre-remove.
+#
+# Maintainer-script side of the V01-E07/E09 invariant that the agent
+# owns serving-worker lifecycle: the agent unit is stopped *before*
+# the agent binary is unlinked so a half-removed agent never leaves
+# orphaned serving workers behind. systemd shutdown is delegated to
+# the debhelper-generated #DEBHELPER# block.
+
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        ;;
+    failed-upgrade)
+        ;;
+    *)
+        echo "tensorplate-agent.prerm: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

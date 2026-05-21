@@ -1,0 +1,3 @@
+packaging/scripts/create-users.sh            usr/share/tensorplate/packaging/scripts/
+packaging/scripts/install-paths.sh           usr/share/tensorplate/packaging/scripts/
+packaging/scripts/path-constants.sh          usr/share/tensorplate/packaging/scripts/

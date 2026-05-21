@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F07: tensorplate-agent post-remove.
+#
+# `remove` keeps /var/lib/tensorplate intact so a reinstall picks up
+# desired state and bundles. `purge` removes durable state but never
+# touches operator-managed paths outside /var/lib/tensorplate or
+# /etc/tensorplate. The system user/group is retained: removing it
+# would orphan files on shared appliances and is left to the operator.
+
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /var/lib/tensorplate/state \
+               /var/lib/tensorplate/bundles \
+               /var/lib/tensorplate/worker-configs \
+               /var/log/tensorplate \
+               /run/tensorplate || true
+        # Keep /etc/tensorplate when other tensorplate-* packages may
+        # still reference it; dpkg removes the conffile via the
+        # generated section below.
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "tensorplate-agent.postrm: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -11,9 +11,26 @@ Vcs-Browser: https://github.com/tensorplate/tensorplate
 Vcs-Git: https://github.com/tensorplate/tensorplate.git
 Rules-Requires-Root: no
 
+Package: tensorplate-common
+Architecture: all
+Multi-Arch: foreign
+Depends:
+ ${misc:Depends},
+ adduser,
+Description: TensorPlate shared maintainer-script helpers (V01-E14)
+ Ships the shared install-paths / create-users / path-constants
+ helpers used by every tensorplate-* package's maintainer scripts so
+ the on-device filesystem layout is created consistently regardless
+ of which packages are installed first.
+ .
+ Installing this package alone has no runtime effect; it is pulled in
+ automatically by the agent, observability, serving, and CLI packages.
+
 Package: tensorplate-agent
 Architecture: any
-Pre-Depends: ${misc:Pre-Depends}
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
@@ -35,7 +52,9 @@ Description: TensorPlate device agent (V01-E08/E09)
 
 Package: tensorplate-serving
 Architecture: any
-Pre-Depends: ${misc:Pre-Depends}
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
@@ -52,7 +71,9 @@ Description: TensorPlate serving worker (V01-E07)
 
 Package: tensorplate-observability
 Architecture: any
-Pre-Depends: ${misc:Pre-Depends}
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
@@ -72,6 +93,7 @@ Architecture: any
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
+ tensorplate-common (= ${source:Version}),
 Recommends:
  tensorplate-agent (= ${binary:Version}),
 Description: TensorPlate operator CLI (V01-E11)
