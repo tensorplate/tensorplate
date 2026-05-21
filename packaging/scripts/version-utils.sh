@@ -25,8 +25,8 @@ tensorplate_version_lt() {
   _b="$2"
   _ai=1
   while :; do
-    _ap="$(printf '%s' "${_a}" | awk -F'[.+-]' -v i="${_ai}" '{print $i}')"
-    _bp="$(printf '%s' "${_b}" | awk -F'[.+-]' -v i="${_ai}" '{print $i}')"
+    _ap="$(printf '%s' "${_a}" | awk -F'[.+~-]' -v i="${_ai}" '{print $i}')"
+    _bp="$(printf '%s' "${_b}" | awk -F'[.+~-]' -v i="${_ai}" '{print $i}')"
     if [ -z "${_ap}" ] && [ -z "${_bp}" ]; then
       return 1
     fi

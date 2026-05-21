@@ -8,6 +8,98 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Packaging and first-run install (V01-E14). v0.1.0 becomes
+  installable as a Jetson-class Linux appliance. None of the
+  artifacts are published yet — V01-E14 ships the inspectable
+  skeleton, the verifier suite, and the V01-E15 handoff runbook.
+    - Native Debian-style package split under `packaging/debian/`
+      with binary packages for `tensorplate-common`,
+      `tensorplate-agent`, `tensorplate-serving`,
+      `tensorplate-observability`, `tensorplate-cli`, and the
+      separately installable `tensorplate-backend-python-pytorch`.
+      Core packages do not depend on the Python/PyTorch backend.
+      PyTorch is intentionally not a Debian dependency.
+    - On-device filesystem contract under
+      `protocol/rust/src/install_paths.rs` (single source of truth)
+      mirrored by `packaging/scripts/path-constants.sh` for
+      maintainer scripts and tests:
+      `/etc/tensorplate`, `/var/lib/tensorplate/{state,bundles/{staging,active,previous,quarantine},worker-configs}`,
+      `/var/log/tensorplate`, `/run/tensorplate`, and
+      `/usr/share/tensorplate/backends`.
+    - Shared maintainer-script helpers
+      (`create-users.sh`, `install-paths.sh`, `upgrade-preflight.sh`,
+      `version-utils.sh`) shipped by the new
+      `tensorplate-common` package so every other package can
+      Pre-Depend on it for layout + ownership.
+    - systemd units for `tensorplate-agent.service` and
+      `tensorplate-observability.service` with hardened defaults
+      (`User=tensorplate`, `ProtectSystem=strict` + scoped
+      `ReadWritePaths`, `RuntimeDirectory=tensorplate`,
+      `NoNewPrivileges`, `ProtectKernel*`, restricted address
+      families, bounded restart). No `tensorplate-serving.service`:
+      the agent supervises the worker (V01-E09 invariant
+      encoded directly in the package layout).
+    - Default config files installed under `/etc/tensorplate/` as
+      dpkg conffiles. All endpoints default to loopback / Unix
+      sockets. First-run state is the existing typed
+      `SupervisionServingState::NoActiveDeployment`, not an error.
+    - Backend descriptor surface
+      (`protocol::backend_descriptor` + schema
+      `protocol/schemas/backend_descriptor.json`) and a shared
+      `protocol::backend_probe` that the agent and the CLI doctor
+      both consume. Probes never execute user model code; they
+      shell out only to `python3 -c 'import sys; ...'` /
+      `python3 -c 'import torch; ...'` against the descriptor's
+      pinned interpreter and return a typed `BackendProbeState`.
+    - `tensorplate-agent` startup probes every backend listed in
+      `available_backends`; the new
+      `AgentError::BackendUnrunnable` is raised before staging
+      when the bundle's `backend_hint` maps to a non-Runnable
+      probe. SmolVLA / Python bundles fail at deploy time, never
+      at first inference.
+    - `tensorplate doctor` gains the V01-E14 install diagnostics
+      (stable finding IDs):
+      `path_layout`, `config_files`, `agent_systemd_unit`,
+      `observability_systemd_unit`, `serving_systemd_absent`,
+      `serving_binary_installed`, `python_pytorch_backend`,
+      `python_pytorch_runtime`, `cuda_runtime`. Doctor degrades
+      to `missing` (not `fail`) when no install layout is
+      detected so host CI on dev hosts stays green.
+    - Lifecycle policy (V01-E14-F07):
+      reinstall preserves user state; upgrade preflight refuses
+      unknown `schema_version`, unsafe `/var/lib/tensorplate`
+      ownership, or a downgrade; `remove` keeps state, `purge`
+      clears state but never deletes the `tensorplate` system
+      user / group.
+    - Packaging verification suite under `test/packaging/`
+      (`verify_layout.sh`, `verify_debian_metadata.sh`,
+      `verify_systemd_units.sh`, `verify_lifecycle_scripts.sh`,
+      `verify_descriptor.sh`, `run.sh`). All five verifiers pass
+      on the host CI without root.
+    - Operator + handoff documentation under `docs/install/`:
+      filesystem-layout, services, lifecycle,
+      python-pytorch-backend, clean-install-runbook, and
+      e15-handoff. Doctor finding catalog updated in
+      `docs/cli/doctor.md`.
+
+### Behavior changes
+
+- `tensorplate_agent::config::AgentConfig` is unchanged in shape;
+  the V01-E14 backend probe is carried on the coordinator via the
+  new `Coordinator::with_backend_probes` builder. Tests and
+  embedders that did not call the builder see no behavior change.
+- `tensorplate_agent::bundle::verify` is unchanged. The new
+  `verify_with_probes(bundle_path, config, probes)` is the
+  deploy-time entry point used by the coordinator; the legacy
+  `verify` calls it with an empty map. Callers that hit
+  `verify` directly retain the previous behavior.
+- `tensorplate doctor` no longer emits the historical placeholder
+  findings for `python_pytorch_backend` / `tensorrt_runtime` /
+  `libtorch_runtime` from the runtime-environment probe; the
+  install-probe module owns those checks now with real probing.
+  Finding IDs are stable; the V01-E15 harness's grep keys are
+  unchanged.
+
 - Model bundle format (V01-E13). The v0.1.0 bundle authoring surface
   lands as the shared `tensorplate_protocol::bundle` module that the
   agent verifier, CLI, and fixture tooling consume. The same module
