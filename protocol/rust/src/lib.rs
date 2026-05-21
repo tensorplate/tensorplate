@@ -29,6 +29,7 @@ use serde::de::DeserializeOwned;
 pub mod agent_control;
 pub mod agent_state;
 pub mod backend_descriptor;
+pub mod backend_probe;
 pub mod buffer_pressure_event;
 pub mod buffer_ref;
 pub mod bundle;
