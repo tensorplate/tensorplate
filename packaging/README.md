@@ -31,7 +31,8 @@ packaging/
 │   ├── tensorplate-agent.postrm
 │   ├── tensorplate-agent.service   Auto-installed by dh_installsystemd.
 │   ├── ...                         Same files for -observability/-serving/-cli/-backend-python-pytorch.
-├── systemd/                        Source unit files referenced by debian/*.service.
+│   ├── tensorplate-agent.service
+│   └── tensorplate-observability.service       Auto-installed by dh_installsystemd.
 ├── conf/                           Default config installed under /etc/tensorplate/.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
 └── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.

@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F03: tensorplate-observability independent health monitor.
+#
+# Architecture invariant (V01-E10): the observability service must
+# start, run, and detect missing heartbeats independently from the
+# agent and the serving worker. The unit therefore declares no Wants=,
+# Requires=, or After= dependency on the agent unit.
+
+[Unit]
+Description=TensorPlate observability service (independent health monitor)
+Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/services.md
+After=network.target local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+User=tensorplate
+Group=tensorplate
+WorkingDirectory=/var/lib/tensorplate
+EnvironmentFile=-/etc/default/tensorplate-observability
+
+ExecStart=/usr/bin/tensorplate-observability --config /etc/tensorplate/observability.json
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+RuntimeDirectory=tensorplate
+RuntimeDirectoryMode=0750
+StateDirectory=tensorplate
+StateDirectoryMode=0750
+LogsDirectory=tensorplate
+LogsDirectoryMode=0750
+
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+LockPersonality=true
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
