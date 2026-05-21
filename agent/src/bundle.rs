@@ -120,7 +120,7 @@ pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedB
     let result = evaluate_compatibility(&descriptor, &device);
     if !result.ok {
         // Surface the first violation as a typed agent error. The full
-        // list is preserved through `compatibility_for` when callers
+        // list is preserved through `parse_and_check` when callers
         // need the structured payload (e.g. CLI rendering, transaction
         // failure recording).
         if let Some(v) = result.violations.into_iter().next() {
