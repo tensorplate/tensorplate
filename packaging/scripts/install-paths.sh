@@ -59,6 +59,18 @@ ensure_dir() {
   fi
 }
 
+ensure_config_file() {
+  path="$1"
+  mode="$2"
+  full="${prefix}${path}"
+  [ -e "${full}" ] || return 0
+  chmod "${mode}" "${full}"
+  if [ "${real_install}" -eq 1 ]; then
+    chgrp "${TP_SYSTEM_GROUP}" "${full}" 2>/dev/null || true
+    chown "root:${TP_SYSTEM_GROUP}" "${full}" 2>/dev/null || true
+  fi
+}
+
 ensure_dir "${TP_ETC_DIR}"               "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_STATE_DIR}"             "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_STATE_INNER_DIR}"       "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
@@ -76,3 +88,10 @@ ensure_dir "${TP_BACKEND_DESCRIPTOR_DIR}" "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 if [ "${real_install}" -eq 1 ]; then
   ensure_dir "${TP_RUN_DIR}"             "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 fi
+
+# Package payloads land before postinst runs. Normalize metadata on
+# whichever configs are present without overwriting conffile contents.
+ensure_config_file "${TP_AGENT_CONFIG_PATH}"          "${TP_CONF_FILE_MODE}"
+ensure_config_file "${TP_OBSERVABILITY_CONFIG_PATH}"  "${TP_CONF_FILE_MODE}"
+ensure_config_file "${TP_SERVING_WORKER_CONFIG_PATH}" "${TP_CONF_FILE_MODE}"
+ensure_config_file "${TP_CLI_CONFIG_PATH}"            "${TP_CLI_FILE_MODE}"

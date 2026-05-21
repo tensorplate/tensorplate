@@ -6,8 +6,8 @@ This page is the V01-E14-F03 service lifecycle contract.
 
 | Unit | Package | Type | Notes |
 | --- | --- | --- | --- |
-| `tensorplate-agent.service` | `tensorplate-agent` | `notify` | Appliance entrypoint. Supervises the serving worker (V01-E09). |
-| `tensorplate-observability.service` | `tensorplate-observability` | `notify` | Independent health monitor (V01-E10). |
+| `tensorplate-agent.service` | `tensorplate-agent` | `simple` | Appliance entrypoint. Supervises the serving worker (V01-E09). |
+| `tensorplate-observability.service` | `tensorplate-observability` | `simple` | Independent health monitor (V01-E10). |
 
 No `tensorplate-serving.service` ships in v0.1.0. The serving worker
 runs only as a child of the agent. Operators that try
@@ -31,7 +31,8 @@ detection.
 ## Restart policy
 
 Both units use `Restart=on-failure` with a bounded `RestartSec=5` and
-`StartLimitBurst=5` within `StartLimitIntervalSec=60`. This gives
+`StartLimitBurst=5` within `StartLimitIntervalSec=60`. The start-limit
+directives live in the `[Unit]` section for the Jetson systemd version. This gives
 systemd enough room to recover from a hard crash without masking a
 broken config: a unit that fails to start five times in a minute
 enters `failed` state and stops retrying.
@@ -94,5 +95,6 @@ journalctl -u tensorplate-observability -f
 ```
 
 The `tensorplate doctor` install probes also surface the same state
-through stable finding IDs (`agent_service`, `observability_service`,
-`serving_systemd_absent` — see `docs/cli/doctor.md`).
+through stable finding IDs (`agent_service_state`,
+`observability_service_state`, `serving_systemd_absent` — see
+`docs/cli/doctor.md`).

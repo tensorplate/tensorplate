@@ -19,10 +19,9 @@ packaging/
 ├── VERSION                         Single-source version stamp.
 ├── version.sh                      Helper to emit the version string.
 ├── debian/                         debhelper-style packaging metadata.
-│   ├── control                     Source + binary package definitions.
+│   ├── control                     Source + binary package definitions and debhelper compat level.
 │   ├── changelog                   Debian changelog (auto-aligned to VERSION).
 │   ├── rules                       dh-style build / install rules.
-│   ├── compat                      debhelper compat level.
 │   ├── copyright                   Apache-2.0 declaration.
 │   ├── source/format               Quilt format.
 │   ├── tensorplate-agent.install   Per-binary-package install manifest.
@@ -49,7 +48,10 @@ packaging/
 | `tensorplate-backend-python-pytorch` | Python sidecar backend for SmolVLA / Python-native bundles. | `tensorplate-backend-python-pytorch` (entrypoint) | no — backend lifecycle is per-session by the serving worker |
 
 Core packages do **not** depend on `tensorplate-backend-python-pytorch`.
-Installing it later is sufficient to unlock SmolVLA-class deploys.
+Installing it later makes the Python module + console entrypoint
+discoverable by the descriptor interpreter; after PyTorch is installed
+and the agent is restarted, SmolVLA-class deploys can pass the startup
+backend probe.
 
 ## Building (skeleton)
 

@@ -6,8 +6,8 @@ V01-E14-F08 packaging verification suite.
 
 | File | What it asserts |
 | --- | --- |
-| `verify_layout.sh` | Stages the V01-E14 install layout under a tempdir using the shared `packaging/scripts/install-paths.sh` helper and asserts every documented directory exists with the documented permissions. Asserts that no directory ends up world-writable. |
-| `verify_debian_metadata.sh` | Lints the debhelper-style metadata under `packaging/debian/`: every binary package declared in `control` has an `*.install` manifest, every conffile-bearing package has a `*.conffiles`, every maintainer script is executable, and only `tensorplate-agent` and `tensorplate-observability` ship a systemd unit. |
+| `verify_layout.sh` | Stages the V01-E14 install layout under a tempdir using the shared `packaging/scripts/install-paths.sh` helper and asserts every documented directory and config file has the documented permissions. Asserts that no directory ends up world-writable. |
+| `verify_debian_metadata.sh` | Lints the debhelper-style metadata under `packaging/debian/`: every binary package declared in `control` has an `*.install` manifest, `/etc` config payloads rely on debhelper's single auto-generated conffile list, every maintainer script is executable, and only `tensorplate-agent` and `tensorplate-observability` ship a systemd unit. |
 | `verify_systemd_units.sh` | Parses `packaging/debian/*.service` and asserts the v0.1.0 invariants: `User=tensorplate`, `Group=tensorplate`, loopback-only `ReadWritePaths=`, hardening directives present, no `tensorplate-serving.service`. |
 | `verify_lifecycle_scripts.sh` | Runs `version-utils.sh` and `upgrade-preflight.sh` against known-good and known-bad config fixtures and asserts each returns the correct exit code. |
 | `verify_descriptor.sh` | Validates the shipped backend descriptor against the JSON schema using `jq` (or falls back to a structural check). |

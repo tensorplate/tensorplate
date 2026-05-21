@@ -1,0 +1,6 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+exec /usr/bin/python3 -m tensorplate_pytorch_backend "$@"

@@ -26,10 +26,14 @@ Description=TensorPlate device agent (control plane, deploy transaction, worker 
 Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/services.md
 After=network.target local-fs.target
 Wants=local-fs.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
-Type=notify
-NotifyAccess=main
+# The current v0.1.0 binary opens its listener synchronously and does
+# not implement sd_notify. Keep the unit honest so `systemctl start`
+# reaches active as soon as ExecStart stays running.
+Type=simple
 
 User=tensorplate
 Group=tensorplate
@@ -45,8 +49,6 @@ ExecReload=/bin/kill -HUP $MAINPID
 # errors with infinite restart.
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 # tmpfs-managed runtime dir; systemd recreates it on every start.
 RuntimeDirectory=tensorplate

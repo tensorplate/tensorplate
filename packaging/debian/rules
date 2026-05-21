@@ -17,10 +17,13 @@ export SOURCE_DATE_EPOCH := $(shell date +%s)
 endif
 
 %:
-	dh $@ --with systemd
+	dh $@
 
 # Upstream binaries are built outside debhelper for v0.1.0. The driver
 # script that produces them must run before `dpkg-buildpackage`.
+override_dh_auto_configure:
+	@echo "tensorplate: upstream configure is driven externally; debian/rules configure step is a no-op"
+
 override_dh_auto_build:
 	@echo "tensorplate: upstream build is driven externally; debian/rules build step is a no-op"
 
@@ -34,5 +37,5 @@ override_dh_auto_install:
 # Operators run `systemctl enable --now tensorplate-agent` after the
 # clean-install doctor pass, per docs/install/.
 override_dh_installsystemd:
-	dh_installsystemd --no-start --name=tensorplate-agent tensorplate-agent.service
-	dh_installsystemd --no-start --name=tensorplate-observability tensorplate-observability.service
+	dh_installsystemd --no-start -ptensorplate-agent
+	dh_installsystemd --no-start -ptensorplate-observability

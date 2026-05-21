@@ -3,9 +3,9 @@
 # Sourced by lifecycle scripts. POSIX sh.
 
 # tensorplate_version_lt A B
-#   Exits 0 (true) iff A < B under Debian-like ordering (digits
-#   compared numerically, non-digit suffixes lexically). Sufficient
-#   for the small set of versions v0.1.0 packages will see.
+#   Exits 0 (true) iff A < B under Debian-like ordering. Package
+#   pre-release versions must use the Debian `~` separator so the
+#   dpkg and fallback paths agree.
 # shellcheck shell=sh
 
 tensorplate_version_lt() {
@@ -18,9 +18,8 @@ tensorplate_version_lt() {
     fi
     return 1
   fi
-  # Fallback: split on dots/dashes/pluses, compare numeric then
-  # lexical. Pre-release suffix on the right side is treated as less
-  # than the bare version on the left (semver-style).
+  # Fallback: split on dots/dashes/pluses/tilde, compare numeric then
+  # lexical. Debian pre-release suffixes use `~`.
   _a="$1"
   _b="$2"
   _ai=1

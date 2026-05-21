@@ -38,7 +38,7 @@ forbid_line() {
 for unit in "${debian}/tensorplate-agent.service" "${debian}/tensorplate-observability.service"; do
   require_line "${unit}" '^User=tensorplate$'
   require_line "${unit}" '^Group=tensorplate$'
-  require_line "${unit}" '^Type=notify$'
+  require_line "${unit}" '^Type=simple$'
   require_line "${unit}" '^RuntimeDirectory=tensorplate$'
   require_line "${unit}" '^ProtectSystem=strict$'
   require_line "${unit}" '^ReadWritePaths=.*/var/lib/tensorplate'

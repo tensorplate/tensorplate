@@ -17,6 +17,7 @@
 // `skipped` finding, not a `fail`, so workspace CI still passes.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tensorplate_protocol::install_paths::{
     self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH, OBSERVABILITY_CONFIG_PATH,
@@ -63,19 +64,118 @@ impl Default for InstallProbeOptions {
 pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
     let mut out = Vec::new();
     let any_install = any_install_present(opts);
+    out.extend(probe_core_packages(opts, any_install));
     out.extend(probe_path_layout(opts));
     out.extend(probe_config_files(opts));
+    out.extend(probe_config_endpoints(opts));
     out.extend(probe_serving_binary(opts));
     if any_install {
         out.extend(probe_systemd_units(opts));
+        out.extend(probe_service_states(opts));
     } else {
         out.extend(skipped_systemd_units(
+            "no tensorplate install layout detected",
+        ));
+        out.extend(skipped_service_states(
             "no tensorplate install layout detected",
         ));
     }
     out.extend(probe_python_pytorch_backend(opts));
     out.extend(probe_optional_runtimes(opts));
     out
+}
+
+fn probe_core_packages(opts: &InstallProbeOptions, any_install: bool) -> Vec<Finding> {
+    if opts.prefix.is_some() {
+        return vec![Finding::skipped(
+            FindingId::CorePackages,
+            Severity::Info,
+            "dpkg package query skipped for a prefixed test install",
+            None,
+        )];
+    }
+    if !any_install {
+        return vec![Finding::missing(
+            FindingId::CorePackages,
+            Severity::Info,
+            "no tensorplate core package footprint detected",
+            Some("install tensorplate-common, -agent, -serving, -observability, and -cli".into()),
+        )];
+    }
+    if !cfg!(target_os = "linux") {
+        return vec![Finding::skipped(
+            FindingId::CorePackages,
+            Severity::Info,
+            "dpkg package query is only available on the Linux package target",
+            None,
+        )];
+    }
+
+    let mut installed = Vec::new();
+    let mut missing = Vec::new();
+    for package in [
+        "tensorplate-common",
+        "tensorplate-agent",
+        "tensorplate-serving",
+        "tensorplate-observability",
+        "tensorplate-cli",
+    ] {
+        match query_dpkg_package(package) {
+            DpkgPackageState::Installed(version) => installed.push(format!("{package}={version}")),
+            DpkgPackageState::Missing => missing.push(package),
+            DpkgPackageState::Unavailable(detail) => {
+                return vec![Finding::skipped(
+                    FindingId::CorePackages,
+                    Severity::Info,
+                    format!("dpkg package query unavailable: {detail}"),
+                    None,
+                )];
+            }
+        }
+    }
+    if missing.is_empty() {
+        vec![Finding::ok(
+            FindingId::CorePackages,
+            Severity::Info,
+            format!("core Debian packages installed: {}", installed.join(", ")),
+            None,
+        )]
+    } else {
+        vec![Finding::fail(
+            FindingId::CorePackages,
+            Severity::Critical,
+            format!("missing core Debian packages: {}", missing.join(", ")),
+            Some("install the full TensorPlate core package set before starting services".into()),
+        )]
+    }
+}
+
+enum DpkgPackageState {
+    Installed(String),
+    Missing,
+    Unavailable(String),
+}
+
+fn query_dpkg_package(package: &str) -> DpkgPackageState {
+    let output = match Command::new("dpkg-query")
+        .args(["-W", "-f=${db:Status-Abbrev}\t${Version}", package])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => return DpkgPackageState::Unavailable(err.to_string()),
+    };
+    if !output.status.success() {
+        return DpkgPackageState::Missing;
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    let Some((status, version)) = body.trim().split_once('\t') else {
+        return DpkgPackageState::Unavailable("unexpected dpkg-query output".into());
+    };
+    if status.starts_with("ii") {
+        DpkgPackageState::Installed(version.to_string())
+    } else {
+        DpkgPackageState::Missing
+    }
 }
 
 fn any_install_present(opts: &InstallProbeOptions) -> bool {
@@ -92,6 +192,23 @@ fn any_install_present(opts: &InstallProbeOptions) -> bool {
         PYTHON_PYTORCH_BACKEND_DESCRIPTOR,
     ];
     candidates.iter().any(|p| prefixed(opts, p).exists())
+}
+
+fn skipped_service_states(reason: &str) -> Vec<Finding> {
+    vec![
+        Finding::skipped(
+            FindingId::AgentServiceState,
+            Severity::Info,
+            format!("{reason}; agent service-state check skipped"),
+            None,
+        ),
+        Finding::skipped(
+            FindingId::ObservabilityServiceState,
+            Severity::Info,
+            format!("{reason}; observability service-state check skipped"),
+            None,
+        ),
+    ]
 }
 
 fn skipped_systemd_units(reason: &str) -> Vec<Finding> {
@@ -132,25 +249,22 @@ fn prefixed(opts: &InstallProbeOptions, path: &str) -> PathBuf {
 fn probe_path_layout(opts: &InstallProbeOptions) -> Vec<Finding> {
     let mut out = Vec::new();
     let mut missing: Vec<String> = Vec::new();
-    let mut world_writable: Vec<String> = Vec::new();
+    let mut unsafe_paths: Vec<String> = Vec::new();
     for dir in install_paths::required_directories() {
         let path = prefixed(opts, dir);
         if !path.exists() {
             missing.push((*dir).to_string());
             continue;
         }
-        if is_world_writable(&path) {
-            world_writable.push((*dir).to_string());
+        if let Some(detail) = directory_metadata_problem(opts, dir, &path) {
+            unsafe_paths.push(detail);
         }
     }
-    if !world_writable.is_empty() {
+    if !unsafe_paths.is_empty() {
         out.push(Finding::fail(
             FindingId::PathLayout,
             Severity::Critical,
-            format!(
-                "world-writable install paths detected: {}",
-                world_writable.join(", ")
-            ),
+            format!("unsafe install paths detected: {}", unsafe_paths.join(", ")),
             Some(
                 "rerun the packaging install-paths.sh helper or reinstall the tensorplate-common package"
                     .into(),
@@ -207,6 +321,9 @@ fn probe_config_files(opts: &InstallProbeOptions) -> Vec<Finding> {
                 if !has_recognized_schema_version(&body) {
                     malformed.push((*cfg_path).to_string());
                 }
+                if let Some(detail) = config_metadata_problem(opts, cfg_path, &p) {
+                    malformed.push(detail);
+                }
             }
             Err(e) => {
                 malformed.push(format!("{cfg_path}: {e}"));
@@ -252,6 +369,108 @@ fn probe_config_files(opts: &InstallProbeOptions) -> Vec<Finding> {
         ));
     }
     findings
+}
+
+fn probe_config_endpoints(opts: &InstallProbeOptions) -> Vec<Finding> {
+    let agent = prefixed(opts, AGENT_CONFIG_PATH);
+    let serving = prefixed(opts, SERVING_WORKER_CONFIG_PATH);
+    let observability = prefixed(opts, OBSERVABILITY_CONFIG_PATH);
+    if [&agent, &serving, &observability]
+        .iter()
+        .all(|p| !p.exists())
+    {
+        return vec![Finding::missing(
+            FindingId::ConfigEndpoints,
+            Severity::Info,
+            "no installed service configs available for endpoint-locality checks",
+            None,
+        )];
+    }
+
+    let mut unsafe_configs = Vec::new();
+    match read_config_json(&agent) {
+        Ok(v) if agent_endpoint_is_local(&v) => {}
+        Ok(_) => unsafe_configs.push(format!(
+            "{AGENT_CONFIG_PATH}: control transport is not local"
+        )),
+        Err(err) => unsafe_configs.push(format!("{AGENT_CONFIG_PATH}: {err}")),
+    }
+    match read_config_json(&serving) {
+        Ok(v) if serving_endpoint_is_local(&v) => {}
+        Ok(_) => unsafe_configs.push(format!(
+            "{SERVING_WORKER_CONFIG_PATH}: bind is not loopback-only"
+        )),
+        Err(err) => unsafe_configs.push(format!("{SERVING_WORKER_CONFIG_PATH}: {err}")),
+    }
+    match read_config_json(&observability) {
+        Ok(v) if observability_listener_is_local(&v) => {}
+        Ok(_) => unsafe_configs.push(format!(
+            "{OBSERVABILITY_CONFIG_PATH}: listener is not local"
+        )),
+        Err(err) => unsafe_configs.push(format!("{OBSERVABILITY_CONFIG_PATH}: {err}")),
+    }
+
+    if unsafe_configs.is_empty() {
+        vec![Finding::ok(
+            FindingId::ConfigEndpoints,
+            Severity::Info,
+            "installed service configs keep control, serving, and observability endpoints local",
+            None,
+        )]
+    } else {
+        vec![Finding::fail(
+            FindingId::ConfigEndpoints,
+            Severity::Critical,
+            format!(
+                "non-local or unreadable installed configs: {}",
+                unsafe_configs.join(", ")
+            ),
+            Some("restore the packaged local-only defaults before first start".into()),
+        )]
+    }
+}
+
+fn read_config_json(path: &Path) -> Result<serde_json::Value, String> {
+    let body = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    serde_json::from_str(&body).map_err(|err| err.to_string())
+}
+
+fn agent_endpoint_is_local(v: &serde_json::Value) -> bool {
+    match v.get("transport").and_then(serde_json::Value::as_str) {
+        Some("unix_socket") => v
+            .get("socket_path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|path| path.starts_with("/run/tensorplate/")),
+        Some("loopback_tcp") => v
+            .get("tcp_bind_host")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_loopback_host),
+        _ => false,
+    }
+}
+
+fn serving_endpoint_is_local(v: &serde_json::Value) -> bool {
+    let bind = v.get("bind");
+    bind.and_then(|b| b.get("host"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_loopback_host)
+        && bind
+            .and_then(|b| b.get("allow_non_loopback"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(false)
+}
+
+fn observability_listener_is_local(v: &serde_json::Value) -> bool {
+    matches!(
+        v.get("listener")
+            .and_then(|listener| listener.get("transport"))
+            .and_then(serde_json::Value::as_str),
+        Some("in_process" | "unix_socket")
+    )
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "::1" | "localhost")
 }
 
 fn has_recognized_schema_version(body: &str) -> bool {
@@ -375,6 +594,69 @@ fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
         ));
     }
     out
+}
+
+fn probe_service_states(opts: &InstallProbeOptions) -> Vec<Finding> {
+    if opts.skip_systemd {
+        return skipped_service_states("systemd not present on this host");
+    }
+    if opts.prefix.is_some() {
+        return skipped_service_states("service-state query skipped for a prefixed test install");
+    }
+    vec![
+        probe_service_state(
+            FindingId::AgentServiceState,
+            "tensorplate-agent.service",
+            "start with `systemctl enable --now tensorplate-agent` after install checks pass",
+        ),
+        probe_service_state(
+            FindingId::ObservabilityServiceState,
+            "tensorplate-observability.service",
+            "start with `systemctl enable --now tensorplate-observability`",
+        ),
+    ]
+}
+
+fn probe_service_state(id: FindingId, unit: &str, start_hint: &str) -> Finding {
+    let output = match Command::new("systemctl").args(["is-active", unit]).output() {
+        Ok(output) => output,
+        Err(err) => {
+            return Finding::skipped(
+                id,
+                Severity::Info,
+                format!("systemctl service-state query unavailable for {unit}: {err}"),
+                None,
+            );
+        }
+    };
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match state.as_str() {
+        "active" => Finding::ok(id, Severity::Info, format!("{unit} is active"), None),
+        "failed" => Finding::fail(
+            id,
+            Severity::Critical,
+            format!("{unit} is failed"),
+            Some(format!("inspect `journalctl -u {unit}` before retrying")),
+        ),
+        "inactive" | "activating" | "deactivating" => Finding::warn(
+            id,
+            Severity::Warning,
+            format!("{unit} is {state}"),
+            Some(start_hint.into()),
+        ),
+        other if !other.is_empty() => Finding::warn(
+            id,
+            Severity::Warning,
+            format!("{unit} service state is {other}"),
+            Some(start_hint.into()),
+        ),
+        _ => Finding::skipped(
+            id,
+            Severity::Info,
+            format!("systemctl returned no state for {unit}"),
+            None,
+        ),
+    }
 }
 
 fn systemd_unit_search_dirs(opts: &InstallProbeOptions) -> Vec<PathBuf> {
@@ -603,16 +885,116 @@ fn path_exists(p: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn is_world_writable(p: &Path) -> bool {
+fn path_mode(p: &Path) -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(p)
-        .map(|m| (m.mode() & 0o0002) != 0)
-        .unwrap_or(false)
+    std::fs::metadata(p).map(|m| m.mode() & 0o7777).ok()
 }
 
 #[cfg(not(unix))]
-fn is_world_writable(_p: &Path) -> bool {
-    false
+fn path_mode(_p: &Path) -> Option<u32> {
+    None
+}
+
+fn directory_metadata_problem(
+    opts: &InstallProbeOptions,
+    contract_path: &str,
+    path: &Path,
+) -> Option<String> {
+    let mode = path_mode(path)?;
+    if mode != install_paths::mode::DIR_0750 {
+        return Some(format!("{contract_path} mode={mode:#05o} expected=0o750"));
+    }
+    ownership_problem(opts, contract_path, path)
+}
+
+fn config_metadata_problem(
+    opts: &InstallProbeOptions,
+    contract_path: &str,
+    path: &Path,
+) -> Option<String> {
+    let expected_mode = if contract_path == CLI_CONFIG_PATH {
+        install_paths::mode::FILE_0644
+    } else {
+        install_paths::mode::FILE_0640
+    };
+    let mode = path_mode(path)?;
+    if mode != expected_mode {
+        return Some(format!(
+            "{contract_path} mode={mode:#05o} expected={expected_mode:#05o}"
+        ));
+    }
+    ownership_problem(opts, contract_path, path)
+}
+
+#[cfg(unix)]
+fn ownership_problem(
+    opts: &InstallProbeOptions,
+    contract_path: &str,
+    path: &Path,
+) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if opts.prefix.is_some() || !cfg!(target_os = "linux") {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    let Some(expected_group) = lookup_unix_id("group", install_paths::SYSTEM_GROUP) else {
+        return Some(format!(
+            "{contract_path} cannot validate ownership because group `{}` is missing",
+            install_paths::SYSTEM_GROUP
+        ));
+    };
+    if metadata.gid() != expected_group {
+        return Some(format!(
+            "{contract_path} gid={} expected={expected_group}",
+            metadata.gid()
+        ));
+    }
+    let service_owned = contract_path.starts_with(install_paths::STATE_DIR)
+        || contract_path.starts_with(install_paths::LOG_DIR)
+        || contract_path.starts_with(install_paths::RUN_DIR);
+    let expected_uid = if service_owned {
+        let Some(uid) = lookup_unix_id("passwd", install_paths::SYSTEM_USER) else {
+            return Some(format!(
+                "{contract_path} cannot validate ownership because user `{}` is missing",
+                install_paths::SYSTEM_USER
+            ));
+        };
+        uid
+    } else {
+        0
+    };
+    (metadata.uid() != expected_uid).then(|| {
+        format!(
+            "{contract_path} uid={} expected={expected_uid}",
+            metadata.uid()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn ownership_problem(
+    _opts: &InstallProbeOptions,
+    _contract_path: &str,
+    _path: &Path,
+) -> Option<String> {
+    None
+}
+
+fn lookup_unix_id(database: &str, name: &str) -> Option<u32> {
+    let output = Command::new("getent")
+        .args([database, name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split(':')
+        .nth(2)?
+        .parse()
+        .ok()
 }
 
 #[allow(dead_code)]
@@ -649,22 +1031,29 @@ mod tests {
             let p = td.join(path.trim_start_matches('/'));
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, body).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o0640)).unwrap();
+            let mode = if path == CLI_CONFIG_PATH {
+                0o0644
+            } else {
+                0o0640
+            };
+            fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
         };
-        let v = tensorplate_protocol::SCHEMA_VERSION;
         conf(
             AGENT_CONFIG_PATH,
-            &format!("{{\"schema_version\":\"{v}\"}}"),
+            include_str!("../../../../packaging/conf/agent.json"),
         );
         conf(
             OBSERVABILITY_CONFIG_PATH,
-            &format!("{{\"schema_version\":\"{v}\"}}"),
+            include_str!("../../../../packaging/conf/observability.json"),
         );
         conf(
             SERVING_WORKER_CONFIG_PATH,
-            &format!("{{\"schema_version\":\"{v}\"}}"),
+            include_str!("../../../../packaging/conf/serving_worker.json"),
         );
-        conf(CLI_CONFIG_PATH, &format!("{{\"schema_version\":\"{v}\"}}"));
+        conf(
+            CLI_CONFIG_PATH,
+            include_str!("../../../../packaging/conf/cli.json"),
+        );
     }
 
     fn stage_serving_binary(td: &Path) {
@@ -703,6 +1092,11 @@ mod tests {
             .find(|f| matches!(f.id, FindingId::ConfigFiles))
             .unwrap();
         assert_eq!(config.status_label(), "ok");
+        let endpoints = findings
+            .iter()
+            .find(|f| matches!(f.id, FindingId::ConfigEndpoints))
+            .unwrap();
+        assert_eq!(endpoints.status_label(), "ok");
         let serving = findings
             .iter()
             .find(|f| matches!(f.id, FindingId::ServingBinaryInstalled))

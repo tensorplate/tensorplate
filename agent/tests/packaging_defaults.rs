@@ -52,6 +52,11 @@ fn shipped_agent_config_parses_and_validates() {
         cfg.available_backends.contains(&"mock".to_string()),
         "default available_backends must include mock so first-run doctor passes"
     );
+    assert!(
+        cfg.available_backends
+            .contains(&"python_pytorch".to_string()),
+        "default available_backends must probe the separately-installed Python backend"
+    );
 }
 
 #[test]

@@ -105,7 +105,6 @@ Package: tensorplate-backend-python-pytorch
 Architecture: all
 Depends:
  ${misc:Depends},
- ${python3:Depends},
  python3 (>= 3.10),
  python3-pip,
 Recommends:

@@ -5,7 +5,7 @@
   "package_name": "tensorplate-backend-python-pytorch",
   "package_version": "0.1.0-dev0",
   "tensorplate_runtime_range": {
-    "min": "0.1.0",
+    "min": "0.1.0-dev",
     "max_exclusive": "0.2.0"
   },
   "python": {

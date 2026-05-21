@@ -79,7 +79,12 @@ For each config file, the `config_files` finding asserts:
 
 - file exists
 - mode matches `FILE_0640` (or `FILE_0644` for the CLI config)
+- root ownership and `tensorplate` group ownership on Linux package installs
 - the file parses as JSON and has a recognized `schema_version`
+
+The `config_endpoints` finding reads the installed agent, serving
+worker, and observability configs and fails when a first-run endpoint
+escapes the packaged Unix-socket, loopback, or in-process defaults.
 
 For the agent control socket, the `agent_socket` finding asserts the
 socket path lives under `/run/tensorplate/` and is owned by the

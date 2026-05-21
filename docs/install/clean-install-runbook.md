@@ -54,8 +54,12 @@ yet:
 
 - `path_layout = ok`
 - `config_files = ok`
+- `config_endpoints = ok`
+- `core_packages = ok`
 - `agent_systemd_unit = ok`
+- `agent_service_state = warning` until the unit is enabled in step 3
 - `observability_systemd_unit = ok`
+- `observability_service_state = warning` until the unit is enabled in step 3
 - `serving_systemd_absent = ok`
 - `serving_binary_installed = ok`
 - `python_pytorch_backend = missing` (informational; install in step 5
@@ -78,7 +82,8 @@ Either order works — observability declares no dependency on the
 agent (V01-E10 / F03).
 
 Re-run `tensorplate doctor`; `agent_reachable` should now be `ok`,
-and `agent_state` should be `ready`.
+`agent_state` should be `ready`, and both `*_service_state` findings
+should be `ok`.
 
 ## 4. Deploy a vision bundle (V01-E15 happy path)
 
@@ -101,7 +106,12 @@ sudo apt install tensorplate-backend-python-pytorch
 ```
 
 Re-run `tensorplate doctor`. Both `python_pytorch_backend` and
-`python_pytorch_runtime` should now be `ok`.
+`python_pytorch_runtime` should now be `ok`. Restart the agent after the
+runtime finding turns green so deploy checks refresh the startup probe:
+
+```bash
+sudo systemctl restart tensorplate-agent
+```
 
 ## 6. Collect logs for the E15 handoff
 

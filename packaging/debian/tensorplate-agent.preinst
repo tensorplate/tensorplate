@@ -21,7 +21,11 @@ case "$1" in
     upgrade)
         helper=/usr/share/tensorplate/packaging/scripts/upgrade-preflight.sh
         if [ -x "${helper}" ]; then
-            "${helper}" "${2-}" "$(dpkg -f /var/lib/dpkg/info/tensorplate-agent.list Version 2>/dev/null || echo '')"
+            # dpkg passes the previous and new versions to the new
+            # preinst as $2 and $3 during upgrade. A *.list file is not
+            # package control metadata and cannot be queried with
+            # `dpkg -f`.
+            "${helper}" "${2-}" "${3-}"
         fi
         ;;
     install|abort-upgrade)

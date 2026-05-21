@@ -219,15 +219,49 @@ fn probe_runtime_environment() -> Vec<Finding> {
 }
 
 fn probe_ros2_health_stub() -> Vec<Finding> {
-    // V01-E10 ships an *optional* ROS 2 health-topic publisher stub. The
-    // CLI cannot observe that directly — it asks the observability
-    // snapshot when the status command runs. Here we just record that
-    // the check is deferred and stable.
-    vec![Finding::skipped(
+    let path = std::path::Path::new(tensorplate_protocol::install_paths::OBSERVABILITY_CONFIG_PATH);
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return vec![Finding::missing(
+            FindingId::Ros2HealthStub,
+            Severity::Info,
+            "observability config absent; ROS 2 health stub configuration not checked",
+            None,
+        )];
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "observability config is not valid JSON; ROS 2 health stub configuration unreadable",
+            Some("restore `/etc/tensorplate/observability.json` from the package".into()),
+        )];
+    };
+    let Some(ros2) = value.get("ros2_health") else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "observability config omits the ROS 2 health stub section",
+            Some(
+                "restore the packaged observability config or add `ros2_health` explicitly".into(),
+            ),
+        )];
+    };
+    let Some(enabled) = ros2.get("enabled").and_then(serde_json::Value::as_bool) else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "ROS 2 health stub section has no boolean enabled flag",
+            None,
+        )];
+    };
+    vec![Finding::ok(
         FindingId::Ros2HealthStub,
         Severity::Info,
-        "ROS 2 health stub status is surfaced through `tensorplate status` against the observability snapshot",
-        None,
+        format!("ROS 2 health stub config present (enabled={enabled})"),
+        Some(
+            "runtime health publication appears in `tensorplate status` snapshots when enabled"
+                .into(),
+        ),
     )]
 }
 

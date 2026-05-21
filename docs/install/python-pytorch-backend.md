@@ -25,6 +25,8 @@ This installs:
 | Path | Purpose |
 | --- | --- |
 | `/usr/lib/tensorplate/backends/python_pytorch/` | Sidecar Python package source. |
+| `/usr/lib/python3/dist-packages/tensorplate_pytorch_backend.pth` | Makes the sidecar package importable from the descriptor's `/usr/bin/python3`. |
+| `/usr/bin/tensorplate-backend-python-pytorch` | Console entrypoint wrapper for direct diagnostics. |
 | `/usr/share/tensorplate/backends/python_pytorch/backend.json` | Backend descriptor read by `tensorplate doctor` and the agent. |
 | `/usr/share/doc/tensorplate-backend-python-pytorch/` | README mirror. |
 
@@ -80,9 +82,16 @@ on them):
 | `python_pytorch_backend` | `ok` (descriptor + PyTorch present), `missing` (descriptor missing), `fail` (descriptor malformed), `warning` (Python/PyTorch version below minimum). |
 | `python_pytorch_runtime` | `ok` / `missing` / `warning` for the PyTorch import and its declared minimum version. |
 
-When the doctor reports green for both, run a `python_pytorch` deploy:
+The default agent config already lists `python_pytorch` as an available
+backend. When the descriptor is absent the startup probe records a
+typed missing-backend report; once the backend package and PyTorch are
+installed a new agent start probes the same backend as runnable.
+
+When the doctor reports green for both, restart the agent so it refreshes
+its startup probe cache, then run a `python_pytorch` deploy:
 
 ```bash
+sudo systemctl restart tensorplate-agent
 tensorplate deploy /var/lib/tensorplate/bundles/staging/smolvla.tpmodel
 ```
 

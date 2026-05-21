@@ -12,10 +12,11 @@ Description=TensorPlate observability service (independent health monitor)
 Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/services.md
 After=network.target local-fs.target
 Wants=local-fs.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
-Type=notify
-NotifyAccess=main
+Type=simple
 
 User=tensorplate
 Group=tensorplate
@@ -27,8 +28,6 @@ ExecReload=/bin/kill -HUP $MAINPID
 
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=60
 
 RuntimeDirectory=tensorplate
 RuntimeDirectoryMode=0750

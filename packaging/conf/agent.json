@@ -4,7 +4,7 @@
   "socket_path": "/run/tensorplate/agent.sock",
   "state_dir": "/var/lib/tensorplate/state",
   "staging_dir": "/var/lib/tensorplate/bundles/staging",
-  "available_backends": ["mock"],
+  "available_backends": ["mock", "python_pytorch"],
   "backend_capabilities": {},
   "device_family": "any",
   "worker": {

@@ -29,7 +29,8 @@ expect_not_lt() {
 
 expect_lt 0.1.0 0.2.0
 expect_lt 0.1.0 0.1.1
-expect_lt 0.1.0-dev0 0.1.0
+# Debian package versions use `~` for pre-release ordering. Do not use
+# `-dev0` here: dpkg treats `-` as the Debian revision separator.
 expect_lt 0.1.0~dev0 0.1.0
 expect_not_lt 0.2.0 0.1.0
 expect_not_lt 0.1.0 0.1.0
