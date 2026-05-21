@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F05: tensorplate-backend-python-pytorch post-install.
+#
+# This package installs the Python backend sidecar and a backend
+# descriptor at /usr/share/tensorplate/backends/python_pytorch/backend.json.
+# `tensorplate doctor` reads the descriptor to detect availability,
+# compatible TensorPlate runtime range, the Python interpreter, and
+# the PyTorch requirement. We deliberately do NOT pip install PyTorch
+# here — packagers on Jetson and CPU hosts use different wheels.
+
+set -e
+
+case "$1" in
+    configure)
+        # Ensure the share dir exists with the documented mode even when
+        # installed before tensorplate-agent.
+        mkdir -p /usr/share/tensorplate/backends/python_pytorch
+        chmod 0755 /usr/share/tensorplate/backends/python_pytorch
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "tensorplate-backend-python-pytorch.postinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

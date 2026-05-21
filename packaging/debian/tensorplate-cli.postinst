@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F02: tensorplate-cli post-install.
+#
+# The CLI only needs the config file under /etc/tensorplate. It does
+# has no service, but its shared config contract uses the
+# `tensorplate` group just like service configs. Create the shared
+# user/group and then normalize the layout idempotently.
+
+set -e
+
+case "$1" in
+    configure)
+        /usr/share/tensorplate/packaging/scripts/create-users.sh
+        /usr/share/tensorplate/packaging/scripts/install-paths.sh
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "tensorplate-cli.postinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

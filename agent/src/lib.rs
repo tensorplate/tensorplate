@@ -32,6 +32,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backend_detection;
 pub mod bundle;
 pub mod config;
 pub mod control;

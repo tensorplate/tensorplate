@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F07: tensorplate-observability post-remove.
+#
+# Observability does not own durable state beyond bounded diagnostic
+# logs; `purge` clears those but leaves /var/lib/tensorplate alone
+# (owned by tensorplate-agent's purge contract).
+
+set -e
+
+case "$1" in
+    purge)
+        rm -rf /var/log/tensorplate || true
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "tensorplate-observability.postrm: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

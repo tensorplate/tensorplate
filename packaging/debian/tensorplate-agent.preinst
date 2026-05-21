@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F07: tensorplate-agent pre-install (upgrade preflight).
+#
+# Runs *before* the new package's files are unpacked. The preflight
+# script aborts the upgrade if:
+#   - an installed config carries an unknown schema_version
+#   - durable state under /var/lib/tensorplate has unsafe ownership
+#   - the new package would downgrade an installed newer version
+#
+# preinst sees a `$2` of the previously-installed version on upgrade
+# and is invoked with no extra arg on a fresh install; we only run
+# the preflight when we are upgrading and the helper is already on
+# disk from the previous install (tensorplate-common from the prior
+# install carries the helper).
+
+set -e
+
+case "$1" in
+    upgrade)
+        helper=/usr/share/tensorplate/packaging/scripts/upgrade-preflight.sh
+        if [ -x "${helper}" ]; then
+            # dpkg passes the previous and new versions to the new
+            # preinst as $2 and $3 during upgrade. A *.list file is not
+            # package control metadata and cannot be queried with
+            # `dpkg -f`.
+            "${helper}" "${2-}" "${3-}"
+        fi
+        ;;
+    install|abort-upgrade)
+        ;;
+    *)
+        echo "tensorplate-agent.preinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

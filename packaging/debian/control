@@ -1,0 +1,124 @@
+Source: tensorplate
+Section: misc
+Priority: optional
+Maintainer: TensorPlate Contributors <oss@tensorplate.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-exec,
+Standards-Version: 4.6.2
+Homepage: https://github.com/tensorplate/tensorplate
+Vcs-Browser: https://github.com/tensorplate/tensorplate
+Vcs-Git: https://github.com/tensorplate/tensorplate.git
+Rules-Requires-Root: no
+
+Package: tensorplate-common
+Architecture: all
+Multi-Arch: foreign
+Depends:
+ ${misc:Depends},
+ adduser,
+Description: TensorPlate shared maintainer-script helpers (V01-E14)
+ Ships the shared install-paths / create-users / path-constants
+ helpers used by every tensorplate-* package's maintainer scripts so
+ the on-device filesystem layout is created consistently regardless
+ of which packages are installed first.
+ .
+ Installing this package alone has no runtime effect; it is pulled in
+ automatically by the agent, observability, serving, and CLI packages.
+
+Package: tensorplate-agent
+Architecture: any
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ adduser,
+ systemd,
+Recommends:
+ tensorplate-cli (= ${binary:Version}),
+ tensorplate-observability (= ${binary:Version}),
+ tensorplate-serving (= ${binary:Version}),
+Suggests:
+ tensorplate-backend-python-pytorch (>= ${source:Version}),
+Description: TensorPlate device agent (V01-E08/E09)
+ The agent owns the local control plane for a single TensorPlate device:
+ desired-state store, deploy transaction state machine, bundle
+ verification, serving-worker supervision, and the local control API.
+ .
+ The agent binds locally by default (Unix domain socket). It does not
+ expose any network endpoint without explicit configuration.
+
+Package: tensorplate-serving
+Architecture: any
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Recommends:
+ tensorplate-agent (= ${binary:Version}),
+Description: TensorPlate serving worker (V01-E07)
+ The serving worker is the v0.1.0 data plane: HTTP loopback inference
+ endpoint, request normalization, buffer plane, scheduler, execution
+ session, and backend adapters.
+ .
+ The serving binary is installed under /usr/lib/tensorplate/ but is
+ not registered as a systemd service. The agent supervises its
+ lifecycle (V01-E09).
+
+Package: tensorplate-observability
+Architecture: any
+Pre-Depends:
+ ${misc:Pre-Depends},
+ tensorplate-common (= ${source:Version}),
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ adduser,
+ systemd,
+Recommends:
+ tensorplate-agent (= ${binary:Version}),
+ tensorplate-cli (= ${binary:Version}),
+Description: TensorPlate observability service (V01-E10)
+ Independent heartbeat / health monitor. Starts and runs without the
+ agent or serving worker; consumes events from local in-process and
+ (post-v0.1.0) Unix-domain-socket producers and exposes a bounded
+ status snapshot consumed by `tensorplate status`.
+
+Package: tensorplate-cli
+Architecture: any
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+ tensorplate-common (= ${source:Version}),
+Recommends:
+ tensorplate-agent (= ${binary:Version}),
+Description: TensorPlate operator CLI (V01-E11)
+ Single-device operator CLI: `tensorplate deploy`, `status`, `infer`,
+ `logs`, `rollback`, `doctor`. Routes through the agent's local
+ control API. Installs the binary as /usr/bin/tensorplate.
+
+Package: tensorplate-backend-python-pytorch
+Architecture: all
+Depends:
+ ${misc:Depends},
+ python3 (>= 3.10),
+ python3-pip,
+Recommends:
+ tensorplate-agent (>= ${source:Version}),
+ tensorplate-serving (>= ${source:Version}),
+Description: TensorPlate Python/PyTorch backend (V01-E14-F05)
+ Separate package providing the Python sidecar backend used for
+ SmolVLA / Python-native model bundles. Installs the
+ `tensorplate-backend-python-pytorch` entrypoint and a backend
+ descriptor consumed by `tensorplate doctor` and the agent deploy
+ compatibility check.
+ .
+ Core TensorPlate packages do not depend on this package. PyTorch
+ itself is intentionally not declared as a Debian dependency; it
+ must be installed in the Python environment selected by the
+ backend descriptor. `tensorplate doctor` reports PyTorch runtime
+ status separately.

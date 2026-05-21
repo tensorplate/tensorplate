@@ -21,8 +21,20 @@ tensorplate doctor [--skip-agent] [--output <human|json>]
 | `active_deployment` | The agent has an active deployment promoted. |
 | `worker_state` / `worker_crash_loop` | Supervision summary, crash-loop flag. |
 | `host_facts` / `host_os` | Bounded host detection (arch, OS). |
-| `python_pytorch_backend` / `tensorrt_runtime` / `libtorch_runtime` | Deferred to V01-E14 packaging probes; surfaced as `missing` so operators know to consult the agent's view. |
-| `ros2_health_stub` | Deferred to `tensorplate status` against the observability snapshot. |
+| `core_packages` | V01-E14-F06. On the Debian package target, `tensorplate-common`, `-agent`, `-serving`, `-observability`, and `-cli` are installed and versioned. |
+| `path_layout` | V01-E14-F06. Every directory under `/etc/tensorplate`, `/var/lib/tensorplate`, `/var/log/tensorplate`, `/run/tensorplate`, and `/usr/share/tensorplate/backends` is present, not world-writable, has the documented mode, and uses the expected owner/group on Linux. |
+| `config_files` | V01-E14-F06. Each `/etc/tensorplate/*.json` exists, has the documented file mode/ownership, and declares a recognized `schema_version`. |
+| `config_endpoints` | V01-E14-F06. Installed agent, serving-worker, and observability configs keep first-run endpoints on a Unix socket, loopback, or in-process transport. |
+| `agent_systemd_unit` | V01-E14-F06. `tensorplate-agent.service` is installed under a known systemd unit directory. |
+| `agent_service_state` | V01-E14-F06. Reports whether the agent unit is active, stopped, failed, or not queryable. |
+| `observability_systemd_unit` | V01-E14-F06. `tensorplate-observability.service` is installed. |
+| `observability_service_state` | V01-E14-F06. Reports whether the independent observability unit is active, stopped, failed, or not queryable. |
+| `serving_systemd_absent` | V01-E14-F06. **Fails** if `tensorplate-serving.service` is installed — the agent supervises the serving worker (V01-E09). |
+| `serving_binary_installed` | V01-E14-F06. `/usr/lib/tensorplate/tensorplate-serving` exists. |
+| `python_pytorch_backend` | V01-E14-F05/F06. The backend descriptor at `/usr/share/tensorplate/backends/python_pytorch/backend.json` is present and parses. |
+| `python_pytorch_runtime` | V01-E14-F06. The descriptor's Python interpreter exists, meets the declared minimum Python version, imports the declared backend module, and imports PyTorch at or above the declared minimum version. |
+| `cuda_runtime` / `tensorrt_runtime` / `libtorch_runtime` | V01-E14-F06. Best-effort artifact presence (paths only — actual validation happens in V01-E15). |
+| `ros2_health_stub` | Packaged observability config exposes the optional ROS 2 health-stub section; runtime publications remain visible in `tensorplate status`. |
 
 Each finding has a stable `id`, `status` (`ok`, `fail`, `missing`, `unsupported`,
 `skipped`, `warning`), `severity` (`info`, `warning`, `critical`), human
@@ -36,10 +48,17 @@ scripts can grep on `id` strings.
 
 ## Limitations
 
-- The CLI cannot reliably introspect TensorRT/LibTorch/CUDA/PyTorch installs
-  from inside a Rust process without breaking sandboxing assumptions. V01-E14
-  ships those probes inside the agent and packaging layer; the CLI surfaces
-  the agent's view via `agent_state` and `worker_state`.
-- `--skip-agent` skips every agent-backed probe but still runs the local
-  environment probes. Use it on a development host where no agent is
-  running yet.
+- CUDA / TensorRT / LibTorch checks assert *artifact presence* only. Functional
+  validation happens in V01-E15.
+- The PyTorch runtime check shells out to the interpreter pinned in the
+  backend descriptor (e.g. `/usr/bin/python3 -c 'import torch; ...'`). It
+  never executes user model code; refused module names that fail an
+  identifier-safety check fail as `python_pytorch_runtime = fail`.
+- `--skip-agent` skips every agent-backed probe but still runs the install
+  probes (packages, paths, configs, systemd units, service state, backend
+  descriptor). Use it on a
+  development host where no agent is running yet.
+- The install probes degrade to `missing` (not `fail`) when no install layout
+  is detected at all — that lets host CI on macOS / non-Linux dev hosts pass
+  without a real package install. A *partial* install — some directories
+  present but not all — still surfaces as `fail`.

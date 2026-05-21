@@ -1,0 +1,7 @@
+#!/usr/bin/dh-exec
+backends/python_pytorch/src/                                        usr/lib/tensorplate/backends/python_pytorch/
+backends/python_pytorch/pyproject.toml                              usr/share/tensorplate/backends/python_pytorch/
+backends/python_pytorch/README.md                                   usr/share/doc/tensorplate-backend-python-pytorch/
+packaging/backend-metadata/python_pytorch.json                      => usr/share/tensorplate/backends/python_pytorch/backend.json
+packaging/python/tensorplate_pytorch_backend.pth                    usr/lib/python3/dist-packages/
+packaging/bin/tensorplate-backend-python-pytorch                   usr/bin/

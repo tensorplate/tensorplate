@@ -1,0 +1,42 @@
+{
+  "schema_version": "0.1",
+  "primary_source": "serving_worker",
+  "listener": {
+    "transport": "in_process",
+    "queue_capacity": 1024
+  },
+  "heartbeat": {
+    "expected_interval_ms": 1000,
+    "grace_ms": 250,
+    "missed_threshold": 3,
+    "recovery_heartbeats": 1
+  },
+  "safe_state": {
+    "kind": "in_memory",
+    "queue_capacity": 128
+  },
+  "snapshot": {
+    "kind": "file",
+    "path": "/var/lib/tensorplate/state/observability-snapshot.json",
+    "diagnostics_capacity": 64
+  },
+  "ros2_health": {
+    "enabled": false,
+    "topic": "/tensorplate/health",
+    "interval_ms": 1000,
+    "runtime": "mock"
+  },
+  "diagnostics_retention": {
+    "queue_capacity": 1024,
+    "drop_policy": "drop_oldest",
+    "rotate_bytes": 1048576
+  },
+  "metrics": {
+    "max_series": 256,
+    "queue_capacity": 1024,
+    "backpressure": "drop",
+    "sink": {
+      "kind": "in_memory"
+    }
+  }
+}

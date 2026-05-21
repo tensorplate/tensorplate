@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schemas.tensorplate.io/v0.1/backend_descriptor.json",
+  "schema_version": "0.1",
+  "backend_name": "python_pytorch",
+  "package_name": "tensorplate-backend-python-pytorch",
+  "package_version": "0.1.0-dev0",
+  "tensorplate_runtime_range": {
+    "min": "0.1.0-dev",
+    "max_exclusive": "0.2.0"
+  },
+  "python": {
+    "interpreter": "/usr/bin/python3",
+    "minimum_version": "3.10",
+    "supported_versions": ["3.10", "3.11", "3.12"],
+    "import_module": "tensorplate_pytorch_backend"
+  },
+  "pytorch": {
+    "required": true,
+    "import_module": "torch",
+    "minimum_version": "2.1",
+    "supported_devices": ["cpu", "cuda"]
+  },
+  "entrypoint": {
+    "kind": "console_script",
+    "command": "tensorplate-backend-python-pytorch"
+  },
+  "sidecar": {
+    "transport": "unix_socket",
+    "lifecycle": "per_session",
+    "supervised_by": "tensorplate-serving"
+  },
+  "capabilities": {
+    "async": false,
+    "streaming": false,
+    "generation": false,
+    "kv_cache": false,
+    "fixed_shape": false,
+    "deterministic_latency": false,
+    "control_loop_integration": false,
+    "supported_precision": ["fp32", "fp16", "bfloat16", "int8"],
+    "supported_artifact_kinds": ["python_pytorch_entry", "weights", "tokenizer", "calibration", "auxiliary"]
+  },
+  "install_hint": "Install with `sudo apt install tensorplate-backend-python-pytorch` and ensure PyTorch is available in the interpreter selected by `python.interpreter` (see docs/install/python-pytorch-backend.md)."
+}

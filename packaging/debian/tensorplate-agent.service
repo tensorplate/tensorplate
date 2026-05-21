@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14-F03: tensorplate-agent appliance entrypoint.
+#
+# The agent is the v0.1.0 appliance entrypoint:
+#   * loads /etc/tensorplate/agent.json,
+#   * opens its local control transport (Unix domain socket by default),
+#   * supervises the serving worker (V01-E09),
+#   * exposes status + deploy + logs to the CLI (V01-E11).
+#
+# Operators run `systemctl enable --now tensorplate-agent` after a
+# green `tensorplate doctor` pass on a clean install.
+#
+# Notes:
+#   * Restart is bounded; the agent's own crash-loop policy lives
+#     inside the binary (V01-E09).
+#   * RuntimeDirectory= makes systemd create + chown /run/tensorplate
+#     on every boot so the agent control socket lives on tmpfs and the
+#     directory is recreated after crashes.
+#   * The unit deliberately does NOT order itself before
+#     tensorplate-observability.service — observability must run
+#     independently of the agent (V01-E10).
+
+[Unit]
+Description=TensorPlate device agent (control plane, deploy transaction, worker supervision)
+Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/services.md
+After=network.target local-fs.target
+Wants=local-fs.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+# The current v0.1.0 binary opens its listener synchronously and does
+# not implement sd_notify. Keep the unit honest so `systemctl start`
+# reaches active as soon as ExecStart stays running.
+Type=simple
+
+User=tensorplate
+Group=tensorplate
+WorkingDirectory=/var/lib/tensorplate
+EnvironmentFile=-/etc/default/tensorplate-agent
+
+ExecStart=/usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Conservative restart: bounded backoff. The agent has its own
+# in-process supervision for the serving worker, so we want systemd
+# to recover the *agent itself* from hard crashes but not mask config
+# errors with infinite restart.
+Restart=on-failure
+RestartSec=5
+
+# tmpfs-managed runtime dir; systemd recreates it on every start.
+RuntimeDirectory=tensorplate
+RuntimeDirectoryMode=0750
+
+StateDirectory=tensorplate
+StateDirectoryMode=0750
+
+LogsDirectory=tensorplate
+LogsDirectoryMode=0750
+
+# Stop gracefully so the agent flushes desired-state and gives the
+# supervised serving worker its V01-E09 stop window.
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+# Hardening. v0.1.0 default is the minimum that keeps the agent
+# functional on Jetson; sites can override via drop-ins under
+# /etc/systemd/system/tensorplate-agent.service.d/.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=false
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

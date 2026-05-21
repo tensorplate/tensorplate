@@ -26,6 +26,7 @@ use crate::output::Renderer;
 use crate::profile::ResolvedProfile;
 
 pub mod finding;
+pub mod install;
 
 use finding::{Finding, FindingId, FindingStatus, Severity};
 
@@ -49,6 +50,10 @@ pub fn run<W: Write, E: Write>(
     findings.extend(probe_profile_compatibility(profile));
     findings.extend(probe_runtime_environment());
     findings.extend(probe_ros2_health_stub());
+    // V01-E14-F06 install probes: filesystem layout, configs,
+    // systemd units, serving binary, backend descriptor + runtime,
+    // CUDA/TensorRT/LibTorch.
+    findings.extend(install::run(&install::InstallProbeOptions::default()));
     if !args.skip_agent {
         findings.extend(probe_agent(client, profile));
     } else {
@@ -181,11 +186,9 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
 }
 
 fn probe_runtime_environment() -> Vec<Finding> {
-    // We deliberately do not call out to nvidia-smi, `python -V`, or similar
-    // tools from the CLI binary. V01-E14 will own the packaging-level
-    // probes; the CLI surfaces the *availability* of those checks via the
-    // agent status it just received. This probe reports the host facts
-    // we know cheaply.
+    // Host facts only. Concrete CUDA / TensorRT / LibTorch / Python /
+    // PyTorch checks land in [`install::run`] (V01-E14-F06) so the
+    // CLI / V01-E15 harness reads them from a single source.
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
     let mut findings = vec![Finding::ok(
@@ -212,43 +215,53 @@ fn probe_runtime_environment() -> Vec<Finding> {
             None,
         ));
     }
-    findings.push(Finding::missing(
-        FindingId::PythonPytorchBackend,
-        Severity::Info,
-        "CLI cannot probe `tensorplate-backend-python-pytorch` install directly",
-        Some(
-            "use `tensorplate status` to check the agent's view of backend availability; the V01-E14 doctor probes hook in here"
-                .into(),
-        ),
-    ));
-    findings.push(Finding::missing(
-        FindingId::TensorrtRuntime,
-        Severity::Info,
-        "CLI cannot probe TensorRT installation directly",
-        Some(
-            "the V01-E14 packaging doctor probes will surface CUDA/TensorRT/LibTorch presence on device"
-                .into(),
-        ),
-    ));
-    findings.push(Finding::missing(
-        FindingId::LibtorchRuntime,
-        Severity::Info,
-        "CLI cannot probe LibTorch installation directly",
-        Some("V01-E14 packaging doctor adds the on-device probe".into()),
-    ));
     findings
 }
 
 fn probe_ros2_health_stub() -> Vec<Finding> {
-    // V01-E10 ships an *optional* ROS 2 health-topic publisher stub. The
-    // CLI cannot observe that directly — it asks the observability
-    // snapshot when the status command runs. Here we just record that
-    // the check is deferred and stable.
-    vec![Finding::skipped(
+    let path = std::path::Path::new(tensorplate_protocol::install_paths::OBSERVABILITY_CONFIG_PATH);
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return vec![Finding::missing(
+            FindingId::Ros2HealthStub,
+            Severity::Info,
+            "observability config absent; ROS 2 health stub configuration not checked",
+            None,
+        )];
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "observability config is not valid JSON; ROS 2 health stub configuration unreadable",
+            Some("restore `/etc/tensorplate/observability.json` from the package".into()),
+        )];
+    };
+    let Some(ros2) = value.get("ros2_health") else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "observability config omits the ROS 2 health stub section",
+            Some(
+                "restore the packaged observability config or add `ros2_health` explicitly".into(),
+            ),
+        )];
+    };
+    let Some(enabled) = ros2.get("enabled").and_then(serde_json::Value::as_bool) else {
+        return vec![Finding::fail(
+            FindingId::Ros2HealthStub,
+            Severity::Warning,
+            "ROS 2 health stub section has no boolean enabled flag",
+            None,
+        )];
+    };
+    vec![Finding::ok(
         FindingId::Ros2HealthStub,
         Severity::Info,
-        "ROS 2 health stub status is surfaced through `tensorplate status` against the observability snapshot",
-        None,
+        format!("ROS 2 health stub config present (enabled={enabled})"),
+        Some(
+            "runtime health publication appears in `tensorplate status` snapshots when enabled"
+                .into(),
+        ),
     )]
 }
 
