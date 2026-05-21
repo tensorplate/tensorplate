@@ -5,7 +5,7 @@
 // runtime config validator and the on-disk default config the
 // `tensorplate-agent` Debian package installs to /etc/tensorplate/.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::fs;
 use std::path::PathBuf;
@@ -23,8 +23,7 @@ fn packaging_agent_config_path() -> PathBuf {
 #[test]
 fn shipped_agent_config_parses_and_validates() {
     let p = packaging_agent_config_path();
-    let raw = fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let raw = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let cfg = AgentConfig::parse_json(&raw).expect("packaging agent.json should validate");
 
     assert_eq!(
@@ -42,7 +41,9 @@ fn shipped_agent_config_parses_and_validates() {
 
     // staging_dir must live under the durable state root so reinstall /
     // upgrade preserves verified bundles.
-    assert!(cfg.staging_dir.starts_with(tensorplate_protocol::install_paths::STATE_DIR));
+    assert!(cfg
+        .staging_dir
+        .starts_with(tensorplate_protocol::install_paths::STATE_DIR));
 
     // first-run state contract: no active deployment lives in the agent
     // *state* file, not config. The default config must therefore not

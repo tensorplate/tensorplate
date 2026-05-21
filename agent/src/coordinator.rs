@@ -102,10 +102,7 @@ impl Coordinator {
     /// deploy of a non-runnable backend (e.g. `python_pytorch` with no
     /// PyTorch installed) is rejected before staging.
     #[must_use]
-    pub fn with_backend_probes(
-        mut self,
-        probes: BTreeMap<String, BackendProbeReport>,
-    ) -> Self {
+    pub fn with_backend_probes(mut self, probes: BTreeMap<String, BackendProbeReport>) -> Self {
         self.backend_probes = probes;
         self
     }

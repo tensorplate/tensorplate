@@ -49,7 +49,10 @@ pub enum BackendProbeState {
 
     /// Descriptor refers to a TensorPlate runtime range incompatible
     /// with the running runtime.
-    RuntimeVersionMismatch { runtime_version: String, descriptor_min: String },
+    RuntimeVersionMismatch {
+        runtime_version: String,
+        descriptor_min: String,
+    },
 
     /// Declared Python interpreter is absent from PATH or the absolute
     /// path referenced by the descriptor.
@@ -57,7 +60,11 @@ pub enum BackendProbeState {
 
     /// Python interpreter reports a version outside the descriptor's
     /// supported range.
-    PythonVersionMismatch { interpreter: String, observed: String, required: String },
+    PythonVersionMismatch {
+        interpreter: String,
+        observed: String,
+        required: String,
+    },
 
     /// Descriptor's declared backend module failed to import.
     PythonModuleImportFailed { module: String, detail: String },
@@ -130,7 +137,7 @@ pub fn probe_python_pytorch(opts: &ProbeOptions) -> BackendProbeReport {
 #[must_use]
 pub fn probe_backend(descriptor_path: &Path, opts: &ProbeOptions) -> BackendProbeReport {
     match BackendDescriptor::read_from(descriptor_path) {
-        Ok(d) => probe_descriptor(d, descriptor_path.to_path_buf(), opts),
+        Ok(d) => probe_descriptor(&d, descriptor_path.to_path_buf(), opts),
         Err(BackendDescriptorError::Missing { path }) => BackendProbeReport {
             backend_name: descriptor_path
                 .parent()
@@ -159,7 +166,7 @@ pub fn probe_backend(descriptor_path: &Path, opts: &ProbeOptions) -> BackendProb
 }
 
 fn probe_descriptor(
-    desc: BackendDescriptor,
+    desc: &BackendDescriptor,
     descriptor_path: PathBuf,
     opts: &ProbeOptions,
 ) -> BackendProbeReport {
@@ -186,7 +193,7 @@ fn probe_descriptor(
     }
 
     // 2) Python interpreter
-    let python_path = python_interpreter(&desc, opts);
+    let python_path = python_interpreter(desc, opts);
     if !interpreter_exists(&python_path) {
         report.state = BackendProbeState::PythonInterpreterMissing {
             interpreter: python_path.display().to_string(),
@@ -196,35 +203,32 @@ fn probe_descriptor(
 
     // 3) Python version
     if let Some(py_req) = desc.python.as_ref() {
-        match query_python_version(&python_path, opts.timeout) {
-            Some(observed) => {
-                if let Some(min) = py_req.minimum_version.as_deref() {
-                    if compare_versions(&observed, min) == std::cmp::Ordering::Less {
-                        report.state = BackendProbeState::PythonVersionMismatch {
-                            interpreter: python_path.display().to_string(),
-                            observed,
-                            required: min.into(),
-                        };
-                        return report;
-                    }
-                }
-                // 4) Python module
-                if let Some(module) = py_req.import_module.as_deref() {
-                    if let Err(detail) = probe_python_import(&python_path, module, opts.timeout) {
-                        report.state = BackendProbeState::PythonModuleImportFailed {
-                            module: module.into(),
-                            detail,
-                        };
-                        return report;
-                    }
+        if let Some(observed) = query_python_version(&python_path, opts.timeout) {
+            if let Some(min) = py_req.minimum_version.as_deref() {
+                if compare_versions(&observed, min) == std::cmp::Ordering::Less {
+                    report.state = BackendProbeState::PythonVersionMismatch {
+                        interpreter: python_path.display().to_string(),
+                        observed,
+                        required: min.into(),
+                    };
+                    return report;
                 }
             }
-            None => {
-                report.state = BackendProbeState::PythonInterpreterMissing {
-                    interpreter: python_path.display().to_string(),
-                };
-                return report;
+            // 4) Python module
+            if let Some(module) = py_req.import_module.as_deref() {
+                if let Err(detail) = probe_python_import(&python_path, module, opts.timeout) {
+                    report.state = BackendProbeState::PythonModuleImportFailed {
+                        module: module.into(),
+                        detail,
+                    };
+                    return report;
+                }
             }
+        } else {
+            report.state = BackendProbeState::PythonInterpreterMissing {
+                interpreter: python_path.display().to_string(),
+            };
+            return report;
         }
     }
 
@@ -293,14 +297,13 @@ fn query_python_version(python: &Path, timeout: Duration) -> Option<String> {
 
 fn probe_python_import(python: &Path, module: &str, timeout: Duration) -> Result<(), String> {
     if !is_safe_module_name(module) {
-        return Err(format!("refused to probe non-identifier module name `{module}`"));
+        return Err(format!(
+            "refused to probe non-identifier module name `{module}`"
+        ));
     }
     let code = format!("import {module}");
-    let output = run_with_timeout(
-        Command::new(python).arg("-c").arg(&code),
-        timeout,
-    )
-    .ok_or_else(|| format!("`{}` probe did not complete", python.display()))?;
+    let output = run_with_timeout(Command::new(python).arg("-c").arg(&code), timeout)
+        .ok_or_else(|| format!("`{}` probe did not complete", python.display()))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -333,17 +336,12 @@ fn probe_pytorch(
     };
     if !output.status.success() {
         return Err(BackendProbeState::PytorchMissing {
-            detail: truncate(
-                &String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                256,
-            ),
+            detail: truncate(String::from_utf8_lossy(&output.stderr).trim(), 256),
         });
     }
     let observed = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if let Some(min) = req.minimum_version.as_deref() {
-        if observed != "unknown"
-            && compare_versions(&observed, min) == std::cmp::Ordering::Less
-        {
+        if observed != "unknown" && compare_versions(&observed, min) == std::cmp::Ordering::Less {
             return Err(BackendProbeState::PytorchVersionMismatch {
                 observed,
                 required: min.into(),
@@ -355,11 +353,9 @@ fn probe_pytorch(
 
 fn is_safe_module_name(s: &str) -> bool {
     !s.is_empty()
-        && s.split('.')
-            .all(|part| !part.is_empty()
-                && part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        && s.split('.').all(|part| {
+            !part.is_empty() && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -367,7 +363,7 @@ fn truncate(s: &str, max: usize) -> String {
         s.into()
     } else {
         let mut out = s[..max].to_string();
-        out.push_str("…");
+        out.push('…');
         out
     }
 }
@@ -404,7 +400,7 @@ fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let split = |s: &str| {
         s.split(|c: char| c == '.' || c == '-' || c == '+')
-            .map(|p| p.to_string())
+            .map(String::from)
             .collect::<Vec<_>>()
     };
     let av = split(a);
@@ -564,7 +560,10 @@ mod tests {
             "#!/bin/sh\nif [ \"$2\" = 'import sys;print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' ]; then\n  echo '3.11.0'\n  exit 0\nfi\necho 'ModuleNotFoundError' >&2\nexit 1\n",
         );
         let p = td.path().join("backend.json");
-        write(&p, &descriptor_with_python(&stub, Some("tensorplate_pytorch_backend")));
+        write(
+            &p,
+            &descriptor_with_python(&stub, Some("tensorplate_pytorch_backend")),
+        );
         let report = probe_backend(&p, &ProbeOptions::default());
         assert!(matches!(
             report.state,

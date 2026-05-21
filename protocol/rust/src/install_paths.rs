@@ -235,10 +235,7 @@ mod tests {
         let state_idx = dirs.iter().position(|d| *d == STATE_DIR).unwrap();
         let state_inner_idx = dirs.iter().position(|d| *d == STATE_INNER_DIR).unwrap();
         assert!(state_idx < state_inner_idx);
-        let bundle_staging_idx = dirs
-            .iter()
-            .position(|d| *d == BUNDLE_STAGING_DIR)
-            .unwrap();
+        let bundle_staging_idx = dirs.iter().position(|d| *d == BUNDLE_STAGING_DIR).unwrap();
         assert!(state_idx < bundle_staging_idx);
     }
 
@@ -256,8 +253,7 @@ mod tests {
     #[test]
     fn backend_descriptor_for_python_pytorch_is_under_share() {
         assert!(
-            Path::new(PYTHON_PYTORCH_BACKEND_DESCRIPTOR)
-                .starts_with(BACKEND_DESCRIPTOR_DIR),
+            Path::new(PYTHON_PYTORCH_BACKEND_DESCRIPTOR).starts_with(BACKEND_DESCRIPTOR_DIR),
             "backend descriptor must live under {BACKEND_DESCRIPTOR_DIR}"
         );
     }

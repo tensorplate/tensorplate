@@ -176,18 +176,16 @@ pub fn verify_with_probes(
 fn format_probe_reason(state: &BackendProbeState) -> String {
     match state {
         BackendProbeState::Runnable => "runnable".into(),
-        BackendProbeState::DescriptorMissing => {
-            "backend descriptor not installed".into()
-        }
+        BackendProbeState::DescriptorMissing => "backend descriptor not installed".into(),
         BackendProbeState::DescriptorMalformed { reason } => {
             format!("backend descriptor invalid: {reason}")
         }
         BackendProbeState::RuntimeVersionMismatch {
             runtime_version,
             descriptor_min,
-        } => format!(
-            "tensorplate runtime {runtime_version} below backend minimum {descriptor_min}"
-        ),
+        } => {
+            format!("tensorplate runtime {runtime_version} below backend minimum {descriptor_min}")
+        }
         BackendProbeState::PythonInterpreterMissing { interpreter } => {
             format!("Python interpreter `{interpreter}` missing")
         }

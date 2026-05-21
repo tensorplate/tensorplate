@@ -221,7 +221,10 @@ impl BackendDescriptor {
     /// Returns [`BackendDescriptorError`] when the JSON is malformed,
     /// the schema version is unsupported, or required fields are
     /// missing.
-    pub fn parse_with_path(text: &str, path_for_diagnostics: &Path) -> Result<Self, BackendDescriptorError> {
+    pub fn parse_with_path(
+        text: &str,
+        path_for_diagnostics: &Path,
+    ) -> Result<Self, BackendDescriptorError> {
         let value: serde_json::Value =
             serde_json::from_str(text).map_err(|source| BackendDescriptorError::Malformed {
                 path: path_for_diagnostics.display().to_string(),
@@ -238,12 +241,11 @@ impl BackendDescriptor {
                 expected: SCHEMA_VERSION,
             });
         }
-        let parsed: Self = serde_json::from_value(value).map_err(|source| {
-            BackendDescriptorError::Malformed {
+        let parsed: Self =
+            serde_json::from_value(value).map_err(|source| BackendDescriptorError::Malformed {
                 path: path_for_diagnostics.display().to_string(),
                 source,
-            }
-        })?;
+            })?;
         parsed.validate(path_for_diagnostics)
     }
 
@@ -305,12 +307,11 @@ mod tests {
     fn minimal_json() -> String {
         format!(
             r#"{{
-                "schema_version": "{}",
+                "schema_version": "{SCHEMA_VERSION}",
                 "backend_name": "python_pytorch",
                 "package_name": "tensorplate-backend-python-pytorch",
                 "package_version": "0.1.0"
             }}"#,
-            SCHEMA_VERSION
         )
     }
 
@@ -345,12 +346,11 @@ mod tests {
     fn rejects_empty_required_fields() {
         let raw = format!(
             r#"{{
-                "schema_version": "{}",
+                "schema_version": "{SCHEMA_VERSION}",
                 "backend_name": "",
                 "package_name": "x",
                 "package_version": "0.1.0"
             }}"#,
-            SCHEMA_VERSION
         );
         let err = BackendDescriptor::parse_with_path(&raw, &fake_path()).unwrap_err();
         match err {
@@ -365,7 +365,7 @@ mod tests {
     fn rejects_relative_interpreter() {
         let raw = format!(
             r#"{{
-                "schema_version": "{}",
+                "schema_version": "{SCHEMA_VERSION}",
                 "backend_name": "python_pytorch",
                 "package_name": "x",
                 "package_version": "0.1.0",
@@ -373,7 +373,6 @@ mod tests {
                     "interpreter": "python3"
                 }}
             }}"#,
-            SCHEMA_VERSION
         );
         let err = BackendDescriptor::parse_with_path(&raw, &fake_path()).unwrap_err();
         match err {
@@ -395,7 +394,7 @@ mod tests {
     fn full_python_pytorch_descriptor_round_trips() {
         let json = format!(
             r#"{{
-                "schema_version": "{}",
+                "schema_version": "{SCHEMA_VERSION}",
                 "backend_name": "python_pytorch",
                 "package_name": "tensorplate-backend-python-pytorch",
                 "package_version": "0.1.0",
@@ -425,7 +424,6 @@ mod tests {
                     "supervised_by": "tensorplate-serving"
                 }}
             }}"#,
-            SCHEMA_VERSION
         );
         let d = BackendDescriptor::parse_with_path(&json, &fake_path()).expect("parses");
         assert!(d.is_python_sidecar());

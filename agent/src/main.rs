@@ -116,7 +116,10 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
         // have no on-disk descriptor in v0.1.0. Skipping them keeps
         // the probe map's invariant simple: an entry is present iff
         // the agent has a typed opinion about runnability.
-        if matches!(backend.as_str(), "mock" | "vitis_ai" | "tensorrt" | "libtorch") {
+        if matches!(
+            backend.as_str(),
+            "mock" | "vitis_ai" | "tensorrt" | "libtorch"
+        ) {
             continue;
         }
         let descriptor_path = std::path::Path::new(BACKEND_DESCRIPTOR_DIR)

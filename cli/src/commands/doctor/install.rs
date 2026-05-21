@@ -19,9 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::install_paths::{
-    self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH,
-    OBSERVABILITY_CONFIG_PATH, PYTHON_PYTORCH_BACKEND_DESCRIPTOR, SERVING_BINARY_PATH,
-    SERVING_WORKER_CONFIG_PATH,
+    self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH, OBSERVABILITY_CONFIG_PATH,
+    PYTHON_PYTORCH_BACKEND_DESCRIPTOR, SERVING_BINARY_PATH, SERVING_WORKER_CONFIG_PATH,
 };
 
 use super::finding::{Finding, FindingId, Severity};
@@ -85,11 +84,11 @@ fn probe_path_layout(opts: &InstallProbeOptions) -> Vec<Finding> {
     for dir in install_paths::required_directories() {
         let path = prefixed(opts, dir);
         if !path.exists() {
-            missing.push(dir.to_string());
+            missing.push((*dir).to_string());
             continue;
         }
         if is_world_writable(&path) {
-            world_writable.push(dir.to_string());
+            world_writable.push((*dir).to_string());
         }
     }
     if !world_writable.is_empty() {
@@ -148,13 +147,13 @@ fn probe_config_files(opts: &InstallProbeOptions) -> Vec<Finding> {
     for cfg_path in install_paths::required_config_files() {
         let p = prefixed(opts, cfg_path);
         if !p.exists() {
-            missing.push(cfg_path.to_string());
+            missing.push((*cfg_path).to_string());
             continue;
         }
         match std::fs::read_to_string(&p) {
             Ok(body) => {
                 if !has_recognized_schema_version(&body) {
-                    malformed.push(cfg_path.to_string());
+                    malformed.push((*cfg_path).to_string());
                 }
             }
             Err(e) => {
@@ -166,7 +165,10 @@ fn probe_config_files(opts: &InstallProbeOptions) -> Vec<Finding> {
         findings.push(Finding::fail(
             FindingId::ConfigFiles,
             Severity::Critical,
-            format!("config files missing or with unrecognized schema_version: {}", malformed.join(", ")),
+            format!(
+                "config files missing or with unrecognized schema_version: {}",
+                malformed.join(", ")
+            ),
             Some("compare against config/schemas/*.json or restore from the package".into()),
         ));
     } else if missing.is_empty() {
@@ -217,8 +219,7 @@ fn probe_serving_binary(opts: &InstallProbeOptions) -> Vec<Finding> {
             FindingId::ServingBinaryInstalled,
             Severity::Info,
             format!(
-                "serving worker installed at `{}` (agent-supervised, not systemd-managed)",
-                SERVING_BINARY_PATH
+                "serving worker installed at `{SERVING_BINARY_PATH}` (agent-supervised, not systemd-managed)",
             ),
             None,
         )]
@@ -226,7 +227,7 @@ fn probe_serving_binary(opts: &InstallProbeOptions) -> Vec<Finding> {
         vec![Finding::missing(
             FindingId::ServingBinaryInstalled,
             Severity::Info,
-            format!("serving worker binary missing at `{}`", SERVING_BINARY_PATH),
+            format!("serving worker binary missing at `{SERVING_BINARY_PATH}`"),
             Some(
                 "install tensorplate-serving — the agent supervises this binary; there is no separate systemd unit"
                     .into(),
@@ -325,7 +326,11 @@ fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
 }
 
 fn systemd_unit_search_dirs(opts: &InstallProbeOptions) -> Vec<PathBuf> {
-    let candidates = ["/lib/systemd/system", "/etc/systemd/system", "/usr/lib/systemd/system"];
+    let candidates = [
+        "/lib/systemd/system",
+        "/etc/systemd/system",
+        "/usr/lib/systemd/system",
+    ];
     candidates.iter().map(|c| prefixed(opts, c)).collect()
 }
 
@@ -366,7 +371,8 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
     // Read the descriptor and report a single backend finding + a
     // separate runtime finding so operators can distinguish "backend
     // installed" from "PyTorch importable".
-    let parsed = tensorplate_protocol::backend_descriptor::BackendDescriptor::read_from(&descriptor);
+    let parsed =
+        tensorplate_protocol::backend_descriptor::BackendDescriptor::read_from(&descriptor);
     let mut out = Vec::new();
     match parsed {
         Ok(d) => {
@@ -421,9 +427,7 @@ fn probe_backend_runtime(
     )
 }
 
-fn runtime_finding(
-    report: &tensorplate_protocol::backend_probe::BackendProbeReport,
-) -> Finding {
+fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeReport) -> Finding {
     use tensorplate_protocol::backend_probe::BackendProbeState as S;
     match &report.state {
         S::Runnable => Finding::ok(
@@ -637,9 +641,15 @@ mod tests {
             skip_systemd: false,
         };
         let findings = run(&opts);
-        let path_layout = findings.iter().find(|f| matches!(f.id, FindingId::PathLayout)).unwrap();
+        let path_layout = findings
+            .iter()
+            .find(|f| matches!(f.id, FindingId::PathLayout))
+            .unwrap();
         assert_eq!(path_layout.status_label(), "ok");
-        let config = findings.iter().find(|f| matches!(f.id, FindingId::ConfigFiles)).unwrap();
+        let config = findings
+            .iter()
+            .find(|f| matches!(f.id, FindingId::ConfigFiles))
+            .unwrap();
         assert_eq!(config.status_label(), "ok");
         let serving = findings
             .iter()

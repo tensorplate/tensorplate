@@ -27,7 +27,10 @@ fn shipped_observability_config_parses_and_validates() {
 
     // listener stays in_process by default in v0.1.0 (the unix_socket
     // path is reserved).
-    assert!(matches!(cfg.listener.transport, ListenerTransport::InProcess));
+    assert!(matches!(
+        cfg.listener.transport,
+        ListenerTransport::InProcess
+    ));
 
     // ROS 2 health stub is OFF by default; sites opt-in via drop-in.
     assert!(
