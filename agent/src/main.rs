@@ -21,7 +21,10 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use std::collections::BTreeMap;
+
 use tensorplate_agent::{
+    backend_detection::{probe_backend, BackendProbeReport, ProbeOptions},
     config::AgentConfig,
     coordinator::Coordinator,
     recovery,
@@ -33,6 +36,7 @@ use tensorplate_agent::{
     },
     worker,
 };
+use tensorplate_protocol::install_paths::BACKEND_DESCRIPTOR_DIR;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -92,6 +96,44 @@ fn build_supervisor(cfg: &AgentConfig) -> Result<Option<Arc<WorkerSupervisor>>, 
     Ok(Some(Arc::new(supervisor)))
 }
 
+/// Probe every backend listed in `available_backends` for its
+/// V01-E14-F05 readiness state. The map is then handed to the
+/// coordinator so a `python_pytorch` deploy with no PyTorch (or no
+/// descriptor at all) is refused before staging.
+///
+/// Backends with no descriptor file under
+/// [`BACKEND_DESCRIPTOR_DIR`] log a one-line note and produce a
+/// `DescriptorMissing` entry — the coordinator turns that into a
+/// typed `BackendUnrunnable` deploy error.
+///
+/// Probing is best-effort: failures here never block agent startup.
+/// The agent prefers to come up degraded so the CLI doctor can
+/// surface the issue.
+fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeReport> {
+    let mut out = BTreeMap::new();
+    for backend in &cfg.available_backends {
+        // The Vitis AI / Kria adapter and the in-tree mock backend
+        // have no on-disk descriptor in v0.1.0. Skipping them keeps
+        // the probe map's invariant simple: an entry is present iff
+        // the agent has a typed opinion about runnability.
+        if matches!(backend.as_str(), "mock" | "vitis_ai" | "tensorrt" | "libtorch") {
+            continue;
+        }
+        let descriptor_path = std::path::Path::new(BACKEND_DESCRIPTOR_DIR)
+            .join(backend)
+            .join("backend.json");
+        let report = probe_backend(&descriptor_path, &ProbeOptions::default());
+        eprintln!(
+            "backend probe: backend={} state={:?} descriptor={}",
+            report.backend_name,
+            report.state,
+            report.descriptor_path.display()
+        );
+        out.insert(backend.clone(), report);
+    }
+    out
+}
+
 fn seed_supervisor_from_state(
     supervisor: &WorkerSupervisor,
     store: &StateStore,
@@ -144,7 +186,9 @@ fn main() -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    let mut coordinator = Coordinator::new(cfg.clone(), store.clone(), worker);
+    let backend_probes = probe_available_backends(&cfg);
+    let mut coordinator =
+        Coordinator::new(cfg.clone(), store.clone(), worker).with_backend_probes(backend_probes);
     if let Some(supervisor) = supervisor.as_ref() {
         coordinator = coordinator.with_supervisor(supervisor.clone());
     }

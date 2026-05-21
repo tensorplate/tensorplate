@@ -36,7 +36,12 @@ use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::supervision_event::SupervisionAgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
 
-use crate::bundle::{capacity_check, model_artifact_relative_path, verify, VerifiedBundle};
+use std::collections::BTreeMap;
+
+use crate::backend_detection::BackendProbeReport;
+use crate::bundle::{
+    capacity_check, model_artifact_relative_path, verify_with_probes, VerifiedBundle,
+};
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
@@ -60,6 +65,7 @@ pub struct Coordinator {
     worker: Arc<dyn WorkerControl>,
     sink: Option<Arc<EventSink>>,
     supervisor: Option<Arc<WorkerSupervisor>>,
+    backend_probes: BTreeMap<String, BackendProbeReport>,
 }
 
 /// Result of a successful deploy/rollback.
@@ -85,7 +91,23 @@ impl Coordinator {
             worker,
             sink: None,
             supervisor: None,
+            backend_probes: BTreeMap::new(),
         }
+    }
+
+    /// Attach V01-E14-F05 backend probe reports. The agent main calls
+    /// this once at startup with the cached probe outcomes for every
+    /// backend listed in `config.available_backends`. The coordinator
+    /// hands the map to [`crate::bundle::verify_with_probes`] so a
+    /// deploy of a non-runnable backend (e.g. `python_pytorch` with no
+    /// PyTorch installed) is rejected before staging.
+    #[must_use]
+    pub fn with_backend_probes(
+        mut self,
+        probes: BTreeMap<String, BackendProbeReport>,
+    ) -> Self {
+        self.backend_probes = probes;
+        self
     }
 
     /// Install an event sink. The sink is called on every worker / state
@@ -167,7 +189,7 @@ impl Coordinator {
         self.store.begin_transaction(tx_record)?;
 
         // Phase: verified.
-        let verified = match verify(bundle_path, &self.config) {
+        let verified = match verify_with_probes(bundle_path, &self.config, &self.backend_probes) {
             Ok(v) => v,
             Err(err) => {
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err)

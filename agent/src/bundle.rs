@@ -32,6 +32,7 @@
 // No backend is selected heuristically; bundles are rejected with typed
 // errors when their declared backend is unknown or unavailable.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::bundle::{
@@ -40,6 +41,7 @@ use tensorplate_protocol::bundle::{
 };
 use tensorplate_protocol::bundle_manifest::BundleManifest;
 
+use crate::backend_detection::{BackendProbeReport, BackendProbeState};
 use crate::config::{AgentConfig, BackendCapability};
 use crate::error::{AgentError, AgentResult};
 
@@ -115,6 +117,28 @@ pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<St
 /// `UnsupportedRuntimeVersion`, `UnsupportedHardware`,
 /// `UnsupportedBackend`, `UnsupportedCapability`, `InsufficientCapacity`.
 pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedBundle> {
+    verify_with_probes(bundle_path, config, &BTreeMap::new())
+}
+
+/// Variant of [`verify`] that also rejects the deploy when the bundle's
+/// declared backend has a non-Runnable [`BackendProbeReport`] in
+/// `probes`. The coordinator calls this path with the probe results
+/// populated at agent startup (V01-E14-F05). Tests that do not care
+/// about backend probing keep using [`verify`].
+///
+/// # Errors
+///
+/// In addition to the variants returned by [`verify`], returns
+/// [`AgentError::BackendUnrunnable`] when the bundle's
+/// `backend_hint` matches a probe entry whose state is anything other
+/// than [`BackendProbeState::Runnable`]. The error carries a short
+/// reason string for log output; the CLI doctor surfaces the full
+/// structured detail.
+pub fn verify_with_probes(
+    bundle_path: &Path,
+    config: &AgentConfig,
+    probes: &BTreeMap<String, BackendProbeReport>,
+) -> AgentResult<VerifiedBundle> {
     let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
     let device = device_context_from_config(config)?;
     let result = evaluate_compatibility(&descriptor, &device);
@@ -127,7 +151,61 @@ pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedB
             return Err(violation_to_agent_error(v));
         }
     }
+    // V01-E14-F05: refuse the deploy *before* staging if the bundle's
+    // declared backend has a non-Runnable probe report. The cache is
+    // populated at agent startup so this check is O(1) at deploy time;
+    // we never run Python here. Absent backends (no probe entry) are
+    // pass-through — they were either not requested at startup or the
+    // operator is managing them out-of-band.
+    let backend_hint = descriptor.manifest.backend_hint.as_str();
+    if let Some(report) = probes.get(backend_hint) {
+        if !matches!(report.state, BackendProbeState::Runnable) {
+            return Err(AgentError::BackendUnrunnable {
+                backend: backend_hint.to_string(),
+                reason: format_probe_reason(&report.state),
+            });
+        }
+    }
     Ok(descriptor.into())
+}
+
+/// Render a probe state into a short single-line reason suitable for
+/// embedding in [`AgentError::BackendUnrunnable`]. The full structured
+/// detail is preserved in the [`BackendProbeReport`] passed through
+/// to doctor.
+fn format_probe_reason(state: &BackendProbeState) -> String {
+    match state {
+        BackendProbeState::Runnable => "runnable".into(),
+        BackendProbeState::DescriptorMissing => {
+            "backend descriptor not installed".into()
+        }
+        BackendProbeState::DescriptorMalformed { reason } => {
+            format!("backend descriptor invalid: {reason}")
+        }
+        BackendProbeState::RuntimeVersionMismatch {
+            runtime_version,
+            descriptor_min,
+        } => format!(
+            "tensorplate runtime {runtime_version} below backend minimum {descriptor_min}"
+        ),
+        BackendProbeState::PythonInterpreterMissing { interpreter } => {
+            format!("Python interpreter `{interpreter}` missing")
+        }
+        BackendProbeState::PythonVersionMismatch {
+            interpreter,
+            observed,
+            required,
+        } => format!(
+            "Python interpreter `{interpreter}` is {observed}, descriptor requires {required}"
+        ),
+        BackendProbeState::PythonModuleImportFailed { module, .. } => {
+            format!("Python module `{module}` failed to import")
+        }
+        BackendProbeState::PytorchMissing { .. } => "PyTorch is not importable".into(),
+        BackendProbeState::PytorchVersionMismatch { observed, required } => {
+            format!("PyTorch {observed} below descriptor minimum {required}")
+        }
+    }
 }
 
 /// Run the parser + compatibility evaluator and return the structured
@@ -545,6 +623,78 @@ mod tests {
         );
         let err = verify(bundle.path(), &cfg).expect_err("must reject");
         assert!(matches!(err, AgentError::Unavailable(_)));
+    }
+
+    #[test]
+    fn verify_with_probes_rejects_non_runnable_backend() {
+        use super::verify_with_probes;
+        use crate::backend_detection::{BackendProbeReport, BackendProbeState};
+        use std::collections::BTreeMap;
+
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"smolvla","version":"1","format_version":"0.1","model_class":"vla","backend_hint":"python_pytorch","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.available_backends.push("python_pytorch".into());
+
+        // No probe entry yet -> verify rejects with UnsupportedBackend
+        // because backend_capabilities doesn't publish anything for
+        // python_pytorch — but verify happens to short-circuit at the
+        // capability stage first. Add the probe entry and confirm the
+        // BackendUnrunnable path lights up.
+        let mut probes = BTreeMap::new();
+        probes.insert(
+            "python_pytorch".into(),
+            BackendProbeReport {
+                backend_name: "python_pytorch".into(),
+                descriptor_path: PathBuf::from(
+                    "/usr/share/tensorplate/backends/python_pytorch/backend.json",
+                ),
+                state: BackendProbeState::DescriptorMissing,
+                install_hint: Some("apt install tensorplate-backend-python-pytorch".into()),
+            },
+        );
+        let err = verify_with_probes(bundle.path(), &cfg, &probes).expect_err("must reject");
+        match err {
+            AgentError::BackendUnrunnable { backend, reason } => {
+                assert_eq!(backend, "python_pytorch");
+                assert!(reason.contains("descriptor not installed"));
+            }
+            other => panic!("expected BackendUnrunnable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_with_probes_accepts_runnable_backend() {
+        use super::verify_with_probes;
+        use crate::backend_detection::{BackendProbeReport, BackendProbeState};
+        use std::collections::BTreeMap;
+
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"yolov8n","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let cfg = config(td.path().join("s"), td.path().join("st"));
+        let mut probes = BTreeMap::new();
+        // Probing the mock backend never runs in production (main()
+        // skips it) but we exercise the happy path here.
+        probes.insert(
+            "mock".into(),
+            BackendProbeReport {
+                backend_name: "mock".into(),
+                descriptor_path: PathBuf::from("/dev/null"),
+                state: BackendProbeState::Runnable,
+                install_hint: None,
+            },
+        );
+        verify_with_probes(bundle.path(), &cfg, &probes).expect("ok");
     }
 
     #[test]

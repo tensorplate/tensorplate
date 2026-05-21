@@ -42,6 +42,13 @@ pub enum AgentError {
     #[error("bundle declares unavailable backend `{0}`")]
     UnsupportedBackend(String),
 
+    /// V01-E14-F05: the backend exists in `available_backends` but the
+    /// V01-E14 prober reported a typed reason it cannot run on this
+    /// device. Carries the backend name plus a short reason for log
+    /// output; the CLI doctor surfaces the full structured detail.
+    #[error("backend `{backend}` is unrunnable on this device: {reason}")]
+    BackendUnrunnable { backend: String, reason: String },
+
     #[error("bundle requires capability `{0}` not published by backend `{1}`")]
     UnsupportedCapability(String, String),
 
@@ -96,6 +103,7 @@ impl AgentError {
             AgentError::UnsupportedRuntimeVersion(_)
             | AgentError::UnsupportedHardware(_)
             | AgentError::UnsupportedBackend(_)
+            | AgentError::BackendUnrunnable { .. }
             | AgentError::UnsupportedCapability(_, _)
             | AgentError::Unavailable(_) => (ErrorCode::Unsupported, false),
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),
