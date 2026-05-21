@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "name": "language-block-on-vision",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "vision",
+  "backend_hint": "tensorrt",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "tensorrt_engine",
+      "path": "model.engine",
+      "digest": "sha256:a451240bc4b2426b965591ecef5428ee79eeb7036a7e3f05dc3ea7e40bda1c18"
+    }
+  ],
+  "model_blocks": {
+    "language": {
+      "tokenizer": {"reference": "spiece.model", "kind": "sentencepiece"}
+    }
+  }
+}

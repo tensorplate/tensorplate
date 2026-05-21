@@ -1,0 +1,19 @@
+[package]
+name = "tensorplate-bundle-tool"
+description = "V01-E13 fixture helper: regenerate artifact and manifest digests deterministically using the shared bundle parser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "tensorplate-bundle-tool"
+path = "src/main.rs"
+
+[dependencies]
+tensorplate-protocol = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

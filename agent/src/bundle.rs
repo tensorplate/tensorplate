@@ -1,37 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E08-F03: Bundle reader and deploy-time verifier.
+// V01-E08-F03 + V01-E13-F06: agent deploy-time bundle verifier.
 //
-// The verifier checks:
+// The agent calls into the shared `tensorplate_protocol::bundle` parser
+// and compatibility evaluator. The old in-crate verifier has been
+// migrated so there is exactly one validation path; per V01-E13, the
+// agent must not run a parallel set of integrity / compat checks.
 //
-//   - manifest.json exists, decodes against the v0.1 schema, and validates
-//     semantically (BundleManifest::validate).
+// The verifier checks (via the shared parser):
+//
+//   - manifest.json exists, decodes against the v0.1 schema, and
+//     validates semantically.
 //   - Each artifact file's sha256 matches its declared digest.
 //   - manifest_digest (when present) matches the canonical manifest with
 //     that field stripped.
 //   - The format_version major matches the runtime's supported major.
+//
+// Then the agent calls into the shared `evaluate_compatibility` to
+// check:
+//
 //   - runtime_compatibility includes the configured runtime version.
-//   - target_hardware.device_family matches the configured device family
-//     (or is `any`).
-//   - target_hardware.min_memory_bytes does not exceed the configured
-//     device_memory_bytes (when both are set).
-//   - target_hardware.memory_estimate_bytes does not exceed the configured
-//     device_memory_bytes (when both are set).
+//   - target_hardware.device_family matches (or is `any`).
+//   - target_hardware.min_memory_bytes / memory_estimate_bytes do not
+//     exceed the configured device_memory_bytes.
 //   - backend_hint is in `available_backends`.
 //   - capability_requirements are satisfied by the configured backend
 //     capability map.
+//   - precision profile (when set) is in the backend's
+//     supported_precision list.
 //
 // No backend is selected heuristically; bundles are rejected with typed
 // errors when their declared backend is unknown or unavailable.
 
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
-use tensorplate_protocol::bundle_manifest::{BundleManifest, CapabilityRequirements, DeviceFamily};
-use tensorplate_protocol::SCHEMA_VERSION;
+use tensorplate_protocol::bundle::{
+    evaluate_compatibility, parse_bundle, BackendCapabilityView, BackendProfile, BundleDescriptor,
+    CompatibilityViolation, DeviceContext, ParseError,
+};
+use tensorplate_protocol::bundle_manifest::BundleManifest;
 
 use crate::config::{AgentConfig, BackendCapability};
 use crate::error::{AgentError, AgentResult};
@@ -66,6 +73,16 @@ impl VerifiedBundle {
     }
 }
 
+impl From<BundleDescriptor> for VerifiedBundle {
+    fn from(d: BundleDescriptor) -> Self {
+        Self {
+            manifest: d.manifest,
+            manifest_digest: d.manifest_digest,
+            root_path: d.root_path,
+        }
+    }
+}
+
 /// Read the staged bundle manifest and return its model artifact path
 /// relative to the bundle root.
 ///
@@ -78,22 +95,18 @@ impl VerifiedBundle {
 /// Returns [`AgentError::BundleManifest`] when the manifest is missing,
 /// malformed, or does not validate.
 pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<String> {
-    let manifest_path = bundle_path.join("manifest.json");
-    if !manifest_path.is_file() {
-        return Err(AgentError::BundleManifest(format!(
-            "manifest.json missing at {}",
-            manifest_path.display()
-        )));
-    }
-    let raw = fs::read_to_string(&manifest_path)?;
-    let manifest = decode_manifest(&raw)?;
-    manifest
-        .model_artifact()
-        .map(|artifact| artifact.path.clone())
+    let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
+    descriptor
+        .model_artifact_relative_path()
         .ok_or_else(|| AgentError::BundleManifest("manifest missing model artifact".into()))
 }
 
 /// Verify the bundle at `bundle_path` against the agent config.
+///
+/// V01-E13-F06 migrates the implementation to the shared
+/// `tensorplate_protocol::bundle::parse_bundle` + `evaluate_compatibility`
+/// pair. The returned `VerifiedBundle` shape is preserved so the
+/// coordinator and rollback paths continue to work unchanged.
 ///
 /// # Errors
 ///
@@ -101,133 +114,46 @@ pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<St
 /// `BundleMissing`, `BundleManifest`, `BundleIntegrity`,
 /// `UnsupportedRuntimeVersion`, `UnsupportedHardware`,
 /// `UnsupportedBackend`, `UnsupportedCapability`, `InsufficientCapacity`.
-#[allow(clippy::too_many_lines)]
 pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedBundle> {
-    let bundle_path = canonicalize_bundle_path(bundle_path)?;
-    let manifest_path = bundle_path.join("manifest.json");
-    if !manifest_path.is_file() {
-        return Err(AgentError::BundleManifest(format!(
-            "manifest.json missing at {}",
-            manifest_path.display()
-        )));
-    }
-    let raw = fs::read_to_string(&manifest_path)?;
-    let manifest: BundleManifest = decode_manifest(&raw)?;
-
-    // Format version: accept exactly the runtime-supported major; reject
-    // bundles compiled against an unknown future version.
-    let (major, _minor) = parse_version_pair(&manifest.format_version)
-        .map_err(|m| AgentError::BundleManifest(m.to_string()))?;
-    let supported_major = tensorplate_protocol::BUNDLE_FORMAT_VERSION_MAJOR;
-    if major != supported_major {
-        return Err(AgentError::BundleManifest(format!(
-            "unsupported bundle format_version `{}` (runtime supports major {})",
-            manifest.format_version, supported_major
-        )));
-    }
-
-    // Compute artifact digests strictly.
-    for art in &manifest.artifacts {
-        let path = bundle_path.join(&art.path);
-        if !path.is_file() {
-            return Err(AgentError::BundleIntegrity {
-                path: art.path.clone(),
-                reason: format!("missing on disk: {}", path.display()),
-            });
-        }
-        verify_artifact_digest(&path, &art.digest, &art.path)?;
-    }
-
-    // Optional self-digest check.
-    let canonical_digest = compute_canonical_manifest_digest(&raw)?;
-    if let Some(declared) = manifest.manifest_digest.as_deref() {
-        if !digests_equal(declared, &canonical_digest) {
-            return Err(AgentError::BundleIntegrity {
-                path: "manifest.json".into(),
-                reason: format!(
-                    "manifest_digest mismatch: declared `{declared}` computed `{canonical_digest}`"
-                ),
-            });
+    let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
+    let device = device_context_from_config(config)?;
+    let result = evaluate_compatibility(&descriptor, &device);
+    if !result.ok {
+        // Surface the first violation as a typed agent error. The full
+        // list is preserved through `parse_and_check` when callers
+        // need the structured payload (e.g. CLI rendering, transaction
+        // failure recording).
+        if let Some(v) = result.violations.into_iter().next() {
+            return Err(violation_to_agent_error(v));
         }
     }
+    Ok(descriptor.into())
+}
 
-    // Runtime-compatibility window.
-    let runtime_version = config
-        .runtime_version
-        .as_deref()
-        .ok_or_else(|| AgentError::Config("config.runtime_version not resolved".into()))?;
-    if let Some(min) = manifest
-        .runtime_compatibility
-        .min_runtime_version
-        .as_deref()
-    {
-        if compare_versions(runtime_version, min)? == std::cmp::Ordering::Less {
-            return Err(AgentError::UnsupportedRuntimeVersion(format!(
-                "bundle requires runtime >= {min}; this device runs {runtime_version}"
-            )));
-        }
-    }
-    if let Some(max) = manifest
-        .runtime_compatibility
-        .max_runtime_version
-        .as_deref()
-    {
-        if compare_versions(runtime_version, max)? == std::cmp::Ordering::Greater {
-            return Err(AgentError::UnsupportedRuntimeVersion(format!(
-                "bundle requires runtime <= {max}; this device runs {runtime_version}"
-            )));
-        }
-    }
-
-    // Hardware compatibility.
-    let bundle_hw = manifest.target_hardware.device_family;
-    if bundle_hw != DeviceFamily::Any
-        && config.device_family != DeviceFamily::Any
-        && bundle_hw != config.device_family
-    {
-        return Err(AgentError::UnsupportedHardware(format!(
-            "bundle targets `{}`; device family is `{}`",
-            bundle_hw.as_str(),
-            config.device_family.as_str()
-        )));
-    }
-    if let (Some(min_mem), Some(dev_mem)) = (
-        manifest.target_hardware.min_memory_bytes,
-        config.device_memory_bytes,
-    ) {
-        if min_mem > dev_mem {
-            return Err(AgentError::InsufficientCapacity);
-        }
-    }
-    if let (Some(estimate), Some(dev_mem)) = (
-        manifest.target_hardware.memory_estimate_bytes,
-        config.device_memory_bytes,
-    ) {
-        if estimate > dev_mem {
-            return Err(AgentError::InsufficientCapacity);
-        }
-    }
-
-    // Backend availability.
-    if !config.backend_is_available(&manifest.backend_hint) {
-        return Err(AgentError::UnsupportedBackend(
-            manifest.backend_hint.clone(),
-        ));
-    }
-
-    // Capability requirements vs configured capability map. Missing
-    // capabilities are rejected; the agent does not infer them.
-    check_capabilities(
-        &manifest.backend_hint,
-        manifest.capability_requirements,
-        config.capability_for(&manifest.backend_hint),
-    )?;
-
-    Ok(VerifiedBundle {
-        manifest,
-        manifest_digest: canonical_digest,
-        root_path: bundle_path,
-    })
+/// Run the parser + compatibility evaluator and return the structured
+/// [`tensorplate_protocol::bundle::CompatibilityResult`] alongside the
+/// descriptor.
+///
+/// Useful for CLI / status callers that want to render every failing
+/// check rather than the first one. `verify()` short-circuits to the
+/// agent's typed-error taxonomy; this entry point preserves the full
+/// list of violations.
+///
+/// # Errors
+///
+/// Returns [`AgentError`] for parser failures only. Compat violations
+/// flow through the returned [`CompatibilityResult`] and never raise.
+pub fn parse_and_check(
+    bundle_path: &Path,
+    config: &AgentConfig,
+) -> AgentResult<(
+    BundleDescriptor,
+    tensorplate_protocol::bundle::CompatibilityResult,
+)> {
+    let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
+    let device = device_context_from_config(config)?;
+    let result = evaluate_compatibility(&descriptor, &device);
+    Ok((descriptor, result))
 }
 
 /// Capacity gate run separately from `verify` so the deploy transaction
@@ -251,177 +177,133 @@ pub fn capacity_check(bundle: &VerifiedBundle, config: &AgentConfig) -> AgentRes
     Ok(())
 }
 
-fn canonicalize_bundle_path(path: &Path) -> AgentResult<PathBuf> {
-    match path.canonicalize() {
-        Ok(p) if p.is_dir() => Ok(p),
-        Ok(_) => Err(AgentError::BundleMissing(path.into())),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            Err(AgentError::BundleMissing(path.into()))
-        }
-        Err(err) => Err(err.into()),
-    }
-}
-
-fn decode_manifest(raw: &str) -> AgentResult<BundleManifest> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| AgentError::BundleManifest(e.to_string()))?;
-    let observed = value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| AgentError::BundleManifest("manifest missing schema_version".into()))?;
-    if observed != SCHEMA_VERSION {
-        return Err(AgentError::BundleManifest(format!(
-            "unsupported manifest schema_version `{observed}` (expected `{SCHEMA_VERSION}`)"
-        )));
-    }
-    let manifest: BundleManifest =
-        serde_json::from_value(value).map_err(|e| AgentError::BundleManifest(e.to_string()))?;
-    manifest
-        .validate()
-        .map_err(|e| AgentError::BundleManifest(e.to_string()))
-}
-
-fn parse_version_pair(v: &str) -> Result<(u32, u32), &'static str> {
-    let mut parts = v.split('.');
-    let major = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or("malformed major")?;
-    let minor = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or("malformed minor")?;
-    if parts.next().is_some() {
-        return Err("format_version must be MAJOR.MINOR");
-    }
-    Ok((major, minor))
-}
-
-fn compare_versions(a: &str, b: &str) -> AgentResult<std::cmp::Ordering> {
-    let pa = parse_loose_version(a)?;
-    let pb = parse_loose_version(b)?;
-    Ok(pa.cmp(&pb))
-}
-
-fn parse_loose_version(v: &str) -> AgentResult<(u32, u32, u32)> {
-    // Strip a "0.1.0-dev" style suffix.
-    let core = v.split('-').next().unwrap_or(v);
-    let mut parts = core.split('.').map(str::parse::<u32>);
-    let major = parts
-        .next()
-        .ok_or_else(|| AgentError::Config(format!("missing major in `{v}`")))?
-        .map_err(|_| AgentError::Config(format!("malformed major in `{v}`")))?;
-    let minor = parts
-        .next()
-        .ok_or_else(|| AgentError::Config(format!("missing minor in `{v}`")))?
-        .map_err(|_| AgentError::Config(format!("malformed minor in `{v}`")))?;
-    let patch = parts
-        .next()
-        .map(|p| p.map_err(|_| AgentError::Config(format!("malformed patch in `{v}`"))))
-        .transpose()?
-        .unwrap_or(0);
-    if parts.next().is_some() {
-        return Err(AgentError::Config(format!(
-            "too many segments in version `{v}`"
-        )));
-    }
-    Ok((major, minor, patch))
-}
-
-fn verify_artifact_digest(path: &Path, declared: &str, rel: &str) -> AgentResult<()> {
-    let Some((algo, _expected_hex)) = declared.split_once(':') else {
-        return Err(AgentError::BundleIntegrity {
-            path: rel.into(),
-            reason: format!("malformed digest `{declared}`"),
-        });
-    };
-    if !algo.eq_ignore_ascii_case("sha256") {
-        return Err(AgentError::BundleIntegrity {
-            path: rel.into(),
-            reason: format!("unsupported digest algorithm `{algo}` (only sha256 in v0.1.0)"),
-        });
-    }
-    let computed = sha256_hex(path)?;
-    let computed_full = format!("sha256:{computed}");
-    if !digests_equal(declared, &computed_full) {
-        return Err(AgentError::BundleIntegrity {
-            path: rel.into(),
-            reason: format!("digest mismatch: declared `{declared}` computed `{computed_full}`"),
-        });
-    }
-    Ok(())
-}
-
-fn digests_equal(a: &str, b: &str) -> bool {
-    // Constant-time-ish compare avoiding case differences in the hex.
-    let na = normalize_digest(a);
-    let nb = normalize_digest(b);
-    na == nb
-}
-
-/// Public re-export for the coordinator's `expected_bundle_digest` check.
+/// Public re-export so the coordinator can compare bundle digests
+/// without depending on the protocol crate directly.
 #[must_use]
 pub fn bundle_digests_equal(a: &str, b: &str) -> bool {
-    digests_equal(a, b)
+    tensorplate_protocol::bundle::digests_equal(a, b)
 }
 
-fn normalize_digest(d: &str) -> Option<(String, String)> {
-    let (algo, hex) = d.split_once(':')?;
-    Some((algo.to_ascii_lowercase(), hex.to_ascii_lowercase()))
+fn parse_error_to_agent_error(err: ParseError) -> AgentError {
+    match err {
+        ParseError::BundleMissing(p) => AgentError::BundleMissing(p),
+        ParseError::ManifestMissing { path } => AgentError::BundleManifest(format!(
+            "manifest.json missing at {}",
+            path.display()
+        )),
+        ParseError::Io(e) => AgentError::Io(e),
+        ParseError::ManifestMalformed(m) => AgentError::BundleManifest(m),
+        ParseError::UnsupportedSchemaVersion { got, expected } => AgentError::BundleManifest(
+            format!("unsupported manifest schema_version `{got}` (expected `{expected}`)"),
+        ),
+        ParseError::UnsupportedFormatVersion {
+            got,
+            supported_major,
+        } => AgentError::BundleManifest(format!(
+            "unsupported bundle format_version `{got}` (runtime supports major {supported_major})"
+        )),
+        ParseError::ManifestSemantics(e) => AgentError::BundleManifest(e.to_string()),
+        ParseError::UnsafeArtifactPath { relative_path } => AgentError::BundleManifest(format!(
+            "unsafe artifact path `{relative_path}` (absolute, contains `..`, or contains backslash)"
+        )),
+        ParseError::ArtifactMissing { relative_path } => AgentError::BundleIntegrity {
+            path: relative_path,
+            reason: "missing on disk".into(),
+        },
+        ParseError::UnsupportedDigestAlgorithm {
+            relative_path,
+            algo,
+        } => AgentError::BundleIntegrity {
+            path: relative_path,
+            reason: format!("unsupported digest algorithm `{algo}` (only sha256 in v0.1.0)"),
+        },
+        ParseError::ArtifactDigestMismatch {
+            relative_path,
+            declared,
+            computed,
+        } => AgentError::BundleIntegrity {
+            path: relative_path,
+            reason: format!("digest mismatch: declared `{declared}` computed `{computed}`"),
+        },
+        ParseError::ManifestDigestMismatch { declared, computed } => AgentError::BundleIntegrity {
+            path: "manifest.json".into(),
+            reason: format!(
+                "manifest_digest mismatch: declared `{declared}` computed `{computed}`"
+            ),
+        },
+        ParseError::UnsupportedArchiveFormat => AgentError::BundleManifest(
+            "packaged `.tpmodel` archives are reserved for a later milestone; provide an unpacked bundle directory".into(),
+        ),
+    }
 }
 
-fn sha256_hex(path: &Path) -> AgentResult<String> {
-    let f = File::open(path)?;
-    let mut reader = BufReader::new(f);
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
+fn violation_to_agent_error(v: CompatibilityViolation) -> AgentError {
+    match v {
+        CompatibilityViolation::UnsupportedRuntime { message } => {
+            AgentError::UnsupportedRuntimeVersion(message)
         }
-        hasher.update(&buf[..n]);
-    }
-    let digest = hasher.finalize();
-    Ok(hex::encode(digest))
-}
-
-/// Canonical manifest digest is sha256 of the manifest JSON with the
-/// `manifest_digest` field stripped, serialized in a stable form
-/// (`serde_json::to_vec` on the parsed value).
-fn compute_canonical_manifest_digest(raw: &str) -> AgentResult<String> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| AgentError::BundleManifest(e.to_string()))?;
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("manifest_digest");
-    }
-    let canonical = serde_json::to_vec(&value)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&canonical);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
-}
-
-fn check_capabilities(
-    backend: &str,
-    required: CapabilityRequirements,
-    published: BackendCapability,
-) -> AgentResult<()> {
-    let pairs: &[(bool, bool, &str)] = &[
-        (required.async_, published.async_, "async"),
-        (required.streaming, published.streaming, "streaming"),
-        (required.generation, published.generation, "generation"),
-        (required.kv_cache, published.kv_cache, "kv_cache"),
-        (required.fixed_shape, published.fixed_shape, "fixed_shape"),
-    ];
-    for (need, have, name) in pairs {
-        if *need && !*have {
-            return Err(AgentError::UnsupportedCapability(
-                (*name).to_string(),
-                backend.to_string(),
-            ));
+        CompatibilityViolation::UnsupportedHardware { message } => {
+            AgentError::UnsupportedHardware(message)
         }
+        CompatibilityViolation::UnavailableBackend { backend } => {
+            AgentError::UnsupportedBackend(backend)
+        }
+        CompatibilityViolation::UnsupportedCapability {
+            backend,
+            capability,
+        } => AgentError::UnsupportedCapability(capability, backend),
+        CompatibilityViolation::UnsupportedPrecision { backend, precision } => {
+            AgentError::Unavailable(format!(
+                "backend `{backend}` does not publish precision `{precision}`"
+            ))
+        }
+        CompatibilityViolation::InsufficientMemory { .. } => AgentError::InsufficientCapacity,
+        CompatibilityViolation::BackendArtifactMismatch {
+            backend,
+            artifact_kind,
+        } => AgentError::Unavailable(format!(
+            "backend `{backend}` does not accept artifact kind `{artifact_kind}`"
+        )),
     }
-    Ok(())
+}
+
+fn device_context_from_config(config: &AgentConfig) -> AgentResult<DeviceContext> {
+    let runtime_version = config
+        .runtime_version
+        .as_deref()
+        .ok_or_else(|| AgentError::Config("config.runtime_version not resolved".into()))?
+        .to_string();
+    let backends = config
+        .available_backends
+        .iter()
+        .map(|backend| {
+            let cap = config.capability_for(backend);
+            BackendProfile {
+                backend: backend.clone(),
+                capabilities: capability_view(&cap),
+                supported_precision: cap.supported_precision,
+                supported_artifact_kinds: cap.supported_artifact_kinds,
+            }
+        })
+        .collect();
+    Ok(DeviceContext {
+        runtime_version: Some(runtime_version),
+        device_family: Some(config.device_family),
+        device_memory_bytes: config.device_memory_bytes,
+        backends,
+    })
+}
+
+fn capability_view(c: &BackendCapability) -> BackendCapabilityView {
+    BackendCapabilityView {
+        async_: c.async_,
+        streaming: c.streaming,
+        generation: c.generation,
+        kv_cache: c.kv_cache,
+        fixed_shape: c.fixed_shape,
+        deterministic_latency: c.deterministic_latency,
+        control_loop_integration: c.control_loop_integration,
+    }
 }
 
 #[cfg(test)]
@@ -607,5 +489,79 @@ mod tests {
             },
         );
         verify(bundle.path(), &cfg).expect("ok");
+    }
+
+    #[test]
+    fn rejects_unpublished_e13_capabilities() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vla","backend_hint":"mock","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}],"capability_requirements":{{"deterministic_latency":true,"control_loop_integration":true}}}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let cfg = config(td.path().join("s"), td.path().join("st"));
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::UnsupportedCapability(_, _)));
+    }
+
+    #[test]
+    fn rejects_unsupported_precision_from_agent_profile() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","precision_hint":"fp16","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.backend_capabilities.insert(
+            "mock".into(),
+            BackendCapability {
+                supported_precision: vec!["int8".into()],
+                ..BackendCapability::default()
+            },
+        );
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::Unavailable(_)));
+    }
+
+    #[test]
+    fn rejects_explicit_artifact_kind_mismatch_from_agent_profile() {
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"mock","artifacts":[{{"role":"model","kind":"vitis_xmodel","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.backend_capabilities.insert(
+            "mock".into(),
+            BackendCapability {
+                supported_artifact_kinds: vec!["tensorrt_engine".into()],
+                ..BackendCapability::default()
+            },
+        );
+        let err = verify(bundle.path(), &cfg).expect_err("must reject");
+        assert!(matches!(err, AgentError::Unavailable(_)));
+    }
+
+    #[test]
+    fn parse_and_check_reports_full_violation_list() {
+        use super::parse_and_check;
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        // unavailable backend + unsupported hardware in one bundle.
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"m","version":"1","format_version":"0.1","model_class":"vision","backend_hint":"vitis_ai","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}],"target_hardware":{{"device_family":"kria"}}}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.device_family = DeviceFamily::JetsonOrin;
+        let (_, result) = parse_and_check(bundle.path(), &cfg).expect("parse");
+        assert!(!result.ok);
+        assert!(result.violations.len() >= 2);
     }
 }

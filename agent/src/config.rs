@@ -45,7 +45,7 @@ pub enum WorkerControlMode {
 
 /// Capability flags published by an available backend. The verifier checks
 /// these against the bundle's `capability_requirements`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BackendCapability {
     #[serde(default, rename = "async")]
@@ -58,6 +58,14 @@ pub struct BackendCapability {
     pub kv_cache: bool,
     #[serde(default)]
     pub fixed_shape: bool,
+    #[serde(default)]
+    pub deterministic_latency: bool,
+    #[serde(default)]
+    pub control_loop_integration: bool,
+    #[serde(default)]
+    pub supported_precision: Vec<String>,
+    #[serde(default)]
+    pub supported_artifact_kinds: Vec<String>,
 }
 
 /// Worker-control bounded-timeout knobs.
@@ -275,7 +283,7 @@ impl AgentConfig {
     pub fn capability_for(&self, backend: &str) -> BackendCapability {
         self.backend_capabilities
             .get(backend)
-            .copied()
+            .cloned()
             .unwrap_or_default()
     }
 }

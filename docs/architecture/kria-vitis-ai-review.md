@@ -135,3 +135,54 @@ charter under `v0.4+` in
 `tensorplate-internals/planning/v0.1.0/tensorplate-oss-v0.1-architecture-and-roadmap.md`),
 this document gets revisited and any deviation from the assumptions
 above gets recorded as an addendum here.
+
+---
+
+## V01-E13 schema review addendum
+
+> **Status:** schema portion of the Kria/Vitis AI review completed in
+> V01-E13-F08.
+
+V01-E13 introduces the v0.1.0 manifest authoring surface. The schema
+portion of this review answers the explicit Kria/Vitis questions from
+the roadmap checklist:
+
+- **`.xmodel` as a bundle artifact.** The manifest's `artifacts[].kind`
+  enum reserves `vitis_xmodel`, the `artifacts[].path` rules accept the
+  `.xmodel` extension, and `artifact_kind_for_path` maps the extension
+  to the same slug. The synthetic Vitis fixture
+  (`test/models/bundles/v01_e13/vitis_synthetic/`) proves the envelope
+  carries an `.xmodel` plus calibration metadata without schema
+  revision.
+- **Fixed-shape and op-coverage constraints.** The
+  `capability_requirements.fixed_shape` and
+  `capability_requirements.op_coverage_limits` fields are part of the
+  v0.1.0 capability schema. The conformance suite asserts that a bundle
+  declaring `fixed_shape: true` only deploys when the configured
+  backend publishes that flag.
+- **DPU lifecycle assumptions.** `ExecutionSession::load`/`prime`/
+  `unload` are sufficient; the manifest's `precision.vitis_ai.dpu_arch`
+  field is a bounded, opaque DPU architecture identifier (no XRT or
+  Xilinx SDK type leaks into the schema).
+- **Vitis INT8 calibration / quantization metadata.** The
+  `precision.vitis_ai` block carries `quantize_strategy` (post-training
+  / calibration / qat), `calibration_dataset_digest`,
+  `calibration_sample_count`, and the opaque `dpu_arch`. None of these
+  fields force a vendor-shaped data model onto the Jetson precision
+  metadata, which lives in `precision.jetson`.
+- **Reserved language block.** Schema-side precedent for class-specific
+  reserved blocks is established by `model_blocks.language`. Future
+  Vitis-class-specific blocks (if any) follow the same pattern without
+  bumping the format version.
+
+### V01-E13 sign-off
+
+The bundle schema, parser, and integrity contract carry every Vitis
+metadata field a future adapter would need. No public schema change is
+required; the only outstanding work is the Vitis AI runtime adapter
+itself, which is intentionally out of scope for v0.1.0.
+
+The V01-E13 Epic acceptance criterion *"A Vitis AI `.xmodel` artifact
+can be represented without schema revision"* is met by this addendum,
+the schema, the Rust types, the synthetic fixture, and the conformance
+suite. The interface-freeze gate inherits this sign-off.

@@ -62,6 +62,10 @@ impl Harness {
                 generation: true,
                 kv_cache: true,
                 fixed_shape: true,
+                deterministic_latency: true,
+                control_loop_integration: true,
+                supported_precision: vec!["auto".into(), "fp32".into(), "fp16".into()],
+                supported_artifact_kinds: vec!["tensorrt_engine".into()],
             },
         );
         let config = AgentConfig {

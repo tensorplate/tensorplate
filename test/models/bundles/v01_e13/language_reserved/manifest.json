@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "name": "synthetic-language-450m",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "language",
+  "backend_hint": "libtorch",
+  "precision_hint": "fp16",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "weights",
+      "path": "model.safetensors",
+      "digest": "sha256:9049440888f6b3be6ae1c44946fdf74b0beeae8edd97795c5edab9729b000e9c",
+      "description": "Synthetic language model placeholder. v0.1.0 does not execute generation."
+    },
+    {
+      "role": "tokenizer",
+      "kind": "tokenizer",
+      "path": "tokenizer.model",
+      "digest": "sha256:3e2674d6be32a774e691b30591fba1979ec0b5646226a5c652e54191f4a320b9"
+    }
+  ],
+  "inputs": [
+    {
+      "name": "prompt",
+      "modality": "tokens",
+      "dtype": "int32",
+      "shape": [1, -1],
+      "semantics": "prompt"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [1, -1, -1],
+      "semantics": "logits"
+    }
+  ],
+  "target_hardware": {
+    "device_family": "jetson-orin"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.1.0"
+  },
+  "model_blocks": {
+    "language": {
+      "tokenizer": {
+        "reference": "tokenizer.model",
+        "kind": "sentencepiece",
+        "revision_or_digest": "sha256:3e2674d6be32a774e691b30591fba1979ec0b5646226a5c652e54191f4a320b9"
+      },
+      "context_length_tokens": 4096,
+      "generation_config": {
+        "max_new_tokens": 0,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "stop_sequences": [],
+        "streaming": false
+      }
+    }
+  }
+}

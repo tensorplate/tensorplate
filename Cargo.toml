@@ -12,6 +12,7 @@ members = [
     "cli",
     "observability",
     "protocol/rust",
+    "tools/bundle",
 ]
 
 [workspace.package]

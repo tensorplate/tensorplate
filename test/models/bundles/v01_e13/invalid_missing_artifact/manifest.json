@@ -1,0 +1,16 @@
+{
+  "schema_version": "0.1",
+  "name": "missing-artifact",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "vision",
+  "backend_hint": "tensorrt",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "tensorrt_engine",
+      "path": "model.engine",
+      "digest": "sha256:9d4dc23eecabd84f0d50fbf4f73aa0b9b40c6f0db1d4a32c5e1f9b9b5d8b97a5"
+    }
+  ]
+}

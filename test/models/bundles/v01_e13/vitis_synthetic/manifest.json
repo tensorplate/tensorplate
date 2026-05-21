@@ -1,0 +1,66 @@
+{
+  "schema_version": "0.1",
+  "name": "synthetic-kria-vitis",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "vision",
+  "backend_hint": "vitis_ai",
+  "precision_hint": "int8",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "vitis_xmodel",
+      "path": "model.xmodel",
+      "digest": "sha256:5fc3044f6b4e30608b7c5af66b2871a464cbaee05349d05bb45a63d2e2ade548",
+      "description": "Synthetic .xmodel placeholder for V01-E13 schema review only."
+    },
+    {
+      "role": "vitis_calibration",
+      "kind": "calibration",
+      "path": "calibration.json",
+      "digest": "sha256:76d22ae938511fb23bd9829137ace35c099dd3e992422c829e7a3d4abbd37f2a"
+    }
+  ],
+  "inputs": [
+    {
+      "name": "image",
+      "modality": "image",
+      "dtype": "uint8",
+      "shape": [1, 3, 224, 224],
+      "encoding": "rgb24"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "logits",
+      "dtype": "float32",
+      "shape": [1, 1000]
+    }
+  ],
+  "target_hardware": {
+    "device_family": "kria"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.1.0"
+  },
+  "capability_requirements": {
+    "fixed_shape": true,
+    "deterministic_latency": true
+  },
+  "precision": {
+    "profile": "int8",
+    "vitis_ai": {
+      "quantize_strategy": "post_training",
+      "calibration_dataset_digest": "sha256:76d22ae938511fb23bd9829137ace35c099dd3e992422c829e7a3d4abbd37f2a",
+      "calibration_sample_count": 256,
+      "dpu_arch": "DPUCZDX8G_ISA0"
+    }
+  },
+  "model_blocks": {
+    "vision": {
+      "task": "classification",
+      "input_size": {"height": 224, "width": 224},
+      "color_space": "rgb"
+    }
+  }
+}
