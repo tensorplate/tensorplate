@@ -53,16 +53,68 @@ impl Default for InstallProbeOptions {
 }
 
 /// Run every install probe and return the aggregated findings.
+///
+/// When no install layout is present (dev hosts, CI runners without
+/// the package installed), every install-specific probe degrades to
+/// `missing` / `skipped` — never `fail` — so the dev experience
+/// matches the documented contract: doctor passes on a clean dev host
+/// and lights up `fail` only when an install is partially broken.
 #[must_use]
 pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
     let mut out = Vec::new();
+    let any_install = any_install_present(opts);
     out.extend(probe_path_layout(opts));
     out.extend(probe_config_files(opts));
     out.extend(probe_serving_binary(opts));
-    out.extend(probe_systemd_units(opts));
+    if any_install {
+        out.extend(probe_systemd_units(opts));
+    } else {
+        out.extend(skipped_systemd_units(
+            "no tensorplate install layout detected",
+        ));
+    }
     out.extend(probe_python_pytorch_backend(opts));
     out.extend(probe_optional_runtimes(opts));
     out
+}
+
+fn any_install_present(opts: &InstallProbeOptions) -> bool {
+    // Treat the install layout as present if any of the durable-state
+    // directories or installed binaries exists. We avoid a single
+    // probe (e.g. /etc/tensorplate) because dpkg conffiles, broken
+    // remove/purge cycles, or operator scripts can leave one of those
+    // behind on an otherwise-clean host.
+    let candidates = [
+        tensorplate_protocol::install_paths::ETC_DIR,
+        tensorplate_protocol::install_paths::STATE_DIR,
+        tensorplate_protocol::install_paths::LOG_DIR,
+        SERVING_BINARY_PATH,
+        PYTHON_PYTORCH_BACKEND_DESCRIPTOR,
+    ];
+    candidates.iter().any(|p| prefixed(opts, p).exists())
+}
+
+fn skipped_systemd_units(reason: &str) -> Vec<Finding> {
+    vec![
+        Finding::skipped(
+            FindingId::AgentSystemdUnit,
+            Severity::Info,
+            format!("{reason}; agent unit check skipped"),
+            None,
+        ),
+        Finding::skipped(
+            FindingId::ObservabilitySystemdUnit,
+            Severity::Info,
+            format!("{reason}; observability unit check skipped"),
+            None,
+        ),
+        Finding::skipped(
+            FindingId::ServingSystemdAbsent,
+            Severity::Info,
+            format!("{reason}; serving-no-unit check skipped"),
+            None,
+        ),
+    ]
 }
 
 fn prefixed(opts: &InstallProbeOptions, path: &str) -> PathBuf {
