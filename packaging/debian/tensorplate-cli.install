@@ -1,0 +1,2 @@
+target/release/tensorplate                   usr/bin/
+packaging/conf/cli.json                      etc/tensorplate/

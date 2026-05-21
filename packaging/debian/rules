@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+# SPDX-License-Identifier: Apache-2.0
+#
+# V01-E14 packaging rules. The upstream build (Rust workspace + C++
+# CMake build) is invoked by external CI / driver scripts and stages
+# binaries under debian/<pkg>/ via the per-package *.install files.
+# This rules file deliberately keeps the build target empty so the
+# packaging tree can be linted and dry-run-built independently of the
+# upstream toolchain.
+
+export DH_VERBOSE = 1
+
+# Honour SOURCE_DATE_EPOCH for reproducible-build CI when callers set it.
+ifndef SOURCE_DATE_EPOCH
+export SOURCE_DATE_EPOCH := $(shell date +%s)
+endif
+
+%:
+	dh $@ --with systemd
+
+# Upstream binaries are built outside debhelper for v0.1.0. The driver
+# script that produces them must run before `dpkg-buildpackage`.
+override_dh_auto_build:
+	@echo "tensorplate: upstream build is driven externally; debian/rules build step is a no-op"
+
+override_dh_auto_test:
+	@echo "tensorplate: tests run in their native harnesses; see test/"
+
+override_dh_auto_install:
+	@echo "tensorplate: install is driven by per-package *.install manifests"
+
+# Make sure dh_installsystemd installs but does not start the units.
+# Operators run `systemctl enable --now tensorplate-agent` after the
+# clean-install doctor pass, per docs/install/.
+override_dh_installsystemd:
+	dh_installsystemd --no-start --name=tensorplate-agent tensorplate-agent.service
+	dh_installsystemd --no-start --name=tensorplate-observability tensorplate-observability.service

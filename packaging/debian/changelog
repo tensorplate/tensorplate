@@ -1,0 +1,14 @@
+tensorplate (0.1.0~dev0-1) UNRELEASED; urgency=medium
+
+  * V01-E14 packaging skeleton: tensorplate-agent, tensorplate-serving,
+    tensorplate-observability, tensorplate-cli, and the separately
+    installable tensorplate-backend-python-pytorch.
+  * systemd units for the agent and observability service. Serving worker
+    is supervised by the agent (V01-E09); no `tensorplate-serving.service`.
+  * Local-only defaults: agent Unix domain socket, serving worker
+    loopback bind, observability in-process / Unix socket transports.
+  * `tensorplate doctor` packaging checks for paths, services,
+    permissions, backend availability, CUDA / TensorRT / LibTorch /
+    Python+PyTorch detection, and the ROS 2 health stub.
+
+ -- TensorPlate Contributors <oss@tensorplate.io>  Wed, 20 May 2026 00:00:00 +0000

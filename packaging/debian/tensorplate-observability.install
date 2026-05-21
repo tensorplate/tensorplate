@@ -1,0 +1,2 @@
+target/release/tensorplate-observability     usr/bin/
+packaging/conf/observability.json            etc/tensorplate/

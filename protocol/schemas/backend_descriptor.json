@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.tensorplate.io/v0.1/backend_descriptor.json",
+  "title": "TensorPlate Backend Descriptor",
+  "description": "Metadata file installed by an out-of-tree backend package (e.g. `tensorplate-backend-python-pytorch`). The agent + CLI use this descriptor to detect backend presence, version compatibility, interpreter compatibility, runtime availability, and the sidecar entrypoint without executing user model code. Lives under `/usr/share/tensorplate/backends/<backend_name>/backend.json` after install.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "backend_name", "package_name", "package_version"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "backend_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier the bundle's `backend_hint` matches against (e.g. `python_pytorch`, `tensorrt`, `libtorch`)."
+    },
+    "package_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OS-level package name. Used by `tensorplate doctor` in install hints."
+    },
+    "package_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Backend package version (PEP 440 or Debian-style). Reported by `doctor` and compared against `tensorplate_runtime_range`."
+    },
+    "tensorplate_runtime_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min"],
+      "properties": {
+        "min": {"type": "string", "minLength": 1},
+        "max_exclusive": {"type": "string", "minLength": 1}
+      },
+      "description": "TensorPlate runtime versions this backend is known compatible with. The agent rejects the deploy at compatibility time when the runtime version is outside this range."
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interpreter": {
+          "type": "string",
+          "description": "Absolute path to the Python interpreter the sidecar must invoke. Optional; when absent the runtime falls back to `python3` from PATH."
+        },
+        "minimum_version": {"type": "string"},
+        "supported_versions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "import_module": {
+          "type": "string",
+          "description": "Module the sidecar imports at startup. Detection probes verify this is importable without executing user model code."
+        }
+      }
+    },
+    "pytorch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required": {"type": "boolean", "default": true},
+        "import_module": {"type": "string", "default": "torch"},
+        "minimum_version": {"type": "string"},
+        "supported_devices": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["cpu", "cuda", "mps", "xla", "rocm"]}
+        }
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "command"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["console_script", "module", "binary"]
+        },
+        "command": {"type": "string", "minLength": 1},
+        "args": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "sidecar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transport": {"type": "string", "enum": ["unix_socket"]},
+        "lifecycle": {"type": "string", "enum": ["per_session", "per_request", "shared"]},
+        "supervised_by": {"type": "string"}
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Capability flags published by this backend. The agent verifier checks bundle `capability_requirements` against this declaration; missing fields default to all-false / empty.",
+      "properties": {
+        "async": {"type": "boolean", "default": false},
+        "streaming": {"type": "boolean", "default": false},
+        "generation": {"type": "boolean", "default": false},
+        "kv_cache": {"type": "boolean", "default": false},
+        "fixed_shape": {"type": "boolean", "default": false},
+        "deterministic_latency": {"type": "boolean", "default": false},
+        "control_loop_integration": {"type": "boolean", "default": false},
+        "supported_precision": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"]
+          }
+        },
+        "supported_artifact_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "tensorrt_engine",
+              "libtorch_state",
+              "python_pytorch_entry",
+              "onnx",
+              "vitis_xmodel",
+              "weights",
+              "tokenizer",
+              "calibration",
+              "auxiliary"
+            ]
+          }
+        }
+      }
+    },
+    "install_hint": {
+      "type": "string",
+      "description": "Human-readable hint reported by `tensorplate doctor` when the backend is missing or unrunnable."
+    }
+  }
+}

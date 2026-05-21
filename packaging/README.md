@@ -1,0 +1,91 @@
+# TensorPlate native packaging (V01-E14)
+
+This tree owns the v0.1.0 native package skeleton for TensorPlate. It
+follows the OSS Debian / debhelper convention so the same source tree
+can produce `.deb` artifacts via `dpkg-buildpackage -us -uc -b` on a
+Jetson-class Linux host once the binaries are built and staged.
+
+V01-E14 does **not** publish packages anywhere. It produces inspectable
+artifacts and a clean-install runbook that V01-E15 consumes on the
+target device. Signing, APT repositories, and GitHub release uploads
+are out of scope for this milestone — see
+`tensorplate-internals/planning/v0.1.0/v0.1_E14.md` for the boundary.
+
+## Layout
+
+```
+packaging/
+├── README.md                       This file.
+├── VERSION                         Single-source version stamp.
+├── version.sh                      Helper to emit the version string.
+├── debian/                         debhelper-style packaging metadata.
+│   ├── control                     Source + binary package definitions.
+│   ├── changelog                   Debian changelog (auto-aligned to VERSION).
+│   ├── rules                       dh-style build / install rules.
+│   ├── compat                      debhelper compat level.
+│   ├── copyright                   Apache-2.0 declaration.
+│   ├── source/format               Quilt format.
+│   ├── tensorplate-agent.install   Per-binary-package install manifest.
+│   ├── tensorplate-agent.postinst  Per-package maintainer script.
+│   ├── tensorplate-agent.prerm
+│   ├── tensorplate-agent.postrm
+│   ├── tensorplate-agent.service   Auto-installed by dh_installsystemd.
+│   ├── ...                         Same files for -observability/-serving/-cli/-backend-python-pytorch.
+├── systemd/                        Source unit files referenced by debian/*.service.
+├── conf/                           Default config installed under /etc/tensorplate/.
+├── scripts/                        Shared helpers used by maintainer scripts and tests.
+└── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.
+```
+
+## Package split
+
+| Package | Purpose | Binary | systemd? |
+| --- | --- | --- | --- |
+| `tensorplate-agent` | Device control plane, deploy transaction, worker supervision. | `tensorplate-agent` | yes — `tensorplate-agent.service` |
+| `tensorplate-serving` | Data-plane serving worker. Installed but launched by the agent. | `tensorplate-serving` | no — supervised by agent (V01-E09) |
+| `tensorplate-observability` | Independent health monitor. | `tensorplate-observability` | yes — `tensorplate-observability.service` |
+| `tensorplate-cli` | Operator CLI. | `tensorplate` | no |
+| `tensorplate-backend-python-pytorch` | Python sidecar backend for SmolVLA / Python-native bundles. | `tensorplate-backend-python-pytorch` (entrypoint) | no — backend lifecycle is per-session by the serving worker |
+
+Core packages do **not** depend on `tensorplate-backend-python-pytorch`.
+Installing it later is sufficient to unlock SmolVLA-class deploys.
+
+## Building (skeleton)
+
+The `debian/rules` file assumes the upstream build has already produced
+release artifacts at `target/release/` (Rust) and `build/release/` (C++).
+A driver script (out of scope for V01-E14) chains those builds; the
+packaging tree only owns staging into `debian/<pkg>/`.
+
+```bash
+# 1) Build upstream binaries (out of scope for the skeleton).
+cargo build --release --bin tensorplate-agent --bin tensorplate-observability --bin tensorplate
+cmake --build build/release --target tensorplate-serving
+
+# 2) Run packaging lint / dry-run.
+./packaging/scripts/verify-artifacts.sh
+
+# 3) Build Debian binary packages.
+dpkg-buildpackage -us -uc -b
+```
+
+## v0.1.0 invariants
+
+- All bind addresses default to loopback / Unix domain sockets. The
+  package never publishes a public network endpoint.
+- Maintainer scripts are idempotent: reinstall preserves user config,
+  desired state, bundles, and logs unless `--purge` is supplied.
+- `dh_installsystemd` enables `tensorplate-agent.service` and
+  `tensorplate-observability.service` but does **not** start them.
+  Operators run `systemctl enable --now tensorplate-agent` after
+  `tensorplate doctor` reports green.
+- `tensorplate-serving` has no `.service` unit. The agent owns the
+  serving-worker lifecycle (V01-E09).
+- The Python/PyTorch backend lands a backend descriptor at
+  `/usr/share/tensorplate/backends/python_pytorch/backend.json`. The
+  agent + CLI use that descriptor for typed, actionable doctor /
+  deploy compatibility checks (V01-E14-F05).
+
+See `docs/install/` for the full installation, upgrade, and
+clean-install runbook, and `test/packaging/` for the verification
+suite that asserts these invariants on every change.

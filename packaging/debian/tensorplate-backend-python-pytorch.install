@@ -1,0 +1,4 @@
+backends/python_pytorch/src/                                        usr/lib/tensorplate/backends/python_pytorch/
+backends/python_pytorch/pyproject.toml                              usr/share/tensorplate/backends/python_pytorch/
+backends/python_pytorch/README.md                                   usr/share/doc/tensorplate-backend-python-pytorch/
+packaging/backend-metadata/python_pytorch.json                      usr/share/tensorplate/backends/python_pytorch/backend.json
