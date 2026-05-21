@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: tensorplate
-Upstream-Contact: TensorPlate Contributors <oss@tensorplate.io>
+Upstream-Contact: TensorPlate Contributors <oss@tensorplate.com>
 Source: https://github.com/tensorplate/tensorplate
 
 Files: *

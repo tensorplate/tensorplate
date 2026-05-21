@@ -1,7 +1,7 @@
 Source: tensorplate
 Section: misc
 Priority: optional
-Maintainer: TensorPlate Contributors <oss@tensorplate.io>
+Maintainer: TensorPlate Contributors <oss@tensorplate.com>
 Build-Depends:
  debhelper-compat (= 13),
  dh-exec,

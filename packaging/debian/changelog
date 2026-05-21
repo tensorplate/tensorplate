@@ -11,4 +11,4 @@ tensorplate (0.1.0~dev0-1) UNRELEASED; urgency=medium
     permissions, backend availability, CUDA / TensorRT / LibTorch /
     Python+PyTorch detection, and the ROS 2 health stub.
 
- -- TensorPlate Contributors <oss@tensorplate.io>  Wed, 20 May 2026 00:00:00 +0000
+ -- TensorPlate Contributors <oss@tensorplate.com>  Wed, 20 May 2026 00:00:00 +0000
