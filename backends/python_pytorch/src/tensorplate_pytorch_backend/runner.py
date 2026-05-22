@@ -40,6 +40,7 @@ from tensorplate_pytorch_backend.backends import (
     BackendError,
     FixtureBackend,
     NamedTensor,
+    SmolVLABackend,
 )
 
 logger = logging.getLogger("tensorplate.sidecar")
@@ -49,9 +50,10 @@ logger = logging.getLogger("tensorplate.sidecar")
 # inner discriminator. The `python_pytorch` backend_hint is the only one
 # the adapter forwards; what discriminates between fixture / torchscript /
 # smolvla is the `model_class` and a sidecar-specific config field. For
-# V01-E05-F04 the fixture is the only registered backend.
+# V01-E05-F04 keeps the fixture as the default; SmolVLA is opt-in so host
+# CI stays dependency-free while Jetson validation can exercise a real VLA.
 def default_backend_factories() -> dict[str, type[Backend]]:
-    return {"fixture": FixtureBackend}
+    return {"fixture": FixtureBackend, "smolvla": SmolVLABackend}
 
 
 @dataclass(slots=True)
@@ -389,7 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--default-backend",
-        default="fixture",
+        default=os.environ.get("TP_PYTHON_PYTORCH_DEFAULT_BACKEND", "fixture"),
         help="Backend factory used when the bundle does not declare a profile_id.",
     )
     parser.add_argument(

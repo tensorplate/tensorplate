@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from tensorplate_pytorch_backend import codec, protocol
-from tensorplate_pytorch_backend.runner import SidecarRunner
+from tensorplate_pytorch_backend.runner import SidecarRunner, default_backend_factories
 
 
 def _make_request(kind: str, **extra: Any) -> codec.SidecarFrame:
@@ -78,6 +78,12 @@ def _model_spec() -> dict[str, Any]:
         "backend_hint": "python_pytorch",
         "precision_hint": "auto",
     }
+
+
+def test_default_backend_factories_include_fixture_and_smolvla() -> None:
+    factories = default_backend_factories()
+    assert "fixture" in factories
+    assert "smolvla" in factories
 
 
 def test_load_prime_infer_unload_happy_path(
