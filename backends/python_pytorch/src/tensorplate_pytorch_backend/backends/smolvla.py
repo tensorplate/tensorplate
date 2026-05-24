@@ -223,9 +223,7 @@ class SmolVLABackend(Backend):
             ).to(dtype=self._torch.bool)
         return batch
 
-    def _tensor_to_torch(
-        self, item: NamedTensor, *, expect_dtype: set[str]
-    ) -> Any:  # noqa: ANN401 -- torch is imported lazily so return type stays Any
+    def _tensor_to_torch(self, item: NamedTensor, *, expect_dtype: set[str]) -> Any:  # noqa: ANN401 -- torch is imported lazily so return type stays Any
         dtype = item.tensor.get("dtype")
         shape = item.tensor.get("shape")
         if dtype not in expect_dtype:
