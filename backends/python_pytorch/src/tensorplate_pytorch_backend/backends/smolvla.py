@@ -54,7 +54,9 @@ def _optional_int_config(config: dict[str, Any], key: str) -> int | None:
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config `{key}` must be an integer") from exc
+        raise BackendError(
+            ERR_CONFIG_INVALID, f"SmolVLA config `{key}` must be an integer"
+        ) from exc
     if parsed <= 0:
         raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config `{key}` must be positive")
     return parsed
@@ -117,7 +119,9 @@ class SmolVLABackend(Backend):
                 cfg.vlm_model_name, cache_dir=cache_dir, padding_side="right"
             )
         except Exception as exc:
-            raise BackendError(ERR_LOAD_FAILED, "failed to load SmolVLA policy", context=repr(exc)) from exc
+            raise BackendError(
+                ERR_LOAD_FAILED, "failed to load SmolVLA policy", context=repr(exc)
+            ) from exc
 
         self._torch = torch
         self._np = np
@@ -148,7 +152,9 @@ class SmolVLABackend(Backend):
         except BackendError:
             raise
         except Exception as exc:
-            raise BackendError(ERR_INFERENCE_FAILED, "SmolVLA inference failed", context=repr(exc)) from exc
+            raise BackendError(
+                ERR_INFERENCE_FAILED, "SmolVLA inference failed", context=repr(exc)
+            ) from exc
 
         return [
             NamedTensor(
@@ -187,7 +193,10 @@ class SmolVLABackend(Backend):
 
         state = by_name.get(self._obs_state_key)
         if state is None:
-            raise BackendError(ERR_SHAPE_MISMATCH, f"missing SmolVLA state input `{self._obs_state_key}`")
+            raise BackendError(
+                ERR_SHAPE_MISMATCH,
+                f"missing SmolVLA state input `{self._obs_state_key}`",
+            )
         batch[self._obs_state_key] = self._tensor_to_torch(state, expect_dtype={"float32"}).to(
             dtype=self._torch.float32
         )
@@ -214,12 +223,16 @@ class SmolVLABackend(Backend):
             ).to(dtype=self._torch.bool)
         return batch
 
-    def _tensor_to_torch(self, item: NamedTensor, *, expect_dtype: set[str]) -> Any:
+    def _tensor_to_torch(
+        self, item: NamedTensor, *, expect_dtype: set[str]
+    ) -> Any:  # noqa: ANN401 -- torch is imported lazily so return type stays Any
         dtype = item.tensor.get("dtype")
         shape = item.tensor.get("shape")
         if dtype not in expect_dtype:
             raise BackendError(ERR_SHAPE_MISMATCH, f"unexpected dtype for `{item.name}`: {dtype!r}")
-        if not isinstance(shape, list) or not all(isinstance(dim, int) and dim > 0 for dim in shape):
+        if not isinstance(shape, list) or not all(
+            isinstance(dim, int) and dim > 0 for dim in shape
+        ):
             raise BackendError(ERR_SHAPE_MISMATCH, f"invalid shape for `{item.name}`: {shape!r}")
         np_dtype = {
             "bool": self._np.bool_,

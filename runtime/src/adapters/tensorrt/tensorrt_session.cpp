@@ -320,7 +320,9 @@ class TensorRTSession final : public ExecutionSession {
   {
   }
 
-  [[nodiscard]] std::string_view backend_name() const noexcept override { return kBackendName; }
+  [[nodiscard]] std::string_view backend_name() const noexcept override {
+    return kBackendName;
+  }
 
  protected:
   Result<void> do_load(const ModelSpec& spec) override {
