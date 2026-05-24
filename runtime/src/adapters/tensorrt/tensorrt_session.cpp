@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -86,11 +87,24 @@ namespace {
 
 #if TP_HAS_TENSORRT_SDK
 /// TensorRT logger that routes diagnostics through the structured-log
-/// facility once V01-E12 lands. Until then it discards messages so the
-/// adapter does not spew to stderr.
+/// facility once V01-E12 lands. Until then it surfaces `kERROR` and
+/// `kINTERNAL_ERROR` to stderr so a malformed engine or driver fault is
+/// at least visible in the agent journal, and silently drops the
+/// lower-severity chatter that TensorRT emits during normal load.
 class TensorRTLogger final : public nvinfer1::ILogger {
  public:
-  void log(Severity /*severity*/, const char* /*msg*/) noexcept override {}
+  void log(Severity severity, const char* msg) noexcept override {
+    if (msg == nullptr) {
+      return;
+    }
+    if (severity == Severity::kERROR || severity == Severity::kINTERNAL_ERROR) {
+      // `fprintf` is noexcept and never throws across the C ABI boundary
+      // demanded by ILogger::log. The structured-log replacement lands in
+      // V01-E12 (see TENSORPLATE-LOG-001).
+      std::fprintf(stderr, "[tensorrt][%s] %s\n",
+                   severity == Severity::kINTERNAL_ERROR ? "INTERNAL_ERROR" : "ERROR", msg);
+    }
+  }
 };
 
 TensorRTLogger& trt_logger() noexcept {
@@ -327,6 +341,15 @@ class TensorRTSession final : public ExecutionSession {
  protected:
   Result<void> do_load(const ModelSpec& spec) override {
 #if TP_HAS_TENSORRT_SDK
+#if NV_TENSORRT_MAJOR < 10
+    // do_infer relies on the explicit-IO (enqueueV3) APIs introduced in
+    // TensorRT 10. Fail load-time so operators see a consistent
+    // lifecycle: there is no use in succeeding through prime only to
+    // return `Unsupported` for every inference request.
+    (void)spec;
+    return unexpected(Error::Code::Unsupported,
+                      "TensorRT adapter requires TensorRT 10 explicit-IO APIs");
+#endif
     const auto& path = spec.artifact_path();
     if (path.empty()) {
       return unexpected(Error::Code::ConfigInvalid, "TensorRT artifact_path is empty");
@@ -523,6 +546,13 @@ class TensorRTSession final : public ExecutionSession {
       return fail(Error::make(Error::Code::InferenceFailed, "TensorRT enqueueV3 returned false"));
     }
 
+    // Issue every D2H copy on `state_->stream` and synchronize once at
+    // the end. If any `manager_->allocate` or `cudaMemcpyAsync` fails
+    // mid-loop we return through `fail()` without an explicit sync;
+    // that is still safe because `CudaDeviceBuffer::~CudaDeviceBuffer`
+    // calls `cudaFree`, which performs an implicit per-stream sync per
+    // CUDA semantics, draining any outstanding writes against the
+    // device pointer before its memory is released.
     for (auto& pending : pending_outputs) {
       auto host_buffer = manager_->allocate(pending.tensor.byte_size());
       if (!host_buffer.has_value()) {

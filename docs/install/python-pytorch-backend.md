@@ -126,6 +126,36 @@ files are staged. It will not silently fall through to first inference.
   scan the filesystem, or reach the network. The probe is read-only
   and bounded (it returns within seconds even when Python is missing).
 
+## Tuning environment variables
+
+The adapter and the SmolVLA backend both read environment variables for
+host-specific tuning. Set them in the agent's environment (e.g.
+`Environment=` in `tensorplate-agent.service` or the doctor's `env-file`)
+so they are applied at process start.
+
+### Adapter (consumed by the C++ runtime and Python runner)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TP_PYTHON_PYTORCH_EXECUTABLE` | `/usr/bin/python3` (from descriptor) | Interpreter the sidecar is launched with. Override when running from a virtualenv (e.g. the E15 validation venv). Falls back to `TP_TEST_PYTHON_EXE` then `TP_TEST_PYTHON` for the C++ test fixtures. |
+| `TP_PYTHON_PYTORCH_DEFAULT_BACKEND` | `fixture` | Selects the in-process backend factory. Set to `smolvla` to enable the LeRobot SmolVLA path. |
+| `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS` | `15000` | Deadline for sidecar `start`/`load`/`prime`/`unload` exchanges. Increase on cold-cache or HuggingFace-download-heavy startups (90000 has been tested for Orin SmolVLA). |
+| `TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS` | `30000` | Per-request inference deadline (clamped by the caller's deadline). |
+| `TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS` | `2000` | Health-probe deadline. Sidecar runners that handle health off the inference thread can keep this tight; otherwise raise it to avoid spurious flaps. |
+
+### SmolVLA backend (consumed when `default_backend = smolvla`)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TP_SMOLVLA_MODEL_ID` | `lerobot/smolvla_base` | HuggingFace model id passed to `PreTrainedConfig.from_pretrained`. |
+| `TP_SMOLVLA_CACHE_DIR` | `/var/lib/tensorplate/hf-cache` | HF cache directory shared by the policy, tokenizer, and config. |
+| `TP_SMOLVLA_DEVICE` | `cuda` | Torch device string. Set to `cpu` for non-CUDA hosts. |
+| `TP_SMOLVLA_NUM_STEPS` | _(model default)_ | Optional positive integer that overrides `PreTrainedConfig.num_steps` (inference rollout length). |
+| `TP_SMOLVLA_TASK` | `pick up the cube\n` | Default language task when the inference frame omits explicit token inputs. |
+
+Values from a per-bundle JSON config (`artifact_path`) take precedence
+over the environment, which takes precedence over the built-in default.
+
 ## Removing the backend
 
 ```bash
