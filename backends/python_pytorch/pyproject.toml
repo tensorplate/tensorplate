@@ -84,6 +84,10 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+module = ["numpy", "torch", "lerobot.*", "transformers"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

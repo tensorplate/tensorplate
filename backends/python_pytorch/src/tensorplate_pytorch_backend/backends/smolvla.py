@@ -67,11 +67,11 @@ class SmolVLABackend(Backend):
 
     def __init__(self) -> None:
         self._loaded = False
-        self._policy: Any | None = None
-        self._config: Any | None = None
-        self._device: Any | None = None
-        self._torch: Any | None = None
-        self._np: Any | None = None
+        self._policy: Any = None
+        self._config: Any = None
+        self._device: Any = None
+        self._torch: Any = None
+        self._np: Any = None
         self._obs_state_key = "observation.state"
         self._language_tokens_key = "observation.language.tokens"
         self._language_mask_key = "observation.language.attention_mask"
