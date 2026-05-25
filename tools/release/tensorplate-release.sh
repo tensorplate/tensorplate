@@ -725,7 +725,7 @@ if missing:
     raise SystemExit("missing package artifacts: " + ", ".join(missing))
 
 manifest = {
-    "schema": "https://tensorplate.dev/schemas/release-artifact-manifest-v1.json",
+    "schema": "https://tensorplate.com/schemas/release-artifact-manifest-v1.json",
     "release": {
         "project": "tensorplate",
         "version": version,

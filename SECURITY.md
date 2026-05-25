@@ -3,8 +3,9 @@
 ## Reporting a Vulnerability
 
 Please do not report security vulnerabilities through public GitHub issues.
-
-Until a dedicated security contact is published, report vulnerabilities privately to the repository owner. Include enough detail to reproduce and assess the issue:
+Use GitHub private vulnerability reporting for this repository when it is
+enabled. If that path is unavailable, email `security@tensorplate.com`.
+Include enough detail to reproduce and assess the issue:
 
 - Affected component or package path.
 - Branch, commit, release, or tag.
