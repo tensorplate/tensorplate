@@ -275,6 +275,13 @@ The version constants live at:
 Reviewers should reject PRs that change a public contract without the
 accompanying changelog entry and version bump.
 
+Versioned public releases are cut only from `release/vX.Y.Z` branches with
+annotated `vX.Y.Z` tags. The v0.1.0 release process, tag immutability
+rules, artifact manifest format, and maintainer sign-off requirements live
+in [`docs/release/`](docs/release/). The release tooling PR is distinct
+from the final release operation; final publication must happen
+post-merge from a clean release commit and tag.
+
 ## Pull Request Expectations
 
 Every PR should include:

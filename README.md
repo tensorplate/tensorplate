@@ -6,7 +6,10 @@
 
 TensorPlate is an inference platform for edge AI and robotics. It is designed for reliable, observable model serving on hardware-constrained devices, with a C++ runtime hot path and Rust control-plane components.
 
-> Status: early OSS setup. The repository is being scaffolded before the first public implementation release.
+> Status: release-candidate preparation for v0.1.0. The release tooling,
+> package skeleton, validation reports, and external install docs are in
+> place; the final public release must still be cut from a clean
+> `release/v0.1.0` branch and annotated `v0.1.0` tag.
 
 ## What TensorPlate Is
 
@@ -56,13 +59,16 @@ package owners, allowed dependencies, and review gates.
 
 ## Getting Started
 
-There is no supported build yet. For now:
+For development:
 
 1. Read [CONTRIBUTING.md](CONTRIBUTING.md).
-2. Use the GitHub issue templates for Epics, Features, Tasks, and Bugs.
+2. Follow [local validation](docs/contributing/local-validation.md).
 3. Keep public behavior, interface, config schema, feature flag, and error-code changes reflected in [CHANGELOG.md](CHANGELOG.md).
 
-Build and development instructions will be added once the initial CMake, Cargo, and devcontainer scaffolding lands.
+For the v0.1.0 external install path, start with
+[docs/install/v0.1.0-external-install.md](docs/install/v0.1.0-external-install.md)
+after the `v0.1.0` GitHub Release is published. The release process and
+tag policy live under [docs/release/](docs/release/).
 
 ## Contributing
 
@@ -75,11 +81,15 @@ Issues are organized as:
 
 Pull requests should link an issue, describe acceptance criteria coverage, include test evidence, and note changelog impact.
 
-Branches names should be named after issues: 'git checkout -b issue-##' 
+Branches names should be named after issues: 'git checkout -b issue-##'
 
-For features, issues are implemented at tasks issues levels then merged into feature branch. 
+For features, issues are implemented at tasks issues levels then merged into feature branch.
 
-For bugs, issues can be merged directly into 'develop' or 'feature' branch. 
+For bugs, issues can be merged directly into 'develop' or 'feature' branch.
+
+Release branches use `release/vX.Y.Z` and final public release tags use
+annotated `vX.Y.Z` tags. Retagging a published final release is forbidden;
+see [docs/release/v0.1.0-version-tag-policy.md](docs/release/v0.1.0-version-tag-policy.md).
 
 ## Security
 

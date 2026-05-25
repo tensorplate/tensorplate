@@ -8,6 +8,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Release workflow and external installability (V01-E16). v0.1.0 gains
+  maintainer-facing release machinery and public install documentation,
+  but the release is still cut only after this tooling PR merges.
+    - `tools/release/tensorplate-release.sh` adds guarded release
+      subcommands for preflight, metadata prepare dry-runs, artifact
+      manifest/checksum generation, annotated tag creation, and draft
+      GitHub Release publication. Mutating paths require clean worktree,
+      explicit confirmation, and final release evidence.
+    - Release documentation under `docs/release/` defines the runbook,
+      version/changelog policy, branch and tag policy, final tag
+      immutability, sign-off template, artifact manifest format,
+      checksum verification, GitHub Release attachment procedure,
+      post-release hotfix/deprecation policy, and draft release notes.
+    - External-user docs under `docs/install/` now start from GitHub
+      Release assets rather than local build-tree paths and cover package
+      download, SHA256 verification, core install, optional
+      `tensorplate-backend-python-pytorch`, service start, doctor,
+      quickstart deploy/inference, status/log/metrics inspection,
+      rollback, uninstall, and troubleshooting.
+    - Clean-room release smoke procedure under `docs/validation/` defines
+      the post-merge E16 evidence path from GitHub Release assets on the
+      Jetson Orin Nano 8GB Super hardware floor.
+
 - Packaging and first-run install (V01-E14). v0.1.0 becomes
   installable as a Jetson-class Linux appliance. None of the
   artifacts are published yet — V01-E14 ships the inspectable
