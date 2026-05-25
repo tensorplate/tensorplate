@@ -40,6 +40,19 @@ manifest in place; copy the values into `manifest.json` after reviewing
 the diff. The conformance test `protocol/rust/tests/bundle_conformance.rs`
 re-verifies all fixture digests deterministically.
 
+## Provenance and license
+
+All files in these fixture directories are TensorPlate-authored synthetic
+placeholders and are covered by the repository's Apache-2.0 license. The
+`.engine`, `.safetensors`, `.xmodel`, tokenizer, and calibration files are
+small text or byte fixtures with stable digests; they are not vendor SDK
+outputs, trained model weights, NVIDIA sample binaries, Hugging Face model
+files, or LeRobot artifacts.
+
+The fixtures are produced by writing minimal placeholder content and then
+recording its digest in the adjacent `manifest.json`. When content changes,
+regenerate the digest with `tensorplate-bundle-tool` as described above.
+
 ## Synthetic Vitis fixture
 
 The Vitis fixture exists only to prove the schema can carry `.xmodel`

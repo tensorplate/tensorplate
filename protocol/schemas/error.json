@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/error.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/error.json",
   "title": "TensorPlate Error",
   "description": "Typed error payload shared by C++ runtime, Rust agent/CLI/observability, and the Python sidecar backend. Mirrors include/tensorplate/core/error.hpp::Error.",
   "type": "object",

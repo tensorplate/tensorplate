@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/failure_reason.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/failure_reason.json",
   "title": "TensorPlate Failure Reason Taxonomy",
   "description": "Operator-visible failure reason taxonomy (V01-E12-F03). Normalises local failure reasons across the agent transaction status, serving worker inference errors, backend/adapter failures, Python/PyTorch sidecar lifecycle, worker supervision, and observability heartbeat. Failure reasons classify typed `error_code` values so CLI consumers can render explanations without parsing free-form messages. Each reason maps to exactly one `error_code`; new reasons append rather than rename to keep the wire format stable.",
   "type": "object",

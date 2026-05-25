@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/scheduler_metrics.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/scheduler_metrics.json",
   "title": "TensorPlate Scheduler Metrics Snapshot",
   "description": "Snapshot of scheduler counters and aggregates returned by InferScheduler::metrics(). Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerMetrics. Intended for the local /metrics endpoint (V01-E07), the local status command (V01-E11), and the observability service (V01-E12).\n\nCounters are monotonic (always increase). Wait-time aggregates use steady-clock nanoseconds so durations are comparable across snapshots within a single process; the snapshot itself does not carry timestamps.",
   "type": "object",

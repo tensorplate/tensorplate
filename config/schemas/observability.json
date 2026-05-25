@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/observability.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/observability.json",
   "title": "TensorPlate Observability Config",
   "description": "Runtime configuration for `tensorplate-observability` (V01-E10). The service loads this file at startup, validates it before binding any local transport, and refuses to publish or write snapshots until validation succeeds. Defaults are local-only and never require hosted-platform connectivity. The observability service is independent from `tensorplate-agent` and `tensorplate-serving`: heartbeat freshness is evaluated against a monotonic clock and missing-heartbeat detection works without agent cooperation.",
   "type": "object",

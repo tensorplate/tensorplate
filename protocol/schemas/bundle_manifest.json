@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/bundle_manifest.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json",
   "title": "TensorPlate Bundle Manifest",
   "description": "Full v0.1.0 bundle manifest envelope. V01-E08 ships the deploy-time verification subset; V01-E13 owns the complete authoring surface (named inputs/outputs, model-class blocks, runtime capability declarations, precision schema, and reserved language/Vitis fields). All new fields land as optional so prior bundles remain valid; the v0.1 bundle format version covers the additions without a major bump.",
   "type": "object",

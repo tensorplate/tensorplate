@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/metric_event.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/metric_event.json",
   "title": "TensorPlate Metric Event",
   "description": "Local metric sample envelope (V01-E12-F04). The v0.1 registry supports counters, gauges, and histograms; the wire form is the same for every kind so the local scrape/file/stdout sink can stream samples without per-kind branching. Label sets are bounded to keep cardinality finite on constrained devices.",
   "type": "object",

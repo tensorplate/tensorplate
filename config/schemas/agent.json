@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/agent.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/agent.json",
   "title": "TensorPlate Agent Config",
   "description": "Runtime configuration for `tensorplate-agent` (V01-E08). The agent loads this file at startup, validates it before opening the local control transport, and refuses to mutate durable state until validation succeeds.",
   "type": "object",

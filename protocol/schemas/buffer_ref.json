@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/buffer_ref.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/buffer_ref.json",
   "title": "TensorPlate BufferRef",
   "description": "Opaque buffer-handle identity. The schema is intentionally NOT a memory-transfer wire format; it carries only the metadata required to compare buffer identities across logs, traces, and test fixtures. Mirrors include/tensorplate/buffer/buffer_ref.hpp::BufferRef.",
   "type": "object",

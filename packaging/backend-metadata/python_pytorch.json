@@ -1,5 +1,5 @@
 {
-  "$schema": "https://schemas.tensorplate.io/v0.1/backend_descriptor.json",
+  "$schema": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json",
   "schema_version": "0.1",
   "backend_name": "python_pytorch",
   "package_name": "tensorplate-backend-python-pytorch",

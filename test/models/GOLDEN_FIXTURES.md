@@ -101,13 +101,13 @@ The `FixtureBackend` is sufficient to exercise:
 
 **SmolVLA bundle fixture (V01-E15).** The end-to-end SmolVLA
 validation on Jetson Orin Nano 8GB Super lives in V01-E15. The
-fixture's required shape is documented in the v0.1.0 roadmap and in
-`tensorplate-internals/planning/v0.1.0/v0.1_E5.md`: named inputs
-(e.g. `image_front`, `image_wrist`, `state`, `instruction`) plus a
-named chunk-shaped action output. The fixture is too large to be
-checked in; the V01-E14 packaging work covers the install path for
-the SmolVLA artifact under `backends/python_pytorch/` per the closed
-v0.1.0 decision.
+fixture's required shape is captured by the v0.1.0 bundle manifest:
+named inputs such as `image_front`, `image_wrist`, `state`, and
+`instruction`, plus a named chunk-shaped action output. The full
+SmolVLA fixture is too large to check in; the package install path for
+the Python/PyTorch backend lives under `backends/python_pytorch/` and
+the target validation procedure records the real external artifact used
+for release evidence.
 
 ## How tolerances are surfaced
 

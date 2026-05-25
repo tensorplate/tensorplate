@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/health_event.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/health_event.json",
   "title": "TensorPlate Health Event",
   "description": "Discrete health-state event emitted by the serving worker and consumed by `tensorplate-observability` and the V01-E10 ROS 2 health-topic publisher. Carries monotonic timing; never wall-clock.",
   "type": "object",

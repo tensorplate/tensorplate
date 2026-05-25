@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/serving_health.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/serving_health.json",
   "title": "TensorPlate Serving Health",
   "description": "Local serving-worker `/health` response. Mirrors `include/tensorplate/serving/health.hpp::HealthSnapshot` serialized by `serialize_health_json`.\n\nDiscriminator semantics:\n  - `starting`: components still wiring; HTTP 503.\n  - `ready`: active session is `ready`; HTTP 200.\n  - `degraded`: active session loaded but not yet primed, or non-fatal pressure / backlog observed; HTTP 200.\n  - `failed`: active session reported a fatal error; HTTP 503.\n  - `stopping` / `draining` / `stopped`: shutdown lifecycle; HTTP 503.\n\nAgents are expected to read `state` rather than just the HTTP status to distinguish ready from degraded.",
   "type": "object",

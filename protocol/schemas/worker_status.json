@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/worker_status.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/worker_status.json",
   "title": "TensorPlate Worker Status",
   "description": "Status payload published by `tensorplate-serving` and consumed by `tensorplate-agent`, the CLI, and `tensorplate-observability`. The same fields populate the V01-E10 ROS 2 `diagnostic_msgs/msg/DiagnosticArray` health topic.",
   "type": "object",

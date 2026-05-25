@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/agent_state.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/agent_state.json",
   "title": "TensorPlate Agent Durable State",
   "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`; partial-write recovery falls back to the last known-good copy. The state file is the only durable record of the active deployment, the previous active deployment, the candidate deployment, the in-flight transaction phase, and the quarantine list. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nMigration policy: the agent rejects unknown future `schema_version` values without mutation. Older versions are migrated forward by an explicit migration step when one ships; v0.1 ships no migrations.",
   "type": "object",

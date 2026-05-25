@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/deploy_transaction.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/deploy_transaction.json",
   "title": "TensorPlate Deploy Transaction",
   "description": "Durable state record for one in-progress or completed deploy transaction. Owned by `tensorplate-agent` (V01-E08). The state machine is intentionally explicit so a mid-transaction agent restart (V01-E08-T03) can resume from durable state.",
   "type": "object",

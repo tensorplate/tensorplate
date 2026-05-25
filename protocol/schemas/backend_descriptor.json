@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/backend_descriptor.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json",
   "title": "TensorPlate Backend Descriptor",
   "description": "Metadata file installed by an out-of-tree backend package (e.g. `tensorplate-backend-python-pytorch`). The agent + CLI use this descriptor to detect backend presence, version compatibility, interpreter compatibility, runtime availability, and the sidecar entrypoint without executing user model code. Lives under `/usr/share/tensorplate/backends/<backend_name>/backend.json` after install.",
   "type": "object",

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/control_loop_metrics.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/control_loop_metrics.json",
   "title": "TensorPlate Control-Loop Metrics",
   "description": "Control-loop jitter and frequency stability event (V01-E12-F05). Consumed by the V01-E15 SmolVLA validation harness and the V01-E11 CLI status projection. Formulas are pinned to the v0.1 roadmap: `target_period_ms = 1000 / control_frequency_hz`; `jitter_ms = abs(interval_ms - target_period_ms)`; `instant_frequency_hz = 1000 / interval_ms`; `frequency_error_pct = abs(mean_frequency_hz - control_frequency_hz) / control_frequency_hz * 100`. All timing is monotonic; events derive from successful action outputs only.",
   "type": "object",

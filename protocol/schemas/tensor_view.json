@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/tensor_view.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/tensor_view.json",
   "title": "TensorPlate TensorView",
   "description": "Tensor metadata describing the dtype, shape, layout, and byte-window of a tensor region inside a BufferRef. Mirrors include/tensorplate/buffer/tensor_view.hpp::TensorView. The view does NOT carry memory; pair with `buffer_ref.json` for a full payload reference.",
   "type": "object",

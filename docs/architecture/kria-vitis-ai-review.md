@@ -130,11 +130,9 @@ records that a future adapter can plug in without public interface
 revision, or identifies required v0.1.0 interface fixes before
 freeze"* is met by this document.
 
-When the Vitis AI implementation lands (post-v0.1.0, see the roadmap
-charter under `v0.4+` in
-`tensorplate-internals/planning/v0.1.0/tensorplate-oss-v0.1-architecture-and-roadmap.md`),
-this document gets revisited and any deviation from the assumptions
-above gets recorded as an addendum here.
+When the Vitis AI implementation lands after v0.1.0, this document gets
+revisited and any deviation from the assumptions above gets recorded as
+an addendum here.
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/scheduler_event.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/scheduler_event.json",
   "title": "TensorPlate Scheduler Event",
   "description": "Bounded event record emitted by the v0.1.0 InferScheduler on admission, dispatch, completion, cancellation, expiry, and pressure transitions. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerEvent.\n\nThe scheduler emits one event per state transition. Labels are explicit fields so downstream observability (V01-E12) can scrape them without parsing free text. Slow event subscribers cannot block scheduler critical-path methods (admit / next / on_completion / cancel / expire_due / on_pressure / shutdown): the scheduler invokes the sink inside a defensive try/catch and never blocks on it.\n\nThis schema intentionally does NOT carry raw payload bytes, BufferRef ids, or per-request labels beyond the bounded fields below.",
   "type": "object",
