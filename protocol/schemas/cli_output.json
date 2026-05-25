@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/cli_output.json",
   "title": "TensorPlate CLI JSON Output Envelope",
-  "description": "Stable machine-readable output envelope used by `tensorplate` subcommands when `--output json` is selected. The envelope is intentionally narrow: a coarse `status`, an optional typed `error`, the active correlation/transaction id, and a command-specific `payload` whose shape is documented by each subcommand. The envelope is versioned so V01-E15 validation scripts can rely on stable field names.",
+  "description": "Stable machine-readable output envelope used by `tensorplate` subcommands when `--output json` is selected. The envelope is intentionally narrow: a coarse `status`, an optional typed `error`, the active correlation/transaction id, and a command-specific `payload` whose shape is documented by each subcommand. The envelope is versioned so release validation scripts can rely on stable field names.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "command", "status"],

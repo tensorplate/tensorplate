@@ -50,7 +50,7 @@ pub fn run<W: Write, E: Write>(
     findings.extend(probe_profile_compatibility(profile));
     findings.extend(probe_runtime_environment());
     findings.extend(probe_ros2_health_stub());
-    // V01-E14-F06 install probes: filesystem layout, configs,
+    // packaging install probes: filesystem layout, configs,
     // systemd units, serving binary, backend descriptor + runtime,
     // CUDA/TensorRT/LibTorch.
     findings.extend(install::run(&install::InstallProbeOptions::default()));
@@ -187,8 +187,8 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
 
 fn probe_runtime_environment() -> Vec<Finding> {
     // Host facts only. Concrete CUDA / TensorRT / LibTorch / Python /
-    // PyTorch checks land in [`install::run`] (V01-E14-F06) so the
-    // CLI / V01-E15 harness reads them from a single source.
+    // PyTorch checks land in [`install::run`] (packaging) so the
+    // CLI / release validation harness reads them from a single source.
     let arch = std::env::consts::ARCH;
     let os = std::env::consts::OS;
     let mut findings = vec![Finding::ok(

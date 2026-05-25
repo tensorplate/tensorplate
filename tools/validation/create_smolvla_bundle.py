@@ -223,8 +223,8 @@ def main() -> int:
 
     request = {
         "schema_version": "0.1",
-        "request_id": "e15-smolvla-real-1",
-        "endpoint": "e15-smolvla-real",
+        "request_id": "validation-smolvla-real-1",
+        "endpoint": "validation-smolvla-real",
         "metadata": {"action_chunk_id": "smolvla-chunk-1", "action_chunk_sequence": 1},
         "inputs": request_inputs,
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // V01-E11-F01-T02: `tensorplate version` — prints CLI, protocol, and
-// bundle format versions. Useful for support / V01-E15 validation scripts
+// bundle format versions. Useful for support / release validation scripts
 // that need to assert the binary on the device matches the expected
 // release.
 

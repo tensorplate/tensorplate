@@ -8,7 +8,7 @@
 //     constrained device. Severity labels are bracketed, never colorized
 //     for the sake of color alone, and never depend on terminal width.
 //   - json: the envelope documented in
-//     `protocol/schemas/cli_output.json`. Stable enough for V01-E15
+//     `protocol/schemas/cli_output.json`. Stable enough for release validation
 //     validation scripts to grep on.
 //
 // Commands assemble their payload as a `serde_json::Value` and let the

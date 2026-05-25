@@ -1,7 +1,7 @@
 # CLI Exit Codes
 
 The `tensorplate` binary maps every typed `CliError` to a stable exit code. The
-V01-E15 validation harness and shell scripts may assert on these.
+release validation harness and shell scripts may assert on these.
 
 | Code | Name              | When                                                                  |
 | ---: | :---------------- | :-------------------------------------------------------------------- |

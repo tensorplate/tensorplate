@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Verify the E15 TensorRT identity response payload."""
+"""Verify the release validation TensorRT identity response payload."""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@
 // V01-E12-F05: Rust mirror of `protocol/schemas/control_loop_metrics.json`.
 //
 // `ControlLoopEvent` carries the rolling 60s window summary used by the
-// V01-E15 SmolVLA validation harness and the V01-E11 CLI status
+// release validation SmolVLA validation harness and the V01-E11 CLI status
 // projection. Formulas are pinned to the v0.1 roadmap; the aggregator
 // lives in `tensorplate-observability` (see `observability::control_loop`).
 

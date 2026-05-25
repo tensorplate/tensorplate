@@ -1,6 +1,6 @@
 # Bundle Manifest
 
-**Status:** v0.1.0 (V01-E13-F02 / -F03 / -F04 / -F05)
+**Status:** v0.1.0 bundle format
 **Schema:** [`protocol/schemas/bundle_manifest.json`](../../protocol/schemas/bundle_manifest.json)
 **Rust mirror:** [`protocol/rust/src/bundle_manifest.rs`](../../protocol/rust/src/bundle_manifest.rs)
 
@@ -56,7 +56,7 @@ values rather than rejecting them, so bundles can grow incrementally.
 
 ## Model classes
 
-V01-E13 owns the model-class taxonomy. v0.1.0 *validates* vision and VLA;
+bundle format owns the model-class taxonomy. v0.1.0 *validates* vision and VLA;
 the other classes parse cleanly so future releases can land their runtime
 without a bundle-format bump.
 
@@ -134,7 +134,7 @@ non-language non-custom classes.
 ### VLA block
 
 `vla` carries control-loop metadata consumed by V01-E12 telemetry and
-V01-E15 validation:
+release validation:
 
 ```json
 "vla": {

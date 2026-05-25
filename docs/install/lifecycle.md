@@ -1,6 +1,6 @@
 # TensorPlate package lifecycle: reinstall, upgrade, uninstall, purge
 
-V01-E14-F07 contract for the v0.1.0 packages. Operator-visible policy.
+packaging contract for the v0.1.0 packages. Operator-visible policy.
 
 ## Reinstall
 

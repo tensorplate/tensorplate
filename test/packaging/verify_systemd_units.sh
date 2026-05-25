@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # SPDX-License-Identifier: Apache-2.0
 #
-# V01-E14-F08: systemd unit-content verifier.
+# packaging: systemd unit-content verifier.
 #
 # Asserts the v0.1.0 invariants on every shipped unit:
 #   - runs as User=tensorplate, Group=tensorplate

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/log_event.json",
   "title": "TensorPlate Structured Log Event",
-  "description": "Shared structured log envelope emitted by the agent, serving worker, runtime/adapters, Python/PyTorch sidecar, and observability service (V01-E12-F01). The schema is the canonical log shape consumed by the V01-E11 `tensorplate logs` reader, the V01-E12-F07 status projection, and the V01-E15 validation harness. Logging failures must never panic or block the inference path; readers reject unknown `schema_version` strings.",
+  "description": "Shared structured log envelope emitted by the agent, serving worker, runtime/adapters, Python/PyTorch sidecar, and observability service (V01-E12-F01). The schema is the canonical log shape consumed by the V01-E11 `tensorplate logs` reader, the V01-E12-F07 status projection, and the release validation harness. Logging failures must never panic or block the inference path; readers reject unknown `schema_version` strings.",
   "type": "object",
   "additionalProperties": false,
   "required": [

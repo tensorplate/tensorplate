@@ -6,9 +6,9 @@ loss, and crash-loop transitions.
 
 Gated to release branches. Not required for ordinary PRs. Requires a
 physical device; see [`docs/architecture/`](../../docs/architecture/) for
-device setup once V01-E15 lands.
+device setup once release validation lands.
 
-Until the automated V01-E15 HIL suite lands, the manual Jetson
+Until the automated release validation HIL suite lands, the manual Jetson
 adapter/runtime target validation runbook lives at
 [`docs/contributing/jetson-target-validation.md`](../../docs/contributing/jetson-target-validation.md).
 That runbook runs T1/T2/T3 natively on the device with TensorRT enabled;

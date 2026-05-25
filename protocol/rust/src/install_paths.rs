@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F02: TensorPlate v0.1.0 installed-filesystem layout.
+// packaging: TensorPlate v0.1.0 installed-filesystem layout.
 //
 // These constants are the single source of truth for the on-device
 // layout shipped by the native packages (`packaging/debian/`). Maintainer

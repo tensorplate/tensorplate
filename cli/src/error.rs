@@ -4,7 +4,7 @@
 //
 // The CLI never panics on user input. Every failure path lands in this
 // taxonomy so help text, JSON output, and shell scripts see the same
-// shape. Exit codes are stable enough for the V01-E15 validation harness
+// shape. Exit codes are stable enough for the release validation harness
 // to assert on; new variants must extend the table, not reuse a code
 // already meaning something different.
 
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn exit_codes_are_stable() {
-        // Locking the numeric values down so the V01-E15 validation
+        // Locking the numeric values down so the release validation
         // harness can assert specific shell exit codes.
         assert_eq!(ExitCode::Success.as_u8(), 0);
         assert_eq!(ExitCode::Failure.as_u8(), 1);

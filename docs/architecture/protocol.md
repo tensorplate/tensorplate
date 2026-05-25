@@ -16,7 +16,7 @@ See also:
 | Payload family | Format | Justification |
 |----------------|--------|---------------|
 | Configuration  | JSON Schema Draft 7 | Operator-edited; needs to be human-readable and tool-friendly. |
-| Bundle manifest (V01-E13) | JSON Schema Draft 7 | Same audience as config. |
+| Bundle manifest (bundle format) | JSON Schema Draft 7 | Same audience as config. |
 | Cross-component control payloads (desired_state, worker_status, health_event, deploy_transaction) | JSON Schema Draft 7 | Crosses Rust/C++ language boundaries; JSON keeps the schema human-readable; the volume is low (status / event ticks, not request hot-path). |
 | HTTP `/infer` payload | JSON Schema Draft 7 (header) + raw bytes | The header documented in `infer_request.json` / `infer_result.json` rides as JSON; tensor payloads ride as raw bytes per `BufferRef` / `TensorView` metadata. v0.1.0 does not negotiate an alternative encoding; V01-E07 lands the HTTP server. |
 | Python/PyTorch sidecar IPC | JSON header + raw tensor bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: `[4-byte big-endian header_length][JSON header][raw tensor payload bytes]`. JSON-encoding tensors was an explicit non-goal (V01-E05). |

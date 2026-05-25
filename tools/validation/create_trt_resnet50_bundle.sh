@@ -145,8 +145,8 @@ for c in range(3):
 payload = struct.pack(f"<{len(values)}f", *values)
 request = {
     "schema_version": "0.1",
-    "request_id": "e15-trt-resnet50-1",
-    "endpoint": "e15-trt-resnet50",
+    "request_id": "validation-trt-resnet50-1",
+    "endpoint": "validation-trt-resnet50",
     "inputs": [
         {
             "name": "gpu_0/data_0",

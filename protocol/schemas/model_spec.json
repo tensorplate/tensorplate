@@ -25,7 +25,7 @@
     "model_class": {
       "type": "string",
       "enum": ["vision", "speech", "language", "vla", "embedding", "custom"],
-      "description": "Model-class taxonomy. v0.1.0 validates only `vision` and `vla`; the remaining values are reserved for forward compatibility (V01-E13)."
+      "description": "Model-class taxonomy. v0.1.0 validates only `vision` and `vla`; the remaining values are reserved for forward compatibility (bundle format)."
     },
     "artifact_path": {
       "type": "string",

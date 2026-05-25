@@ -6,7 +6,7 @@
 // rendering (CLI doctor/status/logs) and metric aggregation. The mapping
 // from reason to error code is exhaustive so consumers can render the
 // reason and still surface the original code for grep-style assertions
-// in V01-E15 hardware validation runs.
+// in release validation runs.
 
 use serde::{Deserialize, Serialize};
 
@@ -194,7 +194,7 @@ impl FailureReason {
     /// Canonical mapping to the existing `ErrorCode` taxonomy.
     ///
     /// CLI consumers render the reason and still surface the code for
-    /// V01-E15 grep assertions.
+    /// release validation grep assertions.
     #[must_use]
     pub fn error_code(self) -> ErrorCode {
         match self {

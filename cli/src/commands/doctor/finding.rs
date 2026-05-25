@@ -2,7 +2,7 @@
 //
 // V01-E11-F03-T01: stable doctor finding taxonomy.
 //
-// Finding IDs are part of the v0.1.0 CLI contract — the V01-E15
+// Finding IDs are part of the v0.1.0 CLI contract — the release validation
 // validation harness scripts assert on these strings. New checks may
 // be added; existing IDs must not be repurposed, renamed, or have
 // their severity semantics changed.
@@ -26,18 +26,18 @@ pub enum FindingId {
     HostFacts,
     HostOs,
     PythonPytorchBackend,
-    /// V01-E14-F06: PyTorch runtime probe status, reported separately
+    /// packaging: PyTorch runtime probe status, reported separately
     /// from the backend descriptor so operators can distinguish a
     /// missing backend package from a present package whose Python
     /// environment lacks PyTorch.
     PythonPytorchRuntime,
     TensorrtRuntime,
     LibtorchRuntime,
-    /// V01-E14-F06: CUDA runtime presence on the device.
+    /// packaging: CUDA runtime presence on the device.
     CudaRuntime,
     Ros2HealthStub,
     ObservabilitySnapshot,
-    /// V01-E14-F06 install probes:
+    /// packaging install probes:
     CorePackages,
     PathLayout,
     ConfigFiles,
@@ -94,7 +94,7 @@ impl FindingId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingStatus {
-    /// Check succeeded. Serialized as `"ok"` for V01-E15 validation scripts
+    /// Check succeeded. Serialized as `"ok"` for release validation scripts
     /// that grep on a single literal token.
     #[serde(rename = "ok")]
     Pass,

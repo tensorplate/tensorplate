@@ -1,6 +1,6 @@
 # TensorPlate v0.1.0 filesystem layout
 
-This document is the on-device contract owned by V01-E14-F02. The
+This document is the on-device contract owned by packaging. The
 single source of truth for the paths and modes is
 [`protocol/rust/src/install_paths.rs`](../../protocol/rust/src/install_paths.rs);
 the shell sourcing helper at

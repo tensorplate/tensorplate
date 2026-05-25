@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F04: parse the shipped packaging config under
+// packaging: parse the shipped packaging config under
 // `packaging/conf/cli.json`. Confirms the default profile uses the
 // agent's Unix domain socket and that the CLI binary picks up the
 // shipped config without any env override.

@@ -235,7 +235,7 @@ Two workflows live under `.github/workflows/`:
 | T4 hardware-in-loop | No | release branch only, requires Jetson |
 | T5 benchmark regression | No | release branch only |
 
-T3, T4, and T5 workflows are added in later epics (V01-E05, V01-E15) and
+T3, T4, and T5 workflows are added in later epics (V01-E05, release validation) and
 will not block ordinary PRs. Branch protection should require the five
 PR-gated jobs above.
 

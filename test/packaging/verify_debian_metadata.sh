@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # SPDX-License-Identifier: Apache-2.0
 #
-# V01-E14-F08: debhelper metadata linter.
+# packaging: debhelper metadata linter.
 
 set -eu
 

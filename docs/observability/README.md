@@ -66,4 +66,4 @@ implementation lives in `tensorplate-observability` (Rust) and the C++
 emitters serialise into the same schemas before sending events across
 the IPC boundary. The `runtime/src/telemetry/` C++ tree is reserved for
 the C++ producer hooks that bind to these wire formats; they will be
-filled in alongside the V01-E13 model-bundle baseline.
+filled in alongside the bundle format model-bundle baseline.

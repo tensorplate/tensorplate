@@ -74,7 +74,7 @@
         "inference_failed",
         "internal"
       ],
-      "description": "Mapping to the existing `protocol/schemas/error.json` taxonomy. Each reason maps to exactly one code; CLI consumers can render the reason and still surface the code for V01-E15 grep assertions."
+      "description": "Mapping to the existing `protocol/schemas/error.json` taxonomy. Each reason maps to exactly one code; CLI consumers can render the reason and still surface the code for release validation grep assertions."
     },
     "detail": {
       "type": "string",

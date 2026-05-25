@@ -1,7 +1,7 @@
 # TensorPlate v0.1.0 clean-install runbook (Jetson Orin Nano 8GB Super)
 
-V01-E14-F08 deliverable. This is the procedure V01-E15 runs on the
-target hardware to validate the v0.1.0 architecture loop end-to-end.
+This is the release validation procedure for target hardware. It
+validates the v0.1.0 architecture loop end-to-end.
 
 ## 0. Prerequisites
 
@@ -13,8 +13,8 @@ target hardware to validate the v0.1.0 architecture loop end-to-end.
 | Operator account with sudo | yes |
 | `/var/lib/tensorplate` not present (clean install) | recommended |
 
-The target ships pre-flashed in V01-E15. Operators on other hardware
-follow the same steps; doctor probes will surface hardware
+The validation target is expected to be pre-flashed. Operators on other
+hardware follow the same steps; doctor probes will surface hardware
 mismatches.
 
 ## 1. Install the core packages
@@ -29,7 +29,7 @@ sudo apt install \
   tensorplate-cli
 ```
 
-What this does (the F01-F07 contract):
+What this does:
 
 - Creates the `tensorplate` system user and group
   (`tensorplate-common.postinst`).
@@ -41,7 +41,7 @@ What this does (the F01-F07 contract):
   `tensorplate-observability` but does **not** start them.
 - Installs the serving worker binary at
   `/usr/lib/tensorplate/tensorplate-serving`. No serving systemd
-  unit is registered (V01-E09); the agent launches it in process-backed
+  unit is registered; the agent launches it in process-backed
   worker mode during deploy.
 
 ## 2. Run `tensorplate doctor`
@@ -80,18 +80,18 @@ sudo systemctl enable --now tensorplate-observability
 ```
 
 Either order works — observability declares no dependency on the
-agent (V01-E10 / F03).
+agent.
 
 Re-run `tensorplate doctor`; `agent_reachable` should now be `ok`,
 `agent_state` should be `ready`, and both `*_service_state` findings
 should be `ok`.
 
-## 4. Deploy a vision bundle (V01-E15 happy path)
+## 4. Deploy a vision bundle
 
 ```bash
 # Build or copy a real TensorRT engine bundle for this Jetson. The
-# checked-in v01_e13 vision fixture is parser-only and must not be used
-# as E15 functional evidence.
+# checked-in v0_1 vision fixture is parser-only and must not be used
+# as release validation evidence.
 ./tools/validation/create_trt_identity_bundle.sh /tmp/tp-trt-identity
 
 tensorplate deploy /tmp/tp-trt-identity
@@ -115,7 +115,7 @@ runtime finding turns green so deploy checks refresh the startup probe:
 sudo systemctl restart tensorplate-agent
 ```
 
-## 6. Collect logs for the E15 handoff
+## 6. Collect logs for the validation handoff
 
 ```bash
 journalctl -u tensorplate-agent --no-pager > /tmp/agent.log
@@ -123,12 +123,12 @@ journalctl -u tensorplate-observability --no-pager > /tmp/observability.log
 tensorplate doctor --output json > /tmp/doctor.json
 tensorplate status --output json > /tmp/status.json
 
-tar czf /tmp/tensorplate-e15-handoff.tar.gz \
+tar czf /tmp/tensorplate-packaging-validation-handoff.tar.gz \
   /tmp/agent.log /tmp/observability.log \
   /tmp/doctor.json /tmp/status.json
 ```
 
-Attach the archive to the E15 validation report.
+Attach the archive to the release validation report.
 
 ## Troubleshooting
 

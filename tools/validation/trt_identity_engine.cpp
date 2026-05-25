@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Build a tiny TensorRT identity engine for E15 hardware validation.
+// Build a tiny TensorRT identity engine for release validation.
 // The network has one FP32 input named "image" with shape [1, 3, 4, 4]
 // and one FP32 output named "features" with the same shape.
 

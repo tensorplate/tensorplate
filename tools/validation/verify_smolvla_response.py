@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Verify the E15 real SmolVLA response payload."""
+"""Verify the release validation real SmolVLA response payload."""
 
 from __future__ import annotations
 

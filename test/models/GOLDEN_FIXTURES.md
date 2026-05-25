@@ -25,7 +25,7 @@ into:
 | `tensorrt`     | Vision detector engine  | T4 / Orin | V01-E05-F02-T03 |
 | `libtorch`     | Exported TorchScript    | T3 / host | V01-E05-F03-T03 |
 | `python_pytorch` (fixture) | Echo backend       | T2 / host | **landed**, runs every PR |
-| `python_pytorch` (SmolVLA) | Named multi-input  | T4 / Orin | V01-E05-F05 + V01-E15 |
+| `python_pytorch` (SmolVLA) | Named multi-input  | T4 / Orin | V01-E05-F05 + release validation |
 
 ## TensorRT vision golden fixture
 
@@ -99,8 +99,8 @@ The `FixtureBackend` is sufficient to exercise:
   `fail_infer` hooks (covered in
   `tests/test_failure_injection.py`).
 
-**SmolVLA bundle fixture (V01-E15).** The end-to-end SmolVLA
-validation on Jetson Orin Nano 8GB Super lives in V01-E15. The
+**SmolVLA bundle fixture (release validation).** The end-to-end SmolVLA
+validation on Jetson Orin Nano 8GB Super lives in release validation. The
 fixture's required shape is captured by the v0.1.0 bundle manifest:
 named inputs such as `image_front`, `image_wrist`, `state`, and
 `instruction`, plus a named chunk-shaped action output. The full

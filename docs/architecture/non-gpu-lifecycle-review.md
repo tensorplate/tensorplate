@@ -25,7 +25,7 @@ are the mechanical proofs that follow from this review.
 | Concern | Mapping in v0.1.0 public contract | Result |
 | --- | --- | --- |
 | `.xmodel` artifact discovery | `ModelSpec::artifact_path` is a free-form string; backend_hint string is free-form (e.g. `"vitis_ai"`). No CUDA / TensorRT assumption in the type. | OK |
-| Bundle precision metadata | `ModelSpec::precision_hint` includes `Int8` and `Int4`; Vitis AI INT8 calibration metadata fits the existing precision schema (extended through the V01-E13 bundle schema, not the runtime). | OK |
+| Bundle precision metadata | `ModelSpec::precision_hint` includes `Int8` and `Int4`; Vitis AI INT8 calibration metadata fits the existing precision schema (extended through the bundle format bundle schema, not the runtime). | OK |
 | DPU runner instantiation | `do_prime` runs after `do_load`; the adapter performs runner instantiation, bitstream load, and fixed-shape binding inside `do_prime`. The NVI wrapper does not assume `prime` is a no-op. | OK |
 | Fixed-shape execution | `TensorView::shape()` is fully specified; adapters with fixed-shape requirements reject mismatched shapes via `Error::Code::ShapeMismatch` and the NVI wrapper rejects mismatched tensor windows before adapter dispatch. | OK |
 | Op-coverage / fallback | Capability publication lives at the adapter boundary (V01-E05). The V01-E04 contract does not assume any op-coverage policy. | OK |
@@ -60,7 +60,7 @@ fail the T1 build.
 
 Yes — V01-E02 `ModelSpec` carries `artifact_path` + `backend_hint`
 strings and an enum `precision_hint`. Vitis AI INT8 calibration
-metadata is bundle-format payload, not a runtime concern; the V01-E13
+metadata is bundle-format payload, not a runtime concern; the bundle format
 bundle schema reserves space for it without revising `ModelSpec`.
 
 > Does the `load` / `prime` / `infer` / `infer_async` / `unload`

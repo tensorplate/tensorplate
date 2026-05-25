@@ -1,6 +1,6 @@
 # Bundle Compatibility and Agent Deploy Integration
 
-**Status:** v0.1.0 (V01-E13-F06)
+**Status:** v0.1.0 (bundle format)
 **Code:** [`protocol/rust/src/bundle.rs`](../../protocol/rust/src/bundle.rs) (shared evaluator), [`agent/src/bundle.rs`](../../agent/src/bundle.rs) (agent integration).
 **Deploy transaction:** [`docs/architecture/agent.md`](../architecture/agent.md), [`docs/architecture/worker-supervision.md`](../architecture/worker-supervision.md).
 
@@ -10,7 +10,7 @@ A bundle is **compatible** when its declared runtime range, hardware
 profile, backend hint, capability requirements, precision profile, and
 memory estimate are satisfied by the local device.
 
-V01-E13-F06 collapses the two-phase verifier into a single shared path
+bundle format collapses the two-phase verifier into a single shared path
 inside `tensorplate_protocol::bundle`. The agent's `bundle::verify()`
 function is now a thin wrapper around `parse_bundle()` +
 `evaluate_compatibility()`; the migration removed the duplicate

@@ -135,7 +135,7 @@ Use the release-published sample bundle or another documented external
 bundle source. Do not use `test/models/` from a development checkout.
 
 ```bash
-tensorplate deploy ./tensorplate-trt-identity-bundle --deployment-id e16-clean-room
+tensorplate deploy ./tensorplate-trt-identity-bundle --deployment-id release-clean-room
 tensorplate infer \
   --input ./tensorplate-trt-identity-bundle/sample_infer.json \
   --output-file "/tmp/tensorplate-${TP_TAG}-infer-response.json" \

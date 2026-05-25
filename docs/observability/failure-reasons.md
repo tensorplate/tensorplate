@@ -61,7 +61,7 @@ metrics.
 ## Consumer contract
 
 - The CLI renders the reason and category directly; it surfaces the
-  error code only when V01-E15 grep assertions require it.
+  error code only when release validation grep assertions require it.
 - The status snapshot carries the most recent failure as
   `last_failure_reason` (see [snapshot](../../protocol/schemas/observability_status.json)).
 - Metrics aggregation counts failure categories — never reasons — to

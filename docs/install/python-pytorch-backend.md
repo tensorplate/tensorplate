@@ -1,7 +1,7 @@
 # Installing the Python/PyTorch backend
 
 The Python/PyTorch sidecar backend is required for SmolVLA validation
-(V01-E15) and for any bundle whose `manifest.json` declares
+(release validation) and for any bundle whose `manifest.json` declares
 `backend_hint: python_pytorch`. It is **not** part of the core
 TensorPlate install:
 
@@ -61,7 +61,7 @@ sudo /usr/bin/python3 -m pip install <jetson torch wheel URL>
 sudo /usr/bin/python3 -m pip install torch>=2.1
 ```
 
-For the JetPack 6.2 / CUDA 12.6 E15 validation target, the tested wheel
+For the JetPack 6.2 / CUDA 12.6 release validation target, the tested wheel
 source was the Jetson AI Lab JP6 CUDA 12.6 index:
 
 ```bash
@@ -92,7 +92,7 @@ deploy notes; the next package upgrade will overwrite it.
 tensorplate doctor
 ```
 
-The relevant findings are stable strings (the V01-E15 harness asserts
+The relevant findings are stable strings (the release validation harness asserts
 on them):
 
 | Finding ID | Status meanings |
@@ -137,7 +137,7 @@ so they are applied at process start.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TP_PYTHON_PYTORCH_EXECUTABLE` | `/usr/bin/python3` (from descriptor) | Interpreter the sidecar is launched with. Override when running from a virtualenv (e.g. the E15 validation venv). Falls back to `TP_TEST_PYTHON_EXE` then `TP_TEST_PYTHON` for the C++ test fixtures. |
+| `TP_PYTHON_PYTORCH_EXECUTABLE` | `/usr/bin/python3` (from descriptor) | Interpreter the sidecar is launched with. Override when running from a virtualenv (e.g. the release validation venv). Falls back to `TP_TEST_PYTHON_EXE` then `TP_TEST_PYTHON` for the C++ test fixtures. |
 | `TP_PYTHON_PYTORCH_DEFAULT_BACKEND` | `fixture` | Selects the in-process backend factory. Set to `smolvla` to enable the LeRobot SmolVLA path. |
 | `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS` | `15000` | Deadline for sidecar `start`/`load`/`prime`/`unload` exchanges. Increase on cold-cache or HuggingFace-download-heavy startups (90000 has been tested for Orin SmolVLA). |
 | `TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS` | `30000` | Per-request inference deadline (clamped by the caller's deadline). |

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # SPDX-License-Identifier: Apache-2.0
 #
-# V01-E14-F08: lifecycle script verifier.
+# packaging: lifecycle script verifier.
 #
 # Exercises version-utils.sh and a subset of upgrade-preflight.sh
 # logic. Does not require root or dpkg.

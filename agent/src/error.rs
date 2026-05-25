@@ -42,8 +42,8 @@ pub enum AgentError {
     #[error("bundle declares unavailable backend `{0}`")]
     UnsupportedBackend(String),
 
-    /// V01-E14-F05: the backend exists in `available_backends` but the
-    /// V01-E14 prober reported a typed reason it cannot run on this
+    /// packaging: the backend exists in `available_backends` but the
+    /// packaging prober reported a typed reason it cannot run on this
     /// device. Carries the backend name plus a short reason for log
     /// output; the CLI doctor surfaces the full structured detail.
     #[error("backend `{backend}` is unrunnable on this device: {reason}")]

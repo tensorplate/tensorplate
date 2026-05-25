@@ -1,29 +1,29 @@
-# V01-E13 bundle fixtures
+# bundle fixtures
 
-These fixtures exist for V01-E13 parser, verifier, and compatibility
-conformance tests, plus the V01-E15 end-to-end validation gate. They are
+These fixtures exist for parser, verifier, and compatibility
+conformance tests, plus the end-to-end validation gate. They are
 intentionally **small** so they can ship in the repo and run on host CI
 without external download steps. The on-device validation path uses real
 artifacts authored outside the repo.
 
 ## Valid fixtures
 
-| Path                                 | Class      | Backend          | Notes                                                                 |
+| Path | Class | Backend | Notes |
 | ------------------------------------ | ---------- | ---------------- | --------------------------------------------------------------------- |
-| `vision_tensorrt/`                   | `vision`   | `tensorrt`       | Jetson Orin FP16 vision detector; n=1 named input.                    |
-| `smolvla_python_pytorch/`            | `vla`      | `python_pytorch` | SmolVLA-style multi-input + named action chunk output + `vla` block.  |
-| `language_reserved/`                 | `language` | `libtorch`       | Reserved language block (tokenizer + empty generation_config). Parses cleanly; v0.1.0 never executes generation. |
-| `vitis_synthetic/`                   | `vision`   | `vitis_ai`       | `.xmodel` placeholder + Vitis INT8 calibration metadata. Parser-only. |
+| `vision_tensorrt/` | `vision` | `tensorrt` | Jetson Orin FP16 vision detector; n=1 named input. |
+| `smolvla_python_pytorch/` | `vla` | `python_pytorch` | SmolVLA-style multi-input + named action chunk output + `vla` block. |
+| `language_reserved/` | `language` | `libtorch` | Reserved language block (tokenizer + empty generation_config). Parses cleanly; v0.1.0 never executes generation. |
+| `vitis_synthetic/` | `vision` | `vitis_ai` | `.xmodel` placeholder + Vitis INT8 calibration metadata. Parser-only. |
 
 ## Invalid fixtures
 
-| Path                                       | Failure category                |
+| Path | Failure category |
 | ------------------------------------------ | ------------------------------- |
-| `invalid_corrupt_artifact/`                | `ArtifactDigestMismatch`        |
-| `invalid_unsafe_path/`                     | `UnsafeArtifactPath`            |
-| `invalid_missing_artifact/`                | `ArtifactMissing`               |
-| `invalid_duplicate_io/`                    | `DuplicateInputName`            |
-| `invalid_language_block_class/`            | `MismatchedModelClassBlock`     |
+| `invalid_corrupt_artifact/` | `ArtifactDigestMismatch` |
+| `invalid_unsafe_path/` | `UnsafeArtifactPath` |
+| `invalid_missing_artifact/` | `ArtifactMissing` |
+| `invalid_duplicate_io/` | `DuplicateInputName` |
+| `invalid_language_block_class/` | `MismatchedModelClassBlock` |
 
 ## Regenerating digests
 
@@ -31,7 +31,7 @@ When a fixture artifact body changes, regenerate the digests by running
 the helper tool against the bundle root:
 
 ```bash
-cargo run -p tensorplate-bundle-tool -- test/models/bundles/v01_e13/vision_tensorrt
+cargo run -p tensorplate-bundle-tool -- test/models/bundles/v0_1/vision_tensorrt
 ```
 
 The tool prints the canonical `manifest_digest` and the `sha256:` digest

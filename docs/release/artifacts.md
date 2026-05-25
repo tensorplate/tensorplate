@@ -95,7 +95,7 @@ The manifest is JSON with this stable shape:
     "architecture": "arm64"
   },
   "validation": {
-    "gate_report": "docs/validation/e15-orin-validation.md",
+    "gate_report": "docs/validation/orin-release-validation.md",
     "clean_room_report": "dist/release/vX.Y.Z/clean-room.md"
   },
   "artifacts": [

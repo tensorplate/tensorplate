@@ -1,6 +1,6 @@
 # Bundle Integrity
 
-**Status:** v0.1.0 (V01-E13-F02)
+**Status:** v0.1.0 (bundle format)
 **Code:** [`protocol/rust/src/bundle.rs`](../../protocol/rust/src/bundle.rs)
 
 The parser verifies integrity in three layers:

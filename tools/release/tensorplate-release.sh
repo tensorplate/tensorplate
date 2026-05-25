@@ -46,8 +46,8 @@ Common options:
   --manifest FILE           Artifact manifest JSON path.
   --checksums FILE          SHA256SUMS path.
   --signoff FILE            Final release sign-off record.
-  --e15-report FILE         E15 validation report path.
-  --e16-report FILE         E16 clean-room validation report path.
+  --validation-report FILE  Release validation report path.
+  --clean-room-report FILE  Clean-room validation report path.
   --release-notes FILE      Release notes used for GitHub Release creation.
   --report FILE             Preflight report output path.
   --skip-ci                 Record CI as blocked instead of querying GitHub.
@@ -108,8 +108,8 @@ default_paths() {
   MANIFEST="${MANIFEST:-dist/release/v${VERSION}/tensorplate-v${VERSION}-artifacts.json}"
   CHECKSUMS="${CHECKSUMS:-dist/release/v${VERSION}/SHA256SUMS}"
   SIGNOFF="${SIGNOFF:-dist/release/v${VERSION}/signoff.md}"
-  E15_REPORT="${E15_REPORT:-docs/validation/e15-orin-validation.md}"
-  E16_REPORT="${E16_REPORT:-docs/validation/clean-room-release-smoke.md}"
+  VALIDATION_REPORT="${VALIDATION_REPORT:-docs/validation/orin-release-validation.md}"
+  CLEAN_ROOM_REPORT="${CLEAN_ROOM_REPORT:-docs/validation/clean-room-release-smoke.md}"
   RELEASE_NOTES="${RELEASE_NOTES:-docs/release/notes/v${VERSION}.md}"
   REPORT="${REPORT:-/tmp/tensorplate-v${VERSION}-preflight.md}"
 }
@@ -149,8 +149,8 @@ parse_common_args() {
   MANIFEST=""
   CHECKSUMS=""
   SIGNOFF=""
-  E15_REPORT=""
-  E16_REPORT=""
+  VALIDATION_REPORT=""
+  CLEAN_ROOM_REPORT=""
   RELEASE_NOTES=""
   REPORT=""
   SKIP_CI=0
@@ -172,8 +172,8 @@ parse_common_args() {
       --manifest) MANIFEST="${2:-}"; shift 2 ;;
       --checksums) CHECKSUMS="${2:-}"; shift 2 ;;
       --signoff) SIGNOFF="${2:-}"; shift 2 ;;
-      --e15-report) E15_REPORT="${2:-}"; shift 2 ;;
-      --e16-report) E16_REPORT="${2:-}"; shift 2 ;;
+      --validation-report) VALIDATION_REPORT="${2:-}"; shift 2 ;;
+      --clean-room-report) CLEAN_ROOM_REPORT="${2:-}"; shift 2 ;;
       --release-notes) RELEASE_NOTES="${2:-}"; shift 2 ;;
       --report) REPORT="${2:-}"; shift 2 ;;
       --skip-ci) SKIP_CI=1; shift ;;
@@ -419,9 +419,9 @@ check_signoff() {
     pass "release decision is pass or conditional-pass" ||
     fail "$SIGNOFF must contain 'Release decision: pass' or 'Release decision: conditional-pass'"
 
-  grep -Eiq '^E15 gate:[[:space:]]*(pass|conditional-pass)$' "$SIGNOFF" &&
-    pass "E15 gate sign-off is recorded" ||
-    fail "$SIGNOFF must contain 'E15 gate: pass' or 'E15 gate: conditional-pass'"
+  grep -Eiq '^Validation gate:[[:space:]]*(pass|conditional-pass)$' "$SIGNOFF" &&
+    pass "validation gate sign-off is recorded" ||
+    fail "$SIGNOFF must contain 'Validation gate: pass' or 'Validation gate: conditional-pass'"
 
   for field in \
     'Release owner' \
@@ -445,14 +445,14 @@ check_signoff() {
 }
 
 check_evidence() {
-  check_file_exists "$E15_REPORT" "E15 validation report"
-  check_file_exists "$E16_REPORT" "E16 clean-room validation procedure or report"
-  [[ -f "$E15_REPORT" ]] && grep -q 'Observed E15 evidence' "$E15_REPORT" &&
-    pass "E15 report includes observed evidence" ||
-    fail "$E15_REPORT must include observed E15 evidence"
-  [[ -f "$E16_REPORT" ]] && grep -Eiq 'Release decision:[[:space:]]*(pass|conditional-pass)' "$E16_REPORT" &&
-    pass "E16 clean-room report records release decision" ||
-    warn "$E16_REPORT is a procedure or incomplete report; final public publication still requires clean-room decision evidence"
+  check_file_exists "$VALIDATION_REPORT" "release validation report"
+  check_file_exists "$CLEAN_ROOM_REPORT" "clean-room validation procedure or report"
+  [[ -f "$VALIDATION_REPORT" ]] && grep -q 'Observed validation evidence' "$VALIDATION_REPORT" &&
+    pass "release validation report includes observed evidence" ||
+    fail "$VALIDATION_REPORT must include observed validation evidence"
+  [[ -f "$CLEAN_ROOM_REPORT" ]] && grep -Eiq 'Release decision:[[:space:]]*(pass|conditional-pass)' "$CLEAN_ROOM_REPORT" &&
+    pass "clean-room report records release decision" ||
+    warn "$CLEAN_ROOM_REPORT is a procedure or incomplete report; final public publication still requires clean-room decision evidence"
 }
 
 check_artifacts() {
@@ -664,7 +664,7 @@ cmd_prepare() {
 }
 
 manifest_python() {
-  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$(current_branch)" "$E15_REPORT" "$E16_REPORT" <<'PY'
+  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$(current_branch)" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" <<'PY'
 import datetime
 import hashlib
 import json
@@ -672,7 +672,7 @@ import re
 import sys
 from pathlib import Path
 
-version, tag, artifacts_dir, manifest_path, checksums_path, target_os, target_arch, commit, branch, e15, e16 = sys.argv[1:]
+version, tag, artifacts_dir, manifest_path, checksums_path, target_os, target_arch, commit, branch, validation_report, clean_room_report = sys.argv[1:]
 root = Path(artifacts_dir)
 required = [
     "tensorplate-common",
@@ -740,8 +740,8 @@ manifest = {
         "architecture": target_arch,
     },
     "validation": {
-        "e15_report": e15,
-        "e16_clean_room_report": e16,
+        "gate_report": validation_report,
+        "clean_room_report": clean_room_report,
     },
     "artifacts": artifacts,
 }

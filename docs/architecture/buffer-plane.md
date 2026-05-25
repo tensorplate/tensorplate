@@ -89,7 +89,7 @@ logs.
 ## What is **not** in scope for v0.1.0
 
 - No GPU/CUDA memory pools. The Vitis AI / DPU adapter design review in
-  V01-E15 confirms that DPU-compatible memory can be served through an
+  release validation confirms that DPU-compatible memory can be served through an
   adapter-owned copy without changing `BufferRef` semantics.
 - No NVMM / DMA-BUF / CUDA IPC zero-copy.
 - No fragmentation tuning. Each allocation is a fresh aligned heap block.
