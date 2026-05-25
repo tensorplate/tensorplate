@@ -66,7 +66,7 @@ For development:
 3. Keep public behavior, interface, config schema, feature flag, and error-code changes reflected in [CHANGELOG.md](CHANGELOG.md).
 
 For the v0.1.0 external install path, start with
-[docs/install/v0.1.0-external-install.md](docs/install/v0.1.0-external-install.md)
+[docs/install/external-install.md](docs/install/external-install.md)
 after the `v0.1.0` GitHub Release is published. The release process and
 tag policy live under [docs/release/](docs/release/).
 
@@ -89,7 +89,7 @@ For bugs, issues can be merged directly into 'develop' or 'feature' branch.
 
 Release branches use `release/vX.Y.Z` and final public release tags use
 annotated `vX.Y.Z` tags. Retagging a published final release is forbidden;
-see [docs/release/v0.1.0-version-tag-policy.md](docs/release/v0.1.0-version-tag-policy.md).
+see [docs/release/version-tag-policy.md](docs/release/version-tag-policy.md).
 
 ## Security
 

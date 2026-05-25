@@ -4,8 +4,8 @@
 # GitOps-oriented release driver for TensorPlate.
 #
 # The implementation PR adds this tooling, but it must not publish the
-# release. Final v0.1.0 publication happens later from release/v0.1.0 after
-# this script's preflight, artifact, sign-off, and tag checks pass.
+# release. Final publication happens later from release/vX.Y.Z after this
+# script's preflight, artifact, sign-off, and tag checks pass.
 
 set -Eeuo pipefail
 
@@ -109,8 +109,8 @@ default_paths() {
   CHECKSUMS="${CHECKSUMS:-dist/release/v${VERSION}/SHA256SUMS}"
   SIGNOFF="${SIGNOFF:-dist/release/v${VERSION}/signoff.md}"
   E15_REPORT="${E15_REPORT:-docs/validation/e15-orin-validation.md}"
-  E16_REPORT="${E16_REPORT:-docs/validation/v${VERSION}-clean-room-release-smoke.md}"
-  RELEASE_NOTES="${RELEASE_NOTES:-docs/release/v${VERSION}-release-notes.md}"
+  E16_REPORT="${E16_REPORT:-docs/validation/clean-room-release-smoke.md}"
+  RELEASE_NOTES="${RELEASE_NOTES:-docs/release/notes/v${VERSION}.md}"
   REPORT="${REPORT:-/tmp/tensorplate-v${VERSION}-preflight.md}"
 }
 

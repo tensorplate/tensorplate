@@ -60,4 +60,4 @@ Security fixes should avoid public exploit detail until a fix or
 mitigation is available. Public disclosure notes should include affected
 versions, impact, mitigation, upgrade or rollback guidance, and the fixed
 release tag. Patch releases follow the hotfix process in
-[`docs/release/v0.1.0-post-release.md`](docs/release/v0.1.0-post-release.md).
+[`docs/release/post-release.md`](docs/release/post-release.md).

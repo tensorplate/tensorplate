@@ -1,57 +1,57 @@
-# TensorPlate v0.1.0 release evidence and handoff template
+# TensorPlate release evidence and handoff template
 
-Copy this template into `dist/release/v0.1.0/evidence.md` during the
-post-merge release operation. The evidence archive must be complete before
+Copy this template into `dist/release/vX.Y.Z/evidence.md` during the
+release operation. The evidence archive must be complete before
 announcement.
 
-## Release identity
+## Release Identity
 
 ```text
-Release: v0.1.0
-Release branch: release/v0.1.0
+Release: vX.Y.Z
+Release branch: release/vX.Y.Z
 Release commit: TODO
-Final tag: v0.1.0
+Final tag: vX.Y.Z
 Tag object: TODO
 GitHub Release URL: TODO
 Release decision: TODO
 ```
 
-## Required evidence
+## Required Evidence
 
 | Evidence | Path or URL | Owner | Status |
 | --- | --- | --- | --- |
-| Release preflight report | `dist/release/v0.1.0/preflight.md` | Release owner | TODO |
+| Release preflight report | `dist/release/vX.Y.Z/preflight.md` | Release owner | TODO |
 | CI checks for release commit | TODO | Release owner | TODO |
-| E15 validation report | `docs/validation/e15-orin-validation.md` | Validation reviewer | TODO |
-| E16 clean-room validation | `dist/release/v0.1.0/clean-room.md` | Validation reviewer | TODO |
-| Release sign-off | `dist/release/v0.1.0/signoff.md` | Release owner | TODO |
-| Artifact manifest | `dist/release/v0.1.0/tensorplate-v0.1.0-artifacts.json` | Packaging reviewer | TODO |
-| SHA256SUMS | `dist/release/v0.1.0/SHA256SUMS` | Packaging reviewer | TODO |
-| Git tag metadata | `git show v0.1.0` transcript | Release owner | TODO |
+| Release validation report | TODO | Validation reviewer | TODO |
+| Clean-room validation | `dist/release/vX.Y.Z/clean-room.md` | Validation reviewer | TODO |
+| Release sign-off | `dist/release/vX.Y.Z/signoff.md` | Release owner | TODO |
+| Artifact manifest | `dist/release/vX.Y.Z/tensorplate-vX.Y.Z-artifacts.json` | Packaging reviewer | TODO |
+| SHA256SUMS | `dist/release/vX.Y.Z/SHA256SUMS` | Packaging reviewer | TODO |
+| Git tag metadata | `git show vX.Y.Z` transcript | Release owner | TODO |
 | Release notes | GitHub Release body | Docs reviewer | TODO |
 | Security review | sign-off record | Security reviewer | TODO |
 
-## Published assets
+## Published Assets
 
 ```text
-tensorplate-common_0.1.0-1_arm64.deb
-tensorplate-agent_0.1.0-1_arm64.deb
-tensorplate-serving_0.1.0-1_arm64.deb
-tensorplate-observability_0.1.0-1_arm64.deb
-tensorplate-cli_0.1.0-1_arm64.deb
-tensorplate-backend-python-pytorch_0.1.0-1_arm64.deb
-tensorplate-v0.1.0-artifacts.json
+tensorplate-common_X.Y.Z-1_arm64.deb
+tensorplate-agent_X.Y.Z-1_arm64.deb
+tensorplate-serving_X.Y.Z-1_arm64.deb
+tensorplate-observability_X.Y.Z-1_arm64.deb
+tensorplate-cli_X.Y.Z-1_arm64.deb
+tensorplate-backend-python-pytorch_X.Y.Z-1_arm64.deb
+tensorplate-vX.Y.Z-artifacts.json
 SHA256SUMS
 ```
 
 If a sample bundle is attached, list it here with checksum and validation
 scope.
 
-## Clean-room summary
+## Clean-Room Summary
 
 ```text
 Device model: TODO
-JetPack / L4T: TODO
+OS / runtime floor: TODO
 Package source: GitHub Release assets
 Checksums verified: TODO
 Core packages installed: TODO
@@ -67,7 +67,7 @@ Uninstall/reinstall: TODO
 Decision: TODO
 ```
 
-## Redaction review
+## Redaction Review
 
 Confirm the archive does not include:
 
@@ -76,7 +76,7 @@ Confirm the archive does not include:
 - full unbounded journals.
 - unrelated user data.
 
-## Announcement checklist
+## Announcement Checklist
 
 - Release notes match `CHANGELOG.md`.
 - Release notes link install guide, quickstart, validation reports,
@@ -85,7 +85,7 @@ Confirm the archive does not include:
 - Known limitations are listed.
 - Conditional-pass risks have follow-up issues and owners.
 
-## Follow-up issues
+## Follow-Up Issues
 
 | Issue | Owner | Reason | Target |
 | --- | --- | --- | --- |

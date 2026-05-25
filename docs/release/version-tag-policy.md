@@ -1,37 +1,46 @@
-# TensorPlate v0.1.0 version and tag policy
+# TensorPlate version and tag policy
 
-This policy applies to the final public `v0.1.0` release and to any
-release candidates created on the `release/v0.1.0` branch.
+This policy applies to TensorPlate public release branches, release
+candidate tags, final tags, and hotfix tags.
 
-## Version surfaces
+Examples use:
+
+```bash
+export TP_VERSION=0.1.0
+export TP_TAG="v${TP_VERSION}"
+export TP_RELEASE_BRANCH="release/${TP_TAG}"
+```
+
+## Version Surfaces
 
 TensorPlate keeps the four version surfaces defined in
 [`docs/architecture/versioning.md`](../architecture/versioning.md):
 
-| Surface | v0.1.0 value | Files checked before final tag |
+| Surface | Example value | Files checked before final tag |
 | --- | --- | --- |
 | Runtime release version | `0.1.0` | `CMakeLists.txt`, `Cargo.toml`, `Cargo.lock`, `vcpkg.json`, `packaging/VERSION`, `packaging/debian/changelog` |
 | Protocol version | `0.1` | `CMakeLists.txt`, `protocol/rust/src/lib.rs`, protocol schemas |
 | Schema version | `0.1` | `config/schemas/*.json`, `protocol/schemas/*.json` |
 | Bundle format version | `0.1` | `CMakeLists.txt`, `protocol/rust/src/lib.rs`, bundle manifest docs and fixtures |
 
-For the final release, development suffixes must be removed:
+For a final release, development suffixes must be removed from release
+version surfaces:
 
 - `TP_RUNTIME_VERSION_SUFFIX` is empty.
-- Cargo workspace version is `0.1.0`.
-- `tensorplate-protocol` dependency version is `0.1.0`.
+- Cargo workspace version equals `${TP_VERSION}`.
+- `tensorplate-protocol` dependency version equals `${TP_VERSION}`.
 - TensorPlate workspace package entries in `Cargo.lock` have no `-dev`
   suffix.
-- `vcpkg.json` uses `"version-string": "0.1.0"`.
-- `packaging/VERSION` is `0.1.0`.
+- `vcpkg.json` uses `"version-string": "${TP_VERSION}"`.
+- `packaging/VERSION` equals `${TP_VERSION}`.
 - `packaging/debian/changelog` starts with
-  `tensorplate (0.1.0-1) unstable; urgency=medium`.
+  `tensorplate (${TP_VERSION}-1) unstable; urgency=medium`.
 
-The protocol, schema, and bundle format surfaces remain `0.1` unless a
-public contract changes after the E15 interface freeze. Any such change
-reopens validation and blocks release until the evidence is refreshed.
+Protocol, schema, and bundle format surfaces change only when their public
+contracts change. A runtime patch release does not automatically imply a
+protocol or bundle-format bump.
 
-## Changelog promotion
+## Changelog Promotion
 
 `CHANGELOG.md` is the source for release notes. The release owner promotes
 the current `[Unreleased]` entries into a dated section:
@@ -39,31 +48,31 @@ the current `[Unreleased]` entries into a dated section:
 ```markdown
 ## [Unreleased]
 
-## [0.1.0] - YYYY-MM-DD
+## [X.Y.Z] - YYYY-MM-DD
 ```
 
 The release script enforces the dated section before the final tag path.
-Release notes must not claim support beyond the E15 and E16 evidence.
+Release notes must not claim support beyond validation evidence.
 
 ## Branches
 
 | Branch | Purpose |
 | --- | --- |
-| `v01-E16` | Implementation PR branch for release tooling and docs only. |
-| `release/v0.1.0` | Clean post-merge release branch used to finalize metadata, build artifacts, tag, and publish. |
-| `hotfix/v0.1.1` | Patch-release branch if a supported v0.1.0 artifact needs a targeted fix. |
+| `release/vX.Y.Z` | Clean release branch used to finalize metadata, build artifacts, tag, and publish. |
+| `hotfix/vX.Y.Z` | Patch-release branch for a targeted fix after a public release. |
+| Feature/tooling branch | Implementation PR branch for release tooling and docs only. |
 
-The implementation PR branch may run `prepare --dry-run`, manifest
-fixture checks, and documentation review. It must not create `v0.1.0`,
-publish assets, or announce the release.
+The implementation PR branch may run `prepare --dry-run`, manifest fixture
+checks, and documentation review. It must not create release tags, publish
+assets, or announce the release.
 
 ## Tags
 
 | Tag type | Format | Rules |
 | --- | --- | --- |
-| Release candidate | `v0.1.0-rc.N` | Annotated tag from `release/v0.1.0`; supersede by incrementing `N`, never by rewriting. |
-| Final release | `v0.1.0` | Annotated tag from a clean release commit after final preflight passes. |
-| Patch release | `v0.1.1` | Annotated tag from a hotfix release branch after targeted validation. |
+| Release candidate | `vX.Y.Z-rc.N` | Annotated tag from `release/vX.Y.Z`; supersede by incrementing `N`, never by rewriting. |
+| Final release | `vX.Y.Z` | Annotated tag from a clean release commit after final preflight passes. |
+| Patch release | `vX.Y.Z` | Annotated tag from a hotfix release branch after targeted validation. |
 
 Final tags are immutable after publication. Maintainers must not
 force-push, delete, move, or recreate a published final tag. If an
@@ -74,7 +83,7 @@ Where maintainer key material is available, set `TP_RELEASE_SIGN_TAG=1`
 before running tag creation so the release script uses a signed annotated
 tag.
 
-## GitHub protection expectations
+## GitHub Protection Expectations
 
 Repository settings should protect:
 
@@ -87,16 +96,16 @@ The release script checks local and remote tag existence before tag
 creation, but repository protection is still required because local
 automation cannot prevent every server-side mutation.
 
-## Abort and supersede
+## Abort And Supersede
 
 Failed release candidates remain in history. Do not retag them.
 
 1. Record the blocker in the release evidence.
-2. Route the fix to the owning Epic, Task, or hotfix issue.
-3. Merge the fix into `release/v0.1.0` through review.
+2. Route the fix to the owning issue.
+3. Merge the fix into the release branch through review.
 4. Rebuild artifacts, regenerate manifest/checksums, rerun the required
-   validation slice, and create the next `v0.1.0-rc.N` tag.
+   validation slice, and create the next RC tag.
 
-If the final `v0.1.0` tag exists remotely, the release process switches to
+If the final tag exists remotely, the release process switches to
 post-release verification or hotfix mode. It must not create another final
 tag with the same name.

@@ -1,41 +1,48 @@
-# TensorPlate v0.1.0 post-release support and hotfix procedure
+# TensorPlate post-release support and hotfix procedure
 
-## Support posture
+This procedure is reusable across release lines. Each GitHub Release must
+state its supported artifacts, hardware floor, OS/runtime assumptions,
+known limitations, and security posture.
 
-TensorPlate v0.1.0 supports the published GitHub Release assets for the
-validated hardware floor:
+## Support Posture
 
-- Jetson Orin Nano 8GB Super.
+Support applies only to artifacts published under immutable final release
+tags and named in that release's artifact manifest.
+
+For the v0.1.x line, support currently applies to:
+
+- Jetson Orin Nano 8GB Super hardware floor.
 - JetPack 6.x with L4T 36.x.
-- `arm64` Debian packages attached to the `v0.1.0` GitHub Release.
+- `arm64` Debian packages attached to the final GitHub Release.
 - Core services: `tensorplate-agent`, `tensorplate-serving`,
   `tensorplate-observability`, and `tensorplate-cli`.
 - Optional package: `tensorplate-backend-python-pytorch`, with PyTorch
   installed separately by the operator.
 
-Best-effort support applies to Orin NX 16GB when the same JetPack and
-package set are used. Kria, Vitis AI execution, hosted fleet management,
-container-only install, public network endpoints, and an APT repository
-are not supported by v0.1.0.
+Best-effort support may apply to related Orin hardware when the same
+JetPack and package set are used. Kria, Vitis AI execution, hosted fleet
+management, container-only install, public network endpoints, and an APT
+repository are not supported by v0.1.x unless a later release explicitly
+says otherwise.
 
-## Hotfix policy
+## Hotfix Policy
 
 Use a hotfix only for a targeted defect in released artifacts. Do not use
 hotfix branches for unrelated feature work.
 
 | Item | Policy |
 | --- | --- |
-| Branch | `hotfix/v0.1.1` |
-| Tag | `v0.1.1` |
-| Changelog | Add a dated `0.1.1` section. |
-| Version metadata | Runtime/package patch version becomes `0.1.1`; protocol/schema/bundle versions move only if the fix changes those surfaces. |
-| Validation | Run required CI plus the smallest E15/E16 validation slice that proves the fix. |
+| Branch | `hotfix/vX.Y.Z` |
+| Tag | `vX.Y.Z` |
+| Changelog | Add a dated `X.Y.Z` section. |
+| Version metadata | Runtime/package patch version becomes `X.Y.Z`; protocol/schema/bundle versions move only if the fix changes those surfaces. |
+| Validation | Run required CI plus the smallest release validation slice that proves the fix. |
 | Artifacts | Rebuild packages from the hotfix commit, generate a new manifest and checksums, and publish under the new tag. |
 
-Hotfixes preserve the frozen v0.1.0 public contracts unless a security fix
-requires a documented exception.
+Hotfixes preserve frozen public contracts for the release line unless a
+security fix requires a documented exception.
 
-## Artifact deprecation and yanking
+## Artifact Deprecation And Yanking
 
 Never replace a published final-release asset under the same tag.
 
@@ -51,7 +58,7 @@ For severe defects:
 If an asset must be removed for legal or security reasons, record the
 reason in the release evidence and publish a replacement under a new tag.
 
-## User rollback guidance
+## User Rollback Guidance
 
 Rollback should preserve user state unless the operator explicitly purges
 packages. Follow the lifecycle policy in
@@ -81,7 +88,7 @@ tensorplate status
 Do not bypass package ownership by manually editing files under
 `/usr/lib/tensorplate` or `/usr/share/tensorplate`.
 
-## Security advisory procedure
+## Security Advisory Procedure
 
 Security-sensitive reports follow `SECURITY.md`.
 
@@ -92,7 +99,7 @@ Security-sensitive reports follow `SECURITY.md`.
 5. Publish an advisory with impact, affected versions, mitigation,
    upgrade or rollback guidance, and fixed tag.
 
-## Post-release monitoring checklist
+## Post-Release Monitoring Checklist
 
 - New install failures.
 - `tensorplate doctor` finding regressions.
@@ -101,5 +108,5 @@ Security-sensitive reports follow `SECURITY.md`.
 - Security reports.
 - Docs corrections.
 - Conditional-pass follow-up issues.
-- Requests for unsupported hardware or model classes that should feed
-  v0.2 planning, not v0.1.0 hotfix scope.
+- Requests for unsupported hardware or model classes that should feed the
+  next planned release line, not hotfix scope.

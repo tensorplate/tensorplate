@@ -1,9 +1,23 @@
-# TensorPlate v0.1.0 clean-room release smoke
+# TensorPlate Clean-Room Release Smoke
 
 This procedure validates the release as an external user. It starts from
 GitHub Release assets and a clean device state. Local source-tree binaries,
 local package build directories, and unpublished fixtures invalidate the
-evidence.
+evidence. Set `TP_VERSION` to the release being validated; the examples
+default to `0.1.0`.
+
+## Release Variables
+
+```bash
+export TP_VERSION=0.1.0
+export TP_TAG="v${TP_VERSION}"
+export TP_DEBIAN_VERSION="${TP_VERSION}-1"
+export TP_ARCH=arm64
+export TP_REPO=tensorplate/tensorplate
+export TP_RELEASE_URL="https://github.com/${TP_REPO}/releases/download/${TP_TAG}"
+export TP_MANIFEST="tensorplate-${TP_TAG}-artifacts.json"
+export TP_EVIDENCE_DIR="dist/release/${TP_TAG}"
+```
 
 ## Target
 
@@ -11,16 +25,16 @@ evidence.
 | --- | --- |
 | Hardware | Jetson Orin Nano 8GB Super |
 | OS | JetPack 6.x with L4T 36.x |
-| Packages | GitHub Release `.deb` assets for `v0.1.0` |
+| Packages | GitHub Release `.deb` assets for `TP_TAG` |
 | Optional backend | `tensorplate-backend-python-pytorch` when validating a `python_pytorch` bundle |
 
-## Evidence record
+## Evidence Record
 
-Create `dist/release/v0.1.0/clean-room.md` or attach an external archive
+Create `${TP_EVIDENCE_DIR}/clean-room.md` or attach an external archive
 with these fields:
 
 ```text
-Release: v0.1.0
+Release: vX.Y.Z
 Release decision: TODO
 GitHub Release URL: TODO
 Device model: TODO
@@ -49,7 +63,7 @@ Redactions applied: secrets, credentials, raw images, tensor payloads, unbounded
 Allowed final release decisions are `pass`, `conditional-pass`, or
 `block`. Publication requires `pass` or signed `conditional-pass`.
 
-## Clean state
+## Clean State
 
 Start from a device without TensorPlate packages installed:
 
@@ -63,59 +77,59 @@ Do not remove unrelated system packages, JetPack components, CUDA,
 TensorRT, or the operator's Python/PyTorch runtime unless the validation
 plan explicitly says so.
 
-## Download and verify release assets
+## Download And Verify Release Assets
 
 Follow
-[`docs/install/v0.1.0-external-install.md`](../install/v0.1.0-external-install.md)
-to download `.deb` assets, `tensorplate-v0.1.0-artifacts.json`, and
-`SHA256SUMS` from the GitHub Release.
+[`docs/install/external-install.md`](../install/external-install.md)
+to download `.deb` assets, `${TP_MANIFEST}`, and `SHA256SUMS` from the
+GitHub Release.
 
 Record:
 
 ```bash
-sha256sum -c SHA256SUMS | tee /tmp/tensorplate-v0.1.0-checksums.txt
-cat tensorplate-v0.1.0-artifacts.json > /tmp/tensorplate-v0.1.0-artifacts.json
+sha256sum -c SHA256SUMS | tee "/tmp/tensorplate-${TP_TAG}-checksums.txt"
+cp "${TP_MANIFEST}" "/tmp/tensorplate-${TP_TAG}-artifacts.json"
 ```
 
 Any checksum mismatch blocks the release.
 
-## Install and doctor
+## Install And Doctor
 
 Install core packages from the downloaded assets:
 
 ```bash
-sudo apt install ./tensorplate-common_0.1.0-1_arm64.deb \
-  ./tensorplate-agent_0.1.0-1_arm64.deb \
-  ./tensorplate-serving_0.1.0-1_arm64.deb \
-  ./tensorplate-observability_0.1.0-1_arm64.deb \
-  ./tensorplate-cli_0.1.0-1_arm64.deb
+sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-cli_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 
-tensorplate doctor --output json | tee /tmp/tensorplate-v0.1.0-doctor-before.json
+tensorplate doctor --output json | tee "/tmp/tensorplate-${TP_TAG}-doctor-before.json"
 ```
 
 Install findings must not include `fail`. Service-state warnings before
 startup are acceptable if documented.
 
-## Start services and verify local defaults
+## Start Services And Verify Local Defaults
 
 ```bash
 sudo systemctl enable --now tensorplate-agent
 sudo systemctl enable --now tensorplate-observability
-tensorplate doctor --output json | tee /tmp/tensorplate-v0.1.0-doctor-after.json
+tensorplate doctor --output json | tee "/tmp/tensorplate-${TP_TAG}-doctor-after.json"
 test -S /run/tensorplate/agent.sock
 ```
 
 Record service state:
 
 ```bash
-systemctl status tensorplate-agent --no-pager > /tmp/tensorplate-v0.1.0-agent-status.txt
-systemctl status tensorplate-observability --no-pager > /tmp/tensorplate-v0.1.0-observability-status.txt
+systemctl status tensorplate-agent --no-pager > "/tmp/tensorplate-${TP_TAG}-agent-status.txt"
+systemctl status tensorplate-observability --no-pager > "/tmp/tensorplate-${TP_TAG}-observability-status.txt"
 ```
 
 Failed service start, failed doctor checks, or non-local endpoint drift
 blocks publication unless explicitly signed as a conditional pass.
 
-## Deploy, infer, status, logs, and metrics
+## Deploy, Infer, Status, Logs, And Metrics
 
 Use the release-published sample bundle or another documented external
 bundle source. Do not use `test/models/` from a development checkout.
@@ -124,11 +138,11 @@ bundle source. Do not use `test/models/` from a development checkout.
 tensorplate deploy ./tensorplate-trt-identity-bundle --deployment-id e16-clean-room
 tensorplate infer \
   --input ./tensorplate-trt-identity-bundle/sample_infer.json \
-  --output-file /tmp/tensorplate-v0.1.0-infer-response.json \
-  --output json | tee /tmp/tensorplate-v0.1.0-infer.json
-tensorplate status --output json | tee /tmp/tensorplate-v0.1.0-status.json
-tensorplate logs --component agent --tail 100 > /tmp/tensorplate-v0.1.0-agent.log
-tensorplate logs --component observability --tail 100 > /tmp/tensorplate-v0.1.0-observability.log
+  --output-file "/tmp/tensorplate-${TP_TAG}-infer-response.json" \
+  --output json | tee "/tmp/tensorplate-${TP_TAG}-infer.json"
+tensorplate status --output json | tee "/tmp/tensorplate-${TP_TAG}-status.json"
+tensorplate logs --component agent --tail 100 > "/tmp/tensorplate-${TP_TAG}-agent.log"
+tensorplate logs --component observability --tail 100 > "/tmp/tensorplate-${TP_TAG}-observability.log"
 ```
 
 Expected result:
@@ -139,38 +153,38 @@ Expected result:
 - Logs contain no panic-level failures.
 - Metrics or status counters show successful request completion.
 
-## Optional Python/PyTorch validation
+## Optional Python/PyTorch Validation
 
 If the release quickstart includes a `python_pytorch` bundle, validate the
 optional package:
 
 ```bash
-sudo apt install ./tensorplate-backend-python-pytorch_0.1.0-1_arm64.deb
-tensorplate doctor --output json | tee /tmp/tensorplate-v0.1.0-python-doctor.json
+sudo apt install "./tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+tensorplate doctor --output json | tee "/tmp/tensorplate-${TP_TAG}-python-doctor.json"
 sudo systemctl restart tensorplate-agent
 ```
 
 Doctor must report `python_pytorch_backend = ok` and
 `python_pytorch_runtime = ok` before deploying the bundle.
 
-## Rollback and uninstall evidence
+## Rollback And Uninstall Evidence
 
 When a previous deployment exists:
 
 ```bash
 tensorplate rollback --deployment-id <previous-deployment-id>
-tensorplate status --output json | tee /tmp/tensorplate-v0.1.0-rollback-status.json
+tensorplate status --output json | tee "/tmp/tensorplate-${TP_TAG}-rollback-status.json"
 ```
 
 Record uninstall or reinstall behavior where feasible:
 
 ```bash
 sudo apt remove -y tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli tensorplate-backend-python-pytorch
-sudo apt install ./tensorplate-agent_0.1.0-1_arm64.deb \
-  ./tensorplate-serving_0.1.0-1_arm64.deb \
-  ./tensorplate-observability_0.1.0-1_arm64.deb \
-  ./tensorplate-cli_0.1.0-1_arm64.deb
-tensorplate doctor --output json | tee /tmp/tensorplate-v0.1.0-reinstall-doctor.json
+sudo apt install "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  "./tensorplate-cli_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+tensorplate doctor --output json | tee "/tmp/tensorplate-${TP_TAG}-reinstall-doctor.json"
 ```
 
 ## Redaction
