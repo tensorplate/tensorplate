@@ -290,6 +290,8 @@ pub struct DeploymentSummary {
     pub staged_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promoted_monotonic_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

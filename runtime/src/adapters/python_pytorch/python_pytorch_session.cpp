@@ -5,6 +5,7 @@
 #include "python_pytorch_session.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -80,6 +81,21 @@ std::string configured_python_exe() {
     }
   }
   return "python3";
+}
+
+std::chrono::milliseconds configured_duration_ms(const char* env_name,
+                                                 std::chrono::milliseconds fallback) {
+  const char* value = std::getenv(env_name);
+  if (value == nullptr || *value == '\0') {
+    return fallback;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const long long parsed = std::strtoll(value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0' || parsed <= 0) {
+    return fallback;
+  }
+  return std::chrono::milliseconds{parsed};
 }
 
 Error::Code error_code_from_wire(const std::string& wire) {
@@ -597,6 +613,12 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
       [](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
         PythonPytorchConfig config;
         config.python_exe = adapters::python_pytorch::configured_python_exe();
+        config.startup_timeout = adapters::python_pytorch::configured_duration_ms(
+            "TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS", config.startup_timeout);
+        config.infer_timeout = adapters::python_pytorch::configured_duration_ms(
+            "TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS", config.infer_timeout);
+        config.health_timeout = adapters::python_pytorch::configured_duration_ms(
+            "TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", config.health_timeout);
         return std::unique_ptr<ExecutionSession>(
             new PythonPytorchSession(hooks, std::move(config), default_fork_exec_launcher()));
       },

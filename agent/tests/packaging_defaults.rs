@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use tensorplate_agent::config::{AgentConfig, ControlTransport};
+use tensorplate_agent::config::{AgentConfig, ControlTransport, WorkerControlMode};
 
 fn packaging_agent_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -49,14 +49,38 @@ fn shipped_agent_config_parses_and_validates() {
     // *state* file, not config. The default config must therefore not
     // pin a deployment.
     assert!(
-        cfg.available_backends.contains(&"mock".to_string()),
-        "default available_backends must include mock so first-run doctor passes"
+        !cfg.available_backends.contains(&"mock".to_string()),
+        "default install must not publish the test-only mock backend"
+    );
+    assert!(
+        cfg.available_backends.contains(&"tensorrt".to_string()),
+        "default available_backends must include TensorRT for the Jetson vision validation path"
     );
     assert!(
         cfg.available_backends
             .contains(&"python_pytorch".to_string()),
         "default available_backends must probe the separately-installed Python backend"
     );
+    let tensorrt = cfg
+        .backend_capabilities
+        .get("tensorrt")
+        .expect("TensorRT capability must be published");
+    assert!(tensorrt.fixed_shape);
+    assert!(tensorrt.deterministic_latency);
+    assert!(tensorrt
+        .supported_artifact_kinds
+        .contains(&"tensorrt_engine".to_string()));
+    assert!(tensorrt.supported_precision.contains(&"fp16".to_string()));
+
+    let python = cfg
+        .backend_capabilities
+        .get("python_pytorch")
+        .expect("Python/PyTorch capability must be published");
+    assert!(python.async_);
+    assert!(python.control_loop_integration);
+    assert!(python
+        .supported_artifact_kinds
+        .contains(&"python_pytorch_entry".to_string()));
 }
 
 #[test]
@@ -72,5 +96,17 @@ fn shipped_agent_config_is_loopback_only() {
             "127.0.0.1" | "::1" | "localhost"
         ),
         "worker.serving_bind_host must be loopback in the default install"
+    );
+    assert_eq!(
+        cfg.worker.mode,
+        WorkerControlMode::Process,
+        "default install must exercise the agent-supervised serving worker"
+    );
+    assert_eq!(
+        cfg.worker.serving_binary_path.as_deref(),
+        Some(std::path::Path::new(
+            tensorplate_protocol::install_paths::SERVING_BINARY_PATH
+        )),
+        "process worker must launch the package-installed serving binary"
     );
 }

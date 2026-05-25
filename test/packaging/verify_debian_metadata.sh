@@ -61,6 +61,18 @@ for f in "${debian}"/*.preinst "${debian}"/*.postinst "${debian}"/*.prerm "${deb
     fail=1
   fi
 done
+if ! grep -q 'deb-systemd-invoke stop tensorplate-agent.service' "${debian}/tensorplate-agent.prerm"; then
+  echo "FAIL: tensorplate-agent.prerm must stop the running unit before remove/upgrade" >&2
+  fail=1
+fi
+if ! grep -q 'deb-systemd-invoke stop tensorplate-observability.service' "${debian}/tensorplate-observability.prerm"; then
+  echo "FAIL: tensorplate-observability.prerm must stop the running unit before remove/upgrade" >&2
+  fail=1
+fi
+if ! grep -q 'rmdir /var/lib/tensorplate /etc/tensorplate' "${debian}/tensorplate-agent.postrm"; then
+  echo "FAIL: tensorplate-agent.postrm purge must remove empty install roots" >&2
+  fail=1
+fi
 
 # Conffile assertions: configs under /etc are auto-managed by
 # debhelper as conffiles. Do not duplicate those entries via explicit
@@ -103,6 +115,10 @@ if [ ! -x "${debian}/rules" ]; then
   echo "FAIL: debian/rules must be executable" >&2
   fail=1
 fi
+if [ ! -x "${repo_root}/packaging/scripts/build-deb.sh" ]; then
+  echo "FAIL: packaging/scripts/build-deb.sh must be executable" >&2
+  fail=1
+fi
 if grep -q -- '--with systemd' "${debian}/rules"; then
   echo "FAIL: debian/rules must rely on debhelper 13's default dh_installsystemd sequence" >&2
   fail=1
@@ -117,6 +133,10 @@ if ! grep -q 'dh_installsystemd --no-start -ptensorplate-agent' "${debian}/rules
 fi
 if ! grep -q 'dh_installsystemd --no-start -ptensorplate-observability' "${debian}/rules"; then
   echo "FAIL: debian/rules must install the observability unit into tensorplate-observability" >&2
+  fail=1
+fi
+if ! grep -q 'dh_shlibdeps -ptensorplate-serving --dpkg-shlibdeps-params=--ignore-missing-info' "${debian}/rules"; then
+  echo "FAIL: debian/rules must tolerate JetPack CUDA libraries without shlibs metadata for tensorplate-serving" >&2
   fail=1
 fi
 

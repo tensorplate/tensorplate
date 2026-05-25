@@ -22,19 +22,25 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/buffer/buffer_ref.hpp"
+#include "tensorplate/buffer/cleanup.hpp"
 #include "tensorplate/buffer/output.hpp"
 #include "tensorplate/buffer/tensor_view.hpp"
 #include "tensorplate/core/error.hpp"
@@ -81,11 +87,24 @@ namespace {
 
 #if TP_HAS_TENSORRT_SDK
 /// TensorRT logger that routes diagnostics through the structured-log
-/// facility once V01-E12 lands. Until then it discards messages so the
-/// adapter does not spew to stderr.
+/// facility once V01-E12 lands. Until then it surfaces `kERROR` and
+/// `kINTERNAL_ERROR` to stderr so a malformed engine or driver fault is
+/// at least visible in the agent journal, and silently drops the
+/// lower-severity chatter that TensorRT emits during normal load.
 class TensorRTLogger final : public nvinfer1::ILogger {
  public:
-  void log(Severity /*severity*/, const char* /*msg*/) noexcept override {}
+  void log(Severity severity, const char* msg) noexcept override {
+    if (msg == nullptr) {
+      return;
+    }
+    if (severity == Severity::kERROR || severity == Severity::kINTERNAL_ERROR) {
+      // `fprintf` is noexcept and never throws across the C ABI boundary
+      // demanded by ILogger::log. The structured-log replacement lands in
+      // V01-E12 (see TENSORPLATE-LOG-001).
+      std::fprintf(stderr, "[tensorrt][%s] %s\n",
+                   severity == Severity::kINTERNAL_ERROR ? "INTERNAL_ERROR" : "ERROR", msg);
+    }
+  }
 };
 
 TensorRTLogger& trt_logger() noexcept {
@@ -173,7 +192,6 @@ struct TensorRTState {
   TrtUniquePtr<nvinfer1::ICudaEngine> engine;
   TrtUniquePtr<nvinfer1::IExecutionContext> context;
   CudaStreamHandle stream;
-  std::vector<CudaDeviceBuffer> device_buffers;
 };
 
 [[nodiscard]] Result<std::vector<std::byte>> read_file(const std::string& path) {
@@ -192,6 +210,112 @@ struct TensorRTState {
   }
   return buf;
 }
+
+[[nodiscard]] std::string cuda_error_message(cudaError_t status, std::string_view op) {
+  return std::string(op) + " failed: " + cudaGetErrorString(status);
+}
+
+[[nodiscard]] Result<CudaDeviceBuffer> make_device_buffer(std::size_t bytes) {
+  if (bytes == 0) {
+    return unexpected(Error::Code::ShapeMismatch, "TensorRT tensor byte size is zero");
+  }
+  CudaDeviceBuffer out;
+  out.size_bytes = bytes;
+  const cudaError_t status = cudaMalloc(&out.device_ptr, bytes);
+  if (status != cudaSuccess) {
+    return unexpected(Error::Code::OOMError, cuda_error_message(status, "cudaMalloc"));
+  }
+  return out;
+}
+
+[[nodiscard]] Result<nvinfer1::Dims> dims_from_tensor_view(const TensorView& view) {
+  if (view.rank() > static_cast<std::size_t>(nvinfer1::Dims::MAX_DIMS)) {
+    return unexpected(Error::Code::ShapeMismatch,
+                      "TensorRT input rank exceeds nvinfer1::Dims::MAX_DIMS");
+  }
+  nvinfer1::Dims dims{};
+  dims.nbDims = static_cast<std::int32_t>(view.rank());
+  for (std::int32_t i = 0; i < dims.nbDims; ++i) {
+    const auto dim = view.shape().at(static_cast<std::size_t>(i));
+    if (dim <= 0 || dim > std::numeric_limits<std::int32_t>::max()) {
+      return unexpected(Error::Code::ShapeMismatch,
+                        "TensorRT input shape contains an unsupported dimension");
+    }
+    dims.d[i] = static_cast<std::int32_t>(dim);
+  }
+  return dims;
+}
+
+[[nodiscard]] Result<std::vector<std::int64_t>> tensor_shape_from_dims(const nvinfer1::Dims& dims,
+                                                                       std::string_view name) {
+  if (dims.nbDims <= 0) {
+    return unexpected(Error::Code::ShapeMismatch,
+                      "TensorRT tensor `" + std::string(name) + "` has no resolved shape");
+  }
+  std::vector<std::int64_t> shape;
+  shape.reserve(static_cast<std::size_t>(dims.nbDims));
+  for (std::int32_t i = 0; i < dims.nbDims; ++i) {
+    if (dims.d[i] <= 0) {
+      return unexpected(Error::Code::ShapeMismatch, "TensorRT tensor `" + std::string(name) +
+                                                        "` has unresolved dynamic dimension");
+    }
+    shape.push_back(static_cast<std::int64_t>(dims.d[i]));
+  }
+  return shape;
+}
+
+[[nodiscard]] std::optional<DType> dtype_from_trt(nvinfer1::DataType dtype) noexcept {
+  switch (dtype) {
+    case nvinfer1::DataType::kFLOAT:
+      return DType::Float32;
+    case nvinfer1::DataType::kHALF:
+      return DType::Float16;
+    case nvinfer1::DataType::kINT32:
+      return DType::Int32;
+    case nvinfer1::DataType::kINT8:
+      return DType::Int8;
+    case nvinfer1::DataType::kBOOL:
+      return DType::Bool;
+    default:
+      return std::nullopt;
+  }
+}
+
+[[nodiscard]] std::optional<nvinfer1::DataType> dtype_to_trt(DType dtype) noexcept {
+  switch (dtype) {
+    case DType::Float32:
+      return nvinfer1::DataType::kFLOAT;
+    case DType::Float16:
+      return nvinfer1::DataType::kHALF;
+    case DType::Int32:
+      return nvinfer1::DataType::kINT32;
+    case DType::Int8:
+      return nvinfer1::DataType::kINT8;
+    case DType::Bool:
+      return nvinfer1::DataType::kBOOL;
+    case DType::BFloat16:
+    case DType::Int64:
+    case DType::Int16:
+    case DType::UInt8:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] Result<void> check_dtype_matches(nvinfer1::DataType expected, DType observed,
+                                               std::string_view tensor_name) {
+  const auto observed_trt = dtype_to_trt(observed);
+  if (!observed_trt.has_value()) {
+    return unexpected(Error::Code::Unsupported, "TensorRT input `" + std::string(tensor_name) +
+                                                    "` uses unsupported dtype `" +
+                                                    std::string(to_string(observed)) + "`");
+  }
+  if (*observed_trt != expected) {
+    return unexpected(Error::Code::ShapeMismatch, "TensorRT input `" + std::string(tensor_name) +
+                                                      "` dtype does not match engine binding");
+  }
+  return Result<void>{};
+}
 #endif  // TP_HAS_TENSORRT_SDK
 
 }  // namespace
@@ -201,13 +325,31 @@ struct TensorRTState {
 /// interface.
 class TensorRTSession final : public ExecutionSession {
  public:
-  explicit TensorRTSession(ExecutionSessionRuntimeHooks hooks) : ExecutionSession(hooks) {}
+  explicit TensorRTSession(ExecutionSessionRuntimeHooks hooks)
+      : ExecutionSession(hooks)
+#if TP_HAS_TENSORRT_SDK
+        ,
+        manager_(hooks.buffer_manager)
+#endif
+  {
+  }
 
-  [[nodiscard]] std::string_view backend_name() const noexcept override { return kBackendName; }
+  [[nodiscard]] std::string_view backend_name() const noexcept override {
+    return kBackendName;
+  }
 
  protected:
   Result<void> do_load(const ModelSpec& spec) override {
 #if TP_HAS_TENSORRT_SDK
+#if NV_TENSORRT_MAJOR < 10
+    // do_infer relies on the explicit-IO (enqueueV3) APIs introduced in
+    // TensorRT 10. Fail load-time so operators see a consistent
+    // lifecycle: there is no use in succeeding through prime only to
+    // return `Unsupported` for every inference request.
+    (void)spec;
+    return unexpected(Error::Code::Unsupported,
+                      "TensorRT adapter requires TensorRT 10 explicit-IO APIs");
+#endif
     const auto& path = spec.artifact_path();
     if (path.empty()) {
       return unexpected(Error::Code::ConfigInvalid, "TensorRT artifact_path is empty");
@@ -271,13 +413,172 @@ class TensorRTSession final : public ExecutionSession {
     if (!state_ || !state_->context) {
       return unexpected(Error::Code::NotReady, "TensorRT session not primed");
     }
-    // V01-E05-F02-T02 ships the binding-resolution and synchronous
-    // execution path against the v0.1.0 vision validation engine. The
-    // current stub returns `Unsupported` so the conformance suite
-    // skips this path until the fixture lands.
+    if (manager_ == nullptr) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "TensorRT adapter requires a BufferManager hook");
+    }
+#if NV_TENSORRT_MAJOR < 10
     (void)request;
     return unexpected(Error::Code::Unsupported,
-                      "TensorRT do_infer not yet wired to vision-golden fixture (V01-E05-F02-T03)");
+                      "TensorRT inference requires TensorRT 10 explicit-IO APIs");
+#else
+    std::unordered_map<std::string_view, const NamedInput*> inputs_by_name;
+    inputs_by_name.reserve(request.inputs().size());
+    for (const auto& input : request.inputs()) {
+      inputs_by_name.emplace(std::string_view(input.name), &input);
+    }
+
+    std::vector<CudaDeviceBuffer> device_buffers;
+    std::vector<NamedOutput> outputs;
+    auto fail = [&](Error error) -> Result<std::vector<NamedOutput>> {
+      if (!outputs.empty()) {
+        (void)release_partial_outputs(*manager_, outputs);
+      }
+      return unexpected(std::move(error));
+    };
+
+    const auto nb_tensors = state_->engine->getNbIOTensors();
+    for (std::int32_t i = 0; i < nb_tensors; ++i) {
+      const char* tensor_name_c = state_->engine->getIOTensorName(i);
+      if (tensor_name_c == nullptr || *tensor_name_c == '\0') {
+        return fail(
+            Error::make(Error::Code::LoadFailed, "TensorRT engine published an unnamed IO tensor"));
+      }
+      const std::string_view tensor_name{tensor_name_c};
+      if (state_->engine->getTensorIOMode(tensor_name_c) != nvinfer1::TensorIOMode::kINPUT) {
+        continue;
+      }
+
+      const auto found = inputs_by_name.find(tensor_name);
+      if (found == inputs_by_name.end()) {
+        return fail(Error::make(Error::Code::ShapeMismatch, "TensorRT request missing input `" +
+                                                                std::string(tensor_name) + "`"));
+      }
+      const NamedInput& input = *found->second;
+      if (auto d = check_dtype_matches(state_->engine->getTensorDataType(tensor_name_c),
+                                       input.tensor.dtype(), tensor_name);
+          !d.has_value()) {
+        return fail(d.error());
+      }
+      if (input.tensor.layout() != Layout::RowMajor) {
+        return fail(Error::make(
+            Error::Code::Unsupported,
+            "TensorRT input `" + std::string(tensor_name) + "` requires row_major layout"));
+      }
+      auto dims = dims_from_tensor_view(input.tensor);
+      if (!dims.has_value()) {
+        return fail(dims.error());
+      }
+      if (!state_->context->setInputShape(tensor_name_c, dims.value())) {
+        return fail(Error::make(Error::Code::ShapeMismatch, "TensorRT rejected input shape for `" +
+                                                                std::string(tensor_name) + "`"));
+      }
+      auto host = manager_->view(input.buffer, input.tensor);
+      if (!host.has_value()) {
+        return fail(host.error());
+      }
+      auto device = make_device_buffer(host.value().size());
+      if (!device.has_value()) {
+        return fail(device.error());
+      }
+      const cudaError_t copy_status =
+          cudaMemcpyAsync(device.value().device_ptr, host.value().data(), host.value().size(),
+                          cudaMemcpyHostToDevice, state_->stream.stream);
+      if (copy_status != cudaSuccess) {
+        return fail(Error::make(Error::Code::InferenceFailed,
+                                cuda_error_message(copy_status, "cudaMemcpyAsync H2D")));
+      }
+      if (!state_->context->setTensorAddress(tensor_name_c, device.value().device_ptr)) {
+        return fail(Error::make(
+            Error::Code::InferenceFailed,
+            "TensorRT rejected input tensor address for `" + std::string(tensor_name) + "`"));
+      }
+      device_buffers.push_back(std::move(device).value());
+    }
+
+    struct PendingOutput {
+      std::string name;
+      TensorView tensor;
+      CudaDeviceBuffer device;
+    };
+    std::vector<PendingOutput> pending_outputs;
+
+    for (std::int32_t i = 0; i < nb_tensors; ++i) {
+      const char* tensor_name_c = state_->engine->getIOTensorName(i);
+      const std::string_view tensor_name{tensor_name_c == nullptr ? "" : tensor_name_c};
+      if (tensor_name.empty() ||
+          state_->engine->getTensorIOMode(tensor_name_c) != nvinfer1::TensorIOMode::kOUTPUT) {
+        continue;
+      }
+      auto dtype = dtype_from_trt(state_->engine->getTensorDataType(tensor_name_c));
+      if (!dtype.has_value()) {
+        return fail(Error::make(
+            Error::Code::Unsupported,
+            "TensorRT output `" + std::string(tensor_name) + "` uses unsupported dtype"));
+      }
+      auto shape =
+          tensor_shape_from_dims(state_->context->getTensorShape(tensor_name_c), tensor_name);
+      if (!shape.has_value()) {
+        return fail(shape.error());
+      }
+      auto tv = TensorView::create(*dtype, std::move(shape).value());
+      if (!tv.has_value()) {
+        return fail(tv.error());
+      }
+      auto device = make_device_buffer(tv.value().byte_size());
+      if (!device.has_value()) {
+        return fail(device.error());
+      }
+      if (!state_->context->setTensorAddress(tensor_name_c, device.value().device_ptr)) {
+        return fail(Error::make(
+            Error::Code::InferenceFailed,
+            "TensorRT rejected output tensor address for `" + std::string(tensor_name) + "`"));
+      }
+      pending_outputs.push_back(
+          PendingOutput{std::string(tensor_name), tv.value(), std::move(device).value()});
+    }
+    if (pending_outputs.empty()) {
+      return fail(
+          Error::make(Error::Code::InferenceFailed, "TensorRT engine has no output tensors"));
+    }
+
+    if (!state_->context->enqueueV3(state_->stream.stream)) {
+      return fail(Error::make(Error::Code::InferenceFailed, "TensorRT enqueueV3 returned false"));
+    }
+
+    // Issue every D2H copy on `state_->stream` and synchronize once at
+    // the end. If any `manager_->allocate` or `cudaMemcpyAsync` fails
+    // mid-loop we return through `fail()` without an explicit sync;
+    // that is still safe because `CudaDeviceBuffer::~CudaDeviceBuffer`
+    // calls `cudaFree`, which performs an implicit per-stream sync per
+    // CUDA semantics, draining any outstanding writes against the
+    // device pointer before its memory is released.
+    for (auto& pending : pending_outputs) {
+      auto host_buffer = manager_->allocate(pending.tensor.byte_size());
+      if (!host_buffer.has_value()) {
+        return fail(host_buffer.error());
+      }
+      NamedOutput output{pending.name, host_buffer.value(), pending.tensor, std::nullopt};
+      outputs.push_back(output);
+      auto dst = manager_->data(output.buffer);
+      if (!dst.has_value()) {
+        return fail(dst.error());
+      }
+      const cudaError_t copy_status =
+          cudaMemcpyAsync(dst.value().data(), pending.device.device_ptr, pending.tensor.byte_size(),
+                          cudaMemcpyDeviceToHost, state_->stream.stream);
+      if (copy_status != cudaSuccess) {
+        return fail(Error::make(Error::Code::InferenceFailed,
+                                cuda_error_message(copy_status, "cudaMemcpyAsync D2H")));
+      }
+    }
+    const cudaError_t sync_status = cudaStreamSynchronize(state_->stream.stream);
+    if (sync_status != cudaSuccess) {
+      return fail(Error::make(Error::Code::InferenceFailed,
+                              cuda_error_message(sync_status, "cudaStreamSynchronize")));
+    }
+    return outputs;
+#endif
 #else
     (void)request;
     return unexpected(Error::Code::Unsupported, "TensorRT adapter built without the TensorRT SDK");
@@ -295,6 +596,7 @@ class TensorRTSession final : public ExecutionSession {
 
  private:
 #if TP_HAS_TENSORRT_SDK
+  BufferManager* manager_ = nullptr;
   std::unique_ptr<TensorRTState> state_;
 #endif
 };

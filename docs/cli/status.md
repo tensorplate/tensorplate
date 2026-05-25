@@ -42,7 +42,12 @@ supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
   "agent": {
     "available": true,
     "agent_state": "ready",
-    "active": { "deployment_id": "d-1", "backend": "tensorrt", … },
+    "active": {
+      "deployment_id": "d-1",
+      "backend": "tensorrt",
+      "serving_url": "http://127.0.0.1:18081/infer",
+      …
+    },
     "previous_active": null,
     "candidate": null,
     "in_flight_transaction": null,

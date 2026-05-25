@@ -34,6 +34,8 @@ packaging/
 │   └── tensorplate-observability.service       Auto-installed by dh_installsystemd.
 ├── conf/                           Default config installed under /etc/tensorplate/.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
+│   ├── build-deb.sh                Source-tree helper for dpkg-buildpackage.
+│   └── ...                         Maintainer-script helpers installed by tensorplate-common.
 └── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.
 ```
 
@@ -69,8 +71,12 @@ cmake --build build/release --target tensorplate-serving
 ./packaging/scripts/verify-artifacts.sh
 
 # 3) Build Debian binary packages.
-dpkg-buildpackage -us -uc -b
+./packaging/scripts/build-deb.sh
 ```
+
+`dpkg-buildpackage` expects a root `debian/` directory. The helper creates
+the temporary `debian -> packaging/debian` symlink needed by that tool and
+removes it after the build when it created it.
 
 ## v0.1.0 invariants
 
@@ -78,6 +84,13 @@ dpkg-buildpackage -us -uc -b
   package never publishes a public network endpoint.
 - Maintainer scripts are idempotent: reinstall preserves user config,
   desired state, bundles, and logs unless `--purge` is supplied.
+- The packaged agent default uses the process-backed worker and launches
+  `/usr/lib/tensorplate/tensorplate-serving`; the mock backend remains
+  test-only and is not advertised by the installed config.
+- The packaged backend list advertises `tensorrt` for the Jetson vision
+  path and `python_pytorch` for the optional sidecar path. Python/PyTorch
+  deploys are still refused before staging until the optional backend
+  package and PyTorch runtime probe are green.
 - `dh_installsystemd` enables `tensorplate-agent.service` and
   `tensorplate-observability.service` but does **not** start them.
   Operators run `systemctl enable --now tensorplate-agent` after

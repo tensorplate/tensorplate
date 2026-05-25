@@ -528,6 +528,7 @@ mod tests {
                 model_class: Some("vision".into()),
                 staged_path: None,
                 promoted_monotonic_ns: Some(1),
+                serving_url: None,
             });
         }
         ControlResponse {

@@ -547,8 +547,12 @@ impl Coordinator {
             model_class: Some(d.model_class.clone()),
             staged_path: Some(d.staged_path.clone()),
             promoted_monotonic_ns: d.promoted_monotonic_ns,
+            serving_url: None,
         };
-        let active = s.active.as_ref().map(to_summary);
+        let mut active = s.active.as_ref().map(to_summary);
+        if let Some(summary) = active.as_mut() {
+            summary.serving_url = self.worker.active_serving_url()?;
+        }
         let previous = s.previous_active.as_ref().map(to_summary);
         let candidate = s.candidate.as_ref().map(to_summary);
         let in_flight = s.in_flight_transaction.as_ref().map(|t| DeployStatus {

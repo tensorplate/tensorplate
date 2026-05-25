@@ -37,6 +37,7 @@ fn ready_status_response() -> ControlResponse {
             model_class: Some("vision".into()),
             staged_path: None,
             promoted_monotonic_ns: Some(1),
+            serving_url: None,
         }),
         previous_active: None,
         candidate: None,

@@ -126,11 +126,14 @@ fn resolve_serving_endpoint(
         .agent_status
         .as_ref()
         .and_then(|s| s.active.as_ref());
-    if active.is_none() {
+    let Some(active) = active else {
         return Err(CliError::Unavailable {
             message: "no active deployment; deploy a bundle before running `infer`".into(),
             hint: Some("run `tensorplate deploy <bundle>` and wait for status=active".into()),
         });
+    };
+    if let Some(url) = active.serving_url.as_deref() {
+        return parse_serving_url(url, "agent-discovered");
     }
     // The agent's serving endpoint is loopback by default. We hard-code
     // the v0.1.0 default; the user can always override via flag or
@@ -563,6 +566,7 @@ mod tests {
                     model_class: None,
                     staged_path: None,
                     promoted_monotonic_ns: Some(1),
+                    serving_url: None,
                 }),
                 previous_active: None,
                 candidate: None,
@@ -578,5 +582,41 @@ mod tests {
         assert_eq!(res.source, "agent-discovered");
         assert_eq!(res.host, "127.0.0.1");
         assert_eq!(res.port, 18080);
+    }
+
+    #[test]
+    fn endpoint_resolution_uses_agent_serving_url_when_reported() {
+        let (_td, p) = write_fixture(r#"{"inputs":[]}"#);
+        let args = args_with_input(p);
+        let client = MockAgentClient::new();
+        client.enqueue_ok(ControlResponse {
+            agent_status: Some(AgentStatus {
+                agent_state: AgentRunState::Ready,
+                active: Some(DeploymentSummary {
+                    deployment_id: "d-1".into(),
+                    bundle_digest: "sha256:abc".into(),
+                    bundle_name: None,
+                    bundle_version: None,
+                    backend_hint: Some("mock".into()),
+                    model_class: None,
+                    staged_path: None,
+                    promoted_monotonic_ns: Some(1),
+                    serving_url: Some("http://127.0.0.1:18081/infer".into()),
+                }),
+                previous_active: None,
+                candidate: None,
+                in_flight_transaction: None,
+                last_error: None,
+                quarantined: vec![],
+                recovery: None,
+                supervision: None,
+            }),
+            ..ControlResponse::ok(Some("c".into()))
+        });
+        let res = resolve_serving_endpoint(&profile_with_serving(None), &client, &args).unwrap();
+        assert_eq!(res.source, "agent-discovered");
+        assert_eq!(res.host, "127.0.0.1");
+        assert_eq!(res.port, 18081);
+        assert_eq!(res.path, "/infer");
     }
 }

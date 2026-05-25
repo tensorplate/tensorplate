@@ -84,6 +84,16 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
 
+# These are lazy-imported inside SmolVLABackend.load() so the default
+# fixture backend stays dependency-free on host CI. `numpy`/`torch` ship
+# their own stubs but pin to platform-specific wheels we don't install
+# here. `lerobot.*` has no py.typed marker yet -- TODO: tighten this
+# override once lerobot ships type stubs upstream. `transformers` exposes
+# Any-typed re-exports that don't add value under strict mode.
+[[tool.mypy.overrides]]
+module = ["numpy", "torch", "lerobot.*", "transformers"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

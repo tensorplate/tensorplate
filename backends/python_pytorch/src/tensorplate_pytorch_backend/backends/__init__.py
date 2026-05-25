@@ -6,10 +6,12 @@ from tensorplate_pytorch_backend.backends.base import (
     NamedTensor,
 )
 from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
+from tensorplate_pytorch_backend.backends.smolvla import SmolVLABackend
 
 __all__ = [
     "Backend",
     "BackendError",
     "FixtureBackend",
     "NamedTensor",
+    "SmolVLABackend",
 ]

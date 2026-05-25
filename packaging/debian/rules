@@ -39,3 +39,11 @@ override_dh_auto_install:
 override_dh_installsystemd:
 	dh_installsystemd --no-start -ptensorplate-agent
 	dh_installsystemd --no-start -ptensorplate-observability
+
+# JetPack installs CUDA runtime libraries under /usr/local/cuda-* without
+# Debian shlibs metadata. The serving worker links those libraries only
+# when built with TP_ENABLE_TENSORRT=ON for the Jetson package; doctor and
+# the E15 validation runbook own the runtime dependency check.
+override_dh_shlibdeps:
+	dh_shlibdeps -ptensorplate-serving --dpkg-shlibdeps-params=--ignore-missing-info
+	dh_shlibdeps -a -Ntensorplate-serving
