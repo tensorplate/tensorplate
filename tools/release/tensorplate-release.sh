@@ -4,8 +4,8 @@
 # GitOps-oriented release driver for TensorPlate.
 #
 # The implementation PR adds this tooling, but it must not publish the
-# release. Final publication happens later from release/vX.Y.Z after this
-# script's preflight, artifact, sign-off, and tag checks pass.
+# release. Final publication happens later from release/vX.Y.Z: this script
+# creates the reviewed source commit/tag, and CI owns artifact publication.
 
 set -Eeuo pipefail
 
@@ -33,6 +33,8 @@ Usage:
   tensorplate-release.sh preflight --version 0.1.0 [options]
   tensorplate-release.sh prepare --version 0.1.0 --dry-run
   tensorplate-release.sh prepare --version 0.1.0 --execute --confirm PREPARE-v0.1.0
+  tensorplate-release.sh cut --version 0.1.0 --final --execute --push --confirm CUT-v0.1.0
+  tensorplate-release.sh cut --version 0.1.0 --rc 1 --execute --push --confirm CUT-v0.1.0-rc.1
   tensorplate-release.sh manifest --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR [options]
   tensorplate-release.sh verify --version 0.1.0 --tag v0.1.0 --manifest FILE --checksums FILE --artifacts-dir DIR
   tensorplate-release.sh tag --version 0.1.0 (--rc N | --final) --confirm CREATE-v0.1.0[-rc.N] [options]
@@ -41,6 +43,7 @@ Usage:
 Common options:
   --version VERSION          Release version without leading v, for example 0.1.0.
   --release-branch BRANCH   Expected release branch. Defaults to release/vVERSION.
+  --base REF                Source ref for cut. Defaults to origin/develop.
   --prep-branch BRANCH      Additional branch accepted for preflight during tooling PR dry runs.
   --artifacts-dir DIR       Directory containing release artifacts.
   --manifest FILE           Artifact manifest JSON path.
@@ -53,6 +56,7 @@ Common options:
   --skip-ci                 Record CI as blocked instead of querying GitHub.
   --dry-run                 Print intended action without mutating repository or GitHub state.
   --execute                 Execute a mutating operation.
+  --push                    Push the release branch and tag after cut.
   --confirm TOKEN           Required confirmation token for mutating operations.
 
 Subcommands:
@@ -62,6 +66,9 @@ Subcommands:
   prepare     Promote release metadata from development values to final values.
               Defaults to non-mutating dry-run unless --execute and confirmation
               are provided.
+  cut         Create/switch the release branch, prepare release metadata,
+              commit it, create an annotated source tag, and optionally push
+              branch + tag so CI builds and publishes release assets.
   manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   tag         Create an annotated RC or final tag. Never pushes tags.
@@ -144,6 +151,7 @@ command_exists() {
 parse_common_args() {
   VERSION=""
   RELEASE_BRANCH=""
+  BASE_REF="origin/develop"
   PREP_BRANCH=""
   ARTIFACTS_DIR=""
   MANIFEST=""
@@ -156,6 +164,7 @@ parse_common_args() {
   SKIP_CI=0
   DRY_RUN=0
   EXECUTE=0
+  PUSH=0
   CONFIRM=""
   TAG=""
   RC=""
@@ -167,6 +176,7 @@ parse_common_args() {
     case "$1" in
       --version) VERSION="${2:-}"; shift 2 ;;
       --release-branch) RELEASE_BRANCH="${2:-}"; shift 2 ;;
+      --base) BASE_REF="${2:-}"; shift 2 ;;
       --prep-branch) PREP_BRANCH="${2:-}"; shift 2 ;;
       --artifacts-dir) ARTIFACTS_DIR="${2:-}"; shift 2 ;;
       --manifest) MANIFEST="${2:-}"; shift 2 ;;
@@ -179,6 +189,7 @@ parse_common_args() {
       --skip-ci) SKIP_CI=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --execute) EXECUTE=1; shift ;;
+      --push) PUSH=1; shift ;;
       --confirm) CONFIRM="${2:-}"; shift 2 ;;
       --tag) TAG="${2:-}"; shift 2 ;;
       --rc) RC="${2:-}"; shift 2 ;;
@@ -305,6 +316,25 @@ check_tag_state() {
       pass "final tag $final_tag was not found on origin"
     else
       fail "could not query origin for tag $final_tag; see /tmp/tensorplate-release-ls-remote.log"
+    fi
+  fi
+}
+
+assert_tag_available() {
+  local tag="$1"
+  if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+    die "tag $tag already exists locally; refusing to rewrite"
+  fi
+  if git remote get-url origin >/dev/null 2>&1; then
+    local rc
+    set +e
+    git ls-remote --exit-code --tags origin "$tag" >/tmp/tensorplate-release-ls-remote.log 2>&1
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      die "tag $tag already exists on origin; refusing to rewrite"
+    elif [[ "$rc" -ne 2 ]]; then
+      die "could not query origin for tag $tag; see /tmp/tensorplate-release-ls-remote.log"
     fi
   fi
 }
@@ -663,8 +693,97 @@ cmd_prepare() {
   note "release metadata prepared; review git diff before committing"
 }
 
+run_source_preflight() {
+  reset_results
+  check_clean
+  check_branch_state
+  check_remote
+  check_version_files
+  check_changelog
+
+  if ((${#FAILURES[@]})); then
+    printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2
+    printf 'first failure: %s\n' "${FAILURES[0]}" >&2
+    return 1
+  fi
+  printf 'source preflight passed with %d checks\n' "${#PASSES[@]}"
+}
+
+cmd_cut() {
+  parse_common_args "$@"
+  if [[ "$DRY_RUN" -eq 0 && "$EXECUTE" -eq 0 ]]; then
+    DRY_RUN=1
+  fi
+
+  if [[ "$FINAL" -eq 1 ]]; then
+    TAG="v${VERSION}"
+  elif [[ -n "$RC" ]]; then
+    [[ "$RC" =~ ^[1-9][0-9]*$ ]] || die "--rc must be a positive integer"
+    TAG="v${VERSION}-rc.${RC}"
+  else
+    die "cut requires --rc N or --final"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    note "dry-run: cut release source tag $TAG"
+    printf 'Would create or switch release branch: %s\n' "$RELEASE_BRANCH"
+    printf 'Would branch from base ref: %s\n' "$BASE_REF"
+    printf 'Would prepare release metadata for: %s\n' "$VERSION"
+    printf 'Would commit: Prepare %s release\n' "$TAG"
+    printf 'Would create annotated tag: %s\n' "$TAG"
+    if [[ "$PUSH" -eq 1 ]]; then
+      printf 'Would push branch and tag to origin, triggering release CI.\n'
+    else
+      printf 'Would leave branch and tag local for review.\n'
+    fi
+    return 0
+  fi
+
+  [[ "$CONFIRM" == "CUT-${TAG}" ]] ||
+    die "cut --execute requires --confirm CUT-${TAG}"
+  require_clean_worktree
+
+  if git remote get-url origin >/dev/null 2>&1; then
+    git fetch origin --prune --tags
+  fi
+
+  if git show-ref --verify --quiet "refs/heads/${RELEASE_BRANCH}"; then
+    git switch "$RELEASE_BRANCH"
+  else
+    git switch --create "$RELEASE_BRANCH" "$BASE_REF"
+  fi
+
+  require_clean_worktree
+  assert_tag_available "$TAG"
+  prepare_python
+  ensure_prepare_diff_scope
+  git add -- "${APPROVED_PREPARE_FILES[@]}"
+  if git diff --cached --quiet; then
+    note "release metadata already matches $VERSION; no prepare commit needed"
+  else
+    git commit -m "Prepare ${TAG} release"
+  fi
+  run_source_preflight
+
+  local tag_mode=(-a)
+  if [[ "${TP_RELEASE_SIGN_TAG:-0}" == "1" ]]; then
+    tag_mode=(-s)
+  fi
+  git tag "${tag_mode[@]}" "$TAG" -m "TensorPlate ${TAG}"
+  note "created annotated tag $TAG locally"
+
+  if [[ "$PUSH" -eq 1 ]]; then
+    git push origin "$RELEASE_BRANCH"
+    git push origin "$TAG"
+    note "pushed $RELEASE_BRANCH and $TAG; release CI owns artifact publication"
+  else
+    note "review tag metadata with: git show $TAG"
+    note "push to trigger release CI: git push origin $RELEASE_BRANCH && git push origin $TAG"
+  fi
+}
+
 manifest_python() {
-  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$(current_branch)" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" <<'PY'
+  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" <<'PY'
 import datetime
 import hashlib
 import json
@@ -901,7 +1020,7 @@ cmd_publish() {
   done
   assets+=("$MANIFEST" "$CHECKSUMS")
 
-  local gh_args=(release create "$TAG" "${assets[@]}" --draft --notes-file "$RELEASE_NOTES")
+  local gh_args=(release create "$TAG" "${assets[@]}" --verify-tag --draft --notes-file "$RELEASE_NOTES")
   if [[ "$TAG" == *-rc.* ]]; then
     gh_args+=(--prerelease)
   else
@@ -933,6 +1052,7 @@ main() {
   case "$command" in
     preflight) cmd_preflight "$@" ;;
     prepare) cmd_prepare "$@" ;;
+    cut) cmd_cut "$@" ;;
     manifest) cmd_manifest "$@" ;;
     verify) cmd_verify "$@" ;;
     tag) cmd_tag "$@" ;;

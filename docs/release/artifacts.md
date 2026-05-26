@@ -43,25 +43,32 @@ SHA256SUMS
 
 ## Build Flow
 
-Run from a clean release-branch checkout after release metadata is
-finalized and committed:
+The normal release build runs in `.github/workflows/release.yml` after
+the maintainer pushes an annotated release tag. The workflow invokes:
+
+```bash
+tools/release/build-release-artifacts.sh \
+  --version "${TP_VERSION}" \
+  --tag "${TP_TAG}" \
+  --artifacts-dir "${TP_RELEASE_DIR}" \
+  --manifest "${TP_MANIFEST}" \
+  --checksums "${TP_CHECKSUMS}" \
+  --arch arm64
+```
+
+The release runner must match the target architecture. The script refuses
+to build `arm64` release packages on a non-`arm64` runner.
+
+For local diagnostics only, the equivalent steps are:
 
 ```bash
 cargo build --release --bin tensorplate-agent --bin tensorplate-observability --bin tensorplate
-cmake --build build/release --target tensorplate-serving
+cmake -S . -B build/release -G Ninja -DTP_BUILD_TESTS=OFF -DTP_BUILD_EXAMPLES=OFF
+cmake --build build/release --target tp_serving_worker
 ./packaging/scripts/build-deb.sh
 ```
 
-Copy the generated `.deb` files into the release artifact directory:
-
-```bash
-mkdir -p "${TP_RELEASE_DIR}"
-cp ../tensorplate-*_"${TP_VERSION}"-1_arm64.deb "${TP_RELEASE_DIR}/"
-```
-
-The exact source directory depends on where `dpkg-buildpackage` writes
-outputs on the target builder. Do not list artifacts from a local
-development build unless they were built from the release commit.
+Do not attach local diagnostic builds to a public GitHub Release.
 
 ## Manifest Format
 
@@ -145,19 +152,23 @@ checksum mismatches.
 
 ## GitHub Release Attachment Procedure
 
-1. Create the annotated tag locally with the release script.
+1. Cut the annotated source tag with `tools/release/tensorplate-release.sh cut`.
 2. Push the reviewed release branch and tag.
-3. Create a draft GitHub Release for `${TP_TAG}`.
-4. Attach all `.deb` packages, manifest, and `SHA256SUMS`.
-5. Confirm the draft release notes include supported hardware/OS, known
+3. Let the `Release` workflow build all `.deb` packages, manifest, and
+   `SHA256SUMS`.
+4. Let the workflow create the GitHub Release and attach all assets. RC
+   tags publish as public prereleases; final tags create draft releases.
+5. Confirm the release notes include supported hardware/OS, known
    limitations, install guide, validation links, support policy, security
    policy, and rollback guidance.
 6. Run clean-room validation from the GitHub Release assets, not from local
    package build paths.
-7. Publish the GitHub Release only after the clean-room decision is `pass`
-   or an explicitly signed `conditional-pass`.
+7. Publish the final draft, then announce the release, only after the
+   clean-room decision is `pass` or an explicitly signed
+   `conditional-pass`.
 
-The release script can produce and execute the guarded draft command:
+The manual `publish` subcommand is retained as a fallback for maintainers
+when CI publication is unavailable:
 
 ```bash
 tools/release/tensorplate-release.sh publish \
@@ -170,7 +181,7 @@ tools/release/tensorplate-release.sh publish \
   --dry-run
 ```
 
-Use `--execute --confirm "PUBLISH-${TP_TAG}"` only after the dry-run
-command has been reviewed. The script creates a draft release; it never
-force-pushes, deletes tags, rewrites tags, or silently replaces final
-assets.
+Use `publish --execute --confirm "PUBLISH-${TP_TAG}"` only after the
+dry-run command has been reviewed. The script creates a draft release; it
+never force-pushes, deletes tags, rewrites tags, or silently replaces
+final assets.

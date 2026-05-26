@@ -74,170 +74,122 @@ The release owner stops immediately unless all prerequisites are true:
 - Clean-room validation target is ready.
 - No release blocker is open without a signed conditional pass.
 
-### 2. Create Or Verify The Release Branch
+### 2. Verify The Release Runner
 
-```bash
-git fetch origin
-git switch --create "${TP_RELEASE_BRANCH}" origin/develop
-git status --short --branch
+The automated path is tag-driven:
+
+1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
+2. The script creates or switches `release/vX.Y.Z`, prepares version
+   metadata, commits it, creates an annotated source tag, and pushes the
+   branch + tag.
+3. `.github/workflows/release.yml` builds the `.deb` packages from that
+   tag, generates the manifest/checksums, and creates the GitHub Release
+   with those assets attached.
+
+RC tags create public prereleases. Final tags create draft GitHub
+Releases by default so assets can be verified and clean-room validation
+can run before publication.
+
+The workflow must run on the release target architecture. By default it
+requires a self-hosted runner labeled:
+
+```json
+["self-hosted", "linux", "ARM64", "tensorplate-release"]
 ```
 
-If the release branch already exists, verify it points at the reviewed
-post-merge release baseline before continuing.
+If the repository uses different labels, set the repository variable
+`TENSORPLATE_RELEASE_RUNNER` to a JSON array of labels, for example:
 
-### 3. Prepare Release Metadata
-
-Preview changes:
-
-```bash
-tools/release/tensorplate-release.sh prepare --version "${TP_VERSION}" --dry-run
+```json
+["self-hosted", "linux", "ARM64", "jetson-orin"]
 ```
 
-Apply metadata changes only on the release branch:
+The release runner must have:
+
+- `sudo` access for installing Debian build dependencies.
+- Rust via `rustup`, CMake, Ninja, a C++ compiler, debhelper, `dh-exec`,
+  `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
+- The target SDK stack needed for release validation. For v0.1.0 that
+  means JetPack/CUDA/TensorRT on `arm64`.
+- A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
+  or a system `nlohmann_json` package.
+
+### 3. Cut The Release Source Tag
+
+Preview the local operation:
 
 ```bash
-tools/release/tensorplate-release.sh prepare \
+tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
+  --final \
+  --dry-run
+```
+
+Cut and push the final release source tag:
+
+```bash
+tools/release/tensorplate-release.sh cut \
+  --version "${TP_VERSION}" \
+  --final \
   --execute \
-  --confirm "PREPARE-${TP_TAG}"
+  --push \
+  --confirm "CUT-${TP_TAG}"
 ```
 
-Review that only approved release metadata files changed, then commit the
-release metadata update.
-
-### 4. Build Artifacts
-
-Build from the release commit:
+For a release candidate:
 
 ```bash
-cargo build --release --bin tensorplate-agent --bin tensorplate-observability --bin tensorplate
-cmake --build build/release --target tensorplate-serving
-./packaging/scripts/build-deb.sh
-```
-
-Collect required `.deb` assets under `${TP_RELEASE_DIR}`. Artifact names
-and manifest rules are defined in [`artifacts.md`](./artifacts.md).
-
-### 5. Generate Manifest And Checksums
-
-```bash
-tools/release/tensorplate-release.sh manifest \
+tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
-  --tag "${TP_TAG}" \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}"
+  --rc 1 \
+  --execute \
+  --push \
+  --confirm "CUT-${TP_TAG}-rc.1"
+```
+
+The script refuses dirty worktrees, existing tags, and unexpected release
+metadata edits. It pushes the branch before the tag; the tag push is what
+starts the release workflow.
+
+### 4. Watch CI Build And Publish Assets
+
+Open the `Release` workflow run for `${TP_TAG}`. It must:
+
+- Verify `${TP_TAG}` is annotated.
+- Verify the tag commit is contained in `${TP_RELEASE_BRANCH}`.
+- Build Rust release binaries.
+- Build the C++ serving worker.
+- Run `test/packaging/run.sh`.
+- Build all required `.deb` packages.
+- Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
+- Create the GitHub Release and attach the six `.deb` packages,
+  manifest, and checksum file. RC tags are public prereleases; final tags
+  are drafts until the release owner publishes them.
+
+The workflow refuses to replace an existing GitHub Release. If it fails
+after creating no release, fix the release branch, cut a new RC tag, or
+delete only the failed unpublished tag according to the tag policy.
+
+### 5. Download And Verify CI Assets
+
+After the workflow succeeds, download the assets from the GitHub Release
+and verify checksums from a clean machine:
+
+```bash
+mkdir -p "${TP_RELEASE_DIR}"
+gh release download "${TP_TAG}" \
+  --dir "${TP_RELEASE_DIR}" \
+  --pattern '*.deb' \
+  --pattern 'SHA256SUMS' \
+  --pattern "tensorplate-${TP_TAG}-artifacts.json"
+cd "${TP_RELEASE_DIR}"
+sha256sum -c SHA256SUMS
 ```
 
 Review the manifest for package names, versions, architecture, release
 commit, source tag, checksums, and validation links.
 
-### 6. Record Sign-Off
-
-```bash
-mkdir -p "${TP_RELEASE_DIR}"
-cp docs/release/signoff-template.md "${TP_SIGNOFF}"
-cp docs/release/evidence-template.md "${TP_RELEASE_DIR}/evidence.md"
-```
-
-Fill the copied files with final decisions. The release script rejects
-`TODO`, `TBD`, `PLACEHOLDER`, `BLOCKED`, missing reviewers, missing gate
-state, or a final decision other than `pass` / `conditional-pass`.
-
-### 7. Run Preflight
-
-```bash
-tools/release/tensorplate-release.sh preflight \
-  --version "${TP_VERSION}" \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}" \
-  --signoff "${TP_SIGNOFF}" \
-  --report "${TP_PREFLIGHT}"
-```
-
-Preflight must pass before tag creation. A failure is actionable and must
-be fixed in the owning area, not patched around in release automation.
-
-### 8. Create The Annotated Tag
-
-For a release candidate:
-
-```bash
-tools/release/tensorplate-release.sh tag \
-  --version "${TP_VERSION}" \
-  --rc 1 \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}" \
-  --signoff "${TP_SIGNOFF}" \
-  --confirm "CREATE-${TP_TAG}-rc.1"
-```
-
-Failed RCs are never retagged. Fix the blocker, rebuild artifacts,
-regenerate manifest/checksums, rerun required validation, and create the
-next RC tag.
-
-For the final release:
-
-```bash
-tools/release/tensorplate-release.sh tag \
-  --version "${TP_VERSION}" \
-  --final \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}" \
-  --signoff "${TP_SIGNOFF}" \
-  --confirm "CREATE-${TP_TAG}"
-```
-
-Inspect tag metadata:
-
-```bash
-git show "${TP_TAG}"
-```
-
-Push the branch and tag only after review:
-
-```bash
-git push origin "${TP_RELEASE_BRANCH}"
-git push origin "${TP_TAG}"
-```
-
-### 9. Create The GitHub Release Draft
-
-Generate the guarded draft command first:
-
-```bash
-tools/release/tensorplate-release.sh publish \
-  --version "${TP_VERSION}" \
-  --tag "${TP_TAG}" \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}" \
-  --release-notes "${TP_RELEASE_NOTES}" \
-  --dry-run
-```
-
-After review, create the draft:
-
-```bash
-tools/release/tensorplate-release.sh publish \
-  --version "${TP_VERSION}" \
-  --tag "${TP_TAG}" \
-  --artifacts-dir "${TP_RELEASE_DIR}" \
-  --manifest "${TP_MANIFEST}" \
-  --checksums "${TP_CHECKSUMS}" \
-  --release-notes "${TP_RELEASE_NOTES}" \
-  --execute \
-  --confirm "PUBLISH-${TP_TAG}"
-```
-
-The draft must contain packages, manifest, checksums, release notes,
-install guide, validation links, supported hardware/OS statement, known
-limitations, support policy, security policy, and rollback guidance.
-
-### 10. Run Clean-Room Validation
+### 6. Run Clean-Room Validation
 
 Run [`docs/validation/clean-room-release-smoke.md`](../validation/clean-room-release-smoke.md)
 from the GitHub Release assets. The validation must download release
@@ -245,17 +197,40 @@ assets and verify checksums before install. Local source-tree binaries or
 local package build directories invalidate the evidence.
 
 Record the result in `${TP_RELEASE_DIR}/clean-room.md`. If the result is
-`block`, do not publish the release. If the result is `conditional-pass`,
-the risk, mitigation, owner, and follow-up issue must also appear in
-release notes.
+`block`, do not publish or announce the release. For an RC, fix the
+blocker and cut the next RC tag. For a final release, leave the draft
+unpublished and cut a corrected release tag. If the result is
+`conditional-pass`, the risk, mitigation, owner, and follow-up issue must
+also appear in release notes.
 
-### 11. Publish And Announce
+### 7. Record Sign-Off And Evidence
 
-Publish the GitHub Release only after clean-room validation is accepted.
+```bash
+cp docs/release/signoff-template.md "${TP_SIGNOFF}"
+cp docs/release/evidence-template.md "${TP_RELEASE_DIR}/evidence.md"
+```
+
+Fill the copied files with final decisions and links to:
+
+- The `Release` workflow run.
+- The GitHub Release URL.
+- The downloaded manifest/checksum verification transcript.
+- The clean-room validation report.
+- Reviewer approvals.
+
+### 8. Publish And Announce
+
+For a final release, publish the draft only after release evidence is
+accepted:
+
+```bash
+gh release edit "${TP_TAG}" --draft=false --latest
+```
+
 Then publish the announcement using the release notes as the source of
 truth. The announcement must not claim support beyond release evidence.
 
-### 12. Monitor After Release
+### 9. Monitor After Release
 
 For the first release window:
 

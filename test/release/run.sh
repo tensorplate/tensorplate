@@ -10,12 +10,21 @@ repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$repo_root"
 
 script="tools/release/tensorplate-release.sh"
+build_script="tools/release/build-release-artifacts.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 bash -n "$script"
+bash -n "$build_script"
 "$script" --help >/dev/null
 "$script" prepare --version 0.1.0 --dry-run >/dev/null
+"$script" cut --version 0.1.0 --final --dry-run >/dev/null
+"$script" cut --version 0.1.0 --rc 1 --dry-run >/dev/null
+"$build_script" --help >/dev/null
+grep -q 'name: Release' .github/workflows/release.yml
+grep -q 'tools/release/build-release-artifacts.sh' .github/workflows/release.yml
+grep -q 'draft="true"' .github/workflows/release.yml
+grep -q 'gh release edit "${TP_TAG}" --draft=false --latest' docs/release/runbook.md
 
 mkdir -p "$tmp/artifacts"
 for pkg in \

@@ -58,7 +58,7 @@ Release notes must not claim support beyond validation evidence.
 
 | Branch | Purpose |
 | --- | --- |
-| `release/vX.Y.Z` | Clean release branch used to finalize metadata, build artifacts, tag, and publish. |
+| `release/vX.Y.Z` | Clean release branch used to finalize metadata and create the annotated source tag that triggers CI publication. |
 | `hotfix/vX.Y.Z` | Patch-release branch for a targeted fix after a public release. |
 | Feature/tooling branch | Implementation PR branch for release tooling and docs only. |
 
@@ -70,9 +70,13 @@ assets, or announce the release.
 
 | Tag type | Format | Rules |
 | --- | --- | --- |
-| Release candidate | `vX.Y.Z-rc.N` | Annotated tag from `release/vX.Y.Z`; supersede by incrementing `N`, never by rewriting. |
-| Final release | `vX.Y.Z` | Annotated tag from a clean release commit after final preflight passes. |
+| Release candidate | `vX.Y.Z-rc.N` | Annotated tag from `release/vX.Y.Z`; supersede by incrementing `N`, never by rewriting. The Release workflow publishes RC tags as public prereleases. |
+| Final release | `vX.Y.Z` | Annotated tag from a clean release commit. Pushing the tag triggers the Release workflow to build artifacts and create a draft GitHub Release for final verification. |
 | Patch release | `vX.Y.Z` | Annotated tag from a hotfix release branch after targeted validation. |
+
+The release workflow publishes only annotated tags. Lightweight tags are
+rejected. Public prerelease tags use the RC form above; `alpha` tags are
+not supported until the Debian prerelease-version policy is added.
 
 Final tags are immutable after publication. Maintainers must not
 force-push, delete, move, or recreate a published final tag. If an

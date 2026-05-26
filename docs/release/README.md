@@ -4,8 +4,10 @@ This directory owns the public release process for TensorPlate. The
 release flow has two separated phases:
 
 1. Add and review release machinery changes in a normal implementation PR.
-2. After that PR merges, cut and publish the release from a clean
-   `release/vX.Y.Z` commit and annotated `vX.Y.Z` tag.
+2. After that PR merges, run the release script from a clean checkout.
+   It creates the `release/vX.Y.Z` source commit and annotated tag; the
+   tag-driven Release workflow builds packages and attaches them to the
+   GitHub Release.
 
 The implementation PR must not be treated as the release. Final
 publication requires the release branch, green CI, release-gate evidence,
@@ -26,6 +28,7 @@ Release automation entry point:
 
 ```bash
 tools/release/tensorplate-release.sh --help
+tools/release/tensorplate-release.sh cut --version 0.1.0 --final --dry-run
 ```
 
 Create one release note file per final tag, for example
