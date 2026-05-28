@@ -1,8 +1,14 @@
 <p align="center">
-  <img src="docs/assets/tensorplate_branding_header_dark.png" alt="TensorPlate" width="100%">
+  <img src="docs/assets/readme_banner.png" alt="TensorPlate" width="100%">
 </p>
 
 # TensorPlate
+
+[![C++](https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml)
+[![Rust](https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml)
+[![Python](https://github.com/tensorplate/tensorplate/actions/workflows/python.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/python.yml)
+[![Release](https://github.com/tensorplate/tensorplate/actions/workflows/release.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/release.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 TensorPlate is an inference platform for edge AI and robotics. It is designed for reliable, observable model serving on hardware-constrained devices, with a C++ runtime hot path and Rust control-plane components.
 
