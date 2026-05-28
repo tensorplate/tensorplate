@@ -24,9 +24,46 @@ TensorPlate is an inference platform for edge AI and robotics — reliable, obse
 
 ## Getting Started
 
-**Install from a release.** Start with [external-install.md](docs/install/external-install.md), then [quickstart.md](docs/install/quickstart.md). Release process and tag policy: [docs/release/](docs/release/).
+### Install From A Release
 
-**Build from source.** Read [CONTRIBUTING.md](CONTRIBUTING.md), then follow [local-validation.md](docs/contributing/local-validation.md) for the exact CMake, ctest, Cargo, and lint commands CI runs. For Jetson cross-compilation, see [jetson-cross-compile.md](docs/contributing/jetson-cross-compile.md).
+On a supported target (Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
+
+```bash
+export TP_VERSION=0.1.0
+export TP_TAG="v${TP_VERSION}"
+export TP_DEBIAN_VERSION="${TP_VERSION}-1"
+export TP_ARCH=arm64
+export TP_RELEASE_URL="https://github.com/tensorplate/tensorplate/releases/download/${TP_TAG}"
+
+mkdir -p "/tmp/tensorplate-${TP_TAG}" && cd "/tmp/tensorplate-${TP_TAG}"
+for pkg in common agent serving observability cli; do
+  curl -fL -O "${TP_RELEASE_URL}/tensorplate-${pkg}_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+done
+curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS" && sha256sum -c SHA256SUMS
+
+sudo apt install ./tensorplate-*_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb
+sudo systemctl enable --now tensorplate-agent tensorplate-observability
+tensorplate doctor
+```
+
+Full guide, troubleshooting, and the optional Python/PyTorch backend: [external-install.md](docs/install/external-install.md). Then walk through [quickstart.md](docs/install/quickstart.md).
+
+### Build From Source
+
+```bash
+# C++ runtime and serving worker
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure -L T1
+
+# Rust agent, CLI, observability
+cargo test --workspace --no-fail-fast
+```
+
+Prerequisites, lint/format checks, and the full CI-equivalent sequence: [local-validation.md](docs/contributing/local-validation.md). For Jetson cross-compilation, see [jetson-cross-compile.md](docs/contributing/jetson-cross-compile.md). Release process and tag policy: [docs/release/](docs/release/).
 
 ## Repository Layout
 
