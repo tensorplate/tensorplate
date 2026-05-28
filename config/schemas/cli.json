@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/cli.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/cli.json",
   "title": "TensorPlate CLI Config",
   "description": "Versioned configuration for `tensorplate-cli` (V01-E11). The CLI loads this file at startup, validates it before any command runs, and refuses to call the agent until validation succeeds. v0.1.0 implements `local` and explicit `url` modes; `ssh-tunnel`, `overlay`, and `relay` are reserved in the schema and fail at command execution with a typed `Unsupported` error.",
   "type": "object",

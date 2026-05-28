@@ -11,7 +11,7 @@ a local safe-state signal when the aggregate state becomes
 - detects a wedged serving worker without depending on the agent's
   supervision loop,
 - exposes a minimal local status snapshot for the V01-E11 CLI and the
-  V01-E15 validation harness,
+  release validation harness,
 - optionally publishes a v0.1.0 ROS 2 health-topic stub
   (`diagnostic_msgs/msg/DiagnosticArray` on `/tensorplate/health`).
 

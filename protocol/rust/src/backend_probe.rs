@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F05: backend availability probing.
+// packaging: backend availability probing.
 //
-// The probe consumes a [`BackendDescriptor`] (V01-E14-F05 protocol
+// The probe consumes a [`BackendDescriptor`] (packaging protocol
 // surface) and reports a typed [`BackendProbeReport`] covering descriptor
 // presence, runtime-version compatibility, Python interpreter presence
 // + version, declared Python import module availability, and PyTorch
@@ -19,7 +19,7 @@
 //
 // The agent calls the probe at startup for every backend listed in
 // `available_backends` whose descriptor location is provided in
-// configuration; the CLI doctor calls the probe per-finding (V01-E14-F06).
+// configuration; the CLI doctor calls the probe per-finding (packaging).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

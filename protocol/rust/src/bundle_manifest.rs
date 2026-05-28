@@ -2,7 +2,7 @@
 //
 // V01-E08-F03: Rust mirror of `protocol/schemas/bundle_manifest.json`.
 //
-// Owned by the agent's deploy-time bundle verifier. V01-E13 may add fields
+// Owned by the agent's deploy-time bundle verifier. bundle format may add fields
 // without bumping the bundle format version as long as the fields listed
 // here keep their shape; the verifier deliberately tolerates unknown extra
 // fields so the manifest envelope can grow without breaking older agents.
@@ -495,7 +495,7 @@ pub struct SbomReference {
     pub digest: String,
 }
 
-/// V01-E13 manifest envelope. Mirrors
+/// bundle format manifest envelope. Mirrors
 /// `protocol/schemas/bundle_manifest.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BundleManifest {

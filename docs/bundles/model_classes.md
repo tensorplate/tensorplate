@@ -1,6 +1,6 @@
 # Model Classes and IO Schema
 
-**Status:** v0.1.0 (V01-E13-F03 / -F04)
+**Status:** v0.1.0 bundle format
 **Schema:** [`protocol/schemas/bundle_manifest.json`](../../protocol/schemas/bundle_manifest.json)
 
 The manifest's `model_class` slug picks one of the v0.1.0 model
@@ -90,8 +90,8 @@ require generation runtime support.
 ```
 
 V01-E12 telemetry consumes the control frequency to bound rolling
-control-loop jitter aggregation; V01-E15 hardware validation uses the
-SmolVLA fixture as the reference VLA bundle.
+control-loop jitter aggregation; release validation uses the SmolVLA
+fixture as the reference VLA bundle.
 
 ### `vision`, `speech`, `embedding`, `custom`
 

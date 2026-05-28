@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E13-F07 fixture helper.
+// bundle format fixture helper.
 //
 // `tensorplate-bundle-tool` is intentionally minimal: it walks a bundle
 // directory, computes the sha256 of every file referenced in

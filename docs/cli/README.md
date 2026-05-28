@@ -54,7 +54,7 @@ Every subcommand supports `--output json`. Envelope schema:
 ## Exit codes
 
 See [`exit-codes.md`](./exit-codes.md). The numeric values are part of the v0.1.0
-CLI contract — V01-E15 validation scripts assert on them.
+CLI contract — release validation scripts assert on them.
 
 ## Command details
 

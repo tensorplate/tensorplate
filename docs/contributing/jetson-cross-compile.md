@@ -71,7 +71,7 @@ the toolchain file does not bake in any contributor's machine.
 
 ## Verifying cross-compiled artifacts on device
 
-T4 hardware-in-loop validation lands in V01-E15 along with the end-to-end
+T4 hardware-in-loop validation lands in release validation along with the end-to-end
 deploy and inference loop. Until then, cross-compiled artifacts can be
 smoke-tested manually:
 

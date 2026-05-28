@@ -8,8 +8,8 @@ Jetson-class Linux host once the binaries are built and staged.
 V01-E14 does **not** publish packages anywhere. It produces inspectable
 artifacts and a clean-install runbook that V01-E15 consumes on the
 target device. Signing, APT repositories, and GitHub release uploads
-are out of scope for this milestone — see
-`tensorplate-internals/planning/v0.1.0/v0.1_E14.md` for the boundary.
+are out of scope for this milestone. The public release publication flow
+is owned by [`docs/release/`](../docs/release/).
 
 ## Layout
 

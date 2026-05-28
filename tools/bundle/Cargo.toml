@@ -1,6 +1,6 @@
 [package]
 name = "tensorplate-bundle-tool"
-description = "V01-E13 fixture helper: regenerate artifact and manifest digests deterministically using the shared bundle parser."
+description = "bundle format fixture helper: regenerate artifact and manifest digests deterministically using the shared bundle parser."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

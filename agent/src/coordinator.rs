@@ -95,7 +95,7 @@ impl Coordinator {
         }
     }
 
-    /// Attach V01-E14-F05 backend probe reports. The agent main calls
+    /// Attach packaging backend probe reports. The agent main calls
     /// this once at startup with the cached probe outcomes for every
     /// backend listed in `config.available_backends`. The coordinator
     /// hands the map to [`crate::bundle::verify_with_probes`] so a

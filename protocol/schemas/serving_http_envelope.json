@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/serving_http_envelope.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/serving_http_envelope.json",
   "title": "TensorPlate Serving HTTP Envelope",
   "description": "Wire-format request/response envelope used by `tensorplate-serving`'s `/infer`, `/policy/infer`, `/policy/result/<id>`, and `/policy/cancel/<id>` routes. Single-input vision requests and LeRobot-compatible async policy requests share the same `inputs` shape; the only difference between sync and async is the HTTP route and the response status.\n\nTensor payloads are base64-encoded raw bytes following RFC 4648 with the standard alphabet. The runtime derives a TensorView from `tensor.dtype`, `tensor.shape`, `tensor.layout`, `tensor.byte_offset`, and `tensor.byte_size`; the payload must contain at least `byte_offset + byte_size` bytes.",
   "oneOf": [
@@ -103,7 +103,7 @@
         "request_id": {"type": "string"},
         "correlation_id": {"type": "string"},
         "status": {"type": "string", "const": "failure"},
-        "error": {"$ref": "https://schemas.tensorplate.io/v0.1/error.json"},
+        "error": {"$ref": "https://tensorplate.com/schemas/v0.1/error.json"},
         "timing": {"$ref": "#/definitions/Timing"}
       }
     },
@@ -137,7 +137,7 @@
         "action_chunk_sequence": {"type": "integer"},
         "result": {"oneOf": [{"$ref": "#/definitions/InferResponseSuccess"},
                               {"$ref": "#/definitions/InferResponseFailure"}]},
-        "error": {"$ref": "https://schemas.tensorplate.io/v0.1/error.json"}
+        "error": {"$ref": "https://tensorplate.com/schemas/v0.1/error.json"}
       }
     },
     "AsyncCancelResponse": {

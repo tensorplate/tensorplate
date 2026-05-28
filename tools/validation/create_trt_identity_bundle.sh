@@ -98,7 +98,7 @@ manifest = {
             "path": "model.engine",
             "digest": digest,
             "byte_size": size,
-            "description": "E15 TensorRT identity engine generated on the target Jetson.",
+            "description": "release validation TensorRT identity engine generated on the target Jetson.",
         }
     ],
     "inputs": [
@@ -145,8 +145,8 @@ manifest = {
 payload = struct.pack("<48f", *[float(i) for i in range(48)])
 request = {
     "schema_version": "0.1",
-    "request_id": "e15-trt-identity-1",
-    "endpoint": "e15-trt-identity",
+    "request_id": "validation-trt-identity-1",
+    "endpoint": "validation-trt-identity",
     "inputs": [
         {
             "name": "image",

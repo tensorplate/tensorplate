@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # SPDX-License-Identifier: Apache-2.0
 #
-# V01-E14-F08: filesystem layout verifier.
+# packaging: filesystem layout verifier.
 #
 # Stages the install layout under a tempdir using the shared helper
 # and asserts every documented directory exists with the documented

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F05: backend descriptor parser.
+// packaging: backend descriptor parser.
 //
 // A backend descriptor is the metadata file installed by an
 // out-of-tree backend package. `tensorplate doctor` and the agent

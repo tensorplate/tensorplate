@@ -97,7 +97,7 @@ fn build_supervisor(cfg: &AgentConfig) -> Result<Option<Arc<WorkerSupervisor>>, 
 }
 
 /// Probe every backend listed in `available_backends` for its
-/// V01-E14-F05 readiness state. The map is then handed to the
+/// packaging readiness state. The map is then handed to the
 /// coordinator so a `python_pytorch` deploy with no PyTorch (or no
 /// descriptor at all) is refused before staging.
 ///

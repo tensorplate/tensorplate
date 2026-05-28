@@ -34,7 +34,7 @@ The artifacts I cross-checked are:
 | Concern | Required mapping | v0.1.0 status |
 | ------- | ---------------- | ------------- |
 | Bundle artifact | `tensorplate-model` bundle must accept a `.xmodel` artifact path under `ModelSpec::artifact_path`, alongside an optional Vitis-style INT8 calibration metadata blob. | `ModelSpec::artifact_path` is a free-form path string and `backend_hint` is a free-form string today (validated by the registry, not by enum). Capability-record fields cover precision and target compatibility notes. **No public change required.** |
-| Bundle schema | `model_class`, named `inputs`, named `outputs`, `runtime_capabilities`, and `precision` must be enough without leaking Vitis types into `protocol/schemas/`. | Confirmed by the existing schema; the V01-E13 reserved-`language`-block precedent shows we extend by adding sibling blocks, not by changing the envelope. **No public change required.** |
+| Bundle schema | `model_class`, named `inputs`, named `outputs`, `runtime_capabilities`, and `precision` must be enough without leaking Vitis types into `protocol/schemas/`. | Confirmed by the existing schema; the bundle format reserved-`language`-block precedent shows we extend by adding sibling blocks, not by changing the envelope. **No public change required.** |
 | `load` semantics | Adapter must be able to deserialize the `.xmodel`, instantiate the Vitis AI graph runner, and report `LoadFailed` / `ConfigInvalid` / `Unsupported` / `OOMError` on a typed error. | `ExecutionSession::do_load(const ModelSpec&)` accepts the spec by reference and returns `Result<void>`. No CUDA / TensorRT / Python assumption appears in the wrapper. **No public change required.** |
 | `prime` semantics | DPU runner instantiation, fixed-shape binding setup, and warmup happen here. The session must transition to `Ready` only when binding succeeds. | `do_prime()` is exactly this slot; it is non-virtual at the NVI level and the wrapper transitions to `Ready` only when the protected `do_prime` returns success. **No public change required.** |
 | `infer` semantics | Vitis AI executes synchronously with fixed-shape inputs; we must copy from `BufferRef` -> DPU-compatible memory before launching the runner. | `do_infer(const InferRequest&)` returns `Result<std::vector<NamedOutput>>`. The NVI wrapper validates shape before dispatch using `TensorView::byte_size()`. Adapters that need their own memory copy (TensorRT and a future Vitis AI adapter) just call `BufferManager::view(buf, tv)` and write the bytes into their own staging buffer. **No public change required.** |
@@ -56,7 +56,7 @@ The artifacts I cross-checked are:
 Yes. `ModelSpec::artifact_path` is a free-form path. Additional Vitis
 metadata (calibration / quantization profile) belongs in a new bundle
 sibling block whose addition does not require revising the envelope,
-analogous to the `language` block already reserved in V01-E13.
+analogous to the `language` block already reserved in bundle format.
 
 > *Does the `load` / `prime` / `infer` / `infer_async` / `unload`
 > lifecycle cover Vitis AI runner lifetime and any required DPU setup?*
@@ -110,7 +110,7 @@ work a future Kria/Vitis AI adapter requires is:
    `runtime/src/backend/builtin.cpp` under a new
    `TP_ENABLE_VITIS_AI` build flag).
 2. A bundle sibling block for Vitis-style calibration metadata, added
-   through the V01-E13 schema-evolution rules (no envelope change).
+   through the bundle format schema-evolution rules (no envelope change).
 3. T1 unit tests asserting registration, capability publication, and
    the no-SDK `Unsupported` path (mirroring V01-E05-F02 / F03).
 4. T4 hardware-in-loop validation on a Kria K26 / K24 board (out of
@@ -121,29 +121,27 @@ work a future Kria/Vitis AI adapter requires is:
 The v0.1.0 public interfaces — `ExecutionSession` (V01-E04),
 `BackendCapability` and `BackendRegistry` (V01-E05-F01), `BufferRef`
 and `TensorView` (V01-E03), `ModelSpec` (V01-E02), the event taxonomy
-(V01-E04-F06), and the bundle envelope (V01-E13) — are sufficient for
+(V01-E04-F06), and the bundle envelope (bundle format) — are sufficient for
 a future Kria/Vitis AI adapter. No required interface change is
 identified.
 
-The V01-E05 Epic acceptance criterion *"Kria/Vitis AI design review
+The Vitis AI design-review acceptance criterion *"Kria/Vitis AI design review
 records that a future adapter can plug in without public interface
 revision, or identifies required v0.1.0 interface fixes before
 freeze"* is met by this document.
 
-When the Vitis AI implementation lands (post-v0.1.0, see the roadmap
-charter under `v0.4+` in
-`tensorplate-internals/planning/v0.1.0/tensorplate-oss-v0.1-architecture-and-roadmap.md`),
-this document gets revisited and any deviation from the assumptions
-above gets recorded as an addendum here.
+When the Vitis AI implementation lands after v0.1.0, this document gets
+revisited and any deviation from the assumptions above gets recorded as
+an addendum here.
 
 ---
 
-## V01-E13 schema review addendum
+## Bundle Format Schema Review Addendum
 
 > **Status:** schema portion of the Kria/Vitis AI review completed in
-> V01-E13-F08.
+> bundle format.
 
-V01-E13 introduces the v0.1.0 manifest authoring surface. The schema
+The bundle format introduces the v0.1.0 manifest authoring surface. The schema
 portion of this review answers the explicit Kria/Vitis questions from
 the roadmap checklist:
 
@@ -151,7 +149,7 @@ the roadmap checklist:
   enum reserves `vitis_xmodel`, the `artifacts[].path` rules accept the
   `.xmodel` extension, and `artifact_kind_for_path` maps the extension
   to the same slug. The synthetic Vitis fixture
-  (`test/models/bundles/v01_e13/vitis_synthetic/`) proves the envelope
+  (`test/models/bundles/v0_1/vitis_synthetic/`) proves the envelope
   carries an `.xmodel` plus calibration metadata without schema
   revision.
 - **Fixed-shape and op-coverage constraints.** The
@@ -175,14 +173,14 @@ the roadmap checklist:
   Vitis-class-specific blocks (if any) follow the same pattern without
   bumping the format version.
 
-### V01-E13 sign-off
+### Bundle Format Sign-Off
 
 The bundle schema, parser, and integrity contract carry every Vitis
 metadata field a future adapter would need. No public schema change is
 required; the only outstanding work is the Vitis AI runtime adapter
 itself, which is intentionally out of scope for v0.1.0.
 
-The V01-E13 Epic acceptance criterion *"A Vitis AI `.xmodel` artifact
+The bundle-format acceptance criterion *"A Vitis AI `.xmodel` artifact
 can be represented without schema revision"* is met by this addendum,
 the schema, the Rust types, the synthetic fixture, and the conformance
 suite. The interface-freeze gate inherits this sign-off.

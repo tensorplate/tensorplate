@@ -1,6 +1,6 @@
 # TensorPlate v0.1.0 systemd services
 
-This page is the V01-E14-F03 service lifecycle contract.
+This page is the packaging service lifecycle contract.
 
 ## What is installed
 

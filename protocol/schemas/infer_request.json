@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/infer_request.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/infer_request.json",
   "title": "TensorPlate InferRequest",
   "description": "Normalized inference-request payload used by the local HTTP endpoint and the LeRobot PolicyServer-compatible async path. Mirrors include/tensorplate/core/infer_request.hpp::InferRequest. Single-input vision is the n=1 case of `inputs`.",
   "type": "object",
@@ -35,10 +35,10 @@
             "description": "Stable model-input name (e.g., `image`, `image_front`, `state`)."
           },
           "buffer": {
-            "$ref": "https://schemas.tensorplate.io/v0.1/buffer_ref.json"
+            "$ref": "https://tensorplate.com/schemas/v0.1/buffer_ref.json"
           },
           "tensor": {
-            "$ref": "https://schemas.tensorplate.io/v0.1/tensor_view.json"
+            "$ref": "https://tensorplate.com/schemas/v0.1/tensor_view.json"
           }
         }
       },

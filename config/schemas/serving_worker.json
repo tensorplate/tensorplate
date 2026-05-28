@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/serving_worker.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/serving_worker.json",
   "title": "TensorPlate Serving Worker Config",
   "description": "Runtime configuration consumed by the V01-E07 `tensorplate-serving` composition root. Mirrors `include/tensorplate/serving/config.hpp::ServingConfig`. Defaults are conservative and loopback-only.",
   "type": "object",
@@ -27,7 +27,7 @@
         "accept_thread_pool_size": {"type": "integer", "minimum": 1, "default": 16}
       }
     },
-    "scheduler": {"$ref": "https://schemas.tensorplate.io/v0.1/scheduler.json"},
+    "scheduler": {"$ref": "https://tensorplate.com/schemas/v0.1/scheduler.json"},
     "buffer": {
       "type": "object",
       "additionalProperties": false,

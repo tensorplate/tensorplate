@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F04: parse the shipped packaging config under
+// packaging: parse the shipped packaging config under
 // `packaging/conf/observability.json`. Asserts the default install
 // stays local-only and matches the documented filesystem layout.
 

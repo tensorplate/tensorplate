@@ -1,7 +1,7 @@
 # Bounded Diagnostics Retention and Sinks (V01-E12-F06)
 
 Diagnostic retention keeps a bounded local copy of structured log
-events for the V01-E11 `tensorplate logs` reader and the V01-E15
+events for the V01-E11 `tensorplate logs` reader and the release validation
 validation harness. The retention store never blocks the serving path;
 producers drop into a bounded queue and the sink absorbs the loss.
 

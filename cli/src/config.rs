@@ -24,7 +24,7 @@ pub const CLI_CONFIG_SCHEMA_VERSION: &str = "0.1";
 /// Default profile name used when no config file is present.
 pub const DEFAULT_PROFILE_NAME: &str = "local";
 
-/// Default Unix socket path for the local agent. Mirrors V01-E14 packaging.
+/// Default Unix socket path for the local agent. Mirrors packaging.
 pub const DEFAULT_LOCAL_AGENT_SOCKET: &str = "/var/run/tensorplate/agent.sock";
 
 /// Default request timeout for agent calls (milliseconds).

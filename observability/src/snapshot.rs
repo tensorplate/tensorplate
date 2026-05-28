@@ -5,7 +5,7 @@
 // The snapshot exposes the v0.1.0 required status fields: `agent_state`,
 // `serving_state`, `observability_state`, `active_deployment`, `backend`,
 // `missed_heartbeat_count`, `missed_deadline_rate`, `queue_depth`, and
-// `last_error_code`, plus the bookkeeping the V01-E11 CLI and V01-E15
+// `last_error_code`, plus the bookkeeping the V01-E11 CLI and release validation
 // validation harness need (`last_event_sequence`, `last_heartbeat_age_ms`,
 // safe-state sink status, ROS 2 publisher status).
 //

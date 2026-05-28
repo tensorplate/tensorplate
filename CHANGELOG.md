@@ -8,10 +8,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
-- Packaging and first-run install (V01-E14). v0.1.0 becomes
+- Release workflow and external installability (release publication). v0.1.0 gains
+  maintainer-facing release machinery and public install documentation,
+  but the release is still cut only after this tooling PR merges.
+    - `tools/release/tensorplate-release.sh` adds guarded release
+      subcommands for preflight, metadata prepare dry-runs, artifact
+      manifest/checksum generation, annotated tag creation, and draft
+      GitHub Release publication. Mutating paths require clean worktree,
+      explicit confirmation, and final release evidence.
+    - Release documentation under `docs/release/` defines the runbook,
+      version/changelog policy, branch and tag policy, final tag
+      immutability, sign-off template, artifact manifest format,
+      checksum verification, GitHub Release attachment procedure,
+      post-release hotfix/deprecation policy, and draft release notes.
+    - External-user docs under `docs/install/` now start from GitHub
+      Release assets rather than local build-tree paths and cover package
+      download, SHA256 verification, core install, optional
+      `tensorplate-backend-python-pytorch`, service start, doctor,
+      quickstart deploy/inference, status/log/metrics inspection,
+      rollback, uninstall, and troubleshooting.
+    - Clean-room release smoke procedure under `docs/validation/` defines
+      the post-merge clean-room evidence path from GitHub Release assets on the
+      Jetson Orin Nano 8GB Super hardware floor.
+
+- Packaging and first-run install (packaging). v0.1.0 becomes
   installable as a Jetson-class Linux appliance. None of the
-  artifacts are published yet — V01-E14 ships the inspectable
-  skeleton, the verifier suite, and the V01-E15 handoff runbook.
+  artifacts are published yet — packaging ships the inspectable
+  skeleton, the verifier suite, and the release validation handoff.
     - Native Debian-style package split under `packaging/debian/`
       with binary packages for `tensorplate-common`,
       `tensorplate-agent`, `tensorplate-serving`,
@@ -57,7 +80,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       when the bundle's `backend_hint` maps to a non-Runnable
       probe. SmolVLA / Python bundles fail at deploy time, never
       at first inference.
-    - `tensorplate doctor` gains the V01-E14 install diagnostics
+    - `tensorplate doctor` gains the packaging install diagnostics
       (stable finding IDs):
       `path_layout`, `config_files`, `agent_systemd_unit`,
       `observability_systemd_unit`, `serving_systemd_absent`,
@@ -65,7 +88,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       `python_pytorch_runtime`, `cuda_runtime`. Doctor degrades
       to `missing` (not `fail`) when no install layout is
       detected so host CI on dev hosts stays green.
-    - Lifecycle policy (V01-E14-F07):
+    - Lifecycle policy (packaging):
       reinstall preserves user state; upgrade preflight refuses
       unknown `schema_version`, unsafe `/var/lib/tensorplate`
       ownership, or a downgrade; `remove` keeps state, `purge`
@@ -79,13 +102,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
     - Operator + handoff documentation under `docs/install/`:
       filesystem-layout, services, lifecycle,
       python-pytorch-backend, clean-install-runbook, and
-      e15-handoff. Doctor finding catalog updated in
+      packaging-validation-handoff. Doctor finding catalog updated in
       `docs/cli/doctor.md`.
 
 ### Behavior changes
 
 - `tensorplate_agent::config::AgentConfig` is unchanged in shape;
-  the V01-E14 backend probe is carried on the coordinator via the
+  the packaging backend probe is carried on the coordinator via the
   new `Coordinator::with_backend_probes` builder. Tests and
   embedders that did not call the builder see no behavior change.
 - `tensorplate_agent::bundle::verify` is unchanged. The new
@@ -97,17 +120,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   findings for `python_pytorch_backend` / `tensorrt_runtime` /
   `libtorch_runtime` from the runtime-environment probe; the
   install-probe module owns those checks now with real probing.
-  Finding IDs are stable; the V01-E15 harness's grep keys are
+  Finding IDs are stable; the release validation harness's grep keys are
   unchanged.
 
-- Model bundle format (V01-E13). The v0.1.0 bundle authoring surface
+- Model bundle format (bundle format). The v0.1.0 bundle authoring surface
   lands as the shared `tensorplate_protocol::bundle` module that the
   agent verifier, CLI, and fixture tooling consume. The same module
   owns the deployable artifact contract: envelope, manifest schema,
   named input/output schema, model-class blocks, runtime capability
   declarations, precision metadata, integrity verification, and
   compatibility evaluation.
-    - `protocol/rust/src/bundle.rs` (V01-E13-F01 / -F02 / -F06) — the
+    - `protocol/rust/src/bundle.rs` (bundle format) — the
       single shared parser entrypoint. `parse_bundle` reads a bundle
       directory, validates the manifest semantically, streams sha256
       digests over every artifact, verifies the optional canonical
@@ -117,8 +140,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       violations cover runtime range, hardware family, memory,
       backend availability, capability gaps, precision support, and
       backend / artifact-kind cross-checks.
-    - `protocol/schemas/bundle_manifest.json` (V01-E13-F02 / -F03 /
-      -F04 / -F05) — full v0.1.0 manifest authoring surface. Adds
+    - `protocol/schemas/bundle_manifest.json` (bundle format) — full v0.1.0 manifest authoring surface. Adds
       named `inputs[]` / `outputs[]` (vision is the n=1 case;
       SmolVLA uses named multi-input + named action chunk output),
       `model_blocks` for every class with consistency validation,
@@ -133,14 +155,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       rejected at parse time. v0.1.0 recognizes `tensorrt`,
       `libtorch`, `python_pytorch`; `vitis_ai` and `onnxruntime` are
       reserved schema slots.
-    - Agent deploy integration (V01-E13-F06). `agent/src/bundle.rs`
+    - Agent deploy integration (bundle format). `agent/src/bundle.rs`
       is now a thin wrapper around the shared parser + evaluator;
       the duplicate V01-E08 verifier was removed in favor of the
       shared path. `parse_and_check` exposes the full violation list
       to CLI deploy/doctor rendering; `verify` preserves the typed
       single-error short-circuit for the deploy transaction.
-    - Example bundle fixtures (V01-E13-F07) under
-      `test/models/bundles/v01_e13/`: vision_tensorrt,
+    - Example bundle fixtures (bundle format) under
+      `test/models/bundles/v0_1/`: vision_tensorrt,
       smolvla_python_pytorch, language_reserved, and the synthetic
       Vitis-shaped fixture with a fake `.xmodel` and Vitis-style
       INT8 calibration metadata. Invalid variants cover corrupted
@@ -150,14 +172,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       fixture digest helper. Re-uses the shared canonicalization so
       stale digests fail conformance tests rather than silently
       drifting.
-    - Bundle conformance suite (V01-E13-F08) at
+    - Bundle conformance suite (bundle format) at
       `protocol/rust/tests/bundle_conformance.rs` — 13 tests asserting
       parser, schema, integrity, compatibility, backend hint, precision,
       and model-class block behavior, including that the runtime does
       not attempt heuristic backend fallback when the declared backend
       is unavailable.
     - Documentation under `docs/bundles/` (layout, manifest,
-      model_classes, backends, integrity, compatibility) and the V01-E13
+      model_classes, backends, integrity, compatibility) and the bundle format
       schema review addendum in
       `docs/architecture/kria-vitis-ai-review.md`.
 
@@ -266,7 +288,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       `metrics_export`, `control_loop`, `last_correlation_id`, and
       `last_failure_reason` fields. `SnapshotWriter::update_v12` and
       `update_last_failure` keep V01-E10 callers untouched while
-      letting V01-E11 / V01-E15 consumers read the new fields. Schema
+      letting V01-E11 / release validation consumers read the new fields. Schema
       mirror at `protocol/schemas/observability_status.json` (extended
       with `diagnostics_sink`, `metrics_export`, `control_loop`,
       `last_correlation_id`, `last_failure_reason`); empty fields skip
@@ -302,7 +324,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       for global flags (`--config`, `--profile`, `--agent-url`,
       `--output`, `--timeout-ms`, `--no-color`, `--quiet`/`--verbose`)
       and per-subcommand flags. `tensorplate --help` and
-      `tensorplate <cmd> --help` render stable text suitable for E15
+      `tensorplate <cmd> --help` render stable text suitable for release validation
       validation logs.
     - `tensorplate_cli::config::CliConfig` (V01-E11-F01-T01) —
       versioned schema for the CLI config file mirrored at
@@ -327,7 +349,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       inference_failed). The mapping lives in `docs/cli/exit-codes.md`.
     - `tensorplate_cli::output::Renderer` (V01-E11-F01-T02) — shared
       human + JSON renderer. JSON envelopes follow
-      `protocol/schemas/cli_output.json` so V01-E15 validation can
+      `protocol/schemas/cli_output.json` so release validation can
       grep on stable field names.
     - `tensorplate doctor` (V01-E11-F03) — read-only validation pass
       with a stable finding taxonomy
@@ -356,7 +378,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       observability snapshot (`--observability-snapshot <path>`,
       mirroring V01-E10). Severity ordering
       (`ready < degraded < no_heartbeat < crash_loop < failed`) is
-      stable for V01-E15 grep assertions.
+      stable for release validation grep assertions.
     - `tensorplate infer` (V01-E11-F06) — convenience inference call
       against the v0.1.0 serving HTTP envelope. Endpoint resolution
       order: `--serving-url` flag, profile `serving_url`,
@@ -448,7 +470,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       SinkStatus, PublisherStatus, ListenerStatus,
       BoundedDiagnostics, RecentTransition, RecentError}`
       (V01-E10-F06) — versioned status snapshot that surfaces every
-      v0.1.0 required field plus the diagnostics ring V01-E11 / V01-E15
+      v0.1.0 required field plus the diagnostics ring V01-E11 / release validation
       consume. File-backed snapshots use atomic-replace
       (`*.partial` -> rename) so readers never observe partial records.
     - `observability::service::Service` (V01-E10-F01) — composition
@@ -472,7 +494,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       context.
     - `protocol/schemas/observability_status.json` — versioned status
       snapshot schema consumed by the V01-E11 CLI (`tensorplate
-      status`) and the V01-E15 validation harness. Includes
+      status`) and the release validation harness. Includes
       sink / publisher / listener counters and the bounded
       `diagnostics` ring.
 - Observability integration / failure-injection tests
@@ -900,7 +922,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   that **no public interface change is required for v0.1.0 freeze**;
   the only work required for a future Vitis AI adapter is a new
   `runtime/src/adapters/vitis_ai/` directory, a bundle sibling block
-  for Vitis-style calibration metadata (addable through the V01-E13
+  for Vitis-style calibration metadata (addable through the bundle format
   schema-evolution rules), a T1 unit-test set mirroring the
   TensorRT / LibTorch pattern, and Kria K26 / K24 HIL validation.
 - Real-adapter conformance harness (V01-E05-F06-T01) at
@@ -932,7 +954,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   fixture lands. The fixture backend round-trip already covers exact
   bytewise correctness for `python_pytorch`; vision-TensorRT and
   LibTorch golden artifacts land in V01-E05-F02-T03 / F03-T03 /
-  V01-E15.
+  release validation.
 - Python/PyTorch sidecar execution-backend adapter and supervisor
   (V01-E05-F05) under `runtime/src/adapters/python_pytorch/`,
   registered as `python_pytorch`. The adapter forks one Python sidecar

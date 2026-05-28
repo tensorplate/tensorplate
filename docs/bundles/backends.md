@@ -1,6 +1,6 @@
 # Backend Hints, Artifacts, and Capabilities
 
-**Status:** v0.1.0 (V01-E13-F05)
+**Status:** v0.1.0 (bundle format)
 **Schema:** [`protocol/schemas/bundle_manifest.json`](../../protocol/schemas/bundle_manifest.json)
 **Backend registry:** [`docs/architecture/backend-registry.md`](../architecture/backend-registry.md)
 
@@ -126,5 +126,5 @@ This is the v0.1.0 design intent: prove the schema supports Kria silicon
 without claiming the runtime can execute it.
 
 The synthetic Vitis fixture lives at
-[`test/models/bundles/v01_e13/vitis_synthetic/`](../../test/models/bundles/v01_e13/vitis_synthetic/).
+[`test/models/bundles/v0_1/vitis_synthetic/`](../../test/models/bundles/v0_1/vitis_synthetic/).
 It is parser/design-review only — never staged on a v0.1.0 device.

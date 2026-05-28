@@ -64,7 +64,7 @@ cargo run -p tensorplate-agent -- --config /etc/tensorplate/agent.json
 
 The agent applies startup recovery before opening the control socket, prints
 its bound address on stderr, and runs until killed. v0.1.0 relies on systemd
-/ supervisor to deliver SIGTERM for shutdown (V01-E14 ships the systemd unit).
+/ supervisor to deliver SIGTERM for shutdown (packaging ships the systemd unit).
 
 ## Tests
 

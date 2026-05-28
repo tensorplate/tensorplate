@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E03 Epic acceptance: end-to-end buffer-plane integration test.
+// End-to-end buffer-plane integration test.
 //
 // Exercises the full v0.1.0 buffer-plane loop end to end:
 //

@@ -23,7 +23,7 @@ data source is down.
 
 ## Severity ordering
 
-The `payload.severity` field is a stable label used by V01-E15 validation:
+The `payload.severity` field is a stable label used by release validation:
 
 ```
 ready < degraded < no_heartbeat < crash_loop < failed

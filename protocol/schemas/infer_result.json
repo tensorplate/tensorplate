@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/infer_result.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/infer_result.json",
   "title": "TensorPlate InferResult",
   "description": "Normalized inference-result payload. Mirrors include/tensorplate/core/infer_result.hpp::InferResult. The result is either a success (vector of named outputs) or a failure (typed Error); the `status` field discriminates between them. Chunk-shaped VLA action output is one pattern of `outputs` and does not require a VLA-specific result type.",
   "type": "object",
@@ -33,10 +33,10 @@
             "minLength": 1
           },
           "buffer": {
-            "$ref": "https://schemas.tensorplate.io/v0.1/buffer_ref.json"
+            "$ref": "https://tensorplate.com/schemas/v0.1/buffer_ref.json"
           },
           "tensor": {
-            "$ref": "https://schemas.tensorplate.io/v0.1/tensor_view.json"
+            "$ref": "https://tensorplate.com/schemas/v0.1/tensor_view.json"
           },
           "semantic_tag": {
             "type": "string",
@@ -47,7 +47,7 @@
       }
     },
     "error": {
-      "$ref": "https://schemas.tensorplate.io/v0.1/error.json"
+      "$ref": "https://tensorplate.com/schemas/v0.1/error.json"
     },
     "timing": {
       "type": "object",

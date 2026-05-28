@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/safe_state_event.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/safe_state_event.json",
   "title": "TensorPlate Safe-State Event",
-  "description": "Discrete safe-state event emitted by `tensorplate-observability` (V01-E10-F04) on transitions into degraded / failed / no-heartbeat states and, optionally, on a configured periodic interval. Consumers (V01-E11 status / log views, V01-E15 validation harness, future safe-state actuators) MUST NOT assume the producer is alive between emissions; the event captures the full diagnostic context required to decide next steps without a follow-up query.",
+  "description": "Discrete safe-state event emitted by `tensorplate-observability` (V01-E10-F04) on transitions into degraded / failed / no-heartbeat states and, optionally, on a configured periodic interval. Consumers (V01-E11 status / log views, release validation harness, future safe-state actuators) MUST NOT assume the producer is alive between emissions; the event captures the full diagnostic context required to decide next steps without a follow-up query.",
   "type": "object",
   "additionalProperties": false,
   "required": [

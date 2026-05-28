@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E13-F08: bundle conformance suite.
+// bundle format: bundle conformance suite.
 //
 // These tests assert the v0.1.0 bundle contract end-to-end against the
-// checked-in fixtures under `test/models/bundles/v01_e13/`. They run on
+// checked-in fixtures under `test/models/bundles/v0_1/`. They run on
 // the host without TensorRT, CUDA, PyTorch, or Vitis AI SDKs — the
 // parser/verifier path is deliberately SDK-free in v0.1.0.
 
@@ -24,7 +24,7 @@ fn fixtures_root() -> PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("test/models/bundles/v01_e13")
+        .join("test/models/bundles/v0_1")
 }
 
 fn jetson_device(backends: &[(&str, BackendCapabilityView, &[&str])]) -> DeviceContext {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/supervision_event.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/supervision_event.json",
   "title": "TensorPlate Supervision Event",
   "description": "Discrete agent-owned worker-supervision event (V01-E09-F05). Emitted by `tensorplate-agent` at every supervision state transition and consumed by the V01-E10 observability service plus V01-E11 status/log views. Events carry monotonic timing, bounded context, and per-process sequence numbers; the sink is non-blocking and may drop events when its bounded queue is full.",
   "type": "object",

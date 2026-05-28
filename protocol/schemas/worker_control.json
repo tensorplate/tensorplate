@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/worker_control.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/worker_control.json",
   "title": "TensorPlate Agent -> Serving Worker Control Contract (V01-E08-F05)",
   "description": "Versioned local control messages the V01-E08 agent uses to prepare, warm, promote, inspect, and unload a candidate deployment on the V01-E07 serving worker. v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. This schema documents the JSON shape used when the contract is serialized across the agent <-> worker process boundary so a future cross-process control transport (e.g. an authenticated worker control socket) can reuse the same field names.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
   "oneOf": [

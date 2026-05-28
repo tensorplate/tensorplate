@@ -9,7 +9,7 @@ prepare/warm/promote handoff with the V01-E07 serving worker.
 This document records the V01-E08 architecture decisions. It is the
 single source of truth for the cross-component contracts the CLI
 (V01-E11), the observability service (V01-E10), and the package layout
-(V01-E14) build on top of.
+(packaging) build on top of.
 
 ## Layering
 

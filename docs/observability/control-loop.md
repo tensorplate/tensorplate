@@ -1,6 +1,6 @@
 # Control-Loop Jitter and Frequency Stability (V01-E12-F05)
 
-The control-loop aggregator emits the metrics that V01-E15 SmolVLA
+The control-loop aggregator emits the metrics that release validation SmolVLA
 validation needs: missed-deadline rate, jitter p50/p95/p99/max, mean
 frequency, instant-frequency standard deviation, and frequency error
 percent. Every formula uses monotonic time and a rolling 60s window.
@@ -72,10 +72,10 @@ The aggregator emits two surfaces:
 2. A
    [`ControlLoopStatus`](../../observability/src/snapshot.rs)
    projection embedded in the status snapshot so `tensorplate status`
-   and V01-E15 validation can read the rolling summary without
+   and release validation can read the rolling summary without
    subscribing to the event stream.
 
-## V01-E15 expectations
+## release validation expectations
 
 The SmolVLA validation harness will consume:
 

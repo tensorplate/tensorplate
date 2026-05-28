@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Annotated release tag to publish, for example v0.1.0 or v0.1.0-rc.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: build packages + publish release assets
+    runs-on: ${{ fromJSON(vars.TENSORPLATE_RELEASE_RUNNER || '["self-hosted","linux","ARM64","tensorplate-release"]') }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]]; then
+            echo "::error::release tags must be vX.Y.Z or vX.Y.Z-rc.N"
+            exit 1
+          fi
+          version="${tag#v}"
+          version="${version%%-*}"
+          prerelease="false"
+          if [[ "$tag" == *-* ]]; then
+            prerelease="true"
+          fi
+          draft="false"
+          if [[ "$prerelease" == "false" ]]; then
+            draft="true"
+          fi
+          release_dir="dist/release/${tag}"
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+            echo "draft=${draft}"
+            echo "release_dir=${release_dir}"
+            echo "manifest=${release_dir}/tensorplate-${tag}-artifacts.json"
+            echo "checksums=${release_dir}/SHA256SUMS"
+            echo "notes=docs/release/notes/v${version}.md"
+            echo "release_branch=release/v${version}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify annotated tag and release branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          release_branch="${{ steps.meta.outputs.release_branch }}"
+          if [[ "$(git cat-file -t "$tag" 2>/dev/null || true)" != "tag" ]]; then
+            echo "::error::$tag must be an annotated tag"
+            exit 1
+          fi
+          tag_commit="$(git rev-list -n 1 "$tag")"
+          git fetch origin "+refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
+          if ! git merge-base --is-ancestor "$tag_commit" "origin/${release_branch}"; then
+            echo "::error::$tag does not point at ${release_branch}"
+            exit 1
+          fi
+
+      - name: Install release build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            clang \
+            cmake \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            git \
+            ninja-build \
+            nlohmann-json3-dev \
+            pkg-config \
+            python3 \
+            python3-pip
+          command -v gh >/dev/null || {
+            echo "::error::GitHub CLI (gh) must be installed on the release runner"
+            exit 1
+          }
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Build Debian packages and release manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+        run: |
+          set -Eeuo pipefail
+          tools/release/build-release-artifacts.sh \
+            --version "${{ steps.meta.outputs.version }}" \
+            --tag "${{ steps.meta.outputs.tag }}" \
+            --artifacts-dir "${{ steps.meta.outputs.release_dir }}" \
+            --manifest "${{ steps.meta.outputs.manifest }}" \
+            --checksums "${{ steps.meta.outputs.checksums }}" \
+            --arch arm64
+
+      - name: Upload release build artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets
+          path: |
+            ${{ steps.meta.outputs.release_dir }}/*.deb
+            ${{ steps.meta.outputs.manifest }}
+            ${{ steps.meta.outputs.checksums }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release with assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          tag="${{ steps.meta.outputs.tag }}"
+          release_dir="${{ steps.meta.outputs.release_dir }}"
+          notes="${{ steps.meta.outputs.notes }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::GitHub Release $tag already exists; refusing to replace published assets"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          deb_assets=("${release_dir}"/*.deb)
+          ((${#deb_assets[@]} == 6)) || {
+            echo "::error::expected six .deb packages plus manifest and checksums"
+            exit 1
+          }
+          assets=("${deb_assets[@]}" "${{ steps.meta.outputs.manifest }}" "${{ steps.meta.outputs.checksums }}")
+
+          args=(release create "$tag" "${assets[@]}" --verify-tag --title "TensorPlate ${tag}" --notes-file "$notes")
+          if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          elif [[ "${{ steps.meta.outputs.draft }}" != "true" ]]; then
+            args+=(--latest)
+          fi
+          if [[ "${{ steps.meta.outputs.draft }}" == "true" ]]; then
+            args+=(--draft)
+          fi
+
+          gh "${args[@]}"

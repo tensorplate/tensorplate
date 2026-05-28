@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F04: parse the shipped packaging config under
+// packaging: parse the shipped packaging config under
 // `packaging/conf/agent.json`. Catches drift between the agent's
 // runtime config validator and the on-disk default config the
 // `tensorplate-agent` Debian package installs to /etc/tensorplate/.

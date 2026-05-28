@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/scheduler.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/scheduler.json",
   "title": "TensorPlate Scheduler Config",
   "description": "Runtime configuration consumed by the serving worker to construct an InferScheduler. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerConfig.\n\nv0.1.0 supports the 'fifo' policy. Unknown policy strings are rejected with Error::Code::Unsupported. All durations are monotonic; wall-clock time is never consulted.",
   "type": "object",

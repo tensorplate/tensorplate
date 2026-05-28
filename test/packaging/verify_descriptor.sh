@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # SPDX-License-Identifier: Apache-2.0
 #
-# V01-E14-F08: backend descriptor sanity check.
+# packaging: backend descriptor sanity check.
 
 set -eu
 

@@ -15,7 +15,7 @@ mismatches surface as typed errors instead of undefined behavior.
 | Runtime version | The C++ runtime, serving worker, and adapter implementations. | Runtime tech lead | `project()` in `CMakeLists.txt`; surfaced via `tensorplate::kRuntimeVersion`. |
 | Protocol version | Cross-process schemas in `protocol/schemas/` (request/response, worker status, health events, deploy transaction state). | Runtime + agent | `tensorplate::kProtocolVersion` (C++) / `tensorplate_protocol::PROTOCOL_VERSION` (Rust). |
 | Schema version | Per-schema `schemaVersion` field in `config/schemas/` and `protocol/schemas/`. | Schema author | The schema file itself. |
-| Bundle format version | Layout of the deployable model bundle described in V01-E13. | Agent owner | `tensorplate::kBundleFormatVersion` and the `bundleFormatVersion` field in the bundle manifest. |
+| Bundle format version | Layout of the deployable model bundle described in bundle format. | Agent owner | `tensorplate::kBundleFormatVersion` and the `bundleFormatVersion` field in the bundle manifest. |
 
 These surfaces evolve at independent cadences. A runtime patch release does
 not imply a protocol or bundle bump, and vice versa.

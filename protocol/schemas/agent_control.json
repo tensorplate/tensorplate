@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/agent_control.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/agent_control.json",
   "title": "TensorPlate Agent Local Control API",
   "description": "Versioned request/response envelope spoken by `tensorplate-agent` on its local control transport (Unix domain socket by default; see `docs/architecture/agent-control-api.md`). The CLI (V01-E11) and any local operator tooling speak this contract — never the serving worker's data-plane HTTP directly. Wire encoding is newline-delimited JSON: one request object terminated by `\\n`, one response object terminated by `\\n`, on a freshly-connected socket. Concurrent conflicting mutating requests are rejected with `agent_busy`.",
   "oneOf": [

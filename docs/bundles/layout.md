@@ -1,6 +1,6 @@
 # Bundle Layout
 
-**Status:** v0.1.0 (V01-E13-F01)
+**Status:** v0.1.0 (bundle format)
 **Bundle format version:** `0.1`
 **Schema:** [`protocol/schemas/bundle_manifest.json`](../../protocol/schemas/bundle_manifest.json)
 
@@ -118,7 +118,7 @@ Backend SDK types never appear in this value object.
 
 ## Examples
 
-Both example fixtures live under [`test/models/bundles/v01_e13/`](../../test/models/bundles/v01_e13/).
+Both example fixtures live under [`test/models/bundles/v0_1/`](../../test/models/bundles/v0_1/).
 
 ### TensorRT vision bundle (single-input vision, n=1)
 
@@ -161,7 +161,7 @@ would fail on Kria silicon.
 
 - Implementing the packaged `.tpmodel` archive reader. Reserved as an
   extension point.
-- Bundle directory layout under `/var` (owned by V01-E14 packaging).
+- Bundle directory layout under `/var` (owned by packaging).
 - CLI authoring tools beyond the deterministic digest helper used by
   fixtures (see [`tools/bundle/`](../../tools/bundle/)).
 - Hosted provenance verification. The `provenance/` and `signature` fields

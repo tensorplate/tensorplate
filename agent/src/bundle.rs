@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E08-F03 + V01-E13-F06: agent deploy-time bundle verifier.
+// V01-E08-F03 + bundle format: agent deploy-time bundle verifier.
 //
 // The agent calls into the shared `tensorplate_protocol::bundle` parser
 // and compatibility evaluator. The old in-crate verifier has been
-// migrated so there is exactly one validation path; per V01-E13, the
+// migrated so there is exactly one validation path; per bundle format, the
 // agent must not run a parallel set of integrity / compat checks.
 //
 // The verifier checks (via the shared parser):
@@ -105,7 +105,7 @@ pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<St
 
 /// Verify the bundle at `bundle_path` against the agent config.
 ///
-/// V01-E13-F06 migrates the implementation to the shared
+/// bundle format migrates the implementation to the shared
 /// `tensorplate_protocol::bundle::parse_bundle` + `evaluate_compatibility`
 /// pair. The returned `VerifiedBundle` shape is preserved so the
 /// coordinator and rollback paths continue to work unchanged.
@@ -123,7 +123,7 @@ pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedB
 /// Variant of [`verify`] that also rejects the deploy when the bundle's
 /// declared backend has a non-Runnable [`BackendProbeReport`] in
 /// `probes`. The coordinator calls this path with the probe results
-/// populated at agent startup (V01-E14-F05). Tests that do not care
+/// populated at agent startup (packaging). Tests that do not care
 /// about backend probing keep using [`verify`].
 ///
 /// # Errors
@@ -151,7 +151,7 @@ pub fn verify_with_probes(
             return Err(violation_to_agent_error(v));
         }
     }
-    // V01-E14-F05: refuse the deploy *before* staging if the bundle's
+    // packaging: refuse the deploy *before* staging if the bundle's
     // declared backend has a non-Runnable probe report. The cache is
     // populated at agent startup so this check is O(1) at deploy time;
     // we never run Python here. Absent backends (no probe entry) are

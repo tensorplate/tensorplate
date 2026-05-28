@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E13-F01 / V01-E13-F02 / V01-E13-F05: shared bundle parser, layout, and
+// Bundle format: shared bundle parser, layout, and
 // integrity verifier.
 //
 // The agent calls into this module before staging a bundle. The parser is

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/serving_metrics.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/serving_metrics.json",
   "title": "TensorPlate Serving Metrics (JSON mode)",
   "description": "Structured-JSON `/metrics` body produced by the V01-E07 serving worker when `metrics_mode = json`. The Prometheus 0.0.4 text-format body is also accepted as the default exposition; this schema is for agent-side scrapers that prefer machine-friendly bodies. Labels are bounded: only the four documented dimensions appear.\n\nLatency histogram bucket boundaries (milliseconds, inclusive upper bound): 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf.",
   "type": "object",

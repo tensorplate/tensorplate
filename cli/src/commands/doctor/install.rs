@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// V01-E14-F06: install-time doctor probes.
+// packaging: install-time doctor probes.
 //
 // `tensorplate doctor` aggregates these alongside the V01-E11 agent
-// probes. They cover the packaging contract from V01-E14:
+// probes. They cover the packaging contract from packaging:
 //   - filesystem layout (paths, permissions, group ownership)
 //   - config files (presence + schema_version sanity)
 //   - systemd units (agent + observability present, no serving unit)
 //   - serving binary installed under /usr/lib/tensorplate/
 //   - CUDA / TensorRT / LibTorch presence (best-effort)
-//   - Python/PyTorch backend descriptor + runtime status (V01-E14-F05)
+//   - Python/PyTorch backend descriptor + runtime status (packaging)
 //
 // Every probe returns at least one finding. Probes never mutate state
 // and never run user code. Filesystem checks degrade gracefully on
@@ -838,7 +838,7 @@ fn probe_optional_runtimes(opts: &InstallProbeOptions) -> Vec<Finding> {
     // CUDA / TensorRT / LibTorch live outside the package manifest. We
     // probe well-known absolute paths but never run vendor SDK
     // binaries: a positive result means "the file is on disk", not
-    // "this runtime works". Real validation belongs to V01-E15.
+    // "this runtime works". Real validation belongs to release validation.
     let cuda = any_runtime_artifact_exists(
         opts,
         &[

@@ -233,7 +233,7 @@ fn observability_block(o: &ObservabilitySnapshotResult) -> Value {
 }
 
 /// Severity label used to order the human renderer's top line. Stable
-/// label set so V01-E15 validation scripts can grep on a single token.
+/// label set so release validation scripts can grep on a single token.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Severity {
     Ready,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$id": "https://schemas.tensorplate.io/v0.1/desired_state.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/desired_state.json",
   "title": "TensorPlate Desired State",
   "description": "Declarative reconciliation target consumed by `tensorplate-agent`. v0.1.0 supports exactly one active deployment per device; multi-deployment / fleet semantics land post-v0.1.0.",
   "type": "object",
@@ -28,7 +28,7 @@
       "description": "On-disk bundle format version. Bundles encoded against an older format require the agent to refuse promotion."
     },
     "model_spec": {
-      "$ref": "https://schemas.tensorplate.io/v0.1/model_spec.json"
+      "$ref": "https://tensorplate.com/schemas/v0.1/model_spec.json"
     },
     "rollout": {
       "type": "object",
