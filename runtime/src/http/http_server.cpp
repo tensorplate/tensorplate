@@ -42,6 +42,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "net/socket_signal.hpp"
+
 namespace tensorplate::http {
 
 namespace {
@@ -161,7 +163,13 @@ bool write_all(int fd, const std::string& data, std::chrono::steady_clock::time_
     if (pr == 0) {
       return false;
     }
-    ssize_t n = ::send(fd, data.data() + sent, data.size() - sent, 0);
+    // The peer closed or the connection broke: the fd will never accept
+    // the rest of the response. Stop now instead of spinning on EAGAIN
+    // once SIGPIPE is suppressed (issue #19).
+    if ((p.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+      return false;
+    }
+    ssize_t n = ::send(fd, data.data() + sent, data.size() - sent, net::kSendNoSignal);
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
         continue;
@@ -500,6 +508,11 @@ struct HttpServer::Impl {
       }
       int one = 1;
       ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+      // Suppress SIGPIPE on the connection fd so a write to a peer that
+      // closed mid-response returns EPIPE instead of terminating the
+      // process; tp_runtime must not depend on the embedding binary's
+      // process-wide signal policy (issue #19).
+      net::suppress_sigpipe(fd);
       {
         std::unique_lock<std::mutex> g(queue_mutex);
         if (connection_queue.size() >= kMaxQueueDepth) {
