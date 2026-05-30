@@ -163,9 +163,8 @@ bool write_all(int fd, const std::string& data, std::chrono::steady_clock::time_
     if (pr == 0) {
       return false;
     }
-    // The peer closed or the connection broke: the fd will never accept
-    // the rest of the response. Stop now instead of spinning on EAGAIN
-    // once SIGPIPE is suppressed (issue #19).
+    // Peer closed or connection broke: the fd will never accept the rest
+    // of the response, so stop instead of spinning on EAGAIN.
     if ((p.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
       return false;
     }
@@ -508,10 +507,8 @@ struct HttpServer::Impl {
       }
       int one = 1;
       ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-      // Suppress SIGPIPE on the connection fd so a write to a peer that
-      // closed mid-response returns EPIPE instead of terminating the
-      // process; tp_runtime must not depend on the embedding binary's
-      // process-wide signal policy (issue #19).
+      // A write to a peer that closed mid-response should return EPIPE,
+      // not raise SIGPIPE.
       net::suppress_sigpipe(fd);
       {
         std::unique_lock<std::mutex> g(queue_mutex);

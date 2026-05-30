@@ -73,12 +73,10 @@ Result<void> wait_for(int fd, short events, UnixSocket::TimePoint deadline) {
     const int r = ::poll(&pfd, 1, ms);
     if (r > 0) {
       // For write waiters, POLLHUP/POLLERR mean the peer is gone and the
-      // fd will never accept more data (POSIX makes POLLHUP and POLLOUT
-      // mutually exclusive). Surface a typed error instead of reporting
-      // "ready" and letting write_all() spin on EAGAIN now that SIGPIPE
-      // no longer tears the process down (issue #19). Read waiters are
-      // intentionally left untouched: POLLHUP can accompany buffered
-      // data, and recv() already reports EOF on its own.
+      // fd will never accept more data, so surface a typed error instead
+      // of letting write_all() spin on EAGAIN. Read waiters are left
+      // untouched: POLLHUP can accompany buffered data that recv() still
+      // drains before reporting EOF.
       if ((events & POLLOUT) != 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
         return unexpected(Error::Code::LoadFailed, "unix-socket peer closed while writing");
       }
@@ -150,8 +148,7 @@ Result<UnixSocket> UnixSocket::create_stream() {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "socket(AF_UNIX, SOCK_STREAM)"));
   }
   UnixSocket sock(fd);
-  // Suppress SIGPIPE on this fd so a write to a peer-closed socket
-  // returns EPIPE instead of terminating the process (issue #19).
+  // Write to a peer-closed socket should return EPIPE, not raise SIGPIPE.
   net::suppress_sigpipe(fd);
   if (auto r = set_nonblock(fd); !r.has_value()) {
     return unexpected(r.error());
@@ -238,8 +235,7 @@ Result<UnixSocket> UnixSocket::accept(  // NOLINT(readability-make-member-functi
     const int client = ::accept(fd_, nullptr, nullptr);
     if (client >= 0) {
       UnixSocket s(client);
-      // Accepted fds do not inherit SO_NOSIGPIPE from the listener;
-      // suppress SIGPIPE on the client fd as well (issue #19).
+      // Accepted fds do not inherit SO_NOSIGPIPE from the listener.
       net::suppress_sigpipe(client);
       if (auto r = set_nonblock(client); !r.has_value()) {
         return unexpected(r.error());

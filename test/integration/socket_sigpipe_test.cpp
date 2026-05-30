@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Issue #19 regression: runtime socket write helpers must suppress
+// Regression coverage: the runtime socket write helpers must suppress
 // SIGPIPE locally and surface a typed error when the peer has closed,
-// rather than relying on the embedding binary to ignore SIGPIPE
-// process-wide.
+// without relying on the embedding binary to ignore SIGPIPE.
 //
-// Both tests below first reset SIGPIPE to its default (terminating)
-// disposition. If a write path ever escaped a SIGPIPE, the signal would
-// kill this test process instead of the assertion failing quietly --
-// so a regression is loud. The serving worker binary installs a
-// process-wide ignore, but these tests deliberately do not, exercising
-// the library in isolation exactly as a third-party embedder would.
+// Both tests reset SIGPIPE to its default (terminating) disposition, so
+// an escaped SIGPIPE kills this process rather than failing quietly --
+// the tests deliberately do not install a process-wide ignore, exercising
+// the library as a third-party embedder would.
 
 #include <arpa/inet.h>
 #include <gtest/gtest.h>

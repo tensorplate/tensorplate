@@ -45,10 +45,8 @@ void install_signal_handlers() {
   sa.sa_flags = SA_RESTART;
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
-  // Defense-in-depth: ignore SIGPIPE process-wide. tp_runtime already
-  // suppresses SIGPIPE per socket (issue #19), so this is no longer
-  // required for correctness, but it protects any other write paths the
-  // binary may add later.
+  // Defense-in-depth: the runtime already suppresses SIGPIPE per socket,
+  // so this protects only any other write paths the binary may add.
   std::signal(SIGPIPE, SIG_IGN);
 }
 
