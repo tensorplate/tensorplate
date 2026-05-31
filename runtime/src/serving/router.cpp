@@ -199,6 +199,11 @@ http::Response RequestRouter::handle_policy_infer(const http::Request& req) {
     return make_error_response(503, "", correlation_id, Error::Code::NotReady,
                                "serving worker stopping; not accepting new async requests");
   }
+  if (!deps_.async_policy_supported) {
+    return make_error_response(
+        501, "", correlation_id, Error::Code::Unsupported,
+        "async policy routes require backend capability supports_async=true");
+  }
   if (!has_json_content_type(req)) {
     return make_error_response(415, "", correlation_id, Error::Code::Unsupported,
                                "content-type must be application/json");
@@ -275,6 +280,11 @@ http::Response RequestRouter::handle_policy_result(const http::Request& req,
                                                    std::string_view request_id) {
   std::string correlation_id =
       req.correlation_id.empty() ? generate_correlation_id() : req.correlation_id;
+  if (!deps_.async_policy_supported) {
+    return make_error_response(
+        501, std::string{request_id}, correlation_id, Error::Code::Unsupported,
+        "async policy routes require backend capability supports_async=true");
+  }
   if (request_id.empty()) {
     return make_error_response(400, "", correlation_id, Error::Code::ConfigInvalid,
                                "result lookup: missing request_id");
@@ -326,6 +336,11 @@ http::Response RequestRouter::handle_policy_cancel(const http::Request& req,
                                                    std::string_view request_id) {
   std::string correlation_id =
       req.correlation_id.empty() ? generate_correlation_id() : req.correlation_id;
+  if (!deps_.async_policy_supported) {
+    return make_error_response(
+        501, std::string{request_id}, correlation_id, Error::Code::Unsupported,
+        "async policy routes require backend capability supports_async=true");
+  }
   if (request_id.empty()) {
     return make_error_response(400, "", correlation_id, Error::Code::ConfigInvalid,
                                "cancel: missing request_id");

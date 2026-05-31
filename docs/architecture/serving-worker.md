@@ -92,9 +92,9 @@ deliberate v0.2+ decision.
 | Method | Path | Body | Response |
 | ------ | ---- | ---- | -------- |
 | POST   | `/infer` | `serving_http_envelope.InferRequest` | `InferResponseSuccess` (200) or `InferResponseFailure` (4xx/5xx). |
-| POST   | `/policy/infer` | `serving_http_envelope.InferRequest` | `AsyncAccepted` (202) with `result_url` and `cancel_url`. |
-| GET    | `/policy/result/<request_id>` | _empty_ | `AsyncResult` (200) — `status` discriminates `pending`/`in_flight`/`completed`/`cancelled`/`stale`/`failed`/`expired`. |
-| POST   | `/policy/cancel/<request_id>` | _empty_ | `AsyncCancelResponse` (200 if cancelled, 404 otherwise). |
+| POST   | `/policy/infer` | `serving_http_envelope.InferRequest` | `AsyncAccepted` (202) with `result_url` and `cancel_url`, or 501 when the resolved backend lacks `supports_async`. |
+| GET    | `/policy/result/<request_id>` | _empty_ | `AsyncResult` (200) — `status` discriminates `pending`/`in_flight`/`completed`/`cancelled`/`stale`/`failed`/`expired`, or 501 when the resolved backend lacks `supports_async`. |
+| POST   | `/policy/cancel/<request_id>` | _empty_ | `AsyncCancelResponse` (200 if cancelled, 404 otherwise), or 501 when the resolved backend lacks `supports_async`. |
 | GET    | `/health` | _empty_ | `serving_health` (200 ready/degraded, 503 otherwise). |
 | GET    | `/metrics` | _empty_ | Prometheus 0.0.4 text body or `serving_metrics` JSON. |
 
@@ -138,6 +138,13 @@ shape directly. The request envelope is identical to `/infer`; the
 response shape is `AsyncAccepted` instead of `InferResponseSuccess`.
 Clients poll `result_url` until `status` is one of `completed`,
 `cancelled`, `stale`, `failed`, or `expired`.
+
+The route family is enabled only when the resolved backend capability
+advertises `supports_async=true`. Sync-only real adapters, including
+the v0.1.0 Python/PyTorch sidecar, return 501 before request buffers
+are retained or scheduler entries are admitted. This prevents a client
+from receiving cancellation acknowledgement while the backend keeps
+executing work that it cannot cancel.
 
 Stale-request behavior: when an incoming `/policy/infer` request
 carries `metadata.stale_after_sequence = N`, the router tags every

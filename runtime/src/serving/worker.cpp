@@ -101,6 +101,7 @@ struct ServingWorker::Impl {
   std::unique_ptr<http::HttpServer> server;
   std::unique_ptr<SystemSchedulerClock> clock;
   serving::ShutdownController shutdown;
+  bool async_policy_supported = true;
 
   std::atomic<bool> started{false};
   std::atomic<bool> stopped{false};
@@ -151,6 +152,7 @@ Result<void> ServingWorker::Impl::build() {
   }
   // Session.
   if (config.deployment.use_mock_session) {
+    async_policy_supported = true;
     serving::MockSessionConfig mock_cfg;
     auto sess = std::make_unique<serving::MockServingSession>(*buffer_manager, mock_cfg);
     if (auto lr = sess->load(ModelSpec::create("mock-model", ModelClass::Custom, "mock://", "mock",
@@ -174,13 +176,21 @@ Result<void> ServingWorker::Impl::build() {
       return unexpected(Error::Code::ConfigInvalid,
                         "serving worker: deployment.model required when use_mock_session=false");
     }
-    auto cap_r = registry->validate_backend_hint(*config.deployment.model);
-    if (!cap_r) {
+    auto validate_r = registry->validate_backend_hint(*config.deployment.model);
+    if (!validate_r) {
       log_stderr(config, "error", "backend validation failed",
-                 {{"code", std::string{to_string(cap_r.error().code)}},
-                  {"message", cap_r.error().message}});
-      return unexpected(cap_r.error());
+                 {{"code", std::string{to_string(validate_r.error().code)}},
+                  {"message", validate_r.error().message}});
+      return unexpected(validate_r.error());
     }
+    auto capability_r = registry->capability(config.deployment.model->backend_hint());
+    if (!capability_r) {
+      log_stderr(config, "error", "backend capability lookup failed",
+                 {{"code", std::string{to_string(capability_r.error().code)}},
+                  {"message", capability_r.error().message}});
+      return unexpected(capability_r.error());
+    }
+    async_policy_supported = capability_r.value().supports_async();
     ExecutionSessionRuntimeHooks hooks;
     hooks.buffer_manager = buffer_manager.get();
     auto s_r = registry->create_session(config.deployment.model->backend_hint(), hooks);
@@ -257,6 +267,7 @@ Result<void> ServingWorker::Impl::build() {
   r_deps.scheduler = scheduler.get();
   r_deps.max_body_bytes = config.http.max_body_bytes;
   r_deps.endpoint = config.deployment.endpoint;
+  r_deps.async_policy_supported = async_policy_supported;
   router = std::make_unique<serving::RequestRouter>(r_deps);
   // HTTP server.
   server = std::make_unique<http::HttpServer>();

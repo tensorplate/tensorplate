@@ -117,6 +117,14 @@ If the descriptor is missing or the interpreter cannot import `torch`,
 the deploy fails with a typed `BackendUnrunnable` error **before** any
 files are staged. It will not silently fall through to first inference.
 
+## Async-policy route support
+
+The v0.1.0 Python/PyTorch adapter advertises `supports_async=false`.
+Use `/infer` for Python-backed serving. The LeRobot-compatible
+`/policy/infer`, `/policy/result/<id>`, and `/policy/cancel/<id>` route
+family requires a backend with native async/cancel support and returns
+501 with `error.code = "unsupported"` for Python-backed sessions.
+
 ## What the probe does and does not do
 
 - **Does**: `stat` the descriptor file; run `python3 -c 'import sys; ...'`
