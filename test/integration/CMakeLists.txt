@@ -11,6 +11,8 @@ add_executable(tp_test_integration
   scheduler_smolvla_test.cpp
   # V01-E07-F08: full serving worker end-to-end coverage.
   serving_e2e_test.cpp
+  # Socket write helpers suppress SIGPIPE on peer close.
+  socket_sigpipe_test.cpp
 )
 
 target_include_directories(tp_test_integration

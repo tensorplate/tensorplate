@@ -1550,4 +1550,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Runtime socket write paths no longer depend on the embedding binary
+  ignoring `SIGPIPE` process-wide
+  ([#19](https://github.com/tensorplate/tensorplate/issues/19)). A peer that closed the
+  connection before or during a write could raise `SIGPIPE` and
+  terminate the host process before the code observed `EPIPE` and
+  returned a typed error.
+    - `tensorplate::http::HttpServer` and
+      `tensorplate::ipc::UnixSocket` now suppress `SIGPIPE` locally:
+      `MSG_NOSIGNAL` is passed on every `send()` where the platform
+      provides it (Linux) and `SO_NOSIGPIPE` is set on each created or
+      accepted socket where it exists (macOS/BSD). The shared policy
+      lives in `runtime/src/net/socket_signal.hpp`.
+    - The write-side poll waits now treat `POLLHUP`/`POLLERR` as a
+      typed `LoadFailed` instead of reporting the descriptor ready, so a
+      peer that hangs up mid-write yields an error rather than a busy
+      retry loop. Read-side draining is unchanged.
+    - `serving_worker` keeps its process-wide `SIGPIPE` ignore as
+      defense-in-depth; it is no longer required for `tp_runtime`
+      correctness.
+
 ### Security

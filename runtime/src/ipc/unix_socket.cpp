@@ -22,6 +22,8 @@
 
 #include "tensorplate/core/error.hpp"
 
+#include "net/socket_signal.hpp"
+
 namespace tensorplate::ipc {
 
 namespace {
@@ -70,6 +72,14 @@ Result<void> wait_for(int fd, short events, UnixSocket::TimePoint deadline) {
     const int ms = millis_until(deadline);
     const int r = ::poll(&pfd, 1, ms);
     if (r > 0) {
+      // For write waiters, POLLHUP/POLLERR mean the peer is gone and the
+      // fd will never accept more data, so surface a typed error instead
+      // of letting write_all() spin on EAGAIN. Read waiters are left
+      // untouched: POLLHUP can accompany buffered data that recv() still
+      // drains before reporting EOF.
+      if ((events & POLLOUT) != 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+        return unexpected(Error::Code::LoadFailed, "unix-socket peer closed while writing");
+      }
       return Result<void>{};
     }
     if (r == 0) {
@@ -138,6 +148,8 @@ Result<UnixSocket> UnixSocket::create_stream() {
     return unexpected(make_errno_error(Error::Code::LoadFailed, "socket(AF_UNIX, SOCK_STREAM)"));
   }
   UnixSocket sock(fd);
+  // Write to a peer-closed socket should return EPIPE, not raise SIGPIPE.
+  net::suppress_sigpipe(fd);
   if (auto r = set_nonblock(fd); !r.has_value()) {
     return unexpected(r.error());
   }
@@ -223,6 +235,8 @@ Result<UnixSocket> UnixSocket::accept(  // NOLINT(readability-make-member-functi
     const int client = ::accept(fd_, nullptr, nullptr);
     if (client >= 0) {
       UnixSocket s(client);
+      // Accepted fds do not inherit SO_NOSIGPIPE from the listener.
+      net::suppress_sigpipe(client);
       if (auto r = set_nonblock(client); !r.has_value()) {
         return unexpected(r.error());
       }
@@ -279,7 +293,7 @@ Result<void> UnixSocket::write_all(  // NOLINT(readability-make-member-function-
   }
   std::size_t offset = 0;
   while (offset < bytes.size()) {
-    const auto n = ::send(fd_, bytes.data() + offset, bytes.size() - offset, 0);
+    const auto n = ::send(fd_, bytes.data() + offset, bytes.size() - offset, net::kSendNoSignal);
     if (n > 0) {
       offset += static_cast<std::size_t>(n);
       continue;

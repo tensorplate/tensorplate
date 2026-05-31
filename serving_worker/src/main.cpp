@@ -45,7 +45,8 @@ void install_signal_handlers() {
   sa.sa_flags = SA_RESTART;
   sigaction(SIGINT, &sa, nullptr);
   sigaction(SIGTERM, &sa, nullptr);
-  // Ignore SIGPIPE; HTTP server callers see EPIPE on send instead.
+  // Defense-in-depth: the runtime already suppresses SIGPIPE per socket,
+  // so this protects only any other write paths the binary may add.
   std::signal(SIGPIPE, SIG_IGN);
 }
 
