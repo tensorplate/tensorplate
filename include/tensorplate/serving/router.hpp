@@ -56,6 +56,10 @@ struct RequestRouterDeps {
   /// Stable endpoint label echoed into responses, metric labels,
   /// and structured logs.
   std::string endpoint;
+  /// True when the resolved execution backend supports native async
+  /// inference/cancellation semantics. When false, the policy route
+  /// family returns 501 before retaining request buffers.
+  bool async_policy_supported = true;
 };
 
 class RequestRouter {

@@ -18,11 +18,18 @@
 #include <cstring>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "tensorplate/backend/capability.hpp"
+#include "tensorplate/backend/registry.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
+#include "tensorplate/core/error.hpp"
+#include "tensorplate/core/execution_session.hpp"
+#include "tensorplate/core/model_spec.hpp"
 #include "tensorplate/serving/config.hpp"
 #include "tensorplate/serving/serialization.hpp"
 #include "tensorplate/serving/worker.hpp"
@@ -33,6 +40,20 @@ namespace {
 
 using namespace tensorplate;
 using namespace tensorplate::testing;
+
+class SyncOnlySession final : public ExecutionSession {
+ public:
+  explicit SyncOnlySession(ExecutionSessionRuntimeHooks hooks) : ExecutionSession(hooks) {}
+
+  [[nodiscard]] std::string_view backend_name() const noexcept override { return "sync_only"; }
+
+ protected:
+  Result<void> do_load(const ModelSpec& /*spec*/) override { return Result<void>{}; }
+  Result<void> do_prime() override { return Result<void>{}; }
+  Result<std::vector<NamedOutput>> do_infer(const InferRequest& /*request*/) override {
+    return unexpected(Error::Code::Unsupported, "sync-only fixture does not execute inference");
+  }
+};
 
 struct ServingHarness {
   std::unique_ptr<ServingWorker> worker;
@@ -47,6 +68,21 @@ struct ServingHarness {
   static ServingHarness start(ServingConfig cfg) {
     ServingHarness h;
     auto w_r = ServingWorker::create(std::move(cfg));
+    if (!w_r) {
+      throw std::runtime_error("worker create failed: " + w_r.error().message);
+    }
+    h.worker = std::move(w_r).value();
+    auto sr = h.worker->start();
+    if (!sr) {
+      throw std::runtime_error("worker start failed: " + sr.error().message);
+    }
+    h.port = h.worker->bound_port();
+    return h;
+  }
+
+  static ServingHarness start(ServingConfig cfg, BackendRegistry& registry) {
+    ServingHarness h;
+    auto w_r = ServingWorker::create(std::move(cfg), registry);
     if (!w_r) {
       throw std::runtime_error("worker create failed: " + w_r.error().message);
     }
@@ -315,6 +351,44 @@ TEST(ServingE2E, PolicyCancelTransitionsState) {
   // or 404 if completion finished first. In either case the entry
   // is no longer pending.
   EXPECT_TRUE(cancel.status == 200 || cancel.status == 404) << cancel.body;
+}
+
+TEST(ServingE2E, PolicyRoutesReturn501WhenBackendLacksAsyncCapability) {
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("sync_only", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(
+      registry
+          .register_backend(BackendEntry{
+              "sync_only",
+              capability.value(),
+              [](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
+                return std::unique_ptr<ExecutionSession>(new SyncOnlySession(hooks));
+              },
+          })
+          .has_value());
+
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "sync_only";
+  cfg.deployment.model =
+      ModelSpec::create("sync-only-model", ModelClass::Custom, "fixture://sync-only", "sync_only")
+          .value();
+  auto h = ServingHarness::start(std::move(cfg), registry);
+  HttpClient client("127.0.0.1", h.port);
+
+  auto accept = client.post("/policy/infer", make_infer_body("async-unsupported"));
+  ASSERT_EQ(accept.status, 501) << accept.body;
+  auto aj = nlohmann::json::parse(accept.body);
+  EXPECT_EQ(aj["error"]["code"], "unsupported");
+  EXPECT_EQ(h.worker->buffer_manager().accounting().active_count, 0U);
+
+  auto result = client.get("/policy/result/async-unsupported");
+  EXPECT_EQ(result.status, 501) << result.body;
+
+  auto cancel = client.post("/policy/cancel/async-unsupported", "");
+  EXPECT_EQ(cancel.status, 501) << cancel.body;
+  EXPECT_EQ(h.worker->buffer_manager().accounting().active_count, 0U);
 }
 
 TEST(ServingE2E, UnknownPathReturns404) {
