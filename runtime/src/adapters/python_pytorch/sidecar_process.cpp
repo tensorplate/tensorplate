@@ -82,11 +82,20 @@ SidecarHandle::~SidecarHandle() {
   terminate();
 }
 
-bool SidecarHandle::is_alive() const noexcept {
+bool SidecarHandle::is_alive() noexcept {
   if (!is_alive_) {
     return false;
   }
-  return is_alive_(*this);
+  const bool alive = is_alive_(*this);
+  if (!alive && pid_ < 0) {
+    terminate_ = {};
+    is_alive_ = {};
+  }
+  return alive;
+}
+
+void SidecarHandle::mark_exited() noexcept {
+  pid_ = -1;
 }
 
 void SidecarHandle::terminate() noexcept {
@@ -140,6 +149,9 @@ std::vector<char*> argv_pointers(std::vector<std::string>& argv_storage) {
 }
 
 void terminate_sidecar(SidecarHandle& h) noexcept {
+  if (!h.is_alive()) {
+    return;
+  }
   const int pid_local = h.pid();
   if (pid_local <= 0) {
     return;
@@ -149,23 +161,46 @@ void terminate_sidecar(SidecarHandle& h) noexcept {
   for (int i = 0; i < 50; ++i) {
     int status = 0;
     const int r = ::waitpid(pid_local, &status, WNOHANG);
-    if (r != 0) {
+    if (r > 0) {
+      h.mark_exited();
+      return;
+    }
+    if (r < 0) {
+      if (errno == EINTR) {
+        --i;
+        continue;
+      }
+      h.mark_exited();
       return;
     }
     ::usleep(10 * 1000);
   }
   ::kill(pid_local, SIGKILL);
   (void)reap_pid(pid_local, /*wait_for_exit=*/true);
+  h.mark_exited();
 }
 
-bool sidecar_is_alive(const SidecarHandle& h) noexcept {
+bool sidecar_is_alive(SidecarHandle& h) noexcept {
   const int pid_local = h.pid();
   if (pid_local <= 0) {
     return false;
   }
-  int status = 0;
-  const int r = ::waitpid(pid_local, &status, WNOHANG);
-  return r == 0;
+  for (;;) {
+    int status = 0;
+    const int r = ::waitpid(pid_local, &status, WNOHANG);
+    if (r == 0) {
+      return true;
+    }
+    if (r > 0) {
+      h.mark_exited();
+      return false;
+    }
+    if (errno == EINTR) {
+      continue;
+    }
+    h.mark_exited();
+    return false;
+  }
 }
 
 }  // namespace
@@ -244,7 +279,7 @@ SidecarProcess::~SidecarProcess() {
   shutdown();
 }
 
-bool SidecarProcess::is_alive() const noexcept {
+bool SidecarProcess::is_alive() noexcept {
   return handle_.is_alive();
 }
 
