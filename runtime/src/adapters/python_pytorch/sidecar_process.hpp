@@ -47,7 +47,7 @@ struct SidecarLaunchRequest {
 class SidecarHandle {
  public:
   using TerminateFn = std::function<void(SidecarHandle&)>;
-  using IsAliveFn = std::function<bool(const SidecarHandle&)>;
+  using IsAliveFn = std::function<bool(SidecarHandle&)>;
 
   SidecarHandle() noexcept = default;
 
@@ -60,7 +60,8 @@ class SidecarHandle {
   SidecarHandle& operator=(SidecarHandle&& other) noexcept;
 
   [[nodiscard]] int pid() const noexcept { return pid_; }
-  [[nodiscard]] bool is_alive() const noexcept;
+  [[nodiscard]] bool is_alive() noexcept;
+  void mark_exited() noexcept;
   void terminate() noexcept;
 
  private:
@@ -101,7 +102,7 @@ class SidecarProcess {
 
   [[nodiscard]] ipc::UnixSocket& socket() noexcept { return client_; }
   [[nodiscard]] const ipc::UnixSocket& socket() const noexcept { return client_; }
-  [[nodiscard]] bool is_alive() const noexcept;
+  [[nodiscard]] bool is_alive() noexcept;
 
   /// Terminate the child and unlink the socket path. Idempotent.
   void shutdown() noexcept;

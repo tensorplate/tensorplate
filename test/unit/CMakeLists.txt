@@ -27,6 +27,7 @@ add_executable(tp_test_unit
   tensorrt_adapter_test.cpp
   libtorch_adapter_test.cpp
   sidecar_codec_test.cpp
+  sidecar_process_test.cpp
   scheduler_interface_test.cpp
   scheduler_fifo_test.cpp
   scheduler_deadline_test.cpp
