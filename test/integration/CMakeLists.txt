@@ -15,6 +15,8 @@ add_executable(tp_test_integration
   socket_sigpipe_test.cpp
   # Route dispatch releases routes_mutex before invoking handlers.
   http_route_concurrency_test.cpp
+  # Issue #22: HTTP server binds the loopback family the host literal names.
+  http_server_bind_test.cpp
 )
 
 target_include_directories(tp_test_integration
