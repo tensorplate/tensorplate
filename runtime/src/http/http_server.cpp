@@ -54,6 +54,55 @@ bool is_loopback_literal(std::string_view host) {
   return host == "127.0.0.1" || host == "::1" || host == "localhost";
 }
 
+// A resolved, bindable socket address plus the address family that must
+// be passed to socket(). Carrying the family alongside the storage keeps
+// the listening socket and the address it binds in lock-step.
+struct BindAddress {
+  int family = AF_INET;
+  sockaddr_storage storage{};
+  socklen_t len = 0;
+};
+
+// Resolve a loopback host literal into a bindable address. The server
+// accepts both the IPv4 literal ("127.0.0.1") and the IPv6 literal
+// ("::1"); "localhost" maps to the IPv4 loopback to keep v0.1.0 behavior
+// stable (we deliberately do not resolve hostnames here). The chosen
+// family flows back to socket() so an IPv6 literal yields an AF_INET6
+// listener rather than failing at inet_pton time.
+Result<BindAddress> resolve_bind_address(std::string_view host, std::uint16_t port) {
+  const std::string host_str{host == "localhost" ? std::string_view{"127.0.0.1"} : host};
+
+  BindAddress out;
+  sockaddr_in v4{};
+  if (::inet_pton(AF_INET, host_str.c_str(), &v4.sin_addr) == 1) {
+    v4.sin_family = AF_INET;
+    v4.sin_port = htons(port);
+    out.family = AF_INET;
+    out.len = sizeof(v4);
+    std::memcpy(&out.storage, &v4, sizeof(v4));
+    return out;
+  }
+  sockaddr_in6 v6{};
+  if (::inet_pton(AF_INET6, host_str.c_str(), &v6.sin6_addr) == 1) {
+    v6.sin6_family = AF_INET6;
+    v6.sin6_port = htons(port);
+    out.family = AF_INET6;
+    out.len = sizeof(v6);
+    std::memcpy(&out.storage, &v6, sizeof(v6));
+    return out;
+  }
+  return unexpected(Error::Code::ConfigInvalid,
+                    std::string{"http server: inet_pton failed for "} + host_str);
+}
+
+// Extract the bound port from a sockaddr_storage of either family.
+std::uint16_t port_from_sockaddr(const sockaddr_storage& ss) {
+  if (ss.ss_family == AF_INET6) {
+    return ntohs(reinterpret_cast<const sockaddr_in6*>(&ss)->sin6_port);
+  }
+  return ntohs(reinterpret_cast<const sockaddr_in*>(&ss)->sin_port);
+}
+
 int set_nonblock(int fd) {
   // POSIX ::fcntl is a vararg interface; suppress the cppcoreguidelines
   // vararg check here rather than at every call site.
@@ -555,7 +604,12 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
   }
   impl_->config = config;
 
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  auto resolved = resolve_bind_address(config.bind_host, config.bind_port);
+  if (!resolved) {
+    return unexpected(resolved.error());
+  }
+
+  int fd = ::socket(resolved->family, SOCK_STREAM, 0);
   if (fd < 0) {
     return unexpected(Error::Code::LoadFailed,
                       std::string{"http server: socket() failed: "} + std::strerror(errno));
@@ -565,17 +619,15 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
 #ifdef SO_REUSEPORT
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
 #endif
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(config.bind_port);
-  std::string host_for_inet = config.bind_host == "localhost" ? "127.0.0.1" : config.bind_host;
-  if (::inet_pton(AF_INET, host_for_inet.c_str(), &addr.sin_addr) != 1) {
-    ::close(fd);
-    return unexpected(Error::Code::ConfigInvalid,
-                      std::string{"http server: inet_pton failed for "} + host_for_inet);
+#ifdef IPV6_V6ONLY
+  // Bind an IPv6 literal as pure IPv6 so the listener never silently
+  // straddles the IPv4 mapped range; loopback is single-family by intent.
+  if (resolved->family == AF_INET6) {
+    ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one));
   }
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+#endif
+
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&resolved->storage), resolved->len) < 0) {
     int saved = errno;
     ::close(fd);
     return unexpected(Error::Code::LoadFailed,
@@ -587,11 +639,12 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
     return unexpected(Error::Code::LoadFailed,
                       std::string{"http server: listen() failed: "} + std::strerror(saved));
   }
-  // Read the assigned port back.
-  sockaddr_in bound{};
+  // Read the assigned port back. getsockname reports the bound family, so
+  // decode the port from whichever sockaddr variant the kernel filled in.
+  sockaddr_storage bound{};
   socklen_t blen = sizeof(bound);
   if (::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &blen) == 0) {
-    impl_->bound_port = ntohs(bound.sin_port);
+    impl_->bound_port = port_from_sockaddr(bound);
   } else {
     impl_->bound_port = config.bind_port;
   }

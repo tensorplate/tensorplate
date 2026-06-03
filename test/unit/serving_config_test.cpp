@@ -20,6 +20,15 @@ TEST(ServingConfig, DefaultsValidate) {
   EXPECT_EQ(cfg.metrics_mode, MetricsMode::PrometheusText);
 }
 
+TEST(ServingConfig, AcceptsIPv6LoopbackLiteral) {
+  // Issue #22: "::1" is a documented loopback literal. The validator and
+  // the HTTP listener must agree that it is bindable; this pins the
+  // config-layer half of that contract.
+  ServingConfig cfg;
+  cfg.bind.host = "::1";
+  EXPECT_TRUE(cfg.validate());
+}
+
 TEST(ServingConfig, RejectsNonLoopbackByDefault) {
   ServingConfig cfg;
   cfg.bind.host = "0.0.0.0";

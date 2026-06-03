@@ -70,6 +70,9 @@ The HTTP server is a small in-tree implementation (see
   outside the documented loopback set (`127.0.0.1`, `::1`,
   `localhost`) unless `allow_non_loopback = true` is set in config
   *and* the validator's test-only environment opt-in is present.
+  The listener honors the address family the host literal names: an
+  IPv4 literal binds an `AF_INET` socket, `::1` binds an `AF_INET6`
+  socket (IPv6-only), and `localhost` maps to the IPv4 loopback.
 - **Request limits.** `max_body_bytes`, `max_header_bytes`, and
   `request_timeout` are enforced inline by the parser. Oversized
   requests return 413 before any buffer-plane allocation is

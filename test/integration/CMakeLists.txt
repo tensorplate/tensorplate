@@ -13,6 +13,8 @@ add_executable(tp_test_integration
   serving_e2e_test.cpp
   # Socket write helpers suppress SIGPIPE on peer close.
   socket_sigpipe_test.cpp
+  # Issue #22: HTTP server binds the loopback family the host literal names.
+  http_server_bind_test.cpp
 )
 
 target_include_directories(tp_test_integration
