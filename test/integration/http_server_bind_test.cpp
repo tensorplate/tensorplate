@@ -99,8 +99,7 @@ TEST(HttpServerBind, IPv6LoopbackBindsAndServes) {
     // failure (e.g. a host with IPv6 loopback disabled) is an
     // environment limitation, not the regression under test.
     ASSERT_NE(started.error().code, Error::Code::ConfigInvalid)
-        << "::1 must parse as an IPv6 address, not fail validation: "
-        << started.error().message;
+        << "::1 must parse as an IPv6 address, not fail validation: " << started.error().message;
     GTEST_SKIP() << "IPv6 loopback unavailable on this host: " << started.error().message;
   }
 
