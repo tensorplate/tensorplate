@@ -17,6 +17,9 @@ add_executable(tp_test_integration
   http_route_concurrency_test.cpp
   # Issue #22: HTTP server binds the loopback family the host literal names.
   http_server_bind_test.cpp
+  # Issue #23: header-size limit is enforced before a completed header block
+  # is accepted, including the read chunk that carries the terminator.
+  http_header_limit_test.cpp
 )
 
 target_include_directories(tp_test_integration

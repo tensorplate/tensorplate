@@ -120,6 +120,16 @@ ssize_t read_until_headers(int fd, std::string& buffer, std::size_t max_header_b
                            std::chrono::steady_clock::time_point deadline) {
   while (true) {
     if (auto p = buffer.find("\r\n\r\n"); p != std::string::npos) {
+      // The header section spans bytes [0, p) plus the 4-byte CRLFCRLF
+      // terminator. Enforce max_header_bytes on that block -- not on the
+      // whole buffer, which may already hold body bytes that arrived in
+      // the same read. Checking it here, ahead of the success return,
+      // rejects a chunk that both completes and overflows the header
+      // section (issue #23) instead of accepting an oversized header just
+      // because the terminator happened to be present.
+      if (p + 4 > max_header_bytes) {
+        return -2;  // header too large
+      }
       return static_cast<ssize_t>(buffer.size());
     }
     if (buffer.size() > max_header_bytes) {
