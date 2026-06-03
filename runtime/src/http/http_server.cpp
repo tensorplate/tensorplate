@@ -362,38 +362,50 @@ struct HttpServer::Impl {
   std::mutex routes_mutex;
 
   Response dispatch(const Request& req) {
-    std::lock_guard<std::mutex> g(routes_mutex);
-    for (const auto& r : exact_routes) {
-      if (r.method == req.method && r.path == req.path) {
-        try {
-          return r.handler(req);
-        } catch (const std::exception& e) {
-          return Response::plain(500, std::string{"internal error: "} + e.what());
-        } catch (...) {
-          return Response::plain(500, "internal error");
-        }
-      }
-    }
-    for (const auto& r : prefix_routes) {
-      if (r.method == req.method && req.path.compare(0, r.prefix.size(), r.prefix) == 0 &&
-          req.path.size() > r.prefix.size()) {
-        try {
-          return r.handler(req);
-        } catch (const std::exception& e) {
-          return Response::plain(500, std::string{"internal error: "} + e.what());
-        } catch (...) {
-          return Response::plain(500, "internal error");
-        }
-      }
-    }
-    // 405 if path matches but method doesn't; otherwise 404.
+    // Select the matching handler under routes_mutex, then release the
+    // lock *before* invoking it. routes_mutex guards only the route
+    // table; handlers may run for a long time (e.g. /infer), and holding
+    // the lock across execution would serialize every other route --
+    // turning a route-table lookup mutex into a global request-execution
+    // lock so /health, /metrics, and /policy/* stall behind inference
+    // (issue #21). RouteHandler is documented as safe to call
+    // concurrently, so copying it out and invoking the copy outside the
+    // lock is sound. We copy rather than hold a pointer because add_route
+    // can append (and thus reallocate) the route vectors concurrently.
+    RouteHandler handler;
     bool path_known = false;
-    for (const auto& r : exact_routes) {
-      if (r.path == req.path) {
-        path_known = true;
-        break;
+    {
+      std::lock_guard<std::mutex> g(routes_mutex);
+      for (const auto& r : exact_routes) {
+        if (r.path == req.path) {
+          path_known = true;
+          if (r.method == req.method) {
+            handler = r.handler;
+            break;
+          }
+        }
+      }
+      if (!handler) {
+        for (const auto& r : prefix_routes) {
+          if (r.method == req.method && req.path.compare(0, r.prefix.size(), r.prefix) == 0 &&
+              req.path.size() > r.prefix.size()) {
+            handler = r.handler;
+            break;
+          }
+        }
       }
     }
+
+    if (handler) {
+      try {
+        return handler(req);
+      } catch (const std::exception& e) {
+        return Response::plain(500, std::string{"internal error: "} + e.what());
+      } catch (...) {
+        return Response::plain(500, "internal error");
+      }
+    }
+    // 405 if an exact path matched but the method did not; otherwise 404.
     if (path_known) {
       return Response::plain(405, "method not allowed");
     }

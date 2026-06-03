@@ -1550,6 +1550,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Serving HTTP routes no longer serialize behind long-running handlers
+  ([#21](https://github.com/tensorplate/tensorplate/issues/21)). The route
+  dispatcher held the route-table mutex across handler execution, so a
+  slow `POST /infer` blocked every other route — `/health`, `/metrics`,
+  and the async-policy `/policy/result` and `/policy/cancel` routes —
+  turning a lookup lock into a global request-execution lock.
+    - `HttpServer::Impl::dispatch()` now copies the matching
+      `RouteHandler` out from under `routes_mutex` and invokes it after
+      releasing the lock. The handler is copied (not referenced) because
+      `add_route`/`add_prefix_route` can append to — and reallocate —
+      the route vectors concurrently. Route matching, the 405-vs-404
+      decision, and the 500-on-exception boundary are unchanged.
+    - This relies on the existing `RouteHandler` contract that handlers
+      are safe to call concurrently; no handler was depending on the
+      mutex for mutual exclusion.
+
 - Runtime socket write paths no longer depend on the embedding binary
   ignoring `SIGPIPE` process-wide
   ([#19](https://github.com/tensorplate/tensorplate/issues/19)). A peer that closed the
