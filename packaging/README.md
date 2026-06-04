@@ -34,6 +34,7 @@ packaging/
 │   └── tensorplate-observability.service       Auto-installed by dh_installsystemd.
 ├── conf/                           Default config installed under /etc/tensorplate/.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
+│   ├── install.sh                  Release installer published with GitHub Release assets.
 │   ├── build-deb.sh                Source-tree helper for dpkg-buildpackage.
 │   └── ...                         Maintainer-script helpers installed by tensorplate-common.
 └── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.

@@ -54,6 +54,8 @@ Common options:
   --release-notes FILE      Release notes used for GitHub Release creation.
   --report FILE             Preflight report output path.
   --skip-ci                 Record CI as blocked instead of querying GitHub.
+  --skip-tag-verify         For build-only artifact validation, verify manifest
+                            and checksums without requiring a local annotated tag.
   --dry-run                 Print intended action without mutating repository or GitHub state.
   --execute                 Execute a mutating operation.
   --push                    Push the release branch and tag after cut.
@@ -69,7 +71,7 @@ Subcommands:
   cut         Create/switch the release branch, prepare release metadata,
               commit it, create an annotated source tag, and optionally push
               branch + tag so CI builds and publishes release assets.
-  manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets.
+  manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets and install.sh.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   tag         Create an annotated RC or final tag. Never pushes tags.
   publish     Validate assets and create a draft GitHub Release when --execute is
@@ -162,6 +164,7 @@ parse_common_args() {
   RELEASE_NOTES=""
   REPORT=""
   SKIP_CI=0
+  SKIP_TAG_VERIFY=0
   DRY_RUN=0
   EXECUTE=0
   PUSH=0
@@ -187,6 +190,7 @@ parse_common_args() {
       --release-notes) RELEASE_NOTES="${2:-}"; shift 2 ;;
       --report) REPORT="${2:-}"; shift 2 ;;
       --skip-ci) SKIP_CI=1; shift ;;
+      --skip-tag-verify) SKIP_TAG_VERIFY=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --execute) EXECUTE=1; shift ;;
       --push) PUSH=1; shift ;;
@@ -813,35 +817,60 @@ def sha256(path):
 
 artifacts = []
 missing = []
+seen = set()
 for package in required:
     matches = sorted(root.glob(f"{package}_*.deb"))
     if not matches:
         missing.append(package)
         continue
-    if len(matches) > 1:
-        raise SystemExit(f"multiple artifacts match {package}: {[p.name for p in matches]}")
-    path = matches[0]
-    match = re.match(r"(?P<package>.+)_(?P<version>[^_]+)_(?P<arch>[^_]+)\.deb$", path.name)
-    if not match:
-        raise SystemExit(f"artifact name is not Debian-like: {path.name}")
-    package_version = match.group("version")
-    if not (package_version == version or package_version.startswith(version + "-")):
-        raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
-    digest = sha256(path)
-    artifacts.append(
-        {
-            "file": path.name,
-            "package": match.group("package"),
-            "version": package_version,
-            "architecture": match.group("arch"),
-            "target_os": target_os,
-            "size_bytes": path.stat().st_size,
-            "sha256": digest,
-        }
-    )
+    target_matches = []
+    for path in matches:
+        match = re.match(r"(?P<package>.+)_(?P<version>[^_]+)_(?P<arch>[^_]+)\.deb$", path.name)
+        if not match:
+            raise SystemExit(f"artifact name is not Debian-like: {path.name}")
+        package_version = match.group("version")
+        arch = match.group("arch")
+        if not (package_version == version or package_version.startswith(version + "-")):
+            raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
+        if package != "tensorplate-cli" and arch not in (target_arch, "all"):
+            raise SystemExit(f"{path.name}: only tensorplate-cli may publish extra desktop architectures")
+        key = (match.group("package"), arch)
+        if key in seen:
+            raise SystemExit(f"duplicate artifact for package/architecture: {key[0]} {key[1]}")
+        seen.add(key)
+        if arch in (target_arch, "all"):
+            target_matches.append(path.name)
+        digest = sha256(path)
+        artifacts.append(
+            {
+                "file": path.name,
+                "package": match.group("package"),
+                "version": package_version,
+                "architecture": arch,
+                "target_os": target_os if arch in (target_arch, "all") else "Debian/Ubuntu desktop CLI",
+                "size_bytes": path.stat().st_size,
+                "sha256": digest,
+            }
+        )
+    if not target_matches:
+        missing.append(f"{package} ({target_arch} or all)")
 
 if missing:
     raise SystemExit("missing package artifacts: " + ", ".join(missing))
+
+installer = root / "install.sh"
+if not installer.is_file():
+    raise SystemExit("missing installer asset: install.sh")
+artifacts.append(
+    {
+        "file": installer.name,
+        "kind": "installer",
+        "version": version,
+        "target_os": target_os,
+        "size_bytes": installer.stat().st_size,
+        "sha256": sha256(installer),
+    }
+)
 
 manifest = {
     "schema": "https://tensorplate.com/schemas/release-artifact-manifest-v1.json",
@@ -870,7 +899,10 @@ checksums_out = Path(checksums_path)
 manifest_out.parent.mkdir(parents=True, exist_ok=True)
 checksums_out.parent.mkdir(parents=True, exist_ok=True)
 manifest_out.write_text(json.dumps(manifest, indent=2) + "\n")
-checksums_out.write_text("".join(f"{a['sha256']}  {a['file']}\n" for a in artifacts))
+manifest_digest = sha256(manifest_out)
+checksum_lines = [f"{manifest_digest}  {manifest_out.name}\n"]
+checksum_lines.extend(f"{a['sha256']}  {a['file']}\n" for a in artifacts)
+checksums_out.write_text("".join(checksum_lines))
 print(f"wrote {manifest_out}")
 print(f"wrote {checksums_out}")
 PY
@@ -913,6 +945,10 @@ for artifact in manifest.get("artifacts", []):
     if checksums.get(name) != digest:
         raise SystemExit(f"SHA256SUMS mismatch for {name}")
 
+manifest_digest = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
+if checksums.get(Path(manifest_path).name) != manifest_digest:
+    raise SystemExit(f"SHA256SUMS mismatch for {Path(manifest_path).name}")
+
 required = {
     "tensorplate-common",
     "tensorplate-agent",
@@ -925,6 +961,8 @@ present = {artifact.get("package") for artifact in manifest.get("artifacts", [])
 missing = sorted(required - present)
 if missing:
     raise SystemExit("manifest is missing packages: " + ", ".join(missing))
+if not any(artifact.get("file") == "install.sh" for artifact in manifest.get("artifacts", [])):
+    raise SystemExit("manifest is missing install.sh")
 print("manifest verified")
 PY
 }
@@ -938,10 +976,14 @@ cmd_manifest() {
 cmd_verify() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "verify requires --tag"
-  if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" == "tag" ]]; then
-    note "annotated tag $TAG exists"
+  if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
+    note "skipping annotated tag check for build-only artifact validation"
   else
-    die "$TAG is missing or is not an annotated tag"
+    if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" == "tag" ]]; then
+      note "annotated tag $TAG exists"
+    else
+      die "$TAG is missing or is not an annotated tag"
+    fi
   fi
   verify_manifest_python "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS"
 }
@@ -1012,13 +1054,18 @@ cmd_publish() {
 
   local assets=()
   local pkg
+  shopt -s nullglob
+  local deb_assets=("$ARTIFACTS_DIR"/*.deb)
+  ((${#deb_assets[@]} >= ${#REQUIRED_PACKAGES[@]})) ||
+    die "expected at least ${#REQUIRED_PACKAGES[@]} Debian package artifacts in $ARTIFACTS_DIR"
   for pkg in "${REQUIRED_PACKAGES[@]}"; do
     local match
     match="$(find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "${pkg}_*.deb" | head -n 1)"
     [[ -n "$match" ]] || die "missing artifact for $pkg"
-    assets+=("$match")
   done
-  assets+=("$MANIFEST" "$CHECKSUMS")
+  assets+=("${deb_assets[@]}")
+  [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
+  assets+=("$ARTIFACTS_DIR/install.sh" "$MANIFEST" "$CHECKSUMS")
 
   local gh_args=(release create "$TAG" "${assets[@]}" --verify-tag --draft --notes-file "$RELEASE_NOTES")
   if [[ "$TAG" == *-rc.* ]]; then

@@ -14,6 +14,7 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-cli
   tensorplate-backend-python-pytorch
 )
+readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 
 usage() {
   cat <<'EOF'
@@ -28,6 +29,7 @@ Options:
   --checksums FILE       SHA256SUMS output path.
   --target-os VALUE      Manifest target OS label.
   --arch ARCH            Manifest target architecture. Defaults to arm64.
+  --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
 EOF
 }
 
@@ -47,6 +49,7 @@ MANIFEST=""
 CHECKSUMS=""
 TARGET_OS="Ubuntu 22.04 / JetPack 6.x (L4T 36.x)"
 TARGET_ARCH="arm64"
+SKIP_TAG_VERIFY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --checksums) CHECKSUMS="${2:-}"; shift 2 ;;
     --target-os) TARGET_OS="${2:-}"; shift 2 ;;
     --arch) TARGET_ARCH="${2:-}"; shift 2 ;;
+    --skip-tag-verify) SKIP_TAG_VERIFY=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
@@ -74,6 +78,12 @@ cd "$repo_root"
 
 [[ "$TARGET_ARCH" == "$(dpkg --print-architecture)" ]] ||
   die "runner architecture $(dpkg --print-architecture) does not match release target $TARGET_ARCH"
+
+note "validating release installer"
+[[ -f "$INSTALLER_SOURCE" ]] || die "missing installer script at $INSTALLER_SOURCE"
+bash -n "$INSTALLER_SOURCE"
+command -v shellcheck >/dev/null 2>&1 || die "shellcheck is required to validate $INSTALLER_SOURCE"
+shellcheck "$INSTALLER_SOURCE"
 
 note "building Rust release binaries"
 cargo build --release \
@@ -132,6 +142,7 @@ for pkg in "${REQUIRED_PACKAGES[@]}"; do
   debs+=("${matches[0]}")
 done
 cp "${debs[@]}" "$ARTIFACTS_DIR/"
+install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 
 note "generating manifest and checksums"
 tools/release/tensorplate-release.sh manifest \
@@ -143,11 +154,17 @@ tools/release/tensorplate-release.sh manifest \
   --target-os "$TARGET_OS" \
   --arch "$TARGET_ARCH"
 
-tools/release/tensorplate-release.sh verify \
-  --version "$VERSION" \
-  --tag "$TAG" \
-  --artifacts-dir "$ARTIFACTS_DIR" \
-  --manifest "$MANIFEST" \
+verify_args=(
+  verify
+  --version "$VERSION"
+  --tag "$TAG"
+  --artifacts-dir "$ARTIFACTS_DIR"
+  --manifest "$MANIFEST"
   --checksums "$CHECKSUMS"
+)
+if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
+  verify_args+=(--skip-tag-verify)
+fi
+tools/release/tensorplate-release.sh "${verify_args[@]}"
 
 note "release artifacts are ready in $ARTIFACTS_DIR"

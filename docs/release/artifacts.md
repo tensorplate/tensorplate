@@ -1,9 +1,12 @@
 # TensorPlate release artifacts, manifest, and publication flow
 
-TensorPlate public releases publish native Debian package artifacts plus a
-manifest and SHA256 checksums. Release pages may also attach validated
-sample bundles, but the required assets are the `.deb` packages, artifact
-manifest, and `SHA256SUMS`.
+TensorPlate public releases publish native Debian package artifacts,
+`install.sh`, an artifact manifest, and SHA256 checksums. Release pages
+may also attach validated sample bundles, but the required assets are the
+`.deb` packages, installer, artifact manifest, and `SHA256SUMS`.
+Releases may additionally attach desktop-only `tensorplate-cli` packages
+for architectures such as `amd64`; those assets are consumed by
+`install.sh --cli-only` and are not part of the Jetson runtime package set.
 
 Use these variables in examples:
 
@@ -37,6 +40,8 @@ tensorplate-serving_${TP_VERSION}-1_arm64.deb
 tensorplate-observability_${TP_VERSION}-1_arm64.deb
 tensorplate-cli_${TP_VERSION}-1_arm64.deb
 tensorplate-backend-python-pytorch_${TP_VERSION}-1_arm64.deb
+tensorplate-cli_${TP_VERSION}-1_amd64.deb    # optional CLI-only desktop asset
+install.sh
 tensorplate-${TP_TAG}-artifacts.json
 SHA256SUMS
 ```
@@ -114,14 +119,24 @@ The manifest is JSON with this stable shape:
       "target_os": "Ubuntu 22.04 / JetPack 6.x (L4T 36.x)",
       "size_bytes": 123,
       "sha256": "<64-hex-digest>"
+    },
+    {
+      "file": "install.sh",
+      "kind": "installer",
+      "version": "X.Y.Z",
+      "target_os": "Ubuntu 22.04 / JetPack 6.x (L4T 36.x)",
+      "size_bytes": 123,
+      "sha256": "<64-hex-digest>"
     }
   ]
 }
 ```
 
-`SHA256SUMS` uses standard two-column format:
+`SHA256SUMS` uses standard two-column format. It covers the manifest file
+itself plus every file listed in the manifest, including `install.sh`:
 
 ```text
+<sha256>  tensorplate-vX.Y.Z-artifacts.json
 <sha256>  <artifact-file-name>
 ```
 
@@ -132,6 +147,9 @@ sha256sum -c SHA256SUMS
 ```
 
 On macOS verification hosts, use `shasum -a 256 -c SHA256SUMS`.
+The primary `install.sh` path also performs checksum verification itself:
+it verifies `install.sh` first, then verifies the manifest and selected
+package assets before installing.
 
 ## Verification
 
@@ -148,22 +166,32 @@ tools/release/tensorplate-release.sh verify \
 
 Verification fails if the tag is not annotated, a required package is
 missing, manifest metadata drifts from the requested version/tag, or any
-checksum mismatches.
+checksum mismatches. The required runtime package set must include the
+target architecture or `all`; additional architecture-specific `.deb`
+assets are currently allowed only for `tensorplate-cli`.
 
 ## GitHub Release Attachment Procedure
 
 1. Cut the annotated source tag with `tools/release/tensorplate-release.sh cut`.
 2. Push the reviewed release branch and tag.
-3. Let the `Release` workflow build all `.deb` packages, manifest, and
-   `SHA256SUMS`.
-4. Let the workflow create the GitHub Release and attach all assets. RC
+3. For pre-publication validation, run the `Release` workflow manually
+   with `publish=false`. It builds all `.deb` packages, copies
+   `install.sh`, generates the manifest and `SHA256SUMS`, uploads the
+   `tensorplate-${TP_TAG}-release-assets` workflow artifact, and stops
+   before creating a GitHub Release.
+4. Download that workflow artifact on the validation target and exercise
+   the installer locally with `sudo bash install.sh`, `sudo bash
+   install.sh --cli-only` when a desktop CLI asset is present, and any
+   optional backend path being released.
+5. Re-run the `Release` workflow with `publish=true`, or push the
+   annotated tag, to create the GitHub Release and attach all assets. RC
    tags publish as public prereleases; final tags create draft releases.
-5. Confirm the release notes include supported hardware/OS, known
+6. Confirm the release notes include supported hardware/OS, known
    limitations, install guide, validation links, support policy, security
    policy, and rollback guidance.
-6. Run clean-room validation from the GitHub Release assets, not from local
+7. Run clean-room validation from the GitHub Release assets, not from local
    package build paths.
-7. Publish the final draft, then announce the release, only after the
+8. Publish the final draft, then announce the release, only after the
    clean-room decision is `pass` or an explicitly signed
    `conditional-pass`.
 

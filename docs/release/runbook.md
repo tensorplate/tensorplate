@@ -151,7 +151,38 @@ The script refuses dirty worktrees, existing tags, and unexpected release
 metadata edits. It pushes the branch before the tag; the tag push is what
 starts the release workflow.
 
-### 4. Watch CI Build And Publish Assets
+### 4. Build Release Assets Without Publishing
+
+Before pushing a final tag or creating a public prerelease, run the
+`Release` workflow manually:
+
+- `tag`: `${TP_TAG}`
+- `publish`: `false`
+- `source_ref`: `${TP_RELEASE_BRANCH}`
+
+The build-only run must:
+
+- Build Rust release binaries.
+- Build the C++ serving worker.
+- Run `test/packaging/run.sh`.
+- Build all required `.deb` packages.
+- Copy `install.sh`.
+- Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
+- Upload the `tensorplate-${TP_TAG}-release-assets` workflow artifact.
+- Stop before creating a GitHub Release.
+
+Download the workflow artifact and smoke-test the installer from the
+artifact directory before publication:
+
+```bash
+sudo bash install.sh
+sudo bash install.sh --cli-only
+```
+
+Run the `--cli-only` smoke only when the artifact bundle includes a
+matching desktop CLI package for that host architecture.
+
+### 5. Watch CI Build And Publish Assets
 
 Open the `Release` workflow run for `${TP_TAG}`. It must:
 
@@ -162,7 +193,7 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
-- Create the GitHub Release and attach the six `.deb` packages,
+- Create the GitHub Release and attach the `.deb` packages, `install.sh`,
   manifest, and checksum file. RC tags are public prereleases; final tags
   are drafts until the release owner publishes them.
 
@@ -170,7 +201,7 @@ The workflow refuses to replace an existing GitHub Release. If it fails
 after creating no release, fix the release branch, cut a new RC tag, or
 delete only the failed unpublished tag according to the tag policy.
 
-### 5. Download And Verify CI Assets
+### 6. Download And Verify CI Assets
 
 After the workflow succeeds, download the assets from the GitHub Release
 and verify checksums from a clean machine:
@@ -180,6 +211,7 @@ mkdir -p "${TP_RELEASE_DIR}"
 gh release download "${TP_TAG}" \
   --dir "${TP_RELEASE_DIR}" \
   --pattern '*.deb' \
+  --pattern 'install.sh' \
   --pattern 'SHA256SUMS' \
   --pattern "tensorplate-${TP_TAG}-artifacts.json"
 cd "${TP_RELEASE_DIR}"
@@ -189,7 +221,7 @@ sha256sum -c SHA256SUMS
 Review the manifest for package names, versions, architecture, release
 commit, source tag, checksums, and validation links.
 
-### 6. Run Clean-Room Validation
+### 7. Run Clean-Room Validation
 
 Run [`docs/validation/clean-room-release-smoke.md`](../validation/clean-room-release-smoke.md)
 from the GitHub Release assets. The validation must download release
@@ -203,7 +235,7 @@ unpublished and cut a corrected release tag. If the result is
 `conditional-pass`, the risk, mitigation, owner, and follow-up issue must
 also appear in release notes.
 
-### 7. Record Sign-Off And Evidence
+### 8. Record Sign-Off And Evidence
 
 ```bash
 cp docs/release/signoff-template.md "${TP_SIGNOFF}"
@@ -218,7 +250,7 @@ Fill the copied files with final decisions and links to:
 - The clean-room validation report.
 - Reviewer approvals.
 
-### 8. Publish And Announce
+### 9. Publish And Announce
 
 For a final release, publish the draft only after release evidence is
 accepted:
@@ -230,7 +262,7 @@ gh release edit "${TP_TAG}" --draft=false --latest
 Then publish the announcement using the release notes as the source of
 truth. The announcement must not claim support beyond release evidence.
 
-### 9. Monitor After Release
+### 10. Monitor After Release
 
 For the first release window:
 

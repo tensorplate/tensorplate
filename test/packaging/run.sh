@@ -12,7 +12,8 @@ for v in "${here}/verify_layout.sh" \
          "${here}/verify_debian_metadata.sh" \
          "${here}/verify_systemd_units.sh" \
          "${here}/verify_lifecycle_scripts.sh" \
-         "${here}/verify_descriptor.sh"; do
+         "${here}/verify_descriptor.sh" \
+         "${here}/verify_installer.sh"; do
   ran=$((ran + 1))
   echo "==> $(basename "${v}")"
   "${v}"

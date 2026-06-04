@@ -10,6 +10,15 @@ on:
         description: 'Annotated release tag to publish, for example v0.1.0 or v0.1.0-rc.1'
         required: true
         type: string
+      publish:
+        description: 'Create the GitHub Release after building assets. Set false for build-only validation.'
+        required: false
+        default: true
+        type: boolean
+      source_ref:
+        description: 'Optional source ref for build-only validation, for example release/v0.1.0. Publish mode always uses the tag.'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -49,6 +58,14 @@ jobs:
           if [[ "$prerelease" == "false" ]]; then
             draft="true"
           fi
+          publish="true"
+          checkout_ref="${tag}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            publish="${{ inputs.publish }}"
+            if [[ "$publish" != "true" && -n "${{ inputs.source_ref }}" ]]; then
+              checkout_ref="${{ inputs.source_ref }}"
+            fi
+          fi
           release_dir="dist/release/${tag}"
           {
             echo "tag=${tag}"
@@ -60,15 +77,18 @@ jobs:
             echo "checksums=${release_dir}/SHA256SUMS"
             echo "notes=docs/release/notes/v${version}.md"
             echo "release_branch=release/v${version}"
+            echo "publish=${publish}"
+            echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
-      - name: Checkout release tag
+      - name: Checkout release source
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.meta.outputs.tag }}
+          ref: ${{ steps.meta.outputs.checkout_ref }}
           fetch-depth: 0
 
       - name: Verify annotated tag and release branch
+        if: ${{ steps.meta.outputs.publish == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -103,7 +123,8 @@ jobs:
             nlohmann-json3-dev \
             pkg-config \
             python3 \
-            python3-pip
+            python3-pip \
+            shellcheck
           command -v gh >/dev/null || {
             echo "::error::GitHub CLI (gh) must be installed on the release runner"
             exit 1
@@ -117,13 +138,19 @@ jobs:
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
         run: |
           set -Eeuo pipefail
-          tools/release/build-release-artifacts.sh \
-            --version "${{ steps.meta.outputs.version }}" \
-            --tag "${{ steps.meta.outputs.tag }}" \
-            --artifacts-dir "${{ steps.meta.outputs.release_dir }}" \
-            --manifest "${{ steps.meta.outputs.manifest }}" \
-            --checksums "${{ steps.meta.outputs.checksums }}" \
+          args=(
+            tools/release/build-release-artifacts.sh
+            --version "${{ steps.meta.outputs.version }}"
+            --tag "${{ steps.meta.outputs.tag }}"
+            --artifacts-dir "${{ steps.meta.outputs.release_dir }}"
+            --manifest "${{ steps.meta.outputs.manifest }}"
+            --checksums "${{ steps.meta.outputs.checksums }}"
             --arch arm64
+          )
+          if [[ "${{ steps.meta.outputs.publish }}" != "true" ]]; then
+            args+=(--skip-tag-verify)
+          fi
+          "${args[@]}"
 
       - name: Upload release build artifact bundle
         uses: actions/upload-artifact@v4
@@ -131,11 +158,13 @@ jobs:
           name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets
           path: |
             ${{ steps.meta.outputs.release_dir }}/*.deb
+            ${{ steps.meta.outputs.release_dir }}/install.sh
             ${{ steps.meta.outputs.manifest }}
             ${{ steps.meta.outputs.checksums }}
           if-no-files-found: error
 
       - name: Create GitHub Release with assets
+        if: ${{ steps.meta.outputs.publish == 'true' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,11 +181,16 @@ jobs:
 
           shopt -s nullglob
           deb_assets=("${release_dir}"/*.deb)
-          ((${#deb_assets[@]} == 6)) || {
-            echo "::error::expected six .deb packages plus manifest and checksums"
+          ((${#deb_assets[@]} >= 6)) || {
+            echo "::error::expected at least six .deb packages plus install.sh, manifest, and checksums"
             exit 1
           }
-          assets=("${deb_assets[@]}" "${{ steps.meta.outputs.manifest }}" "${{ steps.meta.outputs.checksums }}")
+          installer="${release_dir}/install.sh"
+          [[ -f "$installer" ]] || {
+            echo "::error::expected install.sh release asset"
+            exit 1
+          }
+          assets=("${deb_assets[@]}" "$installer" "${{ steps.meta.outputs.manifest }}" "${{ steps.meta.outputs.checksums }}")
 
           args=(release create "$tag" "${assets[@]}" --verify-tag --title "TensorPlate ${tag}" --notes-file "$notes")
           if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
@@ -169,3 +203,13 @@ jobs:
           fi
 
           gh "${args[@]}"
+
+      - name: Build-only validation summary
+        if: ${{ steps.meta.outputs.publish != 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "Release asset build completed without creating a GitHub Release."
+            echo "Download the workflow artifact named tensorplate-${{ steps.meta.outputs.tag }}-release-assets to test install.sh before publishing."
+          } >>"$GITHUB_STEP_SUMMARY"

@@ -1,10 +1,17 @@
 # TensorPlate External Install Guide
 
 This guide starts from GitHub Release assets. It does not require a
-TensorPlate source checkout or local build tree. Set `TP_VERSION` to the
-release being installed; the examples default to `0.1.0`.
+TensorPlate source checkout or local build tree. The primary path is the
+release `install.sh` script: download it and run it locally. The script
+self-checks against release `SHA256SUMS` before downloading or installing
+package assets. Do not use `curl | sh`.
+
+The concrete command below targets `v0.1.0`; later releases use the same
+shape with the tag changed in the two URLs.
 
 ## Supported Target
+
+Runtime install:
 
 | Requirement | Release support |
 | --- | --- |
@@ -18,7 +25,93 @@ Best-effort validation may run on Jetson Orin NX 16GB. Kria K26/K24,
 Vitis AI execution, hosted fleet control, container-only install, and
 public network endpoints are not supported for the v0.1 release line.
 
-## Release Variables
+CLI-only install:
+
+| Requirement | Release support |
+| --- | --- |
+| Host | Debian/Ubuntu desktop or workstation. |
+| Architecture | Any architecture with a matching `tensorplate-cli` release asset. |
+| Package source | `tensorplate-common` plus `tensorplate-cli` `.deb` files attached to the matching GitHub Release. |
+| Runtime services | Not installed or enabled. |
+
+## Runtime Install On Jetson
+
+For TensorPlate `v0.1.0`, paste this into the terminal on the target
+Jetson:
+
+```bash
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
+```
+
+This downloads the installer and runs it locally. The installer downloads
+or reuses `SHA256SUMS`, verifies `install.sh`, then verifies the selected
+release packages before installing. It is intentionally not a `curl | sh`
+path.
+
+The script uses the pinned current release by default. For a newer
+published release, replace `v0.1.0` in both URLs with that release tag.
+
+What the installer does:
+
+- validates the host OS as JetPack 6.x / L4T 36.x and aborts by default
+  on unsupported OS metadata.
+- warns on unrecognized Jetson hardware or non-`arm64` architecture; in
+  interactive mode it prompts before continuing.
+- downloads `tensorplate-${TP_TAG}-artifacts.json`, `SHA256SUMS`, and
+  the selected release artifacts listed in the manifest.
+- verifies the downloaded manifest and artifacts with `sha256sum -c
+  SHA256SUMS`; any mismatch stops the install.
+- installs the core Debian packages with the `apt-get install --reinstall`
+  path.
+- enables `tensorplate-agent` and `tensorplate-observability`.
+- runs `tensorplate doctor --output json` and fails if a critical finding
+  is present.
+
+Installer flags:
+
+| Flag | Behavior |
+| --- | --- |
+| `--version VERSION` | Selects the release tag/version. Accepts `0.1.0`, `v0.1.0`, or `v0.1.0-rc.N`. |
+| `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` for the host Debian architecture. Skips Jetson validation, service enablement, and doctor. |
+| `--with-python-backend` | Also installs `tensorplate-backend-python-pytorch`. |
+| `--yes` / `-y` | Continues without interactive prompts for unattended provisioning. |
+| `--force-os` | Overrides the OS gate. This is unsupported and at your own risk. |
+| `--strict-hardware` | Treats advisory hardware warnings as fatal. |
+| `--dry-run` | Runs validation gates and prints planned actions without downloading or installing. |
+| `--help` | Prints usage and all flags. |
+
+For fleet provisioning on validated Jetson hosts:
+
+```bash
+sudo bash install.sh --yes
+```
+
+Install the optional Python/PyTorch backend package with:
+
+```bash
+sudo bash install.sh --with-python-backend
+```
+
+The optional package does not install PyTorch. Install the
+Jetson-compatible PyTorch stack separately, then run `tensorplate doctor`
+and restart the agent if needed.
+
+## CLI-Only Install On Desktop
+
+On a Debian/Ubuntu desktop or workstation, paste:
+
+```bash
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh --cli-only
+```
+
+CLI-only mode installs the operator CLI package for the host Debian
+architecture when the release includes a matching `tensorplate-cli`
+asset. It does not install Jetson runtime services, does not validate
+JetPack / L4T, and does not run `tensorplate doctor`.
+
+## Manual Fallback Variables
+
+Use these variables only when following the manual fallback flow below:
 
 ```bash
 export TP_VERSION=0.1.0
@@ -33,12 +126,13 @@ export TP_MANIFEST="tensorplate-${TP_TAG}-artifacts.json"
 Use one shell session for the commands below so these variables remain in
 scope.
 
-## Download Release Assets
+## Manual Fallback: Download Release Assets
 
 ```bash
 mkdir -p "/tmp/tensorplate-${TP_TAG}"
 cd "/tmp/tensorplate-${TP_TAG}"
 
+curl -fL -O "${TP_RELEASE_URL}/install.sh"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
@@ -180,7 +274,8 @@ group.
 | Symptom | Action |
 | --- | --- |
 | Checksum mismatch | Delete the asset and download again. If it repeats, stop and file a release issue. |
-| Unsupported hardware or OS | Stop before install. v0.1 supports Jetson Orin Nano 8GB Super with JetPack 6.x / L4T 36.x. |
+| Unsupported OS | The installer aborts by default unless `--force-os` is passed. v0.1 supports JetPack 6.x / L4T 36.x. |
+| Unsupported hardware or architecture | The installer warns and prompts in interactive mode. Use `--strict-hardware` to make this fatal, or `--yes` for unattended validated fleets. |
 | `path_layout = fail` | Reinstall `tensorplate-common`; attach `tensorplate doctor --output json` if it persists. |
 | `config_files = fail` | Reinstall the owning package or restore the dpkg conffile. |
 | Service start failure | Inspect `journalctl -u tensorplate-agent` or `journalctl -u tensorplate-observability`; do not edit `/usr/lib/tensorplate` manually. |
