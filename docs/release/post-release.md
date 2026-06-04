@@ -68,7 +68,7 @@ Package rollback procedure:
 
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
-sudo apt install ./tensorplate-common_<previous-version>_arm64.deb \
+sudo apt install ./tensorplate-common_<previous-version>_all.deb \
   ./tensorplate-agent_<previous-version>_arm64.deb \
   ./tensorplate-serving_<previous-version>_arm64.deb \
   ./tensorplate-observability_<previous-version>_arm64.deb \

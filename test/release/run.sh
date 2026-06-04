@@ -27,15 +27,17 @@ grep -q 'draft="true"' .github/workflows/release.yml
 grep -q 'gh release edit "${TP_TAG}" --draft=false --latest' docs/release/runbook.md
 
 mkdir -p "$tmp/artifacts"
+for pkg in tensorplate-common tensorplate-backend-python-pytorch; do
+  printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_all.deb"
+done
 for pkg in \
-  tensorplate-common \
   tensorplate-agent \
   tensorplate-serving \
   tensorplate-observability \
-  tensorplate-cli \
-  tensorplate-backend-python-pytorch; do
+  tensorplate-cli; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb"
 done
+printf 'fixture artifact for tensorplate-cli desktop\n' > "$tmp/artifacts/tensorplate-cli_0.1.0-1_amd64.deb"
 printf 'fixture installer\n' > "$tmp/artifacts/install.sh"
 
 "$script" manifest \
@@ -54,8 +56,10 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 checksums = Path(sys.argv[2]).read_text().splitlines()
 assert manifest["release"]["version"] == "0.1.0"
 assert manifest["release"]["tag"] == "v0.1.0"
-assert len(manifest["artifacts"]) == 7  # 6 packages + install.sh
-assert len(checksums) == 8  # manifest self-digest + 7 artifacts
+assert len(manifest["artifacts"]) == 8  # 6 packages + desktop CLI + install.sh
+assert len(checksums) == 9  # manifest self-digest + 8 artifacts
+assert any(artifact["file"] == "tensorplate-common_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
+assert any(artifact["file"] == "tensorplate-cli_0.1.0-1_amd64.deb" for artifact in manifest["artifacts"])
 PY
 
 printf 'release script checks green\n'

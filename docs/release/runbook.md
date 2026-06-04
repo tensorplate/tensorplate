@@ -76,15 +76,14 @@ The release owner stops immediately unless all prerequisites are true:
 
 ### 2. Verify The Release Runner
 
-The automated path is tag-driven:
+The publish path is tag-driven:
 
 1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
 2. The script creates or switches `release/vX.Y.Z`, prepares version
-   metadata, commits it, creates an annotated source tag, and pushes the
-   branch + tag.
+   metadata, commits it, and creates an annotated source tag.
 3. `.github/workflows/release.yml` builds the `.deb` packages from that
    tag, generates the manifest/checksums, and creates the GitHub Release
-   with those assets attached.
+   with those assets attached after the tag is pushed.
 
 RC tags create public prereleases. Final tags create draft GitHub
 Releases by default so assets can be verified and clean-room validation
@@ -129,14 +128,13 @@ tools/release/tensorplate-release.sh cut \
   --dry-run
 ```
 
-Cut and push the final release source tag:
+Cut the final release source tag locally:
 
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --final \
   --execute \
-  --push \
   --confirm "CUT-${TP_TAG}"
 ```
 
@@ -147,13 +145,16 @@ tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --rc 1 \
   --execute \
-  --push \
   --confirm "CUT-${TP_TAG}-rc.1"
 ```
 
 The script refuses dirty worktrees, existing tags, and unexpected release
-metadata edits. It pushes the branch before the tag; the tag push is what
-starts the release workflow.
+metadata edits. Push the release branch for build-only validation, but do
+not push the tag yet:
+
+```bash
+git push origin "${TP_RELEASE_BRANCH}"
+```
 
 ### 4. Build Release Assets Without Publishing
 
@@ -190,6 +191,13 @@ Run the `--cli-only` smoke only when the artifact bundle includes a
 matching desktop CLI package for that host architecture.
 
 ### 5. Watch CI Build And Publish Assets
+
+After build-only validation passes, push the annotated tag. The tag push is
+what starts the publish workflow from the tag ref:
+
+```bash
+git push origin "${TP_TAG}"
+```
 
 Open the `Release` workflow run for `${TP_TAG}`. It must:
 

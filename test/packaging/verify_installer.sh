@@ -47,6 +47,24 @@ exit 0
 STUB
 chmod +x "${td}/bin/cosign-ok"
 
+bootstrap_asset=""
+bootstrap_checksum_var=""
+case "$(uname -m)" in
+  x86_64|amd64)
+    bootstrap_asset="cosign-linux-amd64"
+    bootstrap_checksum_var="TP_INSTALL_COSIGN_LINUX_AMD64_SHA256"
+    ;;
+  aarch64|arm64)
+    bootstrap_asset="cosign-linux-arm64"
+    bootstrap_checksum_var="TP_INSTALL_COSIGN_LINUX_ARM64_SHA256"
+    ;;
+esac
+if [ -n "${bootstrap_asset}" ]; then
+  mkdir -p "${td}/cosign-release"
+  cp "${td}/bin/cosign-ok" "${td}/cosign-release/${bootstrap_asset}"
+  bootstrap_checksum="$(sha256sum "${td}/cosign-release/${bootstrap_asset}" | awk '{print $1}')"
+fi
+
 bash -n "${installer}"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "${installer}"
@@ -120,19 +138,44 @@ grep -q "verifying install.sh with SHA256SUMS" "${td}/self-check.out"
 grep -q "install.sh: OK" "${td}/self-check.out"
 grep -q "run as root" "${td}/self-check.err"
 
-# Signature verification fails closed when cosign is unavailable and the
-# operator has not explicitly opted out.
+# When cosign is missing, the installer can bootstrap a pinned transient
+# binary before verifying SHA256SUMS.
+if [ -n "${bootstrap_asset}" ]; then
+  if env \
+     TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+     TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+     TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+     TP_INSTALL_ARCH="aarch64" \
+     TP_INSTALL_DEB_ARCH="arm64" \
+     TP_INSTALL_FORCE_COSIGN_BOOTSTRAP=1 \
+     TP_INSTALL_UNSAFE_TEST_HOOKS=1 \
+     TP_INSTALL_COSIGN_BOOTSTRAP_ASSET="${bootstrap_asset}" \
+     TP_INSTALL_COSIGN_BASE_URL="file://${td}/cosign-release" \
+     "${bootstrap_checksum_var}=${bootstrap_checksum}" \
+       bash "${td}/self-check/install.sh" --yes >"${td}/bootstrap.out" 2>"${td}/bootstrap.err"; then
+    echo "FAIL: bootstrap self-check install unexpectedly passed without root" >&2
+    exit 1
+  fi
+  grep -q "downloading pinned ${bootstrap_asset}" "${td}/bootstrap.out"
+  grep -q "${bootstrap_asset}: OK" "${td}/bootstrap.out"
+  grep -q "SHA256SUMS signature verified" "${td}/bootstrap.out"
+  grep -q "run as root" "${td}/bootstrap.err"
+fi
+
+# Signature verification fails closed when cosign is unavailable, bootstrap is
+# disabled, and the operator has not explicitly opted out.
 if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
    TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
    TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
    TP_INSTALL_ARCH="aarch64" \
    TP_INSTALL_DEB_ARCH="arm64" \
    TP_INSTALL_COSIGN="${td}/bin/cosign-absent" \
+   TP_INSTALL_COSIGN_BOOTSTRAP=0 \
      bash "${td}/self-check/install.sh" --yes >"${td}/nocosign.out" 2>"${td}/nocosign.err"; then
   echo "FAIL: install without cosign unexpectedly passed" >&2
   exit 1
 fi
-grep -q "cosign is required" "${td}/nocosign.err"
+grep -q "configured cosign binary was not found" "${td}/nocosign.err"
 if grep -q "run as root" "${td}/nocosign.err"; then
   echo "FAIL: install proceeded past the signature gate without cosign" >&2
   exit 1

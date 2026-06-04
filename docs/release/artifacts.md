@@ -35,12 +35,12 @@ The release must include one `.deb` asset for each package:
 Expected asset names follow Debian binary-package naming:
 
 ```text
-tensorplate-common_${TP_VERSION}-1_arm64.deb
+tensorplate-common_${TP_VERSION}-1_all.deb
 tensorplate-agent_${TP_VERSION}-1_arm64.deb
 tensorplate-serving_${TP_VERSION}-1_arm64.deb
 tensorplate-observability_${TP_VERSION}-1_arm64.deb
 tensorplate-cli_${TP_VERSION}-1_arm64.deb
-tensorplate-backend-python-pytorch_${TP_VERSION}-1_arm64.deb
+tensorplate-backend-python-pytorch_${TP_VERSION}-1_all.deb
 tensorplate-cli_${TP_VERSION}-1_amd64.deb    # optional CLI-only desktop asset
 install.sh
 tensorplate-${TP_TAG}-artifacts.json
@@ -64,7 +64,11 @@ tools/release/build-release-artifacts.sh \
 ```
 
 The release runner must match the target architecture. The script refuses
-to build `arm64` release packages on a non-`arm64` runner.
+to build `arm64` release packages on a non-`arm64` runner. If a separately
+built desktop `tensorplate-cli` package, such as `amd64`, is pre-staged in
+the repository parent directory with the other Debian outputs, the release
+build copies it into the artifact set and the manifest marks it as a
+desktop CLI asset.
 
 For local diagnostics only, the equivalent steps are:
 
@@ -193,8 +197,8 @@ use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
 
 ## GitHub Release Attachment Procedure
 
-1. Cut the annotated source tag with `tools/release/tensorplate-release.sh cut`.
-2. Push the reviewed release branch and tag.
+1. Cut the local annotated source tag with `tools/release/tensorplate-release.sh cut`.
+2. Push only the reviewed release branch.
 3. For pre-publication validation, run the `Release` workflow manually
    with `publish=false`. It builds all `.deb` packages, copies
    `install.sh`, generates the manifest and `SHA256SUMS`, uploads the
@@ -205,11 +209,11 @@ use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
    `--allow-unsigned`: `sudo bash install.sh --allow-unsigned`, `sudo bash
    install.sh --cli-only --allow-unsigned` when a desktop CLI asset is
    present, and any optional backend path being released.
-5. Re-run the `Release` workflow with `publish=true`, or push the
-   annotated tag, to sign `SHA256SUMS`, record build provenance, create the
-   GitHub Release, and attach all assets including
-   `SHA256SUMS.cosign.bundle`. RC tags publish as public prereleases; final
-   tags create draft releases.
+5. Push the annotated tag to sign `SHA256SUMS`, record build provenance,
+   create the GitHub Release, and attach all assets including
+   `SHA256SUMS.cosign.bundle`. Manual `workflow_dispatch publish=true` is
+   allowed only when the workflow itself is run from that release tag ref.
+   RC tags publish as public prereleases; final tags create draft releases.
 6. Confirm the release notes include supported hardware/OS, known
    limitations, install guide, validation links, support policy, security
    policy, and rollback guidance.

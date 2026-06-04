@@ -51,8 +51,11 @@ workflow (`.github/workflows/release.yml`) running on a `vX.Y.Z[-rc.N]` tag,
 via the GitHub Actions OIDC identity. This provides authenticity, not just
 integrity: a tampered or re-hosted `SHA256SUMS` cannot be re-signed without
 that workflow identity. The release `install.sh` verifies the cosign
-signature by default before trusting any checksum, and fails closed when
-`cosign` is unavailable unless `--allow-unsigned` is passed.
+signature by default before trusting any checksum. If `cosign` is not
+already installed, the installer downloads a pinned Linux `arm64`/`amd64`
+cosign binary to its temporary work directory, verifies the pinned SHA256
+for that binary, and runs it from there. Signature verification still fails
+closed unless `--allow-unsigned` is passed.
 
 Verify a release manually:
 

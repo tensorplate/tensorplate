@@ -34,14 +34,15 @@ Release decision: TODO
 ## Published Assets
 
 ```text
-tensorplate-common_X.Y.Z-1_arm64.deb
+tensorplate-common_X.Y.Z-1_all.deb
 tensorplate-agent_X.Y.Z-1_arm64.deb
 tensorplate-serving_X.Y.Z-1_arm64.deb
 tensorplate-observability_X.Y.Z-1_arm64.deb
 tensorplate-cli_X.Y.Z-1_arm64.deb
-tensorplate-backend-python-pytorch_X.Y.Z-1_arm64.deb
+tensorplate-backend-python-pytorch_X.Y.Z-1_all.deb
 tensorplate-vX.Y.Z-artifacts.json
 SHA256SUMS
+SHA256SUMS.cosign.bundle
 ```
 
 If a sample bundle is attached, list it here with checksum and validation

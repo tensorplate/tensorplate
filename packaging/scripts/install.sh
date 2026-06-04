@@ -16,6 +16,10 @@ readonly CLI_PACKAGE="tensorplate-cli"
 readonly COMMON_PACKAGE="tensorplate-common"
 readonly AGENT_UNIT="tensorplate-agent"
 readonly OBSERVABILITY_UNIT="tensorplate-observability"
+readonly COSIGN_BOOTSTRAP_VERSION="${TP_INSTALL_COSIGN_VERSION:-v3.0.2}"
+readonly COSIGN_BOOTSTRAP_BASE_URL="${TP_INSTALL_COSIGN_BASE_URL:-https://github.com/sigstore/cosign/releases/download/${COSIGN_BOOTSTRAP_VERSION}}"
+readonly COSIGN_LINUX_AMD64_SHA256="46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd"
+readonly COSIGN_LINUX_ARM64_SHA256="17fd784737ca54d7d8a343c82da6c5d6dbdee971e66644d923d1b057fb97d7ed"
 
 VERSION_INPUT="$DEFAULT_VERSION"
 INSTALL_MODE="runtime"
@@ -26,6 +30,7 @@ STRICT_HARDWARE=0
 DRY_RUN=0
 ALLOW_UNSIGNED=0
 INSTALL_WORKDIR=""
+COSIGN_BOOTSTRAP_BIN=""
 
 readonly SIGSTORE_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
@@ -57,9 +62,10 @@ tensorplate-cli package asset for the host Debian architecture.
 
 By default the installer verifies a keyless cosign signature over SHA256SUMS
 that binds it to the TensorPlate release workflow before trusting any
-checksum. This requires the cosign binary on PATH; install it from
-https://docs.sigstore.dev/cosign/installation or pass --allow-unsigned to
-accept checksum-only integrity.
+checksum. If cosign is not already on PATH, the installer downloads a pinned
+Linux cosign binary to its temporary work directory, verifies its pinned
+SHA256, and runs it from there. Pass --allow-unsigned only to accept
+checksum-only integrity.
 EOF
 }
 
@@ -364,11 +370,86 @@ download_file() {
 }
 
 cosign_bin() {
-  printf '%s\n' "${TP_INSTALL_COSIGN:-cosign}"
+  if [[ -n "$COSIGN_BOOTSTRAP_BIN" && "${TP_INSTALL_FORCE_COSIGN_BOOTSTRAP:-0}" == "1" ]]; then
+    printf '%s\n' "$COSIGN_BOOTSTRAP_BIN"
+  elif [[ -n "${TP_INSTALL_COSIGN:-}" ]]; then
+    printf '%s\n' "$TP_INSTALL_COSIGN"
+  elif [[ -n "$COSIGN_BOOTSTRAP_BIN" ]]; then
+    printf '%s\n' "$COSIGN_BOOTSTRAP_BIN"
+  else
+    printf '%s\n' "cosign"
+  fi
 }
 
 cosign_available() {
   command_exists "$(cosign_bin)"
+}
+
+cosign_bootstrap_asset() {
+  if [[ "${TP_INSTALL_UNSAFE_TEST_HOOKS:-0}" == "1" && -n "${TP_INSTALL_COSIGN_BOOTSTRAP_ASSET:-}" ]]; then
+    printf '%s\n' "$TP_INSTALL_COSIGN_BOOTSTRAP_ASSET"
+    return 0
+  fi
+  case "$(uname -s):$(uname -m)" in
+    Linux:x86_64|Linux:amd64) printf '%s\n' "cosign-linux-amd64" ;;
+    Linux:aarch64|Linux:arm64) printf '%s\n' "cosign-linux-arm64" ;;
+    *) return 1 ;;
+  esac
+}
+
+cosign_bootstrap_sha256() {
+  case "$1" in
+    cosign-linux-amd64)
+      if [[ "${TP_INSTALL_UNSAFE_TEST_HOOKS:-0}" == "1" && -n "${TP_INSTALL_COSIGN_LINUX_AMD64_SHA256:-}" ]]; then
+        printf '%s\n' "$TP_INSTALL_COSIGN_LINUX_AMD64_SHA256"
+      else
+        printf '%s\n' "$COSIGN_LINUX_AMD64_SHA256"
+      fi
+      ;;
+    cosign-linux-arm64)
+      if [[ "${TP_INSTALL_UNSAFE_TEST_HOOKS:-0}" == "1" && -n "${TP_INSTALL_COSIGN_LINUX_ARM64_SHA256:-}" ]]; then
+        printf '%s\n' "$TP_INSTALL_COSIGN_LINUX_ARM64_SHA256"
+      else
+        printf '%s\n' "$COSIGN_LINUX_ARM64_SHA256"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+bootstrap_cosign() {
+  local dest_dir="$1"
+  local asset expected dest
+
+  asset="$(cosign_bootstrap_asset)" ||
+    die "cosign is required to verify the release signature, and automatic cosign bootstrap supports only Linux amd64/arm64; install cosign or re-run with --allow-unsigned to accept checksum-only integrity at your own risk"
+  expected="$(cosign_bootstrap_sha256 "$asset")" ||
+    die "cannot resolve pinned checksum for ${asset}"
+  dest="${dest_dir}/${asset}"
+
+  note "cosign not found; downloading pinned ${asset} ${COSIGN_BOOTSTRAP_VERSION}"
+  download_file "${COSIGN_BOOTSTRAP_BASE_URL}/${asset}" "$dest"
+  (
+    cd "$dest_dir"
+    printf '%s  %s\n' "$expected" "$asset" | sha256sum -c -
+  ) || die "downloaded cosign bootstrap checksum did not match the pinned value"
+  chmod 0755 "$dest"
+  COSIGN_BOOTSTRAP_BIN="$dest"
+}
+
+ensure_cosign() {
+  local dest_dir="$1"
+
+  if [[ "${TP_INSTALL_FORCE_COSIGN_BOOTSTRAP:-0}" != "1" ]] && cosign_available; then
+    return 0
+  fi
+  if [[ -n "${TP_INSTALL_COSIGN:-}" && "${TP_INSTALL_FORCE_COSIGN_BOOTSTRAP:-0}" != "1" ]]; then
+    die "configured cosign binary was not found: ${TP_INSTALL_COSIGN}"
+  fi
+  if [[ "${TP_INSTALL_COSIGN_BOOTSTRAP:-1}" != "1" ]]; then
+    die "cosign is required to verify the release signature; install cosign or re-run with --allow-unsigned to accept checksum-only integrity at your own risk"
+  fi
+  bootstrap_cosign "$dest_dir"
 }
 
 checksums_identity_regexp() {
@@ -407,9 +488,7 @@ verify_checksums_signature() {
     warn "signature verification disabled (--allow-unsigned); SHA256SUMS authenticity is NOT verified"
     return 0
   fi
-  if ! cosign_available; then
-    die "cosign is required to verify the release signature; install cosign (https://docs.sigstore.dev/cosign/installation) or re-run with --allow-unsigned to accept checksum-only integrity at your own risk"
-  fi
+  ensure_cosign "$(dirname -- "$bundle")"
 
   fetch_signature_bundle "$local_dir" "$bundle"
   note "verifying SHA256SUMS signature with cosign (keyless)"
@@ -710,13 +789,13 @@ main() {
   note "TensorPlate ${TAG} install complete"
   if [[ "$INSTALL_MODE" == "cli" ]]; then
     printf 'Installed TensorPlate CLI from %s.\n' "$RELEASE_URL"
-    printf 'Next: configure a profile or use `--agent-url` to reach a Jetson runtime.\n'
+    printf 'Next: configure a profile or use --agent-url to reach a Jetson runtime.\n'
   else
     printf 'Installed TensorPlate runtime packages from %s.\n' "$RELEASE_URL"
     if ((WITH_PYTHON_BACKEND)); then
       printf 'Installed optional Python/PyTorch backend package. Install the platform PyTorch stack separately if doctor reports it missing.\n'
     fi
-    printf 'Next: use `tensorplate status` and `tensorplate doctor` for operational checks.\n'
+    printf 'Next: use tensorplate status and tensorplate doctor for operational checks.\n'
   fi
 }
 

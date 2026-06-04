@@ -136,10 +136,30 @@ find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name 'tensorplate*.deb' -delete
 repo_parent="$(dirname "$repo_root")"
 debs=()
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
-  mapfile -t matches < <(find "$repo_parent" -maxdepth 1 -type f -name "${pkg}_${VERSION}-*_${TARGET_ARCH}.deb" | sort)
+  matches=()
+  mapfile -t candidates < <(find "$repo_parent" -maxdepth 1 -type f -name "${pkg}_${VERSION}-*_*.deb" | sort)
+  for candidate in "${candidates[@]}"; do
+    candidate_name="$(basename -- "$candidate")"
+    case "$candidate_name" in
+      ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb|${pkg}_${VERSION}-*_all.deb)
+        matches+=("$candidate")
+        ;;
+    esac
+  done
   ((${#matches[@]} == 1)) ||
-    die "expected exactly one ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb in $repo_parent; found ${#matches[@]}"
+    die "expected exactly one ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb or ${pkg}_${VERSION}-*_all.deb in $repo_parent; found ${#matches[@]}"
   debs+=("${matches[0]}")
+done
+mapfile -t candidates < <(find "$repo_parent" -maxdepth 1 -type f -name "tensorplate-cli_${VERSION}-*_*.deb" | sort)
+for candidate in "${candidates[@]}"; do
+  candidate_name="$(basename -- "$candidate")"
+  case "$candidate_name" in
+    tensorplate-cli_${VERSION}-*_${TARGET_ARCH}.deb|tensorplate-cli_${VERSION}-*_all.deb)
+      ;;
+    tensorplate-cli_${VERSION}-*_*.deb)
+      debs+=("$candidate")
+      ;;
+  esac
 done
 cp "${debs[@]}" "$ARTIFACTS_DIR/"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"

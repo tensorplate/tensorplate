@@ -44,10 +44,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       `SHA256SUMS.cosign.bundle`) and records SLSA build provenance with
       `actions/attest-build-provenance`. `install.sh` verifies the cosign
       signature against the release workflow identity before trusting any
-      checksum and fails closed without `cosign` unless `--allow-unsigned`
-      is passed. `release.yml` passes `workflow_dispatch` inputs through
+      checksum, bootstraps a pinned transient Linux `arm64`/`amd64` cosign
+      binary when `cosign` is absent, and still fails closed unless
+      `--allow-unsigned` is passed. `release.yml` passes `workflow_dispatch` inputs through
       environment variables (no shell interpolation), scopes permissions to
-      the job, and pins all actions by commit SHA.
+      the job, pins all actions by commit SHA, and only signs/publishes when
+      the workflow itself is running from the release tag ref.
     - Clean-room release smoke procedure under `docs/validation/` defines
       the post-merge clean-room evidence path from GitHub Release assets on the
       Jetson Orin Nano 8GB Super hardware floor.

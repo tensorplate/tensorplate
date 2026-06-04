@@ -51,6 +51,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PUBLISH: ${{ inputs.publish }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
@@ -82,6 +83,10 @@ jobs:
             if [[ "$publish" != "true" && -n "$INPUT_SOURCE_REF" ]]; then
               checkout_ref="$INPUT_SOURCE_REF"
             fi
+          fi
+          if [[ "$publish" == "true" && ("$REF_TYPE" != "tag" || "$REF_NAME" != "$tag") ]]; then
+            echo "::error::publish=true must run from the release tag ref $tag; use publish=false for branch build-only validation"
+            exit 1
           fi
           release_dir="dist/release/${tag}"
           {
@@ -187,6 +192,7 @@ jobs:
         env:
           CHECKSUMS: ${{ steps.meta.outputs.checksums }}
           BUNDLE: ${{ steps.meta.outputs.bundle }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
           # Keyless signature over the checksum manifest. The Sigstore bundle is
@@ -195,11 +201,10 @@ jobs:
           # can verify authenticity, not just integrity.
           cosign sign-blob --yes --bundle "$BUNDLE" "$CHECKSUMS"
           # Sanity check that the bundle verifies and binds to this workflow
-          # identity (any ref of release.yml; the installer enforces the
-          # stricter tag-ref identity at install time).
+          # identity on the exact release tag ref the installer will enforce.
           cosign verify-blob \
             --bundle "$BUNDLE" \
-            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "$CHECKSUMS"
 
@@ -213,7 +218,20 @@ jobs:
             ${{ steps.meta.outputs.manifest }}
             ${{ steps.meta.outputs.checksums }}
 
-      - name: Upload release build artifact bundle
+      - name: Upload unsigned release build artifact bundle
+        if: ${{ steps.meta.outputs.publish != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets
+          path: |
+            ${{ steps.meta.outputs.release_dir }}/*.deb
+            ${{ steps.meta.outputs.release_dir }}/install.sh
+            ${{ steps.meta.outputs.manifest }}
+            ${{ steps.meta.outputs.checksums }}
+          if-no-files-found: error
+
+      - name: Upload signed release build artifact bundle
+        if: ${{ steps.meta.outputs.publish == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets

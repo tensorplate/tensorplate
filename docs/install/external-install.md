@@ -7,7 +7,7 @@ self-checks against release `SHA256SUMS` before downloading or installing
 package assets. Do not use `curl | sh`.
 
 The concrete command below targets `v0.1.0`; later releases use the same
-shape with the tag changed in the two URLs.
+shape with the tag changed in the URL.
 
 ## Supported Target
 
@@ -46,12 +46,14 @@ curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/in
 This downloads the installer and runs it locally. The installer verifies a
 keyless cosign signature over `SHA256SUMS`, then verifies `install.sh` and
 the selected release packages before installing. It is intentionally not a
-`curl | sh` path. Signature verification needs the `cosign` binary on the
-host (install it from <https://docs.sigstore.dev/cosign/installation>); pass
-`--allow-unsigned` to accept checksum-only integrity at your own risk.
+`curl | sh` path. If `cosign` is not already installed, the installer
+downloads a pinned Linux cosign binary to its temporary work directory,
+verifies its pinned SHA256, and runs it from there on Linux `arm64` and
+`amd64`. Pass `--allow-unsigned` only to accept checksum-only integrity at
+your own risk.
 
 The script uses the pinned current release by default. For a newer
-published release, replace `v0.1.0` in both URLs with that release tag.
+published release, replace `v0.1.0` in the URL with that release tag.
 
 What the installer does:
 
@@ -63,8 +65,9 @@ What the installer does:
   `SHA256SUMS.cosign.bundle`, and the selected release artifacts listed in
   the manifest.
 - verifies a keyless cosign signature over `SHA256SUMS` against the
-  TensorPlate release workflow identity before trusting it; without `cosign`
-  installed it stops unless `--allow-unsigned` is passed.
+  TensorPlate release workflow identity before trusting it. If `cosign` is
+  not already installed, the installer downloads and checksum-verifies a
+  pinned transient cosign binary first on Linux `arm64` and `amd64`.
 - verifies the downloaded manifest and artifacts with `sha256sum -c
   SHA256SUMS`; any mismatch stops the install.
 - installs the core Debian packages with the `apt-get install --reinstall`
@@ -140,12 +143,12 @@ mkdir -p "/tmp/tensorplate-${TP_TAG}"
 cd "/tmp/tensorplate-${TP_TAG}"
 
 curl -fL -O "${TP_RELEASE_URL}/install.sh"
-curl -fL -O "${TP_RELEASE_URL}/tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+curl -fL -O "${TP_RELEASE_URL}/tensorplate-common_${TP_DEBIAN_VERSION}_all.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-cli_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
-curl -fL -O "${TP_RELEASE_URL}/tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+curl -fL -O "${TP_RELEASE_URL}/tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_all.deb"
 curl -fL -O "${TP_RELEASE_URL}/${TP_MANIFEST}"
 curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS"
 curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS.cosign.bundle"
@@ -182,7 +185,7 @@ gh attestation verify "tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
 
 ```bash
 sudo apt update
-sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_all.deb" \
   "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
@@ -230,7 +233,7 @@ Install the optional package when validating or running a
 `python_pytorch` bundle:
 
 ```bash
-sudo apt install "./tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+sudo apt install "./tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_all.deb"
 ```
 
 This package installs the TensorPlate backend entrypoint and descriptor.
@@ -263,7 +266,7 @@ release line.
 For reinstall of the selected release:
 
 ```bash
-sudo apt install --reinstall "./tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+sudo apt install --reinstall "./tensorplate-common_${TP_DEBIAN_VERSION}_all.deb" \
   "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
@@ -299,7 +302,7 @@ group.
 | --- | --- |
 | Checksum mismatch | Delete the asset and download again. If it repeats, stop and file a release issue. |
 | Signature verification failed | Stop. Re-download `SHA256SUMS` and `SHA256SUMS.cosign.bundle`; if it repeats, do not install and report it privately per [`SECURITY.md`](../../SECURITY.md). |
-| `cosign` not found | Install cosign from <https://docs.sigstore.dev/cosign/installation>, or pass `--allow-unsigned` only for air-gapped/bootstrap installs at your own risk. |
+| Cosign bootstrap failed | Install cosign from <https://docs.sigstore.dev/cosign/installation> and rerun, or pass `--allow-unsigned` only for air-gapped/bootstrap installs at your own risk. |
 | Unsupported OS | The installer aborts by default unless `--force-os` is passed. v0.1 supports JetPack 6.x / L4T 36.x. |
 | Unsupported hardware or architecture | The installer warns and prompts in interactive mode. Use `--strict-hardware` to make this fatal, or `--yes` for unattended validated fleets. |
 | `path_layout = fail` | Reinstall `tensorplate-common`; attach `tensorplate doctor --output json` if it persists. |
