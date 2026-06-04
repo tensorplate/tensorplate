@@ -29,24 +29,24 @@ TensorPlate is an inference platform for edge AI and robotics — reliable, obse
 On a supported target (Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
 
 ```bash
-export TP_VERSION=0.1.0
-export TP_TAG="v${TP_VERSION}"
-export TP_DEBIAN_VERSION="${TP_VERSION}-1"
-export TP_ARCH=arm64
-export TP_RELEASE_URL="https://github.com/tensorplate/tensorplate/releases/download/${TP_TAG}"
-
-mkdir -p "/tmp/tensorplate-${TP_TAG}" && cd "/tmp/tensorplate-${TP_TAG}"
-for pkg in common agent serving observability cli; do
-  curl -fL -O "${TP_RELEASE_URL}/tensorplate-${pkg}_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
-done
-curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS" && sha256sum -c SHA256SUMS
-
-sudo apt install ./tensorplate-*_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb
-sudo systemctl enable --now tensorplate-agent tensorplate-observability
-tensorplate doctor
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
 ```
 
-Full guide, troubleshooting, and the optional Python/PyTorch backend: [external-install.md](docs/install/external-install.md). Then walk through [quickstart.md](docs/install/quickstart.md).
+For a desktop CLI-only install:
+
+```bash
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh --cli-only
+```
+
+Before a release exists, build and install an unreleased branch snapshot:
+
+```bash
+curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
+```
+
+Full guide, troubleshooting, source-install caveats, and the optional
+Python/PyTorch backend: [external-install.md](docs/install/external-install.md).
+Then walk through [quickstart.md](docs/install/quickstart.md).
 
 ### Build From Source
 

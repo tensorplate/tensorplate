@@ -87,6 +87,7 @@ Installer flags:
 | `--force-os` | Overrides the OS gate. This is unsupported and at your own risk. |
 | `--strict-hardware` | Treats advisory hardware warnings as fatal. |
 | `--dry-run` | Runs validation gates and prints planned actions without downloading or installing. |
+| `--local-artifacts DIR` | Installs from a locally built artifact directory containing the installer, manifest, `SHA256SUMS`, and `.deb` packages. Intended for unreleased snapshot/build-only artifacts. |
 | `--allow-unsigned` | Skips the cosign signature check on `SHA256SUMS` and accepts checksum-only integrity. Unsupported; for air-gapped or bootstrap use at your own risk. |
 | `--help` | Prints usage and all flags. |
 
@@ -118,6 +119,58 @@ CLI-only mode installs the operator CLI package for the host Debian
 architecture when the release includes a matching `tensorplate-cli`
 asset. It does not install Jetson runtime services, does not validate
 JetPack / L4T, and does not run `tensorplate doctor`.
+
+## Build And Install An Unreleased Branch
+
+Use this only before a GitHub Release exists, or when validating a branch
+before release. On a Jetson with the native build dependencies installed,
+paste:
+
+```bash
+curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
+```
+
+From an existing TensorPlate checkout, the equivalent command is:
+
+```bash
+sudo bash packaging/scripts/build-install-from-source.sh --branch develop
+```
+
+The wrapper clones or checks out the requested branch, builds snapshot
+packages named with `X.Y.Z~dev.YYYYMMDD.gitsha`, generates a local
+manifest and `SHA256SUMS`, verifies them with
+`tools/release/tensorplate-release.sh`, then invokes the same
+`install.sh` path with `--local-artifacts --allow-unsigned`. There is no
+second installer implementation.
+
+Useful source-install flags:
+
+| Flag | Behavior |
+| --- | --- |
+| `--branch BRANCH` | Branch, tag, or ref to build. Defaults to `develop`. |
+| `--with-python-backend` | Installs the optional Python/PyTorch backend after building. Runtime install mode only. |
+| `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` from the built snapshot artifacts. |
+| `--no-install` | Builds and verifies artifacts only, then prints the local install command. |
+| `--arch ARCH` | Debian target architecture. Defaults to `arm64`. |
+| `--source-dir DIR` | Uses an existing checkout instead of cloning or creating a temporary checkout. |
+| `--artifacts-dir DIR` | Writes snapshot artifacts to a specific directory. |
+| `--help` | Prints usage and all flags. |
+
+Snapshot caveats:
+
+- Snapshot artifacts are unreleased and unsigned. The installer verifies
+  local checksums, but there is no GitHub Release, release workflow
+  cosign identity, or GitHub attestation provenance.
+- Snapshot installs are not release-validation evidence. Run the release
+  workflow build-only path and the clean-room Jetson validation before
+  treating a version as production-ready.
+- Native Jetson builds avoid cross-compile setup. Cross-compiling from
+  x86 to Jetson requires a Jetson sysroot, `TP_JETSON_CC`,
+  `TP_JETSON_CXX`, and a vcpkg toolchain; the builder chainloads
+  `cmake/toolchains/aarch64-jetson.cmake`.
+- The command builds full local packages, so it needs the same compiler,
+  Rust, CMake/Ninja, debhelper, and target SDK dependencies as release
+  artifact builds.
 
 ## Manual Fallback Variables
 

@@ -20,6 +20,7 @@ usage() {
   cat <<'EOF'
 Usage:
   build-release-artifacts.sh --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR --manifest FILE --checksums FILE [options]
+  build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR --manifest FILE --checksums FILE [options]
 
 Options:
   --version VERSION      Core release version, for example 0.1.0.
@@ -30,6 +31,9 @@ Options:
   --target-os VALUE      Manifest target OS label.
   --arch ARCH            Manifest target architecture. Defaults to arm64.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
+  --snapshot             Build unreleased local-source snapshot artifacts.
+  --branch BRANCH        Branch/provenance label for snapshot manifests.
+  --build-dir DIR        CMake build directory. Defaults to build/release, or build/snapshot-ARCH for snapshots.
 EOF
 }
 
@@ -47,9 +51,13 @@ TAG=""
 ARTIFACTS_DIR=""
 MANIFEST=""
 CHECKSUMS=""
+BUILD_DIR=""
 TARGET_OS="Ubuntu 22.04 / JetPack 6.x (L4T 36.x)"
 TARGET_ARCH="arm64"
 SKIP_TAG_VERIFY=0
+SNAPSHOT=0
+BRANCH=""
+CHANGELOG_BACKUP=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,13 +69,14 @@ while [[ $# -gt 0 ]]; do
     --target-os) TARGET_OS="${2:-}"; shift 2 ;;
     --arch) TARGET_ARCH="${2:-}"; shift 2 ;;
     --skip-tag-verify) SKIP_TAG_VERIFY=1; shift ;;
+    --snapshot) SNAPSHOT=1; shift ;;
+    --branch) BRANCH="${2:-}"; shift 2 ;;
+    --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
 done
 
-[[ -n "$VERSION" ]] || die "--version is required"
-[[ -n "$TAG" ]] || die "--tag is required"
 [[ -n "$ARTIFACTS_DIR" ]] || die "--artifacts-dir is required"
 [[ -n "$MANIFEST" ]] || die "--manifest is required"
 [[ -n "$CHECKSUMS" ]] || die "--checksums is required"
@@ -76,8 +85,75 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
   die "not inside a git repository"
 cd "$repo_root"
 
-[[ "$TARGET_ARCH" == "$(dpkg --print-architecture)" ]] ||
-  die "runner architecture $(dpkg --print-architecture) does not match release target $TARGET_ARCH"
+base_version() {
+  local raw
+  raw="$(packaging/version.sh)"
+  printf '%s\n' "${raw%%~*}"
+}
+
+safe_branch_name() {
+  printf '%s\n' "$1" | tr '/[:space:]' '---' | tr -cd 'A-Za-z0-9._-'
+}
+
+derive_snapshot_version() {
+  local date short_sha
+  date="$(date -u +%Y%m%d)"
+  short_sha="$(git rev-parse --short=12 HEAD)"
+  printf '%s~dev.%s.%s\n' "$(base_version)" "$date" "$short_sha"
+}
+
+restore_snapshot_changelog() {
+  if [[ -n "$CHANGELOG_BACKUP" && -f "$CHANGELOG_BACKUP" ]]; then
+    cp -- "$CHANGELOG_BACKUP" packaging/debian/changelog
+    rm -f -- "$CHANGELOG_BACKUP"
+  fi
+}
+
+write_snapshot_changelog() {
+  CHANGELOG_BACKUP="$(mktemp)"
+  cp -- packaging/debian/changelog "$CHANGELOG_BACKUP"
+  trap restore_snapshot_changelog EXIT
+  python3 - "$VERSION" <<'PY'
+import sys
+from pathlib import Path
+
+version = sys.argv[1]
+path = Path("packaging/debian/changelog")
+lines = path.read_text().splitlines()
+if not lines:
+    raise SystemExit("packaging/debian/changelog is empty")
+lines[0] = f"tensorplate ({version}-1) UNRELEASED; urgency=medium"
+path.write_text("\n".join(lines) + "\n")
+PY
+}
+
+BRANCH="${BRANCH:-$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short=12 HEAD)}"
+if ((SNAPSHOT)); then
+  VERSION="${VERSION:-$(derive_snapshot_version)}"
+  TAG="${TAG:-snapshot-$(safe_branch_name "$BRANCH")-$(git rev-parse --short=12 HEAD)}"
+  SKIP_TAG_VERIFY=1
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+~dev\.[0-9]{8}\.[0-9a-f]+$ ]] ||
+    die "snapshot --version must look like X.Y.Z~dev.YYYYMMDD.gitsha"
+else
+  [[ -n "$VERSION" ]] || die "--version is required"
+  [[ -n "$TAG" ]] || die "--tag is required"
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "--version must be MAJOR.MINOR.PATCH for release builds"
+fi
+
+host_arch="$(dpkg --print-architecture)"
+CROSS_BUILD=0
+if [[ "$TARGET_ARCH" != "$host_arch" ]]; then
+  if ((SNAPSHOT)); then
+    CROSS_BUILD=1
+  else
+    die "runner architecture $host_arch does not match release target $TARGET_ARCH"
+  fi
+fi
+
+if ((SNAPSHOT)); then
+  write_snapshot_changelog
+fi
 
 note "validating release installer"
 [[ -f "$INSTALLER_SOURCE" ]] || die "missing installer script at $INSTALLER_SOURCE"
@@ -86,18 +162,46 @@ command -v shellcheck >/dev/null 2>&1 || die "shellcheck is required to validate
 shellcheck "$INSTALLER_SOURCE"
 
 note "building Rust release binaries"
-cargo build --release \
-  --bin tensorplate-agent \
-  --bin tensorplate-observability \
+cargo_args=(
+  build
+  --release
+  --bin tensorplate-agent
+  --bin tensorplate-observability
   --bin tensorplate
+)
+if ((CROSS_BUILD)); then
+  case "$TARGET_ARCH" in
+    arm64) CARGO_TARGET="${TP_RUST_TARGET:-aarch64-unknown-linux-gnu}" ;;
+    *) die "snapshot cross-build only knows a Rust target for $TARGET_ARCH" ;;
+  esac
+  cargo_args+=(--target "$CARGO_TARGET")
+fi
+cargo "${cargo_args[@]}"
+if ((CROSS_BUILD)); then
+  mkdir -p target/release
+  for bin in tensorplate-agent tensorplate-observability tensorplate; do
+    install -m 0755 "target/${CARGO_TARGET}/release/${bin}" "target/release/${bin}"
+  done
+fi
 
 note "configuring C++ release build"
+if [[ -z "$BUILD_DIR" ]]; then
+  if ((SNAPSHOT)); then
+    BUILD_DIR="build/snapshot-${TARGET_ARCH}"
+  else
+    BUILD_DIR="build/release"
+  fi
+fi
+runtime_version_suffix=""
+if ((SNAPSHOT)); then
+  runtime_version_suffix="${VERSION#*~}"
+fi
 cmake_args=(
   -S .
-  -B build/release
+  -B "$BUILD_DIR"
   -G Ninja
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
-  -DTP_RUNTIME_VERSION_SUFFIX=""
+  "-DTP_RUNTIME_VERSION_SUFFIX=${runtime_version_suffix}"
   -DTP_BUILD_TESTS=OFF
   -DTP_BUILD_EXAMPLES=OFF
   -DTP_ENABLE_SANITIZERS=OFF
@@ -106,20 +210,41 @@ cmake_args=(
   -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
 )
 
+vcpkg_toolchain=""
 if [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
-  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${TP_CMAKE_TOOLCHAIN_FILE}")
+  vcpkg_toolchain="$TP_CMAKE_TOOLCHAIN_FILE"
 elif [[ -n "${VCPKG_ROOT:-}" && -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
-  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+  vcpkg_toolchain="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
 elif [[ -n "${VCPKG_INSTALLATION_ROOT:-}" && -f "${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
-  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake")
+  vcpkg_toolchain="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
+fi
+
+if ((CROSS_BUILD)); then
+  [[ "$TARGET_ARCH" == "arm64" ]] || die "snapshot cross-build only supports --arch arm64"
+  [[ -n "${TP_JETSON_SYSROOT:-}" ]] || die "TP_JETSON_SYSROOT is required for x86-to-Jetson snapshot cross-builds"
+  [[ -n "${TP_JETSON_CC:-}" ]] || die "TP_JETSON_CC is required for x86-to-Jetson snapshot cross-builds"
+  [[ -n "${TP_JETSON_CXX:-}" ]] || die "TP_JETSON_CXX is required for x86-to-Jetson snapshot cross-builds"
+  [[ -n "$vcpkg_toolchain" ]] || die "vcpkg toolchain is required for x86-to-Jetson snapshot cross-builds; set VCPKG_ROOT or TP_CMAKE_TOOLCHAIN_FILE"
+  cmake_args+=(
+    "-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}"
+    "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${repo_root}/cmake/toolchains/aarch64-jetson.cmake"
+    "-DVCPKG_TARGET_TRIPLET=arm64-linux"
+  )
+elif [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
+  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${TP_CMAKE_TOOLCHAIN_FILE}")
+elif [[ -n "$vcpkg_toolchain" ]]; then
+  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}")
 fi
 
 cmake "${cmake_args[@]}"
 
 note "building serving worker"
-cmake --build build/release --target tp_serving_worker --parallel
-if [[ -x build/release/serving_worker/tensorplate-serving && ! -e build/release/tensorplate-serving ]]; then
-  cp build/release/serving_worker/tensorplate-serving build/release/tensorplate-serving
+cmake --build "$BUILD_DIR" --target tp_serving_worker --parallel
+mkdir -p build/release
+if [[ -x "${BUILD_DIR}/serving_worker/tensorplate-serving" ]]; then
+  install -m 0755 "${BUILD_DIR}/serving_worker/tensorplate-serving" build/release/tensorplate-serving
+elif [[ -x "${BUILD_DIR}/tensorplate-serving" ]]; then
+  install -m 0755 "${BUILD_DIR}/tensorplate-serving" build/release/tensorplate-serving
 fi
 [[ -x build/release/tensorplate-serving ]] ||
   die "serving worker binary was not staged at build/release/tensorplate-serving"
@@ -128,7 +253,11 @@ note "running packaging verification suite"
 test/packaging/run.sh
 
 note "building Debian packages"
-packaging/scripts/build-deb.sh
+build_deb_args=()
+if ((CROSS_BUILD)); then
+  build_deb_args+=("-a" "$TARGET_ARCH")
+fi
+packaging/scripts/build-deb.sh "${build_deb_args[@]}"
 
 mkdir -p "$ARTIFACTS_DIR"
 find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name 'tensorplate*.deb' -delete
@@ -165,7 +294,8 @@ cp "${debs[@]}" "$ARTIFACTS_DIR/"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 
 note "generating manifest and checksums"
-tools/release/tensorplate-release.sh manifest \
+manifest_args=(
+  manifest
   --version "$VERSION" \
   --tag "$TAG" \
   --artifacts-dir "$ARTIFACTS_DIR" \
@@ -173,6 +303,12 @@ tools/release/tensorplate-release.sh manifest \
   --checksums "$CHECKSUMS" \
   --target-os "$TARGET_OS" \
   --arch "$TARGET_ARCH"
+)
+if ((SNAPSHOT)); then
+  manifest_args+=(--release-branch "$BRANCH")
+  manifest_args+=(--allow-snapshot-version)
+fi
+tools/release/tensorplate-release.sh "${manifest_args[@]}"
 
 verify_args=(
   verify
@@ -185,6 +321,16 @@ verify_args=(
 if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
   verify_args+=(--skip-tag-verify)
 fi
+if ((SNAPSHOT)); then
+  verify_args+=(--allow-snapshot-version)
+fi
 tools/release/tensorplate-release.sh "${verify_args[@]}"
 
-note "release artifacts are ready in $ARTIFACTS_DIR"
+if ((SNAPSHOT)); then
+  note "unreleased snapshot artifacts are ready in $ARTIFACTS_DIR"
+  printf 'Snapshot version: %s\n' "$VERSION"
+  printf 'Snapshot tag: %s\n' "$TAG"
+  printf 'Source branch/provenance label: %s\n' "$BRANCH"
+else
+  note "release artifacts are ready in $ARTIFACTS_DIR"
+fi
