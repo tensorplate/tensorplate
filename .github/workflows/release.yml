@@ -20,8 +20,12 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: write
+# Permissions are scoped to the single release job below rather than granted
+# workflow-wide. The job needs:
+#   contents: write     -> create the GitHub Release and upload assets
+#   id-token: write     -> keyless cosign signing + provenance OIDC
+#   attestations: write -> publish the SLSA build-provenance attestation
+permissions: {}
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -32,17 +36,30 @@ jobs:
     name: build packages + publish release assets
     runs-on: ${{ fromJSON(vars.TENSORPLATE_RELEASE_RUNNER || '["self-hosted","linux","ARM64","tensorplate-release"]') }}
     timeout-minutes: 120
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Resolve release metadata
         id: meta
         shell: bash
+        # Untrusted-ish workflow_dispatch inputs are passed through env and
+        # never interpolated directly into the script body, which would allow
+        # shell injection. They are validated before use.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -Eeuo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            tag="${{ inputs.tag }}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$INPUT_TAG"
           else
-            tag="${GITHUB_REF_NAME}"
+            tag="$REF_NAME"
           fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]]; then
             echo "::error::release tags must be vX.Y.Z or vX.Y.Z-rc.N"
@@ -59,11 +76,11 @@ jobs:
             draft="true"
           fi
           publish="true"
-          checkout_ref="${tag}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            publish="${{ inputs.publish }}"
-            if [[ "$publish" != "true" && -n "${{ inputs.source_ref }}" ]]; then
-              checkout_ref="${{ inputs.source_ref }}"
+          checkout_ref="$tag"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            publish="$INPUT_PUBLISH"
+            if [[ "$publish" != "true" && -n "$INPUT_SOURCE_REF" ]]; then
+              checkout_ref="$INPUT_SOURCE_REF"
             fi
           fi
           release_dir="dist/release/${tag}"
@@ -75,6 +92,7 @@ jobs:
             echo "release_dir=${release_dir}"
             echo "manifest=${release_dir}/tensorplate-${tag}-artifacts.json"
             echo "checksums=${release_dir}/SHA256SUMS"
+            echo "bundle=${release_dir}/SHA256SUMS.cosign.bundle"
             echo "notes=docs/release/notes/v${version}.md"
             echo "release_branch=release/v${version}"
             echo "publish=${publish}"
@@ -82,7 +100,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Checkout release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ steps.meta.outputs.checkout_ref }}
           fetch-depth: 0
@@ -90,18 +108,19 @@ jobs:
       - name: Verify annotated tag and release branch
         if: ${{ steps.meta.outputs.publish == 'true' }}
         shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_BRANCH: ${{ steps.meta.outputs.release_branch }}
         run: |
           set -Eeuo pipefail
-          tag="${{ steps.meta.outputs.tag }}"
-          release_branch="${{ steps.meta.outputs.release_branch }}"
-          if [[ "$(git cat-file -t "$tag" 2>/dev/null || true)" != "tag" ]]; then
-            echo "::error::$tag must be an annotated tag"
+          if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" != "tag" ]]; then
+            echo "::error::$TAG must be an annotated tag"
             exit 1
           fi
-          tag_commit="$(git rev-list -n 1 "$tag")"
-          git fetch origin "+refs/heads/${release_branch}:refs/remotes/origin/${release_branch}"
-          if ! git merge-base --is-ancestor "$tag_commit" "origin/${release_branch}"; then
-            echo "::error::$tag does not point at ${release_branch}"
+          tag_commit="$(git rev-list -n 1 "$TAG")"
+          git fetch origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          if ! git merge-base --is-ancestor "$tag_commit" "origin/${RELEASE_BRANCH}"; then
+            echo "::error::$TAG does not point at ${RELEASE_BRANCH}"
             exit 1
           fi
 
@@ -136,24 +155,66 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_DIR: ${{ steps.meta.outputs.release_dir }}
+          MANIFEST: ${{ steps.meta.outputs.manifest }}
+          CHECKSUMS: ${{ steps.meta.outputs.checksums }}
+          PUBLISH: ${{ steps.meta.outputs.publish }}
         run: |
           set -Eeuo pipefail
           args=(
             tools/release/build-release-artifacts.sh
-            --version "${{ steps.meta.outputs.version }}"
-            --tag "${{ steps.meta.outputs.tag }}"
-            --artifacts-dir "${{ steps.meta.outputs.release_dir }}"
-            --manifest "${{ steps.meta.outputs.manifest }}"
-            --checksums "${{ steps.meta.outputs.checksums }}"
+            --version "$VERSION"
+            --tag "$TAG"
+            --artifacts-dir "$RELEASE_DIR"
+            --manifest "$MANIFEST"
+            --checksums "$CHECKSUMS"
             --arch arm64
           )
-          if [[ "${{ steps.meta.outputs.publish }}" != "true" ]]; then
+          if [[ "$PUBLISH" != "true" ]]; then
             args+=(--skip-tag-verify)
           fi
           "${args[@]}"
 
+      - name: Install cosign
+        if: ${{ steps.meta.outputs.publish == 'true' }}
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Sign SHA256SUMS (keyless)
+        if: ${{ steps.meta.outputs.publish == 'true' }}
+        shell: bash
+        env:
+          CHECKSUMS: ${{ steps.meta.outputs.checksums }}
+          BUNDLE: ${{ steps.meta.outputs.bundle }}
+        run: |
+          set -Eeuo pipefail
+          # Keyless signature over the checksum manifest. The Sigstore bundle is
+          # self-contained (signature + Fulcio certificate + Rekor inclusion
+          # proof) and is published alongside SHA256SUMS so installers and users
+          # can verify authenticity, not just integrity.
+          cosign sign-blob --yes --bundle "$BUNDLE" "$CHECKSUMS"
+          # Sanity check that the bundle verifies and binds to this workflow
+          # identity (any ref of release.yml; the installer enforces the
+          # stricter tag-ref identity at install time).
+          cosign verify-blob \
+            --bundle "$BUNDLE" \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/\.github/workflows/release\.yml@refs/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$CHECKSUMS"
+
+      - name: Attest build provenance
+        if: ${{ steps.meta.outputs.publish == 'true' }}
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            ${{ steps.meta.outputs.release_dir }}/*.deb
+            ${{ steps.meta.outputs.release_dir }}/install.sh
+            ${{ steps.meta.outputs.manifest }}
+            ${{ steps.meta.outputs.checksums }}
+
       - name: Upload release build artifact bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets
           path: |
@@ -161,6 +222,7 @@ jobs:
             ${{ steps.meta.outputs.release_dir }}/install.sh
             ${{ steps.meta.outputs.manifest }}
             ${{ steps.meta.outputs.checksums }}
+            ${{ steps.meta.outputs.bundle }}
           if-no-files-found: error
 
       - name: Create GitHub Release with assets
@@ -168,37 +230,46 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_DIR: ${{ steps.meta.outputs.release_dir }}
+          NOTES: ${{ steps.meta.outputs.notes }}
+          MANIFEST: ${{ steps.meta.outputs.manifest }}
+          CHECKSUMS: ${{ steps.meta.outputs.checksums }}
+          BUNDLE: ${{ steps.meta.outputs.bundle }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          DRAFT: ${{ steps.meta.outputs.draft }}
         run: |
           set -Eeuo pipefail
-          tag="${{ steps.meta.outputs.tag }}"
-          release_dir="${{ steps.meta.outputs.release_dir }}"
-          notes="${{ steps.meta.outputs.notes }}"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::GitHub Release $tag already exists; refusing to replace published assets"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::GitHub Release $TAG already exists; refusing to replace published assets"
             exit 1
           fi
 
           shopt -s nullglob
-          deb_assets=("${release_dir}"/*.deb)
+          deb_assets=("${RELEASE_DIR}"/*.deb)
           ((${#deb_assets[@]} >= 6)) || {
             echo "::error::expected at least six .deb packages plus install.sh, manifest, and checksums"
             exit 1
           }
-          installer="${release_dir}/install.sh"
+          installer="${RELEASE_DIR}/install.sh"
           [[ -f "$installer" ]] || {
             echo "::error::expected install.sh release asset"
             exit 1
           }
-          assets=("${deb_assets[@]}" "$installer" "${{ steps.meta.outputs.manifest }}" "${{ steps.meta.outputs.checksums }}")
+          [[ -f "$BUNDLE" ]] || {
+            echo "::error::expected signed SHA256SUMS.cosign.bundle release asset"
+            exit 1
+          }
+          assets=("${deb_assets[@]}" "$installer" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
 
-          args=(release create "$tag" "${assets[@]}" --verify-tag --title "TensorPlate ${tag}" --notes-file "$notes")
-          if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
+          args=(release create "$TAG" "${assets[@]}" --verify-tag --title "TensorPlate ${TAG}" --notes-file "$NOTES")
+          if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
-          elif [[ "${{ steps.meta.outputs.draft }}" != "true" ]]; then
+          elif [[ "$DRAFT" != "true" ]]; then
             args+=(--latest)
           fi
-          if [[ "${{ steps.meta.outputs.draft }}" == "true" ]]; then
+          if [[ "$DRAFT" == "true" ]]; then
             args+=(--draft)
           fi
 
@@ -207,9 +278,12 @@ jobs:
       - name: Build-only validation summary
         if: ${{ steps.meta.outputs.publish != 'true' }}
         shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
           {
             echo "Release asset build completed without creating a GitHub Release."
-            echo "Download the workflow artifact named tensorplate-${{ steps.meta.outputs.tag }}-release-assets to test install.sh before publishing."
+            echo "Download the workflow artifact named tensorplate-${TAG}-release-assets to test install.sh before publishing."
+            echo "Build-only assets are unsigned; smoke-test the installer with --allow-unsigned. Signing and provenance run on the publish path (RC or final tag)."
           } >>"$GITHUB_STEP_SUMMARY"

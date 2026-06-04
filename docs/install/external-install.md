@@ -43,10 +43,12 @@ Jetson:
 curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
 ```
 
-This downloads the installer and runs it locally. The installer downloads
-or reuses `SHA256SUMS`, verifies `install.sh`, then verifies the selected
-release packages before installing. It is intentionally not a `curl | sh`
-path.
+This downloads the installer and runs it locally. The installer verifies a
+keyless cosign signature over `SHA256SUMS`, then verifies `install.sh` and
+the selected release packages before installing. It is intentionally not a
+`curl | sh` path. Signature verification needs the `cosign` binary on the
+host (install it from <https://docs.sigstore.dev/cosign/installation>); pass
+`--allow-unsigned` to accept checksum-only integrity at your own risk.
 
 The script uses the pinned current release by default. For a newer
 published release, replace `v0.1.0` in both URLs with that release tag.
@@ -57,8 +59,12 @@ What the installer does:
   on unsupported OS metadata.
 - warns on unrecognized Jetson hardware or non-`arm64` architecture; in
   interactive mode it prompts before continuing.
-- downloads `tensorplate-${TP_TAG}-artifacts.json`, `SHA256SUMS`, and
-  the selected release artifacts listed in the manifest.
+- downloads `tensorplate-${TP_TAG}-artifacts.json`, `SHA256SUMS`,
+  `SHA256SUMS.cosign.bundle`, and the selected release artifacts listed in
+  the manifest.
+- verifies a keyless cosign signature over `SHA256SUMS` against the
+  TensorPlate release workflow identity before trusting it; without `cosign`
+  installed it stops unless `--allow-unsigned` is passed.
 - verifies the downloaded manifest and artifacts with `sha256sum -c
   SHA256SUMS`; any mismatch stops the install.
 - installs the core Debian packages with the `apt-get install --reinstall`
@@ -78,6 +84,7 @@ Installer flags:
 | `--force-os` | Overrides the OS gate. This is unsupported and at your own risk. |
 | `--strict-hardware` | Treats advisory hardware warnings as fatal. |
 | `--dry-run` | Runs validation gates and prints planned actions without downloading or installing. |
+| `--allow-unsigned` | Skips the cosign signature check on `SHA256SUMS` and accepts checksum-only integrity. Unsupported; for air-gapped or bootstrap use at your own risk. |
 | `--help` | Prints usage and all flags. |
 
 For fleet provisioning on validated Jetson hosts:
@@ -141,18 +148,35 @@ curl -fL -O "${TP_RELEASE_URL}/tensorplate-cli_${TP_DEBIAN_VERSION}_${TP_ARCH}.d
 curl -fL -O "${TP_RELEASE_URL}/tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
 curl -fL -O "${TP_RELEASE_URL}/${TP_MANIFEST}"
 curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS"
+curl -fL -O "${TP_RELEASE_URL}/SHA256SUMS.cosign.bundle"
 ```
 
 Do not use `curl | sh` install paths. Download, inspect, and verify the
 assets first.
 
-## Verify Checksums
+## Verify Signature And Checksums
+
+Verify the cosign signature over `SHA256SUMS` first (authenticity), then the
+checksums (integrity). This requires the `cosign` binary; install it from
+<https://docs.sigstore.dev/cosign/installation>.
 
 ```bash
+cosign verify-blob \
+  --bundle SHA256SUMS.cosign.bundle \
+  --certificate-identity-regexp "^https://github.com/${TP_REPO}/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+
 sha256sum -c SHA256SUMS
 ```
 
-Every downloaded asset must report `OK`. Stop if any checksum fails.
+The signature must report `Verified OK` and every asset must report `OK`.
+Stop if either fails. Optionally confirm build provenance for a package:
+
+```bash
+gh attestation verify "tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+  --repo "${TP_REPO}"
+```
 
 ## Install Core Packages
 
@@ -274,6 +298,8 @@ group.
 | Symptom | Action |
 | --- | --- |
 | Checksum mismatch | Delete the asset and download again. If it repeats, stop and file a release issue. |
+| Signature verification failed | Stop. Re-download `SHA256SUMS` and `SHA256SUMS.cosign.bundle`; if it repeats, do not install and report it privately per [`SECURITY.md`](../../SECURITY.md). |
+| `cosign` not found | Install cosign from <https://docs.sigstore.dev/cosign/installation>, or pass `--allow-unsigned` only for air-gapped/bootstrap installs at your own risk. |
 | Unsupported OS | The installer aborts by default unless `--force-os` is passed. v0.1 supports JetPack 6.x / L4T 36.x. |
 | Unsupported hardware or architecture | The installer warns and prompts in interactive mode. Use `--strict-hardware` to make this fatal, or `--yes` for unattended validated fleets. |
 | `path_layout = fail` | Reinstall `tensorplate-common`; attach `tensorplate doctor --output json` if it persists. |

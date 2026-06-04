@@ -24,7 +24,10 @@ YES=0
 FORCE_OS=0
 STRICT_HARDWARE=0
 DRY_RUN=0
+ALLOW_UNSIGNED=0
 INSTALL_WORKDIR=""
+
+readonly SIGSTORE_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 usage() {
   cat <<'EOF'
@@ -42,6 +45,8 @@ Options:
   --force-os                 Continue on an unsupported OS. This is unsupported and at your own risk.
   --strict-hardware          Treat hardware or architecture warnings as fatal.
   --dry-run                  Validate host gates and print planned actions without downloading or installing.
+  --allow-unsigned           Skip the cosign signature check on SHA256SUMS and accept checksum-only
+                             integrity. Unsupported; for air-gapped or bootstrap use at your own risk.
   --help, -h                 Show this help text.
 
 The supported OS baseline is NVIDIA Jetson Linux / JetPack 6.x with L4T 36.x.
@@ -49,6 +54,12 @@ Hardware validation is advisory by default: unrecognized Jetson models or
 non-arm64 architectures warn and require confirmation in interactive mode.
 CLI-only mode is for Debian/Ubuntu desktops and requires a matching
 tensorplate-cli package asset for the host Debian architecture.
+
+By default the installer verifies a keyless cosign signature over SHA256SUMS
+that binds it to the TensorPlate release workflow before trusting any
+checksum. This requires the cosign binary on PATH; install it from
+https://docs.sigstore.dev/cosign/installation or pass --allow-unsigned to
+accept checksum-only integrity.
 EOF
 }
 
@@ -122,6 +133,10 @@ while (($# > 0)); do
       DRY_RUN=1
       shift
       ;;
+    --allow-unsigned)
+      ALLOW_UNSIGNED=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -187,7 +202,7 @@ verify_installer_checksum() {
     return 0
   fi
 
-  local path dir base checksums subset tmpdir
+  local path dir base checksums subset tmpdir bundle
   path="$(script_path)"
   dir="$(cd -- "$(dirname -- "$path")" && pwd)"
   base="$(basename -- "$path")"
@@ -203,6 +218,9 @@ verify_installer_checksum() {
     checksums="${tmpdir}/SHA256SUMS"
     download_file "${RELEASE_URL}/SHA256SUMS" "$checksums"
   fi
+
+  bundle="${tmpdir}/SHA256SUMS.cosign.bundle"
+  verify_checksums_signature "$checksums" "$dir" "$bundle"
 
   subset="${tmpdir}/install.sh.SHA256SUMS"
   grep -E '  install[.]sh$' "$checksums" >"$subset" ||
@@ -339,31 +357,71 @@ download_file() {
   local url="$1"
   local dest="$2"
   note "downloading ${url}"
-  curl -fL --retry 3 --connect-timeout 20 --output "$dest" "$url"
+  # --speed-limit/--speed-time abort a stalled transfer (under 1 KiB/s for 30s)
+  # without capping a slow-but-progressing large download.
+  curl -fL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
+    --output "$dest" "$url"
 }
 
-write_manifest_artifact_list() {
-  local manifest="$1"
-  python3 - "$manifest" <<'PY'
-import json
-import sys
-from pathlib import Path
+cosign_bin() {
+  printf '%s\n' "${TP_INSTALL_COSIGN:-cosign}"
+}
 
-manifest = json.loads(Path(sys.argv[1]).read_text())
-artifacts = manifest.get("artifacts")
-if not isinstance(artifacts, list):
-    raise SystemExit("manifest has no artifacts array")
-for artifact in artifacts:
-    name = artifact.get("file")
-    package = artifact.get("package", "")
-    if not isinstance(name, str) or not name:
-        raise SystemExit("manifest artifact is missing file")
-    if "/" in name or name in {".", ".."} or ".." in name.split("/"):
-        raise SystemExit(f"unsafe artifact filename in manifest: {name!r}")
-    if package is not None and not isinstance(package, str):
-        raise SystemExit(f"artifact package must be a string: {name}")
-    print(f"{name}\t{package or ''}")
-PY
+cosign_available() {
+  command_exists "$(cosign_bin)"
+}
+
+checksums_identity_regexp() {
+  # OIDC identity of the TensorPlate release workflow for any vX.Y.Z[-rc.N] tag.
+  printf '^https://github.com/%s/[.]github/workflows/release[.]yml@refs/tags/v[0-9]+[.][0-9]+[.][0-9]+(-rc[.][0-9]+)?$\n' "$REPO"
+}
+
+fetch_signature_bundle() {
+  # Resolve the cosign bundle for SHA256SUMS: reuse a local copy next to the
+  # checksums when present, otherwise download it from the release.
+  local local_dir="$1"
+  local dest="$2"
+  local local_bundle="${local_dir}/SHA256SUMS.cosign.bundle"
+  if [[ -f "$local_bundle" ]]; then
+    [[ "$local_bundle" -ef "$dest" ]] || cp -- "$local_bundle" "$dest"
+    return 0
+  fi
+  download_file "${RELEASE_URL}/SHA256SUMS.cosign.bundle" "$dest"
+}
+
+verify_checksums_signature() {
+  # Verify the keyless cosign signature over SHA256SUMS before trusting it.
+  # This establishes authenticity (signed by the TensorPlate release workflow
+  # on a release tag), not merely integrity against accidental corruption.
+  # The bundle is only fetched once the guards below decide we will verify, so
+  # --allow-unsigned and --dry-run never require a published signature.
+  local checksums="$1"
+  local local_dir="$2"
+  local bundle="$3"
+  local output
+
+  if ((DRY_RUN)); then
+    return 0
+  fi
+  if [[ "${TP_INSTALL_ALLOW_UNSIGNED:-0}" == "1" || "$ALLOW_UNSIGNED" == "1" ]]; then
+    warn "signature verification disabled (--allow-unsigned); SHA256SUMS authenticity is NOT verified"
+    return 0
+  fi
+  if ! cosign_available; then
+    die "cosign is required to verify the release signature; install cosign (https://docs.sigstore.dev/cosign/installation) or re-run with --allow-unsigned to accept checksum-only integrity at your own risk"
+  fi
+
+  fetch_signature_bundle "$local_dir" "$bundle"
+  note "verifying SHA256SUMS signature with cosign (keyless)"
+  if ! output="$("$(cosign_bin)" verify-blob \
+    --bundle "$bundle" \
+    --certificate-identity-regexp "$(checksums_identity_regexp)" \
+    --certificate-oidc-issuer "$SIGSTORE_OIDC_ISSUER" \
+    "$checksums" 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    die "cosign signature verification failed for SHA256SUMS"
+  fi
+  note "SHA256SUMS signature verified: signed by ${REPO} release workflow"
 }
 
 write_install_deb_list() {
@@ -409,6 +467,8 @@ for package in required:
             continue
         if not isinstance(name, str) or not name.endswith(".deb"):
             continue
+        if "/" in name or name in {".", ".."} or ".." in name.split("/"):
+            raise SystemExit(f"unsafe artifact filename in manifest: {name!r}")
         if arch not in ("all", deb_arch):
             continue
         matches.append(name)
@@ -453,12 +513,14 @@ download_and_verify_assets() {
   local workdir="$1"
   local manifest_path="${workdir}/${MANIFEST_NAME}"
   local checksums_path="${workdir}/SHA256SUMS"
+  local bundle_path="${workdir}/SHA256SUMS.cosign.bundle"
   local file
   local deb_arch
   local selected=()
 
   download_file "${RELEASE_URL}/${MANIFEST_NAME}" "$manifest_path"
   download_file "${RELEASE_URL}/SHA256SUMS" "$checksums_path"
+  verify_checksums_signature "$checksums_path" "$workdir" "$bundle_path"
 
   deb_arch="$(host_deb_arch)"
   while IFS= read -r file; do
@@ -587,6 +649,12 @@ dry_run_summary() {
   printf 'Would download:\n'
   printf '  %s/%s\n' "$RELEASE_URL" "$MANIFEST_NAME"
   printf '  %s/SHA256SUMS\n' "$RELEASE_URL"
+  printf '  %s/SHA256SUMS.cosign.bundle\n' "$RELEASE_URL"
+  if [[ "${TP_INSTALL_ALLOW_UNSIGNED:-0}" == "1" || "$ALLOW_UNSIGNED" == "1" ]]; then
+    printf 'Signature check: DISABLED (--allow-unsigned); checksum-only integrity.\n'
+  else
+    printf 'Would verify the SHA256SUMS cosign signature against the %s release workflow identity.\n' "$REPO"
+  fi
   if [[ "$INSTALL_MODE" == "cli" ]]; then
     printf '  %s and %s package assets matching this host architecture\n' "$COMMON_PACKAGE" "$CLI_PACKAGE"
     printf 'Would verify the manifest and selected package assets with SHA256SUMS.\n'

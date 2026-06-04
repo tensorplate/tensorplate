@@ -36,6 +36,7 @@ for pkg in \
   tensorplate-backend-python-pytorch; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb"
 done
+printf 'fixture installer\n' > "$tmp/artifacts/install.sh"
 
 "$script" manifest \
   --version 0.1.0 \
@@ -53,8 +54,8 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 checksums = Path(sys.argv[2]).read_text().splitlines()
 assert manifest["release"]["version"] == "0.1.0"
 assert manifest["release"]["tag"] == "v0.1.0"
-assert len(manifest["artifacts"]) == 6
-assert len(checksums) == 6
+assert len(manifest["artifacts"]) == 7  # 6 packages + install.sh
+assert len(checksums) == 8  # manifest self-digest + 7 artifacts
 PY
 
 printf 'release script checks green\n'

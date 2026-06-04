@@ -39,6 +39,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       (`publish=false`) so maintainers can build the exact release asset
       bundle, download it from GitHub Actions, and smoke-test installer
       flows before creating a GitHub Release or public prerelease.
+    - Supply-chain hardening for published releases: the publish path
+      keyless-signs `SHA256SUMS` with cosign (attaching
+      `SHA256SUMS.cosign.bundle`) and records SLSA build provenance with
+      `actions/attest-build-provenance`. `install.sh` verifies the cosign
+      signature against the release workflow identity before trusting any
+      checksum and fails closed without `cosign` unless `--allow-unsigned`
+      is passed. `release.yml` passes `workflow_dispatch` inputs through
+      environment variables (no shell interpolation), scopes permissions to
+      the job, and pins all actions by commit SHA.
     - Clean-room release smoke procedure under `docs/validation/` defines
       the post-merge clean-room evidence path from GitHub Release assets on the
       Jetson Orin Nano 8GB Super hardware floor.

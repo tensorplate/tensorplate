@@ -113,6 +113,10 @@ The release runner must have:
   means JetPack/CUDA/TensorRT on `arm64`.
 - A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
   or a system `nlohmann_json` package.
+- Outbound network access to Sigstore (Fulcio/Rekor) and the GitHub
+  attestation API so the publish path can keyless-sign `SHA256SUMS` and
+  record build provenance. The repository must allow artifact attestations.
+  `cosign` itself is installed by the workflow.
 
 ### 3. Cut The Release Source Tag
 
@@ -169,14 +173,17 @@ The build-only run must:
 - Copy `install.sh`.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
 - Upload the `tensorplate-${TP_TAG}-release-assets` workflow artifact.
+- Skip signing and provenance, which run only on the publish path; the
+  uploaded assets are unsigned.
 - Stop before creating a GitHub Release.
 
 Download the workflow artifact and smoke-test the installer from the
-artifact directory before publication:
+artifact directory before publication. Build-only assets are unsigned, so
+pass `--allow-unsigned`:
 
 ```bash
-sudo bash install.sh
-sudo bash install.sh --cli-only
+sudo bash install.sh --allow-unsigned
+sudo bash install.sh --cli-only --allow-unsigned
 ```
 
 Run the `--cli-only` smoke only when the artifact bundle includes a
@@ -193,9 +200,12 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
+- Sign `SHA256SUMS` with keyless cosign and record SLSA build provenance
+  for the packages, installer, manifest, and checksums.
 - Create the GitHub Release and attach the `.deb` packages, `install.sh`,
-  manifest, and checksum file. RC tags are public prereleases; final tags
-  are drafts until the release owner publishes them.
+  manifest, checksum file, and `SHA256SUMS.cosign.bundle`. RC tags are
+  public prereleases; final tags are drafts until the release owner
+  publishes them.
 
 The workflow refuses to replace an existing GitHub Release. If it fails
 after creating no release, fix the release branch, cut a new RC tag, or
@@ -213,13 +223,24 @@ gh release download "${TP_TAG}" \
   --pattern '*.deb' \
   --pattern 'install.sh' \
   --pattern 'SHA256SUMS' \
+  --pattern 'SHA256SUMS.cosign.bundle' \
   --pattern "tensorplate-${TP_TAG}-artifacts.json"
 cd "${TP_RELEASE_DIR}"
+cosign verify-blob \
+  --bundle SHA256SUMS.cosign.bundle \
+  --certificate-identity-regexp "^https://github.com/tensorplate/tensorplate/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
 sha256sum -c SHA256SUMS
+gh attestation verify "tensorplate-agent_${TP_VERSION}-1_arm64.deb" \
+  --repo tensorplate/tensorplate
 ```
 
 Review the manifest for package names, versions, architecture, release
-commit, source tag, checksums, and validation links.
+commit, source tag, checksums, and validation links. Verify the cosign
+signature (authenticity) and provenance attestation before checksums; a
+checksum match alone does not prove the assets came from the release
+workflow.
 
 ### 7. Run Clean-Room Validation
 

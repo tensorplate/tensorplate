@@ -35,6 +35,17 @@ printf 'NVIDIA Jetson Unknown Developer Kit\0' >"${td}/model.unknown"
 mkdir -p "${td}/self-check"
 cp "${installer}" "${td}/self-check/install.sh"
 (cd "${td}/self-check" && sha256sum install.sh >SHA256SUMS)
+: >"${td}/self-check/SHA256SUMS.cosign.bundle"
+
+mkdir -p "${td}/bin"
+cat >"${td}/bin/cosign-ok" <<'STUB'
+#!/bin/sh
+# cosign stub: accept a verify-blob invocation and report success.
+[ "$1" = "verify-blob" ] || { echo "unexpected cosign subcommand: $1" >&2; exit 2; }
+echo "Verified OK" >&2
+exit 0
+STUB
+chmod +x "${td}/bin/cosign-ok"
 
 bash -n "${installer}"
 if command -v shellcheck >/dev/null 2>&1; then
@@ -91,18 +102,52 @@ if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
 fi
 grep -q "strict-hardware" "${td}/strict.err"
 
+# Self-check authenticates SHA256SUMS (cosign) before checking install.sh,
+# then proceeds to the root requirement.
 if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
    TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
    TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
    TP_INSTALL_ARCH="aarch64" \
    TP_INSTALL_DEB_ARCH="arm64" \
+   TP_INSTALL_COSIGN="${td}/bin/cosign-ok" \
      bash "${td}/self-check/install.sh" --yes >"${td}/self-check.out" 2>"${td}/self-check.err"; then
   echo "FAIL: self-check install unexpectedly passed without root" >&2
   exit 1
 fi
+grep -q "verifying SHA256SUMS signature with cosign" "${td}/self-check.out"
+grep -q "SHA256SUMS signature verified" "${td}/self-check.out"
 grep -q "verifying install.sh with SHA256SUMS" "${td}/self-check.out"
 grep -q "install.sh: OK" "${td}/self-check.out"
 grep -q "run as root" "${td}/self-check.err"
+
+# Signature verification fails closed when cosign is unavailable and the
+# operator has not explicitly opted out.
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+   TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+   TP_INSTALL_ARCH="aarch64" \
+   TP_INSTALL_DEB_ARCH="arm64" \
+   TP_INSTALL_COSIGN="${td}/bin/cosign-absent" \
+     bash "${td}/self-check/install.sh" --yes >"${td}/nocosign.out" 2>"${td}/nocosign.err"; then
+  echo "FAIL: install without cosign unexpectedly passed" >&2
+  exit 1
+fi
+grep -q "cosign is required" "${td}/nocosign.err"
+if grep -q "run as root" "${td}/nocosign.err"; then
+  echo "FAIL: install proceeded past the signature gate without cosign" >&2
+  exit 1
+fi
+
+# --allow-unsigned proceeds without cosign and without a published signature.
+TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+TP_INSTALL_ARCH="aarch64" \
+TP_INSTALL_DEB_ARCH="arm64" \
+TP_INSTALL_COSIGN="${td}/bin/cosign-absent" \
+  bash "${td}/self-check/install.sh" --yes --allow-unsigned >"${td}/unsigned.out" 2>"${td}/unsigned.err" || true
+grep -q "signature verification disabled" "${td}/unsigned.err"
+grep -q "run as root" "${td}/unsigned.err"
 
 TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.unsupported" \
 TP_INSTALL_OS_RELEASE="${td}/os-release.unsupported" \

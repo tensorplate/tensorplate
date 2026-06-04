@@ -1,9 +1,10 @@
 # TensorPlate release artifacts, manifest, and publication flow
 
 TensorPlate public releases publish native Debian package artifacts,
-`install.sh`, an artifact manifest, and SHA256 checksums. Release pages
-may also attach validated sample bundles, but the required assets are the
-`.deb` packages, installer, artifact manifest, and `SHA256SUMS`.
+`install.sh`, an artifact manifest, SHA256 checksums, and a cosign
+signature over those checksums. Release pages may also attach validated
+sample bundles, but the required assets are the `.deb` packages, installer,
+artifact manifest, `SHA256SUMS`, and `SHA256SUMS.cosign.bundle`.
 Releases may additionally attach desktop-only `tensorplate-cli` packages
 for architectures such as `amd64`; those assets are consumed by
 `install.sh --cli-only` and are not part of the Jetson runtime package set.
@@ -44,6 +45,7 @@ tensorplate-cli_${TP_VERSION}-1_amd64.deb    # optional CLI-only desktop asset
 install.sh
 tensorplate-${TP_TAG}-artifacts.json
 SHA256SUMS
+SHA256SUMS.cosign.bundle
 ```
 
 ## Build Flow
@@ -170,6 +172,25 @@ checksum mismatches. The required runtime package set must include the
 target architecture or `all`; additional architecture-specific `.deb`
 assets are currently allowed only for `tensorplate-cli`.
 
+## Signing and Provenance
+
+On the publish path, the `Release` workflow signs and attests the assets so
+consumers can verify authenticity, not just integrity:
+
+- It signs `SHA256SUMS` with keyless [cosign](https://docs.sigstore.dev/cosign/installation)
+  (GitHub Actions OIDC) and attaches the self-contained Sigstore bundle as
+  `SHA256SUMS.cosign.bundle`.
+- It records SLSA build provenance for every `.deb`, `install.sh`, the
+  manifest, and `SHA256SUMS` with
+  [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance).
+
+Both bind the assets to the release workflow identity on the `vX.Y.Z[-rc.N]`
+tag. Build-only validation runs (`publish=false`) do not sign or attest, so
+their workflow-artifact bundle is unsigned and the installer smoke test must
+use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
+`gh attestation verify` as documented in
+[`SECURITY.md`](../../SECURITY.md) and the external install guide.
+
 ## GitHub Release Attachment Procedure
 
 1. Cut the annotated source tag with `tools/release/tensorplate-release.sh cut`.
@@ -180,12 +201,15 @@ assets are currently allowed only for `tensorplate-cli`.
    `tensorplate-${TP_TAG}-release-assets` workflow artifact, and stops
    before creating a GitHub Release.
 4. Download that workflow artifact on the validation target and exercise
-   the installer locally with `sudo bash install.sh`, `sudo bash
-   install.sh --cli-only` when a desktop CLI asset is present, and any
-   optional backend path being released.
+   the installer locally. Build-only assets are unsigned, so pass
+   `--allow-unsigned`: `sudo bash install.sh --allow-unsigned`, `sudo bash
+   install.sh --cli-only --allow-unsigned` when a desktop CLI asset is
+   present, and any optional backend path being released.
 5. Re-run the `Release` workflow with `publish=true`, or push the
-   annotated tag, to create the GitHub Release and attach all assets. RC
-   tags publish as public prereleases; final tags create draft releases.
+   annotated tag, to sign `SHA256SUMS`, record build provenance, create the
+   GitHub Release, and attach all assets including
+   `SHA256SUMS.cosign.bundle`. RC tags publish as public prereleases; final
+   tags create draft releases.
 6. Confirm the release notes include supported hardware/OS, known
    limitations, install guide, validation links, support policy, security
    policy, and rollback guidance.

@@ -75,7 +75,8 @@ Subcommands:
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   tag         Create an annotated RC or final tag. Never pushes tags.
   publish     Validate assets and create a draft GitHub Release when --execute is
-              explicitly confirmed. Dry-run is the default.
+              explicitly confirmed. Dry-run is the default. Requires the
+              cosign-signed SHA256SUMS.cosign.bundle next to the checksums.
 EOF
 }
 
@@ -1065,7 +1066,10 @@ cmd_publish() {
   done
   assets+=("${deb_assets[@]}")
   [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
-  assets+=("$ARTIFACTS_DIR/install.sh" "$MANIFEST" "$CHECKSUMS")
+  local checksums_bundle="${CHECKSUMS}.cosign.bundle"
+  [[ -f "$checksums_bundle" ]] ||
+    die "missing signature bundle ${checksums_bundle}; the release workflow signs SHA256SUMS with cosign. Publish via .github/workflows/release.yml, or place the signed bundle next to SHA256SUMS before publishing"
+  assets+=("$ARTIFACTS_DIR/install.sh" "$MANIFEST" "$CHECKSUMS" "$checksums_bundle")
 
   local gh_args=(release create "$TAG" "${assets[@]}" --verify-tag --draft --notes-file "$RELEASE_NOTES")
   if [[ "$TAG" == *-rc.* ]]; then
