@@ -27,6 +27,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       `tensorplate-backend-python-pytorch`, service start, doctor,
       quickstart deploy/inference, status/log/metrics inspection,
       rollback, uninstall, and troubleshooting.
+    - `packaging/scripts/install.sh` is now a release asset and the
+      primary external install path. It downloads release artifacts from
+      the manifest, self-checks against `SHA256SUMS`, verifies selected
+      package assets, installs core packages through the idempotent
+      `apt --reinstall` path, enables TensorPlate services, and gates
+      completion on critical `tensorplate doctor` findings. The installer
+      also supports `--cli-only` for desktop operator hosts when a
+      matching `tensorplate-cli` package asset is published.
+    - The release workflow now supports manual build-only validation
+      (`publish=false`) so maintainers can build the exact release asset
+      bundle, download it from GitHub Actions, and smoke-test installer
+      flows before creating a GitHub Release or public prerelease.
+    - Supply-chain hardening for published releases: the publish path
+      keyless-signs `SHA256SUMS` with cosign (attaching
+      `SHA256SUMS.cosign.bundle`) and records SLSA build provenance with
+      `actions/attest-build-provenance`. `install.sh` verifies the cosign
+      signature against the release workflow identity before trusting any
+      checksum, bootstraps a pinned transient Linux `arm64`/`amd64` cosign
+      binary when `cosign` is absent, and still fails closed unless
+      `--allow-unsigned` is passed. `release.yml` passes `workflow_dispatch` inputs through
+      environment variables (no shell interpolation), scopes permissions to
+      the job, pins all actions by commit SHA, and only signs/publishes when
+      the workflow itself is running from the release tag ref.
     - Clean-room release smoke procedure under `docs/validation/` defines
       the post-merge clean-room evidence path from GitHub Release assets on the
       Jetson Orin Nano 8GB Super hardware floor.

@@ -56,7 +56,8 @@ done
 # Stage a parallel scripts dir so the preflight's `here` discovers our
 # rewritten path-constants alongside the real version-utils. The real
 # preflight sources both via "${here}/<name>.sh".
-sed "s|/etc/tensorplate|${td}/etc/tensorplate|g; s|/var/lib/tensorplate|${td}/var/lib/tensorplate|g" \
+test_group="$(id -gn)"
+sed "s|/etc/tensorplate|${td}/etc/tensorplate|g; s|/var/lib/tensorplate|${td}/var/lib/tensorplate|g; s|TP_SYSTEM_GROUP=\"tensorplate\"|TP_SYSTEM_GROUP=\"${test_group}\"|g" \
   "${repo_root}/packaging/scripts/path-constants.sh" >"${td}/scripts/path-constants.sh"
 cp "${repo_root}/packaging/scripts/version-utils.sh" "${td}/scripts/version-utils.sh"
 cp "${preflight}" "${td}/scripts/upgrade-preflight.sh"

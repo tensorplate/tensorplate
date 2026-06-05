@@ -76,15 +76,14 @@ The release owner stops immediately unless all prerequisites are true:
 
 ### 2. Verify The Release Runner
 
-The automated path is tag-driven:
+The publish path is tag-driven:
 
 1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
 2. The script creates or switches `release/vX.Y.Z`, prepares version
-   metadata, commits it, creates an annotated source tag, and pushes the
-   branch + tag.
+   metadata, commits it, and creates an annotated source tag.
 3. `.github/workflows/release.yml` builds the `.deb` packages from that
    tag, generates the manifest/checksums, and creates the GitHub Release
-   with those assets attached.
+   with those assets attached after the tag is pushed.
 
 RC tags create public prereleases. Final tags create draft GitHub
 Releases by default so assets can be verified and clean-room validation
@@ -113,6 +112,10 @@ The release runner must have:
   means JetPack/CUDA/TensorRT on `arm64`.
 - A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
   or a system `nlohmann_json` package.
+- Outbound network access to Sigstore (Fulcio/Rekor) and the GitHub
+  attestation API so the publish path can keyless-sign `SHA256SUMS` and
+  record build provenance. The repository must allow artifact attestations.
+  `cosign` itself is installed by the workflow.
 
 ### 3. Cut The Release Source Tag
 
@@ -125,14 +128,13 @@ tools/release/tensorplate-release.sh cut \
   --dry-run
 ```
 
-Cut and push the final release source tag:
+Cut the final release source tag locally:
 
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --final \
   --execute \
-  --push \
   --confirm "CUT-${TP_TAG}"
 ```
 
@@ -143,15 +145,59 @@ tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --rc 1 \
   --execute \
-  --push \
   --confirm "CUT-${TP_TAG}-rc.1"
 ```
 
 The script refuses dirty worktrees, existing tags, and unexpected release
-metadata edits. It pushes the branch before the tag; the tag push is what
-starts the release workflow.
+metadata edits. Push the release branch for build-only validation, but do
+not push the tag yet:
 
-### 4. Watch CI Build And Publish Assets
+```bash
+git push origin "${TP_RELEASE_BRANCH}"
+```
+
+### 4. Build Release Assets Without Publishing
+
+Before pushing a final tag or creating a public prerelease, run the
+`Release` workflow manually:
+
+- `tag`: `${TP_TAG}`
+- `publish`: `false`
+- `source_ref`: `${TP_RELEASE_BRANCH}`
+
+The build-only run must:
+
+- Build Rust release binaries.
+- Build the C++ serving worker.
+- Run `test/packaging/run.sh`.
+- Build all required `.deb` packages.
+- Copy `install.sh`.
+- Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
+- Upload the `tensorplate-${TP_TAG}-release-assets` workflow artifact.
+- Skip signing and provenance, which run only on the publish path; the
+  uploaded assets are unsigned.
+- Stop before creating a GitHub Release.
+
+Download the workflow artifact and smoke-test the installer from the
+artifact directory before publication. Build-only assets are unsigned, so
+pass `--allow-unsigned`:
+
+```bash
+sudo bash install.sh --allow-unsigned
+sudo bash install.sh --cli-only --allow-unsigned
+```
+
+Run the `--cli-only` smoke only when the artifact bundle includes a
+matching desktop CLI package for that host architecture.
+
+### 5. Watch CI Build And Publish Assets
+
+After build-only validation passes, push the annotated tag. The tag push is
+what starts the publish workflow from the tag ref:
+
+```bash
+git push origin "${TP_TAG}"
+```
 
 Open the `Release` workflow run for `${TP_TAG}`. It must:
 
@@ -162,15 +208,18 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
-- Create the GitHub Release and attach the six `.deb` packages,
-  manifest, and checksum file. RC tags are public prereleases; final tags
-  are drafts until the release owner publishes them.
+- Sign `SHA256SUMS` with keyless cosign and record SLSA build provenance
+  for the packages, installer, manifest, and checksums.
+- Create the GitHub Release and attach the `.deb` packages, `install.sh`,
+  manifest, checksum file, and `SHA256SUMS.cosign.bundle`. RC tags are
+  public prereleases; final tags are drafts until the release owner
+  publishes them.
 
 The workflow refuses to replace an existing GitHub Release. If it fails
 after creating no release, fix the release branch, cut a new RC tag, or
 delete only the failed unpublished tag according to the tag policy.
 
-### 5. Download And Verify CI Assets
+### 6. Download And Verify CI Assets
 
 After the workflow succeeds, download the assets from the GitHub Release
 and verify checksums from a clean machine:
@@ -180,16 +229,28 @@ mkdir -p "${TP_RELEASE_DIR}"
 gh release download "${TP_TAG}" \
   --dir "${TP_RELEASE_DIR}" \
   --pattern '*.deb' \
+  --pattern 'install.sh' \
   --pattern 'SHA256SUMS' \
+  --pattern 'SHA256SUMS.cosign.bundle' \
   --pattern "tensorplate-${TP_TAG}-artifacts.json"
 cd "${TP_RELEASE_DIR}"
+cosign verify-blob \
+  --bundle SHA256SUMS.cosign.bundle \
+  --certificate-identity-regexp "^https://github.com/tensorplate/tensorplate/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
 sha256sum -c SHA256SUMS
+gh attestation verify "tensorplate-agent_${TP_VERSION}-1_arm64.deb" \
+  --repo tensorplate/tensorplate
 ```
 
 Review the manifest for package names, versions, architecture, release
-commit, source tag, checksums, and validation links.
+commit, source tag, checksums, and validation links. Verify the cosign
+signature (authenticity) and provenance attestation before checksums; a
+checksum match alone does not prove the assets came from the release
+workflow.
 
-### 6. Run Clean-Room Validation
+### 7. Run Clean-Room Validation
 
 Run [`docs/validation/clean-room-release-smoke.md`](../validation/clean-room-release-smoke.md)
 from the GitHub Release assets. The validation must download release
@@ -203,7 +264,7 @@ unpublished and cut a corrected release tag. If the result is
 `conditional-pass`, the risk, mitigation, owner, and follow-up issue must
 also appear in release notes.
 
-### 7. Record Sign-Off And Evidence
+### 8. Record Sign-Off And Evidence
 
 ```bash
 cp docs/release/signoff-template.md "${TP_SIGNOFF}"
@@ -218,7 +279,7 @@ Fill the copied files with final decisions and links to:
 - The clean-room validation report.
 - Reviewer approvals.
 
-### 8. Publish And Announce
+### 9. Publish And Announce
 
 For a final release, publish the draft only after release evidence is
 accepted:
@@ -230,7 +291,7 @@ gh release edit "${TP_TAG}" --draft=false --latest
 Then publish the announcement using the release notes as the source of
 truth. The announcement must not claim support beyond release evidence.
 
-### 9. Monitor After Release
+### 10. Monitor After Release
 
 For the first release window:
 
