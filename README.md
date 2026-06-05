@@ -2,6 +2,9 @@
   <img src="docs/assets/tenosrplate_banner.png" alt="TensorPlate" width="100%">
 </p>
 
+<h3 align="center">
+The Inference Layer for Physical AI
+</h3>
 
 <p align="center">
   <a href="https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml"><img src="https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml/badge.svg" alt="C++"></a>
@@ -12,29 +15,30 @@
 </p>
 
 <p align="center">
-  <a href="https://tensorplate.com"><b>🌐 Site</b></a> &nbsp;•&nbsp;
-  <a href="https://tensorplate.com/docs"><b>📖 Documentation</b></a> &nbsp;
+<a href="https://tensorplate.com"><b>Site</b></a> | <a href="https://tensorplate.com/docs"><b>Documentation</b></a> | <a href="https://x.com/tensorplatehq"><b>X (Twitter)</b></a> 
 </p>
-
 
 # TensorPlate
 
 
-Production-grade model serving for the physical AI. TensorPlate runs your models on hardware-constrained devices (NVIDIA Jetson, AMD Kria) and handles deployment, rollback, and health so they keep serving unattended 
+Production-grade model serving for physical AI. TensorPlate runs
+models on Jetson-class edge devices and handles deployment, rollback, and
+health so they keep serving unattended.
 
 
 ## Features
 
-Ship AI models to edge hardware and keep them serving in
-the field, without writing your own deployment, supervision, and health tooling. 
+Ship AI models to edge hardware and keep them serving in the field,
+without writing your own deployment, supervision, and health tooling.
 
 TensorPlate is the runtime and control plane that production physical AI inference needs:
 
 - **Serve models with low, predictable latency.** A C++ inference runtime runs
-  your model on-device through TensorRT, LibTorch, or PyTorch. You can swap backends
-  per deployment without changing your client.
+  your model on-device. The v0.1.0 packaged release supports TensorRT on
+  Jetson and an optional out-of-process Python/PyTorch backend; future
+  backends are reserved by the bundle and adapter interfaces.
 - **Deploy and roll back safely.** Push a new model with one CLI command; if it
-  fails to come up, the agent rolls back automatically. 
+  fails to come up, the agent rolls back automatically.
 - **Survive crashes unattended.** The device agent supervises the serving
   worker, restarts it on failure, and recovers cleanly across reboots so a
   remote box stays serving without a human on site.
@@ -42,7 +46,7 @@ TensorPlate is the runtime and control plane that production physical AI inferen
   tell callers when it's safe to send traffic, and an independent monitor keeps
   reporting health and metrics even if the main process is degraded.
 - **Operate it from one CLI.** `deploy`, `rollback`, `status`, `infer`, `logs`,
-  and `doctor`. It's everything you need to run a fleet, scriptable for CI.
+  and `doctor` cover the local device workflow and are scriptable for CI.
 
 ## Getting Started
 
@@ -54,7 +58,7 @@ On a target [supported hardware](https://tensorplate.com/docs/hardware/overview)
 curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
 ```
 
-For a desktop CLI-only install:
+For a desktop CLI-only install (Debian/Ubuntu):
 
 ```bash
 curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh --cli-only
