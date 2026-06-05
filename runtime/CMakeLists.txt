@@ -10,6 +10,9 @@
 # sidecar defaults ON because the runner is stdlib-only.
 option(TP_ENABLE_TENSORRT
        "Build the TensorRT execution-backend adapter (V01-E05-F02)." OFF)
+option(TP_REQUIRE_TENSORRT_SDK
+       "Fail configure when TensorRT is enabled but the TensorRT/CUDA SDK is missing."
+       OFF)
 option(TP_ENABLE_LIBTORCH
        "Build the LibTorch native execution-backend adapter (V01-E05-F03)." OFF)
 option(TP_ENABLE_PYTHON_PYTORCH_SIDECAR
@@ -122,9 +125,16 @@ if(TP_ENABLE_TENSORRT)
     target_include_directories(tp_runtime PRIVATE ${TP_TENSORRT_INCLUDE_DIR})
     target_link_libraries(tp_runtime PUBLIC ${TP_TENSORRT_NVINFER_LIB} CUDA::cudart)
   else()
-    message(STATUS
-      "TensorRT SDK not found; building TensorRT adapter without execution support "
-      "(load() returns Unsupported). Set TENSORRT_ROOT / install CUDAToolkit to enable.")
+    if(TP_REQUIRE_TENSORRT_SDK)
+      message(FATAL_ERROR
+        "TP_REQUIRE_TENSORRT_SDK=ON but the TensorRT/CUDA SDK was not found. "
+        "Install JetPack/CUDA/TensorRT development headers and libraries, or "
+        "disable the TensorRT adapter for non-release builds.")
+    else()
+      message(STATUS
+        "TensorRT SDK not found; building TensorRT adapter without execution support "
+        "(load() returns Unsupported). Set TENSORRT_ROOT / install CUDAToolkit to enable.")
+    endif()
   endif()
 endif()
 if(TP_ENABLE_LIBTORCH)

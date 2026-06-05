@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build-and-publish:
     name: build packages + publish release assets
-    runs-on: ${{ fromJSON(vars.TENSORPLATE_RELEASE_RUNNER || '["self-hosted","linux","ARM64","tensorplate-release"]') }}
+    runs-on: [self-hosted, linux, ARM64, tensorplate-release]
     timeout-minutes: 120
     permissions:
       contents: write
@@ -184,7 +184,36 @@ jobs:
 
       - name: Install cosign
         if: ${{ steps.meta.outputs.publish == 'true' }}
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+        shell: bash
+        env:
+          COSIGN_VERSION: v3.0.2
+          COSIGN_LINUX_AMD64_SHA256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
+          COSIGN_LINUX_ARM64_SHA256: 17fd784737ca54d7d8a343c82da6c5d6dbdee971e66644d923d1b057fb97d7ed
+        run: |
+          set -Eeuo pipefail
+          case "$(uname -m)" in
+            x86_64|amd64)
+              asset="cosign-linux-amd64"
+              expected="$COSIGN_LINUX_AMD64_SHA256"
+              ;;
+            aarch64|arm64)
+              asset="cosign-linux-arm64"
+              expected="$COSIGN_LINUX_ARM64_SHA256"
+              ;;
+            *)
+              echo "::error::unsupported cosign bootstrap architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL \
+            -o "$tmpdir/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/${asset}"
+          printf '%s  %s\n' "$expected" "$tmpdir/cosign" | sha256sum -c -
+          chmod +x "$tmpdir/cosign"
+          sudo install -m 0755 "$tmpdir/cosign" /usr/local/bin/cosign
+          cosign version
 
       - name: Sign SHA256SUMS (keyless)
         if: ${{ steps.meta.outputs.publish == 'true' }}
