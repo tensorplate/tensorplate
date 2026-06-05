@@ -34,11 +34,7 @@ concurrency:
 jobs:
   build-and-publish:
     name: build packages + publish release assets
-    runs-on:
-      - self-hosted
-      - linux
-      - ARM64
-      - tensorplate-release
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
     permissions:
       contents: write
