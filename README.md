@@ -1,32 +1,54 @@
 <p align="center">
-  <img src="docs/assets/readme_banner.png" alt="TensorPlate" width="100%">
+  <img src="docs/assets/tenosrplate_banner.png" alt="TensorPlate" width="100%">
 </p>
 
-# TensorPlate
 
-[![C++](https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml)
-[![Rust](https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml)
-[![Python](https://github.com/tensorplate/tensorplate/actions/workflows/python.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/python.yml)
-[![Release](https://github.com/tensorplate/tensorplate/actions/workflows/release.yml/badge.svg)](https://github.com/tensorplate/tensorplate/actions/workflows/release.yml)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml"><img src="https://github.com/tensorplate/tensorplate/actions/workflows/cpp.yml/badge.svg" alt="C++"></a>
+  <a href="https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml"><img src="https://github.com/tensorplate/tensorplate/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
+  <a href="https://github.com/tensorplate/tensorplate/actions/workflows/python.yml"><img src="https://github.com/tensorplate/tensorplate/actions/workflows/python.yml/badge.svg" alt="Python"></a>
+  <a href="https://github.com/tensorplate/tensorplate/actions/workflows/release.yml"><img src="https://github.com/tensorplate/tensorplate/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
+</p>
 
-TensorPlate is an inference platform for edge AI and robotics — reliable, observable model serving on hardware-constrained devices, with a C++ runtime hot path and Rust control plane.
+
+
 
 > **Status:** v0.1.0 release-candidate. Tooling, packaging, validation reports, and install docs are in place; the public release must still be cut from a clean `release/v0.1.0` branch and annotated `v0.1.0` tag.
 
+# TensorPlate
+
+
+TensorPlate provides a full stack inference runtime for physical AI with observable model serving on hardware-constrained devices. It's built with a C++ runtime hot path and Rust control plane.
+
+
 ## Features
 
-- Hardware-adjacent inference runtime for Jetson- and Kria-class edge devices.
-- Serving worker with explicit lifecycle, readiness, and health contracts.
-- Rust device agent for deployment, rollback, supervision, and desired-state reconciliation.
-- Adapter-based backends (TensorRT, PyTorch / LibTorch).
-- Tiered tests: unit, integration, adapter contract, hardware-in-loop, and benchmark.
+Ship AI models to NVIDIA Jetson and AMD Kria devices and keep them serving in
+the field, without writing your own deployment, supervision, and health
+tooling. 
+
+TensorPlate is the runtime and control plane that production physical AI inference needs:
+
+- **Serve models with low, predictable latency.** A C++ inference runtime runs
+  your model on-device through TensorRT, LibTorch, or PyTorch. You can swap backends
+  per deployment without changing your client.
+- **Deploy and roll back safely.** Push a new model with one CLI command; if it
+  fails to come up, the agent rolls back automatically. 
+- **Survive crashes unattended.** The device agent supervises the serving
+  worker, restarts it on failure, and recovers cleanly across reboots so a
+  remote box stays serving without a human on site.
+- **Know when it's actually healthy.** Explicit readiness and health endpoints
+  tell callers when it's safe to send traffic, and an independent monitor keeps
+  reporting health and metrics even if the main process is degraded.
+- **Operate it from one CLI.** `deploy`, `rollback`, `status`, `infer`, `logs`,
+  and `doctor`. It's everything you need to run a fleet, scriptable for CI.
 
 ## Getting Started
 
 ### Install From A Release
 
-On a supported target (Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
+On a target [supported hardware](https://tensorplate.com/docs/hardware/overview) (e.g. Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
 
 ```bash
 curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
@@ -44,9 +66,7 @@ Before a release exists, build and install an unreleased branch snapshot:
 curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
 ```
 
-Full guide, troubleshooting, source-install caveats, and the optional
-Python/PyTorch backend: [external-install.md](docs/install/external-install.md).
-Then walk through [quickstart.md](docs/install/quickstart.md).
+Full guide, troubleshooting, and source-install caveats: [Installation](https://tensorplate.com/docs/installation)
 
 ### Build From Source
 
