@@ -128,6 +128,29 @@ The future dedicated self-hosted runner should also have the target SDK
 stack needed for release validation. For v0.1.x that means
 JetPack/CUDA/TensorRT on `arm64`.
 
+For the current Jetson release runner, keep the runner offline and
+unprivileged except during trusted release builds. The operator helper is
+secret-free and may be copied to `/usr/local/sbin/tensorplate-runner` on
+the Jetson, or run from the checked-out repository:
+
+```bash
+sudo tools/release/jetson-runner-control.sh status
+sudo tools/release/jetson-runner-control.sh on
+```
+
+After the build-only or publish workflow finishes, turn the runner back
+off. This stops and disables the systemd service and removes the temporary
+release sudoers allowance for the `gha-runner` account:
+
+```bash
+sudo tools/release/jetson-runner-control.sh off
+```
+
+Do not leave this persistent self-hosted runner online for general OSS PR
+CI. Normal pull-request CI should remain on GitHub-hosted runners; the
+Jetson runner is for trusted release jobs that require JetPack/CUDA/
+TensorRT on the target architecture.
+
 ### 3. Cut The Release Source Tag
 
 Preview the local operation:
