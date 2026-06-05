@@ -89,33 +89,33 @@ RC tags create public prereleases. Final tags create draft GitHub
 Releases by default so assets can be verified and clean-room validation
 can run before publication.
 
-The workflow must run on the release target architecture. By default it
-requires a self-hosted runner labeled:
+The workflow must run on the release target architecture. For v0.1.0, the
+release workflow uses GitHub's hosted `ubuntu-22.04-arm` runner because no
+dedicated release runner is available yet. Final publication still requires
+clean-room validation on the Jetson Orin Nano 8GB Super / JetPack 6.x
+floor, because the hosted runner is not a JetPack/L4T system.
+
+Future release lines should provide a dedicated self-hosted runner labeled:
 
 ```json
 ["self-hosted", "linux", "ARM64", "tensorplate-release"]
 ```
 
-If the repository uses different labels, set the repository variable
-`TENSORPLATE_RELEASE_RUNNER` to a JSON array of labels, for example:
-
-```json
-["self-hosted", "linux", "ARM64", "jetson-orin"]
-```
-
-The release runner must have:
+The package build runner must have:
 
 - `sudo` access for installing Debian build dependencies.
 - Rust via `rustup`, CMake, Ninja, a C++ compiler, debhelper, `dh-exec`,
   `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
-- The target SDK stack needed for release validation. For v0.1.0 that
-  means JetPack/CUDA/TensorRT on `arm64`.
 - A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
   or a system `nlohmann_json` package.
 - Outbound network access to Sigstore (Fulcio/Rekor) and the GitHub
   attestation API so the publish path can keyless-sign `SHA256SUMS` and
   record build provenance. The repository must allow artifact attestations.
   `cosign` itself is installed by the workflow.
+
+The future dedicated self-hosted runner should also have the target SDK
+stack needed for release validation. For v0.1.x that means
+JetPack/CUDA/TensorRT on `arm64`.
 
 ### 3. Cut The Release Source Tag
 
