@@ -11,22 +11,22 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache 2.0"></a>
 </p>
 
+<p align="center">
+  <a href="https://tensorplate.com"><b>🌐 Site</b></a> &nbsp;•&nbsp;
+  <a href="https://tensorplate.com/docs"><b>📖 Documentation</b></a> &nbsp;
+</p>
 
-
-
-> **Status:** v0.1.0 release-candidate. Tooling, packaging, validation reports, and install docs are in place; the public release must still be cut from a clean `release/v0.1.0` branch and annotated `v0.1.0` tag.
 
 # TensorPlate
 
 
-TensorPlate provides a full stack inference runtime for physical AI with observable model serving on hardware-constrained devices. It's built with a C++ runtime hot path and Rust control plane.
+Production-grade model serving for the physical AI. TensorPlate runs your models on hardware-constrained devices (NVIDIA Jetson, AMD Kria) and handles deployment, rollback, and health so they keep serving unattended 
 
 
 ## Features
 
-Ship AI models to NVIDIA Jetson and AMD Kria devices and keep them serving in
-the field, without writing your own deployment, supervision, and health
-tooling. 
+Ship AI models to edge hardware and keep them serving in
+the field, without writing your own deployment, supervision, and health tooling. 
 
 TensorPlate is the runtime and control plane that production physical AI inference needs:
 
@@ -87,20 +87,32 @@ Prerequisites, lint/format checks, and the full CI-equivalent sequence: [local-v
 
 ## Repository Layout
 
-```text
-include/tensorplate/         Public C++ headers
-runtime/                     Core inference runtime (C++20)
-serving_worker/              Data-plane worker process (C++20)
-backends/python_pytorch/     Out-of-process Python/PyTorch backend
-agent/                       Rust device agent
-cli/                         Rust operator CLI
-observability/               Rust independent health monitor
-protocol/                    Cross-component schemas + Rust crate
-config/schemas/              Deployment and runtime config schemas
-test/                        Unit, integration, contract, HIL, benchmark
-cmake/                       Toolchains, modules, feature flags
-docs/                        Architecture and contributing docs
-```
+**Data plane** — the C++20 hot path that runs the model.
+
+| Component | Path | What it is |
+|---|---|---|
+| Inference runtime | [runtime/](runtime/) | Core on-device execution engine (sessions, scheduling, buffers) |
+| Serving worker | [serving_worker/](serving_worker/) | Data-plane worker process that serves inference requests |
+| Python backend | [backends/python_pytorch/](backends/python_pytorch/) | Out-of-process Python/PyTorch backend |
+| Public headers | [include/tensorplate/](include/tensorplate/) | Public C++ API |
+
+**Control plane** — the Rust services that deploy, supervise, and observe.
+
+| Component | Path | What it is |
+|---|---|---|
+| Device agent | [agent/](agent/) | Deployment, rollback, supervision, desired-state reconciliation |
+| Operator CLI | [cli/](cli/) | Command-line interface for running a fleet |
+| Health monitor | [observability/](observability/) | Independent health and metrics monitor |
+
+**Shared contracts & tooling**
+
+| Component | Path | What it is |
+|---|---|---|
+| Protocol | [protocol/](protocol/) | Cross-component JSON Schemas + Rust crate |
+| Config schemas | [config/schemas/](config/schemas/) | Deployment and runtime config schemas |
+| Tests | [test/](test/) | Unit, integration, contract, HIL, benchmark |
+| Build | [cmake/](cmake/) | Toolchains, modules, feature flags |
+| Docs | [docs/](docs/) | Architecture and contributing docs |
 
 Package owners, allowed dependencies, and review gates: [docs/architecture/ownership.md](docs/architecture/ownership.md).
 
