@@ -96,10 +96,8 @@ requires a self-hosted runner labeled:
 ["self-hosted", "linux", "ARM64", "tensorplate-release"]
 ```
 
-If the repository uses a different custom runner label, set the repository
-variable `TENSORPLATE_RELEASE_RUNNER_LABEL` to that label, for example
-`jetson-orin`. The workflow always requires the `self-hosted`, `linux`,
-and `ARM64` labels for release builds.
+If the repository uses different labels, update `.github/workflows/release.yml`
+through the normal reviewed workflow before cutting the release.
 
 The release runner must have:
 

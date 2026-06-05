@@ -38,7 +38,7 @@ jobs:
       - self-hosted
       - linux
       - ARM64
-      - ${{ vars.TENSORPLATE_RELEASE_RUNNER_LABEL || 'tensorplate-release' }}
+      - tensorplate-release
     timeout-minutes: 120
     permissions:
       contents: write
