@@ -34,7 +34,11 @@ concurrency:
 jobs:
   build-and-publish:
     name: build packages + publish release assets
-    runs-on: ${{ fromJSON(vars.TENSORPLATE_RELEASE_RUNNER || '["self-hosted","linux","ARM64","tensorplate-release"]') }}
+    runs-on:
+      - self-hosted
+      - linux
+      - ARM64
+      - ${{ vars.TENSORPLATE_RELEASE_RUNNER_LABEL || 'tensorplate-release' }}
     timeout-minutes: 120
     permissions:
       contents: write

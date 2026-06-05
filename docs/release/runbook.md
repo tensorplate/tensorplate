@@ -96,12 +96,10 @@ requires a self-hosted runner labeled:
 ["self-hosted", "linux", "ARM64", "tensorplate-release"]
 ```
 
-If the repository uses different labels, set the repository variable
-`TENSORPLATE_RELEASE_RUNNER` to a JSON array of labels, for example:
-
-```json
-["self-hosted", "linux", "ARM64", "jetson-orin"]
-```
+If the repository uses a different custom runner label, set the repository
+variable `TENSORPLATE_RELEASE_RUNNER_LABEL` to that label, for example
+`jetson-orin`. The workflow always requires the `self-hosted`, `linux`,
+and `ARM64` labels for release builds.
 
 The release runner must have:
 
