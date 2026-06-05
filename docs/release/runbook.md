@@ -89,11 +89,18 @@ RC tags create public prereleases. Final tags create draft GitHub
 Releases by default so assets can be verified and clean-room validation
 can run before publication.
 
-The workflow must run on the release target architecture. For v0.1.0, the
-release workflow uses GitHub's hosted `ubuntu-22.04-arm` runner because no
-dedicated release runner is available yet. Final publication still requires
-clean-room validation on the Jetson Orin Nano 8GB Super / JetPack 6.x
-floor, because the hosted runner is not a JetPack/L4T system.
+The workflow must run on the release target architecture and must build
+the real TensorRT execution path for v0.1.x packages. GitHub's hosted
+`ubuntu-22.04-arm` runner is acceptable only if the workflow also
+provides a JetPack-compatible CUDA/TensorRT development SDK and the CMake
+configure log contains `TensorRT SDK detected; building real TensorRT
+adapter execution path`. A hosted ARM build without that SDK is not a
+publishable v0.1.x release build, because it produces a TensorRT adapter
+that advertises the backend but returns `Unsupported` at engine load.
+
+Final publication still requires clean-room validation on the Jetson Orin
+Nano 8GB Super / JetPack 6.x floor, because a hosted runner is not a
+JetPack/L4T system.
 
 Future release lines should provide a dedicated self-hosted runner labeled:
 
@@ -108,6 +115,10 @@ The package build runner must have:
   `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
 - A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
   or a system `nlohmann_json` package.
+- JetPack-compatible CUDA/TensorRT development headers and libraries when
+  building v0.1.x release packages with `TP_ENABLE_TENSORRT=ON`. Release
+  artifact builds default `TP_REQUIRE_TENSORRT_SDK=ON` so they fail during
+  CMake configure instead of producing non-functional TensorRT packages.
 - Outbound network access to Sigstore (Fulcio/Rekor) and the GitHub
   attestation API so the publish path can keyless-sign `SHA256SUMS` and
   record build provenance. The repository must allow artifact attestations.
