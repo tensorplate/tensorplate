@@ -36,11 +36,11 @@ CLI-only install:
 
 ## Runtime Install On Jetson
 
-For TensorPlate `v0.1.0`, paste this into the terminal on the target
+For TensorPlate `v0.1.1`, paste this into the terminal on the target
 Jetson:
 
 ```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh
 ```
 
 This downloads the installer and runs it locally. The installer verifies a
@@ -53,7 +53,7 @@ verifies its pinned SHA256, and runs it from there on Linux `arm64` and
 your own risk.
 
 The script uses the pinned current release by default. For a newer
-published release, replace `v0.1.0` in the URL with that release tag.
+published release, replace `v0.1.1` in the URL with that release tag.
 
 What the installer does:
 
@@ -80,7 +80,7 @@ Installer flags:
 
 | Flag | Behavior |
 | --- | --- |
-| `--version VERSION` | Selects the release tag/version. Accepts `0.1.0`, `v0.1.0`, or `v0.1.0-rc.N`. |
+| `--version VERSION` | Selects the release tag/version. Accepts `0.1.1`, `v0.1.1`, or `v0.1.1-rc.N`. |
 | `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` for the host Debian architecture. Skips Jetson validation, service enablement, and doctor. |
 | `--with-python-backend` | Also installs `tensorplate-backend-python-pytorch`. |
 | `--yes` / `-y` | Continues without interactive prompts for unattended provisioning. |
@@ -112,7 +112,7 @@ and restart the agent if needed.
 On a Debian/Ubuntu desktop or workstation, paste:
 
 ```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh --cli-only
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh --cli-only
 ```
 
 CLI-only mode installs the operator CLI package for the host Debian
