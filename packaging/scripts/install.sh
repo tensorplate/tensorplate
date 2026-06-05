@@ -202,7 +202,7 @@ else
   fi
 
   [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
-    die "--version must be 0.1.0, v0.1.0, or v0.1.0-rc.N"
+    die "--version must be 0.1.1, v0.1.1, or v0.1.1-rc.N"
   [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "release version must be MAJOR.MINOR.PATCH"
   MANIFEST_NAME="tensorplate-${TAG}-artifacts.json"

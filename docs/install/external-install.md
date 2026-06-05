@@ -6,7 +6,7 @@ release `install.sh` script: download it and run it locally. The script
 self-checks against release `SHA256SUMS` before downloading or installing
 package assets. Do not use `curl | sh`.
 
-The concrete command below targets `v0.1.0`; later releases use the same
+The concrete command below targets `v0.1.1`; later releases use the same
 shape with the tag changed in the URL.
 
 ## Supported Target
@@ -177,7 +177,7 @@ Snapshot caveats:
 Use these variables only when following the manual fallback flow below:
 
 ```bash
-export TP_VERSION=0.1.0
+export TP_VERSION=0.1.1
 export TP_TAG="v${TP_VERSION}"
 export TP_DEBIAN_VERSION="${TP_VERSION}-1"
 export TP_ARCH=arm64

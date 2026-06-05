@@ -34,7 +34,7 @@ without writing your own deployment, supervision, and health tooling.
 TensorPlate is the runtime and control plane that production physical AI inference needs:
 
 - **Serve models with low, predictable latency.** A C++ inference runtime runs
-  your model on-device. The v0.1.0 packaged release supports TensorRT on
+  your model on-device. The v0.1.1 packaged release supports TensorRT on
   Jetson and an optional out-of-process Python/PyTorch backend; future
   backends are reserved by the bundle and adapter interfaces.
 - **Deploy and roll back safely.** Push a new model with one CLI command; if it
