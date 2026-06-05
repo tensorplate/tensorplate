@@ -42,7 +42,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
 # Version metadata. The runtime version comes from project(); the protocol
 # and bundle format versions evolve on independent cadences and live here.
 # All four are surfaced through include/tensorplate/version.hpp.
-set(TP_RUNTIME_VERSION_SUFFIX       "dev"  CACHE STRING
+set(TP_RUNTIME_VERSION_SUFFIX       ""  CACHE STRING
     "Pre-release / build suffix appended to runtime version (empty for releases).")
 set(TP_PROTOCOL_VERSION_MAJOR       0      CACHE STRING
     "Cross-process schema major version (independent of runtime).")

@@ -1,4 +1,4 @@
-tensorplate (0.1.0~dev0-1) UNRELEASED; urgency=medium
+tensorplate (0.1.0-1) unstable; urgency=medium
 
   * V01-E14 packaging skeleton: tensorplate-agent, tensorplate-serving,
     tensorplate-observability, tensorplate-cli, and the separately

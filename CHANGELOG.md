@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-05
+
 ### Added
 
 - Release workflow and external installability (release publication). v0.1.0 gains
