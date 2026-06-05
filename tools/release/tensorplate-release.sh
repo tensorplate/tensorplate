@@ -56,6 +56,8 @@ Common options:
   --skip-ci                 Record CI as blocked instead of querying GitHub.
   --skip-tag-verify         For build-only artifact validation, verify manifest
                             and checksums without requiring a local annotated tag.
+  --allow-snapshot-version  Allow X.Y.Z~dev.YYYYMMDD.gitsha for unreleased
+                            local-source snapshot manifest/verify operations.
   --dry-run                 Print intended action without mutating repository or GitHub state.
   --execute                 Execute a mutating operation.
   --push                    Push the release branch and tag after cut.
@@ -101,13 +103,20 @@ require_repo() {
 
 require_version() {
   [[ -n "${VERSION:-}" ]] || die "--version is required"
-  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-    die "--version must be a MAJOR.MINOR.PATCH value such as 0.1.0"
+  if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    return 0
+  fi
+  if [[ "${ALLOW_SNAPSHOT_VERSION:-0}" -eq 1 &&
+    "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+~dev\.[0-9]{8}\.[0-9a-f]+$ ]]; then
+    return 0
+  fi
+  die "--version must be MAJOR.MINOR.PATCH; pass --allow-snapshot-version for X.Y.Z~dev.YYYYMMDD.gitsha"
 }
 
 version_short() {
-  local major minor patch
-  IFS=. read -r major minor patch <<<"$VERSION"
+  local base major minor
+  base="${VERSION%%~*}"
+  IFS=. read -r major minor _ <<<"$base"
   printf '%s.%s\n' "$major" "$minor"
 }
 
@@ -166,6 +175,7 @@ parse_common_args() {
   REPORT=""
   SKIP_CI=0
   SKIP_TAG_VERIFY=0
+  ALLOW_SNAPSHOT_VERSION=0
   DRY_RUN=0
   EXECUTE=0
   PUSH=0
@@ -192,6 +202,7 @@ parse_common_args() {
       --report) REPORT="${2:-}"; shift 2 ;;
       --skip-ci) SKIP_CI=1; shift ;;
       --skip-tag-verify) SKIP_TAG_VERIFY=1; shift ;;
+      --allow-snapshot-version) ALLOW_SNAPSHOT_VERSION=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --execute) EXECUTE=1; shift ;;
       --push) PUSH=1; shift ;;
@@ -873,16 +884,25 @@ artifacts.append(
     }
 )
 
+snapshot = "~dev." in version or tag.startswith("snapshot-")
+provenance = "local-source-snapshot" if snapshot else "github-release"
+release = {
+    "project": "tensorplate",
+    "version": version,
+    "tag": tag,
+    "commit": commit,
+    "branch": branch,
+    "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    "provenance": provenance,
+    "unreleased": snapshot,
+}
+if snapshot:
+    release["source_kind"] = "local-source-branch"
+    release["labels"] = ["unreleased", "local-source-snapshot"]
+
 manifest = {
     "schema": "https://tensorplate.com/schemas/release-artifact-manifest-v1.json",
-    "release": {
-        "project": "tensorplate",
-        "version": version,
-        "tag": tag,
-        "commit": commit,
-        "branch": branch,
-        "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-    },
+    "release": release,
     "target": {
         "hardware_floor": "Jetson Orin Nano 8GB Super",
         "os": target_os,

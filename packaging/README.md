@@ -35,6 +35,7 @@ packaging/
 ├── conf/                           Default config installed under /etc/tensorplate/.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
 │   ├── install.sh                  Release installer published with GitHub Release assets.
+│   ├── build-install-from-source.sh Build/install unreleased branch snapshots through install.sh.
 │   ├── build-deb.sh                Source-tree helper for dpkg-buildpackage.
 │   └── ...                         Maintainer-script helpers installed by tensorplate-common.
 └── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.
@@ -56,12 +57,13 @@ discoverable by the descriptor interpreter; after PyTorch is installed
 and the agent is restarted, SmolVLA-class deploys can pass the startup
 backend probe.
 
-## Building (skeleton)
+## Building
 
 The `debian/rules` file assumes the upstream build has already produced
 release artifacts at `target/release/` (Rust) and `build/release/` (C++).
-A driver script (out of scope for V01-E14) chains those builds; the
-packaging tree only owns staging into `debian/<pkg>/`.
+`tools/release/build-release-artifacts.sh` chains those builds for
+release and snapshot artifact bundles; the packaging tree owns staging
+into `debian/<pkg>/`.
 
 ```bash
 # 1) Build upstream binaries (out of scope for the skeleton).
@@ -78,6 +80,15 @@ cmake --build build/release --target tensorplate-serving
 `dpkg-buildpackage` expects a root `debian/` directory. The helper creates
 the temporary `debian -> packaging/debian` symlink needed by that tool and
 removes it after the build when it created it.
+
+For an unreleased branch snapshot, use the source installer wrapper. It
+builds packages with a `X.Y.Z~dev.YYYYMMDD.gitsha` Debian version, writes
+the local manifest and `SHA256SUMS`, then calls `install.sh
+--local-artifacts --allow-unsigned`:
+
+```bash
+sudo bash packaging/scripts/build-install-from-source.sh --branch develop
+```
 
 ## v0.1.0 invariants
 

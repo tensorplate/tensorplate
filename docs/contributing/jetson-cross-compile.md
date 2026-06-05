@@ -69,6 +69,29 @@ clear error if `TP_JETSON_SYSROOT`, `TP_JETSON_CC`, or `TP_JETSON_CXX` are
 missing. This is intentional: the absence of a hardcoded host path means
 the toolchain file does not bake in any contributor's machine.
 
+## Build unreleased Jetson packages from x86
+
+For branch snapshots, `packaging/scripts/build-install-from-source.sh`
+delegates to `tools/release/build-release-artifacts.sh --snapshot`. From
+an x86 host, the target architecture remains `arm64`, so the same sysroot,
+cross compiler, and vcpkg toolchain inputs above are required:
+
+```bash
+export TP_JETSON_SYSROOT=/opt/jetson/sysroot
+export TP_JETSON_CC=/usr/bin/aarch64-linux-gnu-gcc-11
+export TP_JETSON_CXX=/usr/bin/aarch64-linux-gnu-g++-11
+export VCPKG_ROOT=/opt/vcpkg
+
+bash packaging/scripts/build-install-from-source.sh --branch develop --no-install --arch arm64
+```
+
+The output directory contains snapshot packages named
+`X.Y.Z~dev.YYYYMMDD.gitsha`, `install.sh`, a snapshot manifest, and
+`SHA256SUMS`. Copy that directory to the Jetson and install through the
+same local-artifact installer path printed by the wrapper. These artifacts
+are unreleased and unsigned; use them for validation, not as public release
+evidence.
+
 ## Verifying cross-compiled artifacts on device
 
 T4 hardware-in-loop validation lands in release validation along with the end-to-end

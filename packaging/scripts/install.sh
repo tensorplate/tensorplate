@@ -29,6 +29,7 @@ FORCE_OS=0
 STRICT_HARDWARE=0
 DRY_RUN=0
 ALLOW_UNSIGNED=0
+LOCAL_ARTIFACTS_DIR=""
 INSTALL_WORKDIR=""
 COSIGN_BOOTSTRAP_BIN=""
 
@@ -50,6 +51,9 @@ Options:
   --force-os                 Continue on an unsupported OS. This is unsupported and at your own risk.
   --strict-hardware          Treat hardware or architecture warnings as fatal.
   --dry-run                  Validate host gates and print planned actions without downloading or installing.
+  --local-artifacts DIR      Install from a local artifact directory containing install.sh,
+                             tensorplate-*-artifacts.json, SHA256SUMS, and package .debs.
+                             Intended for unreleased snapshot/build-only artifacts.
   --allow-unsigned           Skip the cosign signature check on SHA256SUMS and accept checksum-only
                              integrity. Unsupported; for air-gapped or bootstrap use at your own risk.
   --help, -h                 Show this help text.
@@ -139,6 +143,11 @@ while (($# > 0)); do
       DRY_RUN=1
       shift
       ;;
+    --local-artifacts)
+      (($# >= 2)) || die "--local-artifacts requires a directory"
+      LOCAL_ARTIFACTS_DIR="$2"
+      shift 2
+      ;;
     --allow-unsigned)
       ALLOW_UNSIGNED=1
       shift
@@ -153,26 +162,55 @@ while (($# > 0)); do
   esac
 done
 
-if [[ "$VERSION_INPUT" == v* ]]; then
-  TAG="$VERSION_INPUT"
-  RELEASE_VERSION="${VERSION_INPUT#v}"
-  RELEASE_VERSION="${RELEASE_VERSION%%-*}"
-else
-  RELEASE_VERSION="$VERSION_INPUT"
-  TAG="v${VERSION_INPUT}"
-fi
+if [[ -n "$LOCAL_ARTIFACTS_DIR" ]]; then
+  LOCAL_ARTIFACTS_DIR="$(cd -- "$LOCAL_ARTIFACTS_DIR" && pwd)" ||
+    die "local artifact directory does not exist: $LOCAL_ARTIFACTS_DIR"
+  shopt -s nullglob
+  local_manifests=("$LOCAL_ARTIFACTS_DIR"/tensorplate-*-artifacts.json)
+  shopt -u nullglob
+  ((${#local_manifests[@]} == 1)) ||
+    die "--local-artifacts requires exactly one tensorplate-*-artifacts.json in $LOCAL_ARTIFACTS_DIR; found ${#local_manifests[@]}"
+  MANIFEST_NAME="$(basename -- "${local_manifests[0]}")"
+  local_manifest_meta=()
+  while IFS= read -r line; do
+    local_manifest_meta+=("$line")
+  done < <(python3 - "${local_manifests[0]}" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
-  die "--version must be 0.1.0, v0.1.0, or v0.1.0-rc.N"
-[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-  die "release version must be MAJOR.MINOR.PATCH"
+manifest = json.loads(Path(sys.argv[1]).read_text())
+release = manifest.get("release", {})
+print(release.get("tag", "local-artifacts"))
+print(release.get("version", "0.0.0~local"))
+PY
+  )
+  ((${#local_manifest_meta[@]} == 2)) ||
+    die "could not read release metadata from ${local_manifests[0]}"
+  TAG="${local_manifest_meta[0]}"
+  RELEASE_VERSION="${local_manifest_meta[1]%%-*}"
+else
+  if [[ "$VERSION_INPUT" == v* ]]; then
+    TAG="$VERSION_INPUT"
+    RELEASE_VERSION="${VERSION_INPUT#v}"
+    RELEASE_VERSION="${RELEASE_VERSION%%-*}"
+  else
+    RELEASE_VERSION="$VERSION_INPUT"
+    TAG="v${VERSION_INPUT}"
+  fi
+
+  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
+    die "--version must be 0.1.0, v0.1.0, or v0.1.0-rc.N"
+  [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "release version must be MAJOR.MINOR.PATCH"
+  MANIFEST_NAME="tensorplate-${TAG}-artifacts.json"
+fi
 if [[ "$INSTALL_MODE" == "cli" && "$WITH_PYTHON_BACKEND" -eq 1 ]]; then
   die "--with-python-backend cannot be combined with --cli-only"
 fi
 
 readonly REPO="$DEFAULT_REPO"
 readonly RELEASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
-readonly MANIFEST_NAME="tensorplate-${TAG}-artifacts.json"
 
 host_deb_arch() {
   if [[ -n "${TP_INSTALL_DEB_ARCH:-}" ]]; then
@@ -616,6 +654,41 @@ download_and_verify_assets() {
   )
 }
 
+copy_and_verify_local_assets() {
+  local workdir="$1"
+  local manifest_path="${workdir}/${MANIFEST_NAME}"
+  local checksums_path="${workdir}/SHA256SUMS"
+  local bundle_path="${workdir}/SHA256SUMS.cosign.bundle"
+  local file
+  local deb_arch
+  local selected=()
+
+  [[ -f "${LOCAL_ARTIFACTS_DIR}/${MANIFEST_NAME}" ]] ||
+    die "local artifact manifest is missing: ${LOCAL_ARTIFACTS_DIR}/${MANIFEST_NAME}"
+  [[ -f "${LOCAL_ARTIFACTS_DIR}/SHA256SUMS" ]] ||
+    die "local artifact checksums are missing: ${LOCAL_ARTIFACTS_DIR}/SHA256SUMS"
+
+  cp -- "${LOCAL_ARTIFACTS_DIR}/${MANIFEST_NAME}" "$manifest_path"
+  cp -- "${LOCAL_ARTIFACTS_DIR}/SHA256SUMS" "$checksums_path"
+  verify_checksums_signature "$checksums_path" "$LOCAL_ARTIFACTS_DIR" "$bundle_path"
+
+  deb_arch="$(host_deb_arch)"
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    selected+=("$file")
+    [[ -f "${LOCAL_ARTIFACTS_DIR}/${file}" ]] ||
+      die "local artifact package is missing: ${LOCAL_ARTIFACTS_DIR}/${file}"
+    cp -- "${LOCAL_ARTIFACTS_DIR}/${file}" "${workdir}/${file}"
+  done < <(write_install_deb_list "$manifest_path" "$WITH_PYTHON_BACKEND" "$INSTALL_MODE" "$deb_arch")
+
+  note "verifying local artifacts with SHA256SUMS"
+  (
+    cd "$workdir"
+    write_checksum_subset "$checksums_path" "$MANIFEST_NAME" "${selected[@]}" >SELECTED-SHA256SUMS
+    sha256sum -c SELECTED-SHA256SUMS
+  )
+}
+
 install_packages() {
   local workdir="$1"
   local manifest_path="${workdir}/${MANIFEST_NAME}"
@@ -722,13 +795,20 @@ PY
 }
 
 dry_run_summary() {
-  note "dry-run selected release ${TAG}"
+  note "dry-run selected ${TAG}"
   printf 'Install mode: %s\n' "$INSTALL_MODE"
   printf 'Debian architecture: %s\n' "$(host_deb_arch)"
-  printf 'Would download:\n'
-  printf '  %s/%s\n' "$RELEASE_URL" "$MANIFEST_NAME"
-  printf '  %s/SHA256SUMS\n' "$RELEASE_URL"
-  printf '  %s/SHA256SUMS.cosign.bundle\n' "$RELEASE_URL"
+  if [[ -n "$LOCAL_ARTIFACTS_DIR" ]]; then
+    printf 'Would install from local artifacts: %s\n' "$LOCAL_ARTIFACTS_DIR"
+    printf 'Would read:\n'
+    printf '  %s/%s\n' "$LOCAL_ARTIFACTS_DIR" "$MANIFEST_NAME"
+    printf '  %s/SHA256SUMS\n' "$LOCAL_ARTIFACTS_DIR"
+  else
+    printf 'Would download:\n'
+    printf '  %s/%s\n' "$RELEASE_URL" "$MANIFEST_NAME"
+    printf '  %s/SHA256SUMS\n' "$RELEASE_URL"
+    printf '  %s/SHA256SUMS.cosign.bundle\n' "$RELEASE_URL"
+  fi
   if [[ "${TP_INSTALL_ALLOW_UNSIGNED:-0}" == "1" || "$ALLOW_UNSIGNED" == "1" ]]; then
     printf 'Signature check: DISABLED (--allow-unsigned); checksum-only integrity.\n'
   else
@@ -777,7 +857,11 @@ main() {
     note "keeping installer workdir ${workdir}"
   fi
 
-  download_and_verify_assets "$workdir"
+  if [[ -n "$LOCAL_ARTIFACTS_DIR" ]]; then
+    copy_and_verify_local_assets "$workdir"
+  else
+    download_and_verify_assets "$workdir"
+  fi
   install_packages "$workdir"
   if [[ "$INSTALL_MODE" == "cli" ]]; then
     check_cli
@@ -788,10 +872,18 @@ main() {
 
   note "TensorPlate ${TAG} install complete"
   if [[ "$INSTALL_MODE" == "cli" ]]; then
-    printf 'Installed TensorPlate CLI from %s.\n' "$RELEASE_URL"
+    if [[ -n "$LOCAL_ARTIFACTS_DIR" ]]; then
+      printf 'Installed TensorPlate CLI from local artifacts at %s.\n' "$LOCAL_ARTIFACTS_DIR"
+    else
+      printf 'Installed TensorPlate CLI from %s.\n' "$RELEASE_URL"
+    fi
     printf 'Next: configure a profile or use --agent-url to reach a Jetson runtime.\n'
   else
-    printf 'Installed TensorPlate runtime packages from %s.\n' "$RELEASE_URL"
+    if [[ -n "$LOCAL_ARTIFACTS_DIR" ]]; then
+      printf 'Installed TensorPlate runtime packages from local artifacts at %s.\n' "$LOCAL_ARTIFACTS_DIR"
+    else
+      printf 'Installed TensorPlate runtime packages from %s.\n' "$RELEASE_URL"
+    fi
     if ((WITH_PYTHON_BACKEND)); then
       printf 'Installed optional Python/PyTorch backend package. Install the platform PyTorch stack separately if doctor reports it missing.\n'
     fi

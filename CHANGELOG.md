@@ -34,7 +34,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
       `apt --reinstall` path, enables TensorPlate services, and gates
       completion on critical `tensorplate doctor` findings. The installer
       also supports `--cli-only` for desktop operator hosts when a
-      matching `tensorplate-cli` package asset is published.
+      matching `tensorplate-cli` package asset is published, plus
+      `--local-artifacts` for checksum-verified build-only or source
+      snapshot artifacts.
+    - `packaging/scripts/build-install-from-source.sh` adds the
+      unreleased branch path: clone or check out a branch such as
+      `develop`, build `X.Y.Z~dev.YYYYMMDD.gitsha` snapshot packages,
+      generate and verify a local manifest plus `SHA256SUMS`, then
+      install through `install.sh --local-artifacts --allow-unsigned`.
+      Snapshot manifests are explicitly labeled as unreleased
+      local-source builds and are not GitHub Release evidence.
+    - `tools/release/build-release-artifacts.sh` supports snapshot mode
+      for native Jetson builds and x86-to-Jetson cross builds when a
+      Jetson sysroot, cross compiler, and vcpkg chainload toolchain are
+      provided.
     - The release workflow now supports manual build-only validation
       (`publish=false`) so maintainers can build the exact release asset
       bundle, download it from GitHub Actions, and smoke-test installer

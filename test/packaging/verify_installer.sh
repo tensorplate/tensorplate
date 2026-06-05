@@ -5,7 +5,7 @@
 
 set -eu
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 installer="${repo_root}/packaging/scripts/install.sh"
 
 td="$(mktemp -d)"
@@ -80,6 +80,31 @@ TP_INSTALL_DEB_ARCH="arm64" \
   bash "${installer}" --dry-run --yes >"${td}/supported.out" 2>"${td}/supported.err"
 grep -q "Would download:" "${td}/supported.out"
 grep -q "Install mode: runtime" "${td}/supported.out"
+
+mkdir -p "${td}/local-artifacts"
+cat >"${td}/local-artifacts/tensorplate-snapshot-develop-deadbeef1234-artifacts.json" <<'EOF'
+{
+  "schema": "https://tensorplate.com/schemas/release-artifact-manifest-v1.json",
+  "release": {
+    "project": "tensorplate",
+    "version": "0.1.0~dev.20260604.deadbeef1234",
+    "tag": "snapshot-develop-deadbeef1234",
+    "provenance": "local-source-snapshot",
+    "unreleased": true
+  },
+  "artifacts": []
+}
+EOF
+: >"${td}/local-artifacts/SHA256SUMS"
+TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+TP_INSTALL_ARCH="aarch64" \
+TP_INSTALL_DEB_ARCH="arm64" \
+  bash "${installer}" --dry-run --yes --local-artifacts "${td}/local-artifacts" --allow-unsigned >"${td}/local-artifacts.out" 2>"${td}/local-artifacts.err"
+grep -q "dry-run selected snapshot-develop-deadbeef1234" "${td}/local-artifacts.out"
+grep -q "Would install from local artifacts: ${td}/local-artifacts" "${td}/local-artifacts.out"
+grep -q "Signature check: DISABLED" "${td}/local-artifacts.out"
 
 if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.unsupported" \
    TP_INSTALL_OS_RELEASE="${td}/os-release.unsupported" \
