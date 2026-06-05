@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-readonly DEFAULT_VERSION="${TP_INSTALL_DEFAULT_VERSION:-0.1.0}"
+readonly DEFAULT_VERSION="${TP_INSTALL_DEFAULT_VERSION:-0.1.1}"
 readonly DEFAULT_REPO="${TP_INSTALL_REPO:-tensorplate/tensorplate}"
 readonly OPTIONAL_PYTHON_PACKAGE="tensorplate-backend-python-pytorch"
 readonly CLI_PACKAGE="tensorplate-cli"
@@ -43,7 +43,7 @@ Usage:
   sudo bash install.sh [options]
 
 Options:
-  --version VERSION          Release to install. Accepts 0.1.0, v0.1.0, or v0.1.0-rc.N.
+  --version VERSION          Release to install. Accepts 0.1.1, v0.1.1, or v0.1.1-rc.N.
                              Defaults to the pinned current release.
   --cli-only                 Install only the operator CLI for this host architecture.
                              Skips Jetson OS/hardware validation, service enablement, and doctor.
@@ -202,7 +202,7 @@ else
   fi
 
   [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
-    die "--version must be 0.1.0, v0.1.0, or v0.1.0-rc.N"
+    die "--version must be 0.1.1, v0.1.1, or v0.1.1-rc.N"
   [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "release version must be MAJOR.MINOR.PATCH"
   MANIFEST_NAME="tensorplate-${TAG}-artifacts.json"

@@ -34,7 +34,7 @@ without writing your own deployment, supervision, and health tooling.
 TensorPlate is the runtime and control plane that production physical AI inference needs:
 
 - **Serve models with low, predictable latency.** A C++ inference runtime runs
-  your model on-device. The v0.1.0 packaged release supports TensorRT on
+  your model on-device. The v0.1.1 packaged release supports TensorRT on
   Jetson and an optional out-of-process Python/PyTorch backend; future
   backends are reserved by the bundle and adapter interfaces.
 - **Deploy and roll back safely.** Push a new model with one CLI command; if it
@@ -55,13 +55,13 @@ TensorPlate is the runtime and control plane that production physical AI inferen
 On a target [supported hardware](https://tensorplate.com/docs/hardware/overview) (e.g. Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
 
 ```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh
 ```
 
 For a desktop CLI-only install (Debian/Ubuntu):
 
 ```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.0/install.sh && sudo bash install.sh --cli-only
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh --cli-only
 ```
 
 Before a release exists, build and install an unreleased branch snapshot:
