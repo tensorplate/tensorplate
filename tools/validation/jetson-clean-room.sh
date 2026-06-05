@@ -24,6 +24,7 @@ REPO="${TP_REPO:-$DEFAULT_REPO}"
 WORK_DIR="${TP_CLEAN_ROOM_WORK_DIR:-}"
 ASSETS_DIR="${TP_CLEAN_ROOM_ASSETS_DIR:-}"
 EVIDENCE_DIR="${TP_CLEAN_ROOM_EVIDENCE_DIR:-}"
+RUN_TMP_DIR="${TP_CLEAN_ROOM_TMP_DIR:-}"
 BUNDLE_DIR="${TP_CLEAN_ROOM_BUNDLE_DIR:-/var/lib/tensorplate/validation/tensorplate-trt-identity-bundle}"
 DEPLOYMENT_ID="${TP_CLEAN_ROOM_DEPLOYMENT_ID:-release-clean-room}"
 WITH_PYTHON_BACKEND=0
@@ -53,6 +54,8 @@ Options:
   --assets-dir DIR         Use existing local artifacts instead of downloading.
   --work-dir DIR           Working directory. Default: mktemp under /tmp.
   --evidence-dir DIR       Evidence directory. Default: WORK_DIR/evidence.
+  --tmp-dir DIR            Temporary directory for validation subprocesses.
+                            Default: WORK_DIR/tmp.
   --bundle-dir DIR         TensorRT validation bundle path.
                             Default: /var/lib/tensorplate/validation/tensorplate-trt-identity-bundle
   --deployment-id ID       Deployment id for validation. Default: release-clean-room.
@@ -111,6 +114,7 @@ parse_args() {
       --assets-dir) ASSETS_DIR="${2:-}"; shift 2 ;;
       --work-dir) WORK_DIR="${2:-}"; shift 2 ;;
       --evidence-dir) EVIDENCE_DIR="${2:-}"; shift 2 ;;
+      --tmp-dir) RUN_TMP_DIR="${2:-}"; shift 2 ;;
       --bundle-dir) BUNDLE_DIR="${2:-}"; shift 2 ;;
       --deployment-id) DEPLOYMENT_ID="${2:-}"; shift 2 ;;
       --with-python-backend) WITH_PYTHON_BACKEND=1; shift ;;
@@ -134,6 +138,13 @@ prepare_paths() {
   fi
   mkdir -p "$WORK_DIR"
   WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+
+  if [[ -z "$RUN_TMP_DIR" ]]; then
+    RUN_TMP_DIR="${WORK_DIR}/tmp"
+  fi
+  mkdir -p "$RUN_TMP_DIR"
+  RUN_TMP_DIR="$(cd "$RUN_TMP_DIR" && pwd)"
+  export TMPDIR="$RUN_TMP_DIR"
 
   if [[ -z "$ASSETS_DIR" ]]; then
     ASSETS_DIR="${WORK_DIR}/assets"
@@ -388,6 +399,7 @@ Artifact source:
 - Repository: ${REPO}
 - Assets directory: ${ASSETS_DIR}
 - Work directory: ${WORK_DIR}
+- Temporary directory: ${RUN_TMP_DIR}
 - Evidence directory: ${EVIDENCE_DIR}
 
 Artifact verification:
