@@ -16,6 +16,8 @@ readonly CLI_PACKAGE="tensorplate-cli"
 readonly COMMON_PACKAGE="tensorplate-common"
 readonly AGENT_UNIT="tensorplate-agent"
 readonly OBSERVABILITY_UNIT="tensorplate-observability"
+readonly AGENT_SOCKET_PATH="${TP_INSTALL_AGENT_SOCKET_PATH:-/run/tensorplate/agent.sock}"
+readonly SERVICE_READY_TIMEOUT_SECONDS="${TP_INSTALL_SERVICE_READY_TIMEOUT_SECONDS:-30}"
 readonly COSIGN_BOOTSTRAP_VERSION="${TP_INSTALL_COSIGN_VERSION:-v3.0.2}"
 readonly COSIGN_BOOTSTRAP_BASE_URL="${TP_INSTALL_COSIGN_BASE_URL:-https://github.com/sigstore/cosign/releases/download/${COSIGN_BOOTSTRAP_VERSION}}"
 readonly COSIGN_LINUX_AMD64_SHA256="46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd"
@@ -727,6 +729,23 @@ enable_services() {
   systemctl enable --now "$AGENT_UNIT" "$OBSERVABILITY_UNIT"
 }
 
+wait_for_services_ready() {
+  local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+
+  note "waiting for TensorPlate services to become ready"
+  while ((SECONDS <= deadline)); do
+    if systemctl is-active --quiet "$AGENT_UNIT" &&
+      systemctl is-active --quiet "$OBSERVABILITY_UNIT" &&
+      [[ -S "$AGENT_SOCKET_PATH" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  systemctl --no-pager --full status "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >&2 || true
+  die "TensorPlate services did not become ready within ${SERVICE_READY_TIMEOUT_SECONDS}s"
+}
+
 check_cli() {
   command_exists tensorplate || die "tensorplate CLI was not found after package installation"
   note "validating tensorplate CLI"
@@ -825,8 +844,8 @@ dry_run_summary() {
     if ((WITH_PYTHON_BACKEND)); then
       printf 'Would also install %s.\n' "$OPTIONAL_PYTHON_PACKAGE"
     fi
-    printf 'Would enable %s and %s, then run tensorplate doctor --output json.\n' \
-      "$AGENT_UNIT" "$OBSERVABILITY_UNIT"
+    printf 'Would enable %s and %s, wait for %s, then run tensorplate doctor --output json.\n' \
+      "$AGENT_UNIT" "$OBSERVABILITY_UNIT" "$AGENT_SOCKET_PATH"
   fi
 }
 
@@ -867,6 +886,7 @@ main() {
     check_cli
   else
     enable_services
+    wait_for_services_ready
     check_doctor "$workdir"
   fi
 

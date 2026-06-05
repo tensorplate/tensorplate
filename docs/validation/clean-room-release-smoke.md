@@ -63,6 +63,40 @@ Redactions applied: secrets, credentials, raw images, tensor payloads, unbounded
 Allowed final release decisions are `pass`, `conditional-pass`, or
 `block`. Publication requires `pass` or signed `conditional-pass`.
 
+## Native Jetson Helper
+
+For repeatable Jetson validation from a source checkout, use
+[`tools/validation/jetson-clean-room.sh`](../../tools/validation/jetson-clean-room.sh).
+The helper intentionally validates on the Jetson host rather than in a VM
+or container, because TensorRT/CUDA runtime behavior is release-critical
+and sandboxed package smoke is not equivalent to host GPU validation.
+
+Run against a published release:
+
+```bash
+tools/validation/jetson-clean-room.sh run \
+  --version "${TP_VERSION}" \
+  --with-python-backend \
+  --confirm RESET-TENSORPLATE
+```
+
+Run against a previously downloaded artifact directory:
+
+```bash
+tools/validation/jetson-clean-room.sh run \
+  --assets-dir "/tmp/tensorplate-${TP_TAG}-assets" \
+  --with-python-backend \
+  --confirm RESET-TENSORPLATE
+```
+
+The confirmation token is required because `run` and `reset` stop
+TensorPlate services, purge TensorPlate Debian packages, and remove only
+TensorPlate-owned state under `/etc/tensorplate`, `/var/lib/tensorplate`,
+`/var/log/tensorplate`, and `/run/tensorplate`. The helper writes
+`clean-room.md` plus a bounded evidence archive under its work directory.
+Use `--allow-unsigned` only for build-only artifact validation; do not use
+it for public release signoff.
+
 ## Clean State
 
 Start from a device without TensorPlate packages installed:

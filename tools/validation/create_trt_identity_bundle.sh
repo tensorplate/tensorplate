@@ -16,7 +16,10 @@ fi
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 out_dir="$1"
 engine_path="${out_dir}/model.engine"
-builder_bin="${TMPDIR:-/tmp}/tp_trt_identity_engine"
+tmp_parent="${TMPDIR:-/tmp}"
+builder_tmpdir="$(mktemp -d "${tmp_parent%/}/tp_trt_identity.XXXXXX")"
+builder_bin="${builder_tmpdir}/tp_trt_identity_engine"
+trap 'rm -rf "${builder_tmpdir}"' EXIT
 
 mkdir -p "${out_dir}"
 rm -f "${engine_path}"
