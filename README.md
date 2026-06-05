@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/tenosrplate_banner.png" alt="TensorPlate" width="100%">
+  <img src="docs/assets/tensorplate_banner.png" alt="TensorPlate" width="100%">
 </p>
 
 <h3 align="center">
@@ -15,7 +15,7 @@ The Inference Layer for Physical AI
 </p>
 
 <p align="center">
-<a href="https://tensorplate.com"><b>Site</b></a> | <a href="https://tensorplate.com/docs"><b>Documentation</b></a> | <a href="https://x.com/tensorplatehq"><b>X (Twitter)</b></a> 
+<a href="https://tensorplate.com"><b>Site</b></a> | <a href="https://tensorplate.com/docs"><b>Documentation</b></a> | <a href="https://x.com/tensorplatehq"><b>X (Twitter)</b></a>
 </p>
 
 # TensorPlate
