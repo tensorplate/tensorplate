@@ -27,6 +27,8 @@ EVIDENCE_DIR="${TP_CLEAN_ROOM_EVIDENCE_DIR:-}"
 RUN_TMP_DIR="${TP_CLEAN_ROOM_TMP_DIR:-}"
 BUNDLE_DIR="${TP_CLEAN_ROOM_BUNDLE_DIR:-/var/lib/tensorplate/validation/tensorplate-trt-identity-bundle}"
 DEPLOYMENT_ID="${TP_CLEAN_ROOM_DEPLOYMENT_ID:-release-clean-room}"
+AGENT_SOCKET_PATH="${TP_CLEAN_ROOM_AGENT_SOCKET_PATH:-/run/tensorplate/agent.sock}"
+SERVICE_READY_TIMEOUT_SECONDS="${TP_CLEAN_ROOM_SERVICE_READY_TIMEOUT_SECONDS:-30}"
 WITH_PYTHON_BACKEND=0
 ALLOW_UNSIGNED=0
 CONFIRM_VALUE=""
@@ -206,6 +208,23 @@ optional() {
   capture "$name" "$@" || true
 }
 
+wait_for_services_ready() {
+  local deadline=$((SECONDS + SERVICE_READY_TIMEOUT_SECONDS))
+
+  while ((SECONDS <= deadline)); do
+    if systemctl is-active --quiet tensorplate-agent &&
+      systemctl is-active --quiet tensorplate-observability &&
+      [[ -S "$AGENT_SOCKET_PATH" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  systemctl --no-pager --full status tensorplate-agent tensorplate-observability >&2 || true
+  printf 'TensorPlate services did not become ready within %ss\n' "$SERVICE_READY_TIMEOUT_SECONDS" >&2
+  return 1
+}
+
 download_one() {
   local release_url="$1"
   local name="$2"
@@ -307,8 +326,7 @@ validate_runtime() {
 
   required version tensorplate --version
   required start-services sudo systemctl enable --now tensorplate-agent tensorplate-observability
-  required service-active bash -c 'systemctl is-active tensorplate-agent && systemctl is-active tensorplate-observability'
-  required socket-check test -S /run/tensorplate/agent.sock
+  required services-ready wait_for_services_ready
   required doctor-after tensorplate doctor --output json
   required status-before-deploy tensorplate status --output json
 
