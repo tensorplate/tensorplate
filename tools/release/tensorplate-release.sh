@@ -16,6 +16,7 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-observability
   tensorplate-cli
   tensorplate-backend-python-pytorch
+  tensorplate-apt-source
 )
 readonly APPROVED_PREPARE_FILES=(
   CMakeLists.txt
@@ -816,6 +817,7 @@ required = [
     "tensorplate-observability",
     "tensorplate-cli",
     "tensorplate-backend-python-pytorch",
+    "tensorplate-apt-source",
 ]
 if not root.is_dir():
     raise SystemExit(f"artifact directory does not exist: {root}")
@@ -977,6 +979,7 @@ required = {
     "tensorplate-observability",
     "tensorplate-cli",
     "tensorplate-backend-python-pytorch",
+    "tensorplate-apt-source",
 }
 present = {artifact.get("package") for artifact in manifest.get("artifacts", [])}
 missing = sorted(required - present)

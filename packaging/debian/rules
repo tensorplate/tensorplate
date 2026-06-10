@@ -24,8 +24,18 @@ endif
 override_dh_auto_configure:
 	@echo "tensorplate: upstream configure is driven externally; debian/rules configure step is a no-op"
 
+# The tensorplate-apt-source keyring is reviewed in git as ASCII armor
+# and shipped dearmored (binary OpenPGP) because the installed Signed-By
+# path is /usr/share/keyrings/tensorplate-archive-keyring.gpg.
+# `gpg --dearmor` is a deterministic transform of the committed .asc;
+# debian/generated/ is removed by dh_clean via debian/clean.
 override_dh_auto_build:
 	@echo "tensorplate: upstream build is driven externally; debian/rules build step is a no-op"
+	mkdir -p debian/generated/.gnupg
+	chmod 700 debian/generated/.gnupg
+	GNUPGHOME=$(CURDIR)/debian/generated/.gnupg gpg --batch --yes --dearmor \
+		--output debian/generated/tensorplate-archive-keyring.gpg \
+		packaging/apt/tensorplate-archive-keyring.asc
 
 override_dh_auto_test:
 	@echo "tensorplate: tests run in their native harnesses; see test/"

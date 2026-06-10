@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# tensorplate-apt-source post-install.
+#
+# The only job of this package is to install the archive keyring and the
+# Deb822 source file, so fail closed if either payload is missing or
+# empty. Deliberately does NOT run `apt update`, install runtime
+# packages, start services, or touch TensorPlate runtime state.
+
+set -e
+
+KEYRING=/usr/share/keyrings/tensorplate-archive-keyring.gpg
+SOURCES=/etc/apt/sources.list.d/tensorplate.sources
+
+case "$1" in
+    configure)
+        for f in "$KEYRING" "$SOURCES"; do
+            if [ ! -s "$f" ]; then
+                echo "tensorplate-apt-source.postinst: required file missing or empty: $f" >&2
+                exit 1
+            fi
+        done
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "tensorplate-apt-source.postinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

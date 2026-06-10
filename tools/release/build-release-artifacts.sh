@@ -13,6 +13,7 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-observability
   tensorplate-cli
   tensorplate-backend-python-pytorch
+  tensorplate-apt-source
 )
 readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 
@@ -160,6 +161,21 @@ note "validating release installer"
 bash -n "$INSTALLER_SOURCE"
 command -v shellcheck >/dev/null 2>&1 || die "shellcheck is required to validate $INSTALLER_SOURCE"
 shellcheck "$INSTALLER_SOURCE"
+
+# The apt bootstrap keyring is the repository trust root. Refuse to build
+# publish-grade artifacts while it still holds the reviewed staging
+# placeholder (replaced when the production archive signing key is
+# provisioned; see packaging/apt/README.md).
+note "validating apt bootstrap keyring"
+keyring_asc="packaging/apt/tensorplate-archive-keyring.asc"
+[[ -f "$keyring_asc" ]] || die "missing apt bootstrap keyring at $keyring_asc"
+if grep -q 'STAGING PLACEHOLDER' "$keyring_asc"; then
+  if ((SNAPSHOT)) || ((SKIP_TAG_VERIFY)); then
+    note "WARNING: $keyring_asc holds the staging placeholder key; these artifacts must not be published"
+  else
+    die "$keyring_asc still holds the staging placeholder key; provision the production archive signing key (see packaging/apt/README.md) before building publishable release artifacts"
+  fi
+fi
 
 note "building Rust release binaries"
 cargo_args=(

@@ -152,6 +152,7 @@ jobs:
             dh-exec \
             dpkg-dev \
             git \
+            gnupg \
             ninja-build \
             nlohmann-json3-dev \
             pkg-config \
