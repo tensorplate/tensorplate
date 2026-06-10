@@ -21,7 +21,10 @@ builds, signs, and syncs the repository. It runs:
   additionally rejects non-`vX.Y.Z` tags.
 - **Manually** via `workflow_dispatch` with a published tag, to republish
   repository metadata without rebuilding packages, or with a `dest`
-  override to publish to a staging bucket.
+  override to publish to a staging bucket. GitHub only offers
+  `workflow_dispatch` for workflows that exist on the **default branch**
+  (`develop`), so the manual path becomes available once this workflow's
+  forward-port (per the release-and-branching §3 rule) has merged.
 
 The heavy lifting is
 [`tools/release/publish-apt-repo.sh`](../../tools/release/publish-apt-repo.sh),

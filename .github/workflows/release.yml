@@ -16,7 +16,7 @@ on:
         default: true
         type: boolean
       source_ref:
-        description: 'Optional source ref for build-only validation, for example release/v0.1.0. Publish mode always uses the tag.'
+        description: 'Optional source ref for build-only validation, for example release/0.1. Publish mode always uses the tag.'
         required: false
         type: string
 

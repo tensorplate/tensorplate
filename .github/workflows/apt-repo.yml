@@ -118,10 +118,24 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/assets"
           gh release download "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.deb' \
-            --pattern 'SHA256SUMS*' \
             --dir "${RUNNER_TEMP}/assets"
           ls -la "${RUNNER_TEMP}/assets"
+
+      # The canonical release verifier enforces the complete required
+      # package/architecture set, per-file checksums, and the manifest
+      # self-digest, so a partial asset download can never publish a
+      # partial APT package set.
+      - name: Verify release asset set
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/release/tensorplate-release.sh verify \
+            --skip-tag-verify \
+            --version "${TAG#v}" \
+            --tag "$TAG" \
+            --artifacts-dir "${RUNNER_TEMP}/assets" \
+            --manifest "${RUNNER_TEMP}/assets/tensorplate-${TAG}-artifacts.json" \
+            --checksums "${RUNNER_TEMP}/assets/SHA256SUMS"
 
       - name: Stage signing key
         shell: bash

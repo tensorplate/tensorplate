@@ -108,8 +108,23 @@ done
 checksums="${ASSETS_DIR}/SHA256SUMS"
 [[ -f "$checksums" ]] || die "missing ${checksums}; refusing to publish unverified assets"
 
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+
 note "verifying asset checksums"
-(cd "$ASSETS_DIR" && sha256sum --check --ignore-missing --strict SHA256SUMS >/dev/null) ||
+# Every .deb entry in SHA256SUMS must be present and verify. A partial
+# download must never publish a partial package set, so missing entries
+# are fatal (--ignore-missing would silently skip them). Non-.deb entries
+# (installer, manifest) are not part of the APT tree and stay optional
+# here; the publication workflow runs the full release verifier first.
+deb_sums="${workdir}/deb-SHA256SUMS"
+grep -E '^[0-9a-f]{64}  .+\.deb$' "$checksums" > "$deb_sums" || true
+[[ -s "$deb_sums" ]] || die "SHA256SUMS lists no .deb assets"
+while IFS= read -r listed_deb; do
+  [[ -f "${ASSETS_DIR}/${listed_deb}" ]] ||
+    die "SHA256SUMS lists ${listed_deb} but it is missing from ${ASSETS_DIR}; refusing to publish a partial package set"
+done < <(awk '{print $2}' "$deb_sums")
+(cd "$ASSETS_DIR" && sha256sum --check --strict "$deb_sums" >/dev/null) ||
   die "asset checksum verification failed against $checksums"
 while IFS= read -r deb; do
   deb_name="$(basename -- "$deb")"
@@ -188,8 +203,8 @@ apt-ftparchive \
   release "$dists_dir" > "${dists_dir}/Release"
 
 note "signing Release metadata"
-gnupg_home="$(mktemp -d)"
-trap 'rm -rf "$gnupg_home"' EXIT
+gnupg_home="${workdir}/gnupg"
+mkdir -p "$gnupg_home"
 chmod 700 "$gnupg_home"
 gpg_sign=(env GNUPGHOME="$gnupg_home" gpg --batch --yes --pinentry-mode loopback --digest-algo SHA256)
 if [[ -n "${TP_APT_SIGNING_KEY_PASSPHRASE:-}" ]]; then

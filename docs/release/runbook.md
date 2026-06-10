@@ -7,7 +7,9 @@ the release variables first; examples below use `0.1.0`.
 ```bash
 export TP_VERSION=0.1.0
 export TP_TAG="v${TP_VERSION}"
-export TP_RELEASE_BRANCH="release/${TP_TAG}"
+# One maintenance branch per minor line (release/0.1, release/0.2, ...);
+# every patch of that line is committed and tagged there.
+export TP_RELEASE_BRANCH="release/${TP_VERSION%.*}"
 export TP_RELEASE_DIR="dist/release/${TP_TAG}"
 export TP_MANIFEST="${TP_RELEASE_DIR}/tensorplate-${TP_TAG}-artifacts.json"
 export TP_CHECKSUMS="${TP_RELEASE_DIR}/SHA256SUMS"
