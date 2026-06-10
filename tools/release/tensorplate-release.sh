@@ -17,6 +17,7 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-cli
   tensorplate-backend-python-pytorch
   tensorplate-apt-source
+  tensorplate
 )
 readonly APPROVED_PREPARE_FILES=(
   CMakeLists.txt
@@ -515,6 +516,13 @@ check_artifacts() {
       fail "missing .deb artifact for $pkg in $ARTIFACTS_DIR"
     fi
   done
+  if [[ "${ALLOW_SNAPSHOT_VERSION:-0}" -eq 0 ]]; then
+    if find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "tensorplate-cli_*_amd64.deb" | grep -q .; then
+      pass "amd64 desktop CLI artifact exists"
+    else
+      fail "missing required tensorplate-cli amd64 desktop asset in $ARTIFACTS_DIR"
+    fi
+  fi
 
   [[ -f "$MANIFEST" ]] &&
     pass "artifact manifest exists at $MANIFEST" ||
@@ -818,6 +826,7 @@ required = [
     "tensorplate-cli",
     "tensorplate-backend-python-pytorch",
     "tensorplate-apt-source",
+    "tensorplate",
 ]
 if not root.is_dir():
     raise SystemExit(f"artifact directory does not exist: {root}")
@@ -887,6 +896,13 @@ artifacts.append(
 )
 
 snapshot = "~dev." in version or tag.startswith("snapshot-")
+# Releases ship the workstation CLI for Ubuntu AMD64; snapshot builds are
+# single-architecture local-source flows and may omit it.
+if not snapshot and not any(
+    a.get("package") == "tensorplate-cli" and a.get("architecture") == "amd64"
+    for a in artifacts
+):
+    raise SystemExit("release artifact set is missing the required tensorplate-cli amd64 desktop asset")
 provenance = "local-source-snapshot" if snapshot else "github-release"
 release = {
     "project": "tensorplate",
@@ -980,11 +996,18 @@ required = {
     "tensorplate-cli",
     "tensorplate-backend-python-pytorch",
     "tensorplate-apt-source",
+    "tensorplate",
 }
 present = {artifact.get("package") for artifact in manifest.get("artifacts", [])}
 missing = sorted(required - present)
 if missing:
     raise SystemExit("manifest is missing packages: " + ", ".join(missing))
+snapshot = "~dev." in version or tag.startswith("snapshot-")
+if not snapshot and not any(
+    artifact.get("package") == "tensorplate-cli" and artifact.get("architecture") == "amd64"
+    for artifact in manifest.get("artifacts", [])
+):
+    raise SystemExit("manifest is missing the required tensorplate-cli amd64 desktop asset")
 if not any(artifact.get("file") == "install.sh" for artifact in manifest.get("artifacts", [])):
     raise SystemExit("manifest is missing install.sh")
 print("manifest verified")
@@ -1087,6 +1110,10 @@ cmd_publish() {
     match="$(find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "${pkg}_*.deb" | head -n 1)"
     [[ -n "$match" ]] || die "missing artifact for $pkg"
   done
+  # Package-name checks above accept any architecture; the desktop CLI is
+  # additionally required as an amd64 asset on the publish path.
+  find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "tensorplate-cli_*_amd64.deb" | grep -q . ||
+    die "missing required tensorplate-cli amd64 desktop asset in $ARTIFACTS_DIR"
   assets+=("${deb_assets[@]}")
   [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
   local checksums_bundle="${CHECKSUMS}.cosign.bundle"

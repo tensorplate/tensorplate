@@ -5,18 +5,23 @@
 
 set -eu
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 debian="${repo_root}/packaging/debian"
 
 fail=0
 
 # Expected binary packages.
-PACKAGES="tensorplate-common tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli tensorplate-backend-python-pytorch tensorplate-apt-source"
+PACKAGES="tensorplate-common tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli tensorplate-backend-python-pytorch tensorplate-apt-source tensorplate"
 
 for pkg in ${PACKAGES}; do
   if ! grep -q "^Package: ${pkg}\$" "${debian}/control"; then
     echo "FAIL: ${pkg} missing Package: stanza in debian/control" >&2
     fail=1
+    continue
+  fi
+  if [ "${pkg}" = "tensorplate" ]; then
+    # The runtime metapackage deliberately ships no files; its empty
+    # shape is asserted by verify_metapackage.sh.
     continue
   fi
   if [ ! -f "${debian}/${pkg}.install" ]; then
@@ -125,6 +130,17 @@ if grep -q -- '--with systemd' "${debian}/rules"; then
 fi
 if ! grep -q '^override_dh_auto_configure:' "${debian}/rules"; then
   echo "FAIL: debian/rules must keep configure external to the package skeleton" >&2
+  fail=1
+fi
+# The cli-only build profile lets the hosted amd64 release job build just
+# the workstation CLI. Runtime services and the Jetson metapackage must
+# opt out of that profile; the CLI and its arch-all companions must not.
+if [ "$(grep -c '^Build-Profiles: <!pkg\.tensorplate\.cli-only>$' "${debian}/control")" -ne 4 ]; then
+  echo "FAIL: agent, serving, observability, and the metapackage must declare Build-Profiles: <!pkg.tensorplate.cli-only>" >&2
+  fail=1
+fi
+if awk '/^Package: tensorplate-cli$/{f=1} f && /^$/{exit} f{print}' "${debian}/control" | grep -q 'Build-Profiles'; then
+  echo "FAIL: tensorplate-cli must stay buildable under the cli-only profile" >&2
   fail=1
 fi
 if ! grep -q 'dh_installsystemd --no-start -ptensorplate-agent' "${debian}/rules"; then
