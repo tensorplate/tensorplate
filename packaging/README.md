@@ -31,7 +31,11 @@ packaging/
 │   ├── tensorplate-agent.service   Auto-installed by dh_installsystemd.
 │   ├── ...                         Same files for -observability/-serving/-cli/-backend-python-pytorch.
 │   ├── tensorplate-agent.service
-│   └── tensorplate-observability.service       Auto-installed by dh_installsystemd.
+│   ├── tensorplate-observability.service       Auto-installed by dh_installsystemd.
+│   └── tensorplate-apt-source.*    APT source bootstrap package manifest + fail-closed postinst.
+├── apt/                            Payloads shipped by tensorplate-apt-source; see apt/README.md.
+│   ├── tensorplate.sources         Deb822 stable-channel source installed to /etc/apt/sources.list.d/.
+│   └── tensorplate-archive-keyring.asc  Armored archive key, dearmored into the package at build time.
 ├── conf/                           Default config installed under /etc/tensorplate/.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
 │   ├── install.sh                  Release installer published with GitHub Release assets.
@@ -50,6 +54,7 @@ packaging/
 | `tensorplate-observability` | Independent health monitor. | `tensorplate-observability` | yes — `tensorplate-observability.service` |
 | `tensorplate-cli` | Operator CLI. | `tensorplate` | no |
 | `tensorplate-backend-python-pytorch` | Python sidecar backend for SmolVLA / Python-native bundles. | `tensorplate-backend-python-pytorch` (entrypoint) | no — backend lifecycle is per-session by the serving worker |
+| `tensorplate-apt-source` | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component and never runs `apt update`. | — | no |
 
 Core packages do **not** depend on `tensorplate-backend-python-pytorch`.
 Installing it later makes the Python module + console entrypoint

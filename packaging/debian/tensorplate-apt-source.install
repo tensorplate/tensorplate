@@ -1,0 +1,2 @@
+debian/generated/tensorplate-archive-keyring.gpg   usr/share/keyrings/
+packaging/apt/tensorplate.sources                   etc/apt/sources.list.d/

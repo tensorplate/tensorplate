@@ -5,6 +5,7 @@ Maintainer: TensorPlate Contributors <oss@tensorplate.com>
 Build-Depends:
  debhelper-compat (= 13),
  dh-exec,
+ gnupg,
 Standards-Version: 4.6.2
 Homepage: https://github.com/tensorplate/tensorplate
 Vcs-Browser: https://github.com/tensorplate/tensorplate
@@ -122,3 +123,24 @@ Description: TensorPlate Python/PyTorch backend (V01-E14-F05)
  must be installed in the Python environment selected by the
  backend descriptor. `tensorplate doctor` reports PyTorch runtime
  status separately.
+
+Package: tensorplate-apt-source
+Architecture: all
+Multi-Arch: foreign
+Depends:
+ ${misc:Depends},
+Description: TensorPlate APT repository source bootstrap
+ One-time setup package that configures the stable TensorPlate APT
+ repository: the archive keyring at
+ /usr/share/keyrings/tensorplate-archive-keyring.gpg and the Deb822
+ source file at /etc/apt/sources.list.d/tensorplate.sources.
+ .
+ Installing this package does not install or start any TensorPlate
+ runtime component, does not modify runtime state, and does not run
+ apt update. The configured repository URL never pins a runtime
+ version; future TensorPlate releases are discovered through a normal
+ apt update against the same stable channel.
+ .
+ TensorPlate-ready Jetson images ship with this package preinstalled;
+ stock Ubuntu/Jetson systems install it once as the bootstrap step.
+ No TensorPlate runtime package depends on this package.

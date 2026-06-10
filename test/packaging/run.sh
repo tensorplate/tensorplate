@@ -10,6 +10,7 @@ here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 ran=0
 for v in "${here}/verify_layout.sh" \
          "${here}/verify_debian_metadata.sh" \
+         "${here}/verify_apt_source.sh" \
          "${here}/verify_systemd_units.sh" \
          "${here}/verify_lifecycle_scripts.sh" \
          "${here}/verify_descriptor.sh" \
