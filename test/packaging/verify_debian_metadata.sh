@@ -11,7 +11,7 @@ debian="${repo_root}/packaging/debian"
 fail=0
 
 # Expected binary packages.
-PACKAGES="tensorplate-common tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli tensorplate-backend-python-pytorch"
+PACKAGES="tensorplate-common tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli tensorplate-backend-python-pytorch tensorplate-apt-source"
 
 for pkg in ${PACKAGES}; do
   if ! grep -q "^Package: ${pkg}\$" "${debian}/control"; then
@@ -77,7 +77,7 @@ fi
 # Conffile assertions: configs under /etc are auto-managed by
 # debhelper as conffiles. Do not duplicate those entries via explicit
 # *.conffiles files.
-for cfg_pkg in tensorplate-agent tensorplate-observability tensorplate-serving tensorplate-cli; do
+for cfg_pkg in tensorplate-agent tensorplate-observability tensorplate-serving tensorplate-cli tensorplate-apt-source; do
   if [ -e "${debian}/${cfg_pkg}.conffiles" ]; then
     echo "FAIL: ${cfg_pkg} must not duplicate auto-generated conffile metadata" >&2
     fail=1
