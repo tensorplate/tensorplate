@@ -37,7 +37,8 @@ for pkg in \
   tensorplate-agent \
   tensorplate-serving \
   tensorplate-observability \
-  tensorplate-cli; do
+  tensorplate-cli \
+  tensorplate; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb"
 done
 printf 'fixture artifact for tensorplate-cli desktop\n' > "$tmp/artifacts/tensorplate-cli_0.1.0-1_amd64.deb"
@@ -59,12 +60,63 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 checksums = Path(sys.argv[2]).read_text().splitlines()
 assert manifest["release"]["version"] == "0.1.0"
 assert manifest["release"]["tag"] == "v0.1.0"
-assert len(manifest["artifacts"]) == 9  # 7 packages + desktop CLI + install.sh
-assert len(checksums) == 10  # manifest self-digest + 9 artifacts
+assert len(manifest["artifacts"]) == 10  # 8 packages + desktop CLI + install.sh
+assert len(checksums) == 11  # manifest self-digest + 10 artifacts
 assert any(artifact["file"] == "tensorplate-common_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
 assert any(artifact["file"] == "tensorplate-apt-source_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
+assert any(artifact["file"] == "tensorplate_0.1.0-1_arm64.deb" for artifact in manifest["artifacts"])
 assert any(artifact["file"] == "tensorplate-cli_0.1.0-1_amd64.deb" for artifact in manifest["artifacts"])
 PY
+
+# Publish-grade releases require the amd64 desktop CLI: an arm64-only CLI
+# must not satisfy the requirement on either the manifest-generation or
+# the verification path (snapshot flows below stay exempt).
+mkdir -p "$tmp/artifacts-no-amd64"
+cp "$tmp/artifacts/"* "$tmp/artifacts-no-amd64/"
+rm "$tmp/artifacts-no-amd64/tensorplate-cli_0.1.0-1_amd64.deb"
+if "$script" manifest \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --artifacts-dir "$tmp/artifacts-no-amd64" \
+  --manifest "$tmp/no-amd64-artifacts.json" \
+  --checksums "$tmp/no-amd64-SHA256SUMS" >/dev/null 2>&1; then
+  echo "FAIL: manifest must reject a release artifact set without the amd64 CLI" >&2
+  exit 1
+fi
+
+python3 - "$tmp/tensorplate-v0.1.0-artifacts.json" "$tmp/SHA256SUMS" <<'PY'
+# Strip the amd64 CLI from an otherwise valid manifest and refresh the
+# checksum self-digest so verification exercises the amd64 gate itself
+# rather than a checksum mismatch.
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+manifest_path, checksums_path = map(Path, sys.argv[1:])
+tampered_manifest = manifest_path.with_name("tampered-artifacts.json")
+tampered_checksums = checksums_path.with_name("tampered-SHA256SUMS")
+manifest = json.loads(manifest_path.read_text())
+manifest["artifacts"] = [
+    a for a in manifest["artifacts"]
+    if not (a.get("package") == "tensorplate-cli" and a.get("architecture") == "amd64")
+]
+tampered_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+digest = hashlib.sha256(tampered_manifest.read_bytes()).hexdigest()
+lines = [f"{digest}  {tampered_manifest.name}\n"]
+lines.extend(f"{a['sha256']}  {a['file']}\n" for a in manifest["artifacts"])
+tampered_checksums.write_text("".join(lines))
+PY
+if "$script" verify \
+  --skip-tag-verify \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --artifacts-dir "$tmp/artifacts" \
+  --manifest "$tmp/tampered-artifacts.json" \
+  --checksums "$tmp/tampered-SHA256SUMS" >/dev/null 2>&1; then
+  echo "FAIL: verify must reject a manifest without the amd64 CLI" >&2
+  exit 1
+fi
 
 snapshot_version="0.1.0~dev.20260604.deadbeef1234"
 snapshot_tag="snapshot-develop-deadbeef1234"
@@ -76,7 +128,8 @@ for pkg in \
   tensorplate-agent \
   tensorplate-serving \
   tensorplate-observability \
-  tensorplate-cli; do
+  tensorplate-cli \
+  tensorplate; do
   printf 'fixture snapshot artifact for %s\n' "$pkg" > "$tmp/snapshot-artifacts/${pkg}_${snapshot_version}-1_arm64.deb"
 done
 printf 'fixture snapshot installer\n' > "$tmp/snapshot-artifacts/install.sh"
@@ -114,7 +167,7 @@ assert release["unreleased"] is True
 assert release["source_kind"] == "local-source-branch"
 assert "local-source-snapshot" in release["labels"]
 assert any("~dev.20260604.deadbeef1234-1" in artifact["file"] for artifact in manifest["artifacts"])
-assert len(checksums) == 9  # manifest self-digest + 7 packages + install.sh
+assert len(checksums) == 10  # manifest self-digest + 8 packages + install.sh
 PY
 
 if command -v dpkg >/dev/null 2>&1; then

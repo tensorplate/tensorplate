@@ -32,6 +32,7 @@ The release must include one `.deb` asset for each package:
 | `tensorplate-cli` | yes | Operator CLI binary `tensorplate`. |
 | `tensorplate-backend-python-pytorch` | yes | Optional backend package. It does not vendor PyTorch. |
 | `tensorplate-apt-source` | yes | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component. |
+| `tensorplate` | yes | Jetson full-runtime metapackage (arm64 only); empty payload, strict-versioned depends on the runtime set. |
 
 Expected asset names follow Debian binary-package naming:
 
@@ -43,7 +44,8 @@ tensorplate-observability_${TP_VERSION}-1_arm64.deb
 tensorplate-cli_${TP_VERSION}-1_arm64.deb
 tensorplate-backend-python-pytorch_${TP_VERSION}-1_all.deb
 tensorplate-apt-source_${TP_VERSION}-1_all.deb
-tensorplate-cli_${TP_VERSION}-1_amd64.deb    # optional CLI-only desktop asset
+tensorplate_${TP_VERSION}-1_arm64.deb
+tensorplate-cli_${TP_VERSION}-1_amd64.deb    # CLI-only desktop asset (required for publish-grade builds)
 install.sh
 tensorplate-${TP_TAG}-artifacts.json
 SHA256SUMS

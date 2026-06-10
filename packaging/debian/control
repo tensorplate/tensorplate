@@ -29,6 +29,7 @@ Description: TensorPlate shared maintainer-script helpers (V01-E14)
 
 Package: tensorplate-agent
 Architecture: any
+Build-Profiles: <!pkg.tensorplate.cli-only>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -53,6 +54,7 @@ Description: TensorPlate device agent (V01-E08/E09)
 
 Package: tensorplate-serving
 Architecture: any
+Build-Profiles: <!pkg.tensorplate.cli-only>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -72,6 +74,7 @@ Description: TensorPlate serving worker (V01-E07)
 
 Package: tensorplate-observability
 Architecture: any
+Build-Profiles: <!pkg.tensorplate.cli-only>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -144,3 +147,27 @@ Description: TensorPlate APT repository source bootstrap
  TensorPlate-ready Jetson images ship with this package preinstalled;
  stock Ubuntu/Jetson systems install it once as the bootstrap step.
  No TensorPlate runtime package depends on this package.
+
+Package: tensorplate
+Section: metapackages
+Architecture: arm64
+Build-Profiles: <!pkg.tensorplate.cli-only>
+Depends:
+ ${misc:Depends},
+ tensorplate-common (= ${source:Version}),
+ tensorplate-agent (= ${binary:Version}),
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-observability (= ${binary:Version}),
+ tensorplate-cli (= ${binary:Version}),
+Suggests:
+ tensorplate-backend-python-pytorch (>= ${source:Version}),
+Description: TensorPlate full Jetson runtime (metapackage)
+ Installs the complete TensorPlate runtime for a Jetson device: the
+ device agent, serving worker, observability service, operator CLI,
+ and shared packaging helpers. `sudo apt install tensorplate` is the
+ supported runtime install on TensorPlate-ready Jetson images.
+ .
+ This metapackage ships no files itself and is published for Jetson
+ arm64 only. The optional Python/PyTorch backend stays a separate,
+ suggested package. Workstation users who only need the CLI should
+ install tensorplate-cli instead.

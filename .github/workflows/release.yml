@@ -31,10 +31,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build_packages:
-    name: build packages
-    runs-on: [self-hosted, linux, ARM64, tensorplate-release]
-    timeout-minutes: 120
+  meta:
+    name: resolve release metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -47,6 +47,7 @@ jobs:
       checksums: ${{ steps.meta.outputs.checksums }}
       bundle: ${{ steps.meta.outputs.bundle }}
       notes: ${{ steps.meta.outputs.notes }}
+      release_branch: ${{ steps.meta.outputs.release_branch }}
       publish: ${{ steps.meta.outputs.publish }}
       checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
 
@@ -113,18 +114,91 @@ jobs:
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
+  build_cli_amd64:
+    name: build amd64 CLI package
+    needs: meta
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
       - name: Checkout release source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ steps.meta.outputs.checkout_ref }}
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Install CLI package build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            pkg-config
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Build amd64 CLI binary
+        shell: bash
+        run: cargo build --release --bin tensorplate
+
+      - name: Build tensorplate-cli amd64 package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # The cli-only build profile excludes the runtime services and the
+          # Jetson metapackage, so a binary-arch build produces exactly the
+          # workstation CLI package without the Jetson toolchain.
+          DEB_BUILD_PROFILES=pkg.tensorplate.cli-only packaging/scripts/build-deb.sh -B
+          mkdir -p dist/cli-amd64
+          cp ../tensorplate-cli_*_amd64.deb dist/cli-amd64/
+          dpkg-deb --info dist/cli-amd64/tensorplate-cli_*_amd64.deb
+
+      - name: Upload amd64 CLI package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tensorplate-cli-amd64-deb
+          path: dist/cli-amd64/*.deb
+          if-no-files-found: error
+
+  build_packages:
+    name: build packages
+    needs: [meta, build_cli_amd64]
+    runs-on: [self-hosted, linux, ARM64, tensorplate-release]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ needs.meta.outputs.tag }}
+      version: ${{ needs.meta.outputs.version }}
+      prerelease: ${{ needs.meta.outputs.prerelease }}
+      draft: ${{ needs.meta.outputs.draft }}
+      release_dir: ${{ needs.meta.outputs.release_dir }}
+      manifest: ${{ needs.meta.outputs.manifest }}
+      checksums: ${{ needs.meta.outputs.checksums }}
+      bundle: ${{ needs.meta.outputs.bundle }}
+      notes: ${{ needs.meta.outputs.notes }}
+      publish: ${{ needs.meta.outputs.publish }}
+      checkout_ref: ${{ needs.meta.outputs.checkout_ref }}
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
           fetch-depth: 0
 
       - name: Verify annotated tag and release branch
-        if: ${{ steps.meta.outputs.publish == 'true' }}
+        if: ${{ needs.meta.outputs.publish == 'true' }}
         shell: bash
         env:
-          TAG: ${{ steps.meta.outputs.tag }}
-          RELEASE_BRANCH: ${{ steps.meta.outputs.release_branch }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_BRANCH: ${{ needs.meta.outputs.release_branch }}
         run: |
           set -Eeuo pipefail
           if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" != "tag" ]]; then
@@ -165,17 +239,33 @@ jobs:
           }
           rustup show active-toolchain || rustup toolchain install
 
+      - name: Stage amd64 CLI package next to build outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-cli-amd64-deb
+          path: ${{ runner.temp }}/cli-amd64
+
+      # build-release-artifacts.sh collects extra desktop CLI architectures
+      # from the repository parent directory, the same place
+      # dpkg-buildpackage drops the arm64 packages.
+      - name: Move amd64 CLI package into release collection scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mv -f "${RUNNER_TEMP}/cli-amd64"/tensorplate-cli_*_amd64.deb ..
+          ls ../tensorplate-cli_*_amd64.deb
+
       - name: Build Debian packages and release manifest
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
-          VERSION: ${{ steps.meta.outputs.version }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          RELEASE_DIR: ${{ steps.meta.outputs.release_dir }}
-          MANIFEST: ${{ steps.meta.outputs.manifest }}
-          CHECKSUMS: ${{ steps.meta.outputs.checksums }}
-          PUBLISH: ${{ steps.meta.outputs.publish }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
+          MANIFEST: ${{ needs.meta.outputs.manifest }}
+          CHECKSUMS: ${{ needs.meta.outputs.checksums }}
+          PUBLISH: ${{ needs.meta.outputs.publish }}
         run: |
           set -Eeuo pipefail
           args=(
@@ -195,15 +285,15 @@ jobs:
       - name: Upload unsigned release build artifact bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tensorplate-${{ steps.meta.outputs.tag }}-release-assets-unsigned
-          path: ${{ steps.meta.outputs.release_dir }}/
+          name: tensorplate-${{ needs.meta.outputs.tag }}-release-assets-unsigned
+          path: ${{ needs.meta.outputs.release_dir }}/
           if-no-files-found: error
 
       - name: Build-only validation summary
-        if: ${{ steps.meta.outputs.publish != 'true' }}
+        if: ${{ needs.meta.outputs.publish != 'true' }}
         shell: bash
         env:
-          TAG: ${{ steps.meta.outputs.tag }}
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
           {
@@ -246,8 +336,8 @@ jobs:
           set -Eeuo pipefail
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 6)) || {
-            echo "::error::expected at least six .deb packages plus install.sh, manifest, and checksums"
+          ((${#deb_assets[@]} >= 9)) || {
+            echo "::error::expected at least nine .deb packages (runtime set, apt-source, metapackage, amd64 CLI) plus install.sh, manifest, and checksums"
             find "$RELEASE_DIR" -maxdepth 2 -type f -print
             exit 1
           }
@@ -361,8 +451,8 @@ jobs:
 
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 6)) || {
-            echo "::error::expected at least six .deb packages plus install.sh, manifest, and checksums"
+          ((${#deb_assets[@]} >= 9)) || {
+            echo "::error::expected at least nine .deb packages (runtime set, apt-source, metapackage, amd64 CLI) plus install.sh, manifest, and checksums"
             exit 1
           }
           installer="${RELEASE_DIR}/install.sh"
