@@ -1,0 +1,180 @@
+name: APT Repository
+
+# Publishes the signed APT repository for https://packages.tensorplate.com/apt.
+#
+# Triggers:
+#   - release [released]: fires when a final release goes public (including
+#     a draft being published). GitHub does not emit `released` for
+#     prereleases, so release candidates never reach the stable channel.
+#   - workflow_dispatch: republish an existing release's repository metadata
+#     without rebuilding packages, or publish to a staging destination.
+#
+# The repository tree is built and signed by tools/release/publish-apt-repo.sh
+# from the GitHub Release assets (checksum + cosign verified). This workflow
+# owns only asset download and object-storage sync. Sync order is pool/ then
+# dists/ so published metadata never references missing packages; cache
+# policy is immutable for pool/ and short-lived for dists/.
+#
+# Required configuration (see docs/release/apt-repository.md):
+#   vars.TP_APT_REPO_DEST        s3://bucket/prefix for the production repo
+#   vars.TP_APT_AWS_REGION       optional, defaults to us-east-1
+#   vars.TP_APT_S3_ENDPOINT      optional, for S3-compatible storage (R2, MinIO)
+#   secrets.TP_APT_SIGNING_KEY   armored OpenPGP private archive signing key
+#   secrets.TP_APT_SIGNING_KEY_PASSPHRASE  optional key passphrase
+#   secrets.TP_APT_AWS_ACCESS_KEY_ID / TP_APT_AWS_SECRET_ACCESS_KEY
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to (re)publish, for example v0.1.2
+        required: true
+      dest:
+        description: Destination override (s3://bucket/prefix), e.g. a staging bucket. Defaults to vars.TP_APT_REPO_DEST.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-repo
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: build, sign, and sync apt repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: ${{ vars.TP_APT_REPO_DEST != '' || inputs.dest != '' }}
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+      DEST: ${{ inputs.dest != '' && inputs.dest || vars.TP_APT_REPO_DEST }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TP_APT_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TP_APT_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ vars.TP_APT_AWS_REGION || 'us-east-1' }}
+      TP_APT_S3_ENDPOINT: ${{ vars.TP_APT_S3_ENDPOINT }}
+
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::the stable APT channel only publishes final vX.Y.Z releases; got '$TAG'"
+            exit 1
+          fi
+
+      # Checkout at the release tag so the publication script and the
+      # bootstrap keyring match exactly what that release shipped.
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Install repository tooling
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            dpkg-dev \
+            gnupg \
+            gpgv
+
+      - name: Install cosign
+        shell: bash
+        env:
+          COSIGN_VERSION: v3.0.2
+          COSIGN_LINUX_AMD64_SHA256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
+        run: |
+          set -Eeuo pipefail
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL \
+            -o "$tmpdir/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          printf '%s  %s\n' "$COSIGN_LINUX_AMD64_SHA256" "$tmpdir/cosign" | sha256sum -c -
+          sudo install -m 0755 "$tmpdir/cosign" /usr/local/bin/cosign
+          cosign version
+
+      - name: Download release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${RUNNER_TEMP}/assets"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.deb' \
+            --pattern 'SHA256SUMS*' \
+            --dir "${RUNNER_TEMP}/assets"
+          ls -la "${RUNNER_TEMP}/assets"
+
+      - name: Stage signing key
+        shell: bash
+        env:
+          TP_APT_SIGNING_KEY: ${{ secrets.TP_APT_SIGNING_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$TP_APT_SIGNING_KEY" ]]; then
+            echo "::error::secrets.TP_APT_SIGNING_KEY is not configured; provision the archive signing key per docs/release/apt-repository.md"
+            exit 1
+          fi
+          install -m 0600 /dev/null "${RUNNER_TEMP}/apt-signing-key.asc"
+          printf '%s\n' "$TP_APT_SIGNING_KEY" > "${RUNNER_TEMP}/apt-signing-key.asc"
+
+      - name: Sync down existing pool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint_args=()
+          [[ -n "$TP_APT_S3_ENDPOINT" ]] && endpoint_args+=(--endpoint-url "$TP_APT_S3_ENDPOINT")
+          mkdir -p "${RUNNER_TEMP}/pool-existing"
+          # First publication: the destination pool may not exist yet.
+          aws s3 sync "${DEST}/pool" "${RUNNER_TEMP}/pool-existing" "${endpoint_args[@]}" || true
+          find "${RUNNER_TEMP}/pool-existing" -type f -name '*.deb' | wc -l
+
+      - name: Build and sign repository tree
+        shell: bash
+        env:
+          TP_APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.TP_APT_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -Eeuo pipefail
+          tools/release/publish-apt-repo.sh \
+            --assets-dir "${RUNNER_TEMP}/assets" \
+            --output "${RUNNER_TEMP}/apt-repo" \
+            --existing-pool "${RUNNER_TEMP}/pool-existing" \
+            --signing-key "${RUNNER_TEMP}/apt-signing-key.asc" \
+            --cosign-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+
+      - name: Sync repository to object storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint_args=()
+          [[ -n "$TP_APT_S3_ENDPOINT" ]] && endpoint_args+=(--endpoint-url "$TP_APT_S3_ENDPOINT")
+          # pool/ first and immutable: package files never change contents
+          # (the publish script enforces that), so they can be cached hard.
+          aws s3 sync "${RUNNER_TEMP}/apt-repo/pool" "${DEST}/pool" \
+            --cache-control "public, max-age=31536000, immutable" \
+            "${endpoint_args[@]}"
+          # dists/ second and short-lived so `apt update` sees new releases
+          # quickly without CDN invalidation. --delete drops stale metadata.
+          aws s3 sync "${RUNNER_TEMP}/apt-repo/dists" "${DEST}/dists" \
+            --cache-control "public, max-age=60" \
+            --delete \
+            "${endpoint_args[@]}"
+
+      - name: Publication summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "APT repository for ${TAG} synced to ${DEST}."
+            echo "Validate from a clean host: install tensorplate-apt-source, then 'sudo apt update' must succeed without trust warnings."
+          } >>"$GITHUB_STEP_SUMMARY"

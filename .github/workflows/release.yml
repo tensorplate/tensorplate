@@ -109,7 +109,7 @@ jobs:
             echo "checksums=${release_dir}/SHA256SUMS"
             echo "bundle=${release_dir}/SHA256SUMS.cosign.bundle"
             echo "notes=docs/release/notes/v${version}.md"
-            echo "release_branch=release/v${version}"
+            echo "release_branch=release/${version%.*}"
             echo "publish=${publish}"
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"

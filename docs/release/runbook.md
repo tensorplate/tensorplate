@@ -79,8 +79,9 @@ The release owner stops immediately unless all prerequisites are true:
 The publish path is tag-driven:
 
 1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
-2. The script creates or switches `release/vX.Y.Z`, prepares version
-   metadata, commits it, and creates an annotated source tag.
+2. The script switches to (or creates, once per minor line) the
+   maintenance branch `release/X.Y`, prepares version metadata, commits
+   it, and creates an annotated source tag on that branch.
 3. `.github/workflows/release.yml` builds the `.deb` packages from that
    tag, generates the manifest/checksums, and creates the GitHub Release
    with those assets attached after the tag is pushed.

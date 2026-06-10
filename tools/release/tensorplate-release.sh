@@ -44,7 +44,8 @@ Usage:
 
 Common options:
   --version VERSION          Release version without leading v, for example 0.1.0.
-  --release-branch BRANCH   Expected release branch. Defaults to release/vVERSION.
+  --release-branch BRANCH   Expected release branch. Defaults to the
+                            maintenance line release/MAJOR.MINOR.
   --base REF                Source ref for cut. Defaults to origin/develop.
   --prep-branch BRANCH      Additional branch accepted for preflight during tooling PR dry runs.
   --artifacts-dir DIR       Directory containing release artifacts.
@@ -124,7 +125,9 @@ version_short() {
 
 default_paths() {
   require_version
-  RELEASE_BRANCH="${RELEASE_BRANCH:-release/v${VERSION}}"
+  # Tags live on the per-minor maintenance line (release/0.1, release/0.2);
+  # per-patch release branches are not created.
+  RELEASE_BRANCH="${RELEASE_BRANCH:-release/${VERSION%.*}}"
   ARTIFACTS_DIR="${ARTIFACTS_DIR:-dist/release/v${VERSION}}"
   MANIFEST="${MANIFEST:-dist/release/v${VERSION}/tensorplate-v${VERSION}-artifacts.json}"
   CHECKSUMS="${CHECKSUMS:-dist/release/v${VERSION}/SHA256SUMS}"
