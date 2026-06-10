@@ -44,7 +44,7 @@ every step:
 | --- | --- | --- |
 | variable | `TP_APT_REPO_DEST` | Production destination, `s3://bucket/prefix`. The job skips (does not fail) while unset. |
 | variable | `TP_APT_AWS_REGION` | Optional region; defaults to `us-east-1`. |
-| variable | `TP_APT_S3_ENDPOINT` | Optional endpoint URL for S3-compatible storage (Cloudflare R2, MinIO, …). |
+| variable | `TP_APT_S3_ENDPOINT` | Optional endpoint URL for S3-compatible storage (Cloudflare R2, MinIO, …). May also be set as a secret of the same name, which takes precedence and is auto-masked in public workflow logs (the R2 endpoint embeds the account id — an identifier, not a credential, but maskable if preferred). |
 | secret | `TP_APT_AWS_ACCESS_KEY_ID` / `TP_APT_AWS_SECRET_ACCESS_KEY` | Credentials scoped to the repository bucket only. |
 | secret | `TP_APT_SIGNING_KEY` | Armored OpenPGP **private** archive signing key. |
 | secret | `TP_APT_SIGNING_KEY_PASSPHRASE` | Optional passphrase for the signing key. |
