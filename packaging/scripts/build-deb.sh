@@ -10,7 +10,7 @@
 
 set -eu
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "${repo_root}"
 
 created_symlink=0
@@ -26,4 +26,18 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-dpkg-buildpackage -us -uc -b "$@"
+# Default to a full binary build unless the caller already selects a
+# build type (e.g. -A builds only the architecture-independent packages,
+# which needs no staged upstream binaries).
+build_type_given=0
+for arg in "$@"; do
+  case "${arg}" in
+    -b|-B|-A|-F|-S|-g|-G|--build|--build=*) build_type_given=1 ;;
+  esac
+done
+
+if [ "${build_type_given}" -eq 1 ]; then
+  dpkg-buildpackage -us -uc "$@"
+else
+  dpkg-buildpackage -us -uc -b "$@"
+fi

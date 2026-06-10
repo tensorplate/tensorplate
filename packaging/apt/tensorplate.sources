@@ -1,0 +1,12 @@
+# TensorPlate stable APT repository (one-time source setup installed by
+# the tensorplate-apt-source bootstrap package).
+#
+# This file intentionally never references a TensorPlate runtime version:
+# future releases are discovered through a normal `apt update` against the
+# same stable channel.
+Types: deb
+URIs: https://packages.tensorplate.com/apt
+Suites: jammy
+Components: main
+Architectures: amd64 arm64
+Signed-By: /usr/share/keyrings/tensorplate-archive-keyring.gpg

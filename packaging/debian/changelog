@@ -1,3 +1,11 @@
+tensorplate (0.1.2~dev0-1) UNRELEASED; urgency=medium
+
+  * V012-F01-T01: add the `tensorplate-apt-source` bootstrap package. It
+    installs only the TensorPlate archive keyring and the stable Deb822
+    APT source (no runtime packages, no services, no `apt update`).
+
+ -- TensorPlate Contributors <oss@tensorplate.com>  Tue, 09 Jun 2026 00:00:00 +0000
+
 tensorplate (0.1.1-1) unstable; urgency=medium
 
   * V01-E14 packaging skeleton: tensorplate-agent, tensorplate-serving,
