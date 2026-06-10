@@ -30,7 +30,7 @@ grep -q 'draft="true"' .github/workflows/release.yml
 grep -q 'gh release edit "${TP_TAG}" --draft=false --latest' docs/release/runbook.md
 
 mkdir -p "$tmp/artifacts"
-for pkg in tensorplate-common tensorplate-backend-python-pytorch; do
+for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_all.deb"
 done
 for pkg in \
@@ -59,16 +59,17 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 checksums = Path(sys.argv[2]).read_text().splitlines()
 assert manifest["release"]["version"] == "0.1.0"
 assert manifest["release"]["tag"] == "v0.1.0"
-assert len(manifest["artifacts"]) == 8  # 6 packages + desktop CLI + install.sh
-assert len(checksums) == 9  # manifest self-digest + 8 artifacts
+assert len(manifest["artifacts"]) == 9  # 7 packages + desktop CLI + install.sh
+assert len(checksums) == 10  # manifest self-digest + 9 artifacts
 assert any(artifact["file"] == "tensorplate-common_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
+assert any(artifact["file"] == "tensorplate-apt-source_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
 assert any(artifact["file"] == "tensorplate-cli_0.1.0-1_amd64.deb" for artifact in manifest["artifacts"])
 PY
 
 snapshot_version="0.1.0~dev.20260604.deadbeef1234"
 snapshot_tag="snapshot-develop-deadbeef1234"
 mkdir -p "$tmp/snapshot-artifacts"
-for pkg in tensorplate-common tensorplate-backend-python-pytorch; do
+for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
   printf 'fixture snapshot artifact for %s\n' "$pkg" > "$tmp/snapshot-artifacts/${pkg}_${snapshot_version}-1_all.deb"
 done
 for pkg in \
@@ -113,7 +114,7 @@ assert release["unreleased"] is True
 assert release["source_kind"] == "local-source-branch"
 assert "local-source-snapshot" in release["labels"]
 assert any("~dev.20260604.deadbeef1234-1" in artifact["file"] for artifact in manifest["artifacts"])
-assert len(checksums) == 8  # manifest self-digest + 6 packages + install.sh
+assert len(checksums) == 9  # manifest self-digest + 7 packages + install.sh
 PY
 
 if command -v dpkg >/dev/null 2>&1; then
