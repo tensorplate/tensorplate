@@ -310,15 +310,15 @@ for candidate in "${candidates[@]}"; do
 done
 
 # Releases ship the workstation CLI for Ubuntu AMD64 from the same asset
-# set (the release workflow's hosted amd64 job stages the package).
-# Publish-grade builds fail closed without it; snapshot and build-only
-# flows may omit it.
+# set (the release workflow's hosted amd64 job stages the package), and
+# manifest generation rejects release artifact sets without it. Only
+# single-architecture local-source snapshots may omit it.
 if [[ "$TARGET_ARCH" != "amd64" ]]; then
   if ! find "$repo_parent" -maxdepth 1 -type f -name "tensorplate-cli_${VERSION}-*_amd64.deb" | grep -q .; then
-    if ((SNAPSHOT)) || ((SKIP_TAG_VERIFY)); then
-      note "WARNING: no tensorplate-cli amd64 package staged; the desktop CLI asset will be missing"
+    if ((SNAPSHOT)); then
+      note "WARNING: no tensorplate-cli amd64 package staged; snapshot artifacts omit the desktop CLI"
     else
-      die "missing tensorplate-cli_${VERSION}-*_amd64.deb in $repo_parent; the release workflow's amd64 CLI job must stage it before publish-grade artifact builds"
+      die "missing tensorplate-cli_${VERSION}-*_amd64.deb in $repo_parent; the release workflow's amd64 CLI job must stage it before release artifact builds"
     fi
   fi
 fi
