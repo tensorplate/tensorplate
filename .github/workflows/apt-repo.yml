@@ -56,6 +56,11 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TP_APT_AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: ${{ vars.TP_APT_AWS_REGION || 'us-east-1' }}
       TP_APT_S3_ENDPOINT: ${{ vars.TP_APT_S3_ENDPOINT }}
+      # Newer aws-cli versions send integrity checksums by default, which
+      # some S3-compatible providers (notably Cloudflare R2) have not
+      # always accepted. when_required is correct for AWS S3 too.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
     steps:
       - name: Validate release tag

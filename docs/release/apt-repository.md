@@ -57,6 +57,27 @@ on `pool/` (package files never change contents) and
 Sync order is always `pool/` before `dists/` so live metadata never
 references a missing package.
 
+### Cloudflare R2 setup (recommended when the zone is on Cloudflare)
+
+1. R2 → create bucket `tensorplate-apt` (and `tensorplate-apt-staging` for
+   staging runs). Objects are keyed under the `apt/` prefix, so the
+   destination is `s3://tensorplate-apt/apt`.
+2. Bucket → Settings → Custom Domains → attach `packages.tensorplate.com`.
+   Because the zone is already on Cloudflare this provisions DNS, TLS, and
+   the edge cache in one step; the edge respects the object
+   `Cache-Control` headers set by the sync.
+3. R2 → Manage API Tokens → token scoped to **Object Read & Write** on the
+   bucket only. Store the generated pair as `TP_APT_AWS_ACCESS_KEY_ID` /
+   `TP_APT_AWS_SECRET_ACCESS_KEY`.
+4. Repository variables:
+   `TP_APT_REPO_DEST=s3://tensorplate-apt/apt`,
+   `TP_APT_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`,
+   `TP_APT_AWS_REGION=auto` (R2's documented region value).
+
+GitHub Release assets remain the checksum-and-cosign-covered fallback
+artifact source, and the repository is fully reproducible from them via
+the `workflow_dispatch` republish path — bucket loss is recoverable.
+
 ## Provisioning the production signing key (one-time)
 
 The committed
