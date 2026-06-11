@@ -133,9 +133,14 @@ apt-cache policy tensorplate
 ```
 
 The new version must appear as the candidate without touching
-`tensorplate-apt-source`. The packaging CI rehearses this end-to-end in
-containers (local signed repository, v0.1.1 → v0.1.2 upgrade, then a
-staged higher version discovered by plain `apt update`).
+`tensorplate-apt-source`. CI rehearses this lifecycle end-to-end on a
+disposable arm64 runner — previous-release baseline, stock-state failure
+modes, bootstrap, signed-repo in-place upgrade, then a staged higher
+version discovered by plain `apt update` — via
+[`test/packaging/apt-lifecycle-e2e.sh`](../../test/packaging/apt-lifecycle-e2e.sh)
+(`.github/workflows/apt-lifecycle.yml`, path-filtered to packaging and
+release-tooling changes). Hardware behavior stays with the Jetson T4
+checklist below.
 
 ## Jetson hardware validation checklist (T4, per release)
 
@@ -144,8 +149,10 @@ On the TensorPlate-ready Jetson validation target:
 - [ ] `tensorplate-ready-check.sh` passes offline, then `--online`.
 - [ ] Fresh-boot two-command install succeeds; capture the full apt
       transcript for the release evidence.
-- [ ] `tensorplate doctor` green; `systemctl enable --now
-      tensorplate-agent` per the clean-install runbook.
+- [ ] Enable both services per the
+      [clean-install runbook](./clean-install-runbook.md):
+      `sudo systemctl enable --now tensorplate-agent
+      tensorplate-observability`, then `tensorplate doctor` green.
 - [ ] v0.1.1 → v0.1.2 upgrade flow above on a host installed from the
       v0.1.1 release assets; config/state preserved.
 - [ ] Future-version discovery against the staging channel.
