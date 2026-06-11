@@ -8,7 +8,8 @@ Examples use:
 ```bash
 export TP_VERSION=0.1.0
 export TP_TAG="v${TP_VERSION}"
-export TP_RELEASE_BRANCH="release/${TP_TAG}"
+# One maintenance branch per minor line; all X.Y.Z tags are created there.
+export TP_RELEASE_BRANCH="release/${TP_VERSION%.*}"
 ```
 
 ## Version Surfaces
@@ -58,9 +59,14 @@ Release notes must not claim support beyond validation evidence.
 
 | Branch | Purpose |
 | --- | --- |
-| `release/vX.Y.Z` | Clean release branch used to finalize metadata and create the annotated source tag that triggers CI publication. |
-| `hotfix/vX.Y.Z` | Patch-release branch for a targeted fix after a public release. |
+| `release/X.Y` | Long-lived maintenance line for a minor version (for example `release/0.1`), cut once from the first released tag of that line. Every `X.Y.Z` patch is committed and tagged here; no per-patch branches are created. |
+| `fix/<id>-<slug>` | A single maintenance fix, branched from `release/X.Y` and merged back with a forward-port label. |
 | Feature/tooling branch | Implementation PR branch for release tooling and docs only. |
+
+The historical per-version branches (`release/v0.1.0`, `release/v0.1.1`)
+remain as immutable markers behind their tags; do not develop on them. See
+the internal release-and-branching strategy for the full model, including
+the forward-port rule to `develop`.
 
 The implementation PR branch may run `prepare --dry-run`, manifest fixture
 checks, and documentation review. It must not create release tags, publish
@@ -70,7 +76,7 @@ assets, or announce the release.
 
 | Tag type | Format | Rules |
 | --- | --- | --- |
-| Release candidate | `vX.Y.Z-rc.N` | Annotated tag from `release/vX.Y.Z`; supersede by incrementing `N`, never by rewriting. The Release workflow publishes RC tags as public prereleases. |
+| Release candidate | `vX.Y.Z-rc.N` | Annotated tag from `release/X.Y`; supersede by incrementing `N`, never by rewriting. The Release workflow publishes RC tags as public prereleases. |
 | Final release | `vX.Y.Z` | Annotated tag from a clean release commit. Pushing the tag triggers the Release workflow to build artifacts and create a draft GitHub Release for final verification. |
 | Patch release | `vX.Y.Z` | Annotated tag from a hotfix release branch after targeted validation. |
 

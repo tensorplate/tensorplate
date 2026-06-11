@@ -16,7 +16,7 @@ on:
         default: true
         type: boolean
       source_ref:
-        description: 'Optional source ref for build-only validation, for example release/v0.1.0. Publish mode always uses the tag.'
+        description: 'Optional source ref for build-only validation, for example release/0.1. Publish mode always uses the tag.'
         required: false
         type: string
 
@@ -109,7 +109,7 @@ jobs:
             echo "checksums=${release_dir}/SHA256SUMS"
             echo "bundle=${release_dir}/SHA256SUMS.cosign.bundle"
             echo "notes=docs/release/notes/v${version}.md"
-            echo "release_branch=release/v${version}"
+            echo "release_branch=release/${version%.*}"
             echo "publish=${publish}"
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
