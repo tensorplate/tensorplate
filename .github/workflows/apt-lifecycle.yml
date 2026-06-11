@@ -1,0 +1,55 @@
+name: APT lifecycle
+
+# Rehearses the full channel lifecycle from docs/install/tensorplate-ready.md
+# on a disposable arm64 runner: previous-release baseline install, stock-state
+# failure modes, bootstrap, signed-repo two-command upgrade with state
+# preservation, and staged future-version discovery.
+#
+# Path-filtered (and not a required check) so it runs only when packaging or
+# release tooling changes.
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/**'
+      - 'tools/release/**'
+      - 'tools/validation/**'
+      - 'test/packaging/**'
+      - '.github/workflows/apt-lifecycle.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rehearse:
+    name: channel lifecycle rehearsal (arm64)
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Install packaging toolchain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            build-essential \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            systemd
+
+      - name: Run lifecycle rehearsal
+        shell: bash
+        run: sudo --preserve-env=CI bash test/packaging/apt-lifecycle-e2e.sh
