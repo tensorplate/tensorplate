@@ -11,6 +11,9 @@ tensorplate (0.1.2~dev0-1) UNRELEASED; urgency=medium
     (jammy/main, arm64+amd64) from verified release assets, with
     fail-closed signing/verification against the shipped bootstrap
     keyring and an accumulating pool for future-version discovery.
+  * V012-F01-T05: publish the first-party Homebrew tap
+    (tensorplate/homebrew-tap) for the macOS Apple Silicon CLI-only
+    install, with audit/install/test CI on the tap.
 
  -- TensorPlate Contributors <oss@tensorplate.com>  Tue, 09 Jun 2026 00:00:00 +0000
 
