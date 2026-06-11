@@ -15,7 +15,9 @@ name: APT Repository
 # dists/ so published metadata never references missing packages; cache
 # policy is immutable for pool/ and short-lived for dists/.
 #
-# Required configuration (see docs/release/apt-repository.md):
+# Trust model and validation: docs/release/apt-repository.md.
+# Provisioning details live in the maintainer release-ops runbook.
+# Required configuration:
 #   vars.TP_APT_REPO_DEST        s3://bucket/prefix for the production repo
 #   vars.TP_APT_AWS_REGION       optional, defaults to us-east-1
 #   vars.TP_APT_S3_ENDPOINT      optional, for S3-compatible storage (R2, MinIO)
@@ -144,7 +146,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           if [[ -z "$TP_APT_SIGNING_KEY" ]]; then
-            echo "::error::secrets.TP_APT_SIGNING_KEY is not configured; provision the archive signing key per docs/release/apt-repository.md"
+            echo "::error::secrets.TP_APT_SIGNING_KEY is not configured; provision the archive signing key per the maintainer release-ops runbook"
             exit 1
           fi
           install -m 0600 /dev/null "${RUNNER_TEMP}/apt-signing-key.asc"

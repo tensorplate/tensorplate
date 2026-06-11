@@ -1,126 +1,51 @@
-# TensorPlate APT repository publication
+# TensorPlate APT repository
 
-The stable APT channel at `https://packages.tensorplate.com/apt` serves the
-`jammy/main` suite for `arm64` and `amd64`. Installed hosts trust it through
-the keyring shipped by `tensorplate-apt-source`
-(`/usr/share/keyrings/tensorplate-archive-keyring.gpg`); the repository
-publishes signed `InRelease`, `Release`, and `Release.gpg` metadata plus
-per-architecture `Packages`/`Packages.gz` indexes over an accumulating
-`pool/`, so future releases are discovered through a normal `apt update`
-against the same URL.
+The stable TensorPlate APT channel:
+
+| | |
+| --- | --- |
+| URL | `https://packages.tensorplate.com/apt` |
+| Suite / component | `jammy` / `main` |
+| Architectures | `arm64` (Jetson runtime + CLI), `amd64` (workstation CLI) |
+
+Hosts configure it once through the `tensorplate-apt-source` bootstrap
+package (archive keyring + Deb822 source file); after that, new TensorPlate
+releases are discovered through a normal `apt update` against the same URL.
+No runtime version is ever encoded in the repository path.
+
+## Trust model
+
+- Repository metadata (`InRelease`, `Release` + `Release.gpg`) is signed
+  with the TensorPlate archive key. Clients verify it with the keyring
+  installed at `/usr/share/keyrings/tensorplate-archive-keyring.gpg` via
+  Deb822 `Signed-By`; `apt-key` is never used.
+- The repository is generated exclusively from GitHub Release assets that
+  pass `SHA256SUMS` verification and a cosign signature check binding them
+  to the release workflow identity.
+- Publication fails closed: if generated metadata does not verify against
+  the shipped keyring, if any package listed in `SHA256SUMS` is missing
+  (no partial publications), or if a pool file would change contents under
+  the same name (released bytes are immutable; fixes bump versions).
+- Only final `vX.Y.Z` releases are published. Release candidates never
+  reach the stable channel.
 
 ## How publication runs
 
-[` .github/workflows/apt-repo.yml`](../../.github/workflows/apt-repo.yml)
-builds, signs, and syncs the repository. It runs:
+When a final GitHub Release is published,
+[`.github/workflows/apt-repo.yml`](../../.github/workflows/apt-repo.yml)
+builds and signs the repository tree with
+[`tools/release/publish-apt-repo.sh`](../../tools/release/publish-apt-repo.sh)
+and syncs it to object storage — `pool/` before `dists/`, so live metadata
+never references a missing package. Maintainers can republish the
+repository from the existing signed release assets at any time;
+provisioning and operational details live in the maintainer release-ops
+runbook.
 
-- **Automatically** when a final GitHub Release is published (the
-  `release: released` event — fired when the draft created by the release
-  workflow is made public). Release candidates never reach the stable
-  channel: GitHub does not emit `released` for prereleases and the workflow
-  additionally rejects non-`vX.Y.Z` tags.
-- **Manually** via `workflow_dispatch` with a published tag, to republish
-  repository metadata without rebuilding packages, or with a `dest`
-  override to publish to a staging bucket. GitHub only offers
-  `workflow_dispatch` for workflows that exist on the **default branch**
-  (`develop`), so the manual path becomes available once this workflow's
-  forward-port (per the release-and-branching §3 rule) has merged.
+## Recovery
 
-The heavy lifting is
-[`tools/release/publish-apt-repo.sh`](../../tools/release/publish-apt-repo.sh),
-which is destination-agnostic and locally testable. It fails closed at
-every step:
-
-1. Release assets must match `SHA256SUMS`, every `.deb` must be listed,
-   and the cosign bundle for `SHA256SUMS` must verify against the release
-   workflow identity (waivable only with `--allow-unverified-assets`, for
-   staging/container tests).
-2. The previous `pool/` is carried forward (`--existing-pool`), and a pool
-   file name may never change contents — rebuilds must bump the version.
-3. Generated metadata must verify (`gpgv`) against the public keyring the
-   bootstrap package ships, so CI can never publish metadata installed
-   hosts cannot validate — including signing with the wrong key.
-
-## Configuration contract
-
-| Kind | Name | Meaning |
-| --- | --- | --- |
-| variable | `TP_APT_REPO_DEST` | Production destination, `s3://bucket/prefix`. The job skips (does not fail) while unset. |
-| variable | `TP_APT_AWS_REGION` | Optional region; defaults to `us-east-1`. |
-| variable | `TP_APT_S3_ENDPOINT` | Optional endpoint URL for S3-compatible storage (Cloudflare R2, MinIO, …). May also be set as a secret of the same name, which takes precedence and is auto-masked in public workflow logs (the R2 endpoint embeds the account id — an identifier, not a credential, but maskable if preferred). |
-| secret | `TP_APT_AWS_ACCESS_KEY_ID` / `TP_APT_AWS_SECRET_ACCESS_KEY` | Credentials scoped to the repository bucket only. |
-| secret | `TP_APT_SIGNING_KEY` | Armored OpenPGP **private** archive signing key. |
-| secret | `TP_APT_SIGNING_KEY_PASSPHRASE` | Optional passphrase for the signing key. |
-
-The CDN/site in front of the bucket must serve the bucket contents under
-`https://packages.tensorplate.com/apt/`. No CDN invalidation hook is
-required: the sync sets `Cache-Control: public, max-age=31536000, immutable`
-on `pool/` (package files never change contents) and
-`public, max-age=60` on `dists/` (metadata refreshes within a minute).
-Sync order is always `pool/` before `dists/` so live metadata never
-references a missing package.
-
-### Cloudflare R2 setup (recommended when the zone is on Cloudflare)
-
-1. R2 → create bucket `tensorplate-apt` (and `tensorplate-apt-staging` for
-   staging runs). Objects are keyed under the `apt/` prefix, so the
-   destination is `s3://tensorplate-apt/apt`.
-2. Bucket → Settings → Custom Domains → attach `packages.tensorplate.com`.
-   Because the zone is already on Cloudflare this provisions DNS, TLS, and
-   the edge cache in one step; the edge respects the object
-   `Cache-Control` headers set by the sync.
-3. R2 → Manage API Tokens → token scoped to **Object Read & Write** on the
-   bucket only. Store the generated pair as `TP_APT_AWS_ACCESS_KEY_ID` /
-   `TP_APT_AWS_SECRET_ACCESS_KEY`.
-4. Repository variables:
-   `TP_APT_REPO_DEST=s3://tensorplate-apt/apt`,
-   `TP_APT_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com`,
-   `TP_APT_AWS_REGION=auto` (R2's documented region value).
-
-GitHub Release assets remain the checksum-and-cosign-covered fallback
-artifact source, and the repository is fully reproducible from them via
-the `workflow_dispatch` republish path — bucket loss is recoverable.
-
-## Provisioning the production signing key (one-time)
-
-The committed
-[`packaging/apt/tensorplate-archive-keyring.asc`](../../packaging/apt/README.md)
-is a staging placeholder until this procedure is done. Release builds
-refuse to ship the placeholder, and the publish script refuses metadata
-that the shipped keyring cannot verify — both gates clear only after this
-swap.
-
-On a trusted offline host:
-
-```bash
-export GNUPGHOME="$(mktemp -d)"
-gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
-  "TensorPlate APT Archive Signing Key <packages@tensorplate.com>" ed25519 sign never
-gpg --armor --export packages@tensorplate.com  > tensorplate-archive-keyring.asc
-gpg --armor --export-secret-keys packages@tensorplate.com > apt-signing-key.private.asc
-```
-
-1. Store `apt-signing-key.private.asc` as the `TP_APT_SIGNING_KEY` GitHub
-   secret (and in the organization's offline key escrow). It must never be
-   committed or copied to developer machines.
-2. Replace `packaging/apt/tensorplate-archive-keyring.asc` with the new
-   public key in a reviewed PR (one-file diff; the packaging suite and the
-   release-build placeholder gate validate the swap).
-3. Delete `$GNUPGHOME` and the local private key copy.
-
-Key **rotation** is intentionally out of scope for v0.1.2; a rotation
-runbook (new key shipped alongside the old one in the bootstrap package
-before metadata switches over) is follow-up work.
-
-## Staging publication
-
-Run the `APT Repository` workflow manually with `dest` pointed at a
-staging bucket (for example `s3://tensorplate-apt-staging/apt`), fronted by
-any host. Validate from clean hosts with a sources file pointing at the
-staging URL. The same script also runs fully locally — see the container
-recipe in `test/packaging`'s style: build packages, generate `SHA256SUMS`,
-sign with an ephemeral key, and point a Deb822 `file:` source at the
-output (this is exercised in CI evidence for the publication PR).
+GitHub Release assets remain the checksum-covered, cosign-signed fallback
+artifact source. The repository is fully reproducible from them, so loss
+of the hosting bucket is recoverable without rebuilding any package.
 
 ## Validation checklist (per publication)
 
