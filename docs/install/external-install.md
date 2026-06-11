@@ -1,10 +1,13 @@
-# TensorPlate External Install Guide
+# TensorPlate External Install Guide (GitHub-assets fallback)
 
-This guide starts from GitHub Release assets. It does not require a
-TensorPlate source checkout or local build tree. The primary path is the
-release `install.sh` script: download it and run it locally. The script
-self-checks against release `SHA256SUMS` before downloading or installing
-package assets. Do not use `curl | sh`.
+The preferred install is the APT channel — see
+[`tensorplate-ready.md`](./tensorplate-ready.md) for the two-command
+install and the one-time stock-machine bootstrap. This guide is the
+supported no-APT fallback starting from GitHub Release assets. It does
+not require a TensorPlate source checkout or local build tree. The
+fallback path is the release `install.sh` script: download it and run it
+locally. The script self-checks against release `SHA256SUMS` before
+downloading or installing package assets. Do not use `curl | sh`.
 
 The concrete command below targets `v0.1.1`; later releases use the same
 shape with the tag changed in the URL.

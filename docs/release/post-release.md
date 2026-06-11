@@ -14,6 +14,12 @@ For the v0.1.x line, support currently applies to:
 - Jetson Orin Nano 8GB Super hardware floor.
 - JetPack 6.x with L4T 36.x.
 - `arm64` Debian packages attached to the final GitHub Release.
+- From v0.1.2: the stable APT channel at
+  `https://packages.tensorplate.com/apt` (`jammy/main`), the
+  `tensorplate-apt-source` bootstrap package, the `tensorplate` runtime
+  metapackage (`arm64`), the `tensorplate-cli` AMD64 workstation
+  package, and the macOS Apple Silicon CLI via the
+  `tensorplate/homebrew-tap` Homebrew tap (CLI-only).
 - Core services: `tensorplate-agent`, `tensorplate-serving`,
   `tensorplate-observability`, and `tensorplate-cli`.
 - Optional package: `tensorplate-backend-python-pytorch`, with PyTorch
@@ -21,9 +27,8 @@ For the v0.1.x line, support currently applies to:
 
 Best-effort support may apply to related Orin hardware when the same
 JetPack and package set are used. Kria, Vitis AI execution, hosted fleet
-management, container-only install, public network endpoints, and an APT
-repository are not supported by v0.1.x unless a later release explicitly
-says otherwise.
+management, container-only install, and public network endpoints are not
+supported by v0.1.x unless a later release explicitly says otherwise.
 
 ## Hotfix Policy
 

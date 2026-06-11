@@ -50,20 +50,42 @@ TensorPlate is the runtime and control plane that production physical AI inferen
 
 ## Getting Started
 
-### Install From A Release
+### Install
 
-On a target [supported hardware](https://tensorplate.com/docs/hardware/overview) (e.g. Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`):
-
-```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh
-```
-
-For a desktop CLI-only install (Debian/Ubuntu):
+On a TensorPlate-ready Jetson (the TensorPlate APT source ships
+preconfigured on [supported hardware](https://tensorplate.com/docs/hardware/overview),
+e.g. Jetson Orin Nano 8GB Super, JetPack 6.x, `arm64`), the entire
+runtime install is:
 
 ```bash
-curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.1/install.sh && sudo bash install.sh --cli-only
+sudo apt update
+sudo apt install tensorplate
 ```
 
+On a stock Ubuntu/Jetson host, configure the TensorPlate APT source once,
+then use the same two commands — APT cannot discover TensorPlate until
+this one-time bootstrap runs:
+
+```bash
+curl -fLO https://github.com/tensorplate/tensorplate/releases/download/v0.1.2/tensorplate-apt-source_0.1.2-1_all.deb
+sudo dpkg -i tensorplate-apt-source_0.1.2-1_all.deb
+sudo apt update && sudo apt install tensorplate
+```
+
+The source points at the stable channel, so future releases arrive
+through normal `apt update` / `apt upgrade`; the bootstrap never repeats.
+See [tensorplate-ready.md](docs/install/tensorplate-ready.md) for
+provisioning, validation, and upgrade flows.
+
+CLI-only workstations:
+
+```bash
+sudo apt install tensorplate-cli            # Ubuntu AMD64, after the same one-time bootstrap
+brew install tensorplate/tap/tensorplate    # macOS Apple Silicon (CLI-only by design)
+```
+
+The signed GitHub Release assets and `install.sh` remain the supported
+no-APT fallback ([external-install.md](docs/install/external-install.md)).
 Before a release exists, build and install an unreleased branch snapshot:
 
 ```bash
