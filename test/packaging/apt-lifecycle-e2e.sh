@@ -130,15 +130,19 @@ dpkg -s tensorplate >/dev/null 2>&1 || die "tensorplate metapackage not installe
 pass "two-command install upgraded ${baseline_ver} -> ${cur_ver} in place; config and state preserved"
 
 note "F. future-version discovery without re-bootstrap"
+# Build the FULL staging set (stubs are still staged from step D): the
+# discovery claim in docs/install/tensorplate-ready.md is about the
+# runtime metapackage, which is Architecture: arm64 and therefore not
+# covered by an arch-independent-only build.
 base="${cur_ver%%~*}"; base="${base%-*}"
 IFS=. read -r major minor patch <<<"$base"
 staging_ver="${major}.${minor}.$((patch + 1))~staging-1"
 sed -i "1s/${cur_ver}/${staging_ver}/" packaging/debian/changelog
-packaging/scripts/build-deb.sh -A >"${work}/build-staging.log" 2>&1 ||
+packaging/scripts/build-deb.sh >"${work}/build-staging.log" 2>&1 ||
   { tail -5 "${work}/build-staging.log"; die "staging package build failed"; }
 git checkout -- packaging/debian/changelog
 mkdir -p "${work}/assets-staging"
-cp "${repo_parent}"/tensorplate*_"${staging_ver}"_all.deb "${work}/assets-staging/"
+cp "${repo_parent}"/tensorplate*_"${staging_ver}"_*.deb "${work}/assets-staging/"
 (cd "${work}/assets-staging" && sha256sum -- *.deb > SHA256SUMS)
 tools/release/publish-apt-repo.sh \
   --assets-dir "${work}/assets-staging" --output "${work}/apt-next" \
@@ -148,9 +152,12 @@ tools/release/publish-apt-repo.sh \
 cp -a "${work}/apt-next/pool/." /srv/tensorplate-apt/pool/
 cp -a "${work}/apt-next/dists/." /srv/tensorplate-apt/dists/
 apt-get update -qq
-candidate="$(apt-cache policy tensorplate-apt-source | awk '/Candidate:/{print $2}')"
+candidate="$(apt-cache policy tensorplate | awk '/Candidate:/{print $2}')"
 [[ "$candidate" == "$staging_ver" ]] ||
-  die "future version not discovered; candidate=$candidate expected=$staging_ver"
-pass "future version ${staging_ver} discovered by plain apt update; bootstrap untouched"
+  die "future tensorplate runtime version not discovered; candidate=$candidate expected=$staging_ver"
+installed="$(apt-cache policy tensorplate | awk '/Installed:/{print $2}')"
+[[ "$installed" == "$cur_ver" ]] ||
+  die "installed runtime version changed without an upgrade command; installed=$installed"
+pass "future runtime version ${staging_ver} discovered by plain apt update (installed stays ${cur_ver}); bootstrap untouched"
 
 note "apt lifecycle rehearsal complete"
