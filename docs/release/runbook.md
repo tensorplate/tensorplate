@@ -325,6 +325,18 @@ accepted:
 gh release edit "${TP_TAG}" --draft=false --latest
 ```
 
+Publishing the draft fires the `APT Repository` workflow automatically
+(see [`apt-repository.md`](./apt-repository.md)). Two manual follow-ups:
+
+1. Confirm the APT publication run succeeded and walk the validation
+   checklist in `apt-repository.md`.
+2. Bump the Homebrew tap formula in
+   [`tensorplate/homebrew-tap`](https://github.com/tensorplate/homebrew-tap):
+   update `url` to the new tag and `sha256` to
+   `shasum -a 256` of the new source tarball in
+   `Formula/tensorplate.rb`, then merge once the tap CI (audit +
+   build-from-source install + `brew test` on Apple Silicon) is green.
+
 Then publish the announcement using the release notes as the source of
 truth. The announcement must not claim support beyond release evidence.
 
