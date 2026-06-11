@@ -14,6 +14,10 @@ tensorplate (0.1.2~dev0-1) UNRELEASED; urgency=medium
   * V012-F01-T05: publish the first-party Homebrew tap
     (tensorplate/homebrew-tap) for the macOS Apple Silicon CLI-only
     install, with audit/install/test CI on the tap.
+  * V012-F01-T04: document and validate the TensorPlate-ready image
+    flow: provisioning runbook, tensorplate-ready-check.sh host
+    validation helper, the stock-machine bootstrap fallback, the
+    v0.1.1-to-v0.1.2 upgrade plan, and future-version discovery.
 
  -- TensorPlate Contributors <oss@tensorplate.com>  Tue, 09 Jun 2026 00:00:00 +0000
 
