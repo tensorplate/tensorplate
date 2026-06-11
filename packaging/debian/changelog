@@ -7,6 +7,10 @@ tensorplate (0.1.2~dev0-1) UNRELEASED; urgency=medium
     (arm64 only) so `sudo apt install tensorplate` installs the full
     runtime set, and build/publish `tensorplate-cli` for Ubuntu AMD64
     workstations.
+  * V012-F01-T02: publish the signed stable APT repository
+    (jammy/main, arm64+amd64) from verified release assets, with
+    fail-closed signing/verification against the shipped bootstrap
+    keyring and an accumulating pool for future-version discovery.
 
  -- TensorPlate Contributors <oss@tensorplate.com>  Tue, 09 Jun 2026 00:00:00 +0000
 

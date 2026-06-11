@@ -12,6 +12,7 @@ cd "$repo_root"
 script="tools/release/tensorplate-release.sh"
 build_script="tools/release/build-release-artifacts.sh"
 source_install_script="packaging/scripts/build-install-from-source.sh"
+publish_apt_script="tools/release/publish-apt-repo.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -24,6 +25,43 @@ bash -n "$source_install_script"
 "$script" cut --version 0.1.0 --rc 1 --dry-run >/dev/null
 "$build_script" --help >/dev/null
 "$source_install_script" --help >/dev/null
+bash -n "$publish_apt_script"
+"$publish_apt_script" --help >/dev/null
+
+# Patch tags live on the per-minor maintenance line, not per-version
+# release branches.
+cut_dry_run="$("$script" cut --version 0.1.2 --final --dry-run)"
+printf '%s\n' "$cut_dry_run" | grep -q 'release branch: release/0.1' || {
+  echo "FAIL: cut must default to the release/0.1 maintenance line" >&2
+  exit 1
+}
+
+# publish-apt-repo argument and path validation fails closed.
+if "$publish_apt_script" --output "$tmp/apt-out" --signing-key /nonexistent >/dev/null 2>&1; then
+  echo "FAIL: publish-apt-repo must require --assets-dir" >&2
+  exit 1
+fi
+if "$publish_apt_script" --assets-dir /nonexistent --output "$tmp/apt-out" --signing-key /nonexistent >/dev/null 2>&1; then
+  echo "FAIL: publish-apt-repo must reject a missing assets directory" >&2
+  exit 1
+fi
+# A SHA256SUMS .deb entry whose file is absent must abort publication
+# (a partial download must never publish a partial package set). The
+# check needs the script's tool prerequisites, so probe only where
+# they exist; container CI covers it otherwise.
+if command -v sha256sum >/dev/null 2>&1 && command -v gpg >/dev/null 2>&1 &&
+   command -v dpkg-scanpackages >/dev/null 2>&1 && command -v apt-ftparchive >/dev/null 2>&1; then
+  mkdir -p "$tmp/apt-partial"
+  printf 'fixture deb\n' > "$tmp/apt-partial/tensorplate-common_0.1.0-1_all.deb"
+  ( cd "$tmp/apt-partial" && sha256sum tensorplate-common_0.1.0-1_all.deb > SHA256SUMS )
+  printf '%064d  tensorplate-cli_0.1.0-1_arm64.deb\n' 0 >> "$tmp/apt-partial/SHA256SUMS"
+  if "$publish_apt_script" --assets-dir "$tmp/apt-partial" --output "$tmp/apt-partial-out" \
+      --signing-key "$tmp/apt-partial/SHA256SUMS" --verify-keyring "$tmp/apt-partial/SHA256SUMS" \
+      --allow-unverified-assets >/dev/null 2>&1; then
+    echo "FAIL: publish-apt-repo must reject SHA256SUMS entries with missing .deb files" >&2
+    exit 1
+  fi
+fi
 grep -q 'name: Release' .github/workflows/release.yml
 grep -q 'tools/release/build-release-artifacts.sh' .github/workflows/release.yml
 grep -q 'draft="true"' .github/workflows/release.yml
