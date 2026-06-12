@@ -9,7 +9,7 @@ Do not fill this template in a tooling PR.
 
 ```text
 Release: vX.Y.Z
-Release branch: release/vX.Y.Z
+Release branch: release/X.Y
 Release commit: <git-sha>
 Final tag: vX.Y.Z
 

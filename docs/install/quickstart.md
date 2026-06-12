@@ -1,9 +1,10 @@
 # TensorPlate External Quickstart
 
-This quickstart assumes the packages were installed from
-[`external-install.md`](./external-install.md) and that
-`tensorplate doctor` is green after service startup. Set `TP_VERSION` to
-the installed release; the examples default to `0.1.0`.
+This quickstart assumes the packages were installed through the APT path
+in [`tensorplate-ready.md`](./tensorplate-ready.md) (or the
+[`external-install.md`](./external-install.md) GitHub-assets fallback)
+and that `tensorplate doctor` is green after service startup. Set
+`TP_VERSION` to the installed release; the examples default to `0.1.0`.
 
 ## Release Variables
 
