@@ -49,6 +49,9 @@ on:
 
 permissions:
   contents: read
+  # The pre-tag staging path downloads another workflow run's artifact
+  # (actions/download-artifact with run-id), which needs actions: read.
+  actions: read
 
 concurrency:
   group: apt-repo
