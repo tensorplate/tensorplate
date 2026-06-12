@@ -4,8 +4,9 @@
 # GitOps-oriented release driver for TensorPlate.
 #
 # The implementation PR adds this tooling, but it must not publish the
-# release. Final publication happens later from release/vX.Y.Z: this script
-# creates the reviewed source commit/tag, and CI owns artifact publication.
+# release. Final publication happens later from the per-minor release/X.Y
+# maintenance line: this script creates the reviewed source commit/tag, and
+# CI owns artifact publication.
 
 set -Eeuo pipefail
 
