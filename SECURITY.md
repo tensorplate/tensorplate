@@ -79,6 +79,14 @@ A dependency SBOM (SPDX/CycloneDX) attested with `actions/attest-sbom` is on
 the roadmap; until then, provenance attestations capture build materials and
 the manifest records package versions and digests.
 
+Hosts installed through the APT channel (`packages.tensorplate.com`) get
+this verification automatically: repository metadata (`InRelease`) is
+signed with the TensorPlate archive key and validated by APT against the
+keyring shipped by `tensorplate-apt-source` (Deb822 `Signed-By`;
+`apt-key` is never used), and the repository is generated exclusively
+from cosign-verified release assets. Trust model and validation
+checklist: [`docs/release/apt-repository.md`](docs/release/apt-repository.md).
+
 ## Security-Sensitive Areas
 
 Treat these areas as security-sensitive:

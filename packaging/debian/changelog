@@ -18,6 +18,11 @@ tensorplate (0.1.2~dev0-1) UNRELEASED; urgency=medium
     flow: provisioning runbook, tensorplate-ready-check.sh host
     validation helper, the stock-machine bootstrap fallback, the
     v0.1.1-to-v0.1.2 upgrade plan, and future-version discovery.
+  * V012-F01-T06: make the package-manager install the primary public
+    story: README two-command install, install-doc restructure with the
+    stock-machine bootstrap and AMD64/macOS CLI paths, APT-channel
+    verification wording in SECURITY.md, v0.1.2 release notes, and the
+    updated support posture.
 
  -- TensorPlate Contributors <oss@tensorplate.com>  Tue, 09 Jun 2026 00:00:00 +0000
 

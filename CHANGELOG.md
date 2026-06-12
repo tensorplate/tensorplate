@@ -6,6 +6,41 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- First-party package-manager installation (the v0.1.2 distribution
+  feature):
+    - Stable signed APT repository at
+      `https://packages.tensorplate.com/apt` (`jammy/main`, `arm64` and
+      `amd64`), generated exclusively from checksum- and cosign-verified
+      release assets and published automatically when a final release
+      goes public. Repository metadata verifies against the keyring
+      shipped on the host.
+    - `tensorplate-apt-source` bootstrap package: one-time archive
+      keyring + Deb822 source setup for the stable channel; installs no
+      runtime components and never runs `apt update`.
+    - `tensorplate` runtime metapackage (Jetson `arm64`), making
+      `sudo apt update && sudo apt install tensorplate` the complete
+      runtime install on TensorPlate-ready hosts.
+    - `tensorplate-cli` built and published for Ubuntu AMD64
+      workstations.
+    - First-party Homebrew tap (`tensorplate/homebrew-tap`) for the
+      macOS Apple Silicon CLI-only install.
+    - TensorPlate-ready host validation
+      (`tools/validation/tensorplate-ready-check.sh`), an image and
+      provisioning runbook, the documented v0.1.1 → v0.1.2 upgrade flow,
+      and a CI lifecycle rehearsal covering bootstrap, in-place upgrade,
+      and future-version discovery.
+
+### Changed
+
+- Release branching moved to a single per-minor maintenance line
+  (`release/0.1`): all v0.1.x patch tags are created there; per-version
+  release branches are no longer created.
+- GitHub Release assets and `install.sh` remain fully supported as the
+  signed no-APT fallback install path; public install docs now lead with
+  the APT channel.
+
 ## [0.1.1] - 2026-06-05
 
 ### Added
