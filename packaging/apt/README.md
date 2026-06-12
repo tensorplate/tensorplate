@@ -23,7 +23,7 @@ TensorPlate-ready Jetson images ship with the package preinstalled; stock
 Ubuntu/Jetson systems install it once (from GitHub Release assets) as the
 bootstrap step before `sudo apt update && sudo apt install tensorplate`.
 
-## Staging placeholder key
+## Production archive key
 
 The committed keyring is the **production** archive public key
 (fingerprint `4B6B644C5E342C29D438BD83D2A0E9CE7E0AA310`); the private
