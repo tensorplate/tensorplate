@@ -108,7 +108,7 @@ The manifest is JSON with this stable shape:
     "version": "X.Y.Z",
     "tag": "vX.Y.Z",
     "commit": "<git-sha>",
-    "branch": "release/vX.Y.Z",
+    "branch": "release/X.Y",
     "generated_at_utc": "YYYY-MM-DDTHH:MM:SSZ"
   },
   "target": {

@@ -5,9 +5,9 @@ release flow has two separated phases:
 
 1. Add and review release machinery changes in a normal implementation PR.
 2. After that PR merges, run the release script from a clean checkout.
-   It creates the `release/vX.Y.Z` source commit and annotated tag; the
-   tag-driven Release workflow builds packages and attaches them to the
-   GitHub Release.
+   It commits on the per-minor `release/X.Y` maintenance line and creates
+   an annotated `vX.Y.Z` tag; the tag-driven Release workflow builds
+   packages and attaches them to the GitHub Release.
 
 The implementation PR must not be treated as the release. Final
 publication requires the release branch, green CI, release-gate evidence,
