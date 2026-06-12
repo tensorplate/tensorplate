@@ -8,6 +8,11 @@ name: APT Repository
 #     prereleases, so release candidates never reach the stable channel.
 #   - workflow_dispatch: republish an existing release's repository metadata
 #     without rebuilding packages, or publish to a staging destination.
+#     With source_run_id, publishes a build-only Release run's unsigned
+#     asset artifact for pre-tag staging validation: signed with the
+#     production key (so test hosts use the shipped bootstrap keyring
+#     unchanged) and hard-restricted to non-production destinations.
+#     Dispatch with --ref pointing at the maintenance branch being staged.
 #
 # The repository tree is built and signed by tools/release/publish-apt-repo.sh
 # from the GitHub Release assets (checksum + cosign verified). This workflow
@@ -31,15 +36,22 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published release tag to (re)publish, for example v0.1.2
+        description: Release tag to (re)publish, for example v0.1.2
         required: true
       dest:
         description: Destination override (s3://bucket/prefix), e.g. a staging bucket. Defaults to vars.TP_APT_REPO_DEST.
         required: false
         default: ''
+      source_run_id:
+        description: Pre-tag staging only — a successful build-only Release run ID whose unsigned asset artifact is published instead of GitHub Release assets. Requires dest, and refuses the production destination.
+        required: false
+        default: ''
 
 permissions:
   contents: read
+  # The pre-tag staging path downloads another workflow run's artifact
+  # (actions/download-artifact with run-id), which needs actions: read.
+  actions: read
 
 concurrency:
   group: apt-repo
@@ -70,11 +82,22 @@ jobs:
     steps:
       - name: Validate release tag
         shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PROD_DEST: ${{ vars.TP_APT_REPO_DEST }}
         run: |
           set -Eeuo pipefail
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::the stable APT channel only publishes final vX.Y.Z releases; got '$TAG'"
             exit 1
+          fi
+          # Build-run artifacts are unsigned (no cosign bundle), so they may
+          # only ever reach a non-production destination.
+          if [[ -n "$SOURCE_RUN_ID" ]]; then
+            if [[ -z "$DEST" || "$DEST" == "$PROD_DEST" ]]; then
+              echo "::error::source_run_id publishes pre-tag staging assets; it requires a dest override and refuses the production destination"
+              exit 1
+            fi
           fi
 
       # Checkout at the release tag so the publication script and the
@@ -82,7 +105,10 @@ jobs:
       - name: Checkout release source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: ${{ env.TAG }}
+          # Pre-tag staging publishes (source_run_id) have no tag ref yet;
+          # they check out the ref the dispatch ran against (the maintenance
+          # branch), which is the source the build-only run built.
+          ref: ${{ inputs.source_run_id != '' && github.ref || env.TAG }}
 
       - name: Install repository tooling
         shell: bash
@@ -112,6 +138,7 @@ jobs:
           cosign version
 
       - name: Download release assets
+        if: ${{ inputs.source_run_id == '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,6 +149,15 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --dir "${RUNNER_TEMP}/assets"
           ls -la "${RUNNER_TEMP}/assets"
+
+      - name: Download build-only run assets (staging)
+        if: ${{ inputs.source_run_id != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-${{ env.TAG }}-release-assets-unsigned
+          path: ${{ runner.temp }}/assets
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
 
       # The canonical release verifier enforces the complete required
       # package/architecture set, per-file checksums, and the manifest
@@ -167,14 +203,21 @@ jobs:
         shell: bash
         env:
           TP_APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.TP_APT_SIGNING_KEY_PASSPHRASE }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -Eeuo pipefail
+          # Build-only artifacts carry no cosign bundle; the tag-validation
+          # step already pinned this mode to a non-production destination.
+          asset_trust_args=(--cosign-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}")
+          if [[ -n "$SOURCE_RUN_ID" ]]; then
+            asset_trust_args=(--allow-unverified-assets)
+          fi
           tools/release/publish-apt-repo.sh \
             --assets-dir "${RUNNER_TEMP}/assets" \
             --output "${RUNNER_TEMP}/apt-repo" \
             --existing-pool "${RUNNER_TEMP}/pool-existing" \
             --signing-key "${RUNNER_TEMP}/apt-signing-key.asc" \
-            --cosign-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+            "${asset_trust_args[@]}"
 
       - name: Sync repository to object storage
         shell: bash
