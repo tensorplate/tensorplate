@@ -25,15 +25,14 @@ bootstrap step before `sudo apt update && sudo apt install tensorplate`.
 
 ## Staging placeholder key
 
-The committed keyring is currently a clearly-labeled **STAGING PLACEHOLDER**
-generated for build/test wiring. The production archive signing key is
-provisioned by the signed-APT-repository work (issue #41); swapping it in
-is a one-file change to `tensorplate-archive-keyring.asc`.
-
-`tools/release/build-release-artifacts.sh` refuses to build publish-grade
-release artifacts while the placeholder marker is present, so a release
-cannot ship the placeholder trust root by accident. Key **rotation** is a
-follow-up runbook owned by the release docs; v0.1.2 does not rotate keys.
+The committed keyring is the **production** archive public key
+(fingerprint `4B6B644C5E342C29D438BD83D2A0E9CE7E0AA310`); the private
+half lives only in CI secrets and offline escrow. Repository metadata
+that does not verify against this keyring is refused at publication
+time, and `tools/release/build-release-artifacts.sh` refuses
+publish-grade builds if a staging placeholder marker ever reappears in
+this file. Key **rotation** is a follow-up runbook owned by the release
+docs; v0.1.2 does not rotate keys.
 
 ## Validation
 
