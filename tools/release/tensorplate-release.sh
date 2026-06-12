@@ -251,14 +251,14 @@ write_report() {
   mkdir -p "$(dirname "$REPORT")"
   {
     printf '# TensorPlate release preflight report\n\n'
-    printf '- Version: `%s`\n' "$VERSION"
-    printf '- Commit: `%s`\n' "$(git rev-parse HEAD)"
-    printf '- Branch: `%s`\n' "$(current_branch)"
-    printf '- Generated UTC: `%s`\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf -- '- Version: `%s`\n' "$VERSION"
+    printf -- '- Commit: `%s`\n' "$(git rev-parse HEAD)"
+    printf -- '- Branch: `%s`\n' "$(current_branch)"
+    printf -- '- Generated UTC: `%s`\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '## Summary\n\n'
-    printf '- Passes: %d\n' "${#PASSES[@]}"
-    printf '- Warnings: %d\n' "${#WARNINGS[@]}"
-    printf '- Failures: %d\n\n' "${#FAILURES[@]}"
+    printf -- '- Passes: %d\n' "${#PASSES[@]}"
+    printf -- '- Warnings: %d\n' "${#WARNINGS[@]}"
+    printf -- '- Failures: %d\n\n' "${#FAILURES[@]}"
     if ((${#FAILURES[@]})); then
       printf '## Failures\n\n'
       printf -- '- %s\n' "${FAILURES[@]}"
