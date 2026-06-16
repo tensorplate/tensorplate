@@ -6,6 +6,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- `tensorplate-python` Python SDK package skeleton (import package
+  `tensorplate`): PEP 621 packaging metadata, `src/` layout, `py.typed`
+  marker, and the placeholder public surface (`ServingClient`,
+  `VisionClient`, `Detection`, and the `TensorPlateError` base exception)
+  with import smoke tests and CI coverage. The serving client, vision
+  detection helpers, examples, and published distribution land in later
+  v0.1.3 changes. (V013-F01-T01)
+
 ## [0.1.2] - 2026-06-12
 
 ### Added

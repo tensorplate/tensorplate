@@ -17,15 +17,18 @@ env:
 
 jobs:
   python:
-    name: ruff + mypy + pytest (${{ matrix.python-version }})
+    name: ruff + mypy + pytest (${{ matrix.package }}, py${{ matrix.python-version }})
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
+        package:
+          - backends/python_pytorch
+          - sdk/python
         python-version: ['3.10', '3.12']
     defaults:
       run:
-        working-directory: backends/python_pytorch
+        working-directory: ${{ matrix.package }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +37,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: backends/python_pytorch/pyproject.toml
+          cache-dependency-path: ${{ matrix.package }}/pyproject.toml
 
       - name: Install package and dev dependencies
         run: |
