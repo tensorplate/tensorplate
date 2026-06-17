@@ -13,6 +13,7 @@ enforced at review time. Changes here require tech lead approval.
 | `runtime/` | runtime core (data plane) | C++20 | `tp_runtime` library | runtime tech lead |
 | `serving_worker/` | data plane (process) | C++20 | `tp_serving_worker` binary | runtime tech lead |
 | `backends/python_pytorch/` | data plane (out-of-process backend) | Python 3.10+ | `tensorplate-pytorch-backend` package | runtime tech lead + backend owner |
+| `sdk/python/` | client / user space | Python 3.10+ | `tensorplate-python` package | SDK owner |
 | `agent/` | management plane (process) | Rust | `tensorplate-agent` binary | agent owner |
 | `cli/` | management plane (operator client) | Rust | `tensorplate-cli` binary | agent owner |
 | `observability/` | safety / observability (process) | Rust | `tensorplate-observability` binary | safety owner |
@@ -85,6 +86,7 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
 | `observability/` | `protocol/rust/`, approved third-party Rust crates |
 | `protocol/rust/` | approved third-party Rust crates only |
 | `backends/python_pytorch/` | `protocol/schemas/` (IPC contract), approved Python wheels (PyTorch, etc., system-provided) |
+| `sdk/python/` | standard library and approved third-party Python wheels for client-side HTTP, serialization, and vision helpers |
 
 ## Forbidden dependencies
 
