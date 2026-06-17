@@ -15,6 +15,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   with import smoke tests and CI coverage. The serving client, vision
   detection helpers, examples, and published distribution land in later
   v0.1.3 changes. (V013-F01-T01)
+- `ServingClient` for the v0.1 serving HTTP envelope: schema-valid
+  `InferRequest` marshalling with base64 tensor payloads, success/failure
+  parsing into typed results and exceptions, `schema_version` enforcement,
+  a `GET /health` readiness snapshot, and tensor input/output value objects
+  with optional numpy array access. Serving endpoint resolution matches the
+  CLI precedence (explicit URL, CLI profile, read-only agent discovery,
+  loopback default) with the same URL canonicalization. (V013-F01-T02,
+  V013-F01-T03)
 
 ## [0.1.2] - 2026-06-12
 

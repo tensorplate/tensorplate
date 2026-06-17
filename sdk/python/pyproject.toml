@@ -22,13 +22,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# The SDK core is dependency-free at the skeleton stage so the package
-# builds and imports anywhere a recent CPython is available. The HTTP
-# transport and the vision/array dependencies are introduced alongside the
-# serving client and the vision helpers.
+# The SDK core is dependency-free: the serving client's HTTP transport is
+# hand-rolled over the standard library. numpy is an optional extra, used
+# only for tensor array access; the vision helpers add their own extras.
 dependencies = []
 
 [project.optional-dependencies]
+# Optional array access: ServingClient works without numpy; the tensor
+# `.to_numpy()` / `.from_numpy()` helpers require it.
+numpy = ["numpy>=1.22"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -84,6 +86,13 @@ strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
+
+# numpy is an optional dependency, lazily imported for tensor array access.
+# The dev/CI gate does not install it, so it is ignored when missing; the
+# code also type-checks cleanly when numpy is present.
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
