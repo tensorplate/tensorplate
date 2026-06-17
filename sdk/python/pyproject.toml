@@ -39,6 +39,9 @@ dev = [
 Homepage = "https://github.com/tensorplate/tensorplate"
 Repository = "https://github.com/tensorplate/tensorplate"
 
+[tool.setuptools]
+license-files = ["LICENSE"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["tensorplate*"]
