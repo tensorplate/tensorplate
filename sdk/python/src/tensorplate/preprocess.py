@@ -124,7 +124,9 @@ def _decode_to_hwc_rgb_uint8(image: str | bytes | Path | np.ndarray) -> np.ndarr
         raise ValueError(
             f"ndarray image must be HWC with 3 channels, got shape {tuple(array.shape)}"
         )
-    return np.ascontiguousarray(array if array.dtype == np.uint8 else array.astype("uint8"))
+    if array.dtype != np.uint8:
+        raise ValueError(f"ndarray image must have dtype uint8, got {array.dtype}")
+    return np.ascontiguousarray(array)
 
 
 def _decode_pil(source: str | Path | io.BytesIO) -> np.ndarray:

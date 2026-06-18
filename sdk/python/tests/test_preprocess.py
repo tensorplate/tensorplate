@@ -66,3 +66,12 @@ def test_preprocess_rejects_bad_channel_order() -> None:
     image = numpy.zeros((8, 8, 3), dtype=numpy.uint8)
     with pytest.raises(ValueError, match="channel_order"):
         preprocess(image, PreprocessConfig(channel_order="rbg"))
+
+
+def test_preprocess_rejects_non_uint8_ndarray() -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    image = numpy.zeros((8, 8, 3), dtype=numpy.float32)
+    with pytest.raises(ValueError, match="uint8"):
+        preprocess(image)

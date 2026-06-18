@@ -55,6 +55,23 @@ def test_decode_transposed_layout_matches_default() -> None:
     assert default[0].box == pytest.approx(transposed[0].box)
 
 
+def test_decode_rejects_declared_layout_mismatch() -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    classes, anchors = 2, 8
+    grid = numpy.zeros((4 + classes, anchors), dtype=numpy.float32)
+    default = TensorOutput("det", DType.FLOAT32, (1, 4 + classes, anchors), grid[None].tobytes())
+    transposed = TensorOutput(
+        "det", DType.FLOAT32, (1, anchors, 4 + classes), grid.T[None].tobytes()
+    )
+
+    with pytest.raises(ProtocolError, match="transposed=True"):
+        decode_detections(transposed, _IDENTITY)
+    with pytest.raises(ProtocolError, match="remove transposed=True"):
+        decode_detections(default, _IDENTITY, transposed=True)
+
+
 def test_decode_maps_boxes_through_transform() -> None:
     pytest.importorskip("numpy")
     transform = LetterboxTransform(

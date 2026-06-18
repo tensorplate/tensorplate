@@ -59,6 +59,13 @@ def decode_detections(
         raise ProtocolError(
             f"detector output must be [1, *, *] for {contract!r}, got shape {tuple(array.shape)}"
         )
+    if _looks_like_wrong_layout(array, transposed):
+        expected = "[1, N, 4 + C]" if transposed else "[1, 4 + C, N]"
+        hint = "remove transposed=True" if transposed else "pass transposed=True"
+        raise ProtocolError(
+            f"detector output shape {tuple(array.shape)} does not match declared layout "
+            f"{expected}; {hint} if the tensor uses the opposite layout"
+        )
     grid = array[0].T if transposed else array[0]
     if grid.shape[0] < 5:
         raise ProtocolError(
@@ -90,6 +97,15 @@ def decode_detections(
             Detection(class_id=class_id, score=float(kept_scores[idx]), box=box, label=label)
         )
     return detections
+
+
+def _looks_like_wrong_layout(array: np.ndarray, transposed: bool) -> bool:
+    """Return true for the common unambiguous YOLO transpose mismatch."""
+    rows = int(array.shape[1])
+    cols = int(array.shape[2])
+    if transposed:
+        return cols > rows and rows >= 5
+    return rows > cols and cols >= 5
 
 
 def _class_aware_nms(
