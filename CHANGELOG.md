@@ -32,6 +32,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   class-aware NMS, the `yolo_v8_single_output` contract, and the
   `detections.*` semantic-tag constants). The core install stays
   dependency-free. (V013-F02-T01, V013-F02-T02)
+- `VisionClient.detect`: one-call detection composing preprocessing,
+  `ServingClient.infer`, and YOLO postprocessing — accepts path/bytes/
+  ndarray input with configurable endpoint, input/output names, score and
+  NMS thresholds, labels, and output contract. Selects the detection
+  output explicitly, by single-output, or by a `detections.*`
+  `semantic_tag`, and returns source-pixel `Detection`s. Synchronous in
+  v0.1.3. (V013-F02-T03)
 
 ## [0.1.2] - 2026-06-12
 
