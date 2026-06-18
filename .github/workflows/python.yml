@@ -55,3 +55,33 @@ jobs:
 
       - name: pytest
         run: pytest -q
+
+  sdk-python-vision:
+    name: vision pytest (sdk/python, py${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: sdk/python/pyproject.toml
+
+      - name: Install package with dev and vision dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vision]"
+
+      - name: pytest vision examples
+        env:
+          TENSORPLATE_REQUIRE_VISION_EXTRAS: '1'
+        run: pytest -q tests/test_examples.py::test_yolo_detect_against_fixture

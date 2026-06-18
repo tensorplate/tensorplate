@@ -8,7 +8,9 @@ fixture worker and requires the vision extras.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -21,6 +23,15 @@ import pytest
 _EXAMPLES = Path(__file__).resolve().parents[3] / "examples" / "vision_detection_sdk"
 _YOLO = _EXAMPLES / "yolo_detect.py"
 _CAMERA = _EXAMPLES / "camera_infer.py"
+
+
+def _require_vision_module(module: str) -> None:
+    if importlib.util.find_spec(module) is not None:
+        return
+    message = f"{module} is required for the vision example smoke"
+    if os.environ.get("TENSORPLATE_REQUIRE_VISION_EXTRAS") == "1":
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -81,8 +92,8 @@ def server() -> Iterator[_CannedServer]:
 
 
 def test_yolo_detect_against_fixture(server: _CannedServer, tmp_path: Path) -> None:
-    pytest.importorskip("numpy")
-    pytest.importorskip("PIL")
+    _require_vision_module("numpy")
+    _require_vision_module("PIL")
     import numpy
     from PIL import Image
 
