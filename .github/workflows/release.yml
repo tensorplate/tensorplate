@@ -166,9 +166,52 @@ jobs:
           path: dist/cli-amd64/*.deb
           if-no-files-found: error
 
+  build_sdk_python:
+    name: build tensorplate-python wheel + sdist
+    needs: meta
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Build, check, and smoke-install the SDK distribution
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          # The source tree carries a .dev0 development version between
+          # releases; pin the built distribution to the release version.
+          python3 - "$VERSION" <<'PY'
+          import pathlib, re, sys
+          path = pathlib.Path("sdk/python/pyproject.toml")
+          path.write_text(re.sub(r'(?m)^version = .*$', f'version = "{sys.argv[1]}"', path.read_text()))
+          PY
+          python3 -m venv .sdkbuild
+          .sdkbuild/bin/pip install --upgrade pip build twine
+          .sdkbuild/bin/python -m build sdk/python --outdir dist/sdk-python
+          .sdkbuild/bin/python -m twine check dist/sdk-python/*
+          # Dry-run gate: a clean environment installs the built wheel and imports it.
+          python3 -m venv .sdkverify
+          .sdkverify/bin/pip install dist/sdk-python/tensorplate_python-*.whl
+          .sdkverify/bin/python -c "import tensorplate; print('clean import OK', tensorplate.__version__)"
+
+      - name: Upload SDK distribution
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tensorplate-python-dist
+          path: dist/sdk-python/*
+          if-no-files-found: error
+
   build_packages:
     name: build packages
-    needs: [meta, build_cli_amd64]
+    needs: [meta, build_cli_amd64, build_sdk_python]
     runs-on: [self-hosted, linux, ARM64, tensorplate-release]
     timeout-minutes: 120
     permissions:
@@ -255,6 +298,12 @@ jobs:
           mv -f "${RUNNER_TEMP}/cli-amd64"/tensorplate-cli_*_amd64.deb ..
           ls ../tensorplate-cli_*_amd64.deb
 
+      - name: Stage tensorplate-python SDK distribution
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-python-dist
+          path: ${{ runner.temp }}/sdk-python
+
       - name: Build Debian packages and release manifest
         shell: bash
         env:
@@ -276,6 +325,7 @@ jobs:
             --manifest "$MANIFEST"
             --checksums "$CHECKSUMS"
             --arch arm64
+            --sdk-dist-dir "${RUNNER_TEMP}/sdk-python"
           )
           if [[ "$PUBLISH" != "true" ]]; then
             args+=(--skip-tag-verify)
@@ -414,6 +464,8 @@ jobs:
           subject-path: |
             ${{ needs.build_packages.outputs.release_dir }}/*.deb
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
 
@@ -424,6 +476,8 @@ jobs:
           path: |
             ${{ needs.build_packages.outputs.release_dir }}/*.deb
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
             ${{ needs.build_packages.outputs.bundle }}
@@ -464,7 +518,12 @@ jobs:
             echo "::error::expected signed SHA256SUMS.cosign.bundle release asset"
             exit 1
           }
-          assets=("${deb_assets[@]}" "$installer" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
+          sdk_assets=("${RELEASE_DIR}"/tensorplate_python-*.whl "${RELEASE_DIR}"/tensorplate_python-*.tar.gz)
+          ((${#sdk_assets[@]} == 2)) || {
+            echo "::error::expected tensorplate-python wheel and sdist release assets"
+            exit 1
+          }
+          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
 
           args=(release create "$TAG" "${assets[@]}" --verify-tag --title "TensorPlate ${TAG}" --notes-file "$NOTES")
           if [[ "$PRERELEASE" == "true" ]]; then

@@ -899,6 +899,30 @@ artifacts.append(
     }
 )
 
+# tensorplate-python SDK wheel + sdist (client-only, pure Python). Included
+# in the signed manifest and SHA256SUMS when staged into the artifacts dir;
+# absent from runtime-only snapshot builds.
+for sdk_kind, sdk_pattern in (
+    ("python-wheel", f"tensorplate_python-{version}-py3-none-any.whl"),
+    ("python-sdist", f"tensorplate_python-{version}.tar.gz"),
+):
+    sdk_matches = sorted(root.glob(sdk_pattern))
+    if not sdk_matches:
+        continue
+    if len(sdk_matches) != 1:
+        raise SystemExit(f"expected exactly one {sdk_kind} matching {sdk_pattern} in {root}; found {len(sdk_matches)}")
+    sdk_path = sdk_matches[0]
+    artifacts.append(
+        {
+            "file": sdk_path.name,
+            "kind": sdk_kind,
+            "version": version,
+            "target_os": "Python 3.10+ (any platform)",
+            "size_bytes": sdk_path.stat().st_size,
+            "sha256": sha256(sdk_path),
+        }
+    )
+
 snapshot = "~dev." in version or tag.startswith("snapshot-")
 # Releases ship the workstation CLI for Ubuntu AMD64; snapshot builds are
 # single-architecture local-source flows and may omit it.
@@ -1014,6 +1038,10 @@ if not snapshot and not any(
     raise SystemExit("manifest is missing the required tensorplate-cli amd64 desktop asset")
 if not any(artifact.get("file") == "install.sh" for artifact in manifest.get("artifacts", [])):
     raise SystemExit("manifest is missing install.sh")
+if not snapshot:
+    for sdk_kind in ("python-wheel", "python-sdist"):
+        if not any(artifact.get("kind") == sdk_kind for artifact in manifest.get("artifacts", [])):
+            raise SystemExit(f"manifest is missing the required tensorplate-python {sdk_kind}")
 print("manifest verified")
 PY
 }

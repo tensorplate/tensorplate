@@ -45,6 +45,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   loop (per-frame; OpenCV capture is an optional, example-only
   dependency). Documented as samples — not supported in-runtime ingest,
   DeepStream, or streaming. (V013-F02-T04)
+- SDK release packaging: the release workflow builds the
+  `tensorplate-python` wheel + sdist at the release version, folds them into
+  the cosign-signed `SHA256SUMS` + artifact manifest, and attaches them to
+  the GitHub Release alongside the runtime/CLI assets — so the SDK installs
+  from a signed release artifact under the same integrity model. A build +
+  `twine check` + clean-environment install gate runs in CI. PyPI
+  publication is intentionally deferred to a follow-up; v0.1.3 distributes
+  the SDK via the signed GitHub Release artifact. (V013-F03-T01)
 
 ## [0.1.2] - 2026-06-12
 
