@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     import numpy as np
 
 _DETECTION_TAGS = frozenset({detections.boxes, detections.scores, detections.classes})
+_DEFAULT_INPUT_NAME = "images"
 
 
 class VisionClient:
@@ -57,7 +59,7 @@ class VisionClient:
         image: str | bytes | Path | np.ndarray,
         *,
         endpoint: str,
-        input_name: str = "images",
+        input_name: str = _DEFAULT_INPUT_NAME,
         output_name: str | None = None,
         score_threshold: float = 0.25,
         nms_threshold: float = 0.45,
@@ -76,7 +78,11 @@ class VisionClient:
         ``semantic_tag``; an ambiguous response fails clearly.
         """
         if preprocess_config is not None:
-            config = preprocess_config
+            config = (
+                preprocess_config
+                if input_name == _DEFAULT_INPUT_NAME
+                else replace(preprocess_config, input_name=input_name)
+            )
         else:
             config = PreprocessConfig(input_name=input_name)
         tensor, transform = preprocess(image, config)

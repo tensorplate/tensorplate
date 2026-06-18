@@ -53,11 +53,15 @@ def test_select_ambiguous_fails_clearly() -> None:
 
 class _CannedServer(ThreadingHTTPServer):
     routes: dict[tuple[str, str], tuple[int, object]]
+    captured: list[bytes]
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
-        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        server = self.server
+        assert isinstance(server, _CannedServer)
+        server.captured.append(body)
         self._reply(("POST", self.path))
 
     def do_GET(self) -> None:
@@ -82,6 +86,7 @@ class _Handler(BaseHTTPRequestHandler):
 def server() -> Iterator[_CannedServer]:
     httpd = _CannedServer(("127.0.0.1", 0), _Handler)
     httpd.routes = {}
+    httpd.captured = []
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
@@ -124,6 +129,7 @@ def test_detect_end_to_end(server: _CannedServer) -> None:
     dets = client.detect(
         image,
         endpoint="m",
+        input_name="custom_images",
         score_threshold=0.25,
         labels=["obj"],
         preprocess_config=PreprocessConfig(input_size=(320, 320)),
@@ -135,3 +141,5 @@ def test_detect_end_to_end(server: _CannedServer) -> None:
     assert dets[0].score == pytest.approx(0.9)
     # letterbox: scale 2.0, pad_y 70 -> model box (120,120,200,200) maps to source pixels
     assert dets[0].box == pytest.approx((60.0, 25.0, 100.0, 65.0))
+    sent = json.loads(server.captured[0])
+    assert sent["inputs"][0]["name"] == "custom_images"
