@@ -23,6 +23,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   CLI precedence (explicit URL, CLI profile, read-only agent discovery,
   loopback default) with the same URL canonicalization. (V013-F01-T02,
   V013-F01-T03)
+- Vision detection helpers (the `tensorplate-python[vision]` extra —
+  numpy + Pillow): client-side image preprocessing (`preprocess`,
+  `PreprocessConfig`, `LetterboxTransform`) that decodes path/bytes/ndarray
+  images and letterboxes them into NCHW float32 input tensors while
+  recording the transform for source-pixel box back-mapping; and
+  YOLOv8-style postprocessing (`decode_detections`, `Detection`,
+  class-aware NMS, the `yolo_v8_single_output` contract, and the
+  `detections.*` semantic-tag constants). The core install stays
+  dependency-free. (V013-F02-T01, V013-F02-T02)
 
 ## [0.1.2] - 2026-06-12
 
