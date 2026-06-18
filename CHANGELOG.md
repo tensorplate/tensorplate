@@ -39,6 +39,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   output explicitly, by single-output, or by a `detections.*`
   `semantic_tag`, and returns source-pixel `Detection`s. Synchronous in
   v0.1.3. (V013-F02-T03)
+- Vision detection SDK examples (`examples/vision_detection_sdk/`):
+  `yolo_detect.py` detects on an image via `VisionClient.detect`, and
+  `camera_infer.py` is a user-space reference `camera -> SDK -> /infer`
+  loop (per-frame; OpenCV capture is an optional, example-only
+  dependency). Documented as samples — not supported in-runtime ingest,
+  DeepStream, or streaming. (V013-F02-T04)
 
 ## [0.1.2] - 2026-06-12
 
