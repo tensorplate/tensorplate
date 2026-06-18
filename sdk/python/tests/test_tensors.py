@@ -67,6 +67,17 @@ def test_output_honors_byte_offset_and_size() -> None:
     assert TensorOutput.from_named_output(obj).data == struct.pack("<i", 5)
 
 
+def test_output_accepts_zero_and_padded_byte_size() -> None:
+    data = struct.pack("<i", 5)
+    for byte_size in (0, 8):
+        obj = {
+            "name": "o",
+            "tensor": {"dtype": "int32", "shape": [1], "byte_size": byte_size},
+            "payload_b64": base64.b64encode(data + b"\xff" * 4).decode("ascii"),
+        }
+        assert TensorOutput.from_named_output(obj).data == data
+
+
 def test_output_reports_semantic_tag() -> None:
     obj = {
         "name": "d",

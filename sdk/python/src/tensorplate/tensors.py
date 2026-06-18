@@ -206,10 +206,10 @@ class TensorOutput:
             size_obj = tensor.get("byte_size")
             if not isinstance(size_obj, int) or isinstance(size_obj, bool) or size_obj < 0:
                 raise ProtocolError(f"serving output {name!r} has an invalid 'byte_size'")
-            size = size_obj
+            size = expected_size if size_obj == 0 else size_obj
         else:
             size = expected_size
-        if size != expected_size:
+        if size < expected_size:
             raise ProtocolError(
                 f"serving output {name!r} byte_size is {size}, expected {expected_size} "
                 f"for dtype {dtype.value} shape {shape}"
@@ -217,7 +217,7 @@ class TensorOutput:
         end = offset + size
         if len(raw) < end:
             raise ProtocolError(f"serving output {name!r} payload is {len(raw)} bytes, need {end}")
-        data = raw[offset:end]
+        data = raw[offset : offset + expected_size]
         semantic_tag = obj.get("semantic_tag")
         return cls(
             name=name,
