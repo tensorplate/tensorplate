@@ -1147,6 +1147,10 @@ cmd_publish() {
   find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "tensorplate-cli_*_amd64.deb" | grep -q . ||
     die "missing required tensorplate-cli amd64 desktop asset in $ARTIFACTS_DIR"
   assets+=("${deb_assets[@]}")
+  local sdk_assets=("$ARTIFACTS_DIR"/tensorplate_python-*.whl "$ARTIFACTS_DIR"/tensorplate_python-*.tar.gz)
+  ((${#sdk_assets[@]} == 2)) ||
+    die "expected tensorplate-python wheel and sdist release assets in $ARTIFACTS_DIR"
+  assets+=("${sdk_assets[@]}")
   [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
   local checksums_bundle="${CHECKSUMS}.cosign.bundle"
   [[ -f "$checksums_bundle" ]] ||
