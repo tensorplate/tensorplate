@@ -10,9 +10,25 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from tensorplate.errors import TensorPlateError
+from tensorplate.client import (
+    LOOPBACK_DEFAULT,
+    ResolvedEndpoint,
+    canonicalize_serving_url,
+    resolve_serving_url,
+)
+from tensorplate.errors import (
+    EndpointResolutionError,
+    ErrorCode,
+    ProtocolError,
+    RequestTimeoutError,
+    ServingError,
+    TensorPlateError,
+    TransportError,
+    UnsupportedSchemaVersionError,
+)
 from tensorplate.postprocess import Detection
-from tensorplate.serving import ServingClient
+from tensorplate.serving import HealthSnapshot, InferResult, ServingClient, Timing
+from tensorplate.tensors import DType, Layout, TensorInput, TensorOutput
 from tensorplate.vision import VisionClient
 
 try:
@@ -21,9 +37,27 @@ except PackageNotFoundError:  # pragma: no cover - only hit outside an installed
     __version__ = "0.0.0+unknown"
 
 __all__ = [
+    "LOOPBACK_DEFAULT",
+    "DType",
     "Detection",
+    "EndpointResolutionError",
+    "ErrorCode",
+    "HealthSnapshot",
+    "InferResult",
+    "Layout",
+    "ProtocolError",
+    "RequestTimeoutError",
+    "ResolvedEndpoint",
     "ServingClient",
+    "ServingError",
+    "TensorInput",
+    "TensorOutput",
     "TensorPlateError",
+    "Timing",
+    "TransportError",
+    "UnsupportedSchemaVersionError",
     "VisionClient",
     "__version__",
+    "canonicalize_serving_url",
+    "resolve_serving_url",
 ]
