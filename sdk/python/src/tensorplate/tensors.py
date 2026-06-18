@@ -181,8 +181,16 @@ class TensorOutput:
                 f"serving output {name!r} has unknown layout {layout_value!r}"
             ) from exc
         shape_raw = tensor.get("shape")
-        if not isinstance(shape_raw, list) or not all(isinstance(dim, int) for dim in shape_raw):
+        if (
+            not isinstance(shape_raw, list)
+            or not shape_raw
+            or not all(
+                isinstance(dim, int) and not isinstance(dim, bool) and dim >= 1 for dim in shape_raw
+            )
+        ):
             raise ProtocolError(f"serving output {name!r} has an invalid 'shape'")
+        shape = tuple(int(dim) for dim in shape_raw)
+        expected_size = _ITEMSIZE[dtype] * math.prod(shape)
         payload_b64 = obj.get("payload_b64")
         if not isinstance(payload_b64, str):
             raise ProtocolError(f"serving output {name!r} is missing 'payload_b64'")
@@ -190,23 +198,31 @@ class TensorOutput:
             raw = base64.b64decode(payload_b64, validate=True)
         except ValueError as exc:
             raise ProtocolError(f"serving output {name!r} has an invalid base64 payload") from exc
-        offset = tensor.get("byte_offset", 0)
-        offset = offset if isinstance(offset, int) else 0
-        size = tensor.get("byte_size")
-        if isinstance(size, int):
-            end = offset + size
-            if len(raw) < end:
-                raise ProtocolError(
-                    f"serving output {name!r} payload is {len(raw)} bytes, need {end}"
-                )
-            data = raw[offset:end]
+        offset_obj = tensor.get("byte_offset", 0)
+        if not isinstance(offset_obj, int) or isinstance(offset_obj, bool) or offset_obj < 0:
+            raise ProtocolError(f"serving output {name!r} has an invalid 'byte_offset'")
+        offset = offset_obj
+        if "byte_size" in tensor:
+            size_obj = tensor.get("byte_size")
+            if not isinstance(size_obj, int) or isinstance(size_obj, bool) or size_obj < 0:
+                raise ProtocolError(f"serving output {name!r} has an invalid 'byte_size'")
+            size = size_obj
         else:
-            data = raw[offset:]
+            size = expected_size
+        if size != expected_size:
+            raise ProtocolError(
+                f"serving output {name!r} byte_size is {size}, expected {expected_size} "
+                f"for dtype {dtype.value} shape {shape}"
+            )
+        end = offset + size
+        if len(raw) < end:
+            raise ProtocolError(f"serving output {name!r} payload is {len(raw)} bytes, need {end}")
+        data = raw[offset:end]
         semantic_tag = obj.get("semantic_tag")
         return cls(
             name=name,
             dtype=dtype,
-            shape=tuple(int(dim) for dim in shape_raw),
+            shape=shape,
             data=data,
             layout=layout,
             semantic_tag=semantic_tag if isinstance(semantic_tag, str) else None,

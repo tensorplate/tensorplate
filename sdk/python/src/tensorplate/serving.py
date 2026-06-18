@@ -139,8 +139,16 @@ class ServingClient:
         :class:`~tensorplate.errors.UnsupportedSchemaVersionError` for a
         malformed or unsupported response.
         """
+        if not endpoint:
+            raise ValueError("infer endpoint must be non-empty")
         if not inputs:
             raise ValueError("infer requires at least one input tensor")
+        if deadline_ms is not None and (
+            not isinstance(deadline_ms, int) or isinstance(deadline_ms, bool) or deadline_ms < 1
+        ):
+            raise ValueError("deadline_ms must be an integer greater than or equal to 1")
+        if correlation_id is not None and not correlation_id:
+            raise ValueError("correlation_id must be non-empty when provided")
         request_id = str(uuid.uuid4())
         request_body: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
@@ -203,13 +211,15 @@ def _parse_infer_response(raw: bytes, status_code: int, url: str) -> InferResult
             f"serving response from {url!r} has unexpected status {status!r} (HTTP {status_code})"
         )
     outputs_obj = payload.get("outputs")
-    if not isinstance(outputs_obj, list):
-        raise ProtocolError(f"serving success response from {url!r} is missing 'outputs'")
+    if not isinstance(outputs_obj, list) or not outputs_obj:
+        raise ProtocolError(f"serving success response from {url!r} is missing non-empty 'outputs'")
     outputs = tuple(TensorOutput.from_named_output(item) for item in outputs_obj)
     request_id = payload.get("request_id")
+    if not isinstance(request_id, str):
+        raise ProtocolError(f"serving success response from {url!r} is missing 'request_id'")
     correlation_id = payload.get("correlation_id")
     return InferResult(
-        request_id=request_id if isinstance(request_id, str) else "",
+        request_id=request_id,
         outputs=outputs,
         correlation_id=correlation_id if isinstance(correlation_id, str) else None,
         timing=_parse_timing(payload.get("timing")),

@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from tensorplate.errors import (
+    ProtocolError,
     ServingError,
     TransportError,
     UnsupportedSchemaVersionError,
@@ -110,6 +111,19 @@ def test_infer_success_and_request_shape(server: _CannedServer) -> None:
     assert "payload_b64" in sent["inputs"][0]
 
 
+def test_infer_rejects_invalid_request_fields(server: _CannedServer) -> None:
+    client = _client(server)
+    tensor = ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))
+
+    with pytest.raises(ValueError, match="endpoint"):
+        client.infer("", [tensor])
+    with pytest.raises(ValueError, match="deadline_ms"):
+        client.infer("model", [tensor], deadline_ms=0)
+    with pytest.raises(ValueError, match="correlation_id"):
+        client.infer("model", [tensor], correlation_id="")
+    assert server.captured == []
+
+
 def test_infer_failure_maps_to_serving_error(server: _CannedServer) -> None:
     server.routes[("POST", "/infer")] = (
         200,
@@ -132,6 +146,25 @@ def test_infer_rejects_unsupported_schema_version(server: _CannedServer) -> None
         {"schema_version": "0.2", "status": "success", "outputs": []},
     )
     with pytest.raises(UnsupportedSchemaVersionError):
+        _client(server).infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"schema_version": "0.1", "request_id": "r-1", "status": "success", "outputs": []},
+        {
+            "schema_version": "0.1",
+            "status": "success",
+            "outputs": _success_body()["outputs"],
+        },
+    ],
+)
+def test_infer_rejects_malformed_success_response(
+    server: _CannedServer, body: dict[str, object]
+) -> None:
+    server.routes[("POST", "/infer")] = (200, body)
+    with pytest.raises(ProtocolError):
         _client(server).infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
 
 

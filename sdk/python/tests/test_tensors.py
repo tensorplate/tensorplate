@@ -87,6 +87,25 @@ def test_output_rejects_unknown_dtype() -> None:
         TensorOutput.from_named_output(obj)
 
 
+@pytest.mark.parametrize(
+    ("tensor", "match"),
+    [
+        ({"dtype": "int32", "shape": [0], "byte_size": 4}, "shape"),
+        ({"dtype": "int32", "shape": [1], "byte_offset": -1, "byte_size": 4}, "byte_offset"),
+        ({"dtype": "int32", "shape": [1], "byte_size": -4}, "byte_size"),
+        ({"dtype": "int32", "shape": [1], "byte_size": 2}, "expected 4"),
+    ],
+)
+def test_output_rejects_invalid_tensor_metadata(tensor: dict[str, object], match: str) -> None:
+    obj = {
+        "name": "o",
+        "tensor": tensor,
+        "payload_b64": base64.b64encode(b"\x00\x00\x00\x00").decode("ascii"),
+    }
+    with pytest.raises(ProtocolError, match=match):
+        TensorOutput.from_named_output(obj)
+
+
 def test_output_rejects_short_payload() -> None:
     obj = {
         "name": "o",
