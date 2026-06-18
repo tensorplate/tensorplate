@@ -31,6 +31,9 @@ dependencies = []
 # Optional array access: ServingClient works without numpy; the tensor
 # `.to_numpy()` / `.from_numpy()` helpers require it.
 numpy = ["numpy>=1.22"]
+# Vision helpers (preprocessing + detector postprocessing): array ops plus
+# Pillow image decoding. The superset detection workflows install.
+vision = ["numpy>=1.22", "pillow>=9.1"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -91,7 +94,7 @@ files = ["src", "tests"]
 # The dev/CI gate does not install it, so it is ignored when missing; the
 # code also type-checks cleanly when numpy is present.
 [[tool.mypy.overrides]]
-module = ["numpy", "numpy.*"]
+module = ["numpy", "numpy.*", "PIL", "PIL.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

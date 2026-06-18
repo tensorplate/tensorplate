@@ -16,6 +16,7 @@ from tensorplate.client import (
     canonicalize_serving_url,
     resolve_serving_url,
 )
+from tensorplate.conventions import YOLO_V8_SINGLE_OUTPUT, detections
 from tensorplate.errors import (
     EndpointResolutionError,
     ErrorCode,
@@ -26,7 +27,8 @@ from tensorplate.errors import (
     TransportError,
     UnsupportedSchemaVersionError,
 )
-from tensorplate.postprocess import Detection
+from tensorplate.postprocess import Detection, decode_detections
+from tensorplate.preprocess import LetterboxTransform, PreprocessConfig, preprocess
 from tensorplate.serving import HealthSnapshot, InferResult, ServingClient, Timing
 from tensorplate.tensors import DType, Layout, TensorInput, TensorOutput
 from tensorplate.vision import VisionClient
@@ -38,6 +40,7 @@ except PackageNotFoundError:  # pragma: no cover - only hit outside an installed
 
 __all__ = [
     "LOOPBACK_DEFAULT",
+    "YOLO_V8_SINGLE_OUTPUT",
     "DType",
     "Detection",
     "EndpointResolutionError",
@@ -45,6 +48,8 @@ __all__ = [
     "HealthSnapshot",
     "InferResult",
     "Layout",
+    "LetterboxTransform",
+    "PreprocessConfig",
     "ProtocolError",
     "RequestTimeoutError",
     "ResolvedEndpoint",
@@ -59,5 +64,8 @@ __all__ = [
     "VisionClient",
     "__version__",
     "canonicalize_serving_url",
+    "decode_detections",
+    "detections",
+    "preprocess",
     "resolve_serving_url",
 ]
