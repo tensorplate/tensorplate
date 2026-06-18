@@ -36,6 +36,7 @@ Options:
   --snapshot             Build unreleased local-source snapshot artifacts.
   --branch BRANCH        Branch/provenance label for snapshot manifests.
   --build-dir DIR        CMake build directory. Defaults to build/release, or build/snapshot-ARCH for snapshots.
+  --sdk-dist-dir DIR     Directory holding the tensorplate-python wheel + sdist to include in the release.
 EOF
 }
 
@@ -60,6 +61,7 @@ SKIP_TAG_VERIFY=0
 SNAPSHOT=0
 BRANCH=""
 CHANGELOG_BACKUP=""
+SDK_DIST_DIR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --snapshot) SNAPSHOT=1; shift ;;
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
+    --sdk-dist-dir) SDK_DIST_DIR="${2:-}"; shift 2 ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
@@ -324,6 +327,19 @@ if [[ "$TARGET_ARCH" != "amd64" ]]; then
 fi
 cp "${debs[@]}" "$ARTIFACTS_DIR/"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
+
+# The tensorplate-python SDK wheel + sdist are built by a separate hosted
+# job (pure Python; no Jetson toolchain) and staged here so they are covered
+# by the same signed manifest and SHA256SUMS as the runtime/CLI assets.
+if [[ -n "$SDK_DIST_DIR" ]]; then
+  note "staging tensorplate-python SDK wheel and sdist"
+  shopt -s nullglob
+  sdk_dists=("$SDK_DIST_DIR"/tensorplate_python-*.whl "$SDK_DIST_DIR"/tensorplate_python-*.tar.gz)
+  shopt -u nullglob
+  ((${#sdk_dists[@]} == 2)) ||
+    die "expected one tensorplate-python wheel and one sdist in $SDK_DIST_DIR; found ${#sdk_dists[@]}"
+  cp "${sdk_dists[@]}" "$ARTIFACTS_DIR/"
+fi
 
 note "generating manifest and checksums"
 manifest_args=(
