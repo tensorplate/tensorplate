@@ -40,9 +40,9 @@ python -c "from tensorplate import ServingClient, VisionClient, Detection, Tenso
 - [ ] Wheel installs into a clean environment with no source checkout.
 - [ ] `tensorplate.__version__` matches the release version.
 - [ ] Core import and the public symbols resolve.
-- [ ] PyPI install (`pip install tensorplate-python`): **deferred for
-      v0.1.3** — PyPI publication is not enabled. Record N/A; this row
-      becomes required once the project is published.
+- [ ] PyPI install (`pip install tensorplate-python`) resolves the released
+      version and the public symbols import. Required for final releases
+      (release candidates never publish to PyPI — record N/A for an RC).
 
 ## 2. Fixture integration tests
 
@@ -118,7 +118,9 @@ A recorded run is in
 ## Observed evidence: YOLOv8n on Jetson Orin Nano (2026-06-18)
 
 A full hardware-in-the-loop run of the v0.1.3 SDK against a real deployed
-detector. **Decision: pass** (the PyPI-publish row is N/A — deferred).
+detector. **Decision: pass** (the PyPI-publish row was N/A for this run —
+PyPI publishing was enabled in a later change; the wheel + import checks
+above passed).
 
 Target:
 

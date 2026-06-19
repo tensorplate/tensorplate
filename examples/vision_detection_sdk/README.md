@@ -12,13 +12,12 @@ over the v0.1 serving `/infer` endpoint.
 
 ## Install
 
-> For v0.1.3 the SDK installs from the signed release wheel (PyPI is
-> deferred) — see the [SDK quickstart](../../docs/sdk/python.md#install).
-> These samples need the `[vision]` extra:
+These samples need the `[vision]` extra (numpy + Pillow) plus OpenCV for the
+camera sample:
 
 ```bash
-pip install "./tensorplate_python-<version>-py3-none-any.whl[vision]"   # numpy + Pillow (image decode + arrays)
-pip install opencv-python                                               # only for camera_infer.py
+pip install "tensorplate-python[vision]"   # numpy + Pillow (image decode + arrays)
+pip install opencv-python                   # only for camera_infer.py
 ```
 
 ## `yolo_detect.py` — detect on a single image

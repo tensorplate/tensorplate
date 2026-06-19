@@ -536,3 +536,47 @@ jobs:
           fi
 
           gh "${args[@]}"
+
+  publish-pypi:
+    name: publish tensorplate-python to PyPI
+    needs: [meta, publish-release]
+    # Publishes via PyPI Trusted Publishing (OIDC) through the protected
+    # `pypi` environment. Gated: final releases only (release candidates never
+    # publish to PyPI), and only when repository variable
+    # PUBLISH_SDK_TO_PYPI=true. Requires the PyPI Trusted Publisher to be
+    # configured for this repo + workflow + environment.
+    if: ${{ needs.meta.outputs.publish == 'true' && needs.meta.outputs.prerelease == 'false' && vars.PUBLISH_SDK_TO_PYPI == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tensorplate-python/${{ needs.meta.outputs.version }}/
+    permissions:
+      id-token: write  # OIDC for PyPI Trusted Publishing; no long-lived token stored
+
+    steps:
+      - name: Download signed release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-${{ needs.meta.outputs.tag }}-release-assets
+          path: release-assets
+
+      - name: Collect the signed SDK wheel + sdist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p pypi-dist
+          find release-assets -type f \( -name 'tensorplate_python-*.whl' -o -name 'tensorplate_python-*.tar.gz' \) -exec cp -t pypi-dist {} +
+          ls -1 pypi-dist
+          [[ "$(find pypi-dist -type f | wc -l)" -eq 2 ]] || {
+            echo "::error::expected exactly the tensorplate-python wheel + sdist"
+            exit 1
+          }
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
+        with:
+          packages-dir: pypi-dist
+          # Trusted Publishing (OIDC) — configure the publisher on PyPI:
+          #   project: tensorplate-python | owner/repo: ${{ github.repository }}
+          #   workflow: release.yml | environment: pypi
