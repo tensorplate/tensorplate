@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-19
+
 ### Added
 
 - `tensorplate-python` Python SDK package skeleton (import package
