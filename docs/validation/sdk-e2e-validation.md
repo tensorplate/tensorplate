@@ -3,13 +3,15 @@
 This document records the release-signoff procedure and evidence format for
 the `tensorplate-python` SDK. It covers a clean install from the release
 candidate, fixture integration, compatibility with an unchanged v0.1.2
-serving worker, the failure-mode envelopes, and the deferred
-hardware-detector signoff.
+serving worker, the failure-mode envelopes, and a hardware detector signoff
+on a Jetson Orin Nano.
 
-The SDK is a client-side library; protocol / transport / health
-conformance needs **no GPU**. Real-model detector evidence (a deployed
-Jetson YOLO detector) is hardware-only and is recorded with the
-[Orin validation procedure](./orin-release-validation.md), not here.
+The SDK is a client-side library; protocol / transport / health conformance
+needs **no GPU**. Real-model detector evidence (a deployed Jetson YOLO
+detector exercised through the SDK and the camera sample) is recorded under
+[Observed evidence](#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18);
+the broader runtime procedure stays in the
+[Orin validation procedure](./orin-release-validation.md).
 
 ## Decision
 
@@ -85,16 +87,21 @@ cd sdk/python && pytest -q tests/test_e2e_worker.py
       or recorded N/A when the worker binary is unavailable in this
       environment.
 
-## 4. Hardware detector signoff (deferred to Orin procedure)
+## 4. Hardware detector signoff (Jetson Orin Nano)
 
-A real deployed Jetson YOLO detector with a golden-output tolerance is
-hardware-only and is recorded with the
-[Orin validation procedure](./orin-release-validation.md). The mock worker
-is not a detector, so `VisionClient.detect` end-to-end against a real model
-is not exercised here.
+Deploy a real YOLOv8n TensorRT detector and exercise it through
+`VisionClient.detect` and the `camera_infer.py` loop. Build the engine on the
+target with `trtexec` from an exported `yolov8n.onnx`
+(`images[1,3,640,640]` -> `output0[1,84,8400]`, the `yolo_v8_single_output`
+contract) and stage the bundle under `/var/lib/tensorplate`: the agent runs
+with `ProtectHome=yes` and `PrivateTmp=yes`, so bundles under `/home` or
+`/tmp` are not visible to it and deploy fails with a permission error.
 
-- [ ] Jetson YOLO detector golden-output validation: recorded in the Orin
-      validation evidence, or explicitly deferred for this candidate.
+- [ ] YOLOv8n golden-output detection on known images within tolerance.
+- [ ] Live USB-camera `camera_infer.py` loop produces per-frame detections.
+
+A recorded run is in
+[Observed evidence](#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18).
 
 ## 5. Release artifact, docs, and changelog checks
 
@@ -107,3 +114,47 @@ is not exercised here.
       install / quickstart docs.
 - [ ] `CHANGELOG.md` is promoted from `[Unreleased]` to the dated `[0.1.3]`
       section before the final tag.
+
+## Observed evidence: YOLOv8n on Jetson Orin Nano (2026-06-18)
+
+A full hardware-in-the-loop run of the v0.1.3 SDK against a real deployed
+detector. **Decision: pass** (the PyPI-publish row is N/A — deferred).
+
+Target:
+
+- Jetson Orin Nano 8GB Super; L4T R36 REV 5.0 (JetPack 6.x), kernel
+  `5.15.185-tegra`, `aarch64`; TensorRT 10.3, CUDA present.
+- Runtime `tensorplate 0.1.2 (protocol 0.1)`, core packages `0.1.2-1`,
+  `tensorplate doctor` failing: 0. SDK installed with the `[vision]` extra.
+  The v0.1.3 SDK running against the unchanged 0.1.2 runtime is itself the
+  v0.1.2-worker compatibility check — pass.
+
+Detector:
+
+- YOLOv8n (ultralytics 8.4.71) exported to ONNX
+  (`images[1,3,640,640]` -> `output0[1,84,8400]`) and built to a TensorRT
+  FP16 engine with `trtexec` (engine 9,467,732 bytes; GPU compute ~3.9 ms
+  mean, ~255 qps). Deployed as `validation-yolov8n` (`backend tensorrt`,
+  health `ready`).
+
+Results:
+
+- `ServingClient.health()`: `state ready`, `backend tensorrt`,
+  `active_model validation-yolov8n`.
+- `VisionClient.detect` golden output (boxes in source pixels):
+  - `bus.jpg` -> 4x `person` (0.90, 0.88, 0.87, 0.43) + 1x `bus` (0.83), the
+    canonical YOLOv8n result for this image.
+  - `zidane.jpg` -> 2x `person` (0.82, 0.82) + 1x `tie` (0.29).
+- `camera_infer.py` loop:
+  - 30-frame video source: per-frame detections throughout.
+  - Live USB webcam (`/dev/video0`, 640x480): 20-frame loop, 1-2
+    detections/frame; a grabbed frame detected `tv` (0.58).
+
+Findings:
+
+- The agent runs with `ProtectHome=yes` and `PrivateTmp=yes`; bundles must be
+  staged under `/var/lib/tensorplate` (not `/home` or `/tmp`), or deploy
+  fails with `Permission denied (os error 13)`.
+- A pip-installed `opencv-python` has no GStreamer support; a USB / V4L2
+  camera works via `--source 0`, but a CSI / MIPI camera needs a
+  GStreamer-enabled OpenCV (for example, JetPack's system build).
