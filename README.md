@@ -94,6 +94,21 @@ curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packa
 
 Full guide, troubleshooting, and source-install caveats: [Installation](https://tensorplate.com/docs/installation)
 
+### Call Deployed Models From Python
+
+The first-party `tensorplate-python` SDK calls models you have already
+deployed, over the serving `/infer` envelope:
+
+```python
+import tensorplate
+
+client = tensorplate.VisionClient("http://127.0.0.1:18080")
+detections = client.detect("frame.jpg", endpoint="yolov8n")
+```
+
+Install (from the signed release wheel; PyPI deferred), quickstart, and the
+API reference: [docs/sdk/](docs/sdk/).
+
 ### Build From Source
 
 ```bash
@@ -139,6 +154,7 @@ Prerequisites, lint/format checks, and the full CI-equivalent sequence: [local-v
 | Tests | [test/](test/) | Unit, integration, contract, HIL, benchmark |
 | Build | [cmake/](cmake/) | Toolchains, modules, feature flags |
 | Docs | [docs/](docs/) | Architecture and contributing docs |
+| Python SDK | [sdk/python/](sdk/python/) | First-party client SDK for calling deployed models from Python |
 
 Package owners, allowed dependencies, and review gates: [docs/architecture/ownership.md](docs/architecture/ownership.md).
 
