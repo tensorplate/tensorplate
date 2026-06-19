@@ -53,6 +53,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `twine check` + clean-environment install gate runs in CI. PyPI
   publication is intentionally deferred to a follow-up; v0.1.3 distributes
   the SDK via the signed GitHub Release artifact. (V013-F03-T01)
+- SDK documentation (`docs/sdk/`): a quickstart and API reference for
+  `ServingClient`, `VisionClient`, `Detection`, the tensor value objects,
+  and the typed error hierarchy; the detection workflow (preprocessing, the
+  `yolo_v8_single_output` contract, the `detections.*` convention, and
+  postprocessing); and endpoint-resolution semantics matching the CLI. The
+  package README, the example README, and the top-level README link it, and
+  `docs/release/notes/v0.1.3.md` headlines the SDK. (V013-F03-T02)
+- SDK end-to-end release validation: a serving-worker compatibility test
+  proving the SDK round-trips against the unchanged v0.1 (`schema_version`
+  `0.1`) envelope shipped since v0.1.2, an opt-in real-worker e2e test
+  (`TENSORPLATE_SERVING_WORKER_BIN`) that exercises the `tensorplate-serving`
+  mock worker, and a release-signoff checklist
+  (`docs/validation/sdk-e2e-validation.md`) covering clean install, fixture
+  integration, the failure/transport/schema cases, v0.1.2 compatibility, and
+  the deferred Jetson detector signoff. (V013-F03-T03)
 
 ## [0.1.2] - 2026-06-12
 
