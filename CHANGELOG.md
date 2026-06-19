@@ -48,11 +48,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - SDK release packaging: the release workflow builds the
   `tensorplate-python` wheel + sdist at the release version, folds them into
   the cosign-signed `SHA256SUMS` + artifact manifest, and attaches them to
-  the GitHub Release alongside the runtime/CLI assets — so the SDK installs
-  from a signed release artifact under the same integrity model. A build +
-  `twine check` + clean-environment install gate runs in CI. PyPI
-  publication is intentionally deferred to a follow-up; v0.1.3 distributes
-  the SDK via the signed GitHub Release artifact. (V013-F03-T01)
+  the GitHub Release alongside the runtime/CLI assets. The SDK is published to
+  PyPI via Trusted Publishing (OIDC, through a protected `pypi` environment,
+  on final releases only); the same signed wheel + sdist remain attached to
+  the GitHub Release for checksum/cosign-verified installs. A build +
+  `twine check` + clean-environment install gate runs in CI. (V013-F03-T01)
 - SDK documentation (`docs/sdk/`): a quickstart and API reference for
   `ServingClient`, `VisionClient`, `Detection`, the tensor value objects,
   and the typed error hierarchy; the detection workflow (preprocessing, the
