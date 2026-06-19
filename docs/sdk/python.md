@@ -15,14 +15,21 @@ capabilities (see [Scope and non-goals](#scope-and-non-goals)).
 
 ## Install
 
-> **PyPI publication is deferred for v0.1.3.** The SDK ships as a signed
-> artifact attached to the matching GitHub Release — the wheel and sdist
-> are covered by the release `SHA256SUMS` and its cosign signature, exactly
-> like the runtime packages. Install from that wheel. Once the project is
-> published, `pip install tensorplate-python` becomes the primary path; it
-> is not yet available.
+```bash
+pip install tensorplate-python            # core client (no third-party deps)
+pip install "tensorplate-python[numpy]"   # + numpy for tensor array access
+pip install "tensorplate-python[vision]"  # + numpy & Pillow for VisionClient.detect
+```
 
-Download the wheel and the signature material from the release:
+`import tensorplate` and constructing a `ServingClient` with raw-bytes
+tensors never import numpy or Pillow; the optional dependencies load lazily
+only when you call an array or vision helper.
+
+### Verified / air-gapped install
+
+The same wheel + sdist are attached to each GitHub Release, cosign-signed and
+covered by the release `SHA256SUMS`. Use this path to verify provenance or
+install offline. Download the wheel and signature material:
 
 ```bash
 export TP_VERSION=0.1.3
@@ -50,30 +57,11 @@ sha256sum -c SHA256SUMS 2>/dev/null | grep tensorplate_python
 ```
 
 The signature must report `Verified OK` and the wheel must report `OK`.
-Then install it:
+Then install it (append `[vision]` for the detection helpers):
 
 ```bash
-pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl"
+pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"
 ```
-
-### Extras
-
-The core install is dependency-free — `ServingClient` and the raw-bytes
-tensor helpers run on the standard library alone. Array access and the
-vision helpers pull optional dependencies:
-
-```bash
-pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl"          # core: ServingClient, raw-bytes tensors
-pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[numpy]"   # + numpy: TensorInput.from_numpy / TensorOutput.to_numpy
-pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"  # + numpy + Pillow: VisionClient.detect, preprocess, decode_detections
-```
-
-Once `tensorplate-python` is on PyPI the equivalents are
-`pip install tensorplate-python`, `pip install "tensorplate-python[numpy]"`,
-and `pip install "tensorplate-python[vision]"`. Either way, `import
-tensorplate` and constructing a `ServingClient` with raw-bytes tensors
-never import numpy or Pillow; the optional dependencies load lazily only
-when you call an array or vision helper.
 
 ## Quickstart
 

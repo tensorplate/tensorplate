@@ -12,16 +12,15 @@ import tensorplate
 
 ## Install
 
-> PyPI publication is deferred for v0.1.3. Install the SDK from the signed
-> wheel attached to the matching GitHub Release; `pip install
-> tensorplate-python` becomes the primary path once the project is
-> published. See the [SDK quickstart](../../docs/sdk/python.md#install) for
-> the download-and-verify flow and the `[numpy]` / `[vision]` extras.
-
 ```bash
-# v0.1.3: install from the signed release wheel
-pip install "./tensorplate_python-<version>-py3-none-any.whl"
+pip install tensorplate-python            # core client
+pip install "tensorplate-python[vision]"  # + numpy & Pillow for VisionClient.detect
 ```
+
+The wheel + sdist are also attached to each signed GitHub Release for
+checksum-verified or air-gapped installs. See the
+[SDK quickstart](../../docs/sdk/python.md#install) for that flow and the
+`[numpy]` / `[vision]` extras.
 
 ## Ownership
 
