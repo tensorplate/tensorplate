@@ -16,7 +16,7 @@ from tensorplate.errors import (
     TransportError,
     UnsupportedSchemaVersionError,
 )
-from tensorplate.serving import ServingClient
+from tensorplate.serving import SCHEMA_VERSION, ServingClient
 from tensorplate.tensors import DType
 
 
@@ -206,3 +206,23 @@ def test_health_degraded_returns_state_not_just_http(server: _CannedServer) -> N
     assert snapshot.state == "failed"
     assert snapshot.last_error_code is not None
     assert snapshot.last_error_code.value == "load_failed"
+
+
+def test_round_trips_against_unchanged_v0_1_2_worker(server: _CannedServer) -> None:
+    # The /infer and /health envelope is schema_version "0.1", pinned
+    # unchanged since v0.1.2, so the SDK works against an unchanged v0.1.2
+    # serving worker without any code path difference.
+    assert SCHEMA_VERSION == "0.1"
+    server.routes[("GET", "/health")] = (
+        200,
+        {"schema_version": "0.1", "state": "ready", "endpoint": "default", "backend": "trt"},
+    )
+    server.routes[("POST", "/infer")] = (200, _success_body())
+    client = _client(server)
+    assert client.health().is_ready
+    result = client.infer(
+        "m", [ServingClient.tensor_input("x", b"\x00\x00\x80?", DType.FLOAT32, (1,))]
+    )
+    assert result.request_id == "r-1"
+    sent = json.loads(server.captured[0])
+    assert sent["schema_version"] == "0.1"
