@@ -106,7 +106,7 @@ client = tensorplate.VisionClient("http://127.0.0.1:18080")
 detections = client.detect("frame.jpg", endpoint="yolov8n")
 ```
 
-Install (from the signed release wheel; PyPI deferred), quickstart, and the
+Install (`pip install tensorplate-python`), quickstart, and the
 API reference: [docs/sdk/](docs/sdk/).
 
 ### Build From Source
