@@ -162,11 +162,11 @@ std::string make_binary_infer_body(const std::string& request_id) {
   body["schema_version"] = "0.1";
   body["request_id"] = request_id;
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {2, 2}}, {"byte_size", 4}}},
-        {"payload_offset", 0},
-        {"payload_size", 4}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {2, 2}}, {"byte_size", 4}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 4}}});
   const std::string metadata = body.dump();
   std::string wire;
   wire.append(serving::kBinaryInferMagic.data(), serving::kBinaryInferMagic.size());
@@ -244,14 +244,12 @@ TEST(ServingE2E, InferRouteHappyPath) {
 TEST(ServingE2E, InferRouteBinaryHappyPath) {
   auto h = ServingHarness::start(default_test_config());
   HttpClient client("127.0.0.1", h.port);
-  auto resp = client.post(
-      "/infer", make_binary_infer_body("bin-req"),
-      {{"content-type", std::string(serving::kBinaryInferContentType.data(),
-                                    serving::kBinaryInferContentType.size())}});
+  auto resp = client.post("/infer", make_binary_infer_body("bin-req"),
+                          {{"content-type", std::string(serving::kBinaryInferContentType.data(),
+                                                        serving::kBinaryInferContentType.size())}});
   ASSERT_EQ(resp.status, 200) << resp.body;
-  EXPECT_EQ(resp.header("content-type"),
-            std::string(serving::kBinaryInferContentType.data(),
-                        serving::kBinaryInferContentType.size()));
+  EXPECT_EQ(resp.header("content-type"), std::string(serving::kBinaryInferContentType.data(),
+                                                     serving::kBinaryInferContentType.size()));
   EXPECT_FALSE(resp.header("x-correlation-id").empty());
   ASSERT_GE(resp.body.size(), serving::kBinaryResultMagic.size() + sizeof(std::uint32_t));
   EXPECT_EQ(resp.body.substr(0, serving::kBinaryResultMagic.size()),
@@ -260,10 +258,8 @@ TEST(ServingE2E, InferRouteBinaryHappyPath) {
   const auto meta_len =
       static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset])) |
       (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 1])) << 8U) |
-      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 2]))
-       << 16U) |
-      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 3]))
-       << 24U);
+      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 2])) << 16U) |
+      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 3])) << 24U);
   const auto meta_start = meta_offset + sizeof(std::uint32_t);
   ASSERT_LE(meta_start + meta_len, resp.body.size());
   auto meta = nlohmann::json::parse(resp.body.substr(meta_start, meta_len));

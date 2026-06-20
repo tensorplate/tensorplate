@@ -137,11 +137,11 @@ TEST(ServingSerialization, DecodeBinaryInferRequestMinimal) {
   body["schema_version"] = "0.1";
   body["request_id"] = "bin-1";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {2, 2}}, {"byte_size", 4}}},
-        {"payload_offset", 0},
-        {"payload_size", 4}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {2, 2}}, {"byte_size", 4}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 4}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0\1\2\3", 4}));
   ASSERT_TRUE(r) << r.error().message;
   auto d = std::move(r).value();
@@ -156,16 +156,17 @@ TEST(ServingSerialization, DecodeBinaryInferRequestAcceptsMultiInput) {
   body["schema_version"] = "0.1";
   body["request_id"] = "bin-multi";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {2}}, {"byte_size", 2}}},
-        {"payload_offset", 0},
-        {"payload_size", 2}},
-       {{"name", "meta"},
-        {"tensor", {{"dtype", "int32"}, {"shape", {1}}, {"byte_size", 4}}},
-        {"payload_offset", 2},
-        {"payload_size", 4}}});
-  auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\1\2\3\4\5\6", 6}));
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {2}}, {"byte_size", 2}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 2}},
+                             {{"name", "meta"},
+                              {"tensor", {{"dtype", "int32"}, {"shape", {1}}, {"byte_size", 4}}},
+                              {"payload_offset", 2},
+                              {"payload_size", 4}}});
+  auto r =
+      decode_binary_infer_request(make_binary_infer_body(body, std::string{"\1\2\3\4\5\6", 6}));
   ASSERT_TRUE(r) << r.error().message;
   auto d = std::move(r).value();
   ASSERT_EQ(d.inputs.size(), 2U);
@@ -214,11 +215,11 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsShortPayload) {
   nlohmann::json body;
   body["request_id"] = "short";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {4}}, {"byte_size", 4}}},
-        {"payload_offset", 0},
-        {"payload_size", 2}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {4}}, {"byte_size", 4}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 2}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0\1", 2}));
   ASSERT_FALSE(r);
   EXPECT_EQ(r.error().code, Error::Code::ShapeMismatch);
@@ -228,11 +229,11 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsInvalidOffset) {
   nlohmann::json body;
   body["request_id"] = "offset";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {1}}, {"byte_size", 1}}},
-        {"payload_offset", -1},
-        {"payload_size", 1}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {1}}, {"byte_size", 1}}},
+                              {"payload_offset", -1},
+                              {"payload_size", 1}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0", 1}));
   ASSERT_FALSE(r);
   EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
@@ -242,11 +243,11 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsPayloadOverrun) {
   nlohmann::json body;
   body["request_id"] = "overrun";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "uint8"}, {"shape", {1}}, {"byte_size", 1}}},
-        {"payload_offset", 3},
-        {"payload_size", 2}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {1}}, {"byte_size", 1}}},
+                              {"payload_offset", 3},
+                              {"payload_size", 2}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0\1\2\3", 4}));
   ASSERT_FALSE(r);
   EXPECT_EQ(r.error().code, Error::Code::ShapeMismatch);
@@ -256,11 +257,11 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsBadDtype) {
   nlohmann::json body;
   body["request_id"] = "dtype";
   body["endpoint"] = "default";
-  body["inputs"] = nlohmann::json::array(
-      {{{"name", "image"},
-        {"tensor", {{"dtype", "wibble"}, {"shape", {1}}, {"byte_size", 1}}},
-        {"payload_offset", 0},
-        {"payload_size", 1}}});
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "wibble"}, {"shape", {1}}, {"byte_size", 1}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 1}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0", 1}));
   ASSERT_FALSE(r);
   EXPECT_EQ(r.error().code, Error::Code::Unsupported);
@@ -272,8 +273,7 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsBadLayout) {
   body["endpoint"] = "default";
   body["inputs"] = nlohmann::json::array(
       {{{"name", "image"},
-        {"tensor",
-         {{"dtype", "uint8"}, {"layout", "strided"}, {"shape", {1}}, {"byte_size", 1}}},
+        {"tensor", {{"dtype", "uint8"}, {"layout", "strided"}, {"shape", {1}}, {"byte_size", 1}}},
         {"payload_offset", 0},
         {"payload_size", 1}}});
   auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0", 1}));

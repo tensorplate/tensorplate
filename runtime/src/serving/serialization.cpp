@@ -318,18 +318,15 @@ Result<DecodedInferRequest> decode_binary_infer_request(std::string_view body) {
   if (metadata_len > body.size() - metadata_offset) {
     return unexpected(Error::Code::ConfigInvalid, "binary infer request: truncated metadata");
   }
-  const auto metadata_text =
-      body.substr(metadata_offset, static_cast<std::size_t>(metadata_len));
-  const auto payload =
-      body.substr(metadata_offset + static_cast<std::size_t>(metadata_len));
+  const auto metadata_text = body.substr(metadata_offset, static_cast<std::size_t>(metadata_len));
+  const auto payload = body.substr(metadata_offset + static_cast<std::size_t>(metadata_len));
 
   json root;
   try {
     root = json::parse(metadata_text);
   } catch (const json::parse_error& e) {
     return unexpected(Error::Code::ConfigInvalid,
-                      std::string{"binary infer request: metadata JSON parse error: "} +
-                          e.what());
+                      std::string{"binary infer request: metadata JSON parse error: "} + e.what());
   }
   auto decoded_r = parse_request_metadata_root(root);
   if (!decoded_r) {
@@ -373,8 +370,7 @@ Result<DecodedInferRequest> decode_binary_infer_request(std::string_view body) {
     if (size < expected) {
       return unexpected(Error::Code::ShapeMismatch,
                         std::string{"binary infer request: payload bytes ("} +
-                            std::to_string(size) +
-                            ") shorter than declared tensor window (" +
+                            std::to_string(size) + ") shorter than declared tensor window (" +
                             std::to_string(expected) + ")");
     }
     std::vector<std::byte> bytes(size);
@@ -677,8 +673,7 @@ Result<std::string> render_binary_infer_response_checked(
     return unexpected(Error::Code::Internal, "binary infer response metadata too large");
   }
   std::string out;
-  out.reserve(kBinaryResultMagic.size() + sizeof(std::uint32_t) + metadata.size() +
-              payload.size());
+  out.reserve(kBinaryResultMagic.size() + sizeof(std::uint32_t) + metadata.size() + payload.size());
   out.append(kBinaryResultMagic.data(), kBinaryResultMagic.size());
   append_u32_le(out, static_cast<std::uint32_t>(metadata.size()));
   out.append(metadata);

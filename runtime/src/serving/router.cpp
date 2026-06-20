@@ -132,9 +132,9 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   }
   const bool binary_request = has_binary_content_type(req);
   if (!binary_request && !has_json_content_type(req)) {
-    return make_error_response(415, "", correlation_id, Error::Code::Unsupported,
-                               "content-type must be application/json or " +
-                                   std::string{kBinaryInferContentType});
+    return make_error_response(
+        415, "", correlation_id, Error::Code::Unsupported,
+        "content-type must be application/json or " + std::string{kBinaryInferContentType});
   }
   if (req.body.size() > deps_.max_body_bytes) {
     if (deps_.metrics != nullptr) {
