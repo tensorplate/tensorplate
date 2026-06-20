@@ -56,7 +56,11 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         server.captured.append(body)
-        key = ("POST_BINARY", self.path) if content_type == _BINARY_CONTENT_TYPE else ("POST", self.path)
+        key = (
+            ("POST_BINARY", self.path)
+            if content_type == _BINARY_CONTENT_TYPE
+            else ("POST", self.path)
+        )
         self._reply(key)
 
     def do_GET(self) -> None:
@@ -289,7 +293,9 @@ def test_binary_request_encoder_uses_raw_payload() -> None:
         [ServingClient.tensor_input("x", b"\x01\x02\x03\x04", DType.UINT8, (4,))],
     )
     assert wire.startswith(_BINARY_INFER_MAGIC)
-    (metadata_len,) = struct.unpack("<I", wire[len(_BINARY_INFER_MAGIC) : len(_BINARY_INFER_MAGIC) + 4])
+    (metadata_len,) = struct.unpack(
+        "<I", wire[len(_BINARY_INFER_MAGIC) : len(_BINARY_INFER_MAGIC) + 4]
+    )
     metadata_start = len(_BINARY_INFER_MAGIC) + 4
     metadata = json.loads(wire[metadata_start : metadata_start + metadata_len])
     assert metadata["inputs"][0]["payload_offset"] == 0
@@ -321,7 +327,9 @@ def test_auto_falls_back_to_json_and_caches_decision(server: _CannedServer) -> N
 
 def test_binary_mode_does_not_fallback(server: _CannedServer) -> None:
     server.routes[("POST", "/infer")] = (200, _success_body())
-    client = ServingClient(_base_url(server), discover=False, timeout=3.0, preferred_transport="binary")
+    client = ServingClient(
+        _base_url(server), discover=False, timeout=3.0, preferred_transport="binary"
+    )
     with pytest.raises(ServingError) as excinfo:
         client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
     assert excinfo.value.code.value == "unsupported"
