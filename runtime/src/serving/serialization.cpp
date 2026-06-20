@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -83,43 +84,71 @@ std::uint32_t read_u32_le(std::string_view data, std::size_t offset) {
   return b0 | (b1 << 8U) | (b2 << 16U) | (b3 << 24U);
 }
 
+Result<void> parse_optional_metadata_string(const json& metadata, std::string_view field,
+                                            std::optional<std::string>& target) {
+  const auto item = metadata.find(std::string{field});
+  if (item == metadata.end() || !item->is_string()) {
+    return Result<void>{};
+  }
+  auto value = item->get<std::string>();
+  if (value.empty()) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "infer request: metadata." + std::string{field} + " empty");
+  }
+  target = std::move(value);
+  return Result<void>{};
+}
+
+void parse_optional_metadata_i64(const json& metadata, std::string_view field,
+                                 std::optional<std::int64_t>& target) {
+  const auto item = metadata.find(std::string{field});
+  if (item != metadata.end() && item->is_number_integer()) {
+    target = item->get<std::int64_t>();
+  }
+}
+
+Result<void> parse_metadata_extra(const json& metadata, RequestMetadata& out) {
+  const auto extra = metadata.find("extra");
+  if (extra == metadata.end() || !extra->is_object()) {
+    return Result<void>{};
+  }
+  for (auto it = extra->begin(); it != extra->end(); ++it) {
+    if (!it.value().is_string()) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "infer request: metadata.extra values must be strings");
+    }
+    out.extra.emplace(it.key(), it.value().get<std::string>());
+  }
+  return Result<void>{};
+}
+
+Result<void> parse_metadata_object(const json& metadata, RequestMetadata& out) {
+  auto correlation_id =
+      parse_optional_metadata_string(metadata, "correlation_id", out.correlation_id);
+  if (!correlation_id) {
+    return unexpected(correlation_id.error());
+  }
+  auto action_chunk_id =
+      parse_optional_metadata_string(metadata, "action_chunk_id", out.action_chunk_id);
+  if (!action_chunk_id) {
+    return unexpected(action_chunk_id.error());
+  }
+  parse_optional_metadata_i64(metadata, "action_chunk_sequence", out.action_chunk_sequence);
+  parse_optional_metadata_i64(metadata, "stale_after_sequence", out.stale_after_sequence);
+  return parse_metadata_extra(metadata, out);
+}
+
 Result<void> parse_request_metadata(const json& root, DecodedInferRequest& out) {
-  if (root.contains("metadata") && root["metadata"].is_object()) {
-    const auto& m = root["metadata"];
-    if (m.contains("correlation_id") && m["correlation_id"].is_string()) {
-      auto v = m["correlation_id"].get<std::string>();
-      if (v.empty()) {
-        return unexpected(Error::Code::ConfigInvalid,
-                          "infer request: metadata.correlation_id empty");
-      }
-      out.metadata.correlation_id = std::move(v);
-    }
-    if (m.contains("action_chunk_id") && m["action_chunk_id"].is_string()) {
-      auto v = m["action_chunk_id"].get<std::string>();
-      if (v.empty()) {
-        return unexpected(Error::Code::ConfigInvalid,
-                          "infer request: metadata.action_chunk_id empty");
-      }
-      out.metadata.action_chunk_id = std::move(v);
-    }
-    if (m.contains("action_chunk_sequence") && m["action_chunk_sequence"].is_number_integer()) {
-      out.metadata.action_chunk_sequence = m["action_chunk_sequence"].get<std::int64_t>();
-    }
-    if (m.contains("stale_after_sequence") && m["stale_after_sequence"].is_number_integer()) {
-      out.metadata.stale_after_sequence = m["stale_after_sequence"].get<std::int64_t>();
-    }
-    if (m.contains("extra") && m["extra"].is_object()) {
-      for (auto it = m["extra"].begin(); it != m["extra"].end(); ++it) {
-        if (!it.value().is_string()) {
-          return unexpected(Error::Code::ConfigInvalid,
-                            "infer request: metadata.extra values must be strings");
-        }
-        out.metadata.extra.emplace(it.key(), it.value().get<std::string>());
-      }
+  const auto metadata = root.find("metadata");
+  if (metadata != root.end() && metadata->is_object()) {
+    auto parsed = parse_metadata_object(*metadata, out.metadata);
+    if (!parsed) {
+      return unexpected(parsed.error());
     }
   }
-  if (root.contains("deadline_ms") && root["deadline_ms"].is_number_integer()) {
-    auto v = root["deadline_ms"].get<std::int64_t>();
+  const auto deadline = root.find("deadline_ms");
+  if (deadline != root.end() && deadline->is_number_integer()) {
+    auto v = deadline->get<std::int64_t>();
     if (v <= 0) {
       return unexpected(Error::Code::ConfigInvalid, "infer request: deadline_ms must be > 0");
     }
