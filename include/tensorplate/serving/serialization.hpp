@@ -9,10 +9,10 @@
 // `protocol/schemas/serving_infer_response.json`. Async result
 // payloads share the response schema; only the route differs.
 //
-// Tensor payloads are base64-encoded raw bytes; metadata (dtype,
-// shape, layout) lives in the JSON envelope. Base64 is chosen for
-// v0.1.0 because it keeps the wire format text-only and avoids
-// multipart parsing; v0.2 may add a binary-friendly transport.
+// Tensor payloads are base64-encoded raw bytes in the JSON envelope. A
+// binary tensor envelope is also available for latency-sensitive local
+// workloads; it keeps the same request/result metadata but stores tensor
+// payloads as raw byte windows after a small header.
 
 #pragma once
 
@@ -30,6 +30,11 @@
 #include "tensorplate/core/result.hpp"
 
 namespace tensorplate::serving {
+
+inline constexpr std::string_view kBinaryInferContentType =
+    "application/vnd.tensorplate.infer.binary.v1";
+inline constexpr std::string_view kBinaryInferMagic = "TPINFER1";
+inline constexpr std::string_view kBinaryResultMagic = "TPRESULT1";
 
 /// Decoded HTTP request envelope before buffer allocation.
 struct DecodedInferRequest {
@@ -66,6 +71,16 @@ struct DecodedInferRequest {
 /// HTTP-level limits are confirmed.
 [[nodiscard]] Result<DecodedInferRequest> decode_infer_request(std::string_view body);
 
+/// Parse a binary `/infer` request envelope into a `DecodedInferRequest`.
+///
+/// Wire format:
+///   - ASCII magic `TPINFER1`
+///   - little-endian uint32 metadata JSON byte length
+///   - metadata JSON mirroring the v0.1 request envelope, except each input
+///     uses `payload_offset` / `payload_size` instead of `payload_b64`
+///   - concatenated raw payload bytes
+[[nodiscard]] Result<DecodedInferRequest> decode_binary_infer_request(std::string_view body);
+
 /// Render a successful `InferResult` to JSON. Outputs are base64-
 /// encoded. The response carries request_id, correlation_id (when
 /// set), timing fields, and the outputs vector.
@@ -77,6 +92,12 @@ struct DecodedInferRequest {
 /// output buffer cannot be viewed while serializing a successful
 /// result.
 [[nodiscard]] Result<std::string> render_infer_response_checked(
+    const InferResult& result, BufferManager& buffer_manager,
+    std::optional<std::string_view> correlation_id);
+
+/// Render a successful `InferResult` to the binary result envelope. Failures
+/// should continue to use `render_error_response` so typed failures remain JSON.
+[[nodiscard]] Result<std::string> render_binary_infer_response_checked(
     const InferResult& result, BufferManager& buffer_manager,
     std::optional<std::string_view> correlation_id);
 

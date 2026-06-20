@@ -12,7 +12,7 @@ from tensorplate.conventions import YOLO_V8_SINGLE_OUTPUT, detections
 from tensorplate.errors import ProtocolError
 from tensorplate.postprocess import Detection, decode_detections
 from tensorplate.preprocess import PreprocessConfig, preprocess
-from tensorplate.serving import InferResult, ServingClient
+from tensorplate.serving import InferResult, ServingClient, TransportPreference
 from tensorplate.tensors import TensorOutput
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ class VisionClient:
         config_path: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_S,
         discover: bool = True,
+        preferred_transport: TransportPreference = "auto",
         client: ServingClient | None = None,
     ) -> None:
         self._serving = client or ServingClient(
@@ -47,6 +48,7 @@ class VisionClient:
             config_path=config_path,
             timeout=timeout,
             discover=discover,
+            preferred_transport=preferred_transport,
         )
 
     @property

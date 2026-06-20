@@ -73,6 +73,16 @@ bool has_json_content_type(const http::Request& req) {
   return lower == "application/json" || lower.starts_with("application/json;");
 }
 
+bool has_binary_content_type(const http::Request& req) {
+  auto value = req.header("content-type");
+  if (!value.has_value()) {
+    return false;
+  }
+  const std::string lower = http::lower_ascii(*value);
+  const std::string binary_type{kBinaryInferContentType};
+  return lower == binary_type || lower.starts_with(binary_type + ";");
+}
+
 }  // namespace
 
 RequestRouter::RequestRouter(RequestRouterDeps deps) : deps_(std::move(deps)) {}
@@ -120,9 +130,11 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
     return make_error_response(503, "", correlation_id, Error::Code::NotReady,
                                "serving worker stopping; not accepting new requests");
   }
-  if (!has_json_content_type(req)) {
+  const bool binary_request = has_binary_content_type(req);
+  if (!binary_request && !has_json_content_type(req)) {
     return make_error_response(415, "", correlation_id, Error::Code::Unsupported,
-                               "content-type must be application/json");
+                               "content-type must be application/json or " +
+                                   std::string{kBinaryInferContentType});
   }
   if (req.body.size() > deps_.max_body_bytes) {
     if (deps_.metrics != nullptr) {
@@ -131,7 +143,8 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
     return make_error_response(413, "", correlation_id, Error::Code::Unsupported,
                                "payload exceeds configured max_body_bytes");
   }
-  auto decoded_r = decode_infer_request(req.body);
+  auto decoded_r =
+      binary_request ? decode_binary_infer_request(req.body) : decode_infer_request(req.body);
   if (!decoded_r) {
     return make_error_response(http_status_for_error(decoded_r.error().code), "", correlation_id,
                                decoded_r.error().code, decoded_r.error().message);
@@ -174,6 +187,23 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   if (result.is_failure() && deps_.metrics != nullptr) {
     deps_.metrics->record_rejection(result.error().code);
   }
+  if (binary_request && result.is_success()) {
+    auto body_r = render_binary_infer_response_checked(result, *deps_.buffer_manager,
+                                                       std::string_view{correlation_id});
+    (void)release_partial_outputs(*deps_.buffer_manager, result.outputs());
+    if (!body_r) {
+      return make_error_response(http_status_for_error(body_r.error().code), decoded.request_id,
+                                 correlation_id, body_r.error().code,
+                                 "response serialization failed", body_r.error().message);
+    }
+    http::Response resp;
+    resp.status = 200;
+    resp.set_header("content-type", std::string{kBinaryInferContentType});
+    resp.set_header("x-correlation-id", correlation_id);
+    resp.body = std::move(body_r).value();
+    return resp;
+  }
+
   auto body_r = render_infer_response_checked(result, *deps_.buffer_manager,
                                               std::string_view{correlation_id});
   (void)release_partial_outputs(*deps_.buffer_manager, result.outputs());

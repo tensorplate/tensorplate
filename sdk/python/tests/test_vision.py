@@ -13,7 +13,7 @@ import pytest
 from tensorplate.conventions import detections
 from tensorplate.errors import ProtocolError
 from tensorplate.preprocess import PreprocessConfig
-from tensorplate.serving import InferResult
+from tensorplate.serving import _BINARY_CONTENT_TYPE, InferResult
 from tensorplate.tensors import DType, TensorOutput
 from tensorplate.vision import VisionClient, _select_detection_output
 
@@ -61,6 +61,26 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         server = self.server
         assert isinstance(server, _CannedServer)
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if content_type == _BINARY_CONTENT_TYPE:
+            data = json.dumps(
+                {
+                    "schema_version": "0.1",
+                    "request_id": "",
+                    "status": "failure",
+                    "error": {
+                        "schema_version": "0.1",
+                        "code": "unsupported",
+                        "message": "binary transport unsupported",
+                    },
+                }
+            ).encode("utf-8")
+            self.send_response(415)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         server.captured.append(body)
         self._reply(("POST", self.path))
 

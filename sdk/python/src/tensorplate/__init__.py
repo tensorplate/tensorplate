@@ -29,7 +29,7 @@ from tensorplate.errors import (
 )
 from tensorplate.postprocess import Detection, decode_detections
 from tensorplate.preprocess import LetterboxTransform, PreprocessConfig, preprocess
-from tensorplate.serving import HealthSnapshot, InferResult, ServingClient, Timing
+from tensorplate.serving import ClientTiming, HealthSnapshot, InferResult, ServingClient, Timing
 from tensorplate.tensors import DType, Layout, TensorInput, TensorOutput
 from tensorplate.vision import VisionClient
 
@@ -41,6 +41,7 @@ except PackageNotFoundError:  # pragma: no cover - only hit outside an installed
 __all__ = [
     "LOOPBACK_DEFAULT",
     "YOLO_V8_SINGLE_OUTPUT",
+    "ClientTiming",
     "DType",
     "Detection",
     "EndpointResolutionError",

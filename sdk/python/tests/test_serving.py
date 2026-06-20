@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +17,14 @@ from tensorplate.errors import (
     TransportError,
     UnsupportedSchemaVersionError,
 )
-from tensorplate.serving import SCHEMA_VERSION, ServingClient
+from tensorplate.serving import (
+    _BINARY_CONTENT_TYPE,
+    _BINARY_INFER_MAGIC,
+    _BINARY_RESULT_MAGIC,
+    SCHEMA_VERSION,
+    ServingClient,
+    _encode_binary_infer_request,
+)
 from tensorplate.tensors import DType
 
 
@@ -31,8 +39,25 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length)
         server = self.server
         assert isinstance(server, _CannedServer)
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if content_type == _BINARY_CONTENT_TYPE and ("POST_BINARY", self.path) not in server.routes:
+            self._reply_payload(
+                415,
+                {
+                    "schema_version": "0.1",
+                    "request_id": "",
+                    "status": "failure",
+                    "error": {
+                        "schema_version": "0.1",
+                        "code": "unsupported",
+                        "message": "binary transport unsupported",
+                    },
+                },
+            )
+            return
         server.captured.append(body)
-        self._reply(("POST", self.path))
+        key = ("POST_BINARY", self.path) if content_type == _BINARY_CONTENT_TYPE else ("POST", self.path)
+        self._reply(key)
 
     def do_GET(self) -> None:
         self._reply(("GET", self.path))
@@ -41,9 +66,17 @@ class _Handler(BaseHTTPRequestHandler):
         server = self.server
         assert isinstance(server, _CannedServer)
         status, payload = server.routes.get(key, (404, {"status": "failure"}))
-        data = json.dumps(payload).encode("utf-8")
+        self._reply_payload(status, payload)
+
+    def _reply_payload(self, status: int, payload: object) -> None:
+        if isinstance(payload, bytes):
+            data = payload
+            content_type = _BINARY_CONTENT_TYPE
+        else:
+            data = json.dumps(payload).encode("utf-8")
+            content_type = "application/json"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -93,6 +126,26 @@ def _success_body() -> dict[str, object]:
     }
 
 
+def _binary_success_body() -> bytes:
+    payload = b"\x00\x00\x80?\x00\x00\x00@"
+    metadata = {
+        "schema_version": "0.1",
+        "request_id": "r-bin",
+        "status": "success",
+        "outputs": [
+            {
+                "name": "out",
+                "tensor": {"dtype": "float32", "shape": [2], "byte_size": 8},
+                "payload_offset": 0,
+                "payload_size": len(payload),
+                "semantic_tag": "detections",
+            }
+        ],
+    }
+    encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    return _BINARY_RESULT_MAGIC + struct.pack("<I", len(encoded)) + encoded + payload
+
+
 def test_infer_success_and_request_shape(server: _CannedServer) -> None:
     server.routes[("POST", "/infer")] = (200, _success_body())
     result = _client(server).infer(
@@ -109,6 +162,7 @@ def test_infer_success_and_request_shape(server: _CannedServer) -> None:
     assert sent["request_id"]
     assert sent["inputs"][0]["name"] == "x"
     assert "payload_b64" in sent["inputs"][0]
+    assert result.transport == "json"
 
 
 def test_infer_rejects_invalid_request_fields(server: _CannedServer) -> None:
@@ -226,3 +280,59 @@ def test_round_trips_against_unchanged_v0_1_2_worker(server: _CannedServer) -> N
     assert result.request_id == "r-1"
     sent = json.loads(server.captured[0])
     assert sent["schema_version"] == "0.1"
+
+
+def test_binary_request_encoder_uses_raw_payload() -> None:
+    wire = _encode_binary_infer_request(
+        "r",
+        "model",
+        [ServingClient.tensor_input("x", b"\x01\x02\x03\x04", DType.UINT8, (4,))],
+    )
+    assert wire.startswith(_BINARY_INFER_MAGIC)
+    (metadata_len,) = struct.unpack("<I", wire[len(_BINARY_INFER_MAGIC) : len(_BINARY_INFER_MAGIC) + 4])
+    metadata_start = len(_BINARY_INFER_MAGIC) + 4
+    metadata = json.loads(wire[metadata_start : metadata_start + metadata_len])
+    assert metadata["inputs"][0]["payload_offset"] == 0
+    assert metadata["inputs"][0]["payload_size"] == 4
+    assert wire[-4:] == b"\x01\x02\x03\x04"
+
+
+def test_binary_response_parser_reconstructs_outputs(server: _CannedServer) -> None:
+    server.routes[("POST_BINARY", "/infer")] = (200, _binary_success_body())
+    result = ServingClient(
+        _base_url(server), discover=False, timeout=3.0, preferred_transport="binary"
+    ).infer("model", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert result.transport == "binary"
+    assert result.request_id == "r-bin"
+    assert result.output("out").data == b"\x00\x00\x80?\x00\x00\x00@"
+    assert server.captured[0].startswith(_BINARY_INFER_MAGIC)
+
+
+def test_auto_falls_back_to_json_and_caches_decision(server: _CannedServer) -> None:
+    server.routes[("POST", "/infer")] = (200, _success_body())
+    client = _client(server)
+    first = client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    second = client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert first.transport == "json"
+    assert second.transport == "json"
+    assert len(server.captured) == 2
+    assert all(json.loads(body)["schema_version"] == "0.1" for body in server.captured)
+
+
+def test_binary_mode_does_not_fallback(server: _CannedServer) -> None:
+    server.routes[("POST", "/infer")] = (200, _success_body())
+    client = ServingClient(_base_url(server), discover=False, timeout=3.0, preferred_transport="binary")
+    with pytest.raises(ServingError) as excinfo:
+        client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert excinfo.value.code.value == "unsupported"
+    assert server.captured == []
+
+
+def test_json_mode_preserves_json_request_shape(server: _CannedServer) -> None:
+    server.routes[("POST", "/infer")] = (200, _success_body())
+    result = ServingClient(
+        _base_url(server), discover=False, timeout=3.0, preferred_transport="json"
+    ).infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert result.transport == "json"
+    assert len(server.captured) == 1
+    assert json.loads(server.captured[0])["inputs"][0]["payload_b64"] == "AA=="

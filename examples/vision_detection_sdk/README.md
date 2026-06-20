@@ -43,3 +43,16 @@ python camera_infer.py --serving-url http://127.0.0.1:18080 \
 reference sample code for the v0.1.3 learning loop — capture happens
 in-process and each frame is sent as one synchronous request. It is not a
 production real-time perception pipeline.
+
+## `bench_yolo.py` — detector latency profile
+
+```bash
+python bench_yolo.py --serving-url http://127.0.0.1:18080 \
+    --endpoint yolov8n --image bus.jpg --input-size 640 \
+    --iters 300 --warmup 30 --transport auto --expected-count 5
+```
+
+The benchmark emits JSON by default, or Markdown with `--format markdown`.
+It records preprocess, SDK encode, HTTP round trip, SDK decode, worker
+execution, postprocess, end-to-end latency, payload sizes, and the transport
+actually used (`json` or `binary`).
