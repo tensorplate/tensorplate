@@ -27,22 +27,39 @@ def _load_labels(path: str | None) -> list[str] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--image", required=True, help="Path to the input image.")
-    parser.add_argument("--endpoint", required=True, help="Deployed model / endpoint name.")
-    parser.add_argument(
-        "--serving-url", default=None, help="Serving URL; omit to resolve like `tensorplate infer`."
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--input-size", type=int, default=640, help="Square model input size.")
+    parser.add_argument("--image", required=True, help="Path to the input image.")
+    parser.add_argument(
+        "--endpoint", required=True, help="Deployed model / endpoint name."
+    )
+    parser.add_argument(
+        "--serving-url",
+        default=None,
+        help="Serving URL; omit to resolve like `tensorplate infer`.",
+    )
+    parser.add_argument(
+        "--input-size", type=int, default=640, help="Square model input size."
+    )
     parser.add_argument("--score-threshold", type=float, default=0.25)
     parser.add_argument("--nms-threshold", type=float, default=0.45)
-    parser.add_argument("--transposed", action="store_true", help="Model output is [1, N, 4+C].")
-    parser.add_argument("--output-name", default=None, help="Detection output tensor name.")
-    parser.add_argument("--labels", default=None, help="Class-label file (one label per line).")
+    parser.add_argument(
+        "--transposed", action="store_true", help="Model output is [1, N, 4+C]."
+    )
+    parser.add_argument("--contract", default=tensorplate.YOLO_V8_SINGLE_OUTPUT)
+    parser.add_argument(
+        "--output-name", default=None, help="Detection output tensor name."
+    )
+    parser.add_argument(
+        "--labels", default=None, help="Class-label file (one label per line)."
+    )
     parser.add_argument("--json", action="store_true", help="Emit detections as JSON.")
     args = parser.parse_args(argv)
 
-    client = tensorplate.VisionClient(args.serving_url, discover=args.serving_url is None)
+    client = tensorplate.VisionClient(
+        args.serving_url, discover=args.serving_url is None
+    )
     config = tensorplate.PreprocessConfig(input_size=(args.input_size, args.input_size))
     detections = client.detect(
         args.image,
@@ -52,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         nms_threshold=args.nms_threshold,
         labels=_load_labels(args.labels),
         transposed=args.transposed,
+        contract=args.contract,
         preprocess_config=config,
     )
 

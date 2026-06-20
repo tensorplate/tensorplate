@@ -39,7 +39,9 @@ def run(args: argparse.Namespace) -> int:
         sys.stderr.write(f"could not open video source {args.source!r}\n")
         return 1
 
-    client = tensorplate.VisionClient(args.serving_url, discover=args.serving_url is None)
+    client = tensorplate.VisionClient(
+        args.serving_url, discover=args.serving_url is None
+    )
     config = tensorplate.PreprocessConfig(input_size=(args.input_size, args.input_size))
     processed = 0
     try:
@@ -53,6 +55,7 @@ def run(args: argparse.Namespace) -> int:
                 endpoint=args.endpoint,
                 score_threshold=args.score_threshold,
                 transposed=args.transposed,
+                contract=args.contract,
                 preprocess_config=config,
             )
             processed += 1
@@ -63,16 +66,32 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--endpoint", required=True, help="Deployed model / endpoint name.")
-    parser.add_argument("--serving-url", default=None, help="Serving URL; omit to resolve like the CLI.")
-    parser.add_argument("--source", default="0", help="Camera index (e.g. 0) or video file path.")
-    parser.add_argument(
-        "--max-frames", type=int, default=100, help="Stop after N frames (<= 0 means unbounded)."
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--input-size", type=int, default=640, help="Square model input size.")
+    parser.add_argument(
+        "--endpoint", required=True, help="Deployed model / endpoint name."
+    )
+    parser.add_argument(
+        "--serving-url", default=None, help="Serving URL; omit to resolve like the CLI."
+    )
+    parser.add_argument(
+        "--source", default="0", help="Camera index (e.g. 0) or video file path."
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=100,
+        help="Stop after N frames (<= 0 means unbounded).",
+    )
+    parser.add_argument(
+        "--input-size", type=int, default=640, help="Square model input size."
+    )
     parser.add_argument("--score-threshold", type=float, default=0.25)
-    parser.add_argument("--transposed", action="store_true", help="Model output is [1, N, 4+C].")
+    parser.add_argument(
+        "--transposed", action="store_true", help="Model output is [1, N, 4+C]."
+    )
+    parser.add_argument("--contract", default="yolo_v8_single_output")
     return run(parser.parse_args(argv))
 
 

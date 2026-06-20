@@ -11,9 +11,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from tensorplate.conventions import YOLO_V8_SINGLE_OUTPUT
+from tensorplate.conventions import YOLO26_E2E_DETECTIONS, YOLO_V8_SINGLE_OUTPUT
 from tensorplate.errors import ProtocolError
-from tensorplate.tensors import TensorOutput
+from tensorplate.tensors import DType, TensorOutput
 
 if TYPE_CHECKING:
     import numpy as np
@@ -41,16 +41,22 @@ def decode_detections(
     transposed: bool = False,
     contract: str = YOLO_V8_SINGLE_OUTPUT,
 ) -> list[Detection]:
-    """Decode a YOLOv8-style single-output tensor into source-pixel detections.
+    """Decode a supported YOLO-style output tensor into source-pixel detections.
 
-    Expects ``[1, 4 + C, N]`` (or ``[1, N, 4 + C]`` when ``transposed``): 4
-    box coordinates (center-x, center-y, width, height in model-input
-    pixels) followed by C per-class scores. Applies score thresholding and
-    class-aware NMS, then maps boxes back to source pixels via ``transform``.
+    ``yolo_v8_single_output`` expects ``[1, 4 + C, N]`` (or
+    ``[1, N, 4 + C]`` when ``transposed``): 4 center-format box coordinates
+    followed by C per-class scores. It applies score thresholding and
+    class-aware NMS.
+
+    ``yolo26_e2e_detections`` expects NMS-free ``[1, K, 6]`` with columns
+    x1, y1, x2, y2, score, class_id. It applies only score thresholding.
     """
+    if contract == YOLO26_E2E_DETECTIONS:
+        return _decode_yolo26_e2e(output, transform, score_threshold=score_threshold, labels=labels)
     if contract != YOLO_V8_SINGLE_OUTPUT:
         raise ValueError(
-            f"unsupported output contract {contract!r}; only {YOLO_V8_SINGLE_OUTPUT!r} is built in"
+            f"unsupported output contract {contract!r}; supported contracts are "
+            f"{YOLO_V8_SINGLE_OUTPUT!r} and {YOLO26_E2E_DETECTIONS!r}"
         )
     import numpy as np
 
@@ -96,6 +102,49 @@ def decode_detections(
         detections.append(
             Detection(class_id=class_id, score=float(kept_scores[idx]), box=box, label=label)
         )
+    return detections
+
+
+def _decode_yolo26_e2e(
+    output: TensorOutput,
+    transform: LetterboxTransform,
+    *,
+    score_threshold: float,
+    labels: Sequence[str] | None,
+) -> list[Detection]:
+    if output.dtype not in (DType.FLOAT16, DType.FLOAT32):
+        raise ProtocolError(
+            f"detector output for {YOLO26_E2E_DETECTIONS!r} must be float16 or float32, "
+            f"got {output.dtype.value!r}"
+        )
+    try:
+        array = output.to_numpy().astype("float32")
+    except (RuntimeError, ValueError) as exc:
+        raise ProtocolError(
+            f"could not convert detector output for {YOLO26_E2E_DETECTIONS!r} to float32"
+        ) from exc
+    if array.ndim != 3 or array.shape[0] != 1 or array.shape[2] != 6:
+        raise ProtocolError(
+            f"detector output must be [1, K, 6] for {YOLO26_E2E_DETECTIONS!r}, "
+            f"got shape {tuple(array.shape)}"
+        )
+    if array.shape[1] > 300:
+        raise ProtocolError(
+            f"detector output has {int(array.shape[1])} rows for {YOLO26_E2E_DETECTIONS!r}; "
+            "expected K <= 300"
+        )
+
+    detections: list[Detection] = []
+    for row in array[0]:
+        score = float(row[4])
+        if score < score_threshold:
+            continue
+        class_id = int(row[5])
+        box = transform.map_box_to_source(
+            float(row[0]), float(row[1]), float(row[2]), float(row[3])
+        )
+        label = labels[class_id] if labels is not None and 0 <= class_id < len(labels) else None
+        detections.append(Detection(class_id=class_id, score=score, box=box, label=label))
     return detections
 
 

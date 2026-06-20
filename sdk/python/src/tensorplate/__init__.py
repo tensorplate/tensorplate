@@ -16,7 +16,7 @@ from tensorplate.client import (
     canonicalize_serving_url,
     resolve_serving_url,
 )
-from tensorplate.conventions import YOLO_V8_SINGLE_OUTPUT, detections
+from tensorplate.conventions import YOLO26_E2E_DETECTIONS, YOLO_V8_SINGLE_OUTPUT, detections
 from tensorplate.errors import (
     EndpointResolutionError,
     ErrorCode,
@@ -40,6 +40,7 @@ except PackageNotFoundError:  # pragma: no cover - only hit outside an installed
 
 __all__ = [
     "LOOPBACK_DEFAULT",
+    "YOLO26_E2E_DETECTIONS",
     "YOLO_V8_SINGLE_OUTPUT",
     "ClientTiming",
     "DType",
