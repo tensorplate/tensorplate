@@ -21,9 +21,15 @@ class detections:
     classes = "detections.classes"
 
 
-#: Supported built-in detector output contract: a single tensor shaped
+#: Supported built-in YOLOv8-style detector output contract: a single tensor shaped
 #: ``[1, 4 + C, N]`` (YOLOv8-style; 4 box coords + C class scores over N
 #: anchors), or its transpose ``[1, N, 4 + C]`` when the caller declares
 #: it. Other heads (YOLOv5 objectness, exporter-side NMS, masks,
 #: keypoints) remain application-side postprocessing in v0.1.3.
 YOLO_V8_SINGLE_OUTPUT = "yolo_v8_single_output"
+
+#: Supported built-in YOLO26 default one-to-one / end-to-end detector output
+#: contract: a single NMS-free tensor shaped ``[1, K, 6]`` with
+#: ``K <= 300`` and columns ``x1, y1, x2, y2, score, class_id`` in
+#: letterboxed model-input pixels.
+YOLO26_E2E_DETECTIONS = "yolo26_e2e_detections"

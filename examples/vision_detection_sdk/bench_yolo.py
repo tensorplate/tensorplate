@@ -47,6 +47,7 @@ def _render_markdown(report: dict[str, object]) -> str:
         "",
         f"- endpoint: `{report['endpoint']}`",
         f"- input_size: `{report['input_size']}`",
+        f"- contract: `{report['contract']}`",
         f"- iters: `{report['iters']}`",
         f"- warmup: `{report['warmup']}`",
         f"- throughput_req_s: `{report['throughput_req_s']:.2f}`",
@@ -106,6 +107,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             nms_threshold=args.nms_threshold,
             labels=labels,
             transposed=args.transposed,
+            contract=args.contract,
         )
         t3 = time.perf_counter_ns()
         if not measured:
@@ -118,7 +120,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         transports[result.transport] += 1
         if result.client_timing is not None:
             timings["client_encode"].append(result.client_timing.encode_ns / 1e6)
-            timings["http_roundtrip"].append(result.client_timing.http_roundtrip_ns / 1e6)
+            timings["http_roundtrip"].append(
+                result.client_timing.http_roundtrip_ns / 1e6
+            )
             timings["client_decode"].append(result.client_timing.decode_ns / 1e6)
             request_bytes.append(result.client_timing.request_bytes)
             response_bytes.append(result.client_timing.response_bytes)
@@ -133,17 +137,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "endpoint": args.endpoint,
         "image": str(args.image),
         "input_size": args.input_size,
+        "contract": args.contract,
         "iters": args.iters,
         "warmup": args.warmup,
         "transport_preference": args.transport,
         "transports": dict(transports),
-        "throughput_req_s": args.iters / measured_elapsed if measured_elapsed > 0 else 0.0,
+        "throughput_req_s": args.iters / measured_elapsed
+        if measured_elapsed > 0
+        else 0.0,
         "wall_elapsed_s": elapsed,
         "correct": correct,
         "expected_count": args.expected_count,
         "request_bytes_p50": _percentile([float(v) for v in request_bytes], 50.0),
         "response_bytes_p50": _percentile([float(v) for v in response_bytes], 50.0),
-        "stages_ms": {name: _summary(values) for name, values in timings.items() if values},
+        "stages_ms": {
+            name: _summary(values) for name, values in timings.items() if values
+        },
     }
 
 
@@ -156,11 +165,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iters", type=int, default=300)
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--transport", choices=["auto", "binary", "json"], default="auto")
+    parser.add_argument(
+        "--transport", choices=["auto", "binary", "json"], default="auto"
+    )
     parser.add_argument("--output-name", default=None)
     parser.add_argument("--score-threshold", type=float, default=0.25)
     parser.add_argument("--nms-threshold", type=float, default=0.45)
     parser.add_argument("--transposed", action="store_true")
+    parser.add_argument("--contract", default=tensorplate.YOLO_V8_SINGLE_OUTPUT)
     parser.add_argument("--labels", default=None)
     parser.add_argument("--expected-count", type=int, default=None)
     parser.add_argument("--format", choices=["json", "markdown"], default="json")
@@ -168,7 +180,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     report = run(args)
-    rendered = json.dumps(report, indent=2, sort_keys=True) if args.format == "json" else _render_markdown(report)
+    rendered = (
+        json.dumps(report, indent=2, sort_keys=True)
+        if args.format == "json"
+        else _render_markdown(report)
+    )
     if args.output:
         Path(args.output).write_text(rendered, encoding="utf-8")
     else:

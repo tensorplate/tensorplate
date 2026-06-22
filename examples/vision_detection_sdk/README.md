@@ -31,6 +31,9 @@ Omit `--serving-url` to resolve the endpoint exactly as `tensorplate infer`
 does (explicit URL → CLI profile → agent discovery → loopback default).
 Pass `--transposed` if your detector emits `[1, N, 4 + C]` instead of
 `[1, 4 + C, N]`, and `--output-name` to pick a specific output tensor.
+For YOLO26 default end-to-end exports, pass
+`--contract yolo26_e2e_detections`; that output is `[1, K, 6]` and does
+not run SDK-side NMS.
 
 ## `camera_infer.py` — per-frame `camera → SDK → /infer` (sample)
 
@@ -55,4 +58,5 @@ python bench_yolo.py --serving-url http://127.0.0.1:18080 \
 The benchmark emits JSON by default, or Markdown with `--format markdown`.
 It records preprocess, SDK encode, HTTP round trip, SDK decode, worker
 execution, postprocess, end-to-end latency, payload sizes, and the transport
-actually used (`json` or `binary`).
+actually used (`json` or `binary`). Add `--contract yolo26_e2e_detections`
+when benchmarking YOLO26 E2E exports.

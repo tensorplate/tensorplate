@@ -140,8 +140,9 @@ extra.
 - `detect(image, *, endpoint, input_name="images", output_name=None, score_threshold=0.25, nms_threshold=0.45, labels=None, transposed=False, contract="yolo_v8_single_output", preprocess_config=None) -> list[Detection]`
   — preprocess `image` (a path, `bytes`, `Path`, or HWC `uint8` ndarray),
   call `infer`, and decode detections. `endpoint` is keyword-only and
-  required. See [detection.md](./detection.md) for the contract, output
-  selection, and pre/post options.
+  required. Built-in contracts are `yolo_v8_single_output` and
+  `yolo26_e2e_detections`. See [detection.md](./detection.md) for output
+  selection and pre/post options.
 
 `Detection` is a frozen dataclass: `class_id: int`, `score: float`,
 `box: (x1, y1, x2, y2)` in **source-image pixels**, and `label: str | None`
