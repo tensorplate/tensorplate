@@ -19,6 +19,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+import tensorplate
+
 
 def _require_cv2() -> object:
     try:
@@ -30,8 +32,6 @@ def _require_cv2() -> object:
 
 
 def run(args: argparse.Namespace) -> int:
-    import tensorplate
-
     cv2 = _require_cv2()
     source: object = int(args.source) if args.source.isdigit() else args.source
     capture = cv2.VideoCapture(source)
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--transposed", action="store_true", help="Model output is [1, N, 4+C]."
     )
-    parser.add_argument("--contract", default="yolo_v8_single_output")
+    parser.add_argument("--contract", default=tensorplate.YOLO_V8_SINGLE_OUTPUT)
     return run(parser.parse_args(argv))
 
 

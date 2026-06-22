@@ -172,3 +172,23 @@ def test_decode_yolo26_e2e_rejects_non_float_dtype() -> None:
     output = TensorOutput("det", DType.INT32, (1, 300, 6), b"\x00" * (300 * 6 * 4))
     with pytest.raises(ProtocolError, match="float16 or float32"):
         decode_detections(output, _IDENTITY, contract=YOLO26_E2E_DETECTIONS)
+
+
+def test_decode_yolo26_e2e_drops_nonfinite_and_negative_rows() -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    rows = numpy.zeros((1, 300, 6), dtype=numpy.float32)
+    rows[0, 0] = [10, 10, 20, 20, 0.9, 0]  # valid -> kept
+    rows[0, 1] = [10, 10, 20, 20, numpy.nan, 0]  # NaN score -> dropped, no raise
+    rows[0, 2] = [10, 10, 20, 20, 0.8, numpy.nan]  # NaN class id -> dropped, no raise
+    rows[0, 3] = [10, 10, 20, 20, 0.7, -1]  # negative class id -> dropped
+    output = TensorOutput("det", DType.FLOAT32, (1, 300, 6), rows.tobytes())
+
+    detections = decode_detections(
+        output, _IDENTITY, score_threshold=0.25, contract=YOLO26_E2E_DETECTIONS
+    )
+
+    assert len(detections) == 1
+    assert detections[0].class_id == 0
+    assert detections[0].score == pytest.approx(0.9)

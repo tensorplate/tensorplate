@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/serving_http_envelope.json",
   "title": "TensorPlate Serving HTTP Envelope",
-  "description": "Wire-format request/response envelope used by `tensorplate-serving`'s `/infer`, `/policy/infer`, `/policy/result/<id>`, and `/policy/cancel/<id>` routes. Single-input vision requests and LeRobot-compatible async policy requests share the same `inputs` shape; the only difference between sync and async is the HTTP route and the response status.\n\nTensor payloads are base64-encoded raw bytes following RFC 4648 with the standard alphabet. The runtime derives a TensorView from `tensor.dtype`, `tensor.shape`, `tensor.layout`, `tensor.byte_offset`, and `tensor.byte_size`; the payload must contain at least `byte_offset + byte_size` bytes.",
+  "description": "Wire-format request/response envelope used by `tensorplate-serving`'s `/infer`, `/policy/infer`, `/policy/result/<id>`, and `/policy/cancel/<id>` routes. Single-input vision requests and LeRobot-compatible async policy requests share the same `inputs` shape; the only difference between sync and async is the HTTP route and the response status.\n\nTensor payloads are base64-encoded raw bytes following RFC 4648 with the standard alphabet. The runtime derives a TensorView from `tensor.dtype`, `tensor.shape`, `tensor.layout`, `tensor.byte_offset`, and `tensor.byte_size`; the payload must contain at least `byte_offset + byte_size` bytes.\n\nThe `/infer` route also accepts an optional binary transport (Content-Type `application/vnd.tensorplate.infer.binary.v1`) that avoids base64: the request is framed as the 8-byte magic `TPINFER1`, a little-endian uint32 metadata-JSON length, the metadata JSON, then the concatenated raw tensor bytes; the success response uses the same framing with magic `TPRESULT1`. The metadata JSON mirrors `InferRequest` / `InferResponseSuccess` except each `inputs` / `outputs` entry carries `payload_offset` and `payload_size` (a byte window into the trailing payload blob) in place of `payload_b64` -- see `BinaryNamedInput` / `BinaryNamedOutput`. The transport is negotiated by Content-Type; a worker that does not support it replies 415 unsupported and clients fall back to the JSON envelope. Failure responses always use the JSON `InferResponseFailure` envelope.",
   "oneOf": [
     {"$ref": "#/definitions/InferRequest"},
     {"$ref": "#/definitions/InferResponseSuccess"},
@@ -45,6 +45,31 @@
         "name": {"type": "string", "minLength": 1},
         "tensor": {"$ref": "#/definitions/TensorMetadata"},
         "payload_b64": {"type": "string"},
+        "semantic_tag": {"type": "string"}
+      }
+    },
+    "BinaryNamedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An `inputs` entry in the binary `/infer` transport metadata; like `NamedInput` but the payload is a byte window into the trailing raw payload blob instead of an inline base64 string.",
+      "required": ["name", "tensor", "payload_offset", "payload_size"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "tensor": {"$ref": "#/definitions/TensorMetadata"},
+        "payload_offset": {"type": "integer", "minimum": 0},
+        "payload_size": {"type": "integer", "minimum": 0}
+      }
+    },
+    "BinaryNamedOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An `outputs` entry in the binary `/infer` response metadata; mirrors `NamedOutput` with a payload byte window in place of base64.",
+      "required": ["name", "tensor", "payload_offset", "payload_size"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "tensor": {"$ref": "#/definitions/TensorMetadata"},
+        "payload_offset": {"type": "integer", "minimum": 0},
+        "payload_size": {"type": "integer", "minimum": 0},
         "semantic_tag": {"type": "string"}
       }
     },

@@ -395,6 +395,11 @@ Result<DecodedInferRequest> decode_binary_infer_request(std::string_view body) {
       return unexpected(Error::Code::ShapeMismatch,
                         "binary infer request: input payload window exceeds body");
     }
+    if (view.value().byte_size() >
+        std::numeric_limits<std::size_t>::max() - view.value().byte_offset()) {
+      return unexpected(Error::Code::ShapeMismatch,
+                        "binary infer request: declared tensor window offset + size overflows");
+    }
     const std::size_t expected = view.value().byte_offset() + view.value().byte_size();
     if (size < expected) {
       return unexpected(Error::Code::ShapeMismatch,
@@ -549,6 +554,11 @@ Result<DecodedInferRequest> decode_infer_request(std::string_view body) {
     auto bytes = std::move(bytes_r).value();
     // Validate against the declared tensor window: payload must be at
     // least as large as offset + byte_size.
+    if (view.value().byte_size() >
+        std::numeric_limits<std::size_t>::max() - view.value().byte_offset()) {
+      return unexpected(Error::Code::ShapeMismatch,
+                        "infer request: declared tensor window offset + size overflows");
+    }
     const std::size_t expected = view.value().byte_offset() + view.value().byte_size();
     if (bytes.size() < expected) {
       return unexpected(Error::Code::ShapeMismatch, std::string{"infer request: payload bytes ("} +

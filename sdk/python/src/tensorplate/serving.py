@@ -192,7 +192,26 @@ class ServingClient:
                     return _parse_infer_response(
                         raw, status_code, self._endpoint.url, "binary", timing
                     )
+                # In 'auto' mode a 415 'unsupported' is ambiguous: the worker may
+                # lack the binary transport, or the request itself may be
+                # unsupported (unknown dtype/layout, schema_version, ...) — both
+                # surface as 415 + code 'unsupported'. Retry over JSON and only
+                # mark binary unsupported when that retry actually succeeds;
+                # otherwise the failure was request content, not transport
+                # capability, so binary must stay enabled (a transient bad
+                # request must not permanently downgrade the client to JSON).
+                status_code, raw, timing = self._infer_http(
+                    "json",
+                    request_id,
+                    endpoint,
+                    inputs,
+                    deadline_ms=deadline_ms,
+                    correlation_id=correlation_id,
+                    profile=profile,
+                )
+                result = _parse_infer_response(raw, status_code, self._endpoint.url, "json", timing)
                 self._binary_supported = False
+                return result
             else:
                 result = _parse_binary_or_json_response(
                     raw, status_code, self._endpoint.url, "binary", timing

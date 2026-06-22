@@ -6,6 +6,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Binary `/infer` transport for `tensorplate-serving` and the Python SDK: an
+  optional, content-type-negotiated wire format
+  (`application/vnd.tensorplate.infer.binary.v1`) that frames tensor payloads
+  as raw bytes (8-byte magic, little-endian uint32 metadata length, metadata
+  JSON, then concatenated payloads) instead of base64, cutting request encode
+  cost and payload size for large vision inputs. The transport is opt-in and
+  fully backward compatible: the JSON envelope (`schema_version` `0.1`) is
+  unchanged, and a worker that does not accept the binary content-type replies
+  `415` so `auto`-transport clients transparently fall back to JSON. The wire
+  framing is documented in `protocol/schemas/serving_http_envelope.json`.
+- `tensorplate-python` SDK `yolo26_e2e_detections` output contract
+  (`YOLO26_E2E_DETECTIONS`): decodes the Ultralytics YOLO26 default
+  one-to-one / end-to-end detection head — an NMS-free `[1, K, 6]` tensor — via
+  `decode_detections` and `VisionClient.detect`, with `--contract` wiring added
+  to the vision examples and the detection benchmark.
+
 ## [0.1.3] - 2026-06-19
 
 ### Added

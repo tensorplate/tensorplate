@@ -344,3 +344,56 @@ def test_json_mode_preserves_json_request_shape(server: _CannedServer) -> None:
     assert result.transport == "json"
     assert len(server.captured) == 1
     assert json.loads(server.captured[0])["inputs"][0]["payload_b64"] == "AA=="
+
+
+def _unsupported_failure_body(message: str) -> dict[str, object]:
+    return {
+        "schema_version": "0.1",
+        "request_id": "r-bad",
+        "status": "failure",
+        "error": {
+            "schema_version": "0.1",
+            "code": "unsupported",
+            "message": message,
+        },
+    }
+
+
+def test_auto_keeps_binary_after_request_content_415(server: _CannedServer) -> None:
+    # A 415 'unsupported' caused by request content (unknown dtype/layout,
+    # schema_version, ...) rather than a missing binary transport: the worker
+    # returns the same status+code over JSON, so the error must propagate and
+    # the client must NOT latch binary off — otherwise one bad request would
+    # permanently downgrade the connection to JSON (py-bin-1 regression).
+    server.routes[("POST", "/infer")] = (
+        415,
+        _unsupported_failure_body("unknown dtype 'weird'"),
+    )
+    client = _client(server)
+    with pytest.raises(ServingError) as excinfo:
+        client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert excinfo.value.code.value == "unsupported"
+    assert client._binary_supported is None
+
+    # Binary is still attempted on the next call and succeeds.
+    server.routes[("POST_BINARY", "/infer")] = (200, _binary_success_body())
+    result = client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert result.transport == "binary"
+    assert client._binary_supported is True
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        _BINARY_RESULT_MAGIC,  # header without the metadata-length field
+        _BINARY_RESULT_MAGIC + struct.pack("<I", 999),  # metadata longer than body
+        _BINARY_RESULT_MAGIC + struct.pack("<I", 3) + b"{x}",  # malformed metadata JSON
+    ],
+)
+def test_binary_response_parser_rejects_malformed(server: _CannedServer, corrupt: bytes) -> None:
+    server.routes[("POST_BINARY", "/infer")] = (200, corrupt)
+    client = ServingClient(
+        _base_url(server), discover=False, timeout=3.0, preferred_transport="binary"
+    )
+    with pytest.raises(ProtocolError):
+        client.infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])

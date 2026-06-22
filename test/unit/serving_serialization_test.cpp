@@ -225,6 +225,27 @@ TEST(ServingSerialization, DecodeBinaryInferRequestRejectsShortPayload) {
   EXPECT_EQ(r.error().code, Error::Code::ShapeMismatch);
 }
 
+TEST(ServingSerialization, DecodeBinaryInferRequestRejectsTensorWindowOverflow) {
+  // byte_offset + byte_size must not overflow size_t. byte_offset is capped at
+  // INT64_MAX by the JSON parse, but byte_size derives from product(shape) and
+  // can reach ~2^63, so a crafted request (byte_offset = INT64_MAX, a shape
+  // whose byte size is 2^63 + 2) wraps the window-end computation and would
+  // otherwise slip past the "payload shorter than declared window" check.
+  nlohmann::json body;
+  body["request_id"] = "overflow";
+  body["endpoint"] = "default";
+  body["inputs"] = nlohmann::json::array({{{"name", "image"},
+                                           {"tensor",
+                                            {{"dtype", "uint8"},
+                                             {"shape", {2, 4611686018427387905}},
+                                             {"byte_offset", 9223372036854775807}}},
+                                           {"payload_offset", 0},
+                                           {"payload_size", 1}}});
+  auto r = decode_binary_infer_request(make_binary_infer_body(body, std::string{"\0", 1}));
+  ASSERT_FALSE(r);
+  EXPECT_EQ(r.error().code, Error::Code::ShapeMismatch);
+}
+
 TEST(ServingSerialization, DecodeBinaryInferRequestRejectsInvalidOffset) {
   nlohmann::json body;
   body["request_id"] = "offset";

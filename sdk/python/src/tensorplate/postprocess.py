@@ -7,6 +7,7 @@ lazily.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -137,13 +138,20 @@ def _decode_yolo26_e2e(
     detections: list[Detection] = []
     for row in array[0]:
         score = float(row[4])
-        if score < score_threshold:
+        # Skip non-finite scores (NaN never compares >= threshold and would
+        # otherwise fall through to int(row[5]) and raise on a NaN class id).
+        if not math.isfinite(score) or score < score_threshold:
             continue
-        class_id = int(row[5])
+        class_value = float(row[5])
+        # A real YOLO26 head never emits a negative or non-finite class id;
+        # drop such rows rather than store a nonsensical Detection.class_id.
+        if not math.isfinite(class_value) or class_value < 0:
+            continue
+        class_id = int(class_value)
         box = transform.map_box_to_source(
             float(row[0]), float(row[1]), float(row[2]), float(row[3])
         )
-        label = labels[class_id] if labels is not None and 0 <= class_id < len(labels) else None
+        label = labels[class_id] if labels is not None and class_id < len(labels) else None
         detections.append(Detection(class_id=class_id, score=score, box=box, label=label))
     return detections
 
