@@ -33,11 +33,14 @@ ndarray, and prepares the input tensor with `PreprocessConfig`:
 `preprocess(image, config)` returns the `TensorInput` and the
 `LetterboxTransform` it used to map boxes back to source pixels.
 
-## Output contract
+## Output contracts
 
-The built-in contract is `yolo_v8_single_output` (the `contract=` default,
-and the only built-in contract — any other value raises). It expects a
-single output tensor shaped:
+The `contract=` option selects the built-in detector output decoder.
+`yolo_v8_single_output` remains the default for backward compatibility.
+
+### `yolo_v8_single_output`
+
+This contract expects a single output tensor shaped:
 
 - `[1, 4 + C, N]` — the YOLOv8 layout (4 box coordinates + `C` class scores,
   across `N` candidates); or
@@ -46,7 +49,23 @@ single output tensor shaped:
 
 Box coordinates are center-x / center-y / width / height in the letterboxed
 input space; postprocessing converts them to `(x1, y1, x2, y2)` and maps
-them back to source pixels with the `LetterboxTransform`.
+them back to source pixels with the `LetterboxTransform`. Class-aware NMS is
+applied with `nms_threshold`.
+
+### `yolo26_e2e_detections`
+
+This contract targets the default Ultralytics YOLO26 one-to-one / end-to-end
+head. It expects one NMS-free output tensor shaped `[1, K, 6]`, with `K <= 300`
+and columns:
+
+```text
+x1, y1, x2, y2, score, class_id
+```
+
+The box coordinates are already corner coordinates in the letterboxed input
+space. Postprocessing filters by `score_threshold`, maps boxes back to source
+pixels, and does **not** run NMS. `transposed` and `nms_threshold` are ignored
+for this contract.
 
 ## Selecting the output tensor
 
@@ -80,9 +99,9 @@ detections.classes  # "detections.classes"
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `score_threshold` | `0.25` | Drop detections below this confidence. |
-| `nms_threshold` | `0.45` | IoU threshold for class-aware NMS. |
+| `nms_threshold` | `0.45` | IoU threshold for class-aware NMS on `yolo_v8_single_output`; ignored for `yolo26_e2e_detections`. |
 | `labels` | `None` | Class names; when given, `Detection.label` is set from `labels[class_id]`. |
-| `transposed` | `False` | Set for `[1, N, 4 + C]` outputs. |
+| `transposed` | `False` | Set for `[1, N, 4 + C]` YOLOv8 outputs; ignored for `yolo26_e2e_detections`. |
 | `contract` | `"yolo_v8_single_output"` | Output contract to decode. |
 
 The lower-level `decode_detections(output, transform, *, score_threshold,
@@ -92,10 +111,18 @@ run `ServingClient.infer` themselves and decode the result.
 ## Example
 
 ```python
-from tensorplate import VisionClient
+from tensorplate import YOLO26_E2E_DETECTIONS, VisionClient
 
 vc = VisionClient("http://127.0.0.1:18080")
 labels = ["person", "bicycle", "car"]  # ...COCO etc.
 for d in vc.detect("frame.jpg", endpoint="yolov8n", labels=labels, score_threshold=0.3):
+    print(d.label, d.score, d.box)
+
+for d in vc.detect(
+    "frame.jpg",
+    endpoint="yolo26n",
+    labels=labels,
+    contract=YOLO26_E2E_DETECTIONS,
+):
     print(d.label, d.score, d.box)
 ```

@@ -10,10 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from tensorplate.conventions import detections
+from tensorplate.conventions import YOLO26_E2E_DETECTIONS, detections
 from tensorplate.errors import ProtocolError
 from tensorplate.preprocess import PreprocessConfig
-from tensorplate.serving import InferResult
+from tensorplate.serving import _BINARY_CONTENT_TYPE, InferResult
 from tensorplate.tensors import DType, TensorOutput
 from tensorplate.vision import VisionClient, _select_detection_output
 
@@ -61,6 +61,26 @@ class _Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         server = self.server
         assert isinstance(server, _CannedServer)
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if content_type == _BINARY_CONTENT_TYPE:
+            data = json.dumps(
+                {
+                    "schema_version": "0.1",
+                    "request_id": "",
+                    "status": "failure",
+                    "error": {
+                        "schema_version": "0.1",
+                        "code": "unsupported",
+                        "message": "binary transport unsupported",
+                    },
+                }
+            ).encode("utf-8")
+            self.send_response(415)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         server.captured.append(body)
         self._reply(("POST", self.path))
 
@@ -143,3 +163,41 @@ def test_detect_end_to_end(server: _CannedServer) -> None:
     assert dets[0].box == pytest.approx((60.0, 25.0, 100.0, 65.0))
     sent = json.loads(server.captured[0])
     assert sent["inputs"][0]["name"] == "custom_images"
+
+
+def test_detect_yolo26_e2e_end_to_end(server: _CannedServer) -> None:
+    pytest.importorskip("numpy")
+    pytest.importorskip("PIL")
+    import numpy
+
+    rows = numpy.zeros((1, 300, 6), dtype=numpy.float32)
+    rows[0, 0] = [120, 120, 200, 200, 0.95, 0]
+    body = {
+        "schema_version": "0.1",
+        "request_id": "r",
+        "status": "success",
+        "outputs": [
+            {
+                "name": "out",
+                "tensor": {"dtype": "float32", "shape": [1, 300, 6], "byte_size": rows.nbytes},
+                "payload_b64": base64.b64encode(rows.tobytes()).decode("ascii"),
+            }
+        ],
+    }
+    server.routes[("POST", "/infer")] = (200, body)
+
+    client = VisionClient(_base_url(server), discover=False, timeout=3.0)
+    image = numpy.zeros((90, 160, 3), dtype=numpy.uint8)
+    dets = client.detect(
+        image,
+        endpoint="m",
+        score_threshold=0.25,
+        labels=["obj"],
+        contract=YOLO26_E2E_DETECTIONS,
+        preprocess_config=PreprocessConfig(input_size=(320, 320)),
+    )
+
+    assert len(dets) == 1
+    assert dets[0].label == "obj"
+    assert dets[0].score == pytest.approx(0.95)
+    assert dets[0].box == pytest.approx((60.0, 25.0, 100.0, 65.0))
