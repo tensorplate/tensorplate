@@ -150,6 +150,32 @@ std::string make_infer_body(const std::string& request_id,
   return body.dump();
 }
 
+void append_u32_le(std::string& out, std::uint32_t value) {
+  out.push_back(static_cast<char>(value & 0xFFU));
+  out.push_back(static_cast<char>((value >> 8U) & 0xFFU));
+  out.push_back(static_cast<char>((value >> 16U) & 0xFFU));
+  out.push_back(static_cast<char>((value >> 24U) & 0xFFU));
+}
+
+std::string make_binary_infer_body(const std::string& request_id) {
+  nlohmann::json body;
+  body["schema_version"] = "0.1";
+  body["request_id"] = request_id;
+  body["endpoint"] = "default";
+  body["inputs"] =
+      nlohmann::json::array({{{"name", "image"},
+                              {"tensor", {{"dtype", "uint8"}, {"shape", {2, 2}}, {"byte_size", 4}}},
+                              {"payload_offset", 0},
+                              {"payload_size", 4}}});
+  const std::string metadata = body.dump();
+  std::string wire;
+  wire.append(serving::kBinaryInferMagic.data(), serving::kBinaryInferMagic.size());
+  append_u32_le(wire, static_cast<std::uint32_t>(metadata.size()));
+  wire.append(metadata);
+  wire.append(std::string{"\0\1\2\3", 4});
+  return wire;
+}
+
 std::string send_raw_http(std::uint16_t port, const std::string& request) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
@@ -213,6 +239,34 @@ TEST(ServingE2E, InferRouteHappyPath) {
   ASSERT_TRUE(j.contains("outputs"));
   EXPECT_EQ(j["outputs"][0]["name"], "actions");
   EXPECT_FALSE(resp.header("x-correlation-id").empty());
+}
+
+TEST(ServingE2E, InferRouteBinaryHappyPath) {
+  auto h = ServingHarness::start(default_test_config());
+  HttpClient client("127.0.0.1", h.port);
+  auto resp = client.post("/infer", make_binary_infer_body("bin-req"),
+                          {{"content-type", std::string(serving::kBinaryInferContentType.data(),
+                                                        serving::kBinaryInferContentType.size())}});
+  ASSERT_EQ(resp.status, 200) << resp.body;
+  EXPECT_EQ(resp.header("content-type"), std::string(serving::kBinaryInferContentType.data(),
+                                                     serving::kBinaryInferContentType.size()));
+  EXPECT_FALSE(resp.header("x-correlation-id").empty());
+  ASSERT_GE(resp.body.size(), serving::kBinaryResultMagic.size() + sizeof(std::uint32_t));
+  EXPECT_EQ(resp.body.substr(0, serving::kBinaryResultMagic.size()),
+            std::string(serving::kBinaryResultMagic.data(), serving::kBinaryResultMagic.size()));
+  const auto meta_offset = serving::kBinaryResultMagic.size();
+  const auto meta_len =
+      static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset])) |
+      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 1])) << 8U) |
+      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 2])) << 16U) |
+      (static_cast<std::uint32_t>(static_cast<unsigned char>(resp.body[meta_offset + 3])) << 24U);
+  const auto meta_start = meta_offset + sizeof(std::uint32_t);
+  ASSERT_LE(meta_start + meta_len, resp.body.size());
+  auto meta = nlohmann::json::parse(resp.body.substr(meta_start, meta_len));
+  EXPECT_EQ(meta["request_id"], "bin-req");
+  EXPECT_EQ(meta["status"], "success");
+  ASSERT_TRUE(meta.contains("outputs"));
+  EXPECT_EQ(meta["outputs"][0]["name"], "actions");
 }
 
 TEST(ServingE2E, InferPropagatesCorrelationIdFromMetadata) {

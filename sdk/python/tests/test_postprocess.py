@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from tensorplate.conventions import YOLO26_E2E_DETECTIONS
 from tensorplate.errors import ProtocolError
 from tensorplate.postprocess import decode_detections
 from tensorplate.preprocess import LetterboxTransform
@@ -102,3 +103,92 @@ def test_decode_rejects_too_few_channels() -> None:
     output = TensorOutput("det", DType.FLOAT32, (1, 3, 4), grid.tobytes())
     with pytest.raises(ProtocolError):
         decode_detections(output, _IDENTITY)
+
+
+def test_decode_yolo26_e2e_filters_maps_labels_and_preserves_overlaps() -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    transform = LetterboxTransform(
+        src_height=90,
+        src_width=160,
+        scale_x=2.0,
+        scale_y=2.0,
+        pad_x=0.0,
+        pad_y=70.0,
+        input_height=320,
+        input_width=320,
+    )
+    rows = numpy.zeros((1, 300, 6), dtype=numpy.float32)
+    rows[0, 0] = [120, 120, 200, 200, 0.9, 1]
+    rows[0, 1] = [
+        122,
+        122,
+        202,
+        202,
+        0.8,
+        1,
+    ]  # overlapping box, kept because YOLO26 E2E is NMS-free
+    rows[0, 2] = [10, 10, 20, 20, 0.1, 0]
+    output = TensorOutput("det", DType.FLOAT32, (1, 300, 6), rows.tobytes())
+
+    detections = decode_detections(
+        output,
+        transform,
+        score_threshold=0.25,
+        nms_threshold=0.0,
+        labels=["a", "b"],
+        contract=YOLO26_E2E_DETECTIONS,
+    )
+
+    assert len(detections) == 2
+    assert detections[0].class_id == 1
+    assert detections[0].label == "b"
+    assert detections[0].score == pytest.approx(0.9)
+    assert detections[0].box == pytest.approx((60.0, 25.0, 100.0, 65.0))
+    assert detections[1].score == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 6, 300),
+        (2, 300, 6),
+        (1, 301, 6),
+    ],
+)
+def test_decode_yolo26_e2e_rejects_invalid_shapes(shape: tuple[int, ...]) -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    rows = numpy.zeros(shape, dtype=numpy.float32)
+    output = TensorOutput("det", DType.FLOAT32, shape, rows.tobytes())
+    with pytest.raises(ProtocolError):
+        decode_detections(output, _IDENTITY, contract=YOLO26_E2E_DETECTIONS)
+
+
+def test_decode_yolo26_e2e_rejects_non_float_dtype() -> None:
+    pytest.importorskip("numpy")
+    output = TensorOutput("det", DType.INT32, (1, 300, 6), b"\x00" * (300 * 6 * 4))
+    with pytest.raises(ProtocolError, match="float16 or float32"):
+        decode_detections(output, _IDENTITY, contract=YOLO26_E2E_DETECTIONS)
+
+
+def test_decode_yolo26_e2e_drops_nonfinite_and_negative_rows() -> None:
+    pytest.importorskip("numpy")
+    import numpy
+
+    rows = numpy.zeros((1, 300, 6), dtype=numpy.float32)
+    rows[0, 0] = [10, 10, 20, 20, 0.9, 0]  # valid -> kept
+    rows[0, 1] = [10, 10, 20, 20, numpy.nan, 0]  # NaN score -> dropped, no raise
+    rows[0, 2] = [10, 10, 20, 20, 0.8, numpy.nan]  # NaN class id -> dropped, no raise
+    rows[0, 3] = [10, 10, 20, 20, 0.7, -1]  # negative class id -> dropped
+    output = TensorOutput("det", DType.FLOAT32, (1, 300, 6), rows.tobytes())
+
+    detections = decode_detections(
+        output, _IDENTITY, score_threshold=0.25, contract=YOLO26_E2E_DETECTIONS
+    )
+
+    assert len(detections) == 1
+    assert detections[0].class_id == 0
+    assert detections[0].score == pytest.approx(0.9)
