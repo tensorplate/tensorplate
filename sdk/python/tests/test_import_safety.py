@@ -17,10 +17,12 @@ def test_vision_surface_imports_without_numpy() -> None:
     assert tensorplate.detections.scores == "detections.scores"
     assert tensorplate.detections.classes == "detections.classes"
     assert tensorplate.YOLO_V8_SINGLE_OUTPUT == "yolo_v8_single_output"
+    assert tensorplate.YOLO26_E2E_DETECTIONS == "yolo26_e2e_detections"
     for name in (
         "Detection",
         "LetterboxTransform",
         "PreprocessConfig",
+        "YOLO26_E2E_DETECTIONS",
         "decode_detections",
         "preprocess",
     ):

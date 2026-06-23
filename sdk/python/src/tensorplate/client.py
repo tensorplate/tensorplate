@@ -104,8 +104,9 @@ def http_request(
     :class:`RequestTimeoutError`.
     """
     request = urllib.request.Request(url, data=body, method=method)
-    request.add_header("Accept", "application/json")
-    if body is not None:
+    normalized_headers = {key.lower(): value for key, value in (headers or {}).items()}
+    request.add_header("Accept", normalized_headers.get("accept", "application/json"))
+    if body is not None and "content-type" not in normalized_headers:
         request.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         request.add_header(key, value)
