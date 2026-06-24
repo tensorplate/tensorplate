@@ -1,11 +1,14 @@
 name: APT Repository
 
-# Publishes the signed APT repository for https://packages.tensorplate.com/apt.
+# Republish/recovery for the signed APT repository at
+# https://packages.tensorplate.com/apt.
+#
+# The primary APT publish runs inside release.yml's `publish-apt` job (gated
+# by the protected `apt` environment) on the release tag. This workflow is the
+# manual republish/recovery and staging path; it no longer auto-fires on a
+# Release going public.
 #
 # Triggers:
-#   - release [released]: fires when a final release goes public (including
-#     a draft being published). GitHub does not emit `released` for
-#     prereleases, so release candidates never reach the stable channel.
 #   - workflow_dispatch: republish an existing release's repository metadata
 #     without rebuilding packages, or publish to a staging destination.
 #     With source_run_id, publishes a build-only Release run's unsigned
@@ -31,8 +34,6 @@ name: APT Repository
 #   secrets.TP_APT_AWS_ACCESS_KEY_ID / TP_APT_AWS_SECRET_ACCESS_KEY
 
 on:
-  release:
-    types: [released]
   workflow_dispatch:
     inputs:
       tag:
@@ -64,7 +65,7 @@ jobs:
     timeout-minutes: 30
     if: ${{ vars.TP_APT_REPO_DEST != '' || inputs.dest != '' }}
     env:
-      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+      TAG: ${{ inputs.tag }}
       DEST: ${{ inputs.dest != '' && inputs.dest || vars.TP_APT_REPO_DEST }}
       AWS_ACCESS_KEY_ID: ${{ secrets.TP_APT_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.TP_APT_AWS_SECRET_ACCESS_KEY }}

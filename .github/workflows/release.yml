@@ -580,3 +580,244 @@ jobs:
           # Trusted Publishing (OIDC) — configure the publisher on PyPI:
           #   project: tensorplate-python | owner/repo: ${{ github.repository }}
           #   workflow: release.yml | environment: pypi
+
+  publish-apt:
+    name: publish the APT repository
+    needs: [meta, publish-release]
+    # Builds, signs, and syncs the stable APT repository from this run's
+    # signed assets (produced by publish-release), in parallel with the
+    # other channels and behind the protected `apt` environment. This is
+    # now the primary APT publish; apt-repo.yml is republish/recovery only.
+    # Gated: final releases only, and only when the production destination
+    # is configured (TP_APT_REPO_DEST). The `apt` environment must require a
+    # reviewer (see docs/release/runbook.md external setup).
+    if: ${{ needs.meta.outputs.publish == 'true' && needs.meta.outputs.prerelease == 'false' && vars.TP_APT_REPO_DEST != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: apt
+      url: https://packages.tensorplate.com/apt
+    permissions:
+      # actions: read is deliberately omitted: the signed assets are
+      # downloaded from THIS run (not cross-run), which does not require it.
+      contents: read
+    env:
+      TAG: ${{ needs.meta.outputs.tag }}
+      DEST: ${{ vars.TP_APT_REPO_DEST }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TP_APT_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TP_APT_AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ vars.TP_APT_AWS_REGION || 'us-east-1' }}
+      # The endpoint may carry the storage account id. Defining it as a
+      # secret gets it auto-masked in this public repo's workflow logs.
+      TP_APT_S3_ENDPOINT: ${{ secrets.TP_APT_S3_ENDPOINT || vars.TP_APT_S3_ENDPOINT }}
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+    steps:
+      # Checkout the release tag so the publication script and the bootstrap
+      # keyring match exactly what this release shipped.
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Install repository tooling
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            dpkg-dev \
+            gnupg \
+            gpgv
+
+      - name: Install cosign
+        shell: bash
+        env:
+          COSIGN_VERSION: v3.0.2
+          COSIGN_LINUX_AMD64_SHA256: 46dbdcb5467a3dfec2526923d0b3365e40c8d9dc00ec23d5aca3437449e8cbfd
+        run: |
+          set -Eeuo pipefail
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          curl -fsSL \
+            -o "$tmpdir/cosign" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          printf '%s  %s\n' "$COSIGN_LINUX_AMD64_SHA256" "$tmpdir/cosign" | sha256sum -c -
+          sudo install -m 0755 "$tmpdir/cosign" /usr/local/bin/cosign
+          cosign version
+
+      # The signed release-assets bundle (the cosign-verified SHA256SUMS, the
+      # manifest, the .deb set, install.sh, and the wheel/sdist) is produced
+      # by publish-release in this same run, so APT publishes from the build
+      # rather than re-downloading the not-yet-public GitHub Release.
+      - name: Download signed release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-${{ needs.meta.outputs.tag }}-release-assets
+          path: ${{ runner.temp }}/assets
+
+      - name: Resolve downloaded assets directory
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # upload-artifact may preserve the release_dir prefix; locate the
+          # directory that actually holds SHA256SUMS rather than assuming it.
+          sums="$(find "${RUNNER_TEMP}/assets" -type f -name SHA256SUMS | head -n1)"
+          [[ -n "$sums" ]] || {
+            echo "::error::SHA256SUMS not found in the downloaded release-assets artifact"
+            find "${RUNNER_TEMP}/assets" -maxdepth 3 -type f -print
+            exit 1
+          }
+          echo "ASSETS_DIR=$(dirname "$sums")" >>"$GITHUB_ENV"
+
+      # The canonical release verifier enforces the complete required
+      # package/architecture set, per-file checksums, and the manifest
+      # self-digest before anything is published.
+      - name: Verify release asset set
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/release/tensorplate-release.sh verify \
+            --skip-tag-verify \
+            --version "${TAG#v}" \
+            --tag "$TAG" \
+            --artifacts-dir "$ASSETS_DIR" \
+            --manifest "${ASSETS_DIR}/tensorplate-${TAG}-artifacts.json" \
+            --checksums "${ASSETS_DIR}/SHA256SUMS"
+
+      - name: Stage signing key
+        shell: bash
+        env:
+          TP_APT_SIGNING_KEY: ${{ secrets.TP_APT_SIGNING_KEY }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "$TP_APT_SIGNING_KEY" ]]; then
+            echo "::error::secrets.TP_APT_SIGNING_KEY is not configured; provision the archive signing key per the maintainer release-ops runbook"
+            exit 1
+          fi
+          install -m 0600 /dev/null "${RUNNER_TEMP}/apt-signing-key.asc"
+          printf '%s\n' "$TP_APT_SIGNING_KEY" > "${RUNNER_TEMP}/apt-signing-key.asc"
+
+      - name: Sync down existing pool
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint_args=()
+          [[ -n "$TP_APT_S3_ENDPOINT" ]] && endpoint_args+=(--endpoint-url "$TP_APT_S3_ENDPOINT")
+          mkdir -p "${RUNNER_TEMP}/pool-existing"
+          # First publication: the destination pool may not exist yet.
+          aws s3 sync "${DEST}/pool" "${RUNNER_TEMP}/pool-existing" "${endpoint_args[@]}" || true
+          find "${RUNNER_TEMP}/pool-existing" -type f -name '*.deb' | wc -l
+
+      - name: Build and sign repository tree
+        shell: bash
+        env:
+          TP_APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.TP_APT_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -Eeuo pipefail
+          # Release-path assets carry the cosign bundle; verification is
+          # mandatory (no --allow-unverified-assets on this path).
+          tools/release/publish-apt-repo.sh \
+            --assets-dir "$ASSETS_DIR" \
+            --output "${RUNNER_TEMP}/apt-repo" \
+            --existing-pool "${RUNNER_TEMP}/pool-existing" \
+            --signing-key "${RUNNER_TEMP}/apt-signing-key.asc" \
+            --cosign-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+
+      - name: Sync repository to object storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint_args=()
+          [[ -n "$TP_APT_S3_ENDPOINT" ]] && endpoint_args+=(--endpoint-url "$TP_APT_S3_ENDPOINT")
+          # pool/ first and immutable; dists/ second and short-lived so
+          # `apt update` sees new releases without referencing missing files.
+          aws s3 sync "${RUNNER_TEMP}/apt-repo/pool" "${DEST}/pool" \
+            --cache-control "public, max-age=31536000, immutable" \
+            "${endpoint_args[@]}"
+          aws s3 sync "${RUNNER_TEMP}/apt-repo/dists" "${DEST}/dists" \
+            --cache-control "public, max-age=60" \
+            --delete \
+            "${endpoint_args[@]}"
+
+      - name: Publication summary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo "APT repository for ${TAG} synced to ${DEST}."
+            echo "Validate from a clean host: install tensorplate-apt-source, then 'sudo apt update' must succeed without trust warnings."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  publish-homebrew:
+    name: publish the Homebrew formula bump
+    needs: [meta, publish-release]
+    # Opens (or updates) an auto-merge formula-bump PR in the Homebrew tap.
+    # Completion means "PR opened with auto-merge armed", not "merged": the
+    # tap's own CI (audit + build-from-source + `brew test` on Apple
+    # Silicon) gates the actual merge, so go-live is eventually consistent.
+    # Gated: final releases only, and only when PUBLISH_HOMEBREW_FORMULA is
+    # set. The `homebrew` environment must require a reviewer.
+    if: ${{ needs.meta.outputs.publish == 'true' && needs.meta.outputs.prerelease == 'false' && vars.PUBLISH_HOMEBREW_FORMULA == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: homebrew
+      url: https://github.com/tensorplate/homebrew-tap
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Open auto-merge formula-bump PR
+        shell: bash
+        # HOMEBREW_TAP_TOKEN is a fine-grained PAT or GitHub App token with
+        # contents + pull_requests write scoped to the tap repo only.
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          SOURCE_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::secrets.HOMEBREW_TAP_TOKEN is not configured; provision a tap-scoped token per docs/release/runbook.md"
+            exit 1
+          fi
+          tools/release/publish-homebrew-formula.sh \
+            --tag "$TAG" \
+            --source-repo "$SOURCE_REPO" \
+            --tap-repo tensorplate/homebrew-tap
+
+  publish-github:
+    name: publish the GitHub Release
+    needs: [meta, publish-release]
+    # Un-drafts the GitHub Release created by publish-release, making the
+    # attached assets public. This is its own approval-gated step now,
+    # rather than the implicit trigger that used to start the APT publish.
+    # The `github-release` environment must require a reviewer.
+    if: ${{ needs.meta.outputs.publish == 'true' && needs.meta.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-release
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.meta.outputs.tag }}
+    permissions:
+      contents: write
+    steps:
+      - name: Un-draft the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::GitHub Release $TAG not found; publish-release must create the draft first"
+            exit 1
+          fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
