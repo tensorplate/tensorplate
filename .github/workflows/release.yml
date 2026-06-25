@@ -707,8 +707,10 @@ jobs:
           endpoint_args=()
           [[ -n "$TP_APT_S3_ENDPOINT" ]] && endpoint_args+=(--endpoint-url "$TP_APT_S3_ENDPOINT")
           mkdir -p "${RUNNER_TEMP}/pool-existing"
-          # First publication: the destination pool may not exist yet.
-          aws s3 sync "${DEST}/pool" "${RUNNER_TEMP}/pool-existing" "${endpoint_args[@]}" || true
+          # An empty first-publish prefix syncs as an empty source; real
+          # storage, endpoint, or credential failures must stop publication so
+          # older packages are not silently dropped from generated metadata.
+          aws s3 sync "${DEST}/pool" "${RUNNER_TEMP}/pool-existing" "${endpoint_args[@]}"
           find "${RUNNER_TEMP}/pool-existing" -type f -name '*.deb' | wc -l
 
       - name: Build and sign repository tree

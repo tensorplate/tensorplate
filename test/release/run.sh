@@ -13,6 +13,7 @@ script="tools/release/tensorplate-release.sh"
 build_script="tools/release/build-release-artifacts.sh"
 source_install_script="packaging/scripts/build-install-from-source.sh"
 publish_apt_script="tools/release/publish-apt-repo.sh"
+publish_homebrew_script="tools/release/publish-homebrew-formula.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -27,6 +28,8 @@ bash -n "$source_install_script"
 "$source_install_script" --help >/dev/null
 bash -n "$publish_apt_script"
 "$publish_apt_script" --help >/dev/null
+bash -n "$publish_homebrew_script"
+"$publish_homebrew_script" --help >/dev/null
 
 # Patch tags live on the per-minor maintenance line, not per-version
 # release branches.
@@ -65,7 +68,9 @@ fi
 grep -q 'name: Release' .github/workflows/release.yml
 grep -q 'tools/release/build-release-artifacts.sh' .github/workflows/release.yml
 grep -q 'draft="true"' .github/workflows/release.yml
-grep -q 'gh release edit "${TP_TAG}" --draft=false --latest' docs/release/runbook.md
+grep -q 'publish-github' docs/release/runbook.md
+grep -q 'gh release edit --draft=false --latest' docs/release/runbook.md
+grep -q 'Protected environments with \*\*required reviewers\*\*' docs/release/runbook.md
 
 mkdir -p "$tmp/artifacts"
 for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do

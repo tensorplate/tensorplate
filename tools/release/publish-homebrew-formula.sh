@@ -148,6 +148,6 @@ fi
 note "arming auto-merge"
 # Auto-merge holds the PR until the tap's required status checks pass.
 gh pr merge --repo "$TAP_REPO" "$pr_ref" --auto --squash ||
-  note "WARNING: could not arm auto-merge (enable auto-merge + a required check on ${TAP_REPO}); the PR is open for manual merge"
+  die "could not arm auto-merge; enable auto-merge and a required check on ${TAP_REPO}, or merge the PR manually and rerun for confirmation"
 
 note "homebrew formula-bump PR for ${TAG} is open with auto-merge armed"
