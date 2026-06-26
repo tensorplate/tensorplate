@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-06-26
+
 ### Added
 
 - Binary `/infer` transport for `tensorplate-serving` and the Python SDK: an

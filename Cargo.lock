@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "tensorplate-agent"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "hex",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "tensorplate-bundle-tool"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde_json",
  "tensorplate-protocol",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "tensorplate-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "tensorplate-observability"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "tensorplate-protocol"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "hex",
  "serde",
