@@ -113,20 +113,27 @@ plan explicitly says so.
 
 ## Download And Verify Release Assets
 
-Follow
-[`docs/install/external-install.md`](../install/external-install.md)
-to download `.deb` assets, `${TP_MANIFEST}`, and `SHA256SUMS` from the
-GitHub Release. Also fetch the SDK wheel + sdist (covered by the same
-`SHA256SUMS`, and used by the SDK wheel verification below):
+Download the **complete** release asset set into a clean working directory.
+`sha256sum -c SHA256SUMS` checks every file listed in `SHA256SUMS` — all
+`.deb` packages (including `tensorplate-apt-source`, the `tensorplate`
+metapackage, and the `amd64` CLI), `install.sh`, the SDK wheel + sdist, and
+the manifest — so a partial download (for example the runtime subset in
+[`docs/install/external-install.md`](../install/external-install.md), which
+covers the trust model and signature steps) false-fails verification:
 
 ```bash
-gh release download "${TP_TAG}" --dir . \
+gh release download "${TP_TAG}" --repo "${TP_REPO}" --dir . \
+  --pattern '*.deb' \
+  --pattern 'install.sh' \
   --pattern 'tensorplate_python-*.whl' \
-  --pattern 'tensorplate_python-*.tar.gz'
+  --pattern 'tensorplate_python-*.tar.gz' \
+  --pattern "${TP_MANIFEST}" \
+  --pattern 'SHA256SUMS' \
+  --pattern 'SHA256SUMS.cosign.bundle'
 ```
 
-Record (every file listed in `SHA256SUMS` must be present, including the
-wheel + sdist, or `sha256sum -c` fails):
+Record (every file listed in `SHA256SUMS` must be present, or `sha256sum -c`
+fails):
 
 ```bash
 sha256sum -c SHA256SUMS | tee "/tmp/tensorplate-${TP_TAG}-checksums.txt"
