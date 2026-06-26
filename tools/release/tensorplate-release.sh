@@ -475,6 +475,17 @@ check_changelog() {
   fi
 }
 
+check_release_notes() {
+  # The tag-driven release.yml flow passes this path to gh release create
+  # --notes-file; a missing file fails late, after the multi-hour build, so
+  # gate it here in preflight/cut instead.
+  if [[ -f "$RELEASE_NOTES" ]]; then
+    pass "release notes present at $RELEASE_NOTES"
+  else
+    fail "release notes file is missing: $RELEASE_NOTES (required by the publish path)"
+  fi
+}
+
 check_signoff() {
   check_file_exists "$SIGNOFF" "release sign-off"
   [[ -f "$SIGNOFF" ]] || return 0
@@ -608,6 +619,7 @@ run_preflight() {
   check_tag_state
   check_version_files
   check_changelog
+  check_release_notes
   check_evidence
   check_signoff
   check_artifacts
@@ -741,6 +753,7 @@ run_source_preflight() {
   check_remote
   check_version_files
   check_changelog
+  check_release_notes
 
   if ((${#FAILURES[@]})); then
     printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2

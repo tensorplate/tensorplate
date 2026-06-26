@@ -102,8 +102,8 @@ The release owner stops immediately unless all prerequisites are true:
 - Security review is complete.
 - Packaging artifacts can be built from the release commit.
 - Public install guide and quickstart are reviewed.
-- `docs/release/notes/vX.Y.Z.md` exists (a hard tag prerequisite; otherwise
-  the publish run fails only after the multi-hour build).
+- `docs/release/notes/vX.Y.Z.md` exists (a hard tag prerequisite, enforced by
+  `preflight`/`cut` and required by the publish path's `--notes-file`).
 - The self-hosted release runner is available for the build, and all four
   publish environments (`pypi`, `apt`, `homebrew`, `github-release`) each have
   a required reviewer (a reviewer-less environment publishes without a hold).

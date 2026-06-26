@@ -116,9 +116,17 @@ plan explicitly says so.
 Follow
 [`docs/install/external-install.md`](../install/external-install.md)
 to download `.deb` assets, `${TP_MANIFEST}`, and `SHA256SUMS` from the
-GitHub Release.
+GitHub Release. Also fetch the SDK wheel + sdist (covered by the same
+`SHA256SUMS`, and used by the SDK wheel verification below):
 
-Record:
+```bash
+gh release download "${TP_TAG}" --dir . \
+  --pattern 'tensorplate_python-*.whl' \
+  --pattern 'tensorplate_python-*.tar.gz'
+```
+
+Record (every file listed in `SHA256SUMS` must be present, including the
+wheel + sdist, or `sha256sum -c` fails):
 
 ```bash
 sha256sum -c SHA256SUMS | tee "/tmp/tensorplate-${TP_TAG}-checksums.txt"
