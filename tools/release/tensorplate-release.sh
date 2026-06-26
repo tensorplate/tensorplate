@@ -381,10 +381,22 @@ check_version_files() {
     pass "Cargo protocol dependency version is $VERSION" ||
     fail "Cargo.toml tensorplate-protocol dependency version must be $VERSION"
 
-  grep -Eq "^version = \"${VERSION}\"$" Cargo.lock &&
+  # Every tensorplate-* crate in Cargo.lock must be exactly $VERSION. A plain
+  # grep for one matching line is unsound: prepare_python only rewrites
+  # `-dev` crate versions, so on a finalized->finalized bump a partially
+  # hand-bumped lockfile (some crates still at the prior version, none with a
+  # -dev suffix) would otherwise pass and ship a $VERSION-named .deb whose
+  # binary reports the old version. Check each crate, and reject any -dev.
+  awk -v v="$VERSION" '
+      /^name = "tensorplate-/ {
+        getline ver
+        if (ver != ("version = \"" v "\"")) { print "  stale: " $0 " -> " ver; bad = 1 }
+      }
+      END { exit bad }
+    ' Cargo.lock &&
     ! grep -Eq 'version = "[0-9]+\.[0-9]+\.[0-9]+-dev"' Cargo.lock &&
-    pass "Cargo.lock workspace package versions are finalized" ||
-    fail "Cargo.lock must contain finalized TensorPlate package versions without -dev suffixes"
+    pass "Cargo.lock tensorplate-* crate versions are all finalized at $VERSION" ||
+    fail "every Cargo.lock tensorplate-* crate version must be $VERSION without -dev suffixes"
 
   grep -Eq "\"version-string\": \"${VERSION}\"" vcpkg.json &&
     pass "vcpkg version-string is $VERSION" ||
@@ -460,6 +472,17 @@ check_changelog() {
     pass "CHANGELOG.md contains a dated $VERSION section"
   else
     fail "CHANGELOG.md must promote [Unreleased] to a dated [$VERSION] section before final tagging"
+  fi
+}
+
+check_release_notes() {
+  # The tag-driven release.yml flow passes this path to gh release create
+  # --notes-file; a missing file fails late, after the multi-hour build, so
+  # gate it here in preflight/cut instead.
+  if [[ -f "$RELEASE_NOTES" ]]; then
+    pass "release notes present at $RELEASE_NOTES"
+  else
+    fail "release notes file is missing: $RELEASE_NOTES (required by the publish path)"
   fi
 }
 
@@ -596,6 +619,7 @@ run_preflight() {
   check_tag_state
   check_version_files
   check_changelog
+  check_release_notes
   check_evidence
   check_signoff
   check_artifacts
@@ -729,6 +753,7 @@ run_source_preflight() {
   check_remote
   check_version_files
   check_changelog
+  check_release_notes
 
   if ((${#FAILURES[@]})); then
     printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2

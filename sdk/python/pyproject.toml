@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tensorplate-python"
 description = "First-party Python SDK for calling deployed TensorPlate detection and vision serving models."
-version = "0.1.3.dev0"
+version = "0.1.4.dev0"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 readme = "README.md"

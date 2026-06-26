@@ -46,6 +46,35 @@ Record sign-offs in a copy of
 The implementation PR may add or update release tooling, release docs,
 install docs, validation procedure, support posture, and changelog notes.
 
+### Version surfaces
+
+The implementation PR also bumps the release version across **every** surface,
+because `prepare` does not bump them all on a finalized maintenance line: its
+`prepare_python` step clears the `-dev` suffix but leaves `CMakeLists.txt`'s
+`project(... VERSION X.Y.Z)` and the `Cargo.lock` `tensorplate-*` crate
+versions unchanged (those only carry a `-dev` form on a `develop` cut). Bump,
+by hand, all of:
+
+- `CMakeLists.txt` — `project(... VERSION X.Y.Z)` (leave the protocol/bundle
+  `TP_*_VERSION_*` macros on the protocol track, e.g. `0` / `1` for `0.1`).
+- `Cargo.toml` — `[workspace.package] version` and the `tensorplate-protocol`
+  path-dependency version.
+- `Cargo.lock` — every `tensorplate-*` crate version (third-party crates
+  untouched).
+- `vcpkg.json` — `version-string`.
+- `packaging/VERSION`.
+- `packaging/debian/changelog` — the top stanza `tensorplate (X.Y.Z-1)`.
+- `CHANGELOG.md` — promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`.
+- `sdk/python/pyproject.toml` — the `.dev0` development version (cosmetic; the
+  wheel version is injected at build).
+
+Also add `docs/release/notes/vX.Y.Z.md` — a **hard tag prerequisite** the
+publish path requires (`release.yml` `--notes-file`; the preflight). Then
+validate with `prepare --version X.Y.Z --dry-run` and `test/release/run.sh`.
+`preflight`/`cut` run `check_version_files`, which fails closed on any stale
+surface (including a partially bumped `Cargo.lock`), so a missed surface stops
+the cut rather than shipping a misversioned build.
+
 Allowed validation:
 
 ```bash
@@ -73,6 +102,11 @@ The release owner stops immediately unless all prerequisites are true:
 - Security review is complete.
 - Packaging artifacts can be built from the release commit.
 - Public install guide and quickstart are reviewed.
+- `docs/release/notes/vX.Y.Z.md` exists (a hard tag prerequisite, enforced by
+  `preflight`/`cut` and required by the publish path's `--notes-file`).
+- The self-hosted release runner is available for the build, and all four
+  publish environments (`pypi`, `apt`, `homebrew`, `github-release`) each have
+  a required reviewer (a reviewer-less environment publishes without a hold).
 - Clean-room validation target is ready.
 - No release blocker is open without a signed conditional pass.
 
@@ -206,11 +240,15 @@ The build-only run must:
 
 - Build Rust release binaries.
 - Build the C++ serving worker.
+- Build the `amd64` CLI package (hosted job).
+- Build the `tensorplate-python` wheel + sdist at the release version.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Copy `install.sh`.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
-- Upload the `tensorplate-${TP_TAG}-release-assets` workflow artifact.
+- Upload the `tensorplate-${TP_TAG}-release-assets-unsigned` workflow
+  artifact (the signed `…-release-assets` name is produced only on the
+  publish path).
 - Skip signing and provenance, which run only on the publish path; the
   uploaded assets are unsigned.
 - Stop before creating a GitHub Release.
@@ -242,15 +280,16 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Verify the tag commit is contained in `${TP_RELEASE_BRANCH}`.
 - Build Rust release binaries.
 - Build the C++ serving worker.
+- Build the `amd64` CLI package and the `tensorplate-python` wheel + sdist.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.
 - Sign `SHA256SUMS` with keyless cosign and record SLSA build provenance
-  for the packages, installer, manifest, and checksums.
+  for the packages, installer, wheel/sdist, manifest, and checksums.
 - Create the GitHub Release and attach the `.deb` packages, `install.sh`,
-  manifest, checksum file, and `SHA256SUMS.cosign.bundle`. RC tags are
-  public prereleases; final tags are drafts until the release owner
-  publishes them.
+  the wheel + sdist, manifest, checksum file, and `SHA256SUMS.cosign.bundle`.
+  RC tags are public prereleases; final tags are created as **drafts**, then
+  the approval-gated `publish-github` job un-drafts them (Step 9).
 
 The workflow refuses to replace an existing GitHub Release. If it fails
 after creating no release, fix the release branch, cut a new RC tag, or
@@ -267,6 +306,8 @@ gh release download "${TP_TAG}" \
   --dir "${TP_RELEASE_DIR}" \
   --pattern '*.deb' \
   --pattern 'install.sh' \
+  --pattern 'tensorplate_python-*.whl' \
+  --pattern 'tensorplate_python-*.tar.gz' \
   --pattern 'SHA256SUMS' \
   --pattern 'SHA256SUMS.cosign.bundle' \
   --pattern "tensorplate-${TP_TAG}-artifacts.json"
@@ -364,7 +405,11 @@ the external-setup discipline of earlier releases:
   App token with `contents` + `pull_requests` write **scoped to
   `tensorplate/homebrew-tap` only**.
 - In `tensorplate/homebrew-tap`: **auto-merge enabled** and a **required status
-  check** set, so the bump PR waits for the tap CI before merging.
+  check** set, so the bump PR waits for the tap CI before merging. The tap
+  `main` must require **0 approving reviews** (or grant the bump bot a bypass
+  actor): the automation cannot approve its own PR, so a required review would
+  leave the bump open forever and the Homebrew channel would silently never go
+  live after approval. The required CI check stays the merge gate.
 - Opt-in repository variables: `PUBLISH_SDK_TO_PYPI=true` (PyPI),
   `PUBLISH_HOMEBREW_FORMULA=true` (Homebrew); APT runs when `TP_APT_REPO_DEST`
   is set. The existing `TP_APT_*` vars/secrets carry over unchanged.
@@ -390,6 +435,9 @@ Stop and mark the release blocked if any item is true:
 - The final tag already exists.
 - Artifacts are missing, checksums mismatch, or manifest commit/tag data
   does not match the release.
+- The `cosign verify-blob` signature over `SHA256SUMS`, or any
+  `gh attestation verify`, fails — a checksum match alone does not prove the
+  assets came from the release workflow.
 - Required sign-off is missing.
 - Clean-room validation uses local build-tree paths.
 - Clean-room install, doctor, service start, deploy, inference, status,
