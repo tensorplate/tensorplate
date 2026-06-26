@@ -318,27 +318,56 @@ Fill the copied files with final decisions and links to:
 
 ### 9. Publish And Announce
 
-For a final release, publish the draft only after release evidence is
-accepted:
+For a final tag, the `Release` workflow signs and attests the build, creates
+the GitHub Release as a **draft**, and then fans out to four parallel publish
+jobs — `publish-pypi`, `publish-apt`, `publish-homebrew`, and
+`publish-github` — each **paused on its own protected deployment environment**
+(`pypi`, `apt`, `homebrew`, `github-release`). Every channel publishes the same
+cosign-signed, checksum-covered artifacts from this one build; release
+candidates are gated out of all four.
 
-```bash
-gh release edit "${TP_TAG}" --draft=false --latest
-```
+Approve each channel from the Actions run page only after release evidence is
+accepted. Channels are independent — approve in any order, or hold any one:
 
-Publishing the draft fires the `APT Repository` workflow automatically
-(see [`apt-repository.md`](./apt-repository.md)). Two manual follow-ups:
+- **`publish-pypi`** (env `pypi`) — uploads the signed wheel + sdist via PyPI
+  Trusted Publishing. PyPI is **immutable**: approve last-mile and with full
+  intent; a published version cannot be replaced.
+- **`publish-apt`** (env `apt`) — builds, signs, and syncs the stable APT
+  repository from this run's signed assets, then validate per
+  [`apt-repository.md`](./apt-repository.md). Re-runnable on failure.
+- **`publish-homebrew`** (env `homebrew`) — opens an auto-merge formula-bump PR
+  in [`tensorplate/homebrew-tap`](https://github.com/tensorplate/homebrew-tap).
+  The job finishing means "PR opened with auto-merge armed", not "merged": the
+  tap CI (audit + build-from-source + `brew test` on Apple Silicon) gates the
+  merge, so the tap goes live eventually-consistently. Re-runnable.
+- **`publish-github`** (env `github-release`) — un-drafts the GitHub Release
+  (`gh release edit --draft=false --latest`), making the assets public.
 
-1. Confirm the APT publication run succeeded and walk the validation
-   checklist in `apt-repository.md`.
-2. Bump the Homebrew tap formula in
-   [`tensorplate/homebrew-tap`](https://github.com/tensorplate/homebrew-tap):
-   update `url` to the new tag and `sha256` to
-   `shasum -a 256` of the new source tarball in
-   `Formula/tensorplate.rb`, then merge once the tap CI (audit +
-   build-from-source install + `brew test` on Apple Silicon) is green.
+Holding one channel does not block the others. A held or failed `publish-apt` /
+`publish-homebrew` can be re-run to completion from the run page; `publish-apt`
+also has the manual `apt-repo.yml` (`workflow_dispatch`) republish/recovery
+path. PyPI is not retried for a version that already published.
 
-Then publish the announcement using the release notes as the source of
-truth. The announcement must not claim support beyond release evidence.
+Then publish the announcement using the release notes as the source of truth.
+The announcement must not claim support beyond release evidence.
+
+#### Release publishing environments (one-time external setup)
+
+The parallel flow requires these to exist before the first final tag, mirroring
+the external-setup discipline of earlier releases:
+
+- Protected environments with **required reviewers**: `pypi` (already present),
+  `apt`, `homebrew`, and `github-release`. The reviewer approval on each is the
+  per-channel go-live gate; an environment left without a reviewer publishes
+  without a hold.
+- A **`HOMEBREW_TAP_TOKEN`** secret — a fine-grained PAT or (preferred) GitHub
+  App token with `contents` + `pull_requests` write **scoped to
+  `tensorplate/homebrew-tap` only**.
+- In `tensorplate/homebrew-tap`: **auto-merge enabled** and a **required status
+  check** set, so the bump PR waits for the tap CI before merging.
+- Opt-in repository variables: `PUBLISH_SDK_TO_PYPI=true` (PyPI),
+  `PUBLISH_HOMEBREW_FORMULA=true` (Homebrew); APT runs when `TP_APT_REPO_DEST`
+  is set. The existing `TP_APT_*` vars/secrets carry over unchanged.
 
 ### 10. Monitor After Release
 
