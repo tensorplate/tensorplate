@@ -1,4 +1,4 @@
-tensorplate (0.1.3-1) unstable; urgency=medium
+tensorplate (0.1.4-1) unstable; urgency=medium
 
   * V012-F01-T01: add the `tensorplate-apt-source` bootstrap package. It
     installs only the TensorPlate archive keyring and the stable Deb822
