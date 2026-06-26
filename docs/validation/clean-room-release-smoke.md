@@ -113,12 +113,27 @@ plan explicitly says so.
 
 ## Download And Verify Release Assets
 
-Follow
-[`docs/install/external-install.md`](../install/external-install.md)
-to download `.deb` assets, `${TP_MANIFEST}`, and `SHA256SUMS` from the
-GitHub Release.
+Download the **complete** release asset set into a clean working directory.
+`sha256sum -c SHA256SUMS` checks every file listed in `SHA256SUMS` — all
+`.deb` packages (including `tensorplate-apt-source`, the `tensorplate`
+metapackage, and the `amd64` CLI), `install.sh`, the SDK wheel + sdist, and
+the manifest — so a partial download (for example the runtime subset in
+[`docs/install/external-install.md`](../install/external-install.md), which
+covers the trust model and signature steps) false-fails verification:
 
-Record:
+```bash
+gh release download "${TP_TAG}" --repo "${TP_REPO}" --dir . \
+  --pattern '*.deb' \
+  --pattern 'install.sh' \
+  --pattern 'tensorplate_python-*.whl' \
+  --pattern 'tensorplate_python-*.tar.gz' \
+  --pattern "${TP_MANIFEST}" \
+  --pattern 'SHA256SUMS' \
+  --pattern 'SHA256SUMS.cosign.bundle'
+```
+
+Record (every file listed in `SHA256SUMS` must be present, or `sha256sum -c`
+fails):
 
 ```bash
 sha256sum -c SHA256SUMS | tee "/tmp/tensorplate-${TP_TAG}-checksums.txt"
@@ -132,7 +147,8 @@ Any checksum mismatch blocks the release.
 Install core packages from the downloaded assets:
 
 ```bash
-sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
+# tensorplate-common is Architecture: all; the rest are arm64.
+sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_all.deb" \
   "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-observability_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
@@ -165,8 +181,14 @@ blocks publication unless explicitly signed as a conditional pass.
 
 ## Deploy, Infer, Status, Logs, And Metrics
 
-Use the release-published sample bundle or another documented external
-bundle source. Do not use `test/models/` from a development checkout.
+The release does not ship a model bundle. Generate the TensorRT identity
+bundle on the target with the sanctioned generator — the same one the
+automated clean-room driver (`tools/validation/jetson-clean-room.sh`) uses —
+and do not use `test/models/` from a development checkout:
+
+```bash
+tools/validation/create_trt_identity_bundle.sh ./tensorplate-trt-identity-bundle
+```
 
 ```bash
 tensorplate deploy ./tensorplate-trt-identity-bundle --deployment-id release-clean-room
@@ -193,13 +215,34 @@ If the release quickstart includes a `python_pytorch` bundle, validate the
 optional package:
 
 ```bash
-sudo apt install "./tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb"
+# tensorplate-backend-python-pytorch is Architecture: all.
+sudo apt install "./tensorplate-backend-python-pytorch_${TP_DEBIAN_VERSION}_all.deb"
 tensorplate doctor --output json | tee "/tmp/tensorplate-${TP_TAG}-python-doctor.json"
 sudo systemctl restart tensorplate-agent
 ```
 
 Doctor must report `python_pytorch_backend = ok` and
 `python_pytorch_runtime = ok` before deploying the bundle.
+
+## SDK Wheel Verification
+
+The `tensorplate-python` wheel + sdist are signed release assets covered by
+`SHA256SUMS`. From the verified download, confirm the wheel installs cleanly
+and reports the release version:
+
+```bash
+python3 -m venv /tmp/tp-sdk-clean-room && . /tmp/tp-sdk-clean-room/bin/activate
+pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"
+python -c "import tensorplate; assert tensorplate.__version__ == '${TP_VERSION}', tensorplate.__version__"
+python -c "from tensorplate import ServingClient, VisionClient, YOLO26_E2E_DETECTIONS"
+deactivate
+```
+
+The import must resolve `__version__ == ${TP_VERSION}` and the public symbols
+(including the v0.1.4 `YOLO26_E2E_DETECTIONS` contract). The SDK's optional
+binary `/infer` transport is exercised end-to-end in
+[`sdk-e2e-validation.md`](./sdk-e2e-validation.md); record that evidence link
+here.
 
 ## Rollback And Uninstall Evidence
 
