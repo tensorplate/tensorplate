@@ -381,10 +381,22 @@ check_version_files() {
     pass "Cargo protocol dependency version is $VERSION" ||
     fail "Cargo.toml tensorplate-protocol dependency version must be $VERSION"
 
-  grep -Eq "^version = \"${VERSION}\"$" Cargo.lock &&
+  # Every tensorplate-* crate in Cargo.lock must be exactly $VERSION. A plain
+  # grep for one matching line is unsound: prepare_python only rewrites
+  # `-dev` crate versions, so on a finalized->finalized bump a partially
+  # hand-bumped lockfile (some crates still at the prior version, none with a
+  # -dev suffix) would otherwise pass and ship a $VERSION-named .deb whose
+  # binary reports the old version. Check each crate, and reject any -dev.
+  awk -v v="$VERSION" '
+      /^name = "tensorplate-/ {
+        getline ver
+        if (ver != ("version = \"" v "\"")) { print "  stale: " $0 " -> " ver; bad = 1 }
+      }
+      END { exit bad }
+    ' Cargo.lock &&
     ! grep -Eq 'version = "[0-9]+\.[0-9]+\.[0-9]+-dev"' Cargo.lock &&
-    pass "Cargo.lock workspace package versions are finalized" ||
-    fail "Cargo.lock must contain finalized TensorPlate package versions without -dev suffixes"
+    pass "Cargo.lock tensorplate-* crate versions are all finalized at $VERSION" ||
+    fail "every Cargo.lock tensorplate-* crate version must be $VERSION without -dev suffixes"
 
   grep -Eq "\"version-string\": \"${VERSION}\"" vcpkg.json &&
     pass "vcpkg version-string is $VERSION" ||
