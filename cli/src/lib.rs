@@ -39,6 +39,7 @@ pub mod config;
 pub mod error;
 pub mod output;
 pub mod profile;
+pub mod registry;
 
 use std::io::Write;
 
@@ -48,6 +49,7 @@ pub use config::{CliConfig, OutputDefaults, ProfileMode, ProfileSpec};
 pub use error::{CliError, CliResult, ExitCode};
 pub use output::Renderer;
 pub use profile::ResolvedProfile;
+pub use registry::{DeviceEntry, DeviceRegistry};
 
 /// Crate version string compiled from Cargo metadata.
 #[must_use]
@@ -114,6 +116,10 @@ where
         Subcommand::Logs(opts) => {
             commands::logs::run(&renderer, &profile, &cfg, &opts, stdout, stderr)
         }
+        // Device registry management is local-only: like `version`, it
+        // ignores the resolved transport profile and never opens an agent
+        // client.
+        Subcommand::Device(cmd) => commands::device::run(&renderer, cmd, stdout, stderr),
     }
 }
 

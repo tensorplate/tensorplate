@@ -6,6 +6,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Local SSH device registry and the `tensorplate device` command group
+  (`add`, `list`, `use`, `remove`, `rename`) so a macOS operator can enroll and
+  remember SSH-reachable devices without a hosted service. The registry is an
+  atomic JSON file (temp-file + rename) that resolves its own path
+  (`$TENSORPLATE_DEVICE_REGISTRY`, else
+  `$XDG_CONFIG_HOME/tensorplate/devices.json`, else
+  `~/.config/tensorplate/devices.json`), independent of the CLI config. It
+  stores only device access metadata (SSH target, optional port, optional
+  run-as user) plus cached device facts, and never SSH keys, passwords, or
+  agent secrets. `device add --use` sets the new device as the default; a plain
+  `device add` sets the default only when none exists yet. A missing registry
+  means "no devices enrolled", not an error, so existing local and profile
+  workflows are unchanged. Documented in `docs/cli/device.md` with the schema in
+  `config/schemas/devices.json`. (V015-F01-T01)
+
 ## [0.1.4] - 2026-06-26
 
 ### Added
