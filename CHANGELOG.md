@@ -16,12 +16,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `$XDG_CONFIG_HOME/tensorplate/devices.json`, else
   `~/.config/tensorplate/devices.json`), independent of the CLI config. It
   stores only device access metadata (SSH target, optional port, optional
-  run-as user) plus cached device facts, and never SSH keys, passwords, or
-  agent secrets. `device add --use` sets the new device as the default; a plain
-  `device add` sets the default only when none exists yet. A missing registry
-  means "no devices enrolled", not an error, so existing local and profile
-  workflows are unchanged. Documented in `docs/cli/device.md` with the schema in
-  `config/schemas/devices.json`. (V015-F01-T01)
+  run-as user, remote import dir) plus cached device facts, and never SSH keys,
+  passwords, or agent secrets. Each entry records the remote import directory
+  the deploy path needs, defaulting to `/var/lib/tensorplate/bundles/import`
+  and overridable with `device add --import-dir`. `device add --use` sets the
+  new device as the default; a plain `device add` sets the default only when
+  none exists yet. The command group is local-only — it resolves no transport
+  profile and opens no agent client, so it keeps working when the CLI config's
+  default profile is a reserved/unsupported mode. `device` is added to the
+  `cli_output` envelope `command` enum so `--output json` stays schema-valid. A
+  missing registry means "no devices enrolled", not an error, so existing local
+  and profile workflows are unchanged. Documented in `docs/cli/device.md` with
+  the schema in `config/schemas/devices.json`. (V015-F01-T01)
 
 ## [0.1.4] - 2026-06-26
 

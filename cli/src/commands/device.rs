@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use crate::args::{DeviceAddArgs, DeviceCommand};
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
-use crate::registry::{DeviceEntry, DeviceRegistry};
+use crate::registry::{DeviceEntry, DeviceRegistry, DEFAULT_REMOTE_IMPORT_DIR};
 
 const COMMAND: &str = "device";
 
@@ -62,10 +62,17 @@ fn add<O: Write, E: Write>(
     }
     let name = args.name.clone();
     let ssh_target = args.ssh_target.clone();
+    // Record the import dir on every entry so the registry identity carries
+    // the staging location the remote deploy path needs; default it unless the
+    // operator pinned a per-install location.
+    let import_dir = args
+        .import_dir
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_REMOTE_IMPORT_DIR));
     let entry = DeviceEntry {
         ssh_target: args.ssh_target,
         ssh_port: args.port,
         remote_run_as: args.run_as,
+        remote_import_dir: Some(import_dir.clone()),
         ..DeviceEntry::default()
     };
     registry.devices.insert(name.clone(), entry);
@@ -91,6 +98,7 @@ fn add<O: Write, E: Write>(
     let payload = json!({
         "name": name,
         "ssh_target": ssh_target,
+        "remote_import_dir": import_dir.display().to_string(),
         "default": set_default,
     });
     renderer.ok(stdout, COMMAND, &human, payload, None, None)
@@ -130,6 +138,7 @@ fn list<O: Write>(renderer: &Renderer, registry: &DeviceRegistry, stdout: &mut O
                 "ssh_target": entry.ssh_target,
                 "ssh_port": entry.ssh_port,
                 "remote_run_as": entry.remote_run_as,
+                "remote_import_dir": entry.remote_import_dir,
                 "default": Some(name.as_str()) == default,
                 "last_seen": entry.last_seen,
                 "agent_version": entry.agent_version,
@@ -278,6 +287,7 @@ mod tests {
             ssh_target: target.to_string(),
             port: None,
             run_as: None,
+            import_dir: None,
             use_as_default: use_default,
         }
     }
@@ -317,9 +327,29 @@ mod tests {
         run_add(&h, add_args("orin", "reid@orin.local", false));
         let reg = h.load();
         assert_eq!(reg.default_device.as_deref(), Some("orin"));
+        let entry = reg.devices.get("orin").unwrap();
+        assert_eq!(entry.ssh_target, "reid@orin.local");
+        // Every enrolled device carries the import dir the deploy path needs.
         assert_eq!(
-            reg.devices.get("orin").unwrap().ssh_target,
-            "reid@orin.local"
+            entry.remote_import_dir.as_deref(),
+            Some(std::path::Path::new(DEFAULT_REMOTE_IMPORT_DIR))
+        );
+    }
+
+    #[test]
+    fn add_import_dir_flag_overrides_default() {
+        let h = Harness::new();
+        let mut args = add_args("orin", "reid@orin.local", false);
+        args.import_dir = Some(std::path::PathBuf::from("/srv/tp/import"));
+        run_add(&h, args);
+        assert_eq!(
+            h.load()
+                .devices
+                .get("orin")
+                .unwrap()
+                .remote_import_dir
+                .as_deref(),
+            Some(std::path::Path::new("/srv/tp/import"))
         );
     }
 

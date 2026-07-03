@@ -47,7 +47,7 @@
           },
           "remote_import_dir": {
             "type": "string",
-            "description": "Optional absolute remote staging directory for copied bundles."
+            "description": "Absolute remote staging directory for copied bundles. Recorded on every entry by `device add` (default `/var/lib/tensorplate/bundles/import`, override with `--import-dir`); may be absent in hand-edited registries."
           },
           "last_seen": {
             "type": "string",

@@ -84,42 +84,52 @@ where
     E: Write,
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
-    let profile = profile::resolve(
-        &cfg,
-        parsed.global.profile.as_deref(),
-        parsed.global.agent_url.as_deref(),
-        parsed.global.timeout_ms,
-    )?;
     let renderer = Renderer::new(effective_output_mode(&parsed.global, &cfg));
+    // Resolve the transport profile lazily, only for commands that talk to an
+    // agent. Local-only commands (`version`, `device`) must not fail on an
+    // unrelated reserved/unsupported default profile.
+    let resolve_profile = || {
+        profile::resolve(
+            &cfg,
+            parsed.global.profile.as_deref(),
+            parsed.global.agent_url.as_deref(),
+            parsed.global.timeout_ms,
+        )
+    };
     match parsed.subcommand {
         Subcommand::Version => commands::version::run(&renderer, stdout),
+        // Device registry management is local-only: it neither resolves a
+        // transport profile nor opens an agent client.
+        Subcommand::Device(cmd) => commands::device::run(&renderer, cmd, stdout, stderr),
         Subcommand::Doctor(opts) => {
+            let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::doctor::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Deploy(opts) => {
+            let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::deploy::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Rollback(opts) => {
+            let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::rollback::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Status(opts) => {
+            let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::status::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Infer(opts) => {
+            let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::infer::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Logs(opts) => {
+            let profile = resolve_profile()?;
             commands::logs::run(&renderer, &profile, &cfg, &opts, stdout, stderr)
         }
-        // Device registry management is local-only: like `version`, it
-        // ignores the resolved transport profile and never opens an agent
-        // client.
-        Subcommand::Device(cmd) => commands::device::run(&renderer, cmd, stdout, stderr),
     }
 }
 

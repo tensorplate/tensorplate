@@ -123,6 +123,7 @@ pub struct DeviceAddArgs {
     pub ssh_target: String,
     pub port: Option<u16>,
     pub run_as: Option<String>,
+    pub import_dir: Option<PathBuf>,
     pub use_as_default: bool,
 }
 
@@ -580,7 +581,7 @@ fn parse_logs(rest: &[String], global: &mut GlobalArgs) -> CliResult<LogsArgs> {
 const DEVICE_USAGE: &str = "device <subcommand>
 
 Subcommands:
-  add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--use]
+  add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]
   list [--output <human|json>]
   use <name>
   remove <name>
@@ -630,6 +631,7 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
     let mut ssh_target: Option<String> = None;
     let mut port: Option<u16> = None;
     let mut run_as: Option<String> = None;
+    let mut import_dir: Option<PathBuf> = None;
     let mut use_as_default = false;
     let mut i = 0;
     while i < rest.len() {
@@ -641,13 +643,14 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
             "--ssh" => ssh_target = Some(require_value(rest, &mut i, a)?),
             "--port" => port = Some(parse_u16(&require_value(rest, &mut i, a)?, "--port")?),
             "--run-as" => run_as = Some(require_value(rest, &mut i, a)?),
+            "--import-dir" => import_dir = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
             "--use" => {
                 use_as_default = true;
                 i += 1;
             }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--use]"
+                    "device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]"
                         .into(),
                 ));
             }
@@ -676,6 +679,7 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
         ssh_target,
         port,
         run_as,
+        import_dir,
         use_as_default,
     }))
 }
@@ -932,6 +936,8 @@ mod tests {
             "2222",
             "--run-as",
             "tensorplate",
+            "--import-dir",
+            "/srv/tp/import",
             "--use",
         ]))
         .unwrap();
@@ -945,6 +951,10 @@ mod tests {
         assert_eq!(a.ssh_target, "reid@orin.local");
         assert_eq!(a.port, Some(2222));
         assert_eq!(a.run_as.as_deref(), Some("tensorplate"));
+        assert_eq!(
+            a.import_dir.as_deref(),
+            Some(std::path::Path::new("/srv/tp/import"))
+        );
         assert!(a.use_as_default);
     }
 

@@ -48,6 +48,11 @@ fn add_first_device_becomes_default_and_list_reports_it() {
     let parsed = read_registry(&registry);
     assert_eq!(parsed["default_device"], "orin");
     assert_eq!(parsed["devices"]["orin"]["ssh_target"], "reid@orin.local");
+    // Enrollment records the import dir the remote deploy path needs.
+    assert_eq!(
+        parsed["devices"]["orin"]["remote_import_dir"],
+        "/var/lib/tensorplate/bundles/import"
+    );
 
     let (code, out, _err) = run_device(&registry, &["device", "list", "--output", "json"]);
     assert_eq!(code, 0);
@@ -56,6 +61,10 @@ fn add_first_device_becomes_default_and_list_reports_it() {
     assert_eq!(parsed["payload"]["default_device"], "orin");
     assert_eq!(parsed["payload"]["devices"][0]["name"], "orin");
     assert_eq!(parsed["payload"]["devices"][0]["default"], true);
+    assert_eq!(
+        parsed["payload"]["devices"][0]["remote_import_dir"],
+        "/var/lib/tensorplate/bundles/import"
+    );
 }
 
 #[test]
@@ -133,4 +142,40 @@ fn device_without_subcommand_is_usage_error() {
     let registry = td.path().join("devices.json");
     let (code, _out, _err) = run_device(&registry, &["device"]);
     assert_eq!(code, 2);
+}
+
+#[test]
+fn device_commands_work_with_unsupported_default_profile() {
+    // Device management is local-only: a reserved/unsupported default profile
+    // in the CLI config must not block it (no transport is resolved).
+    let td = TempDir::new().unwrap();
+    let registry = td.path().join("devices.json");
+    run_device(
+        &registry,
+        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+    );
+
+    let cli_cfg = td.path().join("cli.json");
+    std::fs::write(
+        &cli_cfg,
+        r#"{"schema_version":"0.1","default_profile":"relay","profiles":{"relay":{"mode":"relay"}}}"#,
+    )
+    .expect("write relay cli config");
+    let socket = td.path().join("agent.sock");
+    let reg = registry.to_string_lossy().into_owned();
+    let cfg = cli_cfg.to_string_lossy().into_owned();
+    let (code, out, _err) = run_cli_with_extra_env(
+        &socket,
+        &["device", "list", "--output", "json"],
+        &[
+            ("TENSORPLATE_DEVICE_REGISTRY", reg.as_str()),
+            ("TENSORPLATE_CLI_CONFIG", cfg.as_str()),
+        ],
+    );
+    assert_eq!(
+        code, 0,
+        "device list must ignore the unsupported profile: {out}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).expect("list json");
+    assert_eq!(parsed["payload"]["devices"][0]["name"], "orin");
 }

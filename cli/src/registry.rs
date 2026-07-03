@@ -34,6 +34,12 @@ pub const DEVICE_REGISTRY_SCHEMA_VERSION: &str = "0.1";
 /// the registry through this variable.
 pub const DEVICE_REGISTRY_ENV: &str = "TENSORPLATE_DEVICE_REGISTRY";
 
+/// Default remote staging directory for copied bundles. Enrollment records
+/// this on every entry so the registry identity carries the import dir the
+/// remote deploy path needs; `device add --import-dir` overrides it for
+/// installs whose packaged service permissions place it elsewhere.
+pub const DEFAULT_REMOTE_IMPORT_DIR: &str = "/var/lib/tensorplate/bundles/import";
+
 /// A single enrolled device.
 ///
 /// The cached fact fields (`last_seen`, `agent_version`, `protocol_version`,

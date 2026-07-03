@@ -5,12 +5,16 @@ registry is a small, human-inspectable JSON file; these subcommands read and
 write it and never touch a remote device.
 
 ```
-tensorplate device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--use]
+tensorplate device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]
 tensorplate device list [--output <human|json>]
 tensorplate device use <name>
 tensorplate device remove <name>
 tensorplate device rename <old> <new>
 ```
+
+These commands are local-only: they read and write the registry and never
+resolve a transport profile or contact an agent, so they keep working even when
+the CLI config's default profile is a reserved/unsupported mode.
 
 ## Registry location
 
@@ -33,7 +37,10 @@ or agent secrets — authentication stays with your SSH client and
 
 - `add <name> --ssh <user@host>` records a device. `--port` pins a non-default
   SSH port; `--run-as <user>` records a non-interactive run-as user for reaching
-  the device-local agent.
+  the device-local agent. Every entry records a remote import directory (the
+  staging location for copied bundles); it defaults to
+  `/var/lib/tensorplate/bundles/import` and `--import-dir <path>` overrides it
+  for installs whose packaged service permissions place it elsewhere.
 - `list` prints enrolled devices; the default is marked with `*`. `--output
   json` emits the standard envelope with a `payload.devices` array and
   `payload.default_device`.
