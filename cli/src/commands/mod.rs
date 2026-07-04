@@ -5,6 +5,7 @@
 // entry point dispatches to these modules with no logic of its own.
 
 pub mod deploy;
+pub mod device;
 pub mod doctor;
 pub mod infer;
 pub mod logs;

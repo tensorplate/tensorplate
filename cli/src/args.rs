@@ -57,6 +57,7 @@ pub enum Subcommand {
     Status(StatusArgs),
     Infer(InferArgs),
     Logs(LogsArgs),
+    Device(DeviceCommand),
     Version,
 }
 
@@ -106,6 +107,26 @@ pub struct LogsArgs {
     pub source_override: Option<PathBuf>,
 }
 
+/// A `device` registry subcommand.
+#[derive(Clone, Debug)]
+pub enum DeviceCommand {
+    Add(DeviceAddArgs),
+    List,
+    Use(String),
+    Remove(String),
+    Rename { old: String, new: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct DeviceAddArgs {
+    pub name: String,
+    pub ssh_target: String,
+    pub port: Option<u16>,
+    pub run_as: Option<String>,
+    pub import_dir: Option<PathBuf>,
+    pub use_as_default: bool,
+}
+
 /// Result of parsing argv. Holds both the global flags and the chosen
 /// subcommand so command dispatch is a pure projection of this struct.
 #[derive(Clone, Debug)]
@@ -123,6 +144,7 @@ Commands:
   infer               Send a single inference request to the active deployment.
   logs                Read bounded structured logs.
   rollback            Roll back to the previous active deployment.
+  device              Manage the local SSH device registry.
   version             Print CLI and protocol versions.
 
 Global flags:
@@ -179,6 +201,7 @@ pub fn parse(argv: &[String]) -> CliResult<ParseOutcome> {
         "status" => Subcommand::Status(parse_status(rest, &mut global)?),
         "infer" => Subcommand::Infer(parse_infer(rest, &mut global)?),
         "logs" => Subcommand::Logs(parse_logs(rest, &mut global)?),
+        "device" => Subcommand::Device(parse_device(rest, &mut global)?),
         other => return Err(CliError::Usage(format!("unknown command `{other}`"))),
     };
     Ok(ParseOutcome::Run(ParsedArgs { global, subcommand }))
@@ -555,6 +578,193 @@ fn parse_logs(rest: &[String], global: &mut GlobalArgs) -> CliResult<LogsArgs> {
     Ok(args)
 }
 
+const DEVICE_USAGE: &str = "device <subcommand>
+
+Subcommands:
+  add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]
+  list [--output <human|json>]
+  use <name>
+  remove <name>
+  rename <old> <new>";
+
+fn parse_u16(value: &str, flag: &str) -> CliResult<u16> {
+    value
+        .parse::<u16>()
+        .map_err(|_| CliError::Usage(format!("{flag} requires an integer between 0 and 65535")))
+}
+
+fn parse_device(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
+    let mut i = 0;
+    // Global flags may appear before the subcommand (e.g. `device --output json list`).
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        break;
+    }
+    let Some(sub) = rest.get(i).cloned() else {
+        return Err(CliError::Usage(DEVICE_USAGE.into()));
+    };
+    let args = &rest[i + 1..];
+    match sub.as_str() {
+        "add" => parse_device_add(args, global),
+        "list" => {
+            parse_device_flags_only(args, global, "list")?;
+            Ok(DeviceCommand::List)
+        }
+        "use" => Ok(DeviceCommand::Use(parse_device_one_name(
+            args, global, "use",
+        )?)),
+        "remove" => Ok(DeviceCommand::Remove(parse_device_one_name(
+            args, global, "remove",
+        )?)),
+        "rename" => parse_device_rename(args, global),
+        "-h" | "--help" => Err(CliError::Usage(DEVICE_USAGE.into())),
+        other => Err(CliError::Usage(format!(
+            "unknown device subcommand `{other}`\n{DEVICE_USAGE}"
+        ))),
+    }
+}
+
+fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
+    let mut name: Option<String> = None;
+    let mut ssh_target: Option<String> = None;
+    let mut port: Option<u16> = None;
+    let mut run_as: Option<String> = None;
+    let mut import_dir: Option<PathBuf> = None;
+    let mut use_as_default = false;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        let a = &rest[i];
+        match a.as_str() {
+            "--ssh" => ssh_target = Some(require_value(rest, &mut i, a)?),
+            "--port" => port = Some(parse_u16(&require_value(rest, &mut i, a)?, "--port")?),
+            "--run-as" => run_as = Some(require_value(rest, &mut i, a)?),
+            "--import-dir" => import_dir = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
+            "--use" => {
+                use_as_default = true;
+                i += 1;
+            }
+            "-h" | "--help" => {
+                return Err(CliError::Usage(
+                    "device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]"
+                        .into(),
+                ));
+            }
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device add`: {s}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "device add accepts one <name>, got an extra `{other}`"
+                    )));
+                }
+                name = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let name =
+        name.ok_or_else(|| CliError::Usage("device add requires a <name> argument".into()))?;
+    let ssh_target = ssh_target
+        .ok_or_else(|| CliError::Usage("device add requires `--ssh <user@host>`".into()))?;
+    Ok(DeviceCommand::Add(DeviceAddArgs {
+        name,
+        ssh_target,
+        port,
+        run_as,
+        import_dir,
+        use_as_default,
+    }))
+}
+
+fn parse_device_one_name(rest: &[String], global: &mut GlobalArgs, sub: &str) -> CliResult<String> {
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        match rest[i].as_str() {
+            "-h" | "--help" => return Err(CliError::Usage(format!("device {sub} <name>"))),
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device {sub}`: {s}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "device {sub} accepts one <name>, got an extra `{other}`"
+                    )));
+                }
+                name = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    name.ok_or_else(|| CliError::Usage(format!("device {sub} requires a <name> argument")))
+}
+
+fn parse_device_rename(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
+    let mut names: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        match rest[i].as_str() {
+            "-h" | "--help" => return Err(CliError::Usage("device rename <old> <new>".into())),
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device rename`: {s}"
+                )));
+            }
+            other => {
+                names.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    if names.len() != 2 {
+        return Err(CliError::Usage(
+            "device rename requires exactly <old> and <new>".into(),
+        ));
+    }
+    Ok(DeviceCommand::Rename {
+        old: names[0].clone(),
+        new: names[1].clone(),
+    })
+}
+
+fn parse_device_flags_only(rest: &[String], global: &mut GlobalArgs, sub: &str) -> CliResult<()> {
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        match rest[i].as_str() {
+            "-h" | "--help" => {
+                return Err(CliError::Usage(format!(
+                    "device {sub} [--output <human|json>]"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device {sub}`: {other}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -712,5 +922,79 @@ mod tests {
         };
         assert_eq!(parsed.global.output, Some(OutputMode::Json));
         assert!(matches!(parsed.subcommand, Subcommand::Version));
+    }
+
+    #[test]
+    fn device_add_parses_name_ssh_and_flags() {
+        let out = parse(&argv(&[
+            "device",
+            "add",
+            "orin-lab",
+            "--ssh",
+            "reid@orin.local",
+            "--port",
+            "2222",
+            "--run-as",
+            "tensorplate",
+            "--import-dir",
+            "/srv/tp/import",
+            "--use",
+        ]))
+        .unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        let Subcommand::Device(DeviceCommand::Add(a)) = parsed.subcommand else {
+            panic!("expected Device::Add");
+        };
+        assert_eq!(a.name, "orin-lab");
+        assert_eq!(a.ssh_target, "reid@orin.local");
+        assert_eq!(a.port, Some(2222));
+        assert_eq!(a.run_as.as_deref(), Some("tensorplate"));
+        assert_eq!(
+            a.import_dir.as_deref(),
+            Some(std::path::Path::new("/srv/tp/import"))
+        );
+        assert!(a.use_as_default);
+    }
+
+    #[test]
+    fn device_add_requires_ssh_target() {
+        let err = parse(&argv(&["device", "add", "orin"])).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn device_list_accepts_global_output_flag() {
+        let out = parse(&argv(&["device", "list", "--output", "json"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert_eq!(parsed.global.output, Some(OutputMode::Json));
+        assert!(matches!(
+            parsed.subcommand,
+            Subcommand::Device(DeviceCommand::List)
+        ));
+    }
+
+    #[test]
+    fn device_rename_requires_two_names() {
+        let err = parse(&argv(&["device", "rename", "only-one"])).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+        let out = parse(&argv(&["device", "rename", "old", "new"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        let Subcommand::Device(DeviceCommand::Rename { old, new }) = parsed.subcommand else {
+            panic!("expected Device::Rename");
+        };
+        assert_eq!(old, "old");
+        assert_eq!(new, "new");
+    }
+
+    #[test]
+    fn device_without_subcommand_is_usage_error() {
+        let err = parse(&argv(&["device"])).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 }
