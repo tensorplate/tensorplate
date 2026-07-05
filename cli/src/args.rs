@@ -42,6 +42,10 @@ pub struct GlobalArgs {
     pub config_path: Option<PathBuf>,
     pub profile: Option<String>,
     pub agent_url: Option<String>,
+    /// Target an enrolled registry device by name for this invocation.
+    pub device: Option<String>,
+    /// Force the local (current-process) path, bypassing any default device.
+    pub local: bool,
     pub output: Option<OutputMode>,
     pub timeout_ms: Option<u64>,
     pub no_color: bool,
@@ -151,6 +155,8 @@ Global flags:
   --config <path>           CLI config file (default: $TENSORPLATE_CLI_CONFIG or none).
   --profile <name>          Named profile from the CLI config.
   --agent-url <host:port>   Override profile and target a loopback agent URL.
+  --device <name>           Route the command to an enrolled registry device over SSH.
+  --local                   Force the local path, bypassing any default device.
   --output <human|json>     Output mode (default: config output.mode or human).
   --timeout-ms <n>          Per-call agent timeout override.
   --no-color                Disable color in human output.
@@ -274,6 +280,21 @@ fn parse_global_flag(
         }
         s if s.starts_with("--agent-url=") => {
             global.agent_url = Some(s["--agent-url=".len()..].to_string());
+            *cursor += 1;
+            Ok(true)
+        }
+        "--device" => {
+            let value = require_value(argv, cursor, "--device")?;
+            global.device = Some(value);
+            Ok(true)
+        }
+        s if s.starts_with("--device=") => {
+            global.device = Some(s["--device=".len()..].to_string());
+            *cursor += 1;
+            Ok(true)
+        }
+        "--local" => {
+            global.local = true;
             *cursor += 1;
             Ok(true)
         }
@@ -996,5 +1017,23 @@ mod tests {
     fn device_without_subcommand_is_usage_error() {
         let err = parse(&argv(&["device"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn device_and_local_global_flags_parse() {
+        let out = parse(&argv(&["--device", "orin", "status"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert_eq!(parsed.global.device.as_deref(), Some("orin"));
+        assert!(!parsed.global.local);
+        assert!(matches!(parsed.subcommand, Subcommand::Status(_)));
+
+        let out = parse(&argv(&["--local", "status"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert!(parsed.global.local);
+        assert!(parsed.global.device.is_none());
     }
 }

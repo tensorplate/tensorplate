@@ -145,6 +145,17 @@ fn device_without_subcommand_is_usage_error() {
 }
 
 #[test]
+fn operational_command_with_unenrolled_device_is_usage_error() {
+    // `--device <name> status` fails closed before any SSH when the device is
+    // not enrolled.
+    let td = TempDir::new().unwrap();
+    let registry = td.path().join("devices.json");
+    let (code, _out, err) = run_device(&registry, &["--device", "ghost", "status"]);
+    assert_eq!(code, 2, "err={err}");
+    assert!(err.contains("not enrolled"), "err={err}");
+}
+
+#[test]
 fn device_commands_work_with_unsupported_default_profile() {
     // Device management is local-only: a reserved/unsupported default profile
     // in the CLI config must not block it (no transport is resolved).

@@ -65,3 +65,37 @@ tensorplate device list
 #   orin-lab   reid@orin-lab.local
 tensorplate device use orin-lab
 ```
+
+## Routing normal commands to a device
+
+Once a device is selected, normal commands run against it over SSH. The CLI
+shells out to `ssh` and re-invokes the *remote* `tensorplate` with `--local`, so
+the device resolves its own config and never recursively routes.
+
+```sh
+tensorplate device use orin-lab
+tensorplate status                 # runs on orin-lab
+tensorplate --device nano logs --tail 100
+tensorplate --local status         # force the local path, ignoring the default
+```
+
+Target selection precedence, highest first:
+
+1. `--local` (bypass the registry and use the current process).
+2. `--device <name>` (an explicit registry entry).
+3. `--profile <name>` / `--agent-url` (an explicit local transport).
+4. the registry's default device (`device use`).
+5. local, when nothing is selected.
+
+`status`, `rollback`, `logs`, `doctor`, `infer`, and `version` route to the
+selected device. `deploy` over `--device` is not available yet (remote deploy
+staging lands in a later change). Path flags are interpreted where the file
+lives: `logs --source` and `status --observability-snapshot` are device-local,
+while `infer --input` is read locally and piped to the device over stdin and
+`infer --output-file` is written locally. `logs --follow` is not supported over
+`--device` yet.
+
+With `--output json`, routed output preserves the standard envelope and adds a
+top-level `device` object identifying the target; human output from the device
+is forwarded verbatim. The CLI fails closed when SSH exits non-zero, the remote
+output is malformed, or the remote protocol version is incompatible.
