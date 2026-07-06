@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/devices.json",
+  "title": "TensorPlate CLI Device Registry",
+  "description": "Local registry of SSH-reachable devices the `tensorplate` CLI can remember and target. The CLI resolves this file from `$TENSORPLATE_DEVICE_REGISTRY`, else `$XDG_CONFIG_HOME/tensorplate/devices.json`, else `~/.config/tensorplate/devices.json`. It stores only device access metadata and cached facts; it never stores SSH keys, passwords, or agent secrets. Writes are atomic (temp file + rename).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "Independent versioning track for the device registry. Unknown versions return a typed `config_invalid` error."
+    },
+    "default_device": {
+      "type": "string",
+      "description": "Device selected when no device is named explicitly. Must be a key of `devices`."
+    },
+    "devices": {
+      "type": "object",
+      "description": "Enrolled devices keyed by name.",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9._-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ssh_target"],
+        "properties": {
+          "ssh_target": {
+            "type": "string",
+            "description": "SSH destination: `user@host` or a bare `~/.ssh/config` host alias. No whitespace."
+          },
+          "ssh_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Optional SSH port. Defaults to the SSH client's own default when absent."
+          },
+          "remote_tensorplate": {
+            "type": "string",
+            "description": "Optional absolute path to the remote `tensorplate` binary. Must be absolute; a run-as invocation additionally requires it to be root-owned and not group/other-writable."
+          },
+          "remote_run_as": {
+            "type": "string",
+            "description": "Optional non-interactive run-as user for reaching the device-local agent. A plain username (letters, digits, `-`, `_`, `.`)."
+          },
+          "remote_import_dir": {
+            "type": "string",
+            "description": "Absolute remote staging directory for copied bundles. Recorded on every entry by `device add` (default `/var/lib/tensorplate/bundles/import`, override with `--import-dir`); may be absent in hand-edited registries."
+          },
+          "last_seen": {
+            "type": "string",
+            "description": "Cached timestamp of the last successful remote check. Populated by a later sync path."
+          },
+          "agent_version": {
+            "type": "string",
+            "description": "Cached remote agent version. Populated by a later sync path."
+          },
+          "protocol_version": {
+            "type": "string",
+            "description": "Cached remote protocol version. Populated by a later sync path."
+          },
+          "device_family": {
+            "type": "string",
+            "description": "Cached remote device family. Populated by a later sync path."
+          },
+          "available_backends": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Cached remote backend list. Populated by a later sync path."
+          }
+        }
+      }
+    }
+  }
+}

@@ -13,6 +13,7 @@ Operator command-line interface for one reachable `tensorplate-agent`. Lands in
 | `tensorplate infer` | Sends a single inference request to the active deployment (V01-E11-F06). |
 | `tensorplate logs` | Reads bounded NDJSON log entries from a local source (V01-E11-F07). |
 | `tensorplate rollback` | Restores the previous active deployment via the agent (V01-E11-F04). |
+| `tensorplate device` | Manages the local registry of SSH-reachable devices. |
 | `tensorplate version` | Prints CLI, protocol, and bundle-format versions. |
 
 The CLI is **a client**. Every mutating operation goes through the
@@ -64,6 +65,7 @@ CLI contract — release validation scripts assert on them.
 - [`infer`](./infer.md)
 - [`logs`](./logs.md)
 - [`profiles`](./profiles.md)
+- [`device`](./device.md)
 
 ## Non-goals (v0.1.0)
 
