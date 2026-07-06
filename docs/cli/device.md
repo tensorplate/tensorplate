@@ -89,11 +89,12 @@ Target selection precedence, highest first:
 
 `status`, `rollback`, `logs`, `doctor`, `infer`, and `version` route to the
 selected device. `deploy` over `--device` is not available yet (remote deploy
-staging lands in a later change). Path flags are interpreted where the file
-lives: `logs --source` and `status --observability-snapshot` are device-local,
-while `infer --input` is read locally and piped to the device over stdin and
-`infer --output-file` is written locally. `logs --follow` is not supported over
-`--device` yet.
+staging lands in a later change), and entries configured with `--run-as` are
+rejected until run-as SSH execution lands. Path flags are interpreted where the
+file lives: `logs --source` and `status --observability-snapshot` are
+device-local, while `infer --input` is read locally and piped to the device over
+stdin and `infer --output-file` is written locally. `logs --follow` is not
+supported over `--device` yet.
 
 With `--output json`, routed output preserves the standard envelope and adds a
 top-level `device` object identifying the target; human output from the device

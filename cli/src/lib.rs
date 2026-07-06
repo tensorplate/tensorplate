@@ -102,7 +102,10 @@ where
             &entry,
             &name,
             &parsed.subcommand,
-            &renderer,
+            remote::RouteOptions {
+                renderer: &renderer,
+                timeout_ms: parsed.global.timeout_ms,
+            },
             stdout,
             stderr,
         );

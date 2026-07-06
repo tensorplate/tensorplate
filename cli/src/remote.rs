@@ -196,7 +196,14 @@ struct RemoteCtx<'a> {
     runner: &'a dyn SshRunner,
     entry: &'a DeviceEntry,
     device_name: &'a str,
+    timeout_ms: Option<u64>,
     renderer: &'a Renderer,
+}
+
+/// Local options that affect how the remote command is invoked and rendered.
+pub struct RouteOptions<'a> {
+    pub renderer: &'a Renderer,
+    pub timeout_ms: Option<u64>,
 }
 
 /// Route an operational subcommand to `entry` over SSH.
@@ -211,19 +218,31 @@ pub fn route<O: Write, E: Write>(
     entry: &DeviceEntry,
     device_name: &str,
     subcommand: &Subcommand,
-    renderer: &Renderer,
+    options: RouteOptions<'_>,
     stdout: &mut O,
     stderr: &mut E,
 ) -> CliResult<()> {
+    if entry.remote_run_as.is_some() {
+        return Err(CliError::Unavailable {
+            message: format!(
+                "device `{device_name}` is configured with `--run-as`, but run-as SSH execution is not available yet"
+            ),
+            hint: Some(
+                "remove `remote_run_as` from the device entry or run the command on the device until run-as routing lands"
+                    .into(),
+            ),
+        });
+    }
     let ctx = RemoteCtx {
         runner,
         entry,
         device_name,
-        renderer,
+        timeout_ms: options.timeout_ms,
+        renderer: options.renderer,
     };
     // Human runs get a one-line banner; JSON runs carry the device in the
     // envelope instead.
-    renderer.info(
+    options.renderer.info(
         stderr,
         &format!("→ device `{device_name}` ({})", entry.ssh_target),
     )?;
@@ -328,6 +347,7 @@ fn run_forwarded<O: Write, E: Write>(
 ) -> CliResult<()> {
     let mode = ctx.renderer.mode();
     let mut remote_args = args.to_vec();
+    append_timeout_arg(&mut remote_args, ctx.timeout_ms);
     remote_args.push("--output".to_string());
     remote_args.push(output_flag(mode).to_string());
     let out = ctx.runner.run(ctx.entry, &remote_args, stdin)?;
@@ -340,9 +360,11 @@ fn run_forwarded<O: Write, E: Write>(
             stdout.write_all(&out.stdout)?;
         }
         OutputMode::Json => {
-            let envelope = parse_and_check_envelope(&out.stdout)?;
-            let envelope = with_device_field(envelope, ctx.device_name, ctx.entry);
-            writeln!(stdout, "{}", serde_json::to_string_pretty(&envelope)?)?;
+            if out.status == 0 {
+                write_json_envelope(ctx, &out.stdout, stdout)?;
+            } else {
+                write_json_error_envelope(ctx, &out, stderr)?;
+            }
         }
     }
     mirror_exit(out.status)
@@ -362,29 +384,31 @@ fn run_remote_infer<O: Write, E: Write>(
         args.push("--serving-url".to_string());
         args.push(url.clone());
     }
-    if let Some(t) = opts.timeout_ms {
+    if let Some(t) = opts.timeout_ms.or(ctx.timeout_ms) {
         args.push("--timeout-ms".to_string());
         args.push(t.to_string());
     }
 
     if let Some(out_path) = &opts.output_path {
         // A local output file needs the structured response, so force JSON and
-        // emit JSON on stdout regardless of the display mode.
+        // render it locally in the originally requested output mode.
         args.push("--output".to_string());
         args.push("json".to_string());
         let out = ctx.runner.run(ctx.entry, &args, Some(&input))?;
         ssh_transport_guard(&out)?;
-        let envelope = parse_and_check_envelope(&out.stdout)?;
-        if let Some(payload) = envelope.get("payload") {
-            std::fs::write(out_path, serde_json::to_vec_pretty(payload)?).map_err(|e| {
-                CliError::Io(format!(
-                    "failed to write --output-file `{}`: {e}",
-                    out_path.display()
-                ))
-            })?;
+        if out.status != 0 {
+            write_json_error_envelope(ctx, &out, stderr)?;
+            return mirror_exit(out.status);
         }
-        let envelope = with_device_field(envelope, ctx.device_name, ctx.entry);
-        writeln!(stdout, "{}", serde_json::to_string_pretty(&envelope)?)?;
+        let envelope = parse_and_check_envelope(&out.stdout)?;
+        let result = infer_result_payload(&envelope)?;
+        std::fs::write(out_path, serde_json::to_vec_pretty(result)?).map_err(|e| {
+            CliError::Io(format!(
+                "failed to write --output-file `{}`: {e}",
+                out_path.display()
+            ))
+        })?;
+        write_infer_output_file_success(ctx, envelope, stdout)?;
         mirror_exit(out.status)
     } else {
         run_forwarded(ctx, &args, Some(&input), stdout, stderr)
@@ -415,6 +439,13 @@ fn output_flag(mode: OutputMode) -> &'static str {
     }
 }
 
+fn append_timeout_arg(args: &mut Vec<String>, timeout_ms: Option<u64>) {
+    if let Some(timeout_ms) = timeout_ms {
+        args.push("--timeout-ms".to_string());
+        args.push(timeout_ms.to_string());
+    }
+}
+
 fn ssh_transport_guard(out: &RemoteOutput) -> CliResult<()> {
     if out.status == 255 {
         return Err(CliError::Transport {
@@ -423,6 +454,96 @@ fn ssh_transport_guard(out: &RemoteOutput) -> CliResult<()> {
         });
     }
     Ok(())
+}
+
+fn write_json_envelope<O: Write>(
+    ctx: &RemoteCtx<'_>,
+    bytes: &[u8],
+    stdout: &mut O,
+) -> CliResult<()> {
+    let envelope = parse_and_check_envelope(bytes)?;
+    let envelope = with_device_field(envelope, ctx.device_name, ctx.entry);
+    writeln!(stdout, "{}", serde_json::to_string_pretty(&envelope)?)?;
+    Ok(())
+}
+
+fn write_json_error_envelope<E: Write>(
+    ctx: &RemoteCtx<'_>,
+    out: &RemoteOutput,
+    stderr: &mut E,
+) -> CliResult<()> {
+    let bytes = if out.stderr.trim().is_empty() {
+        out.stdout.as_slice()
+    } else {
+        out.stderr.as_bytes()
+    };
+    let envelope = parse_and_check_envelope(bytes)?;
+    let envelope = with_device_field(envelope, ctx.device_name, ctx.entry);
+    writeln!(stderr, "{}", serde_json::to_string_pretty(&envelope)?)?;
+    Ok(())
+}
+
+fn write_infer_output_file_success<O: Write>(
+    ctx: &RemoteCtx<'_>,
+    envelope: Value,
+    stdout: &mut O,
+) -> CliResult<()> {
+    match ctx.renderer.mode() {
+        OutputMode::Human => {
+            let human = render_remote_infer_human(&envelope)?;
+            writeln!(stdout, "{human}")?;
+        }
+        OutputMode::Json => {
+            let envelope = with_device_field(envelope, ctx.device_name, ctx.entry);
+            writeln!(stdout, "{}", serde_json::to_string_pretty(&envelope)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn infer_result_payload(envelope: &Value) -> CliResult<&Value> {
+    envelope
+        .get("payload")
+        .and_then(|payload| payload.get("result"))
+        .ok_or_else(|| CliError::Transport {
+            message: "remote infer JSON payload is missing `payload.result`".into(),
+            hint: Some("upgrade the device's tensorplate to a matching version".into()),
+        })
+}
+
+fn render_remote_infer_human(envelope: &Value) -> CliResult<String> {
+    let payload = envelope.get("payload").ok_or_else(|| CliError::Transport {
+        message: "remote infer JSON payload is missing `payload`".into(),
+        hint: Some("upgrade the device's tensorplate to a matching version".into()),
+    })?;
+    let endpoint = payload
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("<remote>");
+    let result = infer_result_payload(envelope)?;
+    let status = result
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let request_id = result
+        .get("request_id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let mut out = format!("infer: endpoint={endpoint} status={status} request_id={request_id}\n");
+    if let Some(outputs) = result.get("outputs").and_then(Value::as_array) {
+        out.push_str(&format!("  outputs: {} tensor(s)\n", outputs.len()));
+        for output in outputs.iter().take(8) {
+            if let Some(name) = output.get("name").and_then(Value::as_str) {
+                let shape = output
+                    .get("tensor")
+                    .and_then(|tensor| tensor.get("shape"))
+                    .map(Value::to_string)
+                    .unwrap_or_default();
+                out.push_str(&format!("    - {name} shape={shape}\n"));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn parse_and_check_envelope(stdout: &[u8]) -> CliResult<Value> {
@@ -507,12 +628,25 @@ mod tests {
         out: &mut Vec<u8>,
         err: &mut Vec<u8>,
     ) -> CliResult<()> {
+        forward_with_timeout(runner, target, args, mode, None, out, err)
+    }
+
+    fn forward_with_timeout(
+        runner: &MockRunner,
+        target: &str,
+        args: &[&str],
+        mode: OutputMode,
+        timeout_ms: Option<u64>,
+        out: &mut Vec<u8>,
+        err: &mut Vec<u8>,
+    ) -> CliResult<()> {
         let e = entry(target);
         let r = Renderer::new(mode);
         let ctx = RemoteCtx {
             runner,
             entry: &e,
             device_name: "orin",
+            timeout_ms,
             renderer: &r,
         };
         let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
@@ -526,12 +660,24 @@ mod tests {
         out: &mut Vec<u8>,
         err: &mut Vec<u8>,
     ) -> CliResult<()> {
+        infer_with_timeout(runner, opts, mode, None, out, err)
+    }
+
+    fn infer_with_timeout(
+        runner: &MockRunner,
+        opts: &InferArgs,
+        mode: OutputMode,
+        timeout_ms: Option<u64>,
+        out: &mut Vec<u8>,
+        err: &mut Vec<u8>,
+    ) -> CliResult<()> {
         let e = entry("host");
         let r = Renderer::new(mode);
         let ctx = RemoteCtx {
             runner,
             entry: &e,
             device_name: "orin",
+            timeout_ms,
             renderer: &r,
         };
         run_remote_infer(&ctx, opts, out, err)
@@ -679,6 +825,31 @@ mod tests {
     }
 
     #[test]
+    fn route_rejects_run_as_devices_until_supported() {
+        let runner = MockRunner::new(0, "");
+        let mut e = entry("host");
+        e.remote_run_as = Some("tensorplate".into());
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let e = route(
+            &runner,
+            &e,
+            "orin",
+            &Subcommand::Version,
+            RouteOptions {
+                renderer: &r,
+                timeout_ms: None,
+            },
+            &mut out,
+            &mut err,
+        )
+        .unwrap_err();
+        assert!(matches!(e, CliError::Unavailable { .. }));
+        assert!(runner.calls.borrow().is_empty());
+    }
+
+    #[test]
     fn json_route_injects_device_and_mirrors_success() {
         let runner = MockRunner::new(
             0,
@@ -722,6 +893,27 @@ mod tests {
     }
 
     #[test]
+    fn global_timeout_is_forwarded_to_remote_commands() {
+        let runner = MockRunner::new(0, "agent: ready\n");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        forward_with_timeout(
+            &runner,
+            "host",
+            &["status"],
+            OutputMode::Human,
+            Some(250),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert_eq!(
+            runner.last_args(),
+            vec!["status", "--timeout-ms", "250", "--output", "human"]
+        );
+    }
+
+    #[test]
     fn nonzero_remote_exit_is_mirrored() {
         let runner = MockRunner::new(6, "error: nothing to roll back\n");
         let mut out = Vec::new();
@@ -737,6 +929,29 @@ mod tests {
         .unwrap_err();
         assert!(matches!(e, CliError::RemoteExit { code } if code == ExitCode::Unavailable));
         assert!(e.already_reported());
+    }
+
+    #[test]
+    fn json_nonzero_remote_error_is_forwarded_from_stderr() {
+        let mut runner = MockRunner::new(6, "");
+        runner.stderr = r#"{"schema_version":"0.1","command":"rollback","status":"unavailable","error":{"code":"unsupported","message":"no previous active deployment"}}"#.into();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let e = forward(
+            &runner,
+            "reid@orin.local",
+            &["rollback"],
+            OutputMode::Json,
+            &mut out,
+            &mut err,
+        )
+        .unwrap_err();
+        assert!(matches!(e, CliError::RemoteExit { code } if code == ExitCode::Unavailable));
+        assert!(out.is_empty());
+        let parsed: Value = serde_json::from_slice(&err).unwrap();
+        assert_eq!(parsed["device"]["name"], "orin");
+        assert_eq!(parsed["device"]["ssh_target"], "reid@orin.local");
+        assert_eq!(parsed["error"]["message"], "no previous active deployment");
     }
 
     #[test]
@@ -798,6 +1013,37 @@ mod tests {
     }
 
     #[test]
+    fn infer_uses_global_timeout_when_command_timeout_is_absent() {
+        let td = tempfile::TempDir::new().unwrap();
+        let input = td.path().join("in.json");
+        std::fs::write(&input, br#"{"inputs":[]}"#).unwrap();
+        let opts = InferArgs {
+            input_path: Some(input),
+            from_stdin: false,
+            serving_url: None,
+            timeout_ms: None,
+            output_path: None,
+        };
+        let runner = MockRunner::new(
+            0,
+            r#"{"schema_version":"0.1","command":"infer","status":"ok","payload":{"ok":true}}"#,
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        infer_with_timeout(
+            &runner,
+            &opts,
+            OutputMode::Json,
+            Some(250),
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let args = runner.last_args();
+        assert!(args.windows(2).any(|w| w == ["--timeout-ms", "250"]));
+    }
+
+    #[test]
     fn infer_output_file_is_written_locally() {
         let td = tempfile::TempDir::new().unwrap();
         let input = td.path().join("in.json");
@@ -812,7 +1058,7 @@ mod tests {
         };
         let runner = MockRunner::new(
             0,
-            r#"{"schema_version":"0.1","command":"infer","status":"ok","payload":{"outputs":[1,2,3]}}"#,
+            r#"{"schema_version":"0.1","command":"infer","status":"ok","payload":{"endpoint":"http://127.0.0.1:18080/infer","endpoint_source":"agent-discovered","result":{"schema_version":"0.1","request_id":"req-1","status":"success","outputs":[{"name":"scores","tensor":{"shape":[1,3]}}]}}}"#,
         );
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -820,6 +1066,14 @@ mod tests {
         // Even in human mode, --output-file forces a JSON capture on the remote.
         assert!(runner.last_args().contains(&"json".to_string()));
         let written: Value = serde_json::from_slice(&std::fs::read(&out_file).unwrap()).unwrap();
-        assert_eq!(written["outputs"], json!([1, 2, 3]));
+        assert_eq!(written["request_id"], "req-1");
+        assert_eq!(written["outputs"][0]["name"], "scores");
+        assert_eq!(written.get("endpoint"), None);
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(stdout.starts_with(
+            "infer: endpoint=http://127.0.0.1:18080/infer status=success request_id=req-1"
+        ));
+        assert!(stdout.contains("scores shape=[1,3]"));
+        assert!(!stdout.trim_start().starts_with('{'));
     }
 }
