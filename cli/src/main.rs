@@ -25,10 +25,14 @@ fn main() -> ExitCode {
     let exit = match drive(&argv, &mut stdout, &mut stderr_lock) {
         Ok(()) => 0u8,
         Err(err) => {
-            let renderer = Renderer::new(err.output_mode);
-            // Best-effort: ignore renderer IO errors. If stderr is closed
-            // the OS will signal SIGPIPE before this returns anyway.
-            let _ = renderer.render_error(&mut stderr_lock, err.command, &err.error);
+            // A device-routed remote command already forwarded its own output;
+            // mirror its exit code without rendering a second error.
+            if !err.error.already_reported() {
+                let renderer = Renderer::new(err.output_mode);
+                // Best-effort: ignore renderer IO errors. If stderr is closed
+                // the OS will signal SIGPIPE before this returns anyway.
+                let _ = renderer.render_error(&mut stderr_lock, err.command, &err.error);
+            }
             err.error.exit_code().as_u8()
         }
     };
