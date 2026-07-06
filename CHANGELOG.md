@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- SSH remote command adapter: with a device selected (via `--device <name>` or
+  a default set by `device use`), `status`, `rollback`, `logs`, `doctor`,
+  `infer`, and `version` run against the device over plain OpenSSH. The adapter
+  is orthogonal to the profile/transport layer — it shells out to `ssh` and
+  re-invokes the remote `tensorplate` with a forced `--local` (built from
+  structured, POSIX-quoted arguments so nothing is shell-injected), and never
+  routes through a `ProfileMode`. Selection precedence is
+  `--local` > `--device` > `--profile`/`--agent-url` > the registry default >
+  local. `infer --input` is read locally and piped to the device over stdin and
+  `infer --output-file` is written locally; `logs --source` and
+  `status --observability-snapshot` are device-local. JSON output preserves the
+  stable envelope and adds a top-level `device` object (added to
+  `protocol/schemas/cli_output.json`); human output is forwarded verbatim. The
+  CLI fails closed when SSH exits non-zero, remote output is malformed, or the
+  remote protocol version is incompatible, mirroring the remote exit code. The
+  CLI now also version-checks agent responses through the shared
+  `decode_with_version_check`, so an incompatible agent surfaces a typed
+  protocol error instead of a generic parse failure. `deploy` over `--device`
+  and `--run-as` execution are deferred to later changes. (V015-F01-T02)
 - Local SSH device registry and the `tensorplate device` command group
   (`add`, `list`, `use`, `remove`, `rename`) so any operator running the CLI
   (macOS or Ubuntu) can enroll and remember SSH-reachable devices over the

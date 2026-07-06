@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use tensorplate_protocol::agent_control::{ControlRequest, ControlResponse, ResponseStatus};
+use tensorplate_protocol::{decode_with_version_check, DecodeError};
 
 use crate::error::{CliError, CliResult};
 use crate::profile::{ResolvedProfile, Transport};
@@ -259,13 +260,27 @@ fn read_response<R: Read + ReadShutdown>(
             ),
         });
     }
+    // Route the decode through the shared version check so an incompatible
+    // agent is rejected with a typed error instead of a generic parse failure.
+    // Fail closed: any mismatch or decode failure is a transport error.
     let response: ControlResponse =
-        serde_json::from_str(line.trim_end()).map_err(|e| CliError::Transport {
-            message: format!("decode {peer}: {e}"),
-            hint: Some(
-                "agent returned a payload the CLI could not parse; protocol version mismatch?"
-                    .into(),
-            ),
+        decode_with_version_check(line.trim_end()).map_err(|e| match e {
+            DecodeError::UnsupportedSchemaVersion { got, expected } => CliError::Transport {
+                message: format!(
+                    "incompatible agent protocol version: got {got}, CLI expects {expected}"
+                ),
+                hint: Some(
+                    "upgrade the device's tensorplate agent or this CLI so both speak the same protocol version"
+                        .into(),
+                ),
+            },
+            other => CliError::Transport {
+                message: format!("decode {peer}: {other}"),
+                hint: Some(
+                    "agent returned a payload the CLI could not parse; protocol version mismatch?"
+                        .into(),
+                ),
+            },
         })?;
     Ok(response)
 }
