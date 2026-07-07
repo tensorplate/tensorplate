@@ -35,8 +35,8 @@ pub struct RemoteOutput {
 /// Injectable SSH runner. Production uses [`OpensshRunner`]; tests inject a
 /// mock so no real SSH is required.
 pub trait SshRunner {
-    /// Run `<remote tensorplate> --local <args...>` on `entry` over SSH,
-    /// optionally piping `stdin` to the remote process.
+    /// Run `[sudo -n -u <run-as> --] <remote tensorplate> --local <args...>`
+    /// on `entry` over SSH, optionally piping `stdin` to the remote process.
     ///
     /// # Errors
     ///
@@ -46,6 +46,20 @@ pub trait SshRunner {
         &self,
         entry: &DeviceEntry,
         args: &[String],
+        stdin: Option<&[u8]>,
+    ) -> CliResult<RemoteOutput>;
+
+    /// Run an arbitrary, already-tokenized remote command over SSH (e.g. the
+    /// `stat` used to vet a run-as binary). Each token is quoted individually.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError::Transport`] when `ssh` cannot be launched or does
+    /// not complete.
+    fn run_raw(
+        &self,
+        entry: &DeviceEntry,
+        command: &[String],
         stdin: Option<&[u8]>,
     ) -> CliResult<RemoteOutput>;
 }
@@ -60,60 +74,89 @@ impl SshRunner for OpensshRunner {
         args: &[String],
         stdin: Option<&[u8]>,
     ) -> CliResult<RemoteOutput> {
-        let ssh_args = build_ssh_args(entry, args);
-        let mut cmd = Command::new("ssh");
-        cmd.args(&ssh_args);
-        cmd.stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| CliError::Transport {
-            message: format!("failed to launch ssh: {e}"),
-            hint: Some("is OpenSSH installed and on PATH?".into()),
-        })?;
-        if let Some(bytes) = stdin {
-            if let Some(mut sink) = child.stdin.take() {
-                sink.write_all(bytes).map_err(|e| CliError::Transport {
-                    message: format!("failed to write ssh stdin: {e}"),
-                    hint: None,
-                })?;
-            }
-        }
-        let out = child.wait_with_output().map_err(|e| CliError::Transport {
-            message: format!("ssh did not complete: {e}"),
-            hint: None,
-        })?;
-        Ok(RemoteOutput {
-            status: out.status.code().unwrap_or(-1),
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        spawn_ssh(entry, &tensorplate_command_string(entry, args), stdin)
+    }
+
+    fn run_raw(
+        &self,
+        entry: &DeviceEntry,
+        command: &[String],
+        stdin: Option<&[u8]>,
+    ) -> CliResult<RemoteOutput> {
+        spawn_ssh(entry, &quote_join(command), stdin)
     }
 }
 
-fn build_ssh_args(entry: &DeviceEntry, args: &[String]) -> Vec<String> {
+fn spawn_ssh(
+    entry: &DeviceEntry,
+    remote_command: &str,
+    stdin: Option<&[u8]>,
+) -> CliResult<RemoteOutput> {
     let mut ssh_args = Vec::new();
     if let Some(port) = entry.ssh_port {
         ssh_args.push("-p".to_string());
         ssh_args.push(port.to_string());
     }
     ssh_args.push(entry.ssh_target.clone());
-    ssh_args.push(remote_command_string(entry, args));
-    ssh_args
+    ssh_args.push(remote_command.to_string());
+
+    let mut cmd = Command::new("ssh");
+    cmd.args(&ssh_args);
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| CliError::Transport {
+        message: format!("failed to launch ssh: {e}"),
+        hint: Some("is OpenSSH installed and on PATH?".into()),
+    })?;
+    if let Some(bytes) = stdin {
+        if let Some(mut sink) = child.stdin.take() {
+            sink.write_all(bytes).map_err(|e| CliError::Transport {
+                message: format!("failed to write ssh stdin: {e}"),
+                hint: None,
+            })?;
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| CliError::Transport {
+        message: format!("ssh did not complete: {e}"),
+        hint: None,
+    })?;
+    Ok(RemoteOutput {
+        status: out.status.code().unwrap_or(-1),
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
-fn remote_command_string(entry: &DeviceEntry, args: &[String]) -> String {
+/// Build the quoted remote command for a `tensorplate` invocation:
+/// `[sudo -n -u <run-as> --] <bin> --local <args...>`. `--local` is always
+/// forced so the remote CLI resolves its own config. A configured run-as user
+/// goes through structured, non-interactive `sudo` arguments — no shell string
+/// is interpolated.
+fn tensorplate_command_string(entry: &DeviceEntry, args: &[String]) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    if let Some(user) = entry.remote_run_as.as_deref() {
+        tokens.extend(
+            ["sudo", "-n", "-u", user, "--"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
+    }
     let bin = entry.remote_tensorplate.as_deref().map_or_else(
         || "tensorplate".to_string(),
         |p| p.to_string_lossy().into_owned(),
     );
-    let mut tokens = Vec::with_capacity(args.len() + 2);
     tokens.push(bin);
     tokens.push("--local".to_string());
     tokens.extend(args.iter().cloned());
+    quote_join(&tokens)
+}
+
+fn quote_join(tokens: &[String]) -> String {
     tokens
         .iter()
         .map(|t| shell_quote(t))
@@ -222,17 +265,6 @@ pub fn route<O: Write, E: Write>(
     stdout: &mut O,
     stderr: &mut E,
 ) -> CliResult<()> {
-    if entry.remote_run_as.is_some() {
-        return Err(CliError::Unavailable {
-            message: format!(
-                "device `{device_name}` is configured with `--run-as`, but run-as SSH execution is not available yet"
-            ),
-            hint: Some(
-                "remove `remote_run_as` from the device entry or run the command on the device until run-as routing lands"
-                    .into(),
-            ),
-        });
-    }
     let ctx = RemoteCtx {
         runner,
         entry,
@@ -591,6 +623,181 @@ fn mirror_exit(status: i32) -> CliResult<()> {
     }
 }
 
+/// Packaged default path to the remote `tensorplate` binary.
+pub const DEFAULT_REMOTE_TENSORPLATE: &str = "/usr/bin/tensorplate";
+
+/// Refreshable device facts fetched by `device sync`.
+pub struct DeviceFacts {
+    pub agent_version: Option<String>,
+    pub protocol_version: Option<String>,
+}
+
+/// Reachability preflight for `device add`: run
+/// `tensorplate --local status --output json` on the device (through the
+/// configured run-as mode) and confirm a well-formed envelope comes back.
+///
+/// # Errors
+///
+/// Returns a typed [`CliError`] with an actionable hint when SSH fails or the
+/// device-local agent cannot be reached.
+pub fn preflight_reachable(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<()> {
+    let out = runner.run(
+        entry,
+        &["status".into(), "--output".into(), "json".into()],
+        None,
+    )?;
+    ssh_transport_guard(&out)?;
+    if out.status != 0 {
+        return Err(CliError::Unavailable {
+            message: format!(
+                "could not reach the device-local agent on `{}` (remote exit {})",
+                entry.ssh_target, out.status
+            ),
+            hint: Some(reachability_hint(entry)),
+        });
+    }
+    parse_and_check_envelope(&out.stdout)?;
+    Ok(())
+}
+
+fn reachability_hint(entry: &DeviceEntry) -> String {
+    if entry.remote_run_as.is_some() {
+        "the non-interactive sudoers rule for the tensorplate binary may be missing; add a NOPASSWD entry, or SSH as a user that can reach the agent socket".to_string()
+    } else {
+        "SSH as a user that can reach the agent socket, configure `--run-as <user>` with a non-interactive sudoers rule, or make the agent socket group-accessible".to_string()
+    }
+}
+
+/// Verify a run-as device's remote `tensorplate` binary is safe to invoke under
+/// sudo: absolute, owned by root, and not group/other-writable. Resolves the
+/// binary from the entry (or the packaged default) and `stat`s it over SSH.
+///
+/// # Errors
+///
+/// Returns [`CliError::Usage`] when the binary is relative, cannot be stat'd,
+/// is not root-owned, or is group/other-writable.
+pub fn verify_run_as_binary(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<()> {
+    let bin = entry.remote_tensorplate.as_deref().map_or_else(
+        || DEFAULT_REMOTE_TENSORPLATE.to_string(),
+        |p| p.to_string_lossy().into_owned(),
+    );
+    if !std::path::Path::new(&bin).is_absolute() {
+        return Err(CliError::Usage(format!(
+            "run-as requires an absolute remote tensorplate path, got `{bin}`"
+        )));
+    }
+    let out = runner.run_raw(
+        entry,
+        &["stat".into(), "-c".into(), "%u %a".into(), bin.clone()],
+        None,
+    )?;
+    if out.status != 0 {
+        return Err(CliError::Usage(format!(
+            "could not stat the remote tensorplate binary `{bin}`: {}",
+            out.stderr.trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (uid, mode) = parse_stat_owner_mode(text.trim()).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unexpected stat output for `{bin}`: {}",
+            text.trim()
+        ))
+    })?;
+    if uid != 0 {
+        return Err(CliError::Usage(format!(
+            "run-as binary `{bin}` must be owned by root (uid 0), got uid {uid}"
+        )));
+    }
+    if mode & 0o022 != 0 {
+        return Err(CliError::Usage(format!(
+            "run-as binary `{bin}` must not be group/other-writable (mode {mode:o})"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_stat_owner_mode(s: &str) -> Option<(u32, u32)> {
+    let mut it = s.split_whitespace();
+    let uid = it.next()?.parse::<u32>().ok()?;
+    let mode = u32::from_str_radix(it.next()?, 8).ok()?;
+    Some((uid, mode))
+}
+
+/// Fetch refreshable facts for `device sync` from the remote
+/// `version --output json`.
+///
+/// # Errors
+///
+/// Returns a typed [`CliError`] when the device is unreachable or the version
+/// envelope is malformed or version-incompatible.
+pub fn fetch_version_facts(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<DeviceFacts> {
+    let out = runner.run(
+        entry,
+        &["version".into(), "--output".into(), "json".into()],
+        None,
+    )?;
+    ssh_transport_guard(&out)?;
+    if out.status != 0 {
+        return Err(CliError::Unavailable {
+            message: format!(
+                "remote `version` failed on `{}` (exit {})",
+                entry.ssh_target, out.status
+            ),
+            hint: Some(reachability_hint(entry)),
+        });
+    }
+    let envelope = parse_and_check_envelope(&out.stdout)?;
+    let payload = envelope.get("payload");
+    Ok(DeviceFacts {
+        agent_version: payload
+            .and_then(|p| p.get("cli"))
+            .and_then(Value::as_str)
+            .map(String::from),
+        protocol_version: payload
+            .and_then(|p| p.get("protocol"))
+            .and_then(Value::as_str)
+            .map(String::from),
+    })
+}
+
+/// Current UTC time as an RFC3339 `YYYY-MM-DDThh:mm:ssZ` string.
+#[must_use]
+pub fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_epoch_rfc3339(secs)
+}
+
+fn format_epoch_rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+// Howard Hinnant's days-from-civil inverse (proleptic Gregorian, UTC).
+fn civil_from_days(z0: i64) -> (i64, u32, u32) {
+    let z = z0 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_shifted = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_shifted + 2) / 5 + 1) as u32;
+    let month = (if month_shifted < 10 {
+        month_shifted + 3
+    } else {
+        month_shifted - 9
+    }) as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -685,6 +892,7 @@ mod tests {
 
     struct MockRunner {
         calls: RefCell<Vec<(Vec<String>, Option<Vec<u8>>)>>,
+        raw_calls: RefCell<Vec<Vec<String>>>,
         status: i32,
         stdout: Vec<u8>,
         stderr: String,
@@ -694,6 +902,7 @@ mod tests {
         fn new(status: i32, stdout: &str) -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                raw_calls: RefCell::new(Vec::new()),
                 status,
                 stdout: stdout.as_bytes().to_vec(),
                 stderr: String::new(),
@@ -706,6 +915,10 @@ mod tests {
 
         fn last_stdin(&self) -> Option<Vec<u8>> {
             self.calls.borrow().last().unwrap().1.clone()
+        }
+
+        fn last_raw(&self) -> Vec<String> {
+            self.raw_calls.borrow().last().unwrap().clone()
         }
     }
 
@@ -725,6 +938,20 @@ mod tests {
                 stderr: self.stderr.clone(),
             })
         }
+
+        fn run_raw(
+            &self,
+            _entry: &DeviceEntry,
+            command: &[String],
+            _stdin: Option<&[u8]>,
+        ) -> CliResult<RemoteOutput> {
+            self.raw_calls.borrow_mut().push(command.to_vec());
+            Ok(RemoteOutput {
+                status: self.status,
+                stdout: self.stdout.clone(),
+                stderr: self.stderr.clone(),
+            })
+        }
     }
 
     #[test]
@@ -736,24 +963,32 @@ mod tests {
     }
 
     #[test]
-    fn ssh_args_include_port_target_and_forced_local() {
-        let mut e = entry("reid@orin.local");
-        e.ssh_port = Some(2222);
-        let args = build_ssh_args(&e, &["status".into(), "--output".into(), "json".into()]);
-        assert_eq!(args[0], "-p");
-        assert_eq!(args[1], "2222");
-        assert_eq!(args[2], "reid@orin.local");
-        // The remote command always forces --local.
-        assert!(args[3].contains("'--local'"));
-        assert!(args[3].contains("'tensorplate'"));
-        assert!(args[3].contains("'status'"));
+    fn tensorplate_command_forces_local() {
+        let e = entry("reid@orin.local");
+        let s =
+            tensorplate_command_string(&e, &["status".into(), "--output".into(), "json".into()]);
+        assert!(s.contains("'--local'"));
+        assert!(s.contains("'tensorplate'"));
+        assert!(s.contains("'status'"));
+        // No run-as user configured, so no sudo wrapping.
+        assert!(!s.contains("sudo"));
+    }
+
+    #[test]
+    fn tensorplate_command_wraps_run_as_with_structured_sudo() {
+        let mut e = entry("host");
+        e.remote_run_as = Some("tensorplate".into());
+        let s = tensorplate_command_string(&e, &["status".into()]);
+        assert!(
+            s.starts_with("'sudo' '-n' '-u' 'tensorplate' '--' 'tensorplate' '--local' 'status'")
+        );
     }
 
     #[test]
     fn remote_command_uses_configured_binary_path() {
         let mut e = entry("host");
         e.remote_tensorplate = Some(std::path::PathBuf::from("/usr/bin/tensorplate"));
-        let s = remote_command_string(&e, &["version".into()]);
+        let s = tensorplate_command_string(&e, &["version".into()]);
         assert!(s.starts_with("'/usr/bin/tensorplate' '--local' 'version'"));
     }
 
@@ -825,14 +1060,14 @@ mod tests {
     }
 
     #[test]
-    fn route_rejects_run_as_devices_until_supported() {
+    fn route_allows_run_as_devices() {
         let runner = MockRunner::new(0, "");
         let mut e = entry("host");
         e.remote_run_as = Some("tensorplate".into());
         let r = Renderer::new(OutputMode::Human);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let e = route(
+        route(
             &runner,
             &e,
             "orin",
@@ -844,9 +1079,10 @@ mod tests {
             &mut out,
             &mut err,
         )
-        .unwrap_err();
-        assert!(matches!(e, CliError::Unavailable { .. }));
-        assert!(runner.calls.borrow().is_empty());
+        .unwrap();
+        // The command was routed to the device; run-as sudo wrapping is applied
+        // by the runner (see tensorplate_command_wraps_run_as_with_structured_sudo).
+        assert!(!runner.calls.borrow().is_empty());
     }
 
     #[test]
@@ -1075,5 +1311,69 @@ mod tests {
         ));
         assert!(stdout.contains("scores shape=[1,3]"));
         assert!(!stdout.trim_start().starts_with('{'));
+    }
+
+    #[test]
+    fn preflight_accepts_reachable_and_rejects_unreachable() {
+        let ok = MockRunner::new(
+            0,
+            r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{}}"#,
+        );
+        preflight_reachable(&ok, &entry("host")).unwrap();
+        // The probe forces the local status envelope.
+        assert_eq!(ok.last_args(), vec!["status", "--output", "json"]);
+
+        let unreachable = MockRunner::new(3, "");
+        let e = preflight_reachable(&unreachable, &entry("host")).unwrap_err();
+        assert!(matches!(e, CliError::Unavailable { .. }));
+    }
+
+    #[test]
+    fn verify_run_as_binary_enforces_ownership_and_perms() {
+        let ok = MockRunner::new(0, "0 755\n");
+        let mut e = entry("host");
+        e.remote_run_as = Some("tensorplate".into());
+        verify_run_as_binary(&ok, &e).unwrap();
+        assert_eq!(
+            ok.last_raw(),
+            vec!["stat", "-c", "%u %a", "/usr/bin/tensorplate"]
+        );
+
+        let non_root = MockRunner::new(0, "1000 755\n");
+        assert!(matches!(
+            verify_run_as_binary(&non_root, &e).unwrap_err(),
+            CliError::Usage(_)
+        ));
+
+        let group_writable = MockRunner::new(0, "0 775\n");
+        assert!(matches!(
+            verify_run_as_binary(&group_writable, &e).unwrap_err(),
+            CliError::Usage(_)
+        ));
+
+        let mut relative = entry("host");
+        relative.remote_run_as = Some("tensorplate".into());
+        relative.remote_tensorplate = Some(std::path::PathBuf::from("bin/tensorplate"));
+        assert!(matches!(
+            verify_run_as_binary(&MockRunner::new(0, "0 755"), &relative).unwrap_err(),
+            CliError::Usage(_)
+        ));
+    }
+
+    #[test]
+    fn fetch_version_facts_parses_cli_and_protocol() {
+        let runner = MockRunner::new(
+            0,
+            r#"{"schema_version":"0.1","command":"version","status":"ok","payload":{"cli":"0.1.5","protocol":"0.1","bundle_format":"0.1"}}"#,
+        );
+        let facts = fetch_version_facts(&runner, &entry("host")).unwrap();
+        assert_eq!(facts.agent_version.as_deref(), Some("0.1.5"));
+        assert_eq!(facts.protocol_version.as_deref(), Some("0.1"));
+    }
+
+    #[test]
+    fn rfc3339_formats_known_epochs() {
+        assert_eq!(format_epoch_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_epoch_rfc3339(1_600_000_000), "2020-09-13T12:26:40Z");
     }
 }

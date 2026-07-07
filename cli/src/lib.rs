@@ -91,7 +91,7 @@ where
     // Device registry management is always local, independent of any selected
     // device, and never resolves a transport profile or opens a client.
     if let Subcommand::Device(cmd) = parsed.subcommand {
-        return commands::device::run(&renderer, cmd, stdout, stderr);
+        return commands::device::run(&OpensshRunner, &renderer, cmd, stdout, stderr);
     }
 
     // Route operational commands to a selected device over SSH when one is

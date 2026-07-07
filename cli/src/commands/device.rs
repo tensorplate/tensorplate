@@ -17,6 +17,7 @@ use crate::args::{DeviceAddArgs, DeviceCommand};
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
 use crate::registry::{DeviceEntry, DeviceRegistry, DEFAULT_REMOTE_IMPORT_DIR};
+use crate::remote::{self, SshRunner};
 
 const COMMAND: &str = "device";
 
@@ -28,6 +29,7 @@ const COMMAND: &str = "device";
 /// the registry is malformed, the requested device does not exist, or the
 /// registry cannot be written.
 pub fn run<O: Write, E: Write>(
+    runner: &dyn SshRunner,
     renderer: &Renderer,
     command: DeviceCommand,
     stdout: &mut O,
@@ -36,9 +38,19 @@ pub fn run<O: Write, E: Write>(
     let path = DeviceRegistry::resolve_path()?;
     let mut registry = DeviceRegistry::load(&path)?;
     match command {
-        DeviceCommand::Add(args) => add(renderer, &mut registry, &path, args, stdout, stderr),
+        DeviceCommand::Add(args) => {
+            add(runner, renderer, &mut registry, &path, args, stdout, stderr)
+        }
         DeviceCommand::List => list(renderer, &registry, stdout),
         DeviceCommand::Use(name) => use_device(renderer, &mut registry, &path, &name, stdout),
+        DeviceCommand::Sync(name) => sync(
+            runner,
+            renderer,
+            &mut registry,
+            &path,
+            name.as_deref(),
+            stdout,
+        ),
         DeviceCommand::Remove(name) => remove(renderer, &mut registry, &path, &name, stdout),
         DeviceCommand::Rename { old, new } => {
             rename(renderer, &mut registry, &path, &old, &new, stdout)
@@ -47,6 +59,7 @@ pub fn run<O: Write, E: Write>(
 }
 
 fn add<O: Write, E: Write>(
+    runner: &dyn SshRunner,
     renderer: &Renderer,
     registry: &mut DeviceRegistry,
     path: &std::path::Path,
@@ -81,14 +94,30 @@ fn add<O: Write, E: Write>(
     if set_default {
         registry.default_device = Some(name.clone());
     }
+    // Structural validation first (rejects an unsafe ssh_target before we shell
+    // out), then the reachability preflight unless it was skipped. The device is
+    // not persisted if either fails.
     registry.validate()?;
+    if !args.no_verify {
+        // The entry was just inserted, so `get` is always `Some`; the `if let`
+        // avoids a panic path for the impossible case.
+        if let Some(enrolled) = registry.devices.get(&name) {
+            if enrolled.remote_run_as.is_some() {
+                remote::verify_run_as_binary(runner, enrolled)?;
+            }
+            remote::preflight_reachable(runner, enrolled)?;
+        }
+    }
     registry.save(path)?;
 
-    let human = if set_default {
+    let mut human = if set_default {
         format!("added device `{name}` ({ssh_target}) and set it as the default")
     } else {
         format!("added device `{name}` ({ssh_target})")
     };
+    if args.no_verify {
+        human.push_str(" (reachability not verified)");
+    }
     if !set_default {
         renderer.info(
             stderr,
@@ -100,6 +129,58 @@ fn add<O: Write, E: Write>(
         "ssh_target": ssh_target,
         "remote_import_dir": import_dir.display().to_string(),
         "default": set_default,
+    });
+    renderer.ok(stdout, COMMAND, &human, payload, None, None)
+}
+
+fn sync<O: Write>(
+    runner: &dyn SshRunner,
+    renderer: &Renderer,
+    registry: &mut DeviceRegistry,
+    path: &std::path::Path,
+    name: Option<&str>,
+    stdout: &mut O,
+) -> CliResult<()> {
+    let target = match name {
+        Some(n) => n.to_string(),
+        None => registry.default_device.clone().ok_or_else(|| {
+            CliError::Usage(
+                "device sync requires a <name> or a default device (`tensorplate device use <name>`)"
+                    .into(),
+            )
+        })?,
+    };
+    let entry = registry.devices.get(&target).cloned().ok_or_else(|| {
+        CliError::Usage(format!(
+            "device `{target}` is not enrolled; run `tensorplate device list`"
+        ))
+    })?;
+    // Fetch facts first; a failure here leaves the registry untouched, so a
+    // failed sync is non-destructive.
+    let facts = remote::fetch_version_facts(runner, &entry)?;
+    let Some(updated) = registry.devices.get_mut(&target) else {
+        return Err(CliError::Internal(
+            "device entry disappeared during sync".into(),
+        ));
+    };
+    updated.agent_version = facts.agent_version;
+    updated.protocol_version = facts.protocol_version;
+    updated.last_seen = Some(remote::now_rfc3339());
+    let agent_version = updated.agent_version.clone();
+    let protocol_version = updated.protocol_version.clone();
+    let last_seen = updated.last_seen.clone();
+    registry.validate()?;
+    registry.save(path)?;
+    let human = format!(
+        "synced device `{target}` (cli version {}, protocol {})",
+        agent_version.as_deref().unwrap_or("unknown"),
+        protocol_version.as_deref().unwrap_or("unknown"),
+    );
+    let payload = json!({
+        "name": target,
+        "agent_version": agent_version,
+        "protocol_version": protocol_version,
+        "last_seen": last_seen,
     });
     renderer.ok(stdout, COMMAND, &human, payload, None, None)
 }
@@ -289,6 +370,58 @@ mod tests {
             run_as: None,
             import_dir: None,
             use_as_default: use_default,
+            // Registry-mutation tests skip the SSH preflight; dedicated tests
+            // exercise it with a stub runner.
+            no_verify: true,
+        }
+    }
+
+    struct StubRunner {
+        status: i32,
+        stdout: Vec<u8>,
+    }
+
+    impl StubRunner {
+        fn ok(stdout: &str) -> Self {
+            Self {
+                status: 0,
+                stdout: stdout.as_bytes().to_vec(),
+            }
+        }
+
+        fn failing(status: i32) -> Self {
+            Self {
+                status,
+                stdout: Vec::new(),
+            }
+        }
+
+        fn output(&self) -> crate::remote::RemoteOutput {
+            crate::remote::RemoteOutput {
+                status: self.status,
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+            }
+        }
+    }
+
+    impl SshRunner for StubRunner {
+        fn run(
+            &self,
+            _entry: &DeviceEntry,
+            _args: &[String],
+            _stdin: Option<&[u8]>,
+        ) -> CliResult<crate::remote::RemoteOutput> {
+            Ok(self.output())
+        }
+
+        fn run_raw(
+            &self,
+            _entry: &DeviceEntry,
+            _command: &[String],
+            _stdin: Option<&[u8]>,
+        ) -> CliResult<crate::remote::RemoteOutput> {
+            Ok(self.output())
         }
     }
 
@@ -314,7 +447,16 @@ mod tests {
         let mut registry = h.load();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        add(&renderer, &mut registry, &h.path, args, &mut out, &mut err).unwrap();
+        add(
+            &StubRunner::ok(""),
+            &renderer,
+            &mut registry,
+            &h.path,
+            args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
         (
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
@@ -378,6 +520,7 @@ mod tests {
         let renderer = Renderer::new(OutputMode::Human);
         let mut registry = h.load();
         let err = add(
+            &StubRunner::ok(""),
             &renderer,
             &mut registry,
             &h.path,
@@ -387,6 +530,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn add_preflight_saves_when_reachable_and_rejects_when_not() {
+        // Reachable: default-on preflight passes, device is saved.
+        let h = Harness::new();
+        let renderer = Renderer::new(OutputMode::Human);
+        let mut registry = h.load();
+        let mut args = add_args("orin", "reid@orin.local", false);
+        args.no_verify = false;
+        let ok_runner = StubRunner::ok(
+            r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{}}"#,
+        );
+        add(
+            &ok_runner,
+            &renderer,
+            &mut registry,
+            &h.path,
+            args,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(h.load().devices.contains_key("orin"));
+
+        // Unreachable: preflight fails, device is NOT saved.
+        let h2 = Harness::new();
+        let mut registry2 = h2.load();
+        let mut args2 = add_args("orin", "reid@orin.local", false);
+        args2.no_verify = false;
+        let err = add(
+            &StubRunner::failing(3),
+            &renderer,
+            &mut registry2,
+            &h2.path,
+            args2,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CliError::Unavailable { .. }));
+        assert!(!h2.path.exists());
+    }
+
+    #[test]
+    fn sync_updates_cached_facts() {
+        let h = Harness::new();
+        run_add(&h, add_args("orin", "reid@orin.local", false));
+        let renderer = Renderer::new(OutputMode::Human);
+        let mut registry = h.load();
+        let runner = StubRunner::ok(
+            r#"{"schema_version":"0.1","command":"version","status":"ok","payload":{"cli":"0.1.5","protocol":"0.1","bundle_format":"0.1"}}"#,
+        );
+        sync(
+            &runner,
+            &renderer,
+            &mut registry,
+            &h.path,
+            Some("orin"),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let entry = h.load().devices.get("orin").unwrap().clone();
+        assert_eq!(entry.agent_version.as_deref(), Some("0.1.5"));
+        assert_eq!(entry.protocol_version.as_deref(), Some("0.1"));
+        assert!(entry.last_seen.is_some());
     }
 
     #[test]
