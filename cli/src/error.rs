@@ -47,6 +47,24 @@ impl ExitCode {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// Map a raw process exit code back onto the documented table. Used to
+    /// mirror a device-routed remote command's exit code locally. Unknown
+    /// codes collapse to [`ExitCode::Failure`].
+    #[must_use]
+    pub fn from_u8(code: u8) -> Self {
+        match code {
+            0 => Self::Success,
+            2 => Self::Usage,
+            3 => Self::AgentError,
+            4 => Self::Transport,
+            5 => Self::Busy,
+            6 => Self::Unavailable,
+            10 => Self::DoctorFindings,
+            11 => Self::InferenceFailed,
+            _ => Self::Failure,
+        }
+    }
 }
 
 /// Typed CLI error taxonomy. Carries enough context for the human and
@@ -109,6 +127,12 @@ pub enum CliError {
 
     #[error("internal cli error: {0}")]
     Internal(String),
+
+    /// A device-routed remote command already emitted its own output. This
+    /// carries the remote exit code so the local process mirrors it, and is
+    /// rendered as nothing (the remote already reported).
+    #[error("remote command exited with a non-zero status")]
+    RemoteExit { code: ExitCode },
 }
 
 impl CliError {
@@ -125,10 +149,19 @@ impl CliError {
             CliError::Busy { .. } => ExitCode::Busy,
             CliError::DoctorFindings { .. } => ExitCode::DoctorFindings,
             CliError::Inference { .. } => ExitCode::InferenceFailed,
+            CliError::RemoteExit { code } => *code,
             CliError::Io(_) | CliError::Serialization(_) | CliError::Internal(_) => {
                 ExitCode::Failure
             }
         }
+    }
+
+    /// Whether the error's output was already written (so the top-level binary
+    /// must not render it again). True only for [`CliError::RemoteExit`], where
+    /// the device-routed command already forwarded the remote's output.
+    #[must_use]
+    pub fn already_reported(&self) -> bool {
+        matches!(self, CliError::RemoteExit { .. })
     }
 
     /// Stable, machine-readable error code surfaced via JSON output.
@@ -144,9 +177,10 @@ impl CliError {
             CliError::Transport { .. } | CliError::Timeout { .. } => ErrorCode::Timeout,
             CliError::Agent { code, .. } | CliError::Inference { code, .. } => *code,
             CliError::Busy { .. } => ErrorCode::NotReady,
-            CliError::Io(_) | CliError::Serialization(_) | CliError::Internal(_) => {
-                ErrorCode::Internal
-            }
+            CliError::Io(_)
+            | CliError::Serialization(_)
+            | CliError::Internal(_)
+            | CliError::RemoteExit { .. } => ErrorCode::Internal,
         }
     }
 

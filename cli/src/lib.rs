@@ -40,6 +40,7 @@ pub mod error;
 pub mod output;
 pub mod profile;
 pub mod registry;
+pub mod remote;
 
 use std::io::Write;
 
@@ -50,6 +51,7 @@ pub use error::{CliError, CliResult, ExitCode};
 pub use output::Renderer;
 pub use profile::ResolvedProfile;
 pub use registry::{DeviceEntry, DeviceRegistry};
+pub use remote::{OpensshRunner, Route, SshRunner};
 
 /// Crate version string compiled from Cargo metadata.
 #[must_use]
@@ -85,9 +87,33 @@ where
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
     let renderer = Renderer::new(effective_output_mode(&parsed.global, &cfg));
+
+    // Device registry management is always local, independent of any selected
+    // device, and never resolves a transport profile or opens a client.
+    if let Subcommand::Device(cmd) = parsed.subcommand {
+        return commands::device::run(&renderer, cmd, stdout, stderr);
+    }
+
+    // Route operational commands to a selected device over SSH when one is
+    // selected; otherwise fall through to the local agent path below.
+    if let Route::Device { name, entry } = remote::resolve_route(&parsed.global)? {
+        return remote::route(
+            &OpensshRunner,
+            &entry,
+            &name,
+            &parsed.subcommand,
+            remote::RouteOptions {
+                renderer: &renderer,
+                timeout_ms: parsed.global.timeout_ms,
+            },
+            stdout,
+            stderr,
+        );
+    }
+
     // Resolve the transport profile lazily, only for commands that talk to an
-    // agent. Local-only commands (`version`, `device`) must not fail on an
-    // unrelated reserved/unsupported default profile.
+    // agent. Local-only commands (`version`) must not fail on an unrelated
+    // reserved/unsupported default profile.
     let resolve_profile = || {
         profile::resolve(
             &cfg,
@@ -98,9 +124,10 @@ where
     };
     match parsed.subcommand {
         Subcommand::Version => commands::version::run(&renderer, stdout),
-        // Device registry management is local-only: it neither resolves a
-        // transport profile nor opens an agent client.
-        Subcommand::Device(cmd) => commands::device::run(&renderer, cmd, stdout, stderr),
+        // Handled above; kept for exhaustiveness without a panic path.
+        Subcommand::Device(_) => Err(CliError::Internal(
+            "device subcommand should have been dispatched locally".into(),
+        )),
         Subcommand::Doctor(opts) => {
             let profile = resolve_profile()?;
             let client = client_factory(&profile)?;

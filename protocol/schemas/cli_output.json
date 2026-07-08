@@ -44,6 +44,17 @@
     },
     "payload": {
       "description": "Command-specific payload. See per-command docs in `docs/cli/`. Always present on `status=ok` results; absent or null on errors."
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "ssh_target"],
+      "description": "Present only when the command was routed to a registry device over SSH. Identifies the target and is omitted for local runs.",
+      "properties": {
+        "name": {"type": "string"},
+        "ssh_target": {"type": "string"},
+        "family": {"type": ["string", "null"]}
+      }
     }
   }
 }
