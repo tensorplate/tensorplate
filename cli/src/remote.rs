@@ -146,14 +146,24 @@ fn tensorplate_command_string(entry: &DeviceEntry, args: &[String]) -> String {
                 .map(|s| (*s).to_string()),
         );
     }
-    let bin = entry.remote_tensorplate.as_deref().map_or_else(
-        || "tensorplate".to_string(),
-        |p| p.to_string_lossy().into_owned(),
-    );
+    let bin = tensorplate_binary_for_execution(entry);
     tokens.push(bin);
     tokens.push("--local".to_string());
     tokens.extend(args.iter().cloned());
     quote_join(&tokens)
+}
+
+fn tensorplate_binary_for_execution(entry: &DeviceEntry) -> String {
+    entry.remote_tensorplate.as_deref().map_or_else(
+        || {
+            if entry.remote_run_as.is_some() {
+                DEFAULT_REMOTE_TENSORPLATE.to_string()
+            } else {
+                "tensorplate".to_string()
+            }
+        },
+        |p| p.to_string_lossy().into_owned(),
+    )
 }
 
 fn quote_join(tokens: &[String]) -> String {
@@ -677,10 +687,7 @@ fn reachability_hint(entry: &DeviceEntry) -> String {
 /// Returns [`CliError::Usage`] when the binary is relative, cannot be stat'd,
 /// is not root-owned, or is group/other-writable.
 pub fn verify_run_as_binary(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<()> {
-    let bin = entry.remote_tensorplate.as_deref().map_or_else(
-        || DEFAULT_REMOTE_TENSORPLATE.to_string(),
-        |p| p.to_string_lossy().into_owned(),
-    );
+    let bin = tensorplate_binary_for_execution(entry);
     if !std::path::Path::new(&bin).is_absolute() {
         return Err(CliError::Usage(format!(
             "run-as requires an absolute remote tensorplate path, got `{bin}`"
@@ -979,9 +986,9 @@ mod tests {
         let mut e = entry("host");
         e.remote_run_as = Some("tensorplate".into());
         let s = tensorplate_command_string(&e, &["status".into()]);
-        assert!(
-            s.starts_with("'sudo' '-n' '-u' 'tensorplate' '--' 'tensorplate' '--local' 'status'")
-        );
+        assert!(s.starts_with(
+            "'sudo' '-n' '-u' 'tensorplate' '--' '/usr/bin/tensorplate' '--local' 'status'"
+        ));
     }
 
     #[test]

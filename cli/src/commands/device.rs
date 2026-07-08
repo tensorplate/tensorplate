@@ -81,9 +81,14 @@ fn add<O: Write, E: Write>(
     let import_dir = args
         .import_dir
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_REMOTE_IMPORT_DIR));
+    let remote_tensorplate = args
+        .run_as
+        .as_ref()
+        .map(|_| std::path::PathBuf::from(remote::DEFAULT_REMOTE_TENSORPLATE));
     let entry = DeviceEntry {
         ssh_target: args.ssh_target,
         ssh_port: args.port,
+        remote_tensorplate,
         remote_run_as: args.run_as,
         remote_import_dir: Some(import_dir.clone()),
         ..DeviceEntry::default()
@@ -493,6 +498,20 @@ mod tests {
                 .as_deref(),
             Some(std::path::Path::new("/srv/tp/import"))
         );
+    }
+
+    #[test]
+    fn add_run_as_records_verified_default_binary_path() {
+        let h = Harness::new();
+        let mut args = add_args("orin", "reid@orin.local", false);
+        args.run_as = Some("tensorplate".into());
+        run_add(&h, args);
+        let entry = h.load().devices.get("orin").unwrap().clone();
+        assert_eq!(
+            entry.remote_tensorplate.as_deref(),
+            Some(std::path::Path::new(remote::DEFAULT_REMOTE_TENSORPLATE))
+        );
+        assert_eq!(entry.remote_run_as.as_deref(), Some("tensorplate"));
     }
 
     #[test]
