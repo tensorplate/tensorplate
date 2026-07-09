@@ -5,16 +5,18 @@ registry is a small, human-inspectable JSON file; these subcommands read and
 write it and never touch a remote device.
 
 ```
-tensorplate device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]
+tensorplate device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use] [--no-verify]
 tensorplate device list [--output <human|json>]
 tensorplate device use <name>
+tensorplate device sync [<name>]
 tensorplate device remove <name>
 tensorplate device rename <old> <new>
 ```
 
-These commands are local-only: they read and write the registry and never
-resolve a transport profile or contact an agent, so they keep working even when
-the CLI config's default profile is a reserved/unsupported mode.
+`list`, `use`, `remove`, and `rename` are local-only: they read and write the
+registry and never resolve a transport profile, so they keep working even when
+the CLI config's default profile is a reserved/unsupported mode. `add`
+(reachability preflight) and `sync` reach the device over SSH.
 
 ## Registry location
 
@@ -40,13 +42,32 @@ or agent secrets — authentication stays with your SSH client and
   the device-local agent. Every entry records a remote import directory (the
   staging location for copied bundles); it defaults to
   `/var/lib/tensorplate/bundles/import` and `--import-dir <path>` overrides it
-  for installs whose packaged service permissions place it elsewhere.
+  for installs whose packaged service permissions place it elsewhere. `add`
+  runs a reachability preflight by default (see below); `--no-verify` skips it
+  for offline/pre-enrollment.
 - `list` prints enrolled devices; the default is marked with `*`. `--output
   json` emits the standard envelope with a `payload.devices` array and
   `payload.default_device`.
 - `use <name>` selects the default device.
+- `sync [<name>]` refreshes cached facts (remote CLI version, protocol version,
+  and last-seen time) for the named device, or the default when omitted. A
+  failed sync is non-destructive — it leaves the entry as it was.
 - `remove <name>` deletes a local entry. Removing the default clears the default.
 - `rename <old> <new>` renames a local entry, following the default if it moved.
+
+## Enrollment preflight
+
+By default `device add` verifies the device is reachable before saving it: it
+runs `tensorplate --local status --output json` over SSH (through the configured
+run-as mode) and refuses to save if that fails, with a hint naming the supported
+fixes (SSH as a user that can reach the agent socket, configure `--run-as` with
+a non-interactive sudoers rule, or make the socket group-accessible). Pass
+`--no-verify` to skip the preflight and record the device unconditionally.
+
+When `--run-as <user>` is configured, `add` also vets the remote `tensorplate`
+binary (default `/usr/bin/tensorplate`, or the pinned path): it must be
+absolute, owned by root, and not group/other-writable, because the sudoers rule
+grants execution as the run-as user.
 
 ## Default device selection
 
@@ -88,13 +109,13 @@ Target selection precedence, highest first:
 5. local, when nothing is selected.
 
 `status`, `rollback`, `logs`, `doctor`, `infer`, and `version` route to the
-selected device. `deploy` over `--device` is not available yet (remote deploy
-staging lands in a later change), and entries configured with `--run-as` are
-rejected until run-as SSH execution lands. Path flags are interpreted where the
-file lives: `logs --source` and `status --observability-snapshot` are
-device-local, while `infer --input` is read locally and piped to the device over
-stdin and `infer --output-file` is written locally. `logs --follow` is not
-supported over `--device` yet.
+selected device. Devices enrolled with `--run-as` route through a structured,
+non-interactive `sudo -n -u <user> -- …` invocation. `deploy` over `--device` is
+not available yet (remote deploy staging lands in a later change). Path flags are
+interpreted where the file lives: `logs --source` and
+`status --observability-snapshot` are device-local, while `infer --input` is read
+locally and piped to the device over stdin and `infer --output-file` is written
+locally. `logs --follow` is not supported over `--device` yet.
 
 With `--output json`, routed output preserves the standard envelope and adds a
 top-level `device` object identifying the target; human output from the device

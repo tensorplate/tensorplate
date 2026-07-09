@@ -42,7 +42,14 @@ fn add_first_device_becomes_default_and_list_reports_it() {
 
     let (code, out, _err) = run_device(
         &registry,
-        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+        &[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ],
     );
     assert_eq!(code, 0, "add failed: {out}");
     let parsed = read_registry(&registry);
@@ -74,11 +81,25 @@ fn second_add_keeps_default_until_use_switches_it() {
 
     run_device(
         &registry,
-        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+        &[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ],
     );
     let (code, _out, err) = run_device(
         &registry,
-        &["device", "add", "nano", "--ssh", "reid@nano.local"],
+        &[
+            "device",
+            "add",
+            "nano",
+            "--ssh",
+            "reid@nano.local",
+            "--no-verify",
+        ],
     );
     assert_eq!(code, 0);
     assert!(err.contains("device use nano"), "missing hint: {err}");
@@ -96,7 +117,14 @@ fn remove_default_clears_default() {
 
     run_device(
         &registry,
-        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+        &[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ],
     );
     let (code, _out, _err) = run_device(&registry, &["device", "remove", "orin"]);
     assert_eq!(code, 0);
@@ -112,7 +140,14 @@ fn rename_moves_entry_and_follows_default() {
 
     run_device(
         &registry,
-        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+        &[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ],
     );
     let (code, _out, _err) = run_device(&registry, &["device", "rename", "orin", "orin-lab"]);
     assert_eq!(code, 0);
@@ -163,7 +198,14 @@ fn device_commands_work_with_unsupported_default_profile() {
     let registry = td.path().join("devices.json");
     run_device(
         &registry,
-        &["device", "add", "orin", "--ssh", "reid@orin.local"],
+        &[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ],
     );
 
     let cli_cfg = td.path().join("cli.json");
