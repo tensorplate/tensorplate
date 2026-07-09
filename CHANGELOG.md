@@ -8,6 +8,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Device enrollment reachability, run-as execution, and metadata sync. `device
+  add` now runs a reachability preflight by default — it executes
+  `tensorplate --local status --output json` on the device over SSH and refuses
+  to save the entry if that fails, with an actionable hint (SSH as an
+  agent-capable user, configure `--run-as` with a non-interactive sudoers rule,
+  or make the socket group-accessible); `--no-verify` skips it for
+  offline/pre-enrollment. Devices enrolled with `--run-as` now route through a
+  structured, non-interactive `sudo -n -u <user> -- …` invocation (no shell
+  string is interpolated), and `device add` vets the remote binary (absolute,
+  root-owned, not group/other-writable) before trusting it under sudo. A new
+  `device sync [<name>]` refreshes cached facts (remote CLI version, protocol
+  version, last-seen time) and is non-destructive on failure. (V015-F01-T02)
 - SSH remote command adapter: with a device selected (via `--device <name>` or
   a default set by `device use`), `status`, `rollback`, `logs`, `doctor`,
   `infer`, and `version` run against the device over plain OpenSSH. The adapter
