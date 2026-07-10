@@ -8,6 +8,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Remote deploy staging and import pruning for device-routed workflows. `deploy
+  <bundle>` under `--device` now validates the local bundle, copies it to a
+  staged import path on the device (`<import-dir>/<deployment-id>/`, via `rsync`
+  with an `scp` fallback through an injectable copier), then runs the remote
+  deploy transaction against that path with the original flags forwarded; a
+  deployment id is generated when one is not supplied, and unsafe ids (path
+  traversal) are rejected. A new `device prune <name> [--keep <n>]
+  [--older-than <dur>]` reclaims staged import storage: it requires an explicit
+  policy, always keeps the active deployment's import, and keeps any import that
+  survives either policy (so a just-staged import is never reclaimed out from
+  under an in-flight deploy). (V015-F01-T03)
 - Device enrollment reachability, run-as execution, and metadata sync. `device
   add` now runs a reachability preflight by default — it executes
   `tensorplate --local status --output json` on the device over SSH and refuses
