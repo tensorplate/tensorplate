@@ -117,6 +117,7 @@ pub enum DeviceCommand {
     Add(DeviceAddArgs),
     List,
     Use(String),
+    Sync(Option<String>),
     Remove(String),
     Rename { old: String, new: String },
 }
@@ -129,6 +130,7 @@ pub struct DeviceAddArgs {
     pub run_as: Option<String>,
     pub import_dir: Option<PathBuf>,
     pub use_as_default: bool,
+    pub no_verify: bool,
 }
 
 /// Result of parsing argv. Holds both the global flags and the chosen
@@ -602,9 +604,10 @@ fn parse_logs(rest: &[String], global: &mut GlobalArgs) -> CliResult<LogsArgs> {
 const DEVICE_USAGE: &str = "device <subcommand>
 
 Subcommands:
-  add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]
+  add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use] [--no-verify]
   list [--output <human|json>]
   use <name>
+  sync [<name>]
   remove <name>
   rename <old> <new>";
 
@@ -636,6 +639,9 @@ fn parse_device(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCom
         "use" => Ok(DeviceCommand::Use(parse_device_one_name(
             args, global, "use",
         )?)),
+        "sync" => Ok(DeviceCommand::Sync(parse_device_optional_name(
+            args, global, "sync",
+        )?)),
         "remove" => Ok(DeviceCommand::Remove(parse_device_one_name(
             args, global, "remove",
         )?)),
@@ -654,6 +660,7 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
     let mut run_as: Option<String> = None;
     let mut import_dir: Option<PathBuf> = None;
     let mut use_as_default = false;
+    let mut no_verify = false;
     let mut i = 0;
     while i < rest.len() {
         if parse_global_flag(rest, &mut i, global, true)? {
@@ -669,9 +676,13 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
                 use_as_default = true;
                 i += 1;
             }
+            "--no-verify" => {
+                no_verify = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use]"
+                    "device add <name> --ssh <user@host> [--port <n>] [--run-as <user>] [--import-dir <path>] [--use] [--no-verify]"
                         .into(),
                 ));
             }
@@ -702,7 +713,41 @@ fn parse_device_add(rest: &[String], global: &mut GlobalArgs) -> CliResult<Devic
         run_as,
         import_dir,
         use_as_default,
+        no_verify,
     }))
+}
+
+/// Parse an optional trailing `<name>` positional (used by `device sync`).
+fn parse_device_optional_name(
+    rest: &[String],
+    global: &mut GlobalArgs,
+    sub: &str,
+) -> CliResult<Option<String>> {
+    let mut name: Option<String> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        match rest[i].as_str() {
+            "-h" | "--help" => return Err(CliError::Usage(format!("device {sub} [<name>]"))),
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device {sub}`: {s}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "device {sub} accepts at most one <name>, got an extra `{other}`"
+                    )));
+                }
+                name = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    Ok(name)
 }
 
 fn parse_device_one_name(rest: &[String], global: &mut GlobalArgs, sub: &str) -> CliResult<String> {
@@ -1035,5 +1080,46 @@ mod tests {
         };
         assert!(parsed.global.local);
         assert!(parsed.global.device.is_none());
+    }
+
+    #[test]
+    fn device_add_no_verify_flag_parses() {
+        let out = parse(&argv(&[
+            "device",
+            "add",
+            "orin",
+            "--ssh",
+            "reid@orin.local",
+            "--no-verify",
+        ]))
+        .unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        let Subcommand::Device(DeviceCommand::Add(a)) = parsed.subcommand else {
+            panic!("expected Device::Add");
+        };
+        assert!(a.no_verify);
+    }
+
+    #[test]
+    fn device_sync_parses_optional_name() {
+        let out = parse(&argv(&["device", "sync"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        assert!(matches!(
+            parsed.subcommand,
+            Subcommand::Device(DeviceCommand::Sync(None))
+        ));
+
+        let out = parse(&argv(&["device", "sync", "orin"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        let Subcommand::Device(DeviceCommand::Sync(Some(name))) = parsed.subcommand else {
+            panic!("expected Device::Sync(Some)");
+        };
+        assert_eq!(name, "orin");
     }
 }
