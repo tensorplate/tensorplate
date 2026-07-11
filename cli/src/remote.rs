@@ -1011,8 +1011,8 @@ pub struct PruneReport {
 }
 
 /// Reclaim remote import storage. Keeps the `keep` most-recent imports and/or
-/// those newer than `older_than_secs`, always keeps the active deployment's
-/// import, and never deletes an import whose subdir name is not a safe segment.
+/// those newer than `older_than_secs`, always keeps protected active/in-flight
+/// imports, and never deletes an import whose subdir name is not a safe segment.
 ///
 /// # Errors
 ///
@@ -1025,10 +1025,7 @@ pub fn prune_imports(
     older_than_secs: Option<u64>,
 ) -> CliResult<PruneReport> {
     let import_dir = import_dir_for(entry);
-    // Protect the active deployment's import (its subdir is named by the
-    // deployment id). This is the primary in-flight-safety guard, alongside
-    // the keep-newest / newer-than-cutoff policies below.
-    let active = active_deployment_id(runner, entry)?;
+    let protected = protected_import_names(runner, entry, &import_dir)?;
     let now = device_now(runner, entry)?;
     let mut imports = list_import_dirs(runner, entry, &import_dir)?;
     imports.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
@@ -1037,10 +1034,10 @@ pub fn prune_imports(
     let mut kept = Vec::new();
     let mut deleted = Vec::new();
     for (index, (mtime, name)) in imports.iter().enumerate() {
-        let is_active = active.as_deref() == Some(name.as_str());
+        let is_protected = protected.contains(name);
         let within_keep = keep.map_or(false, |k| index < k);
         let newer_than_cutoff = cutoff.map_or(false, |c| *mtime >= c);
-        if is_active || within_keep || newer_than_cutoff || !is_safe_path_segment(name) {
+        if is_protected || within_keep || newer_than_cutoff || !is_safe_path_segment(name) {
             kept.push(name.clone());
             continue;
         }
@@ -1061,7 +1058,11 @@ pub fn prune_imports(
     Ok(PruneReport { deleted, kept })
 }
 
-fn active_deployment_id(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<Option<String>> {
+fn protected_import_names(
+    runner: &dyn SshRunner,
+    entry: &DeviceEntry,
+    import_dir: &str,
+) -> CliResult<std::collections::BTreeSet<String>> {
     let out = runner.run(
         entry,
         &["status".into(), "--output".into(), "json".into()],
@@ -1078,15 +1079,37 @@ fn active_deployment_id(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResul
         });
     }
     let envelope = parse_and_check_envelope(&out.stdout)?;
-    // Best-effort: the active deployment id lives under payload.agent.active.
-    let id = envelope
-        .get("payload")
-        .and_then(|p| p.get("agent"))
-        .and_then(|a| a.get("active"))
-        .and_then(|active| active.get("deployment_id"))
+    let agent = envelope.get("payload").and_then(|p| p.get("agent"));
+    let mut protected = std::collections::BTreeSet::new();
+    for key in ["active", "in_flight_transaction"] {
+        if let Some(id) = agent
+            .and_then(|a| a.get(key))
+            .and_then(|record| record.get("deployment_id"))
+            .and_then(Value::as_str)
+            .filter(|id| is_safe_path_segment(id))
+        {
+            protected.insert(id.to_string());
+        }
+    }
+    if let Some(name) = agent
+        .and_then(|a| a.get("in_flight_transaction"))
+        .and_then(|tx| tx.get("bundle_path"))
         .and_then(Value::as_str)
-        .map(String::from);
-    Ok(id)
+        .and_then(|path| import_name_from_path(import_dir, path))
+        .filter(|name| is_safe_path_segment(name))
+    {
+        protected.insert(name);
+    }
+    Ok(protected)
+}
+
+fn import_name_from_path(import_dir: &str, path: &str) -> Option<String> {
+    let dir = import_dir.trim_end_matches('/');
+    let rest = path.strip_prefix(dir)?.strip_prefix('/')?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.to_string())
 }
 
 fn device_now(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<u64> {
@@ -1123,7 +1146,23 @@ fn list_import_dirs(
         None,
     )?;
     ssh_transport_guard(&out)?;
-    // A missing import dir (nothing staged yet) simply yields no entries.
+    if out.status != 0 {
+        let detail = out.stderr.trim();
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        };
+        return Err(CliError::Unavailable {
+            message: format!(
+                "could not list remote import dir `{import_dir}` (find exited {}){suffix}",
+                out.status
+            ),
+            hint: Some(
+                "confirm the remote import dir exists and is readable by the SSH user".into(),
+            ),
+        });
+    }
     Ok(parse_find_dirs(&String::from_utf8_lossy(&out.stdout)))
 }
 
@@ -1429,6 +1468,14 @@ mod tests {
                 stderr: String::new(),
             }
         }
+
+        fn err(status: i32, stderr: &str) -> RemoteOutput {
+            RemoteOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: stderr.to_string(),
+            }
+        }
     }
 
     impl SshRunner for ScriptedRunner {
@@ -1596,6 +1643,57 @@ mod tests {
         assert!(report.kept.contains(&"deploy-a".to_string()));
         // Deletions used rm -rf under the import dir.
         assert!(runner.raw_args.borrow().iter().any(|c| c[0] == "rm"));
+    }
+
+    #[test]
+    fn prune_keeps_in_flight_import() {
+        let responses = vec![
+            ScriptedRunner::out(
+                0,
+                r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{"agent":{"active":{"deployment_id":"deploy-a"},"in_flight_transaction":{"deployment_id":"deploy-b","bundle_path":"/var/lib/tensorplate/bundles/import/deploy-b"}}}}"#,
+            ),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(0, "999000 deploy-a\n999100 deploy-b\n999200 deploy-c\n"),
+            ScriptedRunner::out(0, ""),
+        ];
+        let runner = ScriptedRunner::new(responses);
+
+        let report = prune_imports(&runner, &entry("host"), None, Some(1)).unwrap();
+
+        assert_eq!(report.deleted, vec!["deploy-c"]);
+        assert!(report.kept.contains(&"deploy-a".to_string()));
+        assert!(report.kept.contains(&"deploy-b".to_string()));
+        let raw_args = runner.raw_args.borrow();
+        let rm_args: Vec<_> = raw_args
+            .iter()
+            .filter(|c| c.first().map(String::as_str) == Some("rm"))
+            .collect();
+        assert_eq!(rm_args.len(), 1);
+        assert_eq!(
+            rm_args[0][2],
+            "/var/lib/tensorplate/bundles/import/deploy-c"
+        );
+    }
+
+    #[test]
+    fn list_import_dirs_fails_when_find_fails() {
+        let runner = ScriptedRunner::new(vec![ScriptedRunner::err(1, "find: Permission denied\n")]);
+
+        let err = list_import_dirs(
+            &runner,
+            &entry("host"),
+            "/var/lib/tensorplate/bundles/import",
+        )
+        .unwrap_err();
+
+        match err {
+            CliError::Unavailable { message, .. } => {
+                assert!(message.contains("could not list remote import dir"));
+                assert!(message.contains("find exited 1"));
+                assert!(message.contains("Permission denied"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
