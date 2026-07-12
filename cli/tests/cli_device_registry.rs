@@ -191,6 +191,19 @@ fn operational_command_with_unenrolled_device_is_usage_error() {
 }
 
 #[test]
+fn prune_requires_a_policy_and_an_enrolled_device() {
+    let td = TempDir::new().unwrap();
+    let registry = td.path().join("devices.json");
+    // No policy flag → usage error (guards against accidental delete-all).
+    let (code, _out, _err) = run_device(&registry, &["device", "prune", "orin"]);
+    assert_eq!(code, 2);
+    // Unenrolled device → usage error before any SSH.
+    let (code, _out, err) = run_device(&registry, &["device", "prune", "ghost", "--keep", "1"]);
+    assert_eq!(code, 2, "err={err}");
+    assert!(err.contains("not enrolled"), "err={err}");
+}
+
+#[test]
 fn device_commands_work_with_unsupported_default_profile() {
     // Device management is local-only: a reserved/unsupported default profile
     // in the CLI config must not block it (no transport is resolved).

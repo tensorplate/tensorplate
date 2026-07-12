@@ -157,7 +157,7 @@ pub fn run<W: Write, E: Write>(
     }
 }
 
-fn validate_local_bundle(path: &Path) -> CliResult<()> {
+pub(crate) fn validate_local_bundle(path: &Path) -> CliResult<()> {
     if !path.exists() {
         return Err(CliError::Usage(format!(
             "deploy: bundle path `{}` does not exist",

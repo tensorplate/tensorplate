@@ -14,11 +14,12 @@
 // command through the remote shell, so quoting is the injection boundary.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
-use crate::args::{InferArgs, OutputMode, Subcommand};
+use crate::args::{DeployArgs, InferArgs, OutputMode, Subcommand};
 use crate::error::{CliError, CliResult, ExitCode};
 use crate::output::{Renderer, CLI_OUTPUT_SCHEMA_VERSION};
 use crate::registry::{DeviceEntry, DeviceRegistry};
@@ -361,13 +362,9 @@ fn build_remote_args(subcommand: &Subcommand) -> CliResult<Vec<String>> {
             Ok(v)
         }
         Subcommand::Version => Ok(vec!["version".to_string()]),
-        Subcommand::Deploy(_) => Err(CliError::Unavailable {
-            message: "deploy over `--device` is not available yet".into(),
-            hint: Some(
-                "remote deploy staging lands in a later change; run deploy on the device for now"
-                    .into(),
-            ),
-        }),
+        Subcommand::Deploy(_) => Err(CliError::Internal(
+            "deploy must route through route_deploy (bundle staging)".into(),
+        )),
         Subcommand::Infer(_) => Err(CliError::Internal(
             "infer must route through run_remote_infer".into(),
         )),
@@ -805,6 +802,389 @@ fn civil_from_days(z0: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+// ── Deploy staging ─────────────────────────────────────────────────────────
+
+/// Injectable copier that stages a local bundle onto the device. Production
+/// uses [`RsyncScpCopier`]; tests inject a mock so no real transfer is needed.
+pub trait BundleCopier {
+    /// Copy the contents of `local_bundle` into `remote_dest` on `entry`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError::Transport`] when the copy tool cannot be launched
+    /// or the transfer fails.
+    fn copy_dir(
+        &self,
+        local_bundle: &Path,
+        entry: &DeviceEntry,
+        remote_dest: &str,
+    ) -> CliResult<()>;
+}
+
+/// Real copier: prefers `rsync`, falls back to `scp`.
+pub struct RsyncScpCopier;
+
+impl BundleCopier for RsyncScpCopier {
+    fn copy_dir(
+        &self,
+        local_bundle: &Path,
+        entry: &DeviceEntry,
+        remote_dest: &str,
+    ) -> CliResult<()> {
+        if command_available("rsync") {
+            rsync_copy(local_bundle, entry, remote_dest)
+        } else {
+            scp_copy(local_bundle, entry, remote_dest)
+        }
+    }
+}
+
+fn command_available(cmd: &str) -> bool {
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn rsync_copy(local: &Path, entry: &DeviceEntry, remote_dest: &str) -> CliResult<()> {
+    // A trailing slash on both sides copies the bundle's contents into
+    // remote_dest, creating remote_dest (rsync makes the final path component).
+    let mut src = local.as_os_str().to_os_string();
+    src.push("/");
+    let dest = format!("{}:{remote_dest}/", entry.ssh_target);
+    let mut cmd = Command::new("rsync");
+    cmd.arg("-a");
+    if let Some(port) = entry.ssh_port {
+        cmd.arg("-e").arg(format!("ssh -p {port}"));
+    }
+    cmd.arg(&src).arg(&dest);
+    run_copy(cmd, "rsync")
+}
+
+fn scp_copy(local: &Path, entry: &DeviceEntry, remote_dest: &str) -> CliResult<()> {
+    // scp copies the local directory to remote_dest (which must not yet exist),
+    // so the parent import dir is created beforehand but remote_dest is not.
+    let dest = format!("{}:{remote_dest}", entry.ssh_target);
+    let mut cmd = Command::new("scp");
+    cmd.arg("-r");
+    if let Some(port) = entry.ssh_port {
+        cmd.arg("-P").arg(port.to_string());
+    }
+    cmd.arg(local).arg(&dest);
+    run_copy(cmd, "scp")
+}
+
+fn run_copy(mut cmd: Command, tool: &str) -> CliResult<()> {
+    let out = cmd.output().map_err(|e| CliError::Transport {
+        message: format!("failed to launch {tool}: {e}"),
+        hint: Some(format!("is {tool} installed and on PATH?")),
+    })?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(CliError::Transport {
+            message: format!(
+                "{tool} failed to stage the bundle: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            hint: Some(
+                "confirm the remote import dir exists and is group-writable by the SSH user".into(),
+            ),
+        })
+    }
+}
+
+/// Route `deploy` to a device: validate the local bundle, copy it to a staged
+/// import path, then run the remote deploy transaction against that path.
+///
+/// # Errors
+///
+/// Returns a typed [`CliError`] for an invalid bundle, an unsafe deployment id,
+/// a failed remote mkdir or copy, or a failed remote deploy (exit mirrored).
+#[allow(clippy::too_many_arguments)]
+pub fn route_deploy<O: Write, E: Write>(
+    runner: &dyn SshRunner,
+    copier: &dyn BundleCopier,
+    entry: &DeviceEntry,
+    device_name: &str,
+    opts: &DeployArgs,
+    options: RouteOptions<'_>,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> CliResult<()> {
+    crate::commands::deploy::validate_local_bundle(&opts.bundle_path)?;
+    let deployment_id = match &opts.deployment_id {
+        Some(id) => {
+            if !is_safe_path_segment(id) {
+                return Err(CliError::Usage(format!(
+                    "deployment id `{id}` must be a plain name (letters, digits, `-`, `_`, `.`)"
+                )));
+            }
+            id.clone()
+        }
+        None => generate_deployment_id(),
+    };
+    let import_dir = import_dir_for(entry);
+    let remote_dest = format!("{import_dir}/{deployment_id}");
+    options.renderer.info(
+        stderr,
+        &format!("→ device `{device_name}`: staging bundle to {remote_dest}"),
+    )?;
+    // Ensure the import dir exists (one-time setup should already have; this is
+    // a safety net). The bundle's own subdir is created by the copy.
+    let mk = runner.run_raw(
+        entry,
+        &["mkdir".into(), "-p".into(), import_dir.clone()],
+        None,
+    )?;
+    ssh_transport_guard(&mk)?;
+    if mk.status != 0 {
+        return Err(CliError::Unavailable {
+            message: format!(
+                "could not prepare the remote import dir `{import_dir}` (exit {})",
+                mk.status
+            ),
+            hint: Some(
+                "create it as group-writable by the SSH user (see docs/cli/device.md)".into(),
+            ),
+        });
+    }
+    copier.copy_dir(&opts.bundle_path, entry, &remote_dest)?;
+
+    let mut args = vec![
+        "deploy".to_string(),
+        remote_dest,
+        "--deployment-id".to_string(),
+        deployment_id,
+    ];
+    if let Some(d) = &opts.expected_digest {
+        args.push("--expected-digest".to_string());
+        args.push(d.clone());
+    }
+    if !opts.wait {
+        args.push("--no-wait".to_string());
+    }
+    args.push("--wait-timeout-ms".to_string());
+    args.push(opts.wait_timeout_ms.to_string());
+    for (k, v) in &opts.labels {
+        args.push("--label".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    let ctx = RemoteCtx {
+        runner,
+        entry,
+        device_name,
+        timeout_ms: options.timeout_ms,
+        renderer: options.renderer,
+    };
+    run_forwarded(&ctx, &args, None, stdout, stderr)
+}
+
+fn generate_deployment_id() -> String {
+    format!("deploy-{}", uuid::Uuid::new_v4())
+}
+
+fn import_dir_for(entry: &DeviceEntry) -> String {
+    entry.remote_import_dir.as_deref().map_or_else(
+        || crate::registry::DEFAULT_REMOTE_IMPORT_DIR.to_string(),
+        |p| p.to_string_lossy().into_owned(),
+    )
+}
+
+fn is_safe_path_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+// ── Import pruning ─────────────────────────────────────────────────────────
+
+/// Result of a `device prune`.
+pub struct PruneReport {
+    pub deleted: Vec<String>,
+    pub kept: Vec<String>,
+}
+
+/// Reclaim remote import storage. Keeps the `keep` most-recent imports and/or
+/// those newer than `older_than_secs`, always keeps protected active/in-flight
+/// imports, and never deletes an import whose subdir name is not a safe segment.
+///
+/// # Errors
+///
+/// Returns a typed [`CliError`] when the device is unreachable, listing fails,
+/// or a deletion fails.
+pub fn prune_imports(
+    runner: &dyn SshRunner,
+    entry: &DeviceEntry,
+    keep: Option<usize>,
+    older_than_secs: Option<u64>,
+) -> CliResult<PruneReport> {
+    let import_dir = import_dir_for(entry);
+    let protected = protected_import_names(runner, entry, &import_dir)?;
+    let now = device_now(runner, entry)?;
+    let mut imports = list_import_dirs(runner, entry, &import_dir)?;
+    imports.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+
+    let cutoff = older_than_secs.map(|o| now.saturating_sub(o));
+    let mut kept = Vec::new();
+    let mut deleted = Vec::new();
+    for (index, (mtime, name)) in imports.iter().enumerate() {
+        let is_protected = protected.contains(name);
+        let within_keep = keep.map_or(false, |k| index < k);
+        let newer_than_cutoff = cutoff.map_or(false, |c| *mtime >= c);
+        if is_protected || within_keep || newer_than_cutoff || !is_safe_path_segment(name) {
+            kept.push(name.clone());
+            continue;
+        }
+        let rm = runner.run_raw(
+            entry,
+            &["rm".into(), "-rf".into(), format!("{import_dir}/{name}")],
+            None,
+        )?;
+        ssh_transport_guard(&rm)?;
+        if rm.status != 0 {
+            return Err(CliError::Unavailable {
+                message: format!("failed to remove import `{name}` (exit {})", rm.status),
+                hint: None,
+            });
+        }
+        deleted.push(name.clone());
+    }
+    Ok(PruneReport { deleted, kept })
+}
+
+fn protected_import_names(
+    runner: &dyn SshRunner,
+    entry: &DeviceEntry,
+    import_dir: &str,
+) -> CliResult<std::collections::BTreeSet<String>> {
+    let out = runner.run(
+        entry,
+        &["status".into(), "--output".into(), "json".into()],
+        None,
+    )?;
+    ssh_transport_guard(&out)?;
+    if out.status != 0 {
+        return Err(CliError::Unavailable {
+            message: format!(
+                "could not read device status before pruning (exit {})",
+                out.status
+            ),
+            hint: Some(reachability_hint(entry)),
+        });
+    }
+    let envelope = parse_and_check_envelope(&out.stdout)?;
+    let agent = envelope.get("payload").and_then(|p| p.get("agent"));
+    let mut protected = std::collections::BTreeSet::new();
+    for key in ["active", "in_flight_transaction"] {
+        if let Some(id) = agent
+            .and_then(|a| a.get(key))
+            .and_then(|record| record.get("deployment_id"))
+            .and_then(Value::as_str)
+            .filter(|id| is_safe_path_segment(id))
+        {
+            protected.insert(id.to_string());
+        }
+    }
+    if let Some(name) = agent
+        .and_then(|a| a.get("in_flight_transaction"))
+        .and_then(|tx| tx.get("bundle_path"))
+        .and_then(Value::as_str)
+        .and_then(|path| import_name_from_path(import_dir, path))
+        .filter(|name| is_safe_path_segment(name))
+    {
+        protected.insert(name);
+    }
+    Ok(protected)
+}
+
+fn import_name_from_path(import_dir: &str, path: &str) -> Option<String> {
+    let dir = import_dir.trim_end_matches('/');
+    let rest = path.strip_prefix(dir)?.strip_prefix('/')?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.to_string())
+}
+
+fn device_now(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliResult<u64> {
+    let out = runner.run_raw(entry, &["date".into(), "+%s".into()], None)?;
+    ssh_transport_guard(&out)?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| CliError::Transport {
+            message: "could not read the device clock".into(),
+            hint: None,
+        })
+}
+
+fn list_import_dirs(
+    runner: &dyn SshRunner,
+    entry: &DeviceEntry,
+    import_dir: &str,
+) -> CliResult<Vec<(u64, String)>> {
+    let out = runner.run_raw(
+        entry,
+        &[
+            "find".into(),
+            import_dir.to_string(),
+            "-mindepth".into(),
+            "1".into(),
+            "-maxdepth".into(),
+            "1".into(),
+            "-type".into(),
+            "d".into(),
+            "-printf".into(),
+            "%T@ %f\\n".into(),
+        ],
+        None,
+    )?;
+    ssh_transport_guard(&out)?;
+    if out.status != 0 {
+        let detail = out.stderr.trim();
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        };
+        return Err(CliError::Unavailable {
+            message: format!(
+                "could not list remote import dir `{import_dir}` (find exited {}){suffix}",
+                out.status
+            ),
+            hint: Some(
+                "confirm the remote import dir exists and is readable by the SSH user".into(),
+            ),
+        });
+    }
+    Ok(parse_find_dirs(&String::from_utf8_lossy(&out.stdout)))
+}
+
+fn parse_find_dirs(text: &str) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((mtime_raw, name)) = line.split_once(' ') else {
+            continue;
+        };
+        // `%T@` is `epoch.fraction`; take the whole-seconds part.
+        let secs = mtime_raw.split('.').next().unwrap_or(mtime_raw);
+        if let Ok(mtime) = secs.parse::<u64>() {
+            out.push((mtime, name.to_string()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1049,9 +1429,87 @@ mod tests {
         assert!(matches!(build_remote_args(&logs), Err(CliError::Usage(_))));
     }
 
+    struct MockCopier {
+        calls: RefCell<Vec<(std::path::PathBuf, String)>>,
+    }
+
+    impl BundleCopier for MockCopier {
+        fn copy_dir(
+            &self,
+            local_bundle: &Path,
+            _entry: &DeviceEntry,
+            remote_dest: &str,
+        ) -> CliResult<()> {
+            self.calls
+                .borrow_mut()
+                .push((local_bundle.to_path_buf(), remote_dest.to_string()));
+            Ok(())
+        }
+    }
+
+    /// Runner that returns queued responses in call order (across run/run_raw).
+    struct ScriptedRunner {
+        responses: RefCell<std::collections::VecDeque<RemoteOutput>>,
+        raw_args: RefCell<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(responses: Vec<RemoteOutput>) -> Self {
+            Self {
+                responses: RefCell::new(responses.into_iter().collect()),
+                raw_args: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn out(status: i32, stdout: &str) -> RemoteOutput {
+            RemoteOutput {
+                status,
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: String::new(),
+            }
+        }
+
+        fn err(status: i32, stderr: &str) -> RemoteOutput {
+            RemoteOutput {
+                status,
+                stdout: Vec::new(),
+                stderr: stderr.to_string(),
+            }
+        }
+    }
+
+    impl SshRunner for ScriptedRunner {
+        fn run(
+            &self,
+            _entry: &DeviceEntry,
+            _args: &[String],
+            _stdin: Option<&[u8]>,
+        ) -> CliResult<RemoteOutput> {
+            Ok(self
+                .responses
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted response"))
+        }
+
+        fn run_raw(
+            &self,
+            _entry: &DeviceEntry,
+            command: &[String],
+            _stdin: Option<&[u8]>,
+        ) -> CliResult<RemoteOutput> {
+            self.raw_args.borrow_mut().push(command.to_vec());
+            Ok(self
+                .responses
+                .borrow_mut()
+                .pop_front()
+                .expect("scripted response"))
+        }
+    }
+
     #[test]
-    fn deploy_over_device_is_unavailable() {
-        // A minimal DeployArgs; deploy routing is deferred.
+    fn deploy_build_args_is_internal_error() {
+        // Deploy routes through route_deploy, not build_remote_args.
         let deploy = Subcommand::Deploy(crate::args::DeployArgs {
             bundle_path: std::path::PathBuf::from("/tmp/b"),
             deployment_id: None,
@@ -1062,8 +1520,201 @@ mod tests {
         });
         assert!(matches!(
             build_remote_args(&deploy),
-            Err(CliError::Unavailable { .. })
+            Err(CliError::Internal(_))
         ));
+    }
+
+    #[test]
+    fn route_deploy_stages_bundle_then_runs_remote_deploy() {
+        let td = tempfile::TempDir::new().unwrap();
+        let bundle = td.path().join("bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
+        let opts = crate::args::DeployArgs {
+            bundle_path: bundle.clone(),
+            deployment_id: Some("yolo-1".into()),
+            expected_digest: None,
+            wait: false,
+            wait_timeout_ms: 1000,
+            labels: vec![],
+        };
+        let runner = MockRunner::new(
+            0,
+            r#"{"schema_version":"0.1","command":"deploy","status":"ok","payload":{}}"#,
+        );
+        let copier = MockCopier {
+            calls: RefCell::new(Vec::new()),
+        };
+        let mut e = entry("reid@orin.local");
+        e.remote_import_dir = Some(std::path::PathBuf::from(
+            "/var/lib/tensorplate/bundles/import",
+        ));
+        let r = Renderer::new(OutputMode::Json);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        route_deploy(
+            &runner,
+            &copier,
+            &e,
+            "orin",
+            &opts,
+            RouteOptions {
+                renderer: &r,
+                timeout_ms: None,
+            },
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let (local, dest) = copier.calls.borrow().last().unwrap().clone();
+        assert_eq!(local, bundle);
+        assert_eq!(dest, "/var/lib/tensorplate/bundles/import/yolo-1");
+        // mkdir -p targeted the import dir.
+        assert!(runner
+            .last_raw()
+            .contains(&"/var/lib/tensorplate/bundles/import".to_string()));
+        // The remote deploy ran against the staged path with the deployment id.
+        let args = runner.last_args();
+        assert_eq!(args[0], "deploy");
+        assert_eq!(args[1], "/var/lib/tensorplate/bundles/import/yolo-1");
+        assert!(args.windows(2).any(|w| w == ["--deployment-id", "yolo-1"]));
+        assert!(args.contains(&"--no-wait".to_string()));
+    }
+
+    #[test]
+    fn route_deploy_rejects_unsafe_deployment_id() {
+        let td = tempfile::TempDir::new().unwrap();
+        let bundle = td.path().join("bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
+        let opts = crate::args::DeployArgs {
+            bundle_path: bundle,
+            deployment_id: Some("../../etc".into()),
+            expected_digest: None,
+            wait: true,
+            wait_timeout_ms: 1000,
+            labels: vec![],
+        };
+        let runner = MockRunner::new(0, "");
+        let copier = MockCopier {
+            calls: RefCell::new(Vec::new()),
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let err = route_deploy(
+            &runner,
+            &copier,
+            &entry("host"),
+            "orin",
+            &opts,
+            RouteOptions {
+                renderer: &r,
+                timeout_ms: None,
+            },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(copier.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn prune_keeps_newest_and_active_deletes_the_rest() {
+        // status → active deploy-a (oldest); date; find (unsorted); two rm.
+        let responses = vec![
+            ScriptedRunner::out(
+                0,
+                r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{"agent":{"active":{"deployment_id":"deploy-a"}}}}"#,
+            ),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(
+                0,
+                "999000 deploy-a\n999900 deploy-b\n999990 deploy-c\n999999 deploy-d\n",
+            ),
+            ScriptedRunner::out(0, ""),
+            ScriptedRunner::out(0, ""),
+        ];
+        let runner = ScriptedRunner::new(responses);
+        // keep=1 keeps deploy-d (newest); deploy-a is active (kept despite oldest);
+        // deploy-c and deploy-b are deleted.
+        let report = prune_imports(&runner, &entry("host"), Some(1), None).unwrap();
+        assert_eq!(report.deleted, vec!["deploy-c", "deploy-b"]);
+        assert!(report.kept.contains(&"deploy-d".to_string()));
+        assert!(report.kept.contains(&"deploy-a".to_string()));
+        // Deletions used rm -rf under the import dir.
+        assert!(runner.raw_args.borrow().iter().any(|c| c[0] == "rm"));
+    }
+
+    #[test]
+    fn prune_keeps_in_flight_import() {
+        let responses = vec![
+            ScriptedRunner::out(
+                0,
+                r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{"agent":{"active":{"deployment_id":"deploy-a"},"in_flight_transaction":{"deployment_id":"deploy-b","bundle_path":"/var/lib/tensorplate/bundles/import/deploy-b"}}}}"#,
+            ),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(0, "999000 deploy-a\n999100 deploy-b\n999200 deploy-c\n"),
+            ScriptedRunner::out(0, ""),
+        ];
+        let runner = ScriptedRunner::new(responses);
+
+        let report = prune_imports(&runner, &entry("host"), None, Some(1)).unwrap();
+
+        assert_eq!(report.deleted, vec!["deploy-c"]);
+        assert!(report.kept.contains(&"deploy-a".to_string()));
+        assert!(report.kept.contains(&"deploy-b".to_string()));
+        let raw_args = runner.raw_args.borrow();
+        let rm_args: Vec<_> = raw_args
+            .iter()
+            .filter(|c| c.first().map(String::as_str) == Some("rm"))
+            .collect();
+        assert_eq!(rm_args.len(), 1);
+        assert_eq!(
+            rm_args[0][2],
+            "/var/lib/tensorplate/bundles/import/deploy-c"
+        );
+    }
+
+    #[test]
+    fn list_import_dirs_fails_when_find_fails() {
+        let runner = ScriptedRunner::new(vec![ScriptedRunner::err(1, "find: Permission denied\n")]);
+
+        let err = list_import_dirs(
+            &runner,
+            &entry("host"),
+            "/var/lib/tensorplate/bundles/import",
+        )
+        .unwrap_err();
+
+        match err {
+            CliError::Unavailable { message, .. } => {
+                assert!(message.contains("could not list remote import dir"));
+                assert!(message.contains("find exited 1"));
+                assert!(message.contains("Permission denied"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_find_dirs_parses_mtime_and_name() {
+        let parsed = parse_find_dirs("1699999999.12345 deploy-a\n1700000000.9 deploy-b\n\n");
+        assert_eq!(
+            parsed,
+            vec![
+                (1_699_999_999, "deploy-a".to_string()),
+                (1_700_000_000, "deploy-b".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn safe_path_segment_rejects_traversal() {
+        assert!(is_safe_path_segment("deploy-abc_1.2"));
+        assert!(!is_safe_path_segment(".."));
+        assert!(!is_safe_path_segment("."));
+        assert!(!is_safe_path_segment("a/b"));
+        assert!(!is_safe_path_segment(""));
     }
 
     #[test]

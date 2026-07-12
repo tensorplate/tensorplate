@@ -51,6 +51,19 @@ pub fn run<O: Write, E: Write>(
             name.as_deref(),
             stdout,
         ),
+        DeviceCommand::Prune {
+            name,
+            keep,
+            older_than_secs,
+        } => prune(
+            runner,
+            renderer,
+            &registry,
+            &name,
+            keep,
+            older_than_secs,
+            stdout,
+        ),
         DeviceCommand::Remove(name) => remove(renderer, &mut registry, &path, &name, stdout),
         DeviceCommand::Rename { old, new } => {
             rename(renderer, &mut registry, &path, &old, &new, stdout)
@@ -186,6 +199,35 @@ fn sync<O: Write>(
         "agent_version": agent_version,
         "protocol_version": protocol_version,
         "last_seen": last_seen,
+    });
+    renderer.ok(stdout, COMMAND, &human, payload, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prune<O: Write>(
+    runner: &dyn SshRunner,
+    renderer: &Renderer,
+    registry: &DeviceRegistry,
+    name: &str,
+    keep: Option<usize>,
+    older_than_secs: Option<u64>,
+    stdout: &mut O,
+) -> CliResult<()> {
+    let entry = registry.devices.get(name).ok_or_else(|| {
+        CliError::Usage(format!(
+            "device `{name}` is not enrolled; run `tensorplate device list`"
+        ))
+    })?;
+    let report = remote::prune_imports(runner, entry, keep, older_than_secs)?;
+    let human = format!(
+        "pruned {} import(s) on `{name}`, kept {}",
+        report.deleted.len(),
+        report.kept.len()
+    );
+    let payload = json!({
+        "name": name,
+        "deleted": report.deleted,
+        "kept": report.kept,
     });
     renderer.ok(stdout, COMMAND, &human, payload, None, None)
 }
