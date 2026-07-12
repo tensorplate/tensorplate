@@ -118,8 +118,16 @@ pub enum DeviceCommand {
     List,
     Use(String),
     Sync(Option<String>),
+    Prune {
+        name: String,
+        keep: Option<usize>,
+        older_than_secs: Option<u64>,
+    },
     Remove(String),
-    Rename { old: String, new: String },
+    Rename {
+        old: String,
+        new: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -608,6 +616,7 @@ Subcommands:
   list [--output <human|json>]
   use <name>
   sync [<name>]
+  prune <name> [--keep <n>] [--older-than <dur>]
   remove <name>
   rename <old> <new>";
 
@@ -642,6 +651,7 @@ fn parse_device(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCom
         "sync" => Ok(DeviceCommand::Sync(parse_device_optional_name(
             args, global, "sync",
         )?)),
+        "prune" => parse_device_prune(args, global),
         "remove" => Ok(DeviceCommand::Remove(parse_device_one_name(
             args, global, "remove",
         )?)),
@@ -776,6 +786,85 @@ fn parse_device_one_name(rest: &[String], global: &mut GlobalArgs, sub: &str) ->
         }
     }
     name.ok_or_else(|| CliError::Usage(format!("device {sub} requires a <name> argument")))
+}
+
+fn parse_device_prune(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
+    let mut name: Option<String> = None;
+    let mut keep: Option<usize> = None;
+    let mut older_than_secs: Option<u64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        let a = &rest[i];
+        match a.as_str() {
+            "--keep" => {
+                let v = require_value(rest, &mut i, a)?;
+                keep = Some(v.parse::<usize>().map_err(|_| {
+                    CliError::Usage("--keep requires a non-negative integer".into())
+                })?);
+            }
+            "--older-than" => {
+                older_than_secs = Some(parse_duration_secs(&require_value(rest, &mut i, a)?)?);
+            }
+            "-h" | "--help" => {
+                return Err(CliError::Usage(
+                    "device prune <name> [--keep <n>] [--older-than <dur>]".into(),
+                ));
+            }
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `device prune`: {s}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "device prune accepts one <name>, got an extra `{other}`"
+                    )));
+                }
+                name = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let name =
+        name.ok_or_else(|| CliError::Usage("device prune requires a <name> argument".into()))?;
+    if keep.is_none() && older_than_secs.is_none() {
+        return Err(CliError::Usage(
+            "device prune requires `--keep <n>` and/or `--older-than <dur>`".into(),
+        ));
+    }
+    Ok(DeviceCommand::Prune {
+        name,
+        keep,
+        older_than_secs,
+    })
+}
+
+/// Parse a duration like `30s`, `15m`, `24h`, `7d`, or a bare seconds count.
+fn parse_duration_secs(value: &str) -> CliResult<u64> {
+    let value = value.trim();
+    let (num, mult) = if let Some(n) = value.strip_suffix('d') {
+        (n, 86_400)
+    } else if let Some(n) = value.strip_suffix('h') {
+        (n, 3_600)
+    } else if let Some(n) = value.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = value.strip_suffix('s') {
+        (n, 1)
+    } else {
+        (value, 1)
+    };
+    let parsed: u64 = num.parse().map_err(|_| {
+        CliError::Usage(format!(
+            "--older-than must be a duration like `7d`, `24h`, `30m`, `60s`, got `{value}`"
+        ))
+    })?;
+    parsed
+        .checked_mul(mult)
+        .ok_or_else(|| CliError::Usage(format!("--older-than duration `{value}` is too large")))
 }
 
 fn parse_device_rename(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
@@ -1100,6 +1189,48 @@ mod tests {
             panic!("expected Device::Add");
         };
         assert!(a.no_verify);
+    }
+
+    #[test]
+    fn device_prune_parses_policies_and_requires_one() {
+        let out = parse(&argv(&[
+            "device",
+            "prune",
+            "orin",
+            "--keep",
+            "3",
+            "--older-than",
+            "7d",
+        ]))
+        .unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected Run");
+        };
+        let Subcommand::Device(DeviceCommand::Prune {
+            name,
+            keep,
+            older_than_secs,
+        }) = parsed.subcommand
+        else {
+            panic!("expected Device::Prune");
+        };
+        assert_eq!(name, "orin");
+        assert_eq!(keep, Some(3));
+        assert_eq!(older_than_secs, Some(7 * 86_400));
+
+        // Requires at least one policy.
+        let err = parse(&argv(&["device", "prune", "orin"])).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn duration_parsing_covers_units() {
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("15m").unwrap(), 900);
+        assert_eq!(parse_duration_secs("24h").unwrap(), 86_400);
+        assert_eq!(parse_duration_secs("2d").unwrap(), 172_800);
+        assert_eq!(parse_duration_secs("90").unwrap(), 90);
+        assert!(parse_duration_secs("soon").is_err());
     }
 
     #[test]

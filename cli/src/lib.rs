@@ -51,7 +51,7 @@ pub use error::{CliError, CliResult, ExitCode};
 pub use output::Renderer;
 pub use profile::ResolvedProfile;
 pub use registry::{DeviceEntry, DeviceRegistry};
-pub use remote::{OpensshRunner, Route, SshRunner};
+pub use remote::{BundleCopier, OpensshRunner, Route, RsyncScpCopier, SshRunner};
 
 /// Crate version string compiled from Cargo metadata.
 #[must_use]
@@ -97,15 +97,30 @@ where
     // Route operational commands to a selected device over SSH when one is
     // selected; otherwise fall through to the local agent path below.
     if let Route::Device { name, entry } = remote::resolve_route(&parsed.global)? {
+        let options = remote::RouteOptions {
+            renderer: &renderer,
+            timeout_ms: parsed.global.timeout_ms,
+        };
+        // Deploy stages the bundle to the device before running the remote
+        // deploy transaction, so it takes a copier and a dedicated path.
+        if let Subcommand::Deploy(opts) = &parsed.subcommand {
+            return remote::route_deploy(
+                &OpensshRunner,
+                &remote::RsyncScpCopier,
+                &entry,
+                &name,
+                opts,
+                options,
+                stdout,
+                stderr,
+            );
+        }
         return remote::route(
             &OpensshRunner,
             &entry,
             &name,
             &parsed.subcommand,
-            remote::RouteOptions {
-                renderer: &renderer,
-                timeout_ms: parsed.global.timeout_ms,
-            },
+            options,
             stdout,
             stderr,
         );
