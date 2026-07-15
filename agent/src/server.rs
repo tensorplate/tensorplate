@@ -10,7 +10,8 @@
 // `agent_busy` deterministically.
 //
 // The agent always binds the socket inside its `state_dir`, removes any
-// stale file before binding, and sets restrictive permissions (`0o600`).
+// stale file before binding, and sets group-accessible permissions (`0o660`)
+// so `tensorplate`-group members can reach it without world access.
 // Loopback TCP is supported only as an escape hatch and is gated by an
 // explicit config opt-in.
 
@@ -78,7 +79,12 @@ impl Server {
                 let listener = UnixListener::bind(&path)?;
                 #[cfg(unix)]
                 {
-                    let perms = std::fs::Permissions::from_mode(0o600);
+                    // Group-accessible (0o660): CLI clients reach the agent by
+                    // membership in the `tensorplate` group, without making the
+                    // socket world-writable. See install_paths::mode::SOCKET_0660.
+                    let perms = std::fs::Permissions::from_mode(
+                        tensorplate_protocol::install_paths::mode::SOCKET_0660,
+                    );
                     std::fs::set_permissions(&path, perms)?;
                     listener.set_nonblocking(true)?;
                 }

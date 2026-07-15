@@ -928,8 +928,11 @@ fn directory_metadata_problem(
     path: &Path,
 ) -> Option<String> {
     let mode = path_mode(path)?;
-    if mode != install_paths::mode::DIR_0750 {
-        return Some(format!("{contract_path} mode={mode:#05o} expected=0o750"));
+    let expected = install_paths::expected_dir_mode(contract_path);
+    if mode != expected {
+        return Some(format!(
+            "{contract_path} mode={mode:#05o} expected={expected:#05o}"
+        ));
     }
     ownership_problem(opts, contract_path, path)
 }
@@ -1050,7 +1053,11 @@ mod tests {
         for dir in install_paths::required_directories() {
             let p = td.join(dir.trim_start_matches('/'));
             fs::create_dir_all(&p).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o0750)).unwrap();
+            fs::set_permissions(
+                &p,
+                fs::Permissions::from_mode(install_paths::expected_dir_mode(dir)),
+            )
+            .unwrap();
         }
         // Drop the canonical conffile bodies so the schema_version
         // check passes.
