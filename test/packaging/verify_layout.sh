@@ -16,6 +16,36 @@ td="$(mktemp -d)"
 cleanup() { rm -rf "${td}"; }
 trap cleanup EXIT
 
+expected_dir_mode() {
+  if [ "$1" = "${TP_BUNDLE_IMPORT_DIR}" ]; then
+    printf '%s\n' "${TP_IMPORT_DIR_MODE}"
+  else
+    printf '%s\n' "${TP_DIR_MODE}"
+  fi
+}
+
+mode_matches() {
+  actual="$1"
+  expected="$2"
+  [ "${actual}" = "${expected#0}" ] || [ "${actual}" = "${expected}" ]
+}
+
+dir_mode_matches() {
+  path="$1"
+  actual="$2"
+  expected="$3"
+  if mode_matches "${actual}" "${expected}"; then
+    return 0
+  fi
+  # BSD stat's %Lp formatter reports permission bits without the sticky bit
+  # (e.g. 1775 appears as 775), so verify that bit with find on macOS.
+  if [ "${expected}" = "${TP_IMPORT_DIR_MODE}" ] && [ "${actual}" = "${TP_IMPORT_DIR_MODE#1}" ]; then
+    [ -n "$(find "${path}" -prune -perm -1000 -print)" ]
+    return $?
+  fi
+  return 1
+}
+
 mkdir -p "${td}${TP_ETC_DIR}"
 for cfg in ${TP_REQUIRED_CONFIG_FILES}; do
   : > "${td}${cfg}"
@@ -40,8 +70,9 @@ for d in ${TP_REQUIRED_DIRECTORIES}; do
   # GNU stat accepts `-f` but interprets it as filesystem output. Try
   # its mode formatter first, then fall back to BSD stat for macOS.
   mode="$(stat -c '%a' "${full}" 2>/dev/null || stat -f '%Lp' "${full}")"
-  if [ "${mode}" != "${TP_DIR_MODE#0}" ] && [ "${mode}" != "${TP_DIR_MODE}" ]; then
-    echo "FAIL: ${d} mode=${mode} (expected ${TP_DIR_MODE})" >&2
+  expected="$(expected_dir_mode "${d}")"
+  if ! dir_mode_matches "${full}" "${mode}" "${expected}"; then
+    echo "FAIL: ${d} mode=${mode} (expected ${expected})" >&2
     fail=1
   fi
 done

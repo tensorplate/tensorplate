@@ -655,6 +655,9 @@ pub fn preflight_reachable(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliRe
     )?;
     ssh_transport_guard(&out)?;
     if out.status != 0 {
+        if looks_like_old_remote(&out) {
+            return Err(old_remote_error());
+        }
         return Err(CliError::Unavailable {
             message: format!(
                 "could not reach the device-local agent on `{}` (remote exit {})",
@@ -665,6 +668,32 @@ pub fn preflight_reachable(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliRe
     }
     parse_and_check_envelope(&out.stdout)?;
     Ok(())
+}
+
+/// Detect a pre-0.1.5 remote CLI, which rejects the `--local` flag it does not
+/// know. The remote-invocation contract (`--local`, envelope-JSON `version`)
+/// only exists in >= 0.1.5, so an older device cannot be routed to.
+fn looks_like_old_remote(out: &RemoteOutput) -> bool {
+    if out.status != 2 {
+        return false;
+    }
+    let stderr = out.stderr.to_ascii_lowercase();
+    stderr.contains("--local")
+        || (stderr.contains("local")
+            && (stderr.contains("unknown")
+                || stderr.contains("unexpected")
+                || stderr.contains("unrecognized")
+                || stderr.contains("usage")))
+}
+
+fn old_remote_error() -> CliError {
+    CliError::Unavailable {
+        message: "the remote tensorplate is too old for `--device` routing".into(),
+        hint: Some(
+            "upgrade the device's tensorplate to >= 0.1.5; the `--local` remote-invocation contract does not exist in older releases"
+                .into(),
+        ),
+    }
 }
 
 fn reachability_hint(entry: &DeviceEntry) -> String {
@@ -743,6 +772,9 @@ pub fn fetch_version_facts(runner: &dyn SshRunner, entry: &DeviceEntry) -> CliRe
     )?;
     ssh_transport_guard(&out)?;
     if out.status != 0 {
+        if looks_like_old_remote(&out) {
+            return Err(old_remote_error());
+        }
         return Err(CliError::Unavailable {
             message: format!(
                 "remote `version` failed on `{}` (exit {})",
@@ -1984,6 +2016,21 @@ mod tests {
         let unreachable = MockRunner::new(3, "");
         let e = preflight_reachable(&unreachable, &entry("host")).unwrap_err();
         assert!(matches!(e, CliError::Unavailable { .. }));
+    }
+
+    #[test]
+    fn preflight_reports_old_remote_clearly() {
+        // A pre-0.1.5 remote rejects `--local` with a usage error (exit 2).
+        let mut old = MockRunner::new(2, "");
+        old.stderr = "error: unknown global flag `--local`".into();
+        let e = preflight_reachable(&old, &entry("host")).unwrap_err();
+        assert!(matches!(e, CliError::Unavailable { .. }));
+        assert!(e.hint().unwrap_or_default().contains("0.1.5"));
+
+        // A generic non-usage failure keeps the reachability hint (not "too old").
+        let denied = MockRunner::new(3, "");
+        let e = preflight_reachable(&denied, &entry("host")).unwrap_err();
+        assert!(!e.hint().unwrap_or_default().contains("0.1.5"));
     }
 
     #[test]

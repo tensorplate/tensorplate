@@ -34,6 +34,7 @@ access is a site policy and is left to the operator.
 | `/var/lib/tensorplate/bundles/active/` | `tensorplate:tensorplate` | `0750` | postinst | Active deployment (symlink or dir). |
 | `/var/lib/tensorplate/bundles/previous/` | `tensorplate:tensorplate` | `0750` | postinst | Previous deployment retained for rollback. |
 | `/var/lib/tensorplate/bundles/quarantine/` | `tensorplate:tensorplate` | `0750` | postinst | Failed deploys land here for operator review. |
+| `/var/lib/tensorplate/bundles/import/` | `tensorplate:tensorplate` | `1775` | postinst | Remote enrollment copies bundles here over SSH before the agent stages them; sticky + group-writable so a group member can stage without deleting others' imports. |
 | `/var/lib/tensorplate/worker-configs/` | `tensorplate:tensorplate` | `0750` | postinst | Agent-rendered serving-worker configs (one per warming candidate). |
 | `/var/log/tensorplate/` | `tensorplate:tensorplate` | `0750` | postinst | On-disk JSON-lines logs when the observability service is configured for file retention. journald is preferred. |
 | `/run/tensorplate/` | `tensorplate:tensorplate` | `0750` | systemd `RuntimeDirectory=` for `tensorplate-agent.service`; postinst as fallback. | tmpfs; holds the agent control socket. |
@@ -70,7 +71,8 @@ The v0.1.0 default install does **not** open any non-loopback port.
 For each directory, the `path_layout` family of findings asserts:
 
 - path exists
-- directory mode matches `DIR_0750`
+- directory mode matches its expected mode (`DIR_0750` for most; `DIR_1775`
+  for the `bundles/import/` staging dir)
 - group ownership is the `tensorplate` system group (best-effort on
   non-Linux hosts: reported as `unsupported` rather than `fail`)
 - world-writable is **not** set
