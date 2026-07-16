@@ -6,7 +6,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Changed
+
+- The agent control socket now binds group-accessible (`0o660`, the documented
+  `SOCKET_0660`) instead of owner-only (`0o600`). CLI/operator users reach the
+  agent by membership in the `tensorplate` group — the MicroK8s-style
+  "install → add to group → enroll" flow — so SSH device enrollment no longer
+  requires a per-user sudoers rule in the common case. Socket access is confined
+  to the non-root `tensorplate` user and the five control ops (deploy, status,
+  rollback, health, version); this is the same privilege the `--run-as` sudoers
+  path already granted, so `--run-as` becomes a fallback for sites that will not
+  grant group membership. (V015-F01-T03)
+
 ### Added
+
+- The packaged install now creates `/var/lib/tensorplate/bundles/import`
+  (`1775`, sticky + group-writable, `tensorplate:tensorplate`) — added to
+  `required_directories()` and the install scripts — so remote deploy staging
+  works with no manual `mkdir`/`chown`/`chmod`. `device add`'s reachability
+  preflight also now reports a pre-0.1.5 remote explicitly ("upgrade the device
+  to >= 0.1.5") instead of a generic unreachable-agent hint. (V015-F01-T03)
 
 - Remote deploy staging and import pruning for device-routed workflows. `deploy
   <bundle>` under `--device` now validates the local bundle, copies it to a

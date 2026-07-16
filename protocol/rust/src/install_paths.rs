@@ -87,6 +87,11 @@ pub const BUNDLE_PREVIOUS_DIR: &str = "/var/lib/tensorplate/bundles/previous";
 /// Quarantined bundles. Failed deploys land here for operator review.
 pub const BUNDLE_QUARANTINE_DIR: &str = "/var/lib/tensorplate/bundles/quarantine";
 
+/// Bundle import staging. Remote enrollment copies bundles here (over SSH)
+/// before the agent reads and stages them, so it is group-writable and sticky
+/// (see [`mode::DIR_1775`]) rather than owner-only like the agent's own dirs.
+pub const BUNDLE_IMPORT_DIR: &str = "/var/lib/tensorplate/bundles/import";
+
 /// Agent-rendered serving-worker configs (one per warming candidate).
 pub const WORKER_CONFIG_DIR: &str = "/var/lib/tensorplate/worker-configs";
 
@@ -119,6 +124,10 @@ pub const SERVING_BINARY_PATH: &str = "/usr/lib/tensorplate/tensorplate-serving"
 pub mod mode {
     /// Directory mode for config, state, log, and runtime roots.
     pub const DIR_0750: u32 = 0o0750;
+    /// Mode for the bundle import dir: group-writable so an SSH copy user in
+    /// the service group can stage bundles, and sticky so users cannot delete
+    /// each other's imports.
+    pub const DIR_1775: u32 = 0o1775;
     /// Mode for config files readable by the service group.
     pub const FILE_0640: u32 = 0o0640;
     /// Mode for the CLI config which operators may read directly.
@@ -168,11 +177,23 @@ pub fn required_directories() -> &'static [&'static str] {
         BUNDLE_ACTIVE_DIR,
         BUNDLE_PREVIOUS_DIR,
         BUNDLE_QUARANTINE_DIR,
+        BUNDLE_IMPORT_DIR,
         WORKER_CONFIG_DIR,
         LOG_DIR,
         RUN_DIR,
         BACKEND_DESCRIPTOR_DIR,
     ]
+}
+
+/// Expected directory mode for `dir` (one of [`required_directories`]). Most
+/// dirs are [`mode::DIR_0750`]; the import staging dir is [`mode::DIR_1775`].
+#[must_use]
+pub fn expected_dir_mode(dir: &str) -> u32 {
+    if dir == BUNDLE_IMPORT_DIR {
+        mode::DIR_1775
+    } else {
+        mode::DIR_0750
+    }
 }
 
 /// All config files installed by the core packages.
@@ -212,6 +233,7 @@ mod tests {
             BUNDLE_ACTIVE_DIR,
             BUNDLE_PREVIOUS_DIR,
             BUNDLE_QUARANTINE_DIR,
+            BUNDLE_IMPORT_DIR,
             WORKER_CONFIG_DIR,
         ] {
             assert!(
@@ -219,6 +241,13 @@ mod tests {
                 "{p} should live under {STATE_DIR}"
             );
         }
+    }
+
+    #[test]
+    fn import_dir_is_required_and_sticky_group_writable() {
+        assert!(required_directories().contains(&BUNDLE_IMPORT_DIR));
+        assert_eq!(expected_dir_mode(BUNDLE_IMPORT_DIR), mode::DIR_1775);
+        assert_eq!(expected_dir_mode(STATE_DIR), mode::DIR_0750);
     }
 
     #[test]
@@ -245,6 +274,7 @@ mod tests {
         // is what the maintainer scripts and packaging tests assert
         // against. If we ever loosen perms we want a deliberate diff.
         assert_eq!(mode::DIR_0750, 0o0750);
+        assert_eq!(mode::DIR_1775, 0o1775);
         assert_eq!(mode::FILE_0640, 0o0640);
         assert_eq!(mode::FILE_0644, 0o0644);
         assert_eq!(mode::SOCKET_0660, 0o0660);
