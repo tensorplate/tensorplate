@@ -63,9 +63,13 @@ or agent secrets — authentication stays with your SSH client and
 
 By default `device add` verifies the device is reachable before saving it: it
 runs `tensorplate --local status --output json` over SSH (through the configured
-run-as mode) and refuses to save if that fails, with a hint naming the supported
-fixes (SSH as a user that can reach the agent socket, configure `--run-as` with
-a non-interactive sudoers rule, or make the socket group-accessible). Pass
+run-as mode) and refuses to save if that fails. On a packaged install the agent
+control socket is group-accessible, so the usual path is simply to add the SSH
+user to the `tensorplate` group (`sudo usermod -aG tensorplate <user>`, then
+re-login) — the same one-time grant MicroK8s uses. The failure hint names the
+fallbacks (configure `--run-as` with a non-interactive sudoers rule, or SSH as a
+user that already reaches the socket). If the remote is older than 0.1.5 the
+preflight reports that explicitly and asks you to upgrade the device. Pass
 `--no-verify` to skip the preflight and record the device unconditionally.
 
 When `--run-as <user>` is configured, `add` also vets the remote `tensorplate`
@@ -131,9 +135,10 @@ transaction against that path with the original flags forwarded
 `--label`). A deployment id is generated when one is not supplied so each import
 is named by its deployment id.
 
-The import dir must exist and be group-writable by the SSH copy user (a one-time
-setup step; see the requirements). Imports are kept by default; reclaim them with
-`device prune`:
+The import dir is created group-writable (sticky `1775`,
+`tensorplate:tensorplate`) by the package install, so a copy user in the
+`tensorplate` group can stage bundles with no manual setup. Imports are kept by
+default; reclaim them with `device prune`:
 
 ```sh
 tensorplate device prune orin-lab --keep 3         # keep the 3 newest imports
