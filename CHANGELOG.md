@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-20
+
 ### Changed
 
 - The agent control socket now binds group-accessible (`0o660`, the documented
