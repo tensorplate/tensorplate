@@ -611,6 +611,36 @@ PY
   fi
 }
 
+# A publish environment without a required reviewer publishes without a
+# hold the moment the tag lands, so a reviewer-less environment must stop
+# the cut, not just appear in a prerequisites checklist.
+check_publish_environments() {
+  local repo env body
+  if ! command_exists gh; then
+    fail "gh is not installed; cannot verify publish environment reviewer gates"
+    return 0
+  fi
+  if ! repo="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)"; then
+    fail "gh cannot resolve the GitHub repository; authenticate or run from a configured checkout"
+    return 0
+  fi
+  for env in pypi apt homebrew github-release; do
+    if ! body="$(gh api "repos/${repo}/environments/${env}" 2>/dev/null)"; then
+      fail "publish environment ${env} does not exist; create it with a required reviewer before tagging"
+      continue
+    fi
+    if printf '%s' "$body" | python3 -c '
+import json, sys
+rules = json.load(sys.stdin).get("protection_rules") or []
+sys.exit(0 if any(r.get("type") == "required_reviewers" for r in rules) else 1)
+'; then
+      pass "publish environment ${env} has a required reviewer gate"
+    else
+      fail "publish environment ${env} has no required reviewer; it would publish without a hold"
+    fi
+  done
+}
+
 run_preflight() {
   reset_results
   check_clean
@@ -624,6 +654,7 @@ run_preflight() {
   check_signoff
   check_artifacts
   check_ci_status
+  check_publish_environments
   write_report
 
   note "preflight report: $REPORT"
@@ -754,6 +785,7 @@ run_source_preflight() {
   check_version_files
   check_changelog
   check_release_notes
+  check_publish_environments
 
   if ((${#FAILURES[@]})); then
     printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2

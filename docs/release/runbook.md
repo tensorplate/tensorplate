@@ -107,6 +107,11 @@ The release owner stops immediately unless all prerequisites are true:
 - The self-hosted release runner is available for the build, and all four
   publish environments (`pypi`, `apt`, `homebrew`, `github-release`) each have
   a required reviewer (a reviewer-less environment publishes without a hold).
+  This is verified mechanically: `preflight` and `cut` run
+  `check_publish_environments`, which queries each environment via `gh api`
+  and fails closed if any environment is missing or has no
+  `required_reviewers` protection rule. Do not bypass this check — the tag
+  push publishes straight through any unguarded channel.
 - Clean-room validation target is ready.
 - No release blocker is open without a signed conditional pass.
 
@@ -254,12 +259,14 @@ The build-only run must:
 - Stop before creating a GitHub Release.
 
 Download the workflow artifact and smoke-test the installer from the
-artifact directory before publication. Build-only assets are unsigned, so
-pass `--allow-unsigned`:
+artifact directory before publication. The installer does **not** auto-detect
+sibling artifacts: without `--local-artifacts` it downloads the pinned
+published release, which does not exist yet for the tag under validation.
+Build-only assets are also unsigned, so pass `--allow-unsigned`:
 
 ```bash
-sudo bash install.sh --allow-unsigned
-sudo bash install.sh --cli-only --allow-unsigned
+sudo bash install.sh --local-artifacts "$(pwd)" --allow-unsigned
+sudo bash install.sh --local-artifacts "$(pwd)" --cli-only --allow-unsigned
 ```
 
 Run the `--cli-only` smoke only when the artifact bundle includes a
