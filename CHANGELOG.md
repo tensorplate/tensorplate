@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-20
+
 ### Changed
 
 - The agent control socket now binds group-accessible (`0o660`, the documented
@@ -90,6 +92,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   missing registry means "no devices enrolled", not an error, so existing local
   and profile workflows are unchanged. Documented in `docs/cli/device.md` with
   the schema in `config/schemas/devices.json`. (V015-F01-T01)
+## [0.1.4] - 2026-06-26
+
+### Added
+
 - Binary `/infer` transport for `tensorplate-serving` and the Python SDK: an
   optional, content-type-negotiated wire format
   (`application/vnd.tensorplate.infer.binary.v1`) that frames tensor payloads
