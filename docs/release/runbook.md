@@ -254,12 +254,14 @@ The build-only run must:
 - Stop before creating a GitHub Release.
 
 Download the workflow artifact and smoke-test the installer from the
-artifact directory before publication. Build-only assets are unsigned, so
-pass `--allow-unsigned`:
+artifact directory before publication. The installer does **not** auto-detect
+sibling artifacts: without `--local-artifacts` it downloads the pinned
+published release, which does not exist yet for the tag under validation.
+Build-only assets are also unsigned, so pass `--allow-unsigned`:
 
 ```bash
-sudo bash install.sh --allow-unsigned
-sudo bash install.sh --cli-only --allow-unsigned
+sudo bash install.sh --local-artifacts "$(pwd)" --allow-unsigned
+sudo bash install.sh --local-artifacts "$(pwd)" --cli-only --allow-unsigned
 ```
 
 Run the `--cli-only` smoke only when the artifact bundle includes a
