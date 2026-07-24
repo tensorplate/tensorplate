@@ -10,7 +10,9 @@
 
 use std::path::PathBuf;
 
-use tensorplate_protocol::{MemoryBudgetDeclaration, MEMORY_BUDGET_LINE_NAMES};
+use tensorplate_protocol::{
+    MemoryBudgetDeclaration, MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES,
+};
 
 fn fixtures_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -204,6 +206,18 @@ fn rust_vocabulary_matches_schema_document() {
         serde_json::Value::Bool(false),
         "unknown line names must stay fail-closed in the schema"
     );
+
+    for (name, prop) in breakdown["properties"]
+        .as_object()
+        .expect("breakdown properties object")
+    {
+        assert_eq!(prop["minimum"], serde_json::json!(0), "{name}: minimum");
+        assert_eq!(
+            prop["maximum"],
+            serde_json::json!(MEMORY_BUDGET_LINE_MAX_BYTES),
+            "{name}: maximum must equal MEMORY_BUDGET_LINE_MAX_BYTES"
+        );
+    }
 }
 
 #[test]
@@ -211,13 +225,14 @@ fn draft07_validator_agrees_with_rust_decoder() {
     // A real Draft-07 validator and `MemoryBudgetDeclaration::from_json`
     // must return the same accept/reject verdict, so schema-valid
     // declarations can never fail the Rust mirror (or vice versa). The
-    // exact 2^64 boundary is deliberately not asserted: Draft-07 verdicts
-    // there depend on validator float handling, so the domain edge is
-    // covered by the clearly-out-of-range 1e20 case instead.
+    // domain cap sits at 2^53 - 1, inside the exactly-representable f64
+    // range, so the boundary verdicts here are exact on both sides —
+    // including the silently-rounding float token, which parses to a
+    // value above the cap and is rejected by both.
     let schema = schema_document();
     let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
 
-    let cases: [(&str, &str, bool); 10] = [
+    let cases: [(&str, &str, bool); 12] = [
         (
             "minimal valid",
             r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1}}"#,
@@ -229,9 +244,19 @@ fn draft07_validator_agrees_with_rust_decoder() {
             true,
         ),
         (
-            "u64 max",
-            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":18446744073709551615}}"#,
+            "max safe integer (2^53 - 1)",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":9007199254740991}}"#,
             true,
+        ),
+        (
+            "above max safe integer (2^53)",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":9007199254740992}}"#,
+            false,
+        ),
+        (
+            "silently rounding float token (2^53 + 1 as float)",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":9007199254740993.0}}"#,
+            false,
         ),
         (
             "fractional",

@@ -107,8 +107,8 @@ pub use log_event::{
     MAX_LOG_CONTEXT_STRING_BYTES,
 };
 pub use memory_budget::{
-    MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError, MEMORY_BUDGET_LINE_NAMES,
-    MEMORY_BUDGET_SCHEMA_VERSION,
+    MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError,
+    MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
 };
 pub use metric_event::{
     MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,

@@ -12,9 +12,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `config/schemas/memory_budget_breakdown.json` defines the eleven
   `memory_budget_breakdown_bytes` lines shared by every model class:
   undeclared lines default to zero, unknown line names are rejected
-  fail-closed, and line values are integers in [0, 2^64) matching the
-  Draft-07 data model (integral-valued numbers accepted; non-numeric,
-  negative, fractional, or out-of-range values are typed decode errors).
+  fail-closed, and line values are integers in [0, 2^53) — the
+  exactly-representable IEEE-754 range, so declared byte counts can never
+  be silently rounded by a JSON parser (integral-valued numbers accepted;
+  non-numeric, negative, fractional, or out-of-range values are typed
+  decode errors).
   The schema versions on its own config-schema track
   (`MEMORY_BUDGET_SCHEMA_VERSION`), independent of the cross-process
   protocol version, and validation failures map to `config_invalid`.

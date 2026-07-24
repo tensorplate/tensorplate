@@ -53,33 +53,45 @@ impl From<MemoryBudgetError> for ProtocolError {
     }
 }
 
+/// Upper bound (inclusive) for every byte line: 2^53 - 1, the largest
+/// integer that IEEE-754 doubles — and therefore every mainstream JSON
+/// parser — represent exactly. Bounding the domain here means a declared
+/// byte count can never be silently rounded to a different integer on its
+/// way through a JSON pipeline (~9.0 PB, far above any row budget).
+pub const MEMORY_BUDGET_LINE_MAX_BYTES: u64 = (1 << 53) - 1;
+
+const MEMORY_BUDGET_LINE_MAX_BYTES_F64: f64 = 9_007_199_254_740_991.0;
+
 /// Deserialize one byte-count line into the schema's numeric domain:
-/// integers in `[0, 2^64)`. Draft-07 `type: integer` treats any number with
-/// a zero fractional part as an integer (`1.0` validates), so this accepts
-/// integral floats below 2^64 and rejects everything else — keeping the
-/// Rust domain identical to the schema's `minimum`/`maximum` bounds.
+/// integers in `[0, 2^53)`. Draft-07 `type: integer` treats any number with
+/// a zero fractional part as an integer (`4096.0` validates), so integral
+/// floats inside the range are accepted; fractional, negative, or
+/// out-of-range values are rejected. Values above 2^53 - 1 are rejected on
+/// both sides precisely because f64 parsing can silently round them —
+/// see the schema's `maximum`.
 fn de_bytes_line<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let n = serde_json::Number::deserialize(deserializer)?;
     if let Some(v) = n.as_u64() {
-        return Ok(v);
-    }
-    if let Some(f) = n.as_f64() {
-        // Every integral f64 in [0, 2^64) is an exactly representable
-        // integer, so the guarded cast below is lossless.
+        if v <= MEMORY_BUDGET_LINE_MAX_BYTES {
+            return Ok(v);
+        }
+    } else if let Some(f) = n.as_f64() {
+        // Every integral f64 in [0, 2^53) is exactly representable, so the
+        // guarded cast below is lossless.
         #[allow(
             clippy::float_cmp,
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss
         )]
-        if (0.0..18_446_744_073_709_551_616.0).contains(&f) && f.fract() == 0.0 {
+        if (0.0..=MEMORY_BUDGET_LINE_MAX_BYTES_F64).contains(&f) && f.fract() == 0.0 {
             return Ok(f as u64);
         }
     }
     Err(serde::de::Error::custom(format!(
-        "byte line values must be integers in [0, 2^64), got {n}"
+        "byte line values must be integers in [0, 2^53), got {n}"
     )))
 }
 
@@ -198,7 +210,7 @@ mod tests {
 
     use super::{
         MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError,
-        MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
+        MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
     };
     use crate::{ErrorCode, ProtocolError};
 
@@ -279,19 +291,43 @@ mod tests {
     }
 
     #[test]
-    fn u64_max_line_value_accepted() {
-        let raw = declaration_json(r#"{"model_weights_bytes":18446744073709551615}"#);
-        let decl = MemoryBudgetDeclaration::from_json(&raw).expect("u64::MAX decodes");
+    fn max_safe_integer_line_value_accepted() {
+        let raw = declaration_json(r#"{"model_weights_bytes":9007199254740991}"#);
+        let decl = MemoryBudgetDeclaration::from_json(&raw).expect("2^53 - 1 decodes");
         assert_eq!(
             decl.memory_budget_breakdown_bytes.model_weights_bytes,
-            u64::MAX
+            MEMORY_BUDGET_LINE_MAX_BYTES
         );
     }
 
     #[test]
-    fn above_u64_max_line_value_rejects() {
+    fn above_max_safe_integer_line_value_rejects() {
+        let raw = declaration_json(r#"{"model_weights_bytes":9007199254740992}"#);
+        MemoryBudgetDeclaration::from_json(&raw).expect_err("2^53 must reject");
+    }
+
+    #[test]
+    fn far_above_range_line_value_rejects() {
         let raw = declaration_json(r#"{"model_weights_bytes":18446744073709551616}"#);
         MemoryBudgetDeclaration::from_json(&raw).expect_err("2^64 must reject");
+    }
+
+    #[test]
+    fn silently_rounding_float_token_rejects() {
+        // 2^53 + 1 written as a float lexeme parses to a *different* f64
+        // integer; capping the domain below 2^53 keeps every silently
+        // rounded token out instead of decoding a changed byte count.
+        let raw = declaration_json(r#"{"model_weights_bytes":9007199254740993.0}"#);
+        MemoryBudgetDeclaration::from_json(&raw).expect_err("rounded float token must reject");
+    }
+
+    #[test]
+    fn float_bound_constant_matches_integer_bound() {
+        // 2^53 - 1 is exactly representable, so the u64 round-trip through
+        // the f64 constant is lossless and the comparison stays integral.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let round_tripped = super::MEMORY_BUDGET_LINE_MAX_BYTES_F64 as u64;
+        assert_eq!(round_tripped, MEMORY_BUDGET_LINE_MAX_BYTES);
     }
 
     #[test]
