@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "memory_budget_breakdown_bytes": {
+    "model_weights_bytes": 1200000000,
+    "runtime_overhead_bytes": 640000000,
+    "session_scratch_bytes": 256000000,
+    "cache_bytes": 128000000,
+    "step_scratch_bytes": 96000000,
+    "output_queue_bytes": 8000000,
+    "io_buffer_bytes": 64000000,
+    "per_session_state_bytes": 32000000,
+    "os_reserve_bytes": 512000000,
+    "backend_reserve_bytes": 128000000
+  }
+}
