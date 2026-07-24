@@ -117,6 +117,16 @@ fn validate_number_lexemes(raw: &str) -> Result<(), MemoryBudgetError> {
     Ok(())
 }
 
+/// Parsed exponent of a number lexeme. Well-formed exponents that overflow
+/// `i64` are classified by sign so they fail closed at the lexeme layer:
+/// deferring them to f64 parsing would silently underflow tiny nonzero
+/// values (e.g. `1e-9223372036854775809`) to an accepted zero.
+enum LexemeExponent {
+    Value(i64),
+    NegativeOverflow,
+    PositiveOverflow,
+}
+
 /// Exact decimal check of one number lexeme against the byte-line domain:
 /// non-negative, mathematically integral, at most 2^53 - 1. Returns the
 /// violation, or `None` when the token is in-domain — or is not a valid
@@ -133,11 +143,26 @@ fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
         None => (false, token),
     };
     let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
-        Some((m, e)) => match e.parse::<i64>() {
-            Ok(v) => (m, v),
-            Err(_) => return None,
-        },
-        None => (rest, 0),
+        Some((m, e)) => {
+            let exp = if let Ok(v) = e.parse::<i64>() {
+                LexemeExponent::Value(v)
+            } else {
+                // Distinguish a well-formed exponent overflowing i64 (fail
+                // closed by sign, below) from a grammar error (serde's to
+                // report).
+                let magnitude = e.strip_prefix(['+', '-']).unwrap_or(e);
+                if magnitude.is_empty() || !magnitude.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                if e.starts_with('-') {
+                    LexemeExponent::NegativeOverflow
+                } else {
+                    LexemeExponent::PositiveOverflow
+                }
+            };
+            (m, exp)
+        }
+        None => (rest, LexemeExponent::Value(0)),
     };
     let (int_digits, frac_digits) = match mantissa.split_once('.') {
         Some((i, f)) => (i, f),
@@ -162,6 +187,18 @@ fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
     if negative {
         return Some("negative values are not in the byte-line domain");
     }
+    // The mantissa is nonzero past this point, so an exponent overflowing
+    // i64 fails closed by sign instead of deferring to f64 parsing (which
+    // underflows tiny values to an accepted zero).
+    let exponent = match exponent {
+        LexemeExponent::Value(v) => v,
+        LexemeExponent::NegativeOverflow => {
+            return Some("fractional values are not in the byte-line domain")
+        }
+        LexemeExponent::PositiveOverflow => {
+            return Some("exceeds the largest exactly-representable byte value (2^53 - 1)")
+        }
+    };
     // The token-length gate bounds both digit counts at 64, so the base
     // offset stays within [-65, 63]. `exponent`, however, is
     // attacker-controlled up to +/- i64::MAX, so the addition saturates:
@@ -522,10 +559,29 @@ mod tests {
         let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
         assert!(err.to_string().contains("fractional"), "reason: {err}");
 
-        // An exponent that does not even fit i64 falls through to serde,
-        // which rejects the token as outside f64 range.
+        // A positive exponent that does not even fit i64 is classified
+        // out-of-range at the lexeme layer.
         let raw = declaration_json(r#"{"model_weights_bytes":1e99999999999999999999}"#);
-        MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
+        let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
+        assert!(err.to_string().contains("exceeds"), "reason: {err}");
+    }
+
+    #[test]
+    fn negative_exponent_overflow_rejects_as_fractional() {
+        // The exponent is below i64::MIN, so f64 parsing would underflow
+        // the value to 0.0 and fail OPEN with an accepted zero byte count.
+        // The lexeme check classifies the nonzero mantissa as fractional.
+        let raw = declaration_json(r#"{"model_weights_bytes":1e-9223372036854775809}"#);
+        let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
+        assert!(matches!(err, MemoryBudgetError::InvalidNumberLexeme { .. }));
+        assert!(err.to_string().contains("fractional"), "reason: {err}");
+
+        // Exact-zero spellings keep their exemption even with an
+        // overflowing exponent: the value is zero, not fractional.
+        let raw =
+            declaration_json(r#"{"model_weights_bytes":1,"cache_bytes":0e-9223372036854775809}"#);
+        let decl = MemoryBudgetDeclaration::from_json(&raw).expect("zero mantissa stays zero");
+        assert_eq!(decl.memory_budget_breakdown_bytes.cache_bytes, 0);
     }
 
     #[test]
