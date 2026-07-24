@@ -162,8 +162,14 @@ fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
     if negative {
         return Some("negative values are not in the byte-line domain");
     }
-    let int_len = i64::try_from(int_digits.len()).unwrap_or(i64::MAX);
-    let position = |i: usize| int_len - 1 - i64::try_from(i).unwrap_or(i64::MAX) + exponent;
+    // The token-length gate bounds both digit counts at 64, so the base
+    // offset stays within [-65, 63]. `exponent`, however, is
+    // attacker-controlled up to +/- i64::MAX, so the addition saturates:
+    // positive overflow lands above the range check (out-of-range) and
+    // negative overflow lands below zero (fractional), never a panic.
+    let int_len = i64::try_from(int_digits.len()).unwrap_or(64);
+    let position =
+        |i: usize| (int_len - 1 - i64::try_from(i).unwrap_or(64)).saturating_add(exponent);
     if position(last_nonzero) < 0 {
         return Some("fractional values are not in the byte-line domain");
     }
@@ -499,6 +505,27 @@ mod tests {
         assert_eq!(decl.memory_budget_breakdown_bytes.cache_bytes, 0);
         assert_eq!(decl.memory_budget_breakdown_bytes.io_buffer_bytes, 0);
         assert_eq!(decl.memory_budget_breakdown_bytes.os_reserve_bytes, 0);
+    }
+
+    #[test]
+    fn overflowing_exponents_reject_without_panic() {
+        // i64::MAX exponent: position arithmetic must saturate into the
+        // out-of-range rejection, not overflow.
+        let raw = declaration_json(r#"{"model_weights_bytes":10e9223372036854775807}"#);
+        let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
+        assert!(matches!(err, MemoryBudgetError::InvalidNumberLexeme { .. }));
+        assert!(err.to_string().contains("exceeds"), "reason: {err}");
+
+        // i64::MIN exponent with the significand right of the decimal
+        // point: negative saturation maps to the fractional rejection.
+        let raw = declaration_json(r#"{"model_weights_bytes":0.001e-9223372036854775808}"#);
+        let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
+        assert!(err.to_string().contains("fractional"), "reason: {err}");
+
+        // An exponent that does not even fit i64 falls through to serde,
+        // which rejects the token as outside f64 range.
+        let raw = declaration_json(r#"{"model_weights_bytes":1e99999999999999999999}"#);
+        MemoryBudgetDeclaration::from_json(&raw).expect_err("must fail closed");
     }
 
     #[test]
