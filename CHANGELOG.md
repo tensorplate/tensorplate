@@ -12,13 +12,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `config/schemas/memory_budget_breakdown.json` defines the eleven
   `memory_budget_breakdown_bytes` lines shared by every model class:
   undeclared lines default to zero, unknown line names are rejected
-  fail-closed, and non-numeric, negative, or fractional values are typed
-  decode errors. `tensorplate-protocol` gains the Rust mirror
-  (`MemoryBudgetBreakdown`, `MemoryBudgetDeclaration`,
+  fail-closed, and line values are integers in [0, 2^64) matching the
+  Draft-07 data model (integral-valued numbers accepted; non-numeric,
+  negative, fractional, or out-of-range values are typed decode errors).
+  The schema versions on its own config-schema track
+  (`MEMORY_BUDGET_SCHEMA_VERSION`), independent of the cross-process
+  protocol version, and validation failures map to `config_invalid`.
+  `tensorplate-protocol` gains the Rust mirror (`MemoryBudgetBreakdown`,
+  `MemoryBudgetDeclaration::from_json`, `MemoryBudgetError`,
   `MEMORY_BUDGET_LINE_NAMES`) plus committed per-class mapping fixtures for
   VLA, speech STT, speech TTS, vision, and language readiness; the speech
   fixtures declare non-zero `per_session_state_bytes` as the foundation for
-  streaming-session ledger admission. (V023-E03-F04-T01, V023-E03-F04-T02)
+  streaming-session ledger admission. A Draft-07 validator conformance test
+  (dev-only `jsonschema` dependency) keeps the schema document and the Rust
+  mirror verdict-identical. (V023-E03-F04-T01, V023-E03-F04-T02)
 
 ## [0.1.5] - 2026-07-20
 

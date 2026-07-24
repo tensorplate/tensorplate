@@ -10,9 +10,7 @@
 
 use std::path::PathBuf;
 
-use tensorplate_protocol::{
-    decode_with_version_check, MemoryBudgetDeclaration, MEMORY_BUDGET_LINE_NAMES,
-};
+use tensorplate_protocol::{MemoryBudgetDeclaration, MEMORY_BUDGET_LINE_NAMES};
 
 fn fixtures_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -27,13 +25,20 @@ fn load(name: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read fixture {}: {e}", p.display()))
 }
 
+fn schema_document() -> serde_json::Value {
+    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../config/schemas/memory_budget_breakdown.json");
+    let raw = std::fs::read_to_string(&schema_path)
+        .unwrap_or_else(|e| panic!("read schema {}: {e}", schema_path.display()));
+    serde_json::from_str(&raw).expect("schema document parses")
+}
+
 fn decode_fixture(name: &str) -> MemoryBudgetDeclaration {
     let raw = load(name);
-    let first: MemoryBudgetDeclaration =
-        decode_with_version_check(&raw).unwrap_or_else(|e| panic!("decode failed for {name}: {e}"));
+    let first = MemoryBudgetDeclaration::from_json(&raw)
+        .unwrap_or_else(|e| panic!("decode failed for {name}: {e}"));
     let re_emitted = serde_json::to_string(&first).expect("serialize");
-    let second: MemoryBudgetDeclaration =
-        decode_with_version_check(&re_emitted).expect("re-decode");
+    let second = MemoryBudgetDeclaration::from_json(&re_emitted).expect("re-decode");
     assert_eq!(first, second, "round-trip mismatch for {name}");
     first
 }
@@ -170,11 +175,7 @@ fn all_class_fixtures_declare_universal_lines() {
 fn rust_vocabulary_matches_schema_document() {
     // The schema document is the language-neutral source of truth; this
     // test keeps the Rust mirror in lockstep with it.
-    let schema_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/schemas/memory_budget_breakdown.json");
-    let raw = std::fs::read_to_string(&schema_path)
-        .unwrap_or_else(|e| panic!("read schema {}: {e}", schema_path.display()));
-    let schema: serde_json::Value = serde_json::from_str(&raw).expect("schema document parses");
+    let schema = schema_document();
     let breakdown = &schema["definitions"]["memory_budget_breakdown_bytes"];
 
     let mut schema_lines: Vec<&str> = breakdown["properties"]
@@ -203,4 +204,99 @@ fn rust_vocabulary_matches_schema_document() {
         serde_json::Value::Bool(false),
         "unknown line names must stay fail-closed in the schema"
     );
+}
+
+#[test]
+fn draft07_validator_agrees_with_rust_decoder() {
+    // A real Draft-07 validator and `MemoryBudgetDeclaration::from_json`
+    // must return the same accept/reject verdict, so schema-valid
+    // declarations can never fail the Rust mirror (or vice versa). The
+    // exact 2^64 boundary is deliberately not asserted: Draft-07 verdicts
+    // there depend on validator float handling, so the domain edge is
+    // covered by the clearly-out-of-range 1e20 case instead.
+    let schema = schema_document();
+    let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
+
+    let cases: [(&str, &str, bool); 10] = [
+        (
+            "minimal valid",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1}}"#,
+            true,
+        ),
+        (
+            "integral float",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":4096.0}}"#,
+            true,
+        ),
+        (
+            "u64 max",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":18446744073709551615}}"#,
+            true,
+        ),
+        (
+            "fractional",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1.5}}"#,
+            false,
+        ),
+        (
+            "negative",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1,"cache_bytes":-4096}}"#,
+            false,
+        ),
+        (
+            "far above u64 range",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":100000000000000000000}}"#,
+            false,
+        ),
+        (
+            "unknown line",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1,"gpu_weights_bytes":2}}"#,
+            false,
+        ),
+        (
+            "missing required line",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"cache_bytes":128}}"#,
+            false,
+        ),
+        (
+            "unknown top-level field",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1},"memory_budget_total_bytes":1}"#,
+            false,
+        ),
+        (
+            "wrong schema_version",
+            r#"{"schema_version":"9.9","memory_budget_breakdown_bytes":{"model_weights_bytes":1}}"#,
+            false,
+        ),
+    ];
+
+    for (label, raw, expected_valid) in cases {
+        let instance: serde_json::Value = serde_json::from_str(raw).expect("case parses as JSON");
+        let schema_verdict = validator.is_valid(&instance);
+        let rust_verdict = MemoryBudgetDeclaration::from_json(raw).is_ok();
+        assert_eq!(
+            schema_verdict, expected_valid,
+            "{label}: Draft-07 verdict diverged from expectation"
+        );
+        assert_eq!(
+            rust_verdict, expected_valid,
+            "{label}: Rust verdict diverged from expectation"
+        );
+    }
+
+    // Every committed fixture must also pass the real validator.
+    for name in [
+        "memory_budget_vla.json",
+        "memory_budget_speech_stt.json",
+        "memory_budget_speech_tts.json",
+        "memory_budget_vision.json",
+        "memory_budget_language_readiness.json",
+    ] {
+        let instance: serde_json::Value =
+            serde_json::from_str(&load(name)).expect("fixture parses");
+        assert!(
+            validator.is_valid(&instance),
+            "{name} must validate against the schema document"
+        );
+    }
 }
