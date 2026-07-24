@@ -41,6 +41,12 @@ pub enum MemoryBudgetError {
     /// `schema_version` does not match [`MEMORY_BUDGET_SCHEMA_VERSION`].
     #[error("unsupported memory budget schema_version `{got}` (expected `{expected}`)")]
     UnsupportedSchemaVersion { got: String, expected: &'static str },
+
+    /// A number token in the document is outside the byte-line domain.
+    /// Checked on the exact decimal lexeme before any float parsing, so
+    /// high-precision tokens cannot slip through IEEE-754 rounding.
+    #[error("invalid byte line value `{token}`: {reason}")]
+    InvalidNumberLexeme { token: String, reason: &'static str },
 }
 
 impl From<MemoryBudgetError> for ProtocolError {
@@ -62,13 +68,131 @@ pub const MEMORY_BUDGET_LINE_MAX_BYTES: u64 = (1 << 53) - 1;
 
 const MEMORY_BUDGET_LINE_MAX_BYTES_F64: f64 = 9_007_199_254_740_991.0;
 
+/// Scan the raw document and validate every number token's exact decimal
+/// lexeme against the byte-line domain. Without the (workspace-global)
+/// `arbitrary_precision` feature, `serde_json` parses number tokens through
+/// `f64`, which silently rounds high-precision lexemes — `1.0000000000000001`
+/// becomes `1.0` — before any `fract()` check can see them. Scanning the
+/// lexemes first keeps the fail-closed fractional/range guarantees exact.
+/// Every number in a well-formed declaration is a byte line, so the rule
+/// applies to all number tokens; malformed tokens are left for serde to
+/// report as grammar errors.
+fn validate_number_lexemes(raw: &str) -> Result<(), MemoryBudgetError> {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Skip string contents, honoring escapes.
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < bytes.len()
+                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+                {
+                    i += 1;
+                }
+                let token = &raw[start..i];
+                if let Some(reason) = lexeme_domain_violation(token) {
+                    return Err(MemoryBudgetError::InvalidNumberLexeme {
+                        token: token.to_string(),
+                        reason,
+                    });
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Exact decimal check of one number lexeme against the byte-line domain:
+/// non-negative, mathematically integral, at most 2^53 - 1. Returns the
+/// violation, or `None` when the token is in-domain — or is not a valid
+/// JSON number at all, which serde reports as a grammar error instead.
+fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
+    if token.len() > 64 {
+        // Fail closed on pathological tokens instead of reasoning about
+        // arbitrarily long digit strings; real byte counts need <= 17
+        // characters.
+        return Some("number token is longer than the 64 characters accepted");
+    }
+    let (negative, rest) = match token.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, token),
+    };
+    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+        Some((m, e)) => match e.parse::<i64>() {
+            Ok(v) => (m, v),
+            Err(_) => return None,
+        },
+        None => (rest, 0),
+    };
+    let (int_digits, frac_digits) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (mantissa, ""),
+    };
+    if int_digits.is_empty()
+        || frac_digits.is_empty() && mantissa.contains('.')
+        || !int_digits.bytes().all(|b| b.is_ascii_digit())
+        || !frac_digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    // value = <concatenated digits> x 10^(exponent - frac len). The digit
+    // at index `i` has decimal position `int_len - 1 - i + exponent`;
+    // position 0 is the units place.
+    let digits: Vec<u8> = int_digits.bytes().chain(frac_digits.bytes()).collect();
+    let Some(first_nonzero) = digits.iter().position(|&b| b != b'0') else {
+        return None; // exact zero in any spelling (0, -0, 0.0, 0e9) is in-domain
+    };
+    let last_nonzero = digits.iter().rposition(|&b| b != b'0')?;
+    if negative {
+        return Some("negative values are not in the byte-line domain");
+    }
+    let int_len = i64::try_from(int_digits.len()).unwrap_or(i64::MAX);
+    let position = |i: usize| int_len - 1 - i64::try_from(i).unwrap_or(i64::MAX) + exponent;
+    if position(last_nonzero) < 0 {
+        return Some("fractional values are not in the byte-line domain");
+    }
+    if position(first_nonzero) >= 16 {
+        return Some("exceeds the largest exactly-representable byte value (2^53 - 1)");
+    }
+    // The significant span covers at most 16 decimal positions, so the
+    // accumulation below cannot overflow u64.
+    let mut value: u64 = 0;
+    for &b in digits.get(first_nonzero..=last_nonzero)? {
+        value = value * 10 + u64::from(b - b'0');
+    }
+    for _ in 0..position(last_nonzero) {
+        value *= 10;
+    }
+    if value > MEMORY_BUDGET_LINE_MAX_BYTES {
+        return Some("exceeds the largest exactly-representable byte value (2^53 - 1)");
+    }
+    None
+}
+
 /// Deserialize one byte-count line into the schema's numeric domain:
 /// integers in `[0, 2^53)`. Draft-07 `type: integer` treats any number with
 /// a zero fractional part as an integer (`4096.0` validates), so integral
 /// floats inside the range are accepted; fractional, negative, or
-/// out-of-range values are rejected. Values above 2^53 - 1 are rejected on
-/// both sides precisely because f64 parsing can silently round them —
-/// see the schema's `maximum`.
+/// out-of-range values are rejected. This is the serde-level backstop;
+/// [`MemoryBudgetDeclaration::from_json`] additionally validates each
+/// number token's exact decimal lexeme before parsing, which is what
+/// catches tokens that only look integral after IEEE-754 rounding.
 fn de_bytes_line<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -186,9 +310,14 @@ pub struct MemoryBudgetDeclaration {
 
 impl MemoryBudgetDeclaration {
     /// Parse and validate a declaration document, enforcing
-    /// [`MEMORY_BUDGET_SCHEMA_VERSION`]. All failures are fail-closed typed
-    /// errors that map to [`ErrorCode::ConfigInvalid`].
+    /// [`MEMORY_BUDGET_SCHEMA_VERSION`] and the exact byte-line numeric
+    /// domain (validated on each number token's decimal lexeme, immune to
+    /// IEEE-754 rounding). All failures are fail-closed typed errors that
+    /// map to [`ErrorCode::ConfigInvalid`]. This is the validated entry
+    /// point; deserializing the types directly with serde skips the
+    /// lexeme-level checks.
     pub fn from_json(json: &str) -> Result<Self, MemoryBudgetError> {
+        validate_number_lexemes(json)?;
         let value: serde_json::Value = serde_json::from_str(json)?;
         let observed = value
             .get("schema_version")
@@ -319,6 +448,66 @@ mod tests {
         // rounded token out instead of decoding a changed byte count.
         let raw = declaration_json(r#"{"model_weights_bytes":9007199254740993.0}"#);
         MemoryBudgetDeclaration::from_json(&raw).expect_err("rounded float token must reject");
+    }
+
+    #[test]
+    fn precise_fractional_lexeme_rejects() {
+        // 1.0000000000000001 rounds to exactly 1.0 during f64 parsing, so
+        // only the lexeme-level check can see the fractional part.
+        let raw = declaration_json(r#"{"model_weights_bytes":1.0000000000000001}"#);
+        let err = MemoryBudgetDeclaration::from_json(&raw)
+            .expect_err("high-precision fractional token must reject");
+        assert!(
+            matches!(err, MemoryBudgetError::InvalidNumberLexeme { .. }),
+            "expected a lexeme-level rejection, got: {err:?}"
+        );
+        assert!(err.to_string().contains("fractional"), "reason: {err}");
+    }
+
+    #[test]
+    fn precise_below_one_lexeme_rejects() {
+        // 0.9999999999999999999 rounds to exactly 1.0 in f64; the lexeme
+        // check rejects it as fractional regardless.
+        let raw = declaration_json(r#"{"model_weights_bytes":0.9999999999999999999}"#);
+        MemoryBudgetDeclaration::from_json(&raw)
+            .expect_err("sub-integer high-precision token must reject");
+    }
+
+    #[test]
+    fn exponent_lexemes_follow_their_mathematical_value() {
+        // Exponent notation is judged by exact decimal value, matching the
+        // Draft-07 data model: 1e3 and 1.5e1 are integers; 2.5e-1 is not.
+        let accepted = declaration_json(r#"{"model_weights_bytes":1e3,"cache_bytes":1.5e1}"#);
+        let decl = MemoryBudgetDeclaration::from_json(&accepted).expect("integral exponents");
+        assert_eq!(decl.memory_budget_breakdown_bytes.model_weights_bytes, 1000);
+        assert_eq!(decl.memory_budget_breakdown_bytes.cache_bytes, 15);
+
+        let fractional = declaration_json(r#"{"model_weights_bytes":2.5e-1}"#);
+        MemoryBudgetDeclaration::from_json(&fractional).expect_err("2.5e-1 is fractional");
+
+        let too_large = declaration_json(r#"{"model_weights_bytes":1e16}"#);
+        MemoryBudgetDeclaration::from_json(&too_large).expect_err("1e16 exceeds the domain");
+    }
+
+    #[test]
+    fn zero_spellings_accepted() {
+        // Exact zero is in-domain in any lexical form, including -0.
+        let raw = declaration_json(
+            r#"{"model_weights_bytes":1,"cache_bytes":-0,"io_buffer_bytes":0.0,"os_reserve_bytes":0e9}"#,
+        );
+        let decl = MemoryBudgetDeclaration::from_json(&raw).expect("zero spellings decode");
+        assert_eq!(decl.memory_budget_breakdown_bytes.cache_bytes, 0);
+        assert_eq!(decl.memory_budget_breakdown_bytes.io_buffer_bytes, 0);
+        assert_eq!(decl.memory_budget_breakdown_bytes.os_reserve_bytes, 0);
+    }
+
+    #[test]
+    fn oversized_number_token_rejects() {
+        let long_token = format!("1.{}", "0".repeat(70));
+        let raw = declaration_json(&format!(r#"{{"model_weights_bytes":{long_token}}}"#));
+        let err =
+            MemoryBudgetDeclaration::from_json(&raw).expect_err("oversized token must fail closed");
+        assert!(matches!(err, MemoryBudgetError::InvalidNumberLexeme { .. }));
     }
 
     #[test]

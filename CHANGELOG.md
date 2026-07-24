@@ -16,7 +16,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   exactly-representable IEEE-754 range, so declared byte counts can never
   be silently rounded by a JSON parser (integral-valued numbers accepted;
   non-numeric, negative, fractional, or out-of-range values are typed
-  decode errors).
+  decode errors). Each number token's exact decimal lexeme is validated
+  before parsing, so high-precision tokens that would round to integers
+  under IEEE-754 (e.g. 1.0000000000000001) are rejected rather than
+  silently truncated.
   The schema versions on its own config-schema track
   (`MEMORY_BUDGET_SCHEMA_VERSION`), independent of the cross-process
   protocol version, and validation failures map to `config_invalid`.

@@ -232,7 +232,7 @@ fn draft07_validator_agrees_with_rust_decoder() {
     let schema = schema_document();
     let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
 
-    let cases: [(&str, &str, bool); 12] = [
+    let cases: [(&str, &str, bool); 13] = [
         (
             "minimal valid",
             r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1}}"#,
@@ -241,6 +241,11 @@ fn draft07_validator_agrees_with_rust_decoder() {
         (
             "integral float",
             r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":4096.0}}"#,
+            true,
+        ),
+        (
+            "integral exponent notation",
+            r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1e3}}"#,
             true,
         ),
         (
@@ -308,8 +313,30 @@ fn draft07_validator_agrees_with_rust_decoder() {
             "{label}: Rust verdict diverged from expectation"
         );
     }
+}
 
-    // Every committed fixture must also pass the real validator.
+#[test]
+fn precision_edge_lexemes_fail_closed_beyond_f64_validators() {
+    // These lexemes round to in-domain values during float parsing, so an
+    // f64-based Draft-07 validator cannot see the violation. The decoder
+    // validates the exact decimal lexeme and is deliberately stricter here
+    // (fail-closed); a hypothetical arbitrary-precision Draft-07 validator
+    // would agree with the decoder.
+    for raw in [
+        r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":1.0000000000000001}}"#,
+        r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":0.9999999999999999999}}"#,
+    ] {
+        assert!(
+            MemoryBudgetDeclaration::from_json(raw).is_err(),
+            "precision-edge lexeme must fail closed: {raw}"
+        );
+    }
+}
+
+#[test]
+fn fixtures_validate_against_schema_document() {
+    let schema = schema_document();
+    let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
     for name in [
         "memory_budget_vla.json",
         "memory_budget_speech_stt.json",
