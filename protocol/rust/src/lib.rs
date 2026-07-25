@@ -48,6 +48,7 @@ pub mod log_event;
 pub mod memory_budget;
 pub mod metric_event;
 pub mod model_spec;
+pub mod platform_memory_profile;
 pub mod python_pytorch_ipc;
 pub mod supervision_event;
 pub mod tensor_view;
@@ -114,6 +115,11 @@ pub use metric_event::{
     MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,
 };
 pub use model_spec::{ModelClass, ModelSpec, PrecisionHint};
+pub use platform_memory_profile::{
+    BudgetDomain, BudgetDomainName, CopyPressure, PlatformMemoryProfile,
+    PlatformMemoryProfileError, PlatformMemoryProfileName, ProfileInstance,
+    PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION, PLATFORM_MEMORY_TELEMETRY_FIELD_NAMES,
+};
 pub use python_pytorch_ipc::{
     IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
 };

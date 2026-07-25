@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "profile": "unified_memory",
+  "budget_domains": [
+    {
+      "domain": "shared_pool",
+      "measurement_source": "Platform memory stats plus the accelerator working-set bound; CPU, accelerator, and OS reserve compete in one pool.",
+      "headroom_computation": "row_budget - observed_peak(shared_pool)"
+    }
+  ],
+  "headroom_reporting": "Row budget minus observed peak of the single shared pool.",
+  "copy_pressure": "not_applicable",
+  "gate_semantics_note": "Gate values are row-owned; load_bearing on physical edge rows.",
+  "instances": [
+    {
+      "instance": "jetson-orin",
+      "measurement_source_mapping": "Platform memory stats plus NVML/tegrastats-class accelerator working-set bound."
+    },
+    {
+      "instance": "apple-m1-pro",
+      "measurement_source_mapping": "Host statistics plus Metal working-set bound. Platform-lifecycle accounting only; no model-serving support claim."
+    }
+  ]
+}
