@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 use tensorplate_protocol::json_numbers;
 use tensorplate_protocol::serde_shape::{
-    deserialize_map_only, deserialize_optional_map_only, deserialize_vec_map_only,
+    deserialize_map_only, deserialize_some, deserialize_some_map_only, deserialize_vec_map_only,
     is_canonical_identifier, is_canonical_snake_identifier,
 };
 use tensorplate_protocol::PlatformMemoryProfileName;
@@ -34,10 +34,18 @@ macro_rules! string_only_enum {
         pub enum $name:ident { $( $(#[$vmeta:meta])* $variant:ident => $spelling:literal ),+ $(,)? }
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-        #[serde(rename_all = "snake_case", try_from = "String")]
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Deserialize)]
+        #[serde(try_from = "String")]
         pub enum $name {
             $( $(#[$vmeta])* $variant, )+
+        }
+
+        // Serialization goes through `as_str` so the spelling that is
+        // written is by construction the spelling that decodes.
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
         }
 
         impl $name {
@@ -184,7 +192,11 @@ pub struct OsIdentity {
     pub version: String,
     /// Image or distribution identity where the OS version alone is not
     /// exact (e.g. a JetPack release on an Ubuntu base).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub image_identity: Option<String>,
 }
 
@@ -223,7 +235,7 @@ pub struct Accelerator {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "json_numbers::deserialize_optional_safe_bytes"
+        deserialize_with = "json_numbers::deserialize_some_safe_bytes"
     )]
     pub memory_bytes: Option<u64>,
     /// Reference to the platform memory profile record of the same
@@ -258,7 +270,11 @@ pub struct ModelClassRowRef {
 #[serde(deny_unknown_fields)]
 pub struct Gate {
     pub gate: GateValue,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub reason: Option<String>,
 }
 
@@ -313,10 +329,14 @@ pub struct Evidence {
 /// One exact platform support row.
 ///
 /// Fields are private and read-only: a decoded row cannot exist or be
-/// mutated into a state that violates the schema. Parse with
-/// [`PlatformSupportRow::from_json`] for typed errors; direct serde
-/// deserialization runs the same validation through the custom
-/// `Deserialize` impl.
+/// mutated into a state that violates the schema.
+///
+/// [`PlatformSupportRow::from_json`] is deliberately the *only* way to
+/// obtain one — the type does not implement `Deserialize`. A serde
+/// `Deserialize` impl receives numbers that the JSON parser has already
+/// rounded through `f64`, so it could not apply the exact-lexeme gate that
+/// keeps a declared byte count intact; having one would mean the same
+/// document decoded to different values depending on the entry point.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlatformSupportRow {
     schema_version: String,
@@ -347,7 +367,7 @@ struct WireRow {
     kernel_driver_stack: KernelDriverStack,
     #[serde(deserialize_with = "deserialize_map_only")]
     cpu: CpuIdentity,
-    #[serde(default, deserialize_with = "deserialize_optional_map_only")]
+    #[serde(default, deserialize_with = "deserialize_some_map_only")]
     accelerator: Option<Accelerator>,
     #[serde(deserialize_with = "deserialize_vec_map_only")]
     backend_packages: Vec<BackendPackageSet>,
@@ -359,18 +379,15 @@ struct WireRow {
     provenance: Provenance,
     #[serde(deserialize_with = "deserialize_map_only")]
     validation_environment: ValidationEnvironment,
-    #[serde(default, deserialize_with = "deserialize_optional_map_only")]
+    #[serde(default, deserialize_with = "deserialize_some_map_only")]
     evidence: Option<Evidence>,
 }
 
-impl<'de> Deserialize<'de> for PlatformSupportRow {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire: WireRow = deserialize_map_only(deserializer)?;
-        Self::from_wire(wire).map_err(serde::de::Error::custom)
-    }
+/// Whitespace-only satisfies `minLength: 1` but says nothing, so both the
+/// schema (via a `\S` pattern) and the decoder require a non-whitespace
+/// character in every free-text field.
+fn blank(s: &str) -> bool {
+    s.trim().is_empty()
 }
 
 impl PlatformSupportRow {
@@ -443,15 +460,10 @@ impl PlatformSupportRow {
                 "row_id must be lowercase alphanumeric segments separated by single hyphens",
             ));
         }
-        if self.os.name.is_empty() || self.os.version.is_empty() {
+        if blank(&self.os.name) || blank(&self.os.version) {
             return Err(invalid("os name and version must not be empty"));
         }
-        if self
-            .os
-            .image_identity
-            .as_ref()
-            .is_some_and(String::is_empty)
-        {
+        if self.os.image_identity.as_deref().is_some_and(blank) {
             return Err(invalid("os image_identity must not be empty when present"));
         }
         for component in &self.kernel_driver_stack.components {
@@ -460,7 +472,7 @@ impl PlatformSupportRow {
                     "stack component identifiers must be lower_snake_case",
                 ));
             }
-            if component.version.is_empty() {
+            if blank(&component.version) {
                 return Err(invalid("stack component versions must not be empty"));
             }
         }
@@ -471,7 +483,7 @@ impl PlatformSupportRow {
             if !is_canonical_snake_identifier(&set.backend_path) {
                 return Err(invalid("backend_path must be lower_snake_case"));
             }
-            if set.packages.is_empty() || set.packages.iter().any(String::is_empty) {
+            if set.packages.is_empty() || set.packages.iter().any(|p| blank(p)) {
                 return Err(invalid(
                     "each backend path must declare at least one non-empty package",
                 ));
@@ -480,13 +492,13 @@ impl PlatformSupportRow {
         if self
             .model_class_rows
             .iter()
-            .any(|r| r.model_class_row.is_empty())
+            .any(|r| blank(&r.model_class_row))
         {
             return Err(invalid("model_class_row pointers must not be empty"));
         }
         for (signal, gate) in self.gate_semantics.signals() {
             match (gate.gate, gate.reason.as_deref()) {
-                (GateValue::NotApplicable, None | Some("")) => {
+                (GateValue::NotApplicable, None) => {
                     return Err(match signal {
                         "thermal" => invalid("thermal `not_applicable` requires a reason"),
                         "power" => invalid("power `not_applicable` requires a reason"),
@@ -495,22 +507,21 @@ impl PlatformSupportRow {
                         _ => invalid("gpu_utilization `not_applicable` requires a reason"),
                     })
                 }
-                (_, Some("")) => return Err(invalid("a gate reason must not be empty")),
+                (GateValue::NotApplicable, Some(r)) if blank(r) => {
+                    return Err(invalid("a `not_applicable` gate reason must not be blank"))
+                }
+                (_, Some(r)) if blank(r) => return Err(invalid("a gate reason must not be blank")),
                 _ => {}
             }
         }
-        if self.validation_environment.identity.is_empty() {
+        if blank(&self.validation_environment.identity) {
             return Err(invalid("validation_environment identity must not be empty"));
         }
-        if self
-            .evidence
-            .as_ref()
-            .is_some_and(|e| e.location.is_empty())
-        {
+        if self.evidence.as_ref().is_some_and(|e| blank(&e.location)) {
             return Err(invalid("evidence location must not be empty"));
         }
         if let Some(accelerator) = &self.accelerator {
-            if accelerator.family.is_empty() || accelerator.sku.is_empty() {
+            if blank(&accelerator.family) || blank(&accelerator.sku) {
                 return Err(invalid("accelerator family and sku must not be empty"));
             }
         } else {

@@ -345,11 +345,6 @@ fn assert_row_verdicts_agree(cases: Vec<(&str, serde_json::Value, bool)>) {
             expected_valid,
             "{label}: from_json verdict diverged from expectation"
         );
-        assert_eq!(
-            serde_json::from_str::<PlatformSupportRow>(&raw).is_ok(),
-            expected_valid,
-            "{label}: direct serde verdict diverged from expectation"
-        );
     }
 }
 
@@ -550,7 +545,7 @@ fn accelerator_memory_bytes_stay_exact() {
 }
 
 #[test]
-fn duplicate_json_keys_reject_on_both_row_paths() {
+fn duplicate_json_keys_reject() {
     let body = read_dir_sorted("config/platform/rows")
         .into_iter()
         .find(|(name, _)| name == "macos26-m1pro-16gb.json")
@@ -568,10 +563,6 @@ fn duplicate_json_keys_reject_on_both_row_paths() {
     assert!(
         PlatformSupportRow::from_json(&duplicated).is_err(),
         "from_json must reject duplicate keys"
-    );
-    assert!(
-        serde_json::from_str::<PlatformSupportRow>(&duplicated).is_err(),
-        "direct serde must reject duplicate keys"
     );
 }
 
@@ -603,4 +594,146 @@ fn roadmap_targets_cannot_declare_row_fields() {
             "the decoder must reject `{forbidden}` too"
         );
     }
+}
+
+#[test]
+fn explicit_null_is_not_absence() {
+    // `#[serde(default)] Option<T>` treats a present `null` as absent,
+    // but no schema `type` admits null: an optional property is either
+    // absent or a value of its declared type.
+    let mut null_evidence = a_valid_row_value();
+    null_evidence["evidence"] = serde_json::Value::Null;
+    let mut null_image_identity = a_valid_row_value();
+    null_image_identity["os"]["image_identity"] = serde_json::Value::Null;
+    let mut null_memory = a_valid_row_value();
+    null_memory["accelerator"]["memory_bytes"] = serde_json::Value::Null;
+    let mut null_reason = a_valid_row_value();
+    null_reason["gate_semantics"]["thermal"]["reason"] = serde_json::Value::Null;
+    let mut null_accelerator = a_valid_row_value();
+    null_accelerator["accelerator"] = serde_json::Value::Null;
+
+    assert_row_verdicts_agree(vec![
+        ("null evidence", null_evidence, false),
+        ("null image_identity", null_image_identity, false),
+        ("null memory_bytes", null_memory, false),
+        ("null gate reason", null_reason, false),
+        ("null accelerator", null_accelerator, false),
+    ]);
+}
+
+#[test]
+fn blank_strings_are_not_values() {
+    let mut blank_sku = a_valid_row_value();
+    blank_sku["accelerator"]["sku"] = serde_json::json!("   ");
+    let mut blank_reason = a_valid_cpu_row_value();
+    blank_reason["gate_semantics"]["power"] =
+        serde_json::json!({"gate": "not_applicable", "reason": " "});
+    let mut blank_evidence = a_valid_row_value();
+    blank_evidence["evidence"]["location"] = serde_json::json!("\t");
+
+    assert_row_verdicts_agree(vec![
+        ("whitespace-only sku", blank_sku, false),
+        ("whitespace-only gate reason", blank_reason, false),
+        ("whitespace-only evidence location", blank_evidence, false),
+    ]);
+}
+
+#[test]
+fn illegal_json_number_spellings_are_not_repaired() {
+    // Leading zeros are not legal JSON. Canonicalizing them would let
+    // `from_json` accept text a JSON parser — and therefore the schema
+    // validator — cannot read at all.
+    let body = std::fs::read_to_string(repo_path(
+        "config/platform/rows/ubuntu2404-x86-l4-g2s8.json",
+    ))
+    .expect("read the L4 row");
+    let illegal = body.replace("25769803776", "025769803776");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&illegal).is_err(),
+        "the mutated document is not JSON"
+    );
+    assert!(
+        PlatformSupportRow::from_json(&illegal).is_err(),
+        "from_json must not repair illegal number spellings"
+    );
+}
+
+#[test]
+fn byte_values_decode_exactly_through_the_only_path() {
+    // `PlatformSupportRow` has no `Deserialize` impl, so there is one
+    // decoding path and no way for two paths to disagree on a value the
+    // JSON parser would round.
+    let body = std::fs::read_to_string(repo_path(
+        "config/platform/rows/ubuntu2404-x86-l4-g2s8.json",
+    ))
+    .expect("read the L4 row");
+    let float_spelled = body.replace("25769803776", "25769803776.0");
+    let row = PlatformSupportRow::from_json(&float_spelled).expect("integral float decodes");
+    assert_eq!(
+        row.accelerator().expect("accelerator").memory_bytes,
+        Some(25_769_803_776)
+    );
+    for bad in [
+        "25769803776.5",
+        "1.0000000000000001",
+        "1e-9223372036854775809",
+    ] {
+        let mutated = body.replace("25769803776", bad);
+        assert!(
+            PlatformSupportRow::from_json(&mutated).is_err(),
+            "`{bad}` must fail closed"
+        );
+    }
+}
+
+#[test]
+fn enum_spellings_are_welded_to_their_serialized_form() {
+    // Serialization goes through `as_str`, so a spelling that is written
+    // is by construction one that decodes.
+    use tensorplate_platform::{CpuArchitecture, CpuVendor, GateValue, Partitioning, SupportLevel};
+    macro_rules! assert_welded {
+        ($ty:ty, [$($variant:expr),+ $(,)?]) => {
+            $(
+                let json = serde_json::to_string(&$variant).expect("serialize");
+                assert_eq!(json, format!("\"{}\"", $variant.as_str()));
+                let back: $ty = serde_json::from_str(&json).expect("re-deserialize");
+                assert_eq!(back, $variant);
+            )+
+        };
+    }
+    assert_welded!(
+        CpuArchitecture,
+        [CpuArchitecture::X86_64, CpuArchitecture::Arm64]
+    );
+    assert_welded!(
+        CpuVendor,
+        [
+            CpuVendor::Amd,
+            CpuVendor::Intel,
+            CpuVendor::Apple,
+            CpuVendor::NvidiaSoc,
+            CpuVendor::Any
+        ]
+    );
+    assert_welded!(
+        Partitioning,
+        [Partitioning::Unsupported, Partitioning::NotApplicable]
+    );
+    assert_welded!(
+        GateValue,
+        [
+            GateValue::LoadBearing,
+            GateValue::ContextOnly,
+            GateValue::NotApplicable
+        ]
+    );
+    assert_welded!(
+        SupportLevel,
+        [
+            SupportLevel::Production,
+            SupportLevel::Preview,
+            SupportLevel::Experimental,
+            SupportLevel::Planned
+        ]
+    );
 }

@@ -39,17 +39,20 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "\\S"
         },
         "version": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact OS version. Evidence from one version never satisfies another."
+          "description": "Exact OS version. Evidence from one version never satisfies another.",
+          "pattern": "\\S"
         },
         "image_identity": {
           "type": "string",
           "minLength": 1,
-          "description": "Image or distribution identity where the OS version alone is not exact (e.g. a JetPack/L4T release on an Ubuntu base)."
+          "description": "Image or distribution identity where the OS version alone is not exact (e.g. a JetPack/L4T release on an Ubuntu base).",
+          "pattern": "\\S"
         }
       }
     },
@@ -79,7 +82,8 @@
               },
               "version": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "pattern": "\\S"
               }
             }
           }
@@ -127,12 +131,14 @@
       "properties": {
         "family": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "\\S"
         },
         "sku": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact SKU as reported by the platform, recorded at first run."
+          "description": "Exact SKU as reported by the platform, recorded at first run.",
+          "pattern": "\\S"
         },
         "memory_bytes": {
           "type": "integer",
@@ -188,7 +194,8 @@
             "minItems": 1,
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "\\S"
             }
           }
         }
@@ -207,7 +214,8 @@
         "properties": {
           "model_class_row": {
             "type": "string",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "support_level": {
             "type": "string",
@@ -278,7 +286,8 @@
         "identity": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact machine type or physical device identity."
+          "description": "Exact machine type or physical device identity.",
+          "pattern": "\\S"
         }
       }
     },
@@ -292,7 +301,8 @@
       "properties": {
         "location": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "\\S"
         }
       }
     },
@@ -324,7 +334,8 @@
         "reason": {
           "type": "string",
           "minLength": 1,
-          "description": "Why the signal is not applicable on this row. Required for `not_applicable`; free-text row fact, not a typed platform reason."
+          "description": "Why the signal is not applicable on this row. Required for `not_applicable`; free-text row fact, not a typed platform reason.",
+          "pattern": "\\S"
         }
       },
       "allOf": [

@@ -28,11 +28,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   utility rows.
 - The committed registry under `config/platform/`: all twelve v0.2.1 rows
   (five Production, two Preview, five Planned) and all four roadmap
-  targets. Planned rows are marked `spec_authored` and are re-verified
-  against recorded output when their hardware first runs.
+  targets. Every row is currently marked `spec_authored` — no v0.2.1
+  evidence run has happened yet — and each is re-verified against recorded
+  output when its hardware first runs; Planned rows are additionally
+  required to stay `spec_authored`. Production rows declare where their
+  evidence will be filed; the release gate, not the schema, checks that a
+  bundle is actually there.
 - New `tensorplate-platform` workspace crate owning platform identity:
-  row and roadmap-target value objects with unavoidable validation and
-  read-only decoded records, and the ten-value typed `PlatformReason`
+  row and roadmap-target value objects whose only constructor is the
+  validating `from_json` (neither type implements `Deserialize`, so no
+  loader can produce an unvalidated or inexactly-decoded record), and the
+  ten-value typed `PlatformReason`
   vocabulary (`unsupported_accelerator_sku`, `unsupported_os_version`,
   `unsupported_cpu_arch`, `unsupported_cpu_vendor`, `mig_mode_enabled`,
   `missing_backend_package`, `missing_driver_runtime`,
@@ -49,7 +55,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   a JSON parser) and `serde_shape` (object-form and string-form pinning,
   so a decoder is never shape-weaker than its schema, plus canonical
   identifier checks). The memory budget and platform memory profile
-  modules now use these instead of private copies; behavior is unchanged.
+  modules now use these instead of private copies. Behavior is unchanged
+  except that byte-value error messages now say "byte-value domain" rather
+  than "byte-line domain", and number tokens with leading zeros are now
+  reported as the JSON grammar errors they are instead of being
+  canonicalized into legal integers.
 
 - Platform memory profile records and consolidated telemetry field names.
   The new `config/schemas/platform_memory_profile.json` defines the two

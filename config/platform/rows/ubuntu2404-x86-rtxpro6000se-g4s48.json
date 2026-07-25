@@ -35,7 +35,20 @@
       ]
     }
   ],
-  "model_class_rows": [],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Production"
+    },
+    {
+      "model_class_row": "autoregressive_action_tokens",
+      "support_level": "Production"
+    },
+    {
+      "model_class_row": "flow_action_chunk",
+      "support_level": "Production"
+    }
+  ],
   "gate_semantics": {
     "thermal": {
       "gate": "context_only"

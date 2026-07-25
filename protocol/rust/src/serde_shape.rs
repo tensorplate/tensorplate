@@ -46,25 +46,26 @@ where
     deserializer.deserialize_map(MapOnly(std::marker::PhantomData))
 }
 
-/// [`deserialize_map_only`] for an optional field: absent stays `None`,
-/// present must be an object.
-pub fn deserialize_optional_map_only<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+/// [`deserialize_map_only`] for an optional field, for use with
+/// `#[serde(default)]`: an absent key stays `None`, but a key present with
+/// an explicit `null` fails, because no schema `type` admits null.
+pub fn deserialize_some_map_only<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    struct Wrapper<T>(T);
+    deserialize_map_only(deserializer).map(Some)
+}
 
-    impl<'de, T: Deserialize<'de>> Deserialize<'de> for Wrapper<T> {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            deserialize_map_only(deserializer).map(Wrapper)
-        }
-    }
-
-    Option::<Wrapper<T>>::deserialize(deserializer).map(|opt| opt.map(|w| w.0))
+/// An optional non-object field, for use with `#[serde(default)]`: absent
+/// stays `None`, explicit `null` fails. Schemas give optional properties a
+/// concrete `type`, so a present null is a type violation, not an absence.
+pub fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// [`deserialize_map_only`] for every element of a sequence field: the

@@ -42,7 +42,7 @@
       "gate": "load_bearing"
     },
     "power": {
-      "gate": "context_only"
+      "gate": "load_bearing"
     },
     "throttle": {
       "gate": "load_bearing"

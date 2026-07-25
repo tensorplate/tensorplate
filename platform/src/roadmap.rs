@@ -20,8 +20,10 @@ pub const ROADMAP_TARGET_SCHEMA_VERSION: &str = "0.1";
 
 /// A future target not yet exact enough to be a support row.
 ///
-/// Fields are private and read-only; validation runs on every decoding
-/// path through the custom `Deserialize` impl.
+/// Fields are private and read-only, and
+/// [`RoadmapTarget::from_json`] is the only way to obtain one: the type
+/// does not implement `Deserialize`, so no loader can construct an
+/// unvalidated target.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RoadmapTarget {
     schema_version: String,
@@ -39,16 +41,6 @@ struct WireTarget {
     intended_release: String,
     target: String,
     blocking_dependency: String,
-}
-
-impl<'de> Deserialize<'de> for RoadmapTarget {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire: WireTarget = deserialize_map_only(deserializer)?;
-        Self::from_wire(wire).map_err(serde::de::Error::custom)
-    }
 }
 
 impl RoadmapTarget {
@@ -97,12 +89,16 @@ impl RoadmapTarget {
                          single hyphens",
             });
         }
-        if self.intended_release.is_empty()
-            || self.target.is_empty()
-            || self.blocking_dependency.is_empty()
+        if [
+            &self.intended_release,
+            &self.target,
+            &self.blocking_dependency,
+        ]
+        .iter()
+        .any(|field| field.trim().is_empty())
         {
             return Err(PlatformRegistryError::InvalidRoadmapTarget {
-                reason: "intended_release, target, and blocking_dependency must not be empty",
+                reason: "intended_release, target, and blocking_dependency must not be blank",
             });
         }
         Ok(())

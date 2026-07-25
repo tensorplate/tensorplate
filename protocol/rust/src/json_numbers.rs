@@ -131,6 +131,12 @@ pub fn lexeme_exact_value(token: &str) -> Result<Option<u64>, &'static str> {
         Some((i, f)) => (i, f),
         None => (mantissa, ""),
     };
+    // RFC 8259 forbids leading zeros. Repairing them would let
+    // `from_json` accept text that is not JSON at all, so they are
+    // reported as grammar errors for serde to raise.
+    if int_digits.len() > 1 && int_digits.starts_with('0') {
+        return Ok(None);
+    }
     if int_digits.is_empty()
         || frac_digits.is_empty() && mantissa.contains('.')
         || !int_digits.bytes().all(|b| b.is_ascii_digit())
@@ -235,16 +241,14 @@ where
     )))
 }
 
-/// Deserialize an optional byte-valued field. Absent stays `None`; present
-/// goes through [`deserialize_safe_bytes`].
-pub fn deserialize_optional_safe_bytes<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+/// Deserialize an optional byte-valued field, for use with
+/// `#[serde(default)]`: an absent key stays `None`, but a key present with
+/// an explicit `null` fails, because no schema `type` admits null.
+pub fn deserialize_some_safe_bytes<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    struct Wrapper(#[serde(deserialize_with = "deserialize_safe_bytes")] u64);
-
-    Option::<Wrapper>::deserialize(deserializer).map(|opt| opt.map(|w| w.0))
+    deserialize_safe_bytes(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -283,6 +287,30 @@ mod tests {
                 "`{token}` must be out of domain"
             );
         }
+    }
+
+    #[test]
+    fn the_float_bound_matches_the_integer_bound() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let round_tripped = super::MAX_SAFE_BYTES_F64 as u64;
+        assert_eq!(round_tripped, MAX_SAFE_BYTES);
+    }
+
+    #[test]
+    fn leading_zeros_are_grammar_errors_not_values() {
+        // RFC 8259 forbids them; repairing would accept non-JSON text.
+        for token in ["00", "01", "007", "-00", "01e2", "0009007199254740991"] {
+            assert_eq!(
+                lexeme_exact_value(token),
+                Ok(None),
+                "`{token}` must be left for serde to reject"
+            );
+        }
+        assert_eq!(lexeme_exact_value("0"), Ok(Some(0)));
+        assert_eq!(
+            lexeme_exact_value("0.5"),
+            Err("fractional values are not in the byte-value domain")
+        );
     }
 
     #[test]
