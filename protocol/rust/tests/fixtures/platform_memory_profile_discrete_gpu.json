@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1",
+  "profile": "discrete_gpu",
+  "budget_domains": [
+    {
+      "domain": "guest_ram",
+      "measurement_source": "Process RSS on the host side.",
+      "headroom_computation": "guest_ram_budget - observed_peak(guest_ram)"
+    },
+    {
+      "domain": "device_vram",
+      "measurement_source": "NVML-class device memory.",
+      "headroom_computation": "device_vram_budget - observed_peak(device_vram)"
+    }
+  ],
+  "headroom_reporting": "Computed per domain; the binding constraint is reported.",
+  "copy_pressure": "recorded_where_observable",
+  "gate_semantics_note": "Gate values are row-owned; memory load_bearing, thermal context_only on cloud rows.",
+  "instances": [
+    {
+      "instance": "gcp-nvidia-l4-24gb",
+      "measurement_source_mapping": "NVML-class device memory for device_vram; process RSS for guest_ram."
+    },
+    {
+      "instance": "gcp-nvidia-rtx-pro-6000-se",
+      "measurement_source_mapping": "NVML-class device memory for device_vram; process RSS for guest_ram."
+    },
+    {
+      "instance": "gcp-nvidia-a100-40gb",
+      "measurement_source_mapping": "NVML-class device memory for device_vram; process RSS for guest_ram."
+    }
+  ]
+}

@@ -8,6 +8,34 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform memory profile records and consolidated telemetry field names.
+  The new `config/schemas/platform_memory_profile.json` defines the two
+  property-named profiles (`unified_memory`: one shared budget pool;
+  `discrete_gpu`: separate guest-RAM and device-VRAM domains) with their
+  measurement sources, headroom computation, copy-pressure posture, and
+  v0.2 platform instances; the per-profile domain sets are frozen and
+  enforced by both the schema's conditionals and the Rust decoder. The
+  thirteen consolidated platform memory telemetry field spellings
+  (configured/projected budget, per-domain observed peak and headroom,
+  pressure transitions, cache high-water, ledger state, observed output
+  queue, sidecar RSS, engine pool utilization/preemptions, GPU memory) are
+  defined once here for platform registry and telemetry consumers to
+  reference. `tensorplate-protocol` gains the mirror
+  (`PlatformMemoryProfile` with canonical record constructors,
+  `PLATFORM_MEMORY_TELEMETRY_FIELD_NAMES`) on its own config-schema
+  version track with failures mapping to `config_invalid`, plus committed
+  canonical record fixtures pinned to the constructors. Validation is
+  unavoidable: a custom `Deserialize` impl routes every decoding path —
+  including generic serde loaders — through the version gate and
+  frozen-semantics checks, decoded records are read-only, enum-valued
+  fields and object-shaped values decode only from their string and object
+  forms respectively (serde's derived sequence and externally-tagged map
+  forms are rejected, matching the schema's `type` constraints), and
+  instance identifiers must be unique and lowercase-hyphenated. Decoding
+  from JSON text additionally rejects duplicate object keys; loaders that
+  pre-parse into `serde_json::Value` collapse duplicates before any
+  decoder sees them. (V023-E03-F04-T03)
+
 - Canonical memory budget line-item vocabulary. The new
   `config/schemas/memory_budget_breakdown.json` defines the eleven
   `memory_budget_breakdown_bytes` lines shared by every model class:

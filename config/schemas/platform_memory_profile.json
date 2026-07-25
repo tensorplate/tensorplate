@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/platform_memory_profile.json",
+  "title": "TensorPlate Platform Memory Profile Record",
+  "description": "Property-named platform memory profile records (`unified_memory`, `discrete_gpu`) referenced by platform support rows. Each record fixes the profile's budget domains, measurement sources, and headroom computation; adding a platform never adds profile fields, only a new instance with its measurement-source mapping. Profiles are property-named, never vendor-named. This schema also defines the consolidated platform memory telemetry field names (definitions.telemetry_field_name): they are defined once here and referenced — never re-specified — by platform registry and telemetry consumers. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "budget_domains",
+    "headroom_reporting",
+    "copy_pressure",
+    "gate_semantics_note",
+    "instances"
+  ],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "profile": {
+      "type": "string",
+      "enum": ["unified_memory", "discrete_gpu"],
+      "description": "Property-named profile identifier. unified_memory: one shared budget pool where CPU, accelerator, and OS reserve compete. discrete_gpu: two budget domains (guest RAM and device VRAM), each with its own budget and headroom."
+    },
+    "budget_domains": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The profile's budget domains. Frozen per profile: unified_memory has exactly [shared_pool]; discrete_gpu has exactly [guest_ram, device_vram].",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["domain", "measurement_source", "headroom_computation"],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": ["shared_pool", "guest_ram", "device_vram"],
+            "description": "Domain identifier used as the telemetry per-domain qualifier."
+          },
+          "measurement_source": {"type": "string", "minLength": 1},
+          "headroom_computation": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "headroom_reporting": {
+      "type": "string",
+      "minLength": 1,
+      "description": "How headroom is reported for the profile (single shared pool vs. per domain with the binding constraint reported)."
+    },
+    "copy_pressure": {
+      "type": "string",
+      "enum": ["not_applicable", "recorded_where_observable"],
+      "description": "Host-device transfer pressure posture: not_applicable where no transfer link exists (unified memory); recorded_where_observable on discrete GPUs."
+    },
+    "gate_semantics_note": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Note on gate semantics. Gate values are row-owned; the profile records only the default posture."
+    },
+    "instances": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Platform instances carrying this profile, each with its measurement-source mapping. New platforms add instances here without schema change. Instance identifiers must be unique; consumers reject duplicates fail-closed (a keyed-array constraint Draft-07 cannot express, so it is enforced by the decoder).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["instance", "measurement_source_mapping"],
+        "properties": {
+          "instance": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Lowercase alphanumeric segments joined by single hyphens, so identifier resolution is unambiguous (no case or whitespace near-duplicates). Validators whose `$` also matches before a trailing newline (e.g. Python `re`) are more permissive here than the Rust decoder, which rejects any trailing control character."
+          },
+          "measurement_source_mapping": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["profile"], "properties": {"profile": {"const": "unified_memory"}}},
+      "then": {
+        "properties": {
+          "budget_domains": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"properties": {"domain": {"const": "shared_pool"}}}
+          },
+          "copy_pressure": {"const": "not_applicable"}
+        }
+      }
+    },
+    {
+      "if": {"required": ["profile"], "properties": {"profile": {"const": "discrete_gpu"}}},
+      "then": {
+        "properties": {
+          "budget_domains": {
+            "minItems": 2,
+            "maxItems": 2,
+            "items": [
+              {"properties": {"domain": {"const": "guest_ram"}}},
+              {"properties": {"domain": {"const": "device_vram"}}}
+            ]
+          },
+          "copy_pressure": {"const": "recorded_where_observable"}
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "telemetry_field_name": {
+      "type": "string",
+      "description": "Consolidated platform memory telemetry field names for status, metrics, and release evidence. Defined once here; platform registry and telemetry consumers reference these spellings and never re-specify them. Budget-domain and identity qualifiers (budget domain, cache identity, pressure reason codes) are bounded-cardinality diagnostic fields attached to samples, never metric labels.",
+      "enum": [
+        "configured_budget_bytes",
+        "projected_budget_bytes",
+        "observed_peak_bytes",
+        "headroom_bytes",
+        "pressure_transitions",
+        "cache_high_water_bytes",
+        "ledger_active_sessions",
+        "ledger_session_ceiling",
+        "output_queue_observed_bytes",
+        "sidecar_rss_bytes",
+        "engine_pool_utilization",
+        "engine_pool_preemptions",
+        "gpu_memory_used_bytes"
+      ]
+    }
+  }
+}
