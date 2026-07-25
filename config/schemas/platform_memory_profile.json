@@ -68,7 +68,7 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
-            "description": "Lowercase alphanumeric segments joined by single hyphens, so identifier resolution is unambiguous (no case or whitespace near-duplicates)."
+            "description": "Lowercase alphanumeric segments joined by single hyphens, so identifier resolution is unambiguous (no case or whitespace near-duplicates). Validators whose `$` also matches before a trailing newline (e.g. Python `re`) are more permissive here than the Rust decoder, which rejects any trailing control character."
           },
           "measurement_source_mapping": {"type": "string", "minLength": 1}
         }

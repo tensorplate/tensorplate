@@ -28,9 +28,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   unavoidable: a custom `Deserialize` impl routes every decoding path —
   including generic serde loaders — through the version gate and
   frozen-semantics checks, decoded records are read-only, enum-valued
-  fields decode only from their string form, and instance identifiers must
-  be unique and lowercase-hyphenated (all rejected fail-closed by the
-  decoder). (V023-E03-F04-T03)
+  fields and object-shaped values decode only from their string and object
+  forms respectively (serde's derived sequence and externally-tagged map
+  forms are rejected, matching the schema's `type` constraints), and
+  instance identifiers must be unique and lowercase-hyphenated. Decoding
+  from JSON text additionally rejects duplicate object keys; loaders that
+  pre-parse into `serde_json::Value` collapse duplicates before any
+  decoder sees them. (V023-E03-F04-T03)
 
 - Canonical memory budget line-item vocabulary. The new
   `config/schemas/memory_budget_breakdown.json` defines the eleven

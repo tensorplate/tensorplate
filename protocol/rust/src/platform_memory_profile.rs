@@ -152,28 +152,101 @@ impl TryFrom<String> for CopyPressure {
     }
 }
 
+/// Deserialize `T` from a JSON object only.
+///
+/// Serde's derived `Deserialize` for a struct accepts the sequence form
+/// (`["shared_pool", "…", "…"]`) in addition to the map form, and
+/// `deny_unknown_fields` does not cover that path — but the schema pins
+/// `type: "object"`. Routing through `deserialize_map` keeps the decoder
+/// from being weaker than the schema document, the same way `try_from =
+/// "String"` pins the enums to their string form.
+fn deserialize_map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct MapOnly<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for MapOnly<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<A>(self, map: A) -> Result<T, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(MapOnly(std::marker::PhantomData))
+}
+
 /// One budget domain of a profile: what is measured and how headroom is
-/// computed for it. Carries no standalone invariants; its field
-/// constraints are enforced when it is decoded as part of a
-/// [`PlatformMemoryProfile`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// computed for it. Decodes from the object form only. Carries no
+/// standalone invariants; its field constraints are enforced when it is
+/// decoded as part of a [`PlatformMemoryProfile`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BudgetDomain {
     pub domain: BudgetDomainName,
     pub measurement_source: String,
     pub headroom_computation: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireBudgetDomain {
+    domain: BudgetDomainName,
+    measurement_source: String,
+    headroom_computation: String,
+}
+
+impl<'de> Deserialize<'de> for BudgetDomain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire: WireBudgetDomain = deserialize_map_only(deserializer)?;
+        Ok(Self {
+            domain: wire.domain,
+            measurement_source: wire.measurement_source,
+            headroom_computation: wire.headroom_computation,
+        })
+    }
+}
+
 /// A platform instance carrying the profile, with its measurement-source
 /// mapping. New platforms add instances without any schema change.
-/// Carries no standalone invariants; its field constraints (identifier
-/// form, uniqueness, non-empty mapping) are enforced when it is decoded
-/// as part of a [`PlatformMemoryProfile`].
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Decodes from the object form only. Carries no standalone invariants;
+/// its field constraints (identifier form, uniqueness, non-empty mapping)
+/// are enforced when it is decoded as part of a [`PlatformMemoryProfile`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProfileInstance {
     pub instance: String,
     pub measurement_source_mapping: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireProfileInstance {
+    instance: String,
+    measurement_source_mapping: String,
+}
+
+impl<'de> Deserialize<'de> for ProfileInstance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire: WireProfileInstance = deserialize_map_only(deserializer)?;
+        Ok(Self {
+            instance: wire.instance,
+            measurement_source_mapping: wire.measurement_source_mapping,
+        })
+    }
 }
 
 /// Platform memory profile record, mirroring
@@ -216,7 +289,7 @@ impl<'de> Deserialize<'de> for PlatformMemoryProfile {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = WireProfile::deserialize(deserializer)?;
+        let wire: WireProfile = deserialize_map_only(deserializer)?;
         Self::from_wire(wire).map_err(serde::de::Error::custom)
     }
 }
@@ -358,7 +431,9 @@ impl PlatformMemoryProfile {
         // `Value` collapses duplicate JSON keys last-wins, which would make
         // this path weaker than direct serde deserialization. The `Value`
         // above serves only the typed version pre-check.
-        let wire: WireProfile = serde_json::from_str(json)?;
+        let mut de = serde_json::Deserializer::from_str(json);
+        let wire: WireProfile = deserialize_map_only(&mut de)?;
+        de.end()?;
         Self::from_wire(wire)
     }
 
@@ -599,33 +674,55 @@ mod tests {
     fn enum_spellings_round_trip() {
         // Serialization uses `rename_all`, deserialization uses the
         // `TryFrom` literals; this pins the two together so a rename on
-        // one side cannot drift from the other.
-        for (variant, spelling) in [
-            (PlatformMemoryProfileName::UnifiedMemory, "unified_memory"),
-            (PlatformMemoryProfileName::DiscreteGpu, "discrete_gpu"),
+        // one side cannot drift from the other. The exhaustive matches
+        // below make a newly added variant a compile error here rather
+        // than a silently untested one.
+        fn profile_spelling(v: PlatformMemoryProfileName) -> &'static str {
+            match v {
+                PlatformMemoryProfileName::UnifiedMemory => "unified_memory",
+                PlatformMemoryProfileName::DiscreteGpu => "discrete_gpu",
+            }
+        }
+        fn domain_spelling(v: BudgetDomainName) -> &'static str {
+            match v {
+                BudgetDomainName::SharedPool => "shared_pool",
+                BudgetDomainName::GuestRam => "guest_ram",
+                BudgetDomainName::DeviceVram => "device_vram",
+            }
+        }
+        fn pressure_spelling(v: CopyPressure) -> &'static str {
+            match v {
+                CopyPressure::NotApplicable => "not_applicable",
+                CopyPressure::RecordedWhereObservable => "recorded_where_observable",
+            }
+        }
+
+        for variant in [
+            PlatformMemoryProfileName::UnifiedMemory,
+            PlatformMemoryProfileName::DiscreteGpu,
         ] {
+            let spelling = profile_spelling(variant);
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, format!("\"{spelling}\""));
             let back: PlatformMemoryProfileName = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, variant);
         }
-        for (variant, spelling) in [
-            (BudgetDomainName::SharedPool, "shared_pool"),
-            (BudgetDomainName::GuestRam, "guest_ram"),
-            (BudgetDomainName::DeviceVram, "device_vram"),
+        for variant in [
+            BudgetDomainName::SharedPool,
+            BudgetDomainName::GuestRam,
+            BudgetDomainName::DeviceVram,
         ] {
+            let spelling = domain_spelling(variant);
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, format!("\"{spelling}\""));
             let back: BudgetDomainName = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(back, variant);
         }
-        for (variant, spelling) in [
-            (CopyPressure::NotApplicable, "not_applicable"),
-            (
-                CopyPressure::RecordedWhereObservable,
-                "recorded_where_observable",
-            ),
+        for variant in [
+            CopyPressure::NotApplicable,
+            CopyPressure::RecordedWhereObservable,
         ] {
+            let spelling = pressure_spelling(variant);
             let json = serde_json::to_string(&variant).expect("serialize");
             assert_eq!(json, format!("\"{spelling}\""));
             let back: CopyPressure = serde_json::from_str(&json).expect("deserialize");

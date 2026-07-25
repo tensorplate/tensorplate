@@ -207,6 +207,51 @@ fn enum_fields_accept_only_string_form() {
 }
 
 #[test]
+fn object_shaped_values_accept_only_map_form() {
+    // Serde's derived Deserialize for a struct also accepts the sequence
+    // form, which the schema rejects as `type: "object"`. These cases are
+    // written as explicit literals because `to_value(record)` can only
+    // ever produce the map form.
+    let seq_domain = serde_json::json!({
+        "schema_version": "0.1",
+        "profile": "unified_memory",
+        "budget_domains": [["shared_pool", "s", "h"]],
+        "headroom_reporting": "r",
+        "copy_pressure": "not_applicable",
+        "gate_semantics_note": "g",
+        "instances": [{"instance": "jetson-orin", "measurement_source_mapping": "m"}]
+    });
+    let seq_instance = serde_json::json!({
+        "schema_version": "0.1",
+        "profile": "unified_memory",
+        "budget_domains": [{
+            "domain": "shared_pool",
+            "measurement_source": "s",
+            "headroom_computation": "h"
+        }],
+        "headroom_reporting": "r",
+        "copy_pressure": "not_applicable",
+        "gate_semantics_note": "g",
+        "instances": [["jetson-orin", "m"]]
+    });
+    let seq_record = serde_json::json!([
+        "0.1",
+        "unified_memory",
+        [{"domain": "shared_pool", "measurement_source": "s", "headroom_computation": "h"}],
+        "r",
+        "not_applicable",
+        "g",
+        [{"instance": "jetson-orin", "measurement_source_mapping": "m"}]
+    ]);
+
+    assert_verdicts_agree(vec![
+        ("sequence-form budget domain", seq_domain, false),
+        ("sequence-form instance", seq_instance, false),
+        ("sequence-form whole record", seq_record, false),
+    ]);
+}
+
+#[test]
 fn instance_identifier_form_is_enforced() {
     // Near-duplicates by case or stray whitespace would defeat
     // fail-closed identifier resolution, so both sides pin the form.
