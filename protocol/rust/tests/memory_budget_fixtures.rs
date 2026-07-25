@@ -334,6 +334,21 @@ fn precision_edge_lexemes_fail_closed_beyond_f64_validators() {
 }
 
 #[test]
+fn trailing_zero_spelling_decodes_exactly_beyond_f64_validators() {
+    // The f64-based validator double-rounds "962147477.0000000000" to a
+    // non-integral double and would reject it; the decoder judges the
+    // exact decimal lexeme and accepts the exact value. Divergence is
+    // expected in this direction too — the decoder is the more faithful
+    // side of the pair.
+    let raw = r#"{"schema_version":"0.1","memory_budget_breakdown_bytes":{"model_weights_bytes":962147477.0000000000}}"#;
+    let decl = MemoryBudgetDeclaration::from_json(raw).expect("decoder accepts the exact value");
+    assert_eq!(
+        decl.memory_budget_breakdown_bytes.model_weights_bytes,
+        962_147_477
+    );
+}
+
+#[test]
 fn long_integral_spelling_agrees_with_validator() {
     // "1." + 63 zeros is 65 characters long and exactly 1: schema-valid,
     // and the decoder must agree — spelling length is never a rejection
