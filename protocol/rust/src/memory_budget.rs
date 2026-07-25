@@ -132,12 +132,6 @@ enum LexemeExponent {
 /// violation, or `None` when the token is in-domain — or is not a valid
 /// JSON number at all, which serde reports as a grammar error instead.
 fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
-    if token.len() > 64 {
-        // Fail closed on pathological tokens instead of reasoning about
-        // arbitrarily long digit strings; real byte counts need <= 17
-        // characters.
-        return Some("number token is longer than the 64 characters accepted");
-    }
     let (negative, rest) = match token.strip_prefix('-') {
         Some(r) => (true, r),
         None => (false, token),
@@ -199,14 +193,19 @@ fn lexeme_domain_violation(token: &str) -> Option<&'static str> {
             return Some("exceeds the largest exactly-representable byte value (2^53 - 1)")
         }
     };
-    // The token-length gate bounds both digit counts at 64, so the base
-    // offset stays within [-65, 63]. `exponent`, however, is
-    // attacker-controlled up to +/- i64::MAX, so the addition saturates:
-    // positive overflow lands above the range check (out-of-range) and
-    // negative overflow lands below zero (fractional), never a panic.
-    let int_len = i64::try_from(int_digits.len()).unwrap_or(64);
-    let position =
-        |i: usize| (int_len - 1 - i64::try_from(i).unwrap_or(64)).saturating_add(exponent);
+    // Token length is unbounded — a spelling like "1." + 63 zeros is
+    // exactly 1 and must be accepted — so every arithmetic step saturates:
+    // digit counts always fit i64 (they are bounded by the input length),
+    // and with an attacker-controlled exponent up to +/- i64::MAX,
+    // positive saturation lands above the range check (out-of-range) and
+    // negative saturation lands below zero (fractional), never a panic.
+    let int_len = i64::try_from(int_digits.len()).unwrap_or(i64::MAX);
+    let position = |i: usize| {
+        int_len
+            .saturating_sub(1)
+            .saturating_sub(i64::try_from(i).unwrap_or(i64::MAX))
+            .saturating_add(exponent)
+    };
     if position(last_nonzero) < 0 {
         return Some("fractional values are not in the byte-line domain");
     }
@@ -585,12 +584,23 @@ mod tests {
     }
 
     #[test]
-    fn oversized_number_token_rejects() {
-        let long_token = format!("1.{}", "0".repeat(70));
-        let raw = declaration_json(&format!(r#"{{"model_weights_bytes":{long_token}}}"#));
-        let err =
-            MemoryBudgetDeclaration::from_json(&raw).expect_err("oversized token must fail closed");
-        assert!(matches!(err, MemoryBudgetError::InvalidNumberLexeme { .. }));
+    fn long_integral_spelling_accepted() {
+        // "1." + 63 zeros is 65 characters and exactly 1; length alone is
+        // never a rejection reason.
+        let token = format!("1.{}", "0".repeat(63));
+        let raw = declaration_json(&format!(r#"{{"model_weights_bytes":{token}}}"#));
+        let decl = MemoryBudgetDeclaration::from_json(&raw).expect("long integral spelling");
+        assert_eq!(decl.memory_budget_breakdown_bytes.model_weights_bytes, 1);
+    }
+
+    #[test]
+    fn long_fractional_spelling_rejects() {
+        // Same length class, but with a significant digit right of the
+        // point: fractional no matter how long the spelling.
+        let token = format!("1.{}1", "0".repeat(70));
+        let raw = declaration_json(&format!(r#"{{"model_weights_bytes":{token}}}"#));
+        let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("fractional must reject");
+        assert!(err.to_string().contains("fractional"), "reason: {err}");
     }
 
     #[test]

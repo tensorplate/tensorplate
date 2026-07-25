@@ -334,6 +334,26 @@ fn precision_edge_lexemes_fail_closed_beyond_f64_validators() {
 }
 
 #[test]
+fn long_integral_spelling_agrees_with_validator() {
+    // "1." + 63 zeros is 65 characters long and exactly 1: schema-valid,
+    // and the decoder must agree — spelling length is never a rejection
+    // reason on either side.
+    let schema = schema_document();
+    let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
+    let raw = format!(
+        r#"{{"schema_version":"0.1","memory_budget_breakdown_bytes":{{"model_weights_bytes":1.{}}}}}"#,
+        "0".repeat(63)
+    );
+    let instance: serde_json::Value = serde_json::from_str(&raw).expect("document parses");
+    assert!(
+        validator.is_valid(&instance),
+        "schema accepts the long integral spelling"
+    );
+    let decl = MemoryBudgetDeclaration::from_json(&raw).expect("decoder agrees");
+    assert_eq!(decl.memory_budget_breakdown_bytes.model_weights_bytes, 1);
+}
+
+#[test]
 fn fixtures_validate_against_schema_document() {
     let schema = schema_document();
     let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
