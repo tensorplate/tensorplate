@@ -79,8 +79,13 @@ impl From<PlatformMemoryProfileError> for ProtocolError {
 }
 
 /// Property-named profile identifier. Never vendor-named.
+///
+/// `try_from` pins decoding to the plain string form: serde's derived
+/// `Deserialize` for a fieldless enum would also accept the
+/// externally-tagged map form (`{"unified_memory": null}`), which the
+/// schema rejects as `type: "string"`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", try_from = "String")]
 pub enum PlatformMemoryProfileName {
     /// One shared budget pool: CPU, accelerator, and OS reserve compete.
     UnifiedMemory,
@@ -89,18 +94,45 @@ pub enum PlatformMemoryProfileName {
     DiscreteGpu,
 }
 
+impl TryFrom<String> for PlatformMemoryProfileName {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "unified_memory" => Ok(Self::UnifiedMemory),
+            "discrete_gpu" => Ok(Self::DiscreteGpu),
+            other => Err(format!("unknown platform memory profile `{other}`")),
+        }
+    }
+}
+
 /// Budget-domain identifier, used as the telemetry per-domain qualifier.
+/// String-only decoding, as for [`PlatformMemoryProfileName`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", try_from = "String")]
 pub enum BudgetDomainName {
     SharedPool,
     GuestRam,
     DeviceVram,
 }
 
-/// Host-device transfer pressure posture for a profile.
+impl TryFrom<String> for BudgetDomainName {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "shared_pool" => Ok(Self::SharedPool),
+            "guest_ram" => Ok(Self::GuestRam),
+            "device_vram" => Ok(Self::DeviceVram),
+            other => Err(format!("unknown budget domain `{other}`")),
+        }
+    }
+}
+
+/// Host-device transfer pressure posture for a profile. String-only
+/// decoding, as for [`PlatformMemoryProfileName`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", try_from = "String")]
 pub enum CopyPressure {
     /// No transfer link exists (unified memory).
     NotApplicable,
@@ -108,8 +140,22 @@ pub enum CopyPressure {
     RecordedWhereObservable,
 }
 
+impl TryFrom<String> for CopyPressure {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "not_applicable" => Ok(Self::NotApplicable),
+            "recorded_where_observable" => Ok(Self::RecordedWhereObservable),
+            other => Err(format!("unknown copy pressure posture `{other}`")),
+        }
+    }
+}
+
 /// One budget domain of a profile: what is measured and how headroom is
-/// computed for it.
+/// computed for it. Carries no standalone invariants; its field
+/// constraints are enforced when it is decoded as part of a
+/// [`PlatformMemoryProfile`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetDomain {
@@ -120,6 +166,9 @@ pub struct BudgetDomain {
 
 /// A platform instance carrying the profile, with its measurement-source
 /// mapping. New platforms add instances without any schema change.
+/// Carries no standalone invariants; its field constraints (identifier
+/// form, uniqueness, non-empty mapping) are enforced when it is decoded
+/// as part of a [`PlatformMemoryProfile`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileInstance {
@@ -170,6 +219,21 @@ impl<'de> Deserialize<'de> for PlatformMemoryProfile {
         let wire = WireProfile::deserialize(deserializer)?;
         Self::from_wire(wire).map_err(serde::de::Error::custom)
     }
+}
+
+/// Mirror of the schema's instance-identifier pattern
+/// `^[a-z0-9]+(-[a-z0-9]+)*$`: lowercase alphanumeric segments joined by
+/// single hyphens. Rejecting near-duplicates by form (case and stray
+/// whitespace) keeps identifier resolution unambiguous for the registry
+/// and telemetry consumers, and subsumes the non-empty check.
+fn is_canonical_instance_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.split('-').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 impl PlatformMemoryProfile {
@@ -290,7 +354,11 @@ impl PlatformMemoryProfile {
                 expected: PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION,
             });
         }
-        let wire: WireProfile = serde_json::from_value(value)?;
+        // Decode from the original text, not the `Value`: parsing through
+        // `Value` collapses duplicate JSON keys last-wins, which would make
+        // this path weaker than direct serde deserialization. The `Value`
+        // above serves only the typed version pre-check.
+        let wire: WireProfile = serde_json::from_str(json)?;
         Self::from_wire(wire)
     }
 
@@ -423,9 +491,10 @@ impl PlatformMemoryProfile {
         }
         let mut seen_instances = std::collections::HashSet::new();
         for instance in &self.instances {
-            if instance.instance.is_empty() {
+            if !is_canonical_instance_id(&instance.instance) {
                 return Err(PlatformMemoryProfileError::InvalidProfile {
-                    reason: "instance identifier must not be empty",
+                    reason: "instance identifiers must be lowercase alphanumeric segments \
+                             separated by single hyphens",
                 });
             }
             if instance.measurement_source_mapping.is_empty() {
@@ -524,6 +593,76 @@ mod tests {
             err,
             PlatformMemoryProfileError::InvalidProfile { .. }
         ));
+    }
+
+    #[test]
+    fn enum_spellings_round_trip() {
+        // Serialization uses `rename_all`, deserialization uses the
+        // `TryFrom` literals; this pins the two together so a rename on
+        // one side cannot drift from the other.
+        for (variant, spelling) in [
+            (PlatformMemoryProfileName::UnifiedMemory, "unified_memory"),
+            (PlatformMemoryProfileName::DiscreteGpu, "discrete_gpu"),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, format!("\"{spelling}\""));
+            let back: PlatformMemoryProfileName = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, variant);
+        }
+        for (variant, spelling) in [
+            (BudgetDomainName::SharedPool, "shared_pool"),
+            (BudgetDomainName::GuestRam, "guest_ram"),
+            (BudgetDomainName::DeviceVram, "device_vram"),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, format!("\"{spelling}\""));
+            let back: BudgetDomainName = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, variant);
+        }
+        for (variant, spelling) in [
+            (CopyPressure::NotApplicable, "not_applicable"),
+            (
+                CopyPressure::RecordedWhereObservable,
+                "recorded_where_observable",
+            ),
+        ] {
+            let json = serde_json::to_string(&variant).expect("serialize");
+            assert_eq!(json, format!("\"{spelling}\""));
+            let back: CopyPressure = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn enum_map_form_rejects() {
+        // The externally-tagged map form must not decode on any enum.
+        serde_json::from_str::<PlatformMemoryProfileName>(r#"{"unified_memory":null}"#)
+            .expect_err("profile name is string-only");
+        serde_json::from_str::<BudgetDomainName>(r#"{"shared_pool":null}"#)
+            .expect_err("budget domain is string-only");
+        serde_json::from_str::<CopyPressure>(r#"{"not_applicable":null}"#)
+            .expect_err("copy pressure is string-only");
+    }
+
+    #[test]
+    fn instance_identifier_form_rejects_near_duplicates() {
+        for bad in [
+            "Jetson-Orin",
+            "jetson-orin ",
+            "jetson--orin",
+            "-jetson",
+            "jetson_orin",
+        ] {
+            let mut record = PlatformMemoryProfile::unified_memory();
+            record.instances[0].instance = bad.to_string();
+            let json = serde_json::to_string(&record).expect("serialize");
+            let err = PlatformMemoryProfile::from_json(&json)
+                .expect_err("near-duplicate identifier must reject");
+            assert!(
+                err.to_string().contains("instance identifiers"),
+                "`{bad}` should be rejected on identifier form: {err}"
+            );
+        }
     }
 
     #[test]

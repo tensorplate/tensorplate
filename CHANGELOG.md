@@ -27,9 +27,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   canonical record fixtures pinned to the constructors. Validation is
   unavoidable: a custom `Deserialize` impl routes every decoding path —
   including generic serde loaders — through the version gate and
-  frozen-semantics checks, decoded records are read-only, and instance
-  identifiers must be unique (rejected fail-closed by the decoder).
-  (V023-E03-F04-T03)
+  frozen-semantics checks, decoded records are read-only, enum-valued
+  fields decode only from their string form, and instance identifiers must
+  be unique and lowercase-hyphenated (all rejected fail-closed by the
+  decoder). (V023-E03-F04-T03)
 
 - Canonical memory budget line-item vocabulary. The new
   `config/schemas/memory_budget_breakdown.json` defines the eleven

@@ -81,7 +81,14 @@ fn assert_verdicts_agree(cases: Vec<(&str, serde_json::Value, bool)>) {
         assert_eq!(
             PlatformMemoryProfile::from_json(&raw).is_ok(),
             expected_valid,
-            "{label}: Rust verdict diverged from expectation"
+            "{label}: from_json verdict diverged from expectation"
+        );
+        // Both decoding paths are certified, not just the typed one: the
+        // custom Deserialize impl is what makes validation unavoidable.
+        assert_eq!(
+            serde_json::from_str::<PlatformMemoryProfile>(&raw).is_ok(),
+            expected_valid,
+            "{label}: direct serde verdict diverged from expectation"
         );
     }
 }
@@ -168,6 +175,82 @@ fn boundary_minimums_agree_between_schema_and_decoder() {
         ("empty instance identifier", empty_instance_name, false),
         ("empty measurement_source_mapping", empty_mapping, false),
     ]);
+}
+
+#[test]
+fn enum_fields_accept_only_string_form() {
+    // Serde's derived Deserialize for a fieldless enum also accepts the
+    // externally-tagged map form (`{"unified_memory": null}`), which the
+    // schema rejects as `type: "string"`. The enums pin decoding to
+    // strings so the decoder is never weaker than the schema.
+    let mut map_profile = unified_value();
+    map_profile["profile"] = serde_json::json!({"unified_memory": null});
+    let mut map_domain = unified_value();
+    map_domain["budget_domains"][0]["domain"] = serde_json::json!({"shared_pool": null});
+    let mut map_pressure = unified_value();
+    map_pressure["copy_pressure"] = serde_json::json!({"not_applicable": null});
+    let mut numeric_profile = unified_value();
+    numeric_profile["profile"] = serde_json::json!(0);
+    let mut null_pressure = unified_value();
+    null_pressure["copy_pressure"] = serde_json::json!(null);
+    let mut unknown_variant = unified_value();
+    unknown_variant["profile"] = serde_json::json!("apple_silicon");
+
+    assert_verdicts_agree(vec![
+        ("map-form profile", map_profile, false),
+        ("map-form budget domain", map_domain, false),
+        ("map-form copy_pressure", map_pressure, false),
+        ("numeric profile variant index", numeric_profile, false),
+        ("null copy_pressure", null_pressure, false),
+        ("unknown profile variant", unknown_variant, false),
+    ]);
+}
+
+#[test]
+fn instance_identifier_form_is_enforced() {
+    // Near-duplicates by case or stray whitespace would defeat
+    // fail-closed identifier resolution, so both sides pin the form.
+    let mut mixed_case = unified_value();
+    mixed_case["instances"][0]["instance"] = serde_json::json!("Jetson-Orin");
+    let mut trailing_space = unified_value();
+    trailing_space["instances"][0]["instance"] = serde_json::json!("jetson-orin ");
+    let mut double_hyphen = unified_value();
+    double_hyphen["instances"][0]["instance"] = serde_json::json!("jetson--orin");
+    let mut leading_hyphen = unified_value();
+    leading_hyphen["instances"][0]["instance"] = serde_json::json!("-jetson");
+    let mut underscored = unified_value();
+    underscored["instances"][0]["instance"] = serde_json::json!("jetson_orin");
+
+    assert_verdicts_agree(vec![
+        ("mixed-case instance id", mixed_case, false),
+        ("trailing-space instance id", trailing_space, false),
+        ("double-hyphen instance id", double_hyphen, false),
+        ("leading-hyphen instance id", leading_hyphen, false),
+        ("underscored instance id", underscored, false),
+    ]);
+}
+
+#[test]
+fn duplicate_json_keys_reject_on_both_paths() {
+    // Parsing through `serde_json::Value` collapses duplicate keys
+    // last-wins; `from_json` decodes the original text so a reviewer can
+    // never see one value while the loader takes another.
+    let canonical =
+        serde_json::to_string(&PlatformMemoryProfile::unified_memory()).expect("serialize");
+    let duplicated = canonical.replacen(
+        r#""profile":"unified_memory""#,
+        r#""profile":"discrete_gpu","profile":"unified_memory""#,
+        1,
+    );
+    assert_ne!(duplicated, canonical, "the duplicate key was injected");
+    assert!(
+        PlatformMemoryProfile::from_json(&duplicated).is_err(),
+        "from_json must reject duplicate keys"
+    );
+    assert!(
+        serde_json::from_str::<PlatformMemoryProfile>(&duplicated).is_err(),
+        "direct serde must reject duplicate keys"
+    );
 }
 
 #[test]

@@ -64,7 +64,12 @@
         "additionalProperties": false,
         "required": ["instance", "measurement_source_mapping"],
         "properties": {
-          "instance": {"type": "string", "minLength": 1},
+          "instance": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+            "description": "Lowercase alphanumeric segments joined by single hyphens, so identifier resolution is unambiguous (no case or whitespace near-duplicates)."
+          },
           "measurement_source_mapping": {"type": "string", "minLength": 1}
         }
       }
@@ -72,7 +77,7 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"profile": {"const": "unified_memory"}}},
+      "if": {"required": ["profile"], "properties": {"profile": {"const": "unified_memory"}}},
       "then": {
         "properties": {
           "budget_domains": {
@@ -85,7 +90,7 @@
       }
     },
     {
-      "if": {"properties": {"profile": {"const": "discrete_gpu"}}},
+      "if": {"required": ["profile"], "properties": {"profile": {"const": "discrete_gpu"}}},
       "then": {
         "properties": {
           "budget_domains": {
