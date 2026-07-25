@@ -171,6 +171,32 @@ fn boundary_minimums_agree_between_schema_and_decoder() {
 }
 
 #[test]
+fn duplicate_instance_ids_reject_beyond_schema() {
+    // Draft-07 cannot express by-key uniqueness for an array of objects,
+    // so the schema accepts a duplicated instance id while the decoder
+    // rejects it — a documented decoder-stricter, fail-closed divergence
+    // (an id-keyed object was rejected as the alternative because JSON
+    // duplicate keys collapse last-wins, which would fail OPEN).
+    let validator =
+        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
+    let mut duplicated = unified_value();
+    let first = duplicated["instances"][0].clone();
+    duplicated["instances"]
+        .as_array_mut()
+        .expect("instances array")
+        .push(first);
+    assert!(
+        validator.is_valid(&duplicated),
+        "schema cannot see the duplicate"
+    );
+    let raw = serde_json::to_string(&duplicated).expect("serialize");
+    assert!(
+        PlatformMemoryProfile::from_json(&raw).is_err(),
+        "decoder must reject the duplicate fail-closed"
+    );
+}
+
+#[test]
 fn rust_vocabulary_matches_schema_document() {
     let schema = schema_document();
 
@@ -220,5 +246,5 @@ fn stub_row_resolves_its_profile_record() {
     let row: StubRow = serde_json::from_str(stub).expect("stub row parses");
     let record = PlatformMemoryProfile::canonical(row.memory_profile);
     assert_eq!(record, PlatformMemoryProfile::unified_memory());
-    assert_eq!(record.budget_domains.len(), 1, "one shared pool");
+    assert_eq!(record.budget_domains().len(), 1, "one shared pool");
 }

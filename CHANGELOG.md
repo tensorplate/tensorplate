@@ -24,7 +24,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (`PlatformMemoryProfile` with canonical record constructors,
   `PLATFORM_MEMORY_TELEMETRY_FIELD_NAMES`) on its own config-schema
   version track with failures mapping to `config_invalid`, plus committed
-  canonical record fixtures pinned to the constructors.
+  canonical record fixtures pinned to the constructors. Validation is
+  unavoidable: a custom `Deserialize` impl routes every decoding path —
+  including generic serde loaders — through the version gate and
+  frozen-semantics checks, decoded records are read-only, and instance
+  identifiers must be unique (rejected fail-closed by the decoder).
   (V023-E03-F04-T03)
 
 - Canonical memory budget line-item vocabulary. The new

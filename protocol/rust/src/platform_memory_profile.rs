@@ -128,20 +128,48 @@ pub struct ProfileInstance {
 }
 
 /// Platform memory profile record, mirroring
-/// `config/schemas/platform_memory_profile.json`. Parse with
-/// [`PlatformMemoryProfile::from_json`], the validated entry point that
-/// enforces the schema-scoped version track and the frozen per-profile
-/// semantics.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// `config/schemas/platform_memory_profile.json`. Validation is
+/// unavoidable: the custom [`Deserialize`] impl routes every decoding
+/// path — including generic serde configuration loaders — through the
+/// same schema-version gate and frozen-semantics checks as
+/// [`PlatformMemoryProfile::from_json`], and fields are private and
+/// read-only, so a decoded record cannot exist or be mutated in an
+/// invalid state. Prefer `from_json`, which reports failures as typed
+/// [`PlatformMemoryProfileError`] values instead of serde messages.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlatformMemoryProfile {
-    pub schema_version: String,
-    pub profile: PlatformMemoryProfileName,
-    pub budget_domains: Vec<BudgetDomain>,
-    pub headroom_reporting: String,
-    pub copy_pressure: CopyPressure,
-    pub gate_semantics_note: String,
-    pub instances: Vec<ProfileInstance>,
+    schema_version: String,
+    profile: PlatformMemoryProfileName,
+    budget_domains: Vec<BudgetDomain>,
+    headroom_reporting: String,
+    copy_pressure: CopyPressure,
+    gate_semantics_note: String,
+    instances: Vec<ProfileInstance>,
+}
+
+/// Private wire form — the only type serde derives deserialization for.
+/// [`PlatformMemoryProfile`]'s `Deserialize` impl converts it through the
+/// validating constructor so no decoding path can skip validation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireProfile {
+    schema_version: String,
+    profile: PlatformMemoryProfileName,
+    budget_domains: Vec<BudgetDomain>,
+    headroom_reporting: String,
+    copy_pressure: CopyPressure,
+    gate_semantics_note: String,
+    instances: Vec<ProfileInstance>,
+}
+
+impl<'de> Deserialize<'de> for PlatformMemoryProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WireProfile::deserialize(deserializer)?;
+        Self::from_wire(wire).map_err(serde::de::Error::custom)
+    }
 }
 
 impl PlatformMemoryProfile {
@@ -246,9 +274,10 @@ impl PlatformMemoryProfile {
     /// Parse and validate a profile record document, enforcing
     /// [`PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION`] and the frozen
     /// per-profile semantics. All failures are fail-closed typed errors
-    /// that map to [`ErrorCode::ConfigInvalid`]. This is the validated
-    /// entry point; deserializing the types directly with serde skips both
-    /// the schema_version gate and the semantic validation.
+    /// that map to [`ErrorCode::ConfigInvalid`]. Direct serde
+    /// deserialization runs the same validation via the custom
+    /// `Deserialize` impl; this entry point additionally reports typed
+    /// errors instead of serde messages.
     pub fn from_json(json: &str) -> Result<Self, PlatformMemoryProfileError> {
         let value: serde_json::Value = serde_json::from_str(json)?;
         let observed = value
@@ -261,9 +290,73 @@ impl PlatformMemoryProfile {
                 expected: PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION,
             });
         }
-        let record: Self = serde_json::from_value(value)?;
+        let wire: WireProfile = serde_json::from_value(value)?;
+        Self::from_wire(wire)
+    }
+
+    /// Validating constructor shared by [`Self::from_json`] and the custom
+    /// `Deserialize` impl: every decoding path funnels through here.
+    fn from_wire(wire: WireProfile) -> Result<Self, PlatformMemoryProfileError> {
+        if wire.schema_version != PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION {
+            return Err(PlatformMemoryProfileError::UnsupportedSchemaVersion {
+                got: wire.schema_version,
+                expected: PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION,
+            });
+        }
+        let record = Self {
+            schema_version: wire.schema_version,
+            profile: wire.profile,
+            budget_domains: wire.budget_domains,
+            headroom_reporting: wire.headroom_reporting,
+            copy_pressure: wire.copy_pressure,
+            gate_semantics_note: wire.gate_semantics_note,
+            instances: wire.instances,
+        };
         record.validate_profile_semantics()?;
         Ok(record)
+    }
+
+    /// Schema version of the record (always
+    /// [`PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION`] for a decoded record).
+    #[must_use]
+    pub fn schema_version(&self) -> &str {
+        &self.schema_version
+    }
+
+    /// The property-named profile identifier.
+    #[must_use]
+    pub fn profile(&self) -> PlatformMemoryProfileName {
+        self.profile
+    }
+
+    /// The profile's frozen budget domains.
+    #[must_use]
+    pub fn budget_domains(&self) -> &[BudgetDomain] {
+        &self.budget_domains
+    }
+
+    /// How headroom is reported for the profile.
+    #[must_use]
+    pub fn headroom_reporting(&self) -> &str {
+        &self.headroom_reporting
+    }
+
+    /// Host-device transfer pressure posture.
+    #[must_use]
+    pub fn copy_pressure(&self) -> CopyPressure {
+        self.copy_pressure
+    }
+
+    /// Note on row-owned gate semantics.
+    #[must_use]
+    pub fn gate_semantics_note(&self) -> &str {
+        &self.gate_semantics_note
+    }
+
+    /// Platform instances carrying this profile.
+    #[must_use]
+    pub fn instances(&self) -> &[ProfileInstance] {
+        &self.instances
     }
 
     /// The budget domain set and copy-pressure posture are frozen per
@@ -328,6 +421,7 @@ impl PlatformMemoryProfile {
                 });
             }
         }
+        let mut seen_instances = std::collections::HashSet::new();
         for instance in &self.instances {
             if instance.instance.is_empty() {
                 return Err(PlatformMemoryProfileError::InvalidProfile {
@@ -337,6 +431,15 @@ impl PlatformMemoryProfile {
             if instance.measurement_source_mapping.is_empty() {
                 return Err(PlatformMemoryProfileError::InvalidProfile {
                     reason: "instance measurement_source_mapping must not be empty",
+                });
+            }
+            // Uniqueness lives here, not in the schema: Draft-07 cannot
+            // express by-key uniqueness for an array of objects, and an
+            // id-keyed JSON object would let duplicate keys collapse
+            // last-wins instead of rejecting. Decoder-stricter, fail-closed.
+            if !seen_instances.insert(instance.instance.as_str()) {
+                return Err(PlatformMemoryProfileError::InvalidProfile {
+                    reason: "instance identifiers must be unique",
                 });
             }
         }
@@ -421,6 +524,42 @@ mod tests {
             err,
             PlatformMemoryProfileError::InvalidProfile { .. }
         ));
+    }
+
+    #[test]
+    fn duplicate_instance_identifiers_reject() {
+        let mut record = PlatformMemoryProfile::unified_memory();
+        let duplicate = record.instances[0].clone();
+        record.instances.push(duplicate);
+        let json = serde_json::to_string(&record).expect("serialize");
+        let err = PlatformMemoryProfile::from_json(&json).expect_err("duplicates must reject");
+        assert!(
+            err.to_string().contains("unique"),
+            "reason should name uniqueness: {err}"
+        );
+    }
+
+    #[test]
+    fn direct_serde_deserialization_validates() {
+        // The custom Deserialize impl makes validation unavoidable: a
+        // generic serde loader gets the same fail-closed behavior as
+        // from_json.
+        let good =
+            serde_json::to_string(&PlatformMemoryProfile::unified_memory()).expect("serialize");
+        let decoded: PlatformMemoryProfile =
+            serde_json::from_str(&good).expect("canonical record decodes directly");
+        assert_eq!(decoded, PlatformMemoryProfile::unified_memory());
+
+        let wrong_version =
+            good.replace("\"schema_version\":\"0.1\"", "\"schema_version\":\"9.9\"");
+        serde_json::from_str::<PlatformMemoryProfile>(&wrong_version)
+            .expect_err("direct serde must reject unsupported versions");
+
+        let mut wrong_semantics = PlatformMemoryProfile::unified_memory();
+        wrong_semantics.copy_pressure = CopyPressure::RecordedWhereObservable;
+        let raw = serde_json::to_string(&wrong_semantics).expect("serialize");
+        serde_json::from_str::<PlatformMemoryProfile>(&raw)
+            .expect_err("direct serde must reject frozen-semantics violations");
     }
 
     #[test]
