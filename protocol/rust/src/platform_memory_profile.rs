@@ -160,6 +160,11 @@ impl TryFrom<String> for CopyPressure {
 /// `type: "object"`. Routing through `deserialize_map` keeps the decoder
 /// from being weaker than the schema document, the same way `try_from =
 /// "String"` pins the enums to their string form.
+///
+/// Object-encoding formats only. Formats that encode structs as sequences
+/// (bincode, postcard, MessagePack in compact mode) cannot decode these
+/// types, which is correct for a JSON config schema but would need
+/// revisiting before the crate is used with such a format.
 fn deserialize_map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
