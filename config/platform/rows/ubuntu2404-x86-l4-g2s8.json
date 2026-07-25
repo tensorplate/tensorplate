@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-l4-g2s8",
+  "os": {
+    "name": "Ubuntu",
+    "version": "24.04"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "vendor": "intel"
+  },
+  "accelerator": {
+    "family": "NVIDIA L4",
+    "sku": "NVIDIA L4",
+    "memory_bytes": 25769803776,
+    "memory_profile": "discrete_gpu",
+    "partitioning": "unsupported"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "context_only"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Production",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "cloud_instance",
+    "identity": "GCP g2-standard-8 (disposable)"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/ubuntu2404-x86-l4-g2s8/"
+  }
+}

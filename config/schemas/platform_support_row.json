@@ -1,0 +1,444 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/platform_support_row.json",
+  "title": "TensorPlate Platform Support Row",
+  "description": "One exact platform support row: the unit the registry stores, `doctor` matches against, and release evidence is filed under. Every field is exact-version \u2014 a row names a specific OS version, driver/runtime stack, CPU architecture and vendor, accelerator SKU, and validation environment, so evidence never transfers between rows. Non-exact future targets use the separate roadmap_target.json schema and are never rows. Memory accounting references the platform memory profile records by property name (`unified_memory` / `discrete_gpu`) rather than re-specifying them. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "row_id",
+    "os",
+    "kernel_driver_stack",
+    "cpu",
+    "backend_packages",
+    "model_class_rows",
+    "gate_semantics",
+    "support_level",
+    "validation_environment",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "row_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Stable identifier, unique across the registry. Lowercase alphanumeric segments joined by single hyphens so identifier resolution is unambiguous."
+    },
+    "os": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact OS version. Evidence from one version never satisfies another."
+        },
+        "image_identity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Image or distribution identity where the OS version alone is not exact (e.g. a JetPack/L4T release on an Ubuntu base)."
+        }
+      }
+    },
+    "kernel_driver_stack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "components"
+      ],
+      "properties": {
+        "components": {
+          "type": "array",
+          "description": "Kernel constraints and driver/runtime versions recorded exactly at evidence time (accelerator driver, compute runtime, inference runtime, Python, framework; or OS build plus framework on Apple rows). Planned rows declare an empty list until their first evidence run records the stack.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "component",
+              "version"
+            ],
+            "properties": {
+              "component": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+                "description": "Vendor-neutral component identifier in lower_snake_case."
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "cpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture",
+        "vendor"
+      ],
+      "properties": {
+        "architecture": {
+          "type": "string",
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "vendor": {
+          "type": "string",
+          "enum": [
+            "amd",
+            "intel",
+            "apple",
+            "nvidia_soc",
+            "any"
+          ],
+          "description": "Host CPU vendor. `any` is permitted only on accelerator-less utility rows, where the row makes no vendor-specific claim."
+        }
+      }
+    },
+    "accelerator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "sku",
+        "memory_profile",
+        "partitioning"
+      ],
+      "description": "Absent on accelerator-less rows. Names the exact SKU: a near-miss SKU never matches this row.",
+      "properties": {
+        "family": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sku": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact SKU as reported by the platform, recorded at first run."
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Accelerator memory size in bytes. Integers in [0, 2^53) so a declared size can never be silently rounded by a JSON parser."
+        },
+        "memory_profile": {
+          "type": "string",
+          "enum": [
+            "unified_memory",
+            "discrete_gpu"
+          ],
+          "description": "Reference to the platform memory profile record of the same property name; the profile owns budget domains, measurement sources, and headroom computation."
+        },
+        "partitioning": {
+          "type": "string",
+          "enum": [
+            "unsupported",
+            "not_applicable"
+          ],
+          "description": "Partition posture. `unsupported` means the platform can partition the accelerator but the row rejects partitioned devices fail-closed; `not_applicable` means the accelerator has no partitioning concept."
+        }
+      }
+    },
+    "backend_packages": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Required backend package set and package channel per backend path.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "backend_path",
+          "channel",
+          "packages"
+        ],
+        "properties": {
+          "backend_path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$"
+          },
+          "channel": {
+            "type": "string",
+            "enum": [
+              "apt",
+              "homebrew"
+            ]
+          },
+          "packages": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "model_class_rows": {
+      "type": "array",
+      "description": "Pointers to the model support rows valid on this platform row, with their support level. Empty where the row carries no model claim.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model_class_row",
+          "support_level"
+        ],
+        "properties": {
+          "model_class_row": {
+            "type": "string",
+            "minLength": 1
+          },
+          "support_level": {
+            "type": "string",
+            "enum": [
+              "Production",
+              "Preview",
+              "Experimental",
+              "Planned"
+            ]
+          }
+        }
+      }
+    },
+    "gate_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "thermal",
+        "power",
+        "throttle",
+        "memory",
+        "gpu_utilization"
+      ],
+      "description": "Posture of every platform signal on this row. Every signal is declared; a signal that is absent on the row is recorded `not_applicable` with a reason rather than omitted.",
+      "properties": {
+        "thermal": {
+          "$ref": "#/definitions/gate"
+        },
+        "power": {
+          "$ref": "#/definitions/gate"
+        },
+        "throttle": {
+          "$ref": "#/definitions/gate"
+        },
+        "memory": {
+          "$ref": "#/definitions/gate"
+        },
+        "gpu_utilization": {
+          "$ref": "#/definitions/gate"
+        }
+      }
+    },
+    "support_level": {
+      "type": "string",
+      "enum": [
+        "Production",
+        "Preview",
+        "Experimental",
+        "Planned"
+      ],
+      "description": "Appliance-lifecycle support level. Planned rows commit their definition so later validation is a harness run, not re-planning; they carry no evidence and are excluded from supported combinations."
+    },
+    "validation_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "identity"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "physical",
+            "cloud_instance"
+          ]
+        },
+        "identity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact machine type or physical device identity."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location"
+      ],
+      "description": "Where install/upgrade logs, doctor output, smoke results, and telemetry samples for this row are filed. Required on Production rows, forbidden on Planned rows.",
+      "properties": {
+        "location": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "string",
+      "enum": [
+        "recorded",
+        "spec_authored"
+      ],
+      "description": "How this row definition was authored. `recorded` means the fields were transcribed from a real run on this exact hardware; `spec_authored` means they were authored from vendor specifications because no validated hardware exists yet. Planned rows are always spec_authored and are re-verified against recorded output when their hardware first runs."
+    }
+  },
+  "definitions": {
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate"
+      ],
+      "properties": {
+        "gate": {
+          "type": "string",
+          "enum": [
+            "load_bearing",
+            "context_only",
+            "not_applicable"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why the signal is not applicable on this row. Required for `not_applicable`; free-text row fact, not a typed platform reason."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "gate"
+            ],
+            "properties": {
+              "gate": {
+                "const": "not_applicable"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "gate",
+              "reason"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "support_level"
+        ],
+        "properties": {
+          "support_level": {
+            "const": "Production"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "evidence"
+        ]
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "support_level"
+        ],
+        "properties": {
+          "support_level": {
+            "const": "Planned"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "evidence"
+          ]
+        },
+        "properties": {
+          "model_class_rows": {
+            "maxItems": 0
+          },
+          "provenance": {
+            "const": "spec_authored"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "not": {
+          "required": [
+            "accelerator"
+          ]
+        }
+      },
+      "then": {
+        "properties": {
+          "gate_semantics": {
+            "properties": {
+              "gpu_utilization": {
+                "properties": {
+                  "gate": {
+                    "const": "not_applicable"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "$comment": "A row without an accelerator cannot report GPU utilization."
+    },
+    {
+      "if": {
+        "required": [
+          "accelerator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cpu": {
+            "properties": {
+              "vendor": {
+                "not": {
+                  "const": "any"
+                }
+              }
+            }
+          }
+        }
+      },
+      "$comment": "cpu vendor `any` is permitted only on accelerator-less utility rows."
+    }
+  ]
+}

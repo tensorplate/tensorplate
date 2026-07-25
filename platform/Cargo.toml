@@ -1,0 +1,26 @@
+[package]
+name = "tensorplate-platform"
+description = "Platform support row registry types for TensorPlate: exact platform identity, typed platform reasons, and roadmap targets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tensorplate-protocol = { workspace = true }
+
+[dev-dependencies]
+jsonschema = { workspace = true }
+
+[lints]
+workspace = true

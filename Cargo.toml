@@ -11,6 +11,7 @@ members = [
     "agent",
     "cli",
     "observability",
+    "platform",
     "protocol/rust",
     "tools/bundle",
 ]

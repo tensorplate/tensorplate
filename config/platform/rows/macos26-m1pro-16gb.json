@@ -1,0 +1,60 @@
+{
+  "schema_version": "0.1",
+  "row_id": "macos26-m1pro-16gb",
+  "os": {
+    "name": "macOS",
+    "version": "26"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "arm64",
+    "vendor": "apple"
+  },
+  "accelerator": {
+    "family": "Apple M-series",
+    "sku": "Apple M1 Pro",
+    "memory_bytes": 17179869184,
+    "memory_profile": "unified_memory",
+    "partitioning": "not_applicable"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "python_pytorch",
+      "channel": "homebrew",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "not_applicable",
+      "reason": "per-device power draw is not exposed without privileged access"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "not_applicable",
+      "reason": "GPU utilization is not exposed without privileged access"
+    }
+  },
+  "support_level": "Production",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "physical",
+    "identity": "MacBook Pro, Apple M1 Pro 16GB (in lab)"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/macos26-m1pro-16gb/"
+  }
+}

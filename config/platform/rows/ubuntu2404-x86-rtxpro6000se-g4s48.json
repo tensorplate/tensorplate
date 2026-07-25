@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-rtxpro6000se-g4s48",
+  "os": {
+    "name": "Ubuntu",
+    "version": "24.04"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "vendor": "amd"
+  },
+  "accelerator": {
+    "family": "NVIDIA RTX PRO Blackwell",
+    "sku": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "memory_bytes": 103079215104,
+    "memory_profile": "discrete_gpu",
+    "partitioning": "unsupported"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "context_only"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Production",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "cloud_instance",
+    "identity": "GCP g4-standard-48"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/ubuntu2404-x86-rtxpro6000se-g4s48/"
+  }
+}

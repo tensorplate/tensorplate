@@ -1,0 +1,55 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-cpu",
+  "os": {
+    "name": "Ubuntu",
+    "version": "24.04"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "vendor": "any"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "not_applicable",
+      "reason": "accelerator-less utility row; host thermal signals are not gated on"
+    },
+    "power": {
+      "gate": "not_applicable",
+      "reason": "accelerator-less utility row; no device power domain is measured"
+    },
+    "throttle": {
+      "gate": "not_applicable",
+      "reason": "accelerator-less utility row; no accelerator throttle state exists"
+    },
+    "memory": {
+      "gate": "context_only"
+    },
+    "gpu_utilization": {
+      "gate": "not_applicable",
+      "reason": "no accelerator is present on this row"
+    }
+  },
+  "support_level": "Preview",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "cloud_instance",
+    "identity": "GitHub-hosted ubuntu-24.04 runner"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/ubuntu2404-x86-cpu/"
+  }
+}

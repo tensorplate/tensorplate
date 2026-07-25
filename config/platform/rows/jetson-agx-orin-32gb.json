@@ -1,0 +1,63 @@
+{
+  "schema_version": "0.1",
+  "row_id": "jetson-agx-orin-32gb",
+  "os": {
+    "name": "JetPack",
+    "version": "6.2",
+    "image_identity": "L4T r36.4.x (Ubuntu 22.04 base)"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "arm64",
+    "vendor": "nvidia_soc"
+  },
+  "accelerator": {
+    "family": "Jetson AGX Orin",
+    "sku": "Jetson AGX Orin 32GB",
+    "memory_bytes": 34359738368,
+    "memory_profile": "unified_memory",
+    "partitioning": "not_applicable"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "load_bearing"
+    },
+    "power": {
+      "gate": "context_only"
+    },
+    "throttle": {
+      "gate": "load_bearing"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Planned",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "physical",
+    "identity": "Jetson AGX Orin 32GB (hardware not yet in lab)"
+  }
+}

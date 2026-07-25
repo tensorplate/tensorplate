@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "target_id": "pkg-macos-notarized",
+  "intended_release": "follow-up",
+  "target": "Signed and notarized .pkg delivery channel for macOS",
+  "blocking_dependency": "Signing identity and release tooling"
+}

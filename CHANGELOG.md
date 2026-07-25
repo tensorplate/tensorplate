@@ -8,6 +8,49 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform support row registry: the schema-first artifact every later
+  platform feature keys off. `config/schemas/platform_support_row.json`
+  defines one exact platform row (OS with exact version and image
+  identity, kernel/driver stack, CPU architecture and vendor, accelerator
+  SKU with its memory profile reference and partition posture, backend
+  package sets per channel, model-class row pointers, per-signal gate
+  semantics, support level, provenance, validation environment, and
+  evidence location), and the deliberately smaller
+  `config/schemas/roadmap_target.json` describes future targets that are
+  not exact enough to be rows — a target has no row id, support level,
+  model-class rows, gate semantics, or evidence, is never matched against
+  a detected platform, and never counts as a supported combination.
+  Cross-field rules are enforced identically by the schema and the
+  decoder: `not_applicable` signals must state why, Production rows must
+  declare where evidence is filed, Planned rows carry no evidence and no
+  model-class claims, accelerator-less rows cannot report GPU
+  utilization, and a wildcard CPU vendor is confined to accelerator-less
+  utility rows.
+- The committed registry under `config/platform/`: all twelve v0.2.1 rows
+  (five Production, two Preview, five Planned) and all four roadmap
+  targets. Planned rows are marked `spec_authored` and are re-verified
+  against recorded output when their hardware first runs.
+- New `tensorplate-platform` workspace crate owning platform identity:
+  row and roadmap-target value objects with unavoidable validation and
+  read-only decoded records, and the ten-value typed `PlatformReason`
+  vocabulary (`unsupported_accelerator_sku`, `unsupported_os_version`,
+  `unsupported_cpu_arch`, `unsupported_cpu_vendor`, `mig_mode_enabled`,
+  `missing_backend_package`, `missing_driver_runtime`,
+  `accelerator_runtime_unavailable`, `telemetry_degraded`,
+  `row_planned_not_validated`) that diagnosis and admission will emit.
+  (V021-E01-F01-T01, V021-E01-F01-T02)
+
+### Changed
+
+- `tensorplate-protocol` gains shared config-schema helpers used by both
+  the memory-pathway mirrors and the new platform registry:
+  `json_numbers` (exact decimal lexeme validation and canonicalization for
+  byte-valued fields, so a declared size can never be silently rounded by
+  a JSON parser) and `serde_shape` (object-form and string-form pinning,
+  so a decoder is never shape-weaker than its schema, plus canonical
+  identifier checks). The memory budget and platform memory profile
+  modules now use these instead of private copies; behavior is unchanged.
+
 - Platform memory profile records and consolidated telemetry field names.
   The new `config/schemas/platform_memory_profile.json` defines the two
   property-named profiles (`unified_memory`: one shared budget pool;

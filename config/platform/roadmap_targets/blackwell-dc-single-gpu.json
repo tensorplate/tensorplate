@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "target_id": "blackwell-dc-single-gpu",
+  "intended_release": "v0.2.x follow-up",
+  "target": "NVIDIA Blackwell datacenter, single GPU",
+  "blocking_dependency": "Exact SKU, machine shape, and reachable validation environment"
+}

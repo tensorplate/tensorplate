@@ -1,0 +1,57 @@
+{
+  "schema_version": "0.1",
+  "row_id": "macos26-m4pro-24gb",
+  "os": {
+    "name": "macOS",
+    "version": "26"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "arm64",
+    "vendor": "apple"
+  },
+  "accelerator": {
+    "family": "Apple M-series",
+    "sku": "Apple M4 Pro",
+    "memory_bytes": 25769803776,
+    "memory_profile": "unified_memory",
+    "partitioning": "not_applicable"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "python_pytorch",
+      "channel": "homebrew",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "not_applicable",
+      "reason": "per-device power draw is not exposed without privileged access"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "not_applicable",
+      "reason": "GPU utilization is not exposed without privileged access"
+    }
+  },
+  "support_level": "Planned",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "physical",
+    "identity": "MacBook Pro, Apple M4 Pro 24GB (hardware not yet in lab)"
+  }
+}

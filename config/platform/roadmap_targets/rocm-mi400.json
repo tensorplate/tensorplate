@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "target_id": "rocm-mi400",
+  "intended_release": "post-v0.2.2",
+  "target": "AMD Instinct MI400 family",
+  "blocking_dependency": "Exact SKU and reachable validation environment"
+}
