@@ -45,6 +45,7 @@ pub mod infer_request;
 pub mod infer_result;
 pub mod install_paths;
 pub mod log_event;
+pub mod memory_budget;
 pub mod metric_event;
 pub mod model_spec;
 pub mod python_pytorch_ipc;
@@ -104,6 +105,10 @@ pub use infer_result::{
 pub use log_event::{
     LogComponent, LogContextValue, LogEvent, LogLevel, MAX_LOG_CONTEXT_ENTRIES,
     MAX_LOG_CONTEXT_STRING_BYTES,
+};
+pub use memory_budget::{
+    MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError,
+    MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
 };
 pub use metric_event::{
     MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,

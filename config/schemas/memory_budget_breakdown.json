@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/memory_budget_breakdown.json",
+  "title": "TensorPlate Memory Budget Breakdown",
+  "description": "Canonical memory budget line-item vocabulary shared by every model class. A deployable declares the lines relevant to its class; lines not declared default to zero, and unknown line names are rejected. Whether a specific line must be non-zero is a row/bundle admission rule, not a vocabulary rule. Line values are integers in [0, 2^53) — the exactly-representable IEEE-754 double range, so a declared byte count can never be silently rounded to a different integer by a JSON parser; per the JSON data model, numbers with a zero fractional part (e.g. 4096.0) are integers, and consumers validate each number token's exact decimal lexeme, so tokens that only appear integral after IEEE-754 rounding (e.g. 1.0000000000000001) are rejected. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors. This document defines names and record semantics only; bundle-field integration and runtime admission are owned elsewhere.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "memory_budget_breakdown_bytes"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "memory_budget_breakdown_bytes": {"$ref": "#/definitions/memory_budget_breakdown_bytes"}
+  },
+  "definitions": {
+    "memory_budget_breakdown_bytes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_weights_bytes"],
+      "properties": {
+        "model_weights_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Resident weights for this deployment (per variant where variants are full checkpoints)."
+        },
+        "runtime_overhead_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Framework/runtime fixed overhead (CUDA context, torch runtime, CT2 runtime, engine runtime)."
+        },
+        "session_scratch_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Execution-session scratch (activation workspace, bindings)."
+        },
+        "cache_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Reusable cache state: KV/token cache, tokenizer/decoder cache, or an engine-managed KV pool on delegated rows."
+        },
+        "step_scratch_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Iterative-step scratch: flow/denoising steps, beam state beyond per-session state where applicable."
+        },
+        "output_queue_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Queued outputs awaiting delivery: action queue, undelivered stream events."
+        },
+        "io_buffer_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Ingress/egress buffers: frames, audio chunks, preallocated fixed-shape outputs."
+        },
+        "per_session_state_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Marginal cost of one live streaming session (multiplied by the session ceiling in ledger admission)."
+        },
+        "sidecar_process_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Sidecar process footprint (RSS bound) where the backend path uses one."
+        },
+        "os_reserve_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "OS/system reserve for the platform profile."
+        },
+        "backend_reserve_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "default": 0,
+          "description": "Backend-specific reserve (allocator slack, engine internals not covered by other lines)."
+        }
+      }
+    }
+  }
+}
