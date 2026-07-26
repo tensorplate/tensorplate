@@ -16,7 +16,9 @@
   },
   "cpu": {
     "architecture": "arm64",
-    "vendor": "nvidia_soc"
+    "vendors": [
+      "nvidia_soc"
+    ]
   },
   "accelerator": {
     "family": "Jetson Orin",

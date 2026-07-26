@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tensorplate_platform::{PlatformSupportRow, RoadmapTarget, SupportLevel};
+use tensorplate_platform::{CpuVendor, PlatformSupportRow, RoadmapTarget, SupportLevel};
 use tensorplate_protocol::{PlatformMemoryProfile, PlatformMemoryProfileName};
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -439,6 +439,8 @@ fn support_level_invariants_agree_between_schema_and_decoder() {
         .as_object_mut()
         .expect("object")
         .remove("evidence");
+    // A Planned row makes no model-class claim either.
+    valid_planned["model_class_rows"] = serde_json::json!([]);
 
     assert_row_verdicts_agree(vec![
         (
@@ -490,8 +492,8 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
     let mut cpu_row_claiming_gpu = a_valid_cpu_row_value();
     cpu_row_claiming_gpu["gate_semantics"]["gpu_utilization"] =
         serde_json::json!({"gate": "context_only"});
-    let mut vendor_any_with_accelerator = a_valid_row_value();
-    vendor_any_with_accelerator["cpu"]["vendor"] = serde_json::json!("any");
+    let mut multi_vendor_with_accelerator = a_valid_row_value();
+    multi_vendor_with_accelerator["cpu"]["vendors"] = serde_json::json!(["intel", "amd"]);
     let mut unknown_memory_profile = a_valid_row_value();
     unknown_memory_profile["accelerator"]["memory_profile"] = serde_json::json!("hbm");
 
@@ -507,8 +509,8 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
             false,
         ),
         (
-            "vendor `any` with an accelerator",
-            vendor_any_with_accelerator,
+            "multiple vendors with an accelerator",
+            multi_vendor_with_accelerator,
             false,
         ),
         ("unknown memory profile", unknown_memory_profile, false),
@@ -517,6 +519,13 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
 
 #[test]
 fn accelerator_memory_bytes_stay_exact() {
+    let mut zero = a_valid_row_value();
+    zero["accelerator"]["memory_bytes"] = serde_json::json!(0);
+    let mut missing = a_valid_row_value();
+    missing["accelerator"]
+        .as_object_mut()
+        .expect("accelerator object")
+        .remove("memory_bytes");
     let mut oversized = a_valid_row_value();
     oversized["accelerator"]["memory_bytes"] = serde_json::json!(9_007_199_254_740_992_u64);
     let mut negative = a_valid_row_value();
@@ -525,6 +534,8 @@ fn accelerator_memory_bytes_stay_exact() {
     assert_row_verdicts_agree(vec![
         ("memory_bytes above the safe range", oversized, false),
         ("negative memory_bytes", negative, false),
+        ("zero memory_bytes", zero, false),
+        ("missing memory_bytes", missing, false),
     ]);
 
     // Float spellings of exact integers must decode to the declared value,
@@ -537,7 +548,7 @@ fn accelerator_memory_bytes_stay_exact() {
     let decoded = PlatformSupportRow::from_json(&raw).expect("integral float decodes");
     assert_eq!(
         decoded.accelerator().expect("accelerator").memory_bytes,
-        Some(25_769_803_776)
+        25_769_803_776
     );
 
     let fractional = raw.replace("25769803776.0", "25769803776.5");
@@ -671,7 +682,7 @@ fn byte_values_decode_exactly_through_the_only_path() {
     let row = PlatformSupportRow::from_json(&float_spelled).expect("integral float decodes");
     assert_eq!(
         row.accelerator().expect("accelerator").memory_bytes,
-        Some(25_769_803_776)
+        25_769_803_776
     );
     for bad in [
         "25769803776.5",
@@ -711,8 +722,7 @@ fn enum_spellings_are_welded_to_their_serialized_form() {
             CpuVendor::Amd,
             CpuVendor::Intel,
             CpuVendor::Apple,
-            CpuVendor::NvidiaSoc,
-            CpuVendor::Any
+            CpuVendor::NvidiaSoc
         ]
     );
     assert_welded!(
@@ -736,4 +746,85 @@ fn enum_spellings_are_welded_to_their_serialized_form() {
             SupportLevel::Planned
         ]
     );
+}
+
+#[test]
+fn only_production_and_preview_are_supported_combinations() {
+    // Experimental rows are listed separately in release notes and must
+    // not count as supported, exactly like Planned rows.
+    for (name, row) in committed_rows() {
+        let expected = matches!(
+            row.support_level(),
+            SupportLevel::Production | SupportLevel::Preview
+        );
+        assert_eq!(
+            row.is_supported_combination(),
+            expected,
+            "{name}: supported-combination status must follow the support level"
+        );
+    }
+
+    // No Experimental row is committed today, so exercise the rule on a
+    // synthetic one rather than letting it go untested.
+    let mut experimental = a_valid_row_value();
+    experimental["support_level"] = serde_json::json!("Experimental");
+    let raw = serde_json::to_string(&experimental).expect("serialize");
+    let synthetic = PlatformSupportRow::from_json(&raw).expect("Experimental rows are valid");
+    assert!(
+        !synthetic.is_supported_combination(),
+        "an Experimental row is not a supported combination"
+    );
+}
+
+#[test]
+fn cpu_vendor_sets_are_exact() {
+    // The accelerator-less utility rows carry the documented AMD/Intel
+    // posture rather than a wildcard, so vendor support is decided by
+    // registry membership alone.
+    for (name, row) in committed_rows() {
+        let vendors = &row.cpu().vendors;
+        assert!(!vendors.is_empty(), "{name}: a row names its vendors");
+        if row.accelerator().is_some() {
+            assert_eq!(
+                vendors.len(),
+                1,
+                "{name}: an exact accelerator SKU pins one host vendor"
+            );
+        }
+        if row.row_id().ends_with("-x86-cpu") {
+            assert_eq!(
+                vendors,
+                &[CpuVendor::Amd, CpuVendor::Intel],
+                "{name}: the CPU-only rows cover AMD and Intel"
+            );
+            assert!(!row.cpu().covers_vendor(CpuVendor::Apple));
+        }
+    }
+}
+
+#[test]
+fn deploy_smoke_rows_declare_preview_model_pointers() {
+    // doctor renders model-class posture from these pointers, so the
+    // deploy-smoke rows must carry one rather than relying on a hardcoded
+    // list downstream.
+    for (name, row) in committed_rows() {
+        let expected_preview = matches!(
+            row.row_id(),
+            "ubuntu2404-x86-l4-g2s8" | "ubuntu2404-x86-a100-40g-a2hg1" | "macos26-m1pro-16gb"
+        );
+        if !expected_preview {
+            continue;
+        }
+        let pointers = row.model_class_rows();
+        assert!(
+            !pointers.is_empty(),
+            "{name}: deploy-smoke rows declare their Preview model posture"
+        );
+        assert!(
+            pointers
+                .iter()
+                .all(|p| p.support_level == SupportLevel::Preview),
+            "{name}: model rows stay Preview until a model pathway adds evidence"
+        );
+    }
 }

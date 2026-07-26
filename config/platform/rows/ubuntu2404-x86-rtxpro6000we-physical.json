@@ -10,7 +10,9 @@
   },
   "cpu": {
     "architecture": "x86_64",
-    "vendor": "amd"
+    "vendors": [
+      "amd"
+    ]
   },
   "accelerator": {
     "family": "NVIDIA RTX PRO Blackwell",

@@ -10,7 +10,10 @@
   },
   "cpu": {
     "architecture": "x86_64",
-    "vendor": "any"
+    "vendors": [
+      "amd",
+      "intel"
+    ]
   },
   "backend_packages": [
     {

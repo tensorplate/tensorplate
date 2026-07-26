@@ -10,7 +10,9 @@
   },
   "cpu": {
     "architecture": "x86_64",
-    "vendor": "intel"
+    "vendors": [
+      "intel"
+    ]
   },
   "accelerator": {
     "family": "NVIDIA A100",
@@ -35,7 +37,12 @@
       ]
     }
   ],
-  "model_class_rows": [],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Preview"
+    }
+  ],
   "gate_semantics": {
     "thermal": {
       "gate": "context_only"

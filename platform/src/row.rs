@@ -84,14 +84,12 @@ string_only_enum! {
 }
 
 string_only_enum! {
-    /// Host CPU vendor. `Any` is permitted only on accelerator-less
-    /// utility rows, which make no vendor-specific claim.
+    /// Host CPU vendor.
     pub enum CpuVendor {
         Amd => "amd",
         Intel => "intel",
         Apple => "apple",
         NvidiaSoc => "nvidia_soc",
-        Any => "any",
     }
 }
 
@@ -219,11 +217,26 @@ pub struct KernelDriverStack {
 }
 
 /// Host CPU identity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+///
+/// `vendors` is a set rather than a single value so an accelerator-less
+/// utility row can state exactly which vendors it covers instead of
+/// claiming all of them; membership is what drives
+/// [`crate::PlatformReason::UnsupportedCpuVendor`], with no out-of-band
+/// allowlist. A row with an accelerator names exactly one vendor, because
+/// the exact accelerator SKU pins the host.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpuIdentity {
     pub architecture: CpuArchitecture,
-    pub vendor: CpuVendor,
+    pub vendors: Vec<CpuVendor>,
+}
+
+impl CpuIdentity {
+    /// Whether this row covers the given host vendor.
+    #[must_use]
+    pub fn covers_vendor(&self, vendor: CpuVendor) -> bool {
+        self.vendors.contains(&vendor)
+    }
 }
 
 /// Accelerator identity. Names the exact SKU: a near-miss never matches.
@@ -232,12 +245,10 @@ pub struct CpuIdentity {
 pub struct Accelerator {
     pub family: String,
     pub sku: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "json_numbers::deserialize_some_safe_bytes"
-    )]
-    pub memory_bytes: Option<u64>,
+    /// Accelerator memory size in bytes; always declared and positive, so
+    /// a row can never present an accelerator with no usable budget.
+    #[serde(deserialize_with = "json_numbers::deserialize_safe_bytes")]
+    pub memory_bytes: u64,
     /// Reference to the platform memory profile record of the same
     /// property name; the profile owns budget domains, measurement
     /// sources, and headroom computation.
@@ -522,7 +533,10 @@ impl PlatformSupportRow {
         }
         if let Some(accelerator) = &self.accelerator {
             if blank(&accelerator.family) || blank(&accelerator.sku) {
-                return Err(invalid("accelerator family and sku must not be empty"));
+                return Err(invalid("accelerator family and sku must not be blank"));
+            }
+            if accelerator.memory_bytes == 0 {
+                return Err(invalid("accelerator memory_bytes must be positive"));
             }
         } else {
             // An accelerator-less row cannot report GPU utilization, and
@@ -533,9 +547,18 @@ impl PlatformSupportRow {
                 ));
             }
         }
-        if self.cpu.vendor == CpuVendor::Any && self.accelerator.is_some() {
+        if self.cpu.vendors.is_empty() {
+            return Err(invalid("a row must name at least one CPU vendor"));
+        }
+        let mut seen_vendors = self.cpu.vendors.clone();
+        seen_vendors.sort_unstable_by_key(|v| v.as_str());
+        seen_vendors.dedup();
+        if seen_vendors.len() != self.cpu.vendors.len() {
+            return Err(invalid("cpu vendors must be unique"));
+        }
+        if self.accelerator.is_some() && self.cpu.vendors.len() != 1 {
             return Err(invalid(
-                "cpu vendor `any` is permitted only on accelerator-less rows",
+                "a row with an accelerator names exactly one CPU vendor",
             ));
         }
         match self.support_level {
@@ -586,8 +609,8 @@ impl PlatformSupportRow {
 
     /// Host CPU identity.
     #[must_use]
-    pub fn cpu(&self) -> CpuIdentity {
-        self.cpu
+    pub fn cpu(&self) -> &CpuIdentity {
+        &self.cpu
     }
 
     /// Accelerator identity, absent on accelerator-less rows.
@@ -640,9 +663,13 @@ impl PlatformSupportRow {
     }
 
     /// Whether this row counts as a supported combination in release
-    /// notes. Planned rows are defined but never claimed.
+    /// notes. Only Production and Preview do: Planned rows are defined but
+    /// never claimed, and Experimental rows are listed separately.
     #[must_use]
     pub fn is_supported_combination(&self) -> bool {
-        !matches!(self.support_level, SupportLevel::Planned)
+        matches!(
+            self.support_level,
+            SupportLevel::Production | SupportLevel::Preview
+        )
     }
 }

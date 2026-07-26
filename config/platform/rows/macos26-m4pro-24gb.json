@@ -10,7 +10,9 @@
   },
   "cpu": {
     "architecture": "arm64",
-    "vendor": "apple"
+    "vendors": [
+      "apple"
+    ]
   },
   "accelerator": {
     "family": "Apple M-series",

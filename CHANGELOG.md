@@ -12,7 +12,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   platform feature keys off. `config/schemas/platform_support_row.json`
   defines one exact platform row (OS with exact version and image
   identity, kernel/driver stack, CPU architecture and vendor, accelerator
-  SKU with its memory profile reference and partition posture, backend
+  SKU with its required memory size, memory profile reference and
+  partition posture, backend
   package sets per channel, model-class row pointers, per-signal gate
   semantics, support level, provenance, validation environment, and
   evidence location), and the deliberately smaller
@@ -24,11 +25,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   decoder: `not_applicable` signals must state why, Production rows must
   declare where evidence is filed, Planned rows carry no evidence and no
   model-class claims, accelerator-less rows cannot report GPU
-  utilization, and a wildcard CPU vendor is confined to accelerator-less
-  utility rows.
+  utilization, and a row with an accelerator names exactly one CPU vendor
+  while an accelerator-less utility row states the vendor set it covers
+  explicitly — vendor support is decided by registry membership, never an
+  out-of-band allowlist.
 - The committed registry under `config/platform/`: all twelve v0.2.1 rows
   (five Production, two Preview, five Planned) and all four roadmap
-  targets. Every row is currently marked `spec_authored` — no v0.2.1
+  targets, including the deploy-smoke rows' Preview model-class pointers
+  so diagnosis renders posture from the registry rather than a hardcoded
+  list. Every row is currently marked `spec_authored` — no v0.2.1
   evidence run has happened yet — and each is re-verified against recorded
   output when its hardware first runs; Planned rows are additionally
   required to stay `spec_authored`. Production rows declare where their

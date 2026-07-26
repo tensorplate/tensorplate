@@ -10,7 +10,9 @@
   },
   "cpu": {
     "architecture": "arm64",
-    "vendor": "apple"
+    "vendors": [
+      "apple"
+    ]
   },
   "accelerator": {
     "family": "Apple M-series",
@@ -28,7 +30,12 @@
       ]
     }
   ],
-  "model_class_rows": [],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Preview"
+    }
+  ],
   "gate_semantics": {
     "thermal": {
       "gate": "context_only"
