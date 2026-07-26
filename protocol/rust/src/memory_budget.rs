@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::json_numbers;
 use crate::{ErrorCode, ProtocolError};
 
 /// Version of `config/schemas/memory_budget_breakdown.json`.
@@ -61,232 +62,10 @@ impl From<MemoryBudgetError> for ProtocolError {
     }
 }
 
-/// Upper bound (inclusive) for every byte line: 2^53 - 1, the largest
-/// integer that IEEE-754 doubles — and therefore every mainstream JSON
-/// parser — represent exactly. Bounding the domain here means a declared
-/// byte count can never be silently rounded to a different integer on its
-/// way through a JSON pipeline (~9.0 PB, far above any row budget).
-pub const MEMORY_BUDGET_LINE_MAX_BYTES: u64 = (1 << 53) - 1;
-
-const MEMORY_BUDGET_LINE_MAX_BYTES_F64: f64 = 9_007_199_254_740_991.0;
-
-/// Scan the raw document, validate every number token's exact decimal
-/// lexeme against the byte-line domain, and rewrite each valid token to
-/// its canonical integer spelling. Without the (workspace-global)
-/// `arbitrary_precision` feature, `serde_json` parses number tokens
-/// through `f64`, whose double rounding both hides fractional precision
-/// (`1.0000000000000001` becomes `1.0`) and can land float spellings of
-/// exact integers on a *neighboring* value (`9007199254740991.0` parses
-/// as `…990.0`). Validating and canonicalizing the lexemes first means
-/// the decoded byte count is always the exact declared value and never
-/// depends on an f64 parse. Every number in a well-formed declaration is
-/// a byte line, so the rule applies to all number tokens; malformed
-/// tokens pass through verbatim for serde to report as grammar errors.
-fn canonicalize_number_lexemes(raw: &str) -> Result<String, MemoryBudgetError> {
-    let bytes = raw.as_bytes();
-    let mut out = String::with_capacity(raw.len());
-    let mut flushed = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                // Skip string contents, honoring escapes.
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' => i += 2,
-                        b'"' => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
-                    }
-                }
-            }
-            b'-' | b'0'..=b'9' => {
-                let start = i;
-                while i < bytes.len()
-                    && matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
-                {
-                    i += 1;
-                }
-                let token = &raw[start..i];
-                match lexeme_exact_value(token) {
-                    Ok(Some(value)) => {
-                        // Number-token boundaries are ASCII bytes, so both
-                        // slices sit on character boundaries.
-                        out.push_str(&raw[flushed..start]);
-                        out.push_str(&value.to_string());
-                        flushed = i;
-                    }
-                    Ok(None) => {} // grammar error: serde's to report
-                    Err(reason) => {
-                        return Err(MemoryBudgetError::InvalidNumberLexeme {
-                            token: token.to_string(),
-                            reason,
-                        })
-                    }
-                }
-            }
-            _ => i += 1,
-        }
-    }
-    out.push_str(&raw[flushed..]);
-    Ok(out)
-}
-
-/// Parsed exponent of a number lexeme. Well-formed exponents that overflow
-/// `i64` are classified by sign so they fail closed at the lexeme layer:
-/// deferring them to f64 parsing would silently underflow tiny nonzero
-/// values (e.g. `1e-9223372036854775809`) to an accepted zero.
-enum LexemeExponent {
-    Value(i64),
-    NegativeOverflow,
-    PositiveOverflow,
-}
-
-/// Exact decimal evaluation of one number lexeme against the byte-line
-/// domain: non-negative, mathematically integral, at most 2^53 - 1.
-/// Returns `Ok(Some(value))` with the exact `u64` for an in-domain token,
-/// `Ok(None)` when the token is not a valid JSON number (serde reports the
-/// grammar error instead), and `Err(reason)` for a domain violation.
-fn lexeme_exact_value(token: &str) -> Result<Option<u64>, &'static str> {
-    let (negative, rest) = match token.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, token),
-    };
-    let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
-        Some((m, e)) => {
-            let exp = if let Ok(v) = e.parse::<i64>() {
-                LexemeExponent::Value(v)
-            } else {
-                // Distinguish a well-formed exponent overflowing i64 (fail
-                // closed by sign, below) from a grammar error (serde's to
-                // report).
-                let magnitude = e.strip_prefix(['+', '-']).unwrap_or(e);
-                if magnitude.is_empty() || !magnitude.bytes().all(|b| b.is_ascii_digit()) {
-                    return Ok(None);
-                }
-                if e.starts_with('-') {
-                    LexemeExponent::NegativeOverflow
-                } else {
-                    LexemeExponent::PositiveOverflow
-                }
-            };
-            (m, exp)
-        }
-        None => (rest, LexemeExponent::Value(0)),
-    };
-    let (int_digits, frac_digits) = match mantissa.split_once('.') {
-        Some((i, f)) => (i, f),
-        None => (mantissa, ""),
-    };
-    if int_digits.is_empty()
-        || frac_digits.is_empty() && mantissa.contains('.')
-        || !int_digits.bytes().all(|b| b.is_ascii_digit())
-        || !frac_digits.bytes().all(|b| b.is_ascii_digit())
-    {
-        return Ok(None);
-    }
-
-    // value = <concatenated digits> x 10^(exponent - frac len). The digit
-    // at index `i` has decimal position `int_len - 1 - i + exponent`;
-    // position 0 is the units place.
-    let digits: Vec<u8> = int_digits.bytes().chain(frac_digits.bytes()).collect();
-    let Some(first_nonzero) = digits.iter().position(|&b| b != b'0') else {
-        // Exact zero in any spelling (0, -0, 0.0, 0e9) is in-domain.
-        return Ok(Some(0));
-    };
-    let Some(last_nonzero) = digits.iter().rposition(|&b| b != b'0') else {
-        return Ok(None);
-    };
-    if negative {
-        return Err("negative values are not in the byte-line domain");
-    }
-    // The mantissa is nonzero past this point, so an exponent overflowing
-    // i64 fails closed by sign instead of deferring to f64 parsing (which
-    // underflows tiny values to an accepted zero).
-    let exponent = match exponent {
-        LexemeExponent::Value(v) => v,
-        LexemeExponent::NegativeOverflow => {
-            return Err("fractional values are not in the byte-line domain")
-        }
-        LexemeExponent::PositiveOverflow => {
-            return Err("exceeds the largest exactly-representable byte value (2^53 - 1)")
-        }
-    };
-    // Token length is unbounded — a spelling like "1." + 63 zeros is
-    // exactly 1 and must be accepted — so every arithmetic step saturates:
-    // digit counts always fit i64 (they are bounded by the input length),
-    // and with an attacker-controlled exponent up to +/- i64::MAX,
-    // positive saturation lands above the range check (out-of-range) and
-    // negative saturation lands below zero (fractional), never a panic.
-    let int_len = i64::try_from(int_digits.len()).unwrap_or(i64::MAX);
-    let position = |i: usize| {
-        int_len
-            .saturating_sub(1)
-            .saturating_sub(i64::try_from(i).unwrap_or(i64::MAX))
-            .saturating_add(exponent)
-    };
-    if position(last_nonzero) < 0 {
-        return Err("fractional values are not in the byte-line domain");
-    }
-    if position(first_nonzero) >= 16 {
-        return Err("exceeds the largest exactly-representable byte value (2^53 - 1)");
-    }
-    // The significant span covers at most 16 decimal positions, so the
-    // accumulation below cannot overflow u64.
-    let mut value: u64 = 0;
-    let Some(span) = digits.get(first_nonzero..=last_nonzero) else {
-        return Ok(None);
-    };
-    for &b in span {
-        value = value * 10 + u64::from(b - b'0');
-    }
-    for _ in 0..position(last_nonzero) {
-        value *= 10;
-    }
-    if value > MEMORY_BUDGET_LINE_MAX_BYTES {
-        return Err("exceeds the largest exactly-representable byte value (2^53 - 1)");
-    }
-    Ok(Some(value))
-}
-
-/// Deserialize one byte-count line into the schema's numeric domain:
-/// integers in `[0, 2^53)`. Draft-07 `type: integer` treats any number with
-/// a zero fractional part as an integer (`4096.0` validates), so integral
-/// floats inside the range are accepted; fractional, negative, or
-/// out-of-range values are rejected. Through
-/// [`MemoryBudgetDeclaration::from_json`] every number token has already
-/// been validated and canonicalized to an integer spelling, so only the
-/// exact `u64` path runs; the f64 branch is the documented backstop for
-/// direct serde deserialization, which skips the lexeme layer and with it
-/// the exactness guarantees.
-fn de_bytes_line<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let n = serde_json::Number::deserialize(deserializer)?;
-    if let Some(v) = n.as_u64() {
-        if v <= MEMORY_BUDGET_LINE_MAX_BYTES {
-            return Ok(v);
-        }
-    } else if let Some(f) = n.as_f64() {
-        // Every integral f64 in [0, 2^53) is exactly representable, so the
-        // guarded cast below is lossless.
-        #[allow(
-            clippy::float_cmp,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
-        if (0.0..=MEMORY_BUDGET_LINE_MAX_BYTES_F64).contains(&f) && f.fract() == 0.0 {
-            return Ok(f as u64);
-        }
-    }
-    Err(serde::de::Error::custom(format!(
-        "byte line values must be integers in [0, 2^53), got {n}"
-    )))
-}
+/// Upper bound (inclusive) for every byte line, re-exported from the
+/// shared numeric-safety helpers: 2^53 - 1, the largest integer every
+/// mainstream JSON parser represents exactly.
+pub const MEMORY_BUDGET_LINE_MAX_BYTES: u64 = json_numbers::MAX_SAFE_BYTES;
 
 /// Canonical `memory_budget_breakdown_bytes` line items.
 ///
@@ -303,45 +82,45 @@ pub struct MemoryBudgetBreakdown {
     /// Resident weights for this deployment (per variant where variants are
     /// full checkpoints). Required: presence is mandatory, zero is rejected
     /// at row/bundle admission, not here.
-    #[serde(deserialize_with = "de_bytes_line")]
+    #[serde(deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub model_weights_bytes: u64,
     /// Framework/runtime fixed overhead (CUDA context, torch runtime, CT2
     /// runtime, engine runtime).
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub runtime_overhead_bytes: u64,
     /// Execution-session scratch (activation workspace, bindings).
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub session_scratch_bytes: u64,
     /// Reusable cache state: KV/token cache, tokenizer/decoder cache, or an
     /// engine-managed KV pool on delegated rows.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub cache_bytes: u64,
     /// Iterative-step scratch: flow/denoising steps, beam state beyond
     /// per-session state where applicable.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub step_scratch_bytes: u64,
     /// Queued outputs awaiting delivery: action queue, undelivered stream
     /// events.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub output_queue_bytes: u64,
     /// Ingress/egress buffers: frames, audio chunks, preallocated
     /// fixed-shape outputs.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub io_buffer_bytes: u64,
     /// Marginal cost of one live streaming session (multiplied by the
     /// session ceiling in ledger admission).
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub per_session_state_bytes: u64,
     /// Sidecar process footprint (RSS bound) where the backend path uses
     /// one.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub sidecar_process_bytes: u64,
     /// OS/system reserve for the platform profile.
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub os_reserve_bytes: u64,
     /// Backend-specific reserve (allocator slack, engine internals not
     /// covered by other lines).
-    #[serde(default, deserialize_with = "de_bytes_line")]
+    #[serde(default, deserialize_with = "json_numbers::deserialize_safe_bytes")]
     pub backend_reserve_bytes: u64,
 }
 
@@ -386,7 +165,8 @@ impl MemoryBudgetDeclaration {
     /// point; deserializing the types directly with serde skips the
     /// lexeme-level checks.
     pub fn from_json(json: &str) -> Result<Self, MemoryBudgetError> {
-        let canonical = canonicalize_number_lexemes(json)?;
+        let canonical = json_numbers::canonicalize_byte_lexemes(json)
+            .map_err(|(token, reason)| MemoryBudgetError::InvalidNumberLexeme { token, reason })?;
         let value: serde_json::Value = serde_json::from_str(&canonical)?;
         let observed = value
             .get("schema_version")
@@ -670,15 +450,6 @@ mod tests {
         let raw = declaration_json(&format!(r#"{{"model_weights_bytes":{token}}}"#));
         let err = MemoryBudgetDeclaration::from_json(&raw).expect_err("fractional must reject");
         assert!(err.to_string().contains("fractional"), "reason: {err}");
-    }
-
-    #[test]
-    fn float_bound_constant_matches_integer_bound() {
-        // 2^53 - 1 is exactly representable, so the u64 round-trip through
-        // the f64 constant is lossless and the comparison stays integral.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let round_tripped = super::MEMORY_BUDGET_LINE_MAX_BYTES_F64 as u64;
-        assert_eq!(round_tripped, MEMORY_BUDGET_LINE_MAX_BYTES);
     }
 
     #[test]

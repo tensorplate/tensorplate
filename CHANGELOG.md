@@ -8,6 +8,52 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform support row registry: the schema-first artifact every later
+  platform feature keys off. `config/schemas/platform_support_row.json`
+  defines one exact platform row (OS with exact version and image
+  identity, kernel/driver stack, CPU architecture and vendor, accelerator
+  SKU with its required memory size, memory profile reference and
+  partition posture, backend
+  package sets per channel, model-class row pointers, per-signal gate
+  semantics, support level, provenance, validation environment, and
+  evidence location), and the deliberately smaller
+  `config/schemas/roadmap_target.json` describes future targets that are
+  not exact enough to be rows — a target has no row id, support level,
+  model-class rows, gate semantics, or evidence, is never matched against
+  a detected platform, and never counts as a supported combination.
+  Cross-field rules are enforced identically by the schema and the
+  decoder: `not_applicable` signals must state why, Production rows must
+  declare where evidence is filed, Planned rows carry no evidence and no
+  model-class claims, accelerator-less rows cannot report GPU
+  utilization, free-text fields must carry a non-whitespace character
+  (consumer-enforced rather than a schema `pattern`, because regex engines
+  disagree about which code points count as whitespace), and a row with an
+  accelerator names exactly one CPU vendor
+  while an accelerator-less utility row states the vendor set it covers
+  explicitly — vendor support is decided by registry membership, never an
+  out-of-band allowlist.
+- The committed registry under `config/platform/`: all twelve v0.2.1 rows
+  (five Production, two Preview, five Planned) and all four roadmap
+  targets, including the deploy-smoke rows' Preview model-class pointers
+  so diagnosis renders posture from the registry rather than a hardcoded
+  list. Every row is currently marked `spec_authored` — no v0.2.1
+  evidence run has happened yet — and each is re-verified against recorded
+  output when its hardware first runs; Planned rows are additionally
+  required to stay `spec_authored`. Production rows declare where their
+  evidence will be filed; the release gate, not the schema, checks that a
+  bundle is actually there.
+- New `tensorplate-platform` workspace crate owning platform identity:
+  row and roadmap-target value objects whose only constructor is the
+  validating `from_json` (neither type implements `Deserialize`, so no
+  loader can produce an unvalidated or inexactly-decoded record), and the
+  ten-value typed `PlatformReason`
+  vocabulary (`unsupported_accelerator_sku`, `unsupported_os_version`,
+  `unsupported_cpu_arch`, `unsupported_cpu_vendor`, `mig_mode_enabled`,
+  `missing_backend_package`, `missing_driver_runtime`,
+  `accelerator_runtime_unavailable`, `telemetry_degraded`,
+  `row_planned_not_validated`) that diagnosis and admission will emit.
+  (V021-E01-F01-T01, V021-E01-F01-T02)
+
 - Platform memory profile records and consolidated telemetry field names.
   The new `config/schemas/platform_memory_profile.json` defines the two
   property-named profiles (`unified_memory`: one shared budget pool;
@@ -59,6 +105,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   streaming-session ledger admission. A Draft-07 validator conformance test
   (dev-only `jsonschema` dependency) keeps the schema document and the Rust
   mirror verdict-identical. (V023-E03-F04-T01, V023-E03-F04-T02)
+
+### Changed
+
+- `tensorplate-protocol` gains shared config-schema helpers used by both
+  the memory-pathway mirrors and the new platform registry:
+  `json_numbers` (exact decimal lexeme validation and canonicalization for
+  byte-valued fields, so a declared size can never be silently rounded by
+  a JSON parser) and `serde_shape` (object-form and string-form pinning,
+  so a decoder is never shape-weaker than its schema, plus canonical
+  identifier checks). The memory budget and platform memory profile
+  modules now use these instead of private copies. Behavior is unchanged
+  except that byte-value error messages now say "byte-value domain" rather
+  than "byte-line domain", and number tokens with leading zeros are now
+  reported as the JSON grammar errors they are instead of being
+  canonicalized into legal integers.
 
 ## [0.1.5] - 2026-07-20
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/roadmap_target.json",
+  "title": "TensorPlate Roadmap Target",
+  "description": "A future target that is not exact enough to be a platform support row: the SKU, machine shape, or validation environment is not yet named. Deliberately smaller than the support-row schema and NOT interchangeable with it \u2014 a roadmap target has no row_id, no support_level, no model_class_rows, no gate semantics, and no evidence, is never matched by `doctor`, and never counts as a supported or Planned combination. Promoting a target creates a new exact support row with its own fixtures and evidence; it never mutates the descriptor into a row. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors. Free-text fields must also carry a non-whitespace character; that rule is enforced by consumers rather than by a `pattern`, because regex dialects disagree about which code points count as whitespace (U+FEFF and U+3000 among them) and a cross-language contract must not depend on that.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "target_id",
+    "intended_release",
+    "target",
+    "blocking_dependency"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Stable identifier, unique across the catalog and disjoint from platform row identifiers."
+    },
+    "intended_release": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Release line the target is aimed at, as prose (e.g. a follow-up line rather than a committed version)."
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the target is, in prose. Deliberately not decomposed into accelerator/CPU/OS fields: a target precise enough to decompose is precise enough to be a support row."
+    },
+    "blocking_dependency": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What must exist before this target could become an exact support row."
+    }
+  }
+}

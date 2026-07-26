@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::serde_shape::{deserialize_map_only, is_canonical_identifier};
 use crate::{ErrorCode, ProtocolError};
 
 /// Version of `config/schemas/platform_memory_profile.json`. Config schemas
@@ -152,44 +153,6 @@ impl TryFrom<String> for CopyPressure {
     }
 }
 
-/// Deserialize `T` from a JSON object only.
-///
-/// Serde's derived `Deserialize` for a struct accepts the sequence form
-/// (`["shared_pool", "…", "…"]`) in addition to the map form, and
-/// `deny_unknown_fields` does not cover that path — but the schema pins
-/// `type: "object"`. Routing through `deserialize_map` keeps the decoder
-/// from being weaker than the schema document, the same way `try_from =
-/// "String"` pins the enums to their string form.
-///
-/// Object-encoding formats only. Formats that encode structs as sequences
-/// (bincode, postcard, MessagePack in compact mode) cannot decode these
-/// types, which is correct for a JSON config schema but would need
-/// revisiting before the crate is used with such a format.
-fn deserialize_map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct MapOnly<T>(std::marker::PhantomData<T>);
-
-    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for MapOnly<T> {
-        type Value = T;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a JSON object")
-        }
-
-        fn visit_map<A>(self, map: A) -> Result<T, A::Error>
-        where
-            A: serde::de::MapAccess<'de>,
-        {
-            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
-        }
-    }
-
-    deserializer.deserialize_map(MapOnly(std::marker::PhantomData))
-}
-
 /// One budget domain of a profile: what is measured and how headroom is
 /// computed for it. Decodes from the object form only. Carries no
 /// standalone invariants; its field constraints are enforced when it is
@@ -297,21 +260,6 @@ impl<'de> Deserialize<'de> for PlatformMemoryProfile {
         let wire: WireProfile = deserialize_map_only(deserializer)?;
         Self::from_wire(wire).map_err(serde::de::Error::custom)
     }
-}
-
-/// Mirror of the schema's instance-identifier pattern
-/// `^[a-z0-9]+(-[a-z0-9]+)*$`: lowercase alphanumeric segments joined by
-/// single hyphens. Rejecting near-duplicates by form (case and stray
-/// whitespace) keeps identifier resolution unambiguous for the registry
-/// and telemetry consumers, and subsumes the non-empty check.
-fn is_canonical_instance_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.split('-').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        })
 }
 
 impl PlatformMemoryProfile {
@@ -571,7 +519,7 @@ impl PlatformMemoryProfile {
         }
         let mut seen_instances = std::collections::HashSet::new();
         for instance in &self.instances {
-            if !is_canonical_instance_id(&instance.instance) {
+            if !is_canonical_identifier(&instance.instance) {
                 return Err(PlatformMemoryProfileError::InvalidProfile {
                     reason: "instance identifiers must be lowercase alphanumeric segments \
                              separated by single hyphens",

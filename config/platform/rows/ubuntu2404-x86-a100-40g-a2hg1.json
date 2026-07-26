@@ -1,0 +1,72 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-a100-40g-a2hg1",
+  "os": {
+    "name": "Ubuntu",
+    "version": "24.04"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "vendors": [
+      "intel"
+    ]
+  },
+  "accelerator": {
+    "family": "NVIDIA A100",
+    "sku": "NVIDIA A100-SXM4-40GB",
+    "memory_bytes": 42949672960,
+    "memory_profile": "discrete_gpu",
+    "partitioning": "unsupported"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Preview"
+    }
+  ],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "context_only"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Production",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "cloud_instance",
+    "identity": "GCP a2-highgpu-1g (disposable), single GPU, non-partitioned"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/ubuntu2404-x86-a100-40g-a2hg1/"
+  }
+}

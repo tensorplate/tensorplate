@@ -1,0 +1,78 @@
+{
+  "schema_version": "0.1",
+  "row_id": "jetson-orin-nano-8gb-jp62",
+  "os": {
+    "name": "JetPack",
+    "version": "6.2",
+    "image_identity": "L4T r36.4.x (Ubuntu 22.04 base)"
+  },
+  "kernel_driver_stack": {
+    "components": [
+      {
+        "component": "l4t",
+        "version": "r36.4.x"
+      }
+    ]
+  },
+  "cpu": {
+    "architecture": "arm64",
+    "vendors": [
+      "nvidia_soc"
+    ]
+  },
+  "accelerator": {
+    "family": "Jetson Orin",
+    "sku": "Jetson Orin Nano 8GB Super",
+    "memory_bytes": 8589934592,
+    "memory_profile": "unified_memory",
+    "partitioning": "not_applicable"
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Production"
+    }
+  ],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "load_bearing"
+    },
+    "power": {
+      "gate": "load_bearing"
+    },
+    "throttle": {
+      "gate": "load_bearing"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Production",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "physical",
+    "identity": "Jetson Orin Nano 8GB Super, Super power mode (in lab)"
+  },
+  "evidence": {
+    "location": "dist/release/v0.2.1/jetson-orin-nano-8gb-jp62/"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "target_id": "rocm-mi300x",
+  "intended_release": "v0.2.2",
+  "target": "AMD Instinct MI300X through a PyTorch ROCm package profile",
+  "blocking_dependency": "Exact machine shape and reachable validation environment"
+}

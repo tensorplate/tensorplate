@@ -683,6 +683,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tensorplate-platform"
+version = "0.1.1"
+dependencies = [
+ "jsonschema",
+ "serde",
+ "serde_json",
+ "tensorplate-protocol",
+ "thiserror",
+]
+
+[[package]]
 name = "tensorplate-protocol"
 version = "0.1.1"
 dependencies = [
