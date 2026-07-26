@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform registry loading and the query API that resolves a detected
+  machine to exactly one support row. `PlatformRegistry` loads the
+  committed rows and roadmap targets and **fails closed**: one invalid
+  document means no registry, because a half-loaded registry would report
+  supported platforms as unsupported. Colliding entries — a duplicated row
+  id, two rows matching the same platform identity, or a roadmap target
+  shadowing a row id — are rejected at load rather than resolved by
+  picking a winner at query time. Roadmap targets load into a separate
+  catalog that matching never consults, so a target can never be read as
+  support. `resolve()` returns a typed `RowMatch`: supported, matched a
+  Planned row (`row_planned_not_validated`), or unsupported with the most
+  specific reason — a partitioned accelerator is rejected before its SKU
+  is considered, and CPU/OS mismatches are reported before accelerator
+  ones. `candidates()` narrows on host identity alone and deliberately
+  returns a set, since several rows share an OS and CPU and differ only by
+  accelerator. `HostProbe` and `AcceleratorProbe` define the detection
+  seam so OS-specific probes stay out of the matching logic.
+  (V021-E01-F01-T03)
+
 - Platform support row registry: the schema-first artifact every later
   platform feature keys off. `config/schemas/platform_support_row.json`
   defines one exact platform row (OS with exact version and image

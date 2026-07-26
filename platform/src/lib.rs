@@ -28,12 +28,18 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod identity;
 pub mod reason;
+pub mod registry;
 pub mod roadmap;
 pub mod row;
 
 pub use error::PlatformRegistryError;
+pub use identity::{
+    AcceleratorIdentity, AcceleratorProbe, DetectedPlatform, HostIdentity, HostProbe,
+};
 pub use reason::PlatformReason;
+pub use registry::{PlatformRegistry, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};
 pub use row::{
     Accelerator, BackendPackageSet, CpuArchitecture, CpuIdentity, CpuVendor, Evidence, Gate,

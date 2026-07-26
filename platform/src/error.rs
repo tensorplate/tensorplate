@@ -35,6 +35,36 @@ pub enum PlatformRegistryError {
     /// The roadmap target is well-formed but violates a target invariant.
     #[error("invalid roadmap target: {reason}")]
     InvalidRoadmapTarget { reason: &'static str },
+
+    /// A registry document could not be read.
+    #[error("cannot read platform registry path `{path}`: {detail}")]
+    Unreadable { path: String, detail: String },
+
+    /// A registry document is invalid, named by its source path so the
+    /// operator knows which file to fix.
+    #[error("invalid platform registry document `{path}`: {source}")]
+    InDocument {
+        path: String,
+        #[source]
+        source: Box<PlatformRegistryError>,
+    },
+
+    /// Two registry entries collide, so a lookup could not be answered
+    /// deterministically. Rejected at load rather than resolved by
+    /// picking a winner at query time.
+    #[error("ambiguous platform registry: {detail}")]
+    AmbiguousRegistry { detail: String },
+}
+
+impl PlatformRegistryError {
+    /// Attach the source path of the document that failed.
+    #[must_use]
+    pub fn in_document(path: &std::path::Path, source: Self) -> Self {
+        Self::InDocument {
+            path: path.display().to_string(),
+            source: Box::new(source),
+        }
+    }
 }
 
 impl From<PlatformRegistryError> for ProtocolError {
