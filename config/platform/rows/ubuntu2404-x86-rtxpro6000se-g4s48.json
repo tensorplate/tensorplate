@@ -72,7 +72,8 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GCP g4-standard-48"
+    "identity": "GCP g4-standard-48",
+    "machine_type": "g4-standard-48"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/ubuntu2404-x86-rtxpro6000se-g4s48/"

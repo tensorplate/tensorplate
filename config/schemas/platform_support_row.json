@@ -284,8 +284,15 @@
           "type": "string",
           "minLength": 1,
           "description": "Exact machine type or physical device identity."
+        },
+        "machine_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type), when the row's claim is scoped to one. Evidence does not transfer across machine shapes, so a row that declares this matches only a host reporting the same value. Absent where the row makes no machine-shape claim."
         }
-      }
+      },
+      "description": "Exact machine type or physical device the row is validated on. `identity` is prose for humans; `machine_type` is the machine-comparable form used for matching."
     },
     "evidence": {
       "type": "object",

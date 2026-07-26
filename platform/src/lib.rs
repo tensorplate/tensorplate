@@ -36,7 +36,8 @@ pub mod row;
 
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
-    AcceleratorIdentity, AcceleratorProbe, DetectedPlatform, HostIdentity, HostProbe,
+    AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
+    HostIdentity, HostProbe,
 };
 pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, RowMatch};

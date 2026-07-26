@@ -12,12 +12,76 @@
 use crate::error::PlatformProbeError;
 use crate::row::{CpuArchitecture, CpuVendor};
 
+/// A CPU architecture as *observed*, which may be one no row names.
+///
+/// Detection uses an open value where the row schema uses a closed enum:
+/// a machine really can report `riscv64`, and collapsing that into a probe
+/// failure would make [`crate::PlatformReason::UnsupportedCpuArch`]
+/// unreachable — the platform would be reported as undetectable rather
+/// than as unsupported, which is a different and less actionable claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DetectedArchitecture {
+    /// An architecture the row schema can express.
+    Known(CpuArchitecture),
+    /// An architecture no row names, carried verbatim for diagnosis.
+    Other(String),
+}
+
+impl DetectedArchitecture {
+    /// The row-schema value, if this architecture is one rows can name.
+    #[must_use]
+    pub fn known(&self) -> Option<CpuArchitecture> {
+        match self {
+            Self::Known(architecture) => Some(*architecture),
+            Self::Other(_) => None,
+        }
+    }
+
+    /// What the machine reported, for diagnosis.
+    #[must_use]
+    pub fn as_reported(&self) -> &str {
+        match self {
+            Self::Known(architecture) => architecture.as_str(),
+            Self::Other(raw) => raw,
+        }
+    }
+}
+
+/// A CPU vendor as *observed*, which may be one no row names.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DetectedVendor {
+    /// A vendor the row schema can express.
+    Known(CpuVendor),
+    /// A vendor no row names, carried verbatim for diagnosis.
+    Other(String),
+}
+
+impl DetectedVendor {
+    /// The row-schema value, if this vendor is one rows can name.
+    #[must_use]
+    pub fn known(&self) -> Option<CpuVendor> {
+        match self {
+            Self::Known(vendor) => Some(*vendor),
+            Self::Other(_) => None,
+        }
+    }
+
+    /// What the machine reported, for diagnosis.
+    #[must_use]
+    pub fn as_reported(&self) -> &str {
+        match self {
+            Self::Known(vendor) => vendor.as_str(),
+            Self::Other(raw) => raw,
+        }
+    }
+}
+
 /// What the host reports about its OS and CPU, before any accelerator is
 /// considered.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostIdentity {
-    pub architecture: CpuArchitecture,
-    pub vendor: CpuVendor,
+    pub architecture: DetectedArchitecture,
+    pub vendor: DetectedVendor,
     /// OS name as the row schema spells it (e.g. the distribution or
     /// platform name, not a kernel string).
     pub os_name: String,
@@ -28,6 +92,12 @@ pub struct HostIdentity {
     /// exact, e.g. a JetPack release on an Ubuntu base. Absent when the
     /// platform has no such concept.
     pub image_identity: Option<String>,
+    /// Machine-comparable shape the host is running on (e.g. a cloud
+    /// machine type), where the platform exposes one. A row scoped to a
+    /// machine shape matches only a host reporting the same value, so an
+    /// accelerator in an unvalidated chassis does not inherit a claim
+    /// recorded on one specific shape.
+    pub machine_type: Option<String>,
 }
 
 /// What the accelerator reports about itself. Absent on hosts with no

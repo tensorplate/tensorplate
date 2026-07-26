@@ -22,8 +22,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   drawn from the *nearest* row — the one the machine fails in the fewest
   dimensions — so a machine one CPU vendor away from a row is told about
   the vendor rather than about its accelerator. A partitioned accelerator
-  is rejected outright, and Experimental rows resolve as not deployable,
-  matching what `is_supported_combination` already reported. `candidates()` narrows on host identity alone and deliberately
+  is rejected outright. Matching also honours machine shape: rows carry an
+  optional exact `machine_type`, and a machine whose hardware matches a row
+  but whose shape is outside that row's validated environment resolves to
+  `OutsideValidatedEnvironment` rather than inheriting the claim, because
+  evidence does not transfer across machine shapes. Experimental rows get
+  their own non-deployable state rather than borrowing the Planned reason.
+  Detected CPU architecture and vendor are open values, so a host reporting
+  something no row names is reported as unsupported rather than as
+  undetectable. `candidates()` narrows on host identity alone and deliberately
   returns a set, since several rows share an OS and CPU and differ only by
   accelerator. `HostProbe` and `AcceleratorProbe` define the detection
   seam so OS-specific probes stay out of the matching logic.

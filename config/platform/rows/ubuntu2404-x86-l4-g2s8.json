@@ -64,7 +64,8 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GCP g2-standard-8 (disposable)"
+    "identity": "GCP g2-standard-8 (disposable)",
+    "machine_type": "g2-standard-8"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/ubuntu2404-x86-l4-g2s8/"

@@ -13,8 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use tensorplate_platform::{
-    AcceleratorIdentity, CpuArchitecture, CpuVendor, DetectedPlatform, HostIdentity,
-    PlatformReason, PlatformRegistry, RowMatch, SupportLevel,
+    AcceleratorIdentity, CpuArchitecture, CpuVendor, DetectedArchitecture, DetectedPlatform,
+    DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow, RowMatch,
+    SupportLevel,
 };
 
 fn registry_dir() -> PathBuf {
@@ -35,11 +36,12 @@ fn host(
     image_identity: Option<&str>,
 ) -> HostIdentity {
     HostIdentity {
-        architecture,
-        vendor,
+        architecture: DetectedArchitecture::Known(architecture),
+        vendor: DetectedVendor::Known(vendor),
         os_name: os_name.to_string(),
         os_version: os_version.to_string(),
         image_identity: image_identity.map(str::to_string),
+        machine_type: None,
     }
 }
 
@@ -55,11 +57,12 @@ fn accelerator(sku: &str) -> AcceleratorIdentity {
 fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
     let row = registry.row(row_id).expect("row is committed");
     let host = HostIdentity {
-        architecture: row.cpu().architecture,
-        vendor: row.cpu().vendors[0],
+        architecture: DetectedArchitecture::Known(row.cpu().architecture),
+        vendor: DetectedVendor::Known(row.cpu().vendors[0]),
         os_name: row.os().name.clone(),
         os_version: row.os().version.clone(),
         image_identity: row.os().image_identity.clone(),
+        machine_type: row.validation_environment().machine_type.clone(),
     };
     match row.accelerator() {
         Some(a) => DetectedPlatform::with_accelerator(host, accelerator(&a.sku)),
@@ -235,8 +238,22 @@ fn an_experimental_row_is_not_deployable() {
     let detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
     let matched = registry.resolve(&detected);
     assert!(
+        matches!(matched, RowMatch::Experimental(_)),
+        "an Experimental row has its own state ({matched:?})"
+    );
+    assert!(
         !matched.is_supported(),
         "deployment must not proceed on an Experimental row"
+    );
+    assert_eq!(
+        matched.reason(),
+        None,
+        "Experimental is not Planned; the frozen vocabulary has no value for it"
+    );
+    assert_eq!(
+        matched.row().map(PlatformSupportRow::row_id),
+        Some("ubuntu2404-x86-l4-g2s8"),
+        "the exact match is preserved"
     );
 }
 
@@ -246,7 +263,7 @@ fn the_reason_names_the_dimension_that_actually_differs() {
     // vendor, not about its accelerator: the L4 row names an Intel host.
     let registry = registry();
     let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
-    detected.host.vendor = CpuVendor::Amd;
+    detected.host.vendor = DetectedVendor::Known(CpuVendor::Amd);
     assert_eq!(
         registry.resolve(&detected).reason(),
         Some(PlatformReason::UnsupportedCpuVendor),
@@ -467,23 +484,39 @@ fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
     // Ubuntu 24.04 on an Intel host is consistent with the L4 row, the
     // A100 row, and the CPU-only row: exactly the ambiguity that makes
     // accelerator identity necessary before a single row can be named.
-    let candidates = registry.candidates(&host(
+    let mut on_g2 = host(
         CpuArchitecture::X86_64,
         CpuVendor::Intel,
         "Ubuntu",
         "24.04",
         None,
-    ));
-    let ids: Vec<&str> = candidates.iter().map(|row| row.row_id()).collect();
+    );
+    on_g2.machine_type = Some("g2-standard-8".to_string());
+    let ids: Vec<&str> = registry
+        .candidates(&on_g2)
+        .iter()
+        .map(|row| row.row_id())
+        .collect();
     assert_eq!(
         ids,
-        [
-            "ubuntu2404-x86-a100-40g-a2hg1",
-            "ubuntu2404-x86-cpu",
-            "ubuntu2404-x86-l4-g2s8"
-        ],
-        "host identity narrows but cannot decide"
+        ["ubuntu2404-x86-cpu", "ubuntu2404-x86-l4-g2s8"],
+        "host identity narrows to the shapes it could be, but cannot decide"
     );
+
+    // A host reporting no machine shape cannot be a row scoped to one, so
+    // only the shape-agnostic utility row remains.
+    let ids: Vec<&str> = registry
+        .candidates(&host(
+            CpuArchitecture::X86_64,
+            CpuVendor::Intel,
+            "Ubuntu",
+            "24.04",
+            None,
+        ))
+        .iter()
+        .map(|row| row.row_id())
+        .collect();
+    assert_eq!(ids, ["ubuntu2404-x86-cpu"]);
 
     // A vendor no row covers narrows to nothing rather than guessing.
     assert!(registry
@@ -512,5 +545,96 @@ fn lookup_by_row_id_is_exact() {
     assert!(
         registry.row("rocm-mi300x").is_none(),
         "a roadmap target is not reachable through row lookup"
+    );
+}
+
+#[test]
+fn a_row_scoped_to_a_machine_shape_does_not_cover_other_shapes() {
+    // The L4 row's evidence was recorded on one GCP machine type. The same
+    // GPU in a different chassis is not that row: evidence does not
+    // transfer across machine shapes.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    assert!(
+        matches!(registry.resolve(&detected), RowMatch::Supported(_)),
+        "the row resolves on its own machine shape"
+    );
+
+    detected.host.machine_type = Some("g2-standard-16".to_string());
+    let matched = registry.resolve(&detected);
+    assert!(
+        matches!(matched, RowMatch::OutsideValidatedEnvironment(_)),
+        "a different machine shape is outside the row's evidence ({matched:?})"
+    );
+    assert!(!matched.is_supported());
+    assert_eq!(
+        matched.row().map(PlatformSupportRow::row_id),
+        Some("ubuntu2404-x86-l4-g2s8"),
+        "the row is still named, so a caller can say which claim does not transfer"
+    );
+
+    // A bare-metal host reporting no machine type at all is equally not
+    // the cloud row.
+    detected.host.machine_type = None;
+    assert!(!registry.resolve(&detected).is_supported());
+}
+
+#[test]
+fn an_unvalidated_machine_shape_does_not_reach_the_cpu_only_row() {
+    // The CPU-only rows name no machine shape, so they are indifferent to
+    // it — that is deliberate, and this pins it.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-cpu");
+    detected.host.machine_type = Some("some-laptop".to_string());
+    assert!(
+        registry.resolve(&detected).is_supported(),
+        "a row naming no machine shape makes no machine-shape claim"
+    );
+}
+
+#[test]
+fn genuinely_unknown_cpu_values_are_reportable() {
+    // A riscv64 or VIA host must be reported as unsupported, not as
+    // undetectable: the probe carries the observation through.
+    let registry = registry();
+    let unknown_arch = DetectedPlatform::host_only(HostIdentity {
+        architecture: DetectedArchitecture::Other("riscv64".to_string()),
+        vendor: DetectedVendor::Known(CpuVendor::Intel),
+        os_name: "Ubuntu".to_string(),
+        os_version: "24.04".to_string(),
+        image_identity: None,
+        machine_type: None,
+    });
+    assert_eq!(
+        registry.resolve(&unknown_arch).reason(),
+        Some(PlatformReason::UnsupportedCpuArch)
+    );
+
+    let unknown_vendor = DetectedPlatform::host_only(HostIdentity {
+        architecture: DetectedArchitecture::Known(CpuArchitecture::X86_64),
+        vendor: DetectedVendor::Other("via".to_string()),
+        os_name: "Ubuntu".to_string(),
+        os_version: "24.04".to_string(),
+        image_identity: None,
+        machine_type: None,
+    });
+    assert_eq!(
+        registry.resolve(&unknown_vendor).reason(),
+        Some(PlatformReason::UnsupportedCpuVendor)
+    );
+}
+
+#[test]
+fn tied_dimensions_resolve_by_the_documented_priority() {
+    // A machine that is one dimension from two different rows — the L4 row
+    // (vendor) and the CPU-only row (accelerator) — reports the broader
+    // dimension, deterministically.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.host.vendor = DetectedVendor::Known(CpuVendor::Amd);
+    assert_eq!(
+        registry.resolve(&detected).reason(),
+        Some(PlatformReason::UnsupportedCpuVendor),
+        "vendor outranks accelerator in the documented priority"
     );
 }

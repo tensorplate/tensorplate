@@ -32,6 +32,15 @@ pub enum RowMatch<'a> {
     /// validation evidence. Reported with
     /// [`PlatformReason::RowPlannedNotValidated`].
     PlannedNotValidated(&'a PlatformSupportRow),
+    /// The machine matches an Experimental row. Defined and detectable,
+    /// but not a supported combination — and deliberately *not* reported
+    /// as Planned: the frozen reason for Planned means a row awaiting
+    /// hardware validation, which an Experimental integration is not.
+    Experimental(&'a PlatformSupportRow),
+    /// The machine matches a row's hardware but is running on a machine
+    /// shape the row's evidence does not cover. The row is returned so a
+    /// caller can say which claim does not transfer here.
+    OutsideValidatedEnvironment(&'a PlatformSupportRow),
     /// The machine matches no row, with the reason it did not.
     Unsupported(PlatformReason),
 }
@@ -41,17 +50,28 @@ impl RowMatch<'_> {
     #[must_use]
     pub fn row(&self) -> Option<&PlatformSupportRow> {
         match self {
-            Self::Supported(row) | Self::PlannedNotValidated(row) => Some(row),
+            Self::Supported(row)
+            | Self::PlannedNotValidated(row)
+            | Self::Experimental(row)
+            | Self::OutsideValidatedEnvironment(row) => Some(row),
             Self::Unsupported(_) => None,
         }
     }
 
-    /// The typed reason this machine is not a supported combination.
-    /// `None` only when the machine matched a row carrying a claim.
+    /// The typed reason this machine is not a supported combination, where
+    /// the frozen vocabulary has a value for it.
+    ///
+    /// `None` covers both a supported machine and the two outcomes the
+    /// vocabulary cannot express — an Experimental row and a machine shape
+    /// outside a row's validated environment. Callers must consult the
+    /// variant, not just this, before concluding a machine is supported;
+    /// [`Self::is_supported`] is the safe predicate.
     #[must_use]
     pub fn reason(&self) -> Option<PlatformReason> {
         match self {
-            Self::Supported(_) => None,
+            Self::Supported(_) | Self::Experimental(_) | Self::OutsideValidatedEnvironment(_) => {
+                None
+            }
             Self::PlannedNotValidated(_) => Some(PlatformReason::RowPlannedNotValidated),
             Self::Unsupported(reason) => Some(*reason),
         }
@@ -74,19 +94,32 @@ impl RowMatch<'_> {
 struct Mismatch(u8);
 
 impl Mismatch {
-    // Bit order is the dimension priority: the lowest set bit names the
-    // reason, so ties resolve the same way every time.
+    // Bit order is this module's own reason priority, broadest dimension
+    // first: an operator whose machine differs in several dimensions is
+    // told about the architecture before the accelerator, because the
+    // broader fact explains more. This is deliberately NOT the order
+    // `PlatformReason::ALL` happens to list, which is a listing, not a
+    // priority.
     const ARCHITECTURE: u8 = 1 << 0;
     const VENDOR: u8 = 1 << 1;
     const OS: u8 = 1 << 2;
     const ACCELERATOR: u8 = 1 << 3;
+    /// Hardware matches but the machine shape is outside the row's
+    /// evidence. Highest bit: it is only reported when nothing broader
+    /// differs, and it has no frozen reason of its own.
+    const ENVIRONMENT: u8 = 1 << 4;
 
     fn between(row: &PlatformSupportRow, detected: &DetectedPlatform) -> Self {
         let mut bits = 0;
-        if row.cpu().architecture != detected.host.architecture {
+        if detected.host.architecture.known() != Some(row.cpu().architecture) {
             bits |= Self::ARCHITECTURE;
         }
-        if !row.cpu().covers_vendor(detected.host.vendor) {
+        if !detected
+            .host
+            .vendor
+            .known()
+            .is_some_and(|vendor| row.cpu().covers_vendor(vendor))
+        {
             bits |= Self::VENDOR;
         }
         if !os_matches(row, &detected.host) {
@@ -95,7 +128,15 @@ impl Mismatch {
         if !accelerator_matches(row, detected) {
             bits |= Self::ACCELERATOR;
         }
+        if !environment_matches(row, &detected.host) {
+            bits |= Self::ENVIRONMENT;
+        }
         Self(bits)
+    }
+
+    /// Whether the only thing that differs is the machine shape.
+    fn is_environment_only(self) -> bool {
+        self.0 == Self::ENVIRONMENT
     }
 
     /// Combine the dimensions of two equally-near rows, so a tie is
@@ -121,6 +162,8 @@ impl Mismatch {
         } else if self.0 & Self::ACCELERATOR != 0 {
             Some(PlatformReason::UnsupportedAcceleratorSku)
         } else {
+            // An environment-only mismatch has no frozen reason; the
+            // caller reports it through the `RowMatch` variant instead.
             None
         }
     }
@@ -152,6 +195,14 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
     // An absent image identity matches any, so it overlaps everything;
     // two present ones overlap only when equal.
     match (&left.os().image_identity, &right.os().image_identity) {
+        (Some(a), Some(b)) if a != b => return false,
+        _ => {}
+    }
+    // An absent machine type is a wildcard, so it overlaps everything.
+    match (
+        &left.validation_environment().machine_type,
+        &right.validation_environment().machine_type,
+    ) {
         (Some(a), Some(b)) if a != b => return false,
         _ => {}
     }
@@ -317,6 +368,13 @@ impl PlatformRegistry {
     /// degraded version of that row, it is a configuration this release
     /// does not serve on.
     ///
+    /// A machine whose hardware matches a row but whose machine shape is
+    /// outside that row's validated environment resolves to
+    /// [`RowMatch::OutsideValidatedEnvironment`], never to `Supported`:
+    /// evidence recorded on one machine shape does not transfer to
+    /// another, so an accelerator in an unvalidated chassis must not
+    /// inherit a cloud row's claim.
+    ///
     /// Otherwise the answer comes from the *nearest* row — the one the
     /// machine fails in the fewest dimensions — so a machine one CPU
     /// vendor away from a row is told about the vendor rather than about
@@ -344,17 +402,19 @@ impl PlatformRegistry {
 
         let mut nearest_count = u32::MAX;
         let mut nearest = Mismatch::default();
+        let mut outside_environment: Option<&PlatformSupportRow> = None;
         for row in self.rows.values() {
             let mismatch = Mismatch::between(row, detected);
+            if mismatch.is_environment_only() && outside_environment.is_none() {
+                outside_environment = Some(row);
+            }
             if mismatch.count() == 0 {
                 return match row.support_level() {
                     SupportLevel::Planned => RowMatch::PlannedNotValidated(row),
-                    // Experimental rows are defined but are not supported
-                    // combinations, exactly as `is_supported_combination`
-                    // reports them; deployment must not proceed on one.
-                    SupportLevel::Experimental => {
-                        RowMatch::Unsupported(PlatformReason::RowPlannedNotValidated)
-                    }
+                    // Defined and detectable, but not a supported
+                    // combination, exactly as `is_supported_combination`
+                    // reports it.
+                    SupportLevel::Experimental => RowMatch::Experimental(row),
                     SupportLevel::Production | SupportLevel::Preview => RowMatch::Supported(row),
                 };
             }
@@ -370,6 +430,12 @@ impl PlatformRegistry {
             }
         }
 
+        // Hardware matched a row but the machine shape is outside its
+        // evidence: report the row rather than an unrelated reason, so a
+        // caller can say precisely which claim does not transfer here.
+        if let Some(row) = outside_environment {
+            return RowMatch::OutsideValidatedEnvironment(row);
+        }
         RowMatch::Unsupported(
             nearest
                 .reason()
@@ -379,9 +445,25 @@ impl PlatformRegistry {
 }
 
 fn host_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
-    row.cpu().architecture == host.architecture
-        && row.cpu().covers_vendor(host.vendor)
+    host.architecture.known() == Some(row.cpu().architecture)
+        && host
+            .vendor
+            .known()
+            .is_some_and(|vendor| row.cpu().covers_vendor(vendor))
         && os_matches(row, host)
+        && environment_matches(row, host)
+}
+
+/// A row scoped to a machine shape matches only a host reporting the same
+/// one; a row that names no shape is indifferent, exactly like an absent
+/// image identity.
+fn environment_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
+    row.validation_environment()
+        .machine_type
+        .as_ref()
+        .map_or(true, |required| {
+            host.machine_type.as_ref() == Some(required)
+        })
 }
 
 fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
