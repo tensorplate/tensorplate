@@ -9,7 +9,7 @@
 // keeping them distinct is what stops "we saw an NVIDIA GPU" from being
 // read as "this GPU is supported".
 
-use crate::error::PlatformRegistryError;
+use crate::error::PlatformProbeError;
 use crate::row::{CpuArchitecture, CpuVendor};
 
 /// What the host reports about its OS and CPU, before any accelerator is
@@ -83,7 +83,7 @@ pub trait HostProbe {
     ///
     /// Returns an error when the host cannot be identified — an
     /// unreadable source, or a value no supported platform reports.
-    fn detect_host(&self) -> Result<HostIdentity, PlatformRegistryError>;
+    fn detect_host(&self) -> Result<HostIdentity, PlatformProbeError>;
 }
 
 /// Reads accelerator identity from the running machine.
@@ -96,5 +96,5 @@ pub trait AcceleratorProbe {
     ///
     /// Returns an error when an accelerator is present but its identity
     /// cannot be read.
-    fn detect_accelerator(&self) -> Result<Option<AcceleratorIdentity>, PlatformRegistryError>;
+    fn detect_accelerator(&self) -> Result<Option<AcceleratorIdentity>, PlatformProbeError>;
 }

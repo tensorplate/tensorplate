@@ -5,7 +5,7 @@
 //! This crate owns platform identity for TensorPlate: the exact support
 //! rows the registry stores, the roadmap targets that are deliberately not
 //! rows, and the typed platform-reason vocabulary that `doctor`, deploy
-//! admission, and status all emit.
+//! admission, and status will emit once they are wired to it.
 //!
 //! The organizing rule is **exactness**. A row names one OS version, one
 //! driver stack, one CPU architecture, one accelerator SKU, and one
@@ -34,7 +34,7 @@ pub mod registry;
 pub mod roadmap;
 pub mod row;
 
-pub use error::PlatformRegistryError;
+pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedPlatform, HostIdentity, HostProbe,
 };

@@ -67,6 +67,37 @@ impl PlatformRegistryError {
     }
 }
 
+/// Why platform detection failed.
+///
+/// Kept separate from [`PlatformRegistryError`] because the two are
+/// different kinds of failure with different operator responses: a bad
+/// registry document is invalid static config, while an unreadable
+/// hardware source is a runtime detection failure. Collapsing them would
+/// report a failed accelerator query as a config error.
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformProbeError {
+    /// A detection source could not be read.
+    #[error("cannot read platform detection source `{source_name}`: {detail}")]
+    Unreadable { source_name: String, detail: String },
+
+    /// A source was readable but reported something this release does not
+    /// recognise. Detection fails rather than guessing a nearest match.
+    #[error("unrecognised platform detail from `{source_name}`: {detail}")]
+    Unrecognized { source_name: String, detail: String },
+}
+
+impl From<PlatformProbeError> for ProtocolError {
+    fn from(value: PlatformProbeError) -> Self {
+        let code = match value {
+            // The platform is readable but off-matrix.
+            PlatformProbeError::Unrecognized { .. } => ErrorCode::Unsupported,
+            // The runtime could not determine what it is running on.
+            PlatformProbeError::Unreadable { .. } => ErrorCode::Internal,
+        };
+        ProtocolError::new(code, "platform detection failed").with_context(value.to_string())
+    }
+}
+
 impl From<PlatformRegistryError> for ProtocolError {
     fn from(value: PlatformRegistryError) -> Self {
         ProtocolError::new(

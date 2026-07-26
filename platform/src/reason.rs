@@ -3,11 +3,11 @@
 // The typed platform-reason vocabulary: why a detected platform is not a
 // supported combination.
 //
-// This crate owns the enum; `doctor`, deploy admission, and status all
-// emit these values rather than prose, so the same condition reads the
-// same way everywhere. Trigger conditions and user-facing rendering are
-// frozen separately by the doctor work; the values themselves are frozen
-// here.
+// This crate owns the enum. `doctor`, deploy admission, and status are
+// intended to emit these values rather than prose, so the same condition
+// reads the same way everywhere; the consumers are wired up separately.
+// Trigger conditions and user-facing rendering are frozen by the doctor
+// work; the values themselves are frozen here.
 
 use serde::{Deserialize, Serialize};
 

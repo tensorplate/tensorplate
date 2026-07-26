@@ -64,27 +64,101 @@ impl RowMatch<'_> {
     }
 }
 
-/// The identity a row matches on. Two rows sharing one would make
-/// resolution ambiguous, so the registry rejects that at load time rather
-/// than picking a winner at query time.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RowIdentityKey {
-    architecture: &'static str,
-    os_name: String,
-    os_version: String,
-    image_identity: Option<String>,
-    accelerator_sku: Option<String>,
+/// Which dimensions of a row a detected machine fails to satisfy.
+///
+/// Reason selection works from this rather than from a sequence of
+/// filters: a filter chain reports whichever dimension it happened to
+/// narrow on last, which is how a machine one CPU-vendor away from a row
+/// ends up being told its accelerator is unsupported.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Mismatch(u8);
+
+impl Mismatch {
+    // Bit order is the dimension priority: the lowest set bit names the
+    // reason, so ties resolve the same way every time.
+    const ARCHITECTURE: u8 = 1 << 0;
+    const VENDOR: u8 = 1 << 1;
+    const OS: u8 = 1 << 2;
+    const ACCELERATOR: u8 = 1 << 3;
+
+    fn between(row: &PlatformSupportRow, detected: &DetectedPlatform) -> Self {
+        let mut bits = 0;
+        if row.cpu().architecture != detected.host.architecture {
+            bits |= Self::ARCHITECTURE;
+        }
+        if !row.cpu().covers_vendor(detected.host.vendor) {
+            bits |= Self::VENDOR;
+        }
+        if !os_matches(row, &detected.host) {
+            bits |= Self::OS;
+        }
+        if !accelerator_matches(row, detected) {
+            bits |= Self::ACCELERATOR;
+        }
+        Self(bits)
+    }
+
+    /// Combine the dimensions of two equally-near rows, so a tie is
+    /// resolved by dimension priority rather than by whichever row the
+    /// iteration reached first.
+    fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    fn count(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    /// The reason for this mismatch, in the dimension order the frozen
+    /// reason vocabulary declares.
+    fn reason(self) -> Option<PlatformReason> {
+        if self.0 & Self::ARCHITECTURE != 0 {
+            Some(PlatformReason::UnsupportedCpuArch)
+        } else if self.0 & Self::VENDOR != 0 {
+            Some(PlatformReason::UnsupportedCpuVendor)
+        } else if self.0 & Self::OS != 0 {
+            Some(PlatformReason::UnsupportedOsVersion)
+        } else if self.0 & Self::ACCELERATOR != 0 {
+            Some(PlatformReason::UnsupportedAcceleratorSku)
+        } else {
+            None
+        }
+    }
 }
 
-impl RowIdentityKey {
-    fn of(row: &PlatformSupportRow) -> Self {
-        Self {
-            architecture: row.cpu().architecture.as_str(),
-            os_name: row.os().name.clone(),
-            os_version: row.os().version.clone(),
-            image_identity: row.os().image_identity.clone(),
-            accelerator_sku: row.accelerator().map(|a| a.sku.clone()),
-        }
+/// Whether some machine could match both rows at once.
+///
+/// This is the exact negation of "resolution is unambiguous", so it is
+/// derived from the same predicates matching uses rather than from a
+/// separate key: an identity key that omits a dimension (vendors) rejects
+/// rows that are genuinely distinguishable, and one that compares a
+/// wildcard field verbatim (an absent `image_identity` matches any) misses
+/// pairs that really do collide.
+fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) -> bool {
+    if left.cpu().architecture != right.cpu().architecture {
+        return false;
+    }
+    if !left
+        .cpu()
+        .vendors
+        .iter()
+        .any(|vendor| right.cpu().covers_vendor(*vendor))
+    {
+        return false;
+    }
+    if left.os().name != right.os().name || left.os().version != right.os().version {
+        return false;
+    }
+    // An absent image identity matches any, so it overlaps everything;
+    // two present ones overlap only when equal.
+    match (&left.os().image_identity, &right.os().image_identity) {
+        (Some(a), Some(b)) if a != b => return false,
+        _ => {}
+    }
+    match (left.accelerator(), right.accelerator()) {
+        (Some(a), Some(b)) => a.sku == b.sku,
+        (None, None) => true,
+        _ => false,
     }
 }
 
@@ -130,26 +204,36 @@ impl PlatformRegistry {
         R: IntoIterator<Item = (&'a Path, &'a str)>,
         T: IntoIterator<Item = (&'a Path, &'a str)>,
     {
-        let mut loaded_rows = BTreeMap::new();
-        let mut identities: BTreeMap<RowIdentityKey, String> = BTreeMap::new();
+        let mut loaded_rows: BTreeMap<String, PlatformSupportRow> = BTreeMap::new();
         for (path, body) in rows {
             let row = PlatformSupportRow::from_json(body)
                 .map_err(|source| PlatformRegistryError::in_document(path, source))?;
-            let key = RowIdentityKey::of(&row);
-            if let Some(existing) = identities.get(&key) {
+            if let Some(overlapping) = loaded_rows
+                .values()
+                .find(|existing| rows_can_both_match(existing, &row))
+            {
                 return Err(PlatformRegistryError::AmbiguousRegistry {
                     detail: format!(
-                        "rows `{existing}` and `{}` match the same platform identity",
+                        "rows `{}` and `{}` can both match one machine",
+                        overlapping.row_id(),
                         row.row_id()
                     ),
                 });
             }
-            identities.insert(key, row.row_id().to_string());
-            if let Some(existing) = loaded_rows.insert(row.row_id().to_string(), row) {
+            if loaded_rows.contains_key(row.row_id()) {
                 return Err(PlatformRegistryError::AmbiguousRegistry {
-                    detail: format!("row id `{}` is declared twice", existing.row_id()),
+                    detail: format!("row id `{}` is declared twice", row.row_id()),
                 });
             }
+            loaded_rows.insert(row.row_id().to_string(), row);
+        }
+        if loaded_rows.is_empty() {
+            // An empty registry answers "unsupported" for every machine on
+            // earth, which is indistinguishable from a registry that failed
+            // to load. Refuse it.
+            return Err(PlatformRegistryError::AmbiguousRegistry {
+                detail: "the registry declares no platform support rows".to_string(),
+            });
         }
 
         let mut loaded_targets = BTreeMap::new();
@@ -228,18 +312,26 @@ impl PlatformRegistry {
     /// Resolve a fully detected machine to exactly one row, or to the
     /// typed reason it matches none.
     ///
-    /// Checks run in the order that yields the most specific reason: a
-    /// partitioned accelerator is rejected before its SKU is considered,
-    /// and CPU/OS mismatches are reported before accelerator mismatches,
-    /// so an operator is told the first thing that is actually wrong.
+    /// A partitioned accelerator is rejected outright, before any row is
+    /// considered: a partitioned instance of a supported SKU is not a
+    /// degraded version of that row, it is a configuration this release
+    /// does not serve on.
     ///
-    /// [`PlatformReason::UnsupportedCpuArch`] is reachable here only if a
-    /// future release ships rows for a subset of the architectures the
-    /// type can express. Today every architecture the type can express has
-    /// rows, so an unrecognised architecture fails earlier, in the
-    /// host probe that could not name it — which is the correct place: a
-    /// machine whose architecture cannot be identified is not a machine
-    /// whose architecture is unsupported.
+    /// Otherwise the answer comes from the *nearest* row — the one the
+    /// machine fails in the fewest dimensions — so a machine one CPU
+    /// vendor away from a row is told about the vendor rather than about
+    /// its accelerator. Ties resolve in the fixed dimension order the
+    /// frozen reason vocabulary declares, so the answer never depends on
+    /// registry file order.
+    ///
+    /// Trigger *semantics* for the reasons — when `doctor` shows which,
+    /// and how — are frozen elsewhere; this is the registry's own
+    /// mechanical answer. Two limits of the frozen vocabulary show up
+    /// here: it has no value for "no accelerator where the row requires
+    /// one", and none for "the OS name is unknown", so both report the
+    /// nearest available truth
+    /// ([`PlatformReason::UnsupportedAcceleratorSku`] and
+    /// [`PlatformReason::UnsupportedOsVersion`] respectively).
     #[must_use]
     pub fn resolve(&self, detected: &DetectedPlatform) -> RowMatch<'_> {
         if detected
@@ -250,48 +342,54 @@ impl PlatformRegistry {
             return RowMatch::Unsupported(PlatformReason::MigModeEnabled);
         }
 
-        if !self
-            .rows
-            .values()
-            .any(|row| row.cpu().architecture == detected.host.architecture)
-        {
-            return RowMatch::Unsupported(PlatformReason::UnsupportedCpuArch);
-        }
-        if !self.rows.values().any(|row| {
-            row.cpu().architecture == detected.host.architecture
-                && row.cpu().covers_vendor(detected.host.vendor)
-        }) {
-            return RowMatch::Unsupported(PlatformReason::UnsupportedCpuVendor);
-        }
-
-        let host_candidates = self.candidates(&detected.host);
-        if host_candidates.is_empty() {
-            return RowMatch::Unsupported(PlatformReason::UnsupportedOsVersion);
-        }
-
-        let matched = host_candidates
-            .into_iter()
-            .find(|row| accelerator_matches(row, detected));
-        match matched {
-            Some(row) if row.support_level() == SupportLevel::Planned => {
-                RowMatch::PlannedNotValidated(row)
+        let mut nearest_count = u32::MAX;
+        let mut nearest = Mismatch::default();
+        for row in self.rows.values() {
+            let mismatch = Mismatch::between(row, detected);
+            if mismatch.count() == 0 {
+                return match row.support_level() {
+                    SupportLevel::Planned => RowMatch::PlannedNotValidated(row),
+                    // Experimental rows are defined but are not supported
+                    // combinations, exactly as `is_supported_combination`
+                    // reports them; deployment must not proceed on one.
+                    SupportLevel::Experimental => {
+                        RowMatch::Unsupported(PlatformReason::RowPlannedNotValidated)
+                    }
+                    SupportLevel::Production | SupportLevel::Preview => RowMatch::Supported(row),
+                };
             }
-            Some(row) => RowMatch::Supported(row),
-            // The host is recognised but its accelerator configuration is
-            // not: either an unknown SKU, or no accelerator where every
-            // row for this host declares one.
-            None => RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku),
+            match mismatch.count().cmp(&nearest_count) {
+                std::cmp::Ordering::Less => {
+                    nearest_count = mismatch.count();
+                    nearest = mismatch;
+                }
+                // Equally near: fold the dimensions together so the
+                // priority order below decides, not iteration order.
+                std::cmp::Ordering::Equal => nearest = nearest.union(mismatch),
+                std::cmp::Ordering::Greater => {}
+            }
         }
+
+        RowMatch::Unsupported(
+            nearest
+                .reason()
+                .unwrap_or(PlatformReason::UnsupportedAcceleratorSku),
+        )
     }
 }
 
 fn host_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
     row.cpu().architecture == host.architecture
         && row.cpu().covers_vendor(host.vendor)
-        && row.os().name == host.os_name
+        && os_matches(row, host)
+}
+
+fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
+    row.os().name == host.os_name
         && row.os().version == host.os_version
         // A row that names an image identity requires it; a row that does
-        // not is indifferent to whatever the host reports.
+        // not is indifferent to whatever the host reports, which is why
+        // `rows_can_both_match` treats an absent one as overlapping.
         && row
             .os()
             .image_identity
@@ -323,11 +421,19 @@ fn read_json_documents(directory: &Path) -> Result<Vec<(PathBuf, String)>, Platf
                 detail: source.to_string(),
             })?
             .path();
-        let is_json = path
-            .extension()
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+        // Anything that is not a JSON document is an error, not
+        // something to skip: renaming a row to `.json.bak` or dropping it
+        // in a subdirectory would otherwise leave a smaller registry that
+        // loads cleanly and reports real platforms as unsupported.
+        let is_json = path.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
         if !is_json {
-            continue;
+            return Err(PlatformRegistryError::Unreadable {
+                path: path.display().to_string(),
+                detail: "registry directories contain only JSON documents".to_string(),
+            });
         }
         let body =
             std::fs::read_to_string(&path).map_err(|source| PlatformRegistryError::Unreadable {

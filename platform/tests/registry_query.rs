@@ -114,16 +114,21 @@ fn colliding_registry_entries_are_rejected_at_load() {
     let row = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-l4-g2s8.json"))
         .expect("read a committed row");
 
-    // The same row twice: one row id, declared twice.
+    // One row id declared twice, with identities distinct enough that the
+    // overlap check does not fire first.
+    let same_id_other_identity = row.replace("\"version\": \"24.04\"", "\"version\": \"24.10\"");
     let duplicate_id = PlatformRegistry::from_documents(
         [
             (Path::new("a.json"), row.as_str()),
-            (Path::new("b.json"), row.as_str()),
+            (Path::new("b.json"), same_id_other_identity.as_str()),
         ],
         std::iter::empty(),
     )
     .expect_err("a duplicated row id is ambiguous");
-    assert!(duplicate_id.to_string().contains("ambiguous"));
+    assert!(
+        duplicate_id.to_string().contains("declared twice"),
+        "the duplicate-id branch should fire: {duplicate_id}"
+    );
 
     // Distinct ids, same matchable identity: resolution could not pick
     // one, so the registry refuses to load rather than guessing.
@@ -140,8 +145,128 @@ fn colliding_registry_entries_are_rejected_at_load() {
     )
     .expect_err("two rows matching one identity are ambiguous");
     assert!(
-        ambiguous.to_string().contains("same platform identity"),
+        ambiguous.to_string().contains("can both match"),
         "reason should name the collision: {ambiguous}"
+    );
+}
+
+#[test]
+fn a_wildcard_image_identity_cannot_shadow_a_specific_row() {
+    // A row with no image identity matches a host that reports one, so it
+    // overlaps a row that pins that identity. Distinct keys would have
+    // hidden this and left `.find()` picking by row-id order.
+    let pinned =
+        std::fs::read_to_string(registry_dir().join("rows/jetson-orin-nano-8gb-jp62.json"))
+            .expect("read the Jetson row");
+    let mut document: serde_json::Value = serde_json::from_str(&pinned).expect("row parses");
+    document["row_id"] = serde_json::json!("jetpack62-generic");
+    document["os"]
+        .as_object_mut()
+        .expect("os object")
+        .remove("image_identity");
+    let wildcard = serde_json::to_string(&document).expect("serialize");
+    assert!(
+        !wildcard.contains("image_identity"),
+        "the wildcard row drops the image identity"
+    );
+
+    let error = PlatformRegistry::from_documents(
+        [
+            (Path::new("pinned.json"), pinned.as_str()),
+            (Path::new("wildcard.json"), wildcard.as_str()),
+        ],
+        std::iter::empty(),
+    )
+    .expect_err("a wildcard row overlaps the row it would shadow");
+    assert!(error.to_string().contains("can both match"));
+}
+
+#[test]
+fn an_empty_registry_is_not_a_registry() {
+    // Zero rows answers "unsupported" for every machine on earth, which is
+    // indistinguishable from a registry that failed to load.
+    let error = PlatformRegistry::from_documents(std::iter::empty(), std::iter::empty())
+        .expect_err("an empty registry must not load");
+    assert!(error.to_string().contains("no platform support rows"));
+}
+
+#[test]
+fn a_partial_registry_directory_fails_to_load() {
+    // An operator renaming a row to `.json.bak`, or a stray subdirectory,
+    // must not silently produce a smaller registry.
+    let staging = std::env::temp_dir().join(format!(
+        "tensorplate-registry-partial-{}",
+        std::process::id()
+    ));
+    let rows = staging.join("rows");
+    std::fs::create_dir_all(&rows).expect("create staging rows");
+    std::fs::create_dir_all(staging.join("roadmap_targets")).expect("create staging targets");
+    let body = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-cpu.json"))
+        .expect("read a committed row");
+    std::fs::write(rows.join("ubuntu2404-x86-cpu.json"), &body).expect("write row");
+    std::fs::write(rows.join("disabled.json.bak"), &body).expect("write disabled row");
+
+    let error = PlatformRegistry::load(&staging).expect_err("a non-JSON entry must fail the load");
+    assert!(
+        error.to_string().contains("only JSON documents"),
+        "the error should name the offending entry: {error}"
+    );
+    std::fs::remove_dir_all(&staging).ok();
+}
+
+#[test]
+fn an_experimental_row_is_not_deployable() {
+    // The crate owns the support-level vocabulary, so the registry must
+    // agree with `is_supported_combination` about what Experimental means.
+    let body = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-l4-g2s8.json"))
+        .expect("read a committed row")
+        .replace(
+            "\"support_level\": \"Production\"",
+            "\"support_level\": \"Experimental\"",
+        );
+    let registry = PlatformRegistry::from_documents(
+        [(Path::new("row.json"), body.as_str())],
+        std::iter::empty(),
+    )
+    .expect("an Experimental row is a valid row");
+    let row = registry.row("ubuntu2404-x86-l4-g2s8").expect("row loaded");
+    assert!(!row.is_supported_combination());
+
+    let detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    let matched = registry.resolve(&detected);
+    assert!(
+        !matched.is_supported(),
+        "deployment must not proceed on an Experimental row"
+    );
+}
+
+#[test]
+fn the_reason_names_the_dimension_that_actually_differs() {
+    // A machine one CPU vendor away from a row must be told about the
+    // vendor, not about its accelerator: the L4 row names an Intel host.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.host.vendor = CpuVendor::Amd;
+    assert_eq!(
+        registry.resolve(&detected).reason(),
+        Some(PlatformReason::UnsupportedCpuVendor),
+        "the SKU is named by a row; the vendor is what differs"
+    );
+
+    // Same for an OS version: the SKU is right, the version is not.
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.host.os_version = "22.04".to_string();
+    assert_eq!(
+        registry.resolve(&detected).reason(),
+        Some(PlatformReason::UnsupportedOsVersion)
+    );
+
+    // And a genuinely unknown SKU still reports the accelerator.
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.accelerator.as_mut().expect("accelerator").sku = "NVIDIA L40S".to_string();
+    assert_eq!(
+        registry.resolve(&detected).reason(),
+        Some(PlatformReason::UnsupportedAcceleratorSku)
     );
 }
 
@@ -254,7 +379,7 @@ fn unmatched_identities_get_the_most_specific_reason() {
                 "24.04",
                 None,
             )),
-            PlatformReason::UnsupportedCpuVendor,
+            PlatformReason::UnsupportedCpuArch,
         ),
         (
             "unsupported OS version",

@@ -18,10 +18,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   picking a winner at query time. Roadmap targets load into a separate
   catalog that matching never consults, so a target can never be read as
   support. `resolve()` returns a typed `RowMatch`: supported, matched a
-  Planned row (`row_planned_not_validated`), or unsupported with the most
-  specific reason — a partitioned accelerator is rejected before its SKU
-  is considered, and CPU/OS mismatches are reported before accelerator
-  ones. `candidates()` narrows on host identity alone and deliberately
+  Planned row (`row_planned_not_validated`), or unsupported with a reason
+  drawn from the *nearest* row — the one the machine fails in the fewest
+  dimensions — so a machine one CPU vendor away from a row is told about
+  the vendor rather than about its accelerator. A partitioned accelerator
+  is rejected outright, and Experimental rows resolve as not deployable,
+  matching what `is_supported_combination` already reported. `candidates()` narrows on host identity alone and deliberately
   returns a set, since several rows share an OS and CPU and differ only by
   accelerator. `HostProbe` and `AcceleratorProbe` define the detection
   seam so OS-specific probes stay out of the matching logic.
