@@ -51,21 +51,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `row_planned_not_validated`) that diagnosis and admission will emit.
   (V021-E01-F01-T01, V021-E01-F01-T02)
 
-### Changed
-
-- `tensorplate-protocol` gains shared config-schema helpers used by both
-  the memory-pathway mirrors and the new platform registry:
-  `json_numbers` (exact decimal lexeme validation and canonicalization for
-  byte-valued fields, so a declared size can never be silently rounded by
-  a JSON parser) and `serde_shape` (object-form and string-form pinning,
-  so a decoder is never shape-weaker than its schema, plus canonical
-  identifier checks). The memory budget and platform memory profile
-  modules now use these instead of private copies. Behavior is unchanged
-  except that byte-value error messages now say "byte-value domain" rather
-  than "byte-line domain", and number tokens with leading zeros are now
-  reported as the JSON grammar errors they are instead of being
-  canonicalized into legal integers.
-
 - Platform memory profile records and consolidated telemetry field names.
   The new `config/schemas/platform_memory_profile.json` defines the two
   property-named profiles (`unified_memory`: one shared budget pool;
@@ -117,6 +102,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   streaming-session ledger admission. A Draft-07 validator conformance test
   (dev-only `jsonschema` dependency) keeps the schema document and the Rust
   mirror verdict-identical. (V023-E03-F04-T01, V023-E03-F04-T02)
+
+### Changed
+
+- `tensorplate-protocol` gains shared config-schema helpers used by both
+  the memory-pathway mirrors and the new platform registry:
+  `json_numbers` (exact decimal lexeme validation and canonicalization for
+  byte-valued fields, so a declared size can never be silently rounded by
+  a JSON parser) and `serde_shape` (object-form and string-form pinning,
+  so a decoder is never shape-weaker than its schema, plus canonical
+  identifier checks). The memory budget and platform memory profile
+  modules now use these instead of private copies. Behavior is unchanged
+  except that byte-value error messages now say "byte-value domain" rather
+  than "byte-line domain", and number tokens with leading zeros are now
+  reported as the JSON grammar errors they are instead of being
+  canonicalized into legal integers.
 
 ## [0.1.5] - 2026-07-20
 

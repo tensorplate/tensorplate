@@ -11,8 +11,9 @@
 //
 // Like the other config schemas, this versions on its own track and
 // validation failures map to `ErrorCode::ConfigInvalid`. Validation is
-// unavoidable: the custom `Deserialize` impl routes every decoding path
-// through the same checks, and decoded rows are read-only.
+// unavoidable because `PlatformSupportRow::from_json` is the only way to
+// obtain a row — the type deliberately has no `Deserialize` impl — and
+// decoded rows are read-only.
 
 use serde::{Deserialize, Serialize};
 use tensorplate_protocol::json_numbers;
@@ -129,8 +130,9 @@ string_only_enum! {
     pub enum Provenance {
         /// Transcribed from a real run on this exact hardware.
         Recorded => "recorded",
-        /// Authored from vendor specifications because no validated
-        /// hardware exists yet; re-verified when hardware first runs.
+        /// Authored from vendor specifications because no evidence run
+        /// has been recorded for this row yet; re-verified against
+        /// recorded output when one is.
         SpecAuthored => "spec_authored",
     }
 }
@@ -394,9 +396,15 @@ struct WireRow {
     evidence: Option<Evidence>,
 }
 
-/// Whitespace-only satisfies `minLength: 1` but says nothing, so both the
-/// schema (via a `\S` pattern) and the decoder require a non-whitespace
-/// character in every free-text field.
+/// Whitespace-only satisfies `minLength: 1` but says nothing, so every
+/// free-text field must carry a non-whitespace character.
+///
+/// This is deliberately decoder-enforced rather than a schema `pattern`:
+/// regex dialects disagree about which code points are whitespace (Rust's
+/// `str::trim` excludes U+FEFF, ECMA-262 `\s` includes it; the reverse
+/// holds for U+3000 and friends), so a `\S` pattern would make the schema
+/// and its mirrors disagree in both directions. Being stricter than the
+/// schema here is safe; being differently-strict is not.
 fn blank(s: &str) -> bool {
     s.trim().is_empty()
 }
@@ -434,15 +442,10 @@ impl PlatformSupportRow {
         Self::from_wire(wire)
     }
 
-    /// Validating constructor shared by [`Self::from_json`] and the custom
-    /// `Deserialize` impl: every decoding path funnels through here.
+    /// Validating constructor. [`Self::from_json`] gates the schema
+    /// version before decoding, so this only has to enforce the row
+    /// invariants.
     fn from_wire(wire: WireRow) -> Result<Self, PlatformRegistryError> {
-        if wire.schema_version != PLATFORM_SUPPORT_ROW_SCHEMA_VERSION {
-            return Err(PlatformRegistryError::UnsupportedSchemaVersion {
-                got: wire.schema_version,
-                expected: PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
-            });
-        }
         let row = Self {
             schema_version: wire.schema_version,
             row_id: wire.row_id,

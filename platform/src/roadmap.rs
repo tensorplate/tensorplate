@@ -64,13 +64,9 @@ impl RoadmapTarget {
         Self::from_wire(wire)
     }
 
+    /// Validating constructor. [`Self::from_json`] gates the schema
+    /// version before decoding, so this only enforces target invariants.
     fn from_wire(wire: WireTarget) -> Result<Self, PlatformRegistryError> {
-        if wire.schema_version != ROADMAP_TARGET_SCHEMA_VERSION {
-            return Err(PlatformRegistryError::UnsupportedSchemaVersion {
-                got: wire.schema_version,
-                expected: ROADMAP_TARGET_SCHEMA_VERSION,
-            });
-        }
         let target = Self {
             schema_version: wire.schema_version,
             target_id: wire.target_id,

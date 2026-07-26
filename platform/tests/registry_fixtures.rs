@@ -397,7 +397,7 @@ fn shape_and_enum_forms_agree_between_schema_and_decoder() {
     ]]);
     let seq_form_row = serde_json::json!(["0.1", "ubuntu2404-x86-l4-g2s8"]);
     let mut unknown_enum_value = a_valid_row_value();
-    unknown_enum_value["cpu"]["vendor"] = serde_json::json!("via");
+    unknown_enum_value["cpu"]["vendors"] = serde_json::json!(["via"]);
 
     assert_row_verdicts_agree(vec![
         ("map-form architecture", map_form_enum, false),
@@ -405,7 +405,7 @@ fn shape_and_enum_forms_agree_between_schema_and_decoder() {
         ("sequence-form os", seq_form_os, false),
         ("sequence-form backend package set", seq_form_backend, false),
         ("sequence-form whole row", seq_form_row, false),
-        ("unknown cpu vendor", unknown_enum_value, false),
+        ("unknown cpu vendor value", unknown_enum_value, false),
     ]);
 }
 
@@ -633,7 +633,14 @@ fn explicit_null_is_not_absence() {
 }
 
 #[test]
-fn blank_strings_are_not_values() {
+fn blank_strings_are_decoder_stricter_than_the_schema() {
+    // Whitespace-only satisfies `minLength: 1`, and a `\S` pattern cannot
+    // close that portably: regex dialects disagree about which code points
+    // are whitespace (Rust's `str::trim` excludes U+FEFF while ECMA-262
+    // `\s` includes it, and the reverse holds for U+3000). The rule is
+    // therefore decoder-enforced, which is a documented one-directional
+    // divergence: the decoder is stricter, never weaker.
+    let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
     let mut blank_sku = a_valid_row_value();
     blank_sku["accelerator"]["sku"] = serde_json::json!("   ");
     let mut blank_reason = a_valid_cpu_row_value();
@@ -642,11 +649,21 @@ fn blank_strings_are_not_values() {
     let mut blank_evidence = a_valid_row_value();
     blank_evidence["evidence"]["location"] = serde_json::json!("\t");
 
-    assert_row_verdicts_agree(vec![
-        ("whitespace-only sku", blank_sku, false),
-        ("whitespace-only gate reason", blank_reason, false),
-        ("whitespace-only evidence location", blank_evidence, false),
-    ]);
+    for (label, instance) in [
+        ("whitespace-only sku", blank_sku),
+        ("whitespace-only gate reason", blank_reason),
+        ("whitespace-only evidence location", blank_evidence),
+    ] {
+        assert!(
+            validator.is_valid(&instance),
+            "{label}: the schema cannot express this rule"
+        );
+        let raw = serde_json::to_string(&instance).expect("serialize");
+        assert!(
+            PlatformSupportRow::from_json(&raw).is_err(),
+            "{label}: the decoder must still reject it"
+        );
+    }
 }
 
 #[test]

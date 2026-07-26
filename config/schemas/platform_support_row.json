@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/platform_support_row.json",
   "title": "TensorPlate Platform Support Row",
-  "description": "One exact platform support row: the unit the registry stores, `doctor` matches against, and release evidence is filed under. Every field is exact-version \u2014 a row names a specific OS version, driver/runtime stack, CPU architecture and vendor, accelerator SKU, and validation environment, so evidence never transfers between rows. Non-exact future targets use the separate roadmap_target.json schema and are never rows. Memory accounting references the platform memory profile records by property name (`unified_memory` / `discrete_gpu`) rather than re-specifying them. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors.",
+  "description": "One exact platform support row: the unit the registry stores, `doctor` matches against, and release evidence is filed under. Every field is exact-version \u2014 a row names a specific OS version, driver/runtime stack, CPU architecture, accelerator SKU, and validation environment, and covers an explicit CPU vendor set, so evidence never transfers between rows. Non-exact future targets use the separate roadmap_target.json schema and are never rows. Memory accounting references the platform memory profile records by property name (`unified_memory` / `discrete_gpu`) rather than re-specifying them. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors. Free-text fields must also carry a non-whitespace character; that rule is enforced by consumers rather than by a `pattern`, because regex dialects disagree about which code points count as whitespace (U+FEFF and U+3000 among them) and a cross-language contract must not depend on that.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -39,20 +39,17 @@
       "properties": {
         "name": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "minLength": 1
         },
         "version": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact OS version. Evidence from one version never satisfies another.",
-          "pattern": "\\S"
+          "description": "Exact OS version. Evidence from one version never satisfies another."
         },
         "image_identity": {
           "type": "string",
           "minLength": 1,
-          "description": "Image or distribution identity where the OS version alone is not exact (e.g. a JetPack/L4T release on an Ubuntu base).",
-          "pattern": "\\S"
+          "description": "Image or distribution identity where the OS version alone is not exact (e.g. a JetPack/L4T release on an Ubuntu base)."
         }
       }
     },
@@ -82,8 +79,7 @@
               },
               "version": {
                 "type": "string",
-                "minLength": 1,
-                "pattern": "\\S"
+                "minLength": 1
               }
             }
           }
@@ -136,14 +132,12 @@
       "properties": {
         "family": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "minLength": 1
         },
         "sku": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact SKU as reported by the platform, recorded at first run.",
-          "pattern": "\\S"
+          "description": "Exact SKU as reported by the platform, recorded at first run."
         },
         "memory_bytes": {
           "type": "integer",
@@ -199,8 +193,7 @@
             "minItems": 1,
             "items": {
               "type": "string",
-              "minLength": 1,
-              "pattern": "\\S"
+              "minLength": 1
             }
           }
         }
@@ -219,8 +212,7 @@
         "properties": {
           "model_class_row": {
             "type": "string",
-            "minLength": 1,
-            "pattern": "\\S"
+            "minLength": 1
           },
           "support_level": {
             "type": "string",
@@ -291,8 +283,7 @@
         "identity": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact machine type or physical device identity.",
-          "pattern": "\\S"
+          "description": "Exact machine type or physical device identity."
         }
       }
     },
@@ -306,8 +297,7 @@
       "properties": {
         "location": {
           "type": "string",
-          "minLength": 1,
-          "pattern": "\\S"
+          "minLength": 1
         }
       }
     },
@@ -317,7 +307,7 @@
         "recorded",
         "spec_authored"
       ],
-      "description": "How this row definition was authored. `recorded` means the fields were transcribed from a real run on this exact hardware; `spec_authored` means they were authored from vendor specifications because no validated hardware exists yet. Planned rows are always spec_authored and are re-verified against recorded output when their hardware first runs."
+      "description": "How this row definition was authored. `recorded` means the fields were transcribed from a real run on this exact hardware; `spec_authored` means they were authored from vendor specifications because no evidence run has been recorded for this row yet. Planned rows are always spec_authored and are re-verified against recorded output when their hardware first runs."
     }
   },
   "definitions": {
@@ -339,8 +329,7 @@
         "reason": {
           "type": "string",
           "minLength": 1,
-          "description": "Why the signal is not applicable on this row. Required for `not_applicable`; free-text row fact, not a typed platform reason.",
-          "pattern": "\\S"
+          "description": "Why the signal is not applicable on this row. Required for `not_applicable`; free-text row fact, not a typed platform reason."
         }
       },
       "allOf": [
