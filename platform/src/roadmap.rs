@@ -67,6 +67,11 @@ impl RoadmapTarget {
     /// Validating constructor. [`Self::from_json`] gates the schema
     /// version before decoding, so this only enforces target invariants.
     fn from_wire(wire: WireTarget) -> Result<Self, PlatformRegistryError> {
+        debug_assert_eq!(
+            wire.schema_version, ROADMAP_TARGET_SCHEMA_VERSION,
+            "from_json gates the schema version before decoding; a caller that skips it \
+             would bypass the gate"
+        );
         let target = Self {
             schema_version: wire.schema_version,
             target_id: wire.target_id,

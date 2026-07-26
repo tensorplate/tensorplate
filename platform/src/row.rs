@@ -400,11 +400,16 @@ struct WireRow {
 /// free-text field must carry a non-whitespace character.
 ///
 /// This is deliberately decoder-enforced rather than a schema `pattern`:
-/// regex dialects disagree about which code points are whitespace (Rust's
-/// `str::trim` excludes U+FEFF, ECMA-262 `\s` includes it; the reverse
-/// holds for U+3000 and friends), so a `\S` pattern would make the schema
-/// and its mirrors disagree in both directions. Being stricter than the
-/// schema here is safe; being differently-strict is not.
+/// regex engines and `str::trim` disagree about which code points are
+/// whitespace, in both directions. Measured against the validator this
+/// repo pins (jsonschema 0.17.1 / fancy-regex), `\s` matches U+FEFF while
+/// `str::trim` does not, and `str::trim` treats U+0085 as whitespace while
+/// `\s` does not. A `\S` pattern would therefore make the schema and its
+/// mirrors disagree in both directions — including the fail-open one,
+/// where a decoded row re-serializes into a document its own schema
+/// rejects. Being stricter than the schema is safe; being
+/// differently-strict is not, so blankness has exactly one definition
+/// (this function) and the schema makes no claim about it.
 fn blank(s: &str) -> bool {
     s.trim().is_empty()
 }
@@ -446,6 +451,11 @@ impl PlatformSupportRow {
     /// version before decoding, so this only has to enforce the row
     /// invariants.
     fn from_wire(wire: WireRow) -> Result<Self, PlatformRegistryError> {
+        debug_assert_eq!(
+            wire.schema_version, PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
+            "from_json gates the schema version before decoding; a caller that skips it \
+             would bypass the gate"
+        );
         let row = Self {
             schema_version: wire.schema_version,
             row_id: wire.row_id,

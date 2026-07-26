@@ -25,7 +25,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   decoder: `not_applicable` signals must state why, Production rows must
   declare where evidence is filed, Planned rows carry no evidence and no
   model-class claims, accelerator-less rows cannot report GPU
-  utilization, and a row with an accelerator names exactly one CPU vendor
+  utilization, free-text fields must carry a non-whitespace character
+  (consumer-enforced rather than a schema `pattern`, because regex engines
+  disagree about which code points count as whitespace), and a row with an
+  accelerator names exactly one CPU vendor
   while an accelerator-less utility row states the vendor set it covers
   explicitly — vendor support is decided by registry membership, never an
   out-of-band allowlist.

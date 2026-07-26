@@ -649,10 +649,16 @@ fn blank_strings_are_decoder_stricter_than_the_schema() {
     let mut blank_evidence = a_valid_row_value();
     blank_evidence["evidence"]["location"] = serde_json::json!("\t");
 
+    // U+3000 is one of the code points where the two rules diverge: the
+    // pinned validator's `\s` does not match it, `str::trim` does.
+    let mut ideographic_space = a_valid_row_value();
+    ideographic_space["accelerator"]["sku"] = serde_json::json!("\u{3000}");
+
     for (label, instance) in [
         ("whitespace-only sku", blank_sku),
         ("whitespace-only gate reason", blank_reason),
         ("whitespace-only evidence location", blank_evidence),
+        ("ideographic-space sku", ideographic_space),
     ] {
         assert!(
             validator.is_valid(&instance),
@@ -664,6 +670,26 @@ fn blank_strings_are_decoder_stricter_than_the_schema() {
             "{label}: the decoder must still reject it"
         );
     }
+
+    // U+FEFF diverges the other way: `\s` matches it, `str::trim` does not.
+    // Both sides must therefore ACCEPT it — a re-introduced `\S` pattern
+    // would make the schema reject a row the decoder mints, which is the
+    // fail-open direction this design exists to prevent.
+    let mut byte_order_mark = a_valid_row_value();
+    byte_order_mark["accelerator"]["sku"] = serde_json::json!("\u{feff}");
+    assert!(
+        validator.is_valid(&byte_order_mark),
+        "the schema must accept a value the decoder accepts"
+    );
+    let raw = serde_json::to_string(&byte_order_mark).expect("serialize");
+    let accepted = PlatformSupportRow::from_json(&raw).expect("the decoder accepts it too");
+    let re_emitted: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&accepted).expect("serialize"))
+            .expect("parses");
+    assert!(
+        validator.is_valid(&re_emitted),
+        "a decoded row must never re-serialize into a schema-invalid document"
+    );
 }
 
 #[test]
