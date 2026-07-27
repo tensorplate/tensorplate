@@ -80,16 +80,22 @@ pub enum PlatformProbeError {
     #[error("cannot read platform detection source `{source_name}`: {detail}")]
     Unreadable { source_name: String, detail: String },
 
-    /// A source was readable but reported something this release does not
-    /// recognise. Detection fails rather than guessing a nearest match.
-    #[error("unrecognised platform detail from `{source_name}`: {detail}")]
+    /// A source was readable but what it reported could not be
+    /// interpreted at all — malformed, truncated, or structurally
+    /// unexpected.
+    ///
+    /// This is **not** for a value that is merely off-matrix: a readable
+    /// architecture or vendor no row names is returned as
+    /// `DetectedArchitecture::Other` / `DetectedVendor::Other`, so the
+    /// registry can report it as unsupported rather than undetectable.
+    #[error("uninterpretable platform detail from `{source_name}`: {detail}")]
     Unrecognized { source_name: String, detail: String },
 }
 
 impl From<PlatformProbeError> for ProtocolError {
     fn from(value: PlatformProbeError) -> Self {
         let code = match value {
-            // The platform is readable but off-matrix.
+            // Readable, but not something this release can interpret.
             PlatformProbeError::Unrecognized { .. } => ErrorCode::Unsupported,
             // The runtime could not determine what it is running on.
             PlatformProbeError::Unreadable { .. } => ErrorCode::Internal,

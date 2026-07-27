@@ -52,7 +52,13 @@ pub enum RowMatch<'a> {
 }
 
 impl RowMatch<'_> {
-    /// The matched row, if any. `None` for an unsupported machine.
+    /// The row this machine resolved to, where one was identified.
+    ///
+    /// For [`Self::OutsideValidatedEnvironment`] this is the row whose
+    /// hardware matches but whose claim does not reach this machine — it
+    /// is returned so a caller can name that claim, **not** because the
+    /// machine matches it. `None` for an unsupported machine, and for an
+    /// environment miss where several rows were equally close.
     #[must_use]
     pub fn row(&self) -> Option<&PlatformSupportRow> {
         match self {
@@ -111,8 +117,12 @@ impl Mismatch {
     const OS: u8 = 1 << 2;
     const ACCELERATOR: u8 = 1 << 3;
     /// Hardware matches but the machine shape is outside the row's
-    /// evidence. Highest bit: it is only reported when nothing broader
-    /// differs, and it has no frozen reason of its own.
+    /// evidence. This bit is never consulted by [`Self::reason`] — an
+    /// environment-only miss has no frozen reason and is reported through
+    /// [`RowMatch::OutsideValidatedEnvironment`] instead, which
+    /// `resolve` checks *before* the nearest-miss fold because naming the
+    /// row whose claim does not reach this machine is more actionable
+    /// than naming a dimension of some other row.
     const ENVIRONMENT: u8 = 1 << 4;
 
     fn between(row: &PlatformSupportRow, detected: &DetectedPlatform) -> Self {
@@ -359,6 +369,10 @@ impl PlatformRegistry {
     /// and CPU and differ only by accelerator — so this deliberately
     /// returns the candidate set. Use [`Self::resolve`] once accelerator
     /// identity is known.
+    ///
+    /// Machine shape is part of host identity, so a host whose shape no
+    /// row names yields only the rows that are not shape-scoped, and a
+    /// host reporting a shape no row declares can yield none at all.
     #[must_use]
     pub fn candidates(&self, host: &HostIdentity) -> Vec<&PlatformSupportRow> {
         self.rows
@@ -386,11 +400,17 @@ impl PlatformRegistry {
     /// machine fails in the fewest dimensions — so a machine one CPU
     /// vendor away from a row is told about the vendor rather than about
     /// its accelerator. Ties resolve in this module's own dimension
-    /// priority — architecture, then vendor, then OS, then accelerator,
-    /// then environment: broadest first, because the broader fact explains
-    /// more — so the answer never depends on registry file order. That
-    /// order is deliberately not the one `PlatformReason::ALL` happens to
-    /// list, which is a listing rather than a priority.
+    /// priority — architecture, then vendor, then OS, then accelerator:
+    /// broadest first, because the broader fact explains more — so the
+    /// answer never depends on registry file order. That order is
+    /// deliberately not the one `PlatformReason::ALL` happens to list,
+    /// which is a listing rather than a priority.
+    ///
+    /// The environment dimension sits outside that ranking: a row whose
+    /// hardware matches and whose *only* difference is machine shape is
+    /// reported before any nearest-miss reason, because naming the row
+    /// whose claim does not reach this machine says more than naming a
+    /// dimension of some unrelated row.
     ///
     /// Trigger *semantics* for the reasons — when `doctor` shows which,
     /// and how — are frozen elsewhere; this is the registry's own

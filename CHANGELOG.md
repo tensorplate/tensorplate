@@ -23,10 +23,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   dimensions — so a machine one CPU vendor away from a row is told about
   the vendor rather than about its accelerator. A partitioned accelerator
   is rejected outright. Matching also honours machine shape: rows carry an
-  exact `machine_type` — required on every row that carries a Production or
-  Preview claim, so a claim can never silently cover any machine with the
-  same hardware — and a machine whose hardware matches a row but whose
-  shape is outside that row's validated environment resolves to
+  exact `machine_type` where their evidence is scoped to one — the cloud
+  rows, whose machine type a metadata probe reports; physical rows are
+  identified by their exact accelerator SKU, and the accelerator-less
+  utility rows make a deliberately chassis-independent claim — and a
+  machine whose hardware matches a shape-scoped row but whose shape is
+  outside that row's validated environment resolves to
   `OutsideValidatedEnvironment` rather than inheriting the claim, because
   evidence does not transfer across machine shapes. That outcome names the
   row only when exactly one row's hardware matches; where several differ

@@ -289,7 +289,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
-          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type), when the row's claim is scoped to one. Evidence does not transfer across machine shapes, so a row that declares this matches only a host reporting the same value. Absent where the row makes no machine-shape claim."
+          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type) for rows whose evidence is scoped to one. A row that declares this matches only a host reporting the same value, because evidence does not transfer across machine shapes. Omitted where the row's claim is not shape-scoped: physical rows are identified by their exact accelerator SKU, and accelerator-less utility rows make a deliberately chassis-independent claim. Must be a value a host probe can actually report, or the row can never match."
         }
       },
       "description": "Exact machine type or physical device the row is validated on. `identity` is prose for humans; `machine_type` is the machine-comparable form used for matching."
@@ -449,33 +449,6 @@
         }
       },
       "$comment": "An exact accelerator SKU pins the host, so such a row names one vendor."
-    },
-    {
-      "if": {
-        "required": [
-          "support_level"
-        ],
-        "properties": {
-          "support_level": {
-            "enum": [
-              "Production",
-              "Preview"
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "validation_environment": {
-            "required": [
-              "kind",
-              "identity",
-              "machine_type"
-            ]
-          }
-        }
-      },
-      "$comment": "A row carrying a claim names the machine shape the claim was validated on."
     }
   ]
 }

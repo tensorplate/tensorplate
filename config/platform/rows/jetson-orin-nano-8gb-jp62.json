@@ -70,8 +70,7 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "physical",
-    "identity": "Jetson Orin Nano 8GB Super, Super power mode (in lab)",
-    "machine_type": "jetson-orin-nano-8gb-super"
+    "identity": "Jetson Orin Nano 8GB Super, Super power mode (in lab)"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/jetson-orin-nano-8gb-jp62/"

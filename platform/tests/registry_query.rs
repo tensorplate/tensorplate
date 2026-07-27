@@ -505,19 +505,11 @@ fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
         [
             "jetson-agx-orin-32gb",
             "jetson-agx-orin-64gb",
+            "jetson-orin-nano-8gb-jp62",
             "jetson-orin-nx-16gb"
         ],
         "host identity narrows but cannot decide between accelerators"
     );
-
-    // The validated Nano row is scoped to its own machine shape, so it
-    // only becomes a candidate for a host reporting that shape.
-    let mut nano = jetson.clone();
-    nano.machine_type = Some("jetson-orin-nano-8gb-super".to_string());
-    assert!(registry
-        .candidates(&nano)
-        .iter()
-        .any(|row| row.row_id() == "jetson-orin-nano-8gb-jp62"));
 
     // A vendor no row covers narrows to nothing rather than guessing.
     assert!(registry
@@ -581,29 +573,83 @@ fn a_row_scoped_to_a_machine_shape_does_not_cover_other_shapes() {
 }
 
 #[test]
-fn an_arbitrary_machine_cannot_claim_a_validated_row() {
-    // The CPU-only Preview rows are validated on CI runners. An ordinary
-    // Ubuntu laptop with the same OS and CPU is not that row, and must not
-    // inherit its claim.
+fn a_chassis_independent_row_makes_no_machine_shape_claim() {
+    // The CPU-only rows are deliberately broad: their claim is install,
+    // CLI, packaging, and control-plane smoke on any x86_64 Ubuntu host,
+    // so they name no machine shape and any such host matches.
     let registry = registry();
-    let mut detected = identity_of(&registry, "ubuntu2404-x86-cpu");
+    let row = registry
+        .row("ubuntu2404-x86-cpu")
+        .expect("row is committed");
     assert!(
-        registry.resolve(&detected).is_supported(),
-        "the row resolves on the shape it was validated on"
+        row.validation_environment().machine_type.is_none(),
+        "a chassis-independent row declares no shape"
     );
 
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-cpu");
+    assert!(registry.resolve(&detected).is_supported());
     detected.host.machine_type = Some("someones-laptop".to_string());
-    let matched = registry.resolve(&detected);
-    assert!(!matched.is_supported(), "a laptop is not the CI runner row");
-    assert!(matches!(
-        matched,
-        RowMatch::OutsideValidatedEnvironment { .. }
-    ));
+    assert!(
+        registry.resolve(&detected).is_supported(),
+        "a row naming no shape makes no shape claim"
+    );
+}
 
-    // A host that cannot report a machine shape at all is equally not a
-    // row whose claim is scoped to one.
-    detected.host.machine_type = None;
-    assert!(!registry.resolve(&detected).is_supported());
+#[test]
+fn only_shape_scoped_rows_declare_a_machine_type() {
+    // Declaring a machine_type is what scopes a row's evidence, so the
+    // committed registry declares one exactly where the claim is
+    // shape-bound: the cloud rows. A value a probe cannot report would
+    // make its row permanently unmatchable, so physical rows rely on
+    // their exact accelerator SKU instead.
+    let registry = registry();
+    let scoped: Vec<&str> = registry
+        .rows()
+        .filter(|row| row.validation_environment().machine_type.is_some())
+        .map(PlatformSupportRow::row_id)
+        .collect();
+    assert_eq!(
+        scoped,
+        [
+            "ubuntu2404-x86-a100-40g-a2hg1",
+            "ubuntu2404-x86-l4-g2s8",
+            "ubuntu2404-x86-rtxpro6000se-g4s48"
+        ],
+        "only the cloud rows are shape-scoped"
+    );
+    for row_id in scoped {
+        let machine_type = registry
+            .row(row_id)
+            .expect("row is committed")
+            .validation_environment()
+            .machine_type
+            .clone()
+            .expect("scoped row declares a shape");
+        assert!(
+            machine_type.starts_with(['a', 'g']),
+            "{row_id}: the shape is the GCE machine type a metadata probe reports, got \
+             `{machine_type}`"
+        );
+    }
+}
+
+#[test]
+fn an_environment_only_miss_outranks_a_nearest_miss_on_another_row() {
+    // A machine whose hardware matches a shape-scoped row exactly, on the
+    // wrong shape, is told about that row — not about some other row's
+    // dimension, even though both are one dimension away.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.host.machine_type = Some("g2-standard-16".to_string());
+    let matched = registry.resolve(&detected);
+    assert_eq!(
+        matched,
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(registry.row("ubuntu2404-x86-l4-g2s8").expect("committed"))
+        },
+        "the environment miss is reported ahead of any nearest-miss reason"
+    );
+    assert_eq!(matched.reason(), None);
 }
 
 #[test]
@@ -665,15 +711,16 @@ fn a_non_canonical_machine_type_is_rejected_by_both_sides() {
         "the decoder must reject it too"
     );
 
-    // And a claimed row must declare one at all.
-    let mut missing: serde_json::Value = serde_json::from_str(&base).expect("row parses");
-    missing["validation_environment"]
+    // Omitting it entirely is legitimate: that is how a row says its claim
+    // is not scoped to a machine shape.
+    let mut unscoped: serde_json::Value = serde_json::from_str(&base).expect("row parses");
+    unscoped["validation_environment"]
         .as_object_mut()
         .expect("environment object")
         .remove("machine_type");
-    assert!(!validator.is_valid(&missing));
-    let raw = serde_json::to_string(&missing).expect("serialize");
-    assert!(PlatformSupportRow::from_json(&raw).is_err());
+    assert!(validator.is_valid(&unscoped));
+    let raw = serde_json::to_string(&unscoped).expect("serialize");
+    assert!(PlatformSupportRow::from_json(&raw).is_ok());
 }
 
 #[test]
