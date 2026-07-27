@@ -385,9 +385,12 @@ impl PlatformRegistry {
     /// Otherwise the answer comes from the *nearest* row — the one the
     /// machine fails in the fewest dimensions — so a machine one CPU
     /// vendor away from a row is told about the vendor rather than about
-    /// its accelerator. Ties resolve in the fixed dimension order the
-    /// frozen reason vocabulary declares, so the answer never depends on
-    /// registry file order.
+    /// its accelerator. Ties resolve in this module's own dimension
+    /// priority — architecture, then vendor, then OS, then accelerator,
+    /// then environment: broadest first, because the broader fact explains
+    /// more — so the answer never depends on registry file order. That
+    /// order is deliberately not the one `PlatformReason::ALL` happens to
+    /// list, which is a listing rather than a priority.
     ///
     /// Trigger *semantics* for the reasons — when `doctor` shows which,
     /// and how — are frozen elsewhere; this is the registry's own
