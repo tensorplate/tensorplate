@@ -421,15 +421,18 @@ fn unmatched_identities_get_the_most_specific_reason() {
             PlatformReason::UnsupportedOsVersion,
         ),
         (
-            "unknown accelerator SKU on a known host",
+            "unknown accelerator SKU on a validated machine shape",
             DetectedPlatform::with_accelerator(
-                host(
-                    CpuArchitecture::X86_64,
-                    CpuVendor::Intel,
-                    "Ubuntu",
-                    "24.04",
-                    None,
-                ),
+                HostIdentity {
+                    machine_type: Some("g2-standard-8".to_string()),
+                    ..host(
+                        CpuArchitecture::X86_64,
+                        CpuVendor::Intel,
+                        "Ubuntu",
+                        "24.04",
+                        None,
+                    )
+                },
                 accelerator("NVIDIA A100-SXM4-80GB"),
             ),
             PlatformReason::UnsupportedAcceleratorSku,
@@ -480,43 +483,41 @@ fn a_wrong_image_identity_does_not_match_a_row_that_requires_one() {
 
 #[test]
 fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
+    // The Planned Jetson rows name no machine shape yet, so a JetPack host
+    // is consistent with all of them and differs only by accelerator —
+    // exactly the ambiguity that makes accelerator identity necessary
+    // before a single row can be named.
     let registry = registry();
-    // Ubuntu 24.04 on an Intel host is consistent with the L4 row, the
-    // A100 row, and the CPU-only row: exactly the ambiguity that makes
-    // accelerator identity necessary before a single row can be named.
-    let mut on_g2 = host(
-        CpuArchitecture::X86_64,
-        CpuVendor::Intel,
-        "Ubuntu",
-        "24.04",
-        None,
+    let jetson = host(
+        CpuArchitecture::Arm64,
+        CpuVendor::NvidiaSoc,
+        "JetPack",
+        "6.2",
+        Some("L4T r36.4.x (Ubuntu 22.04 base)"),
     );
-    on_g2.machine_type = Some("g2-standard-8".to_string());
     let ids: Vec<&str> = registry
-        .candidates(&on_g2)
+        .candidates(&jetson)
         .iter()
         .map(|row| row.row_id())
         .collect();
     assert_eq!(
         ids,
-        ["ubuntu2404-x86-cpu", "ubuntu2404-x86-l4-g2s8"],
-        "host identity narrows to the shapes it could be, but cannot decide"
+        [
+            "jetson-agx-orin-32gb",
+            "jetson-agx-orin-64gb",
+            "jetson-orin-nx-16gb"
+        ],
+        "host identity narrows but cannot decide between accelerators"
     );
 
-    // A host reporting no machine shape cannot be a row scoped to one, so
-    // only the shape-agnostic utility row remains.
-    let ids: Vec<&str> = registry
-        .candidates(&host(
-            CpuArchitecture::X86_64,
-            CpuVendor::Intel,
-            "Ubuntu",
-            "24.04",
-            None,
-        ))
+    // The validated Nano row is scoped to its own machine shape, so it
+    // only becomes a candidate for a host reporting that shape.
+    let mut nano = jetson.clone();
+    nano.machine_type = Some("jetson-orin-nano-8gb-super".to_string());
+    assert!(registry
+        .candidates(&nano)
         .iter()
-        .map(|row| row.row_id())
-        .collect();
-    assert_eq!(ids, ["ubuntu2404-x86-cpu"]);
+        .any(|row| row.row_id() == "jetson-orin-nano-8gb-jp62"));
 
     // A vendor no row covers narrows to nothing rather than guessing.
     assert!(registry
@@ -563,7 +564,7 @@ fn a_row_scoped_to_a_machine_shape_does_not_cover_other_shapes() {
     detected.host.machine_type = Some("g2-standard-16".to_string());
     let matched = registry.resolve(&detected);
     assert!(
-        matches!(matched, RowMatch::OutsideValidatedEnvironment(_)),
+        matches!(matched, RowMatch::OutsideValidatedEnvironment { .. }),
         "a different machine shape is outside the row's evidence ({matched:?})"
     );
     assert!(!matched.is_supported());
@@ -580,16 +581,99 @@ fn a_row_scoped_to_a_machine_shape_does_not_cover_other_shapes() {
 }
 
 #[test]
-fn an_unvalidated_machine_shape_does_not_reach_the_cpu_only_row() {
-    // The CPU-only rows name no machine shape, so they are indifferent to
-    // it — that is deliberate, and this pins it.
+fn an_arbitrary_machine_cannot_claim_a_validated_row() {
+    // The CPU-only Preview rows are validated on CI runners. An ordinary
+    // Ubuntu laptop with the same OS and CPU is not that row, and must not
+    // inherit its claim.
     let registry = registry();
     let mut detected = identity_of(&registry, "ubuntu2404-x86-cpu");
-    detected.host.machine_type = Some("some-laptop".to_string());
     assert!(
         registry.resolve(&detected).is_supported(),
-        "a row naming no machine shape makes no machine-shape claim"
+        "the row resolves on the shape it was validated on"
     );
+
+    detected.host.machine_type = Some("someones-laptop".to_string());
+    let matched = registry.resolve(&detected);
+    assert!(!matched.is_supported(), "a laptop is not the CI runner row");
+    assert!(matches!(
+        matched,
+        RowMatch::OutsideValidatedEnvironment { .. }
+    ));
+
+    // A host that cannot report a machine shape at all is equally not a
+    // row whose claim is scoped to one.
+    detected.host.machine_type = None;
+    assert!(!registry.resolve(&detected).is_supported());
+}
+
+#[test]
+fn an_ambiguous_environment_miss_names_no_row() {
+    // Two rows with identical hardware differing only by machine shape:
+    // a third shape is outside both, and naming either would be arbitrary.
+    let base = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-l4-g2s8.json"))
+        .expect("read the L4 row");
+    let mut other: serde_json::Value = serde_json::from_str(&base).expect("row parses");
+    other["row_id"] = serde_json::json!("ubuntu2404-x86-l4-g2s16");
+    other["validation_environment"]["machine_type"] = serde_json::json!("g2-standard-16");
+    let other = serde_json::to_string(&other).expect("serialize");
+
+    let registry = PlatformRegistry::from_documents(
+        [
+            (Path::new("a.json"), base.as_str()),
+            (Path::new("b.json"), other.as_str()),
+        ],
+        std::iter::empty(),
+    )
+    .expect("rows differing only by machine shape are distinguishable");
+
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.host.machine_type = Some("g2-standard-32".to_string());
+    let matched = registry.resolve(&detected);
+    assert_eq!(
+        matched,
+        RowMatch::OutsideValidatedEnvironment { candidate: None },
+        "with two equally-close rows, no single row may be named"
+    );
+    assert!(matched.row().is_none());
+}
+
+#[test]
+fn a_non_canonical_machine_type_is_rejected_by_both_sides() {
+    let validator = jsonschema::JSONSchema::compile(
+        &serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../config/schemas/platform_support_row.json"),
+            )
+            .expect("read the row schema"),
+        )
+        .expect("schema parses"),
+    )
+    .expect("schema compiles");
+
+    let base = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-l4-g2s8.json"))
+        .expect("read the L4 row");
+    let mut document: serde_json::Value = serde_json::from_str(&base).expect("row parses");
+    document["validation_environment"]["machine_type"] = serde_json::json!("G2 Standard 8");
+    assert!(
+        !validator.is_valid(&document),
+        "the schema rejects a non-canonical machine type"
+    );
+    let raw = serde_json::to_string(&document).expect("serialize");
+    assert!(
+        PlatformSupportRow::from_json(&raw).is_err(),
+        "the decoder must reject it too"
+    );
+
+    // And a claimed row must declare one at all.
+    let mut missing: serde_json::Value = serde_json::from_str(&base).expect("row parses");
+    missing["validation_environment"]
+        .as_object_mut()
+        .expect("environment object")
+        .remove("machine_type");
+    assert!(!validator.is_valid(&missing));
+    let raw = serde_json::to_string(&missing).expect("serialize");
+    assert!(PlatformSupportRow::from_json(&raw).is_err());
 }
 
 #[test]

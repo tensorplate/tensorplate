@@ -38,9 +38,15 @@ pub enum RowMatch<'a> {
     /// hardware validation, which an Experimental integration is not.
     Experimental(&'a PlatformSupportRow),
     /// The machine matches a row's hardware but is running on a machine
-    /// shape the row's evidence does not cover. The row is returned so a
-    /// caller can say which claim does not transfer here.
-    OutsideValidatedEnvironment(&'a PlatformSupportRow),
+    /// shape that row's evidence does not cover.
+    ///
+    /// `candidate` names the row when exactly one row's hardware matches,
+    /// so a caller can say which claim does not transfer here. It is
+    /// `None` when several rows share the hardware and differ only by
+    /// machine shape: naming one of them would be picking arbitrarily.
+    OutsideValidatedEnvironment {
+        candidate: Option<&'a PlatformSupportRow>,
+    },
     /// The machine matches no row, with the reason it did not.
     Unsupported(PlatformReason),
 }
@@ -50,10 +56,10 @@ impl RowMatch<'_> {
     #[must_use]
     pub fn row(&self) -> Option<&PlatformSupportRow> {
         match self {
-            Self::Supported(row)
-            | Self::PlannedNotValidated(row)
-            | Self::Experimental(row)
-            | Self::OutsideValidatedEnvironment(row) => Some(row),
+            Self::Supported(row) | Self::PlannedNotValidated(row) | Self::Experimental(row) => {
+                Some(row)
+            }
+            Self::OutsideValidatedEnvironment { candidate } => *candidate,
             Self::Unsupported(_) => None,
         }
     }
@@ -69,9 +75,9 @@ impl RowMatch<'_> {
     #[must_use]
     pub fn reason(&self) -> Option<PlatformReason> {
         match self {
-            Self::Supported(_) | Self::Experimental(_) | Self::OutsideValidatedEnvironment(_) => {
-                None
-            }
+            Self::Supported(_)
+            | Self::Experimental(_)
+            | Self::OutsideValidatedEnvironment { .. } => None,
             Self::PlannedNotValidated(_) => Some(PlatformReason::RowPlannedNotValidated),
             Self::Unsupported(reason) => Some(*reason),
         }
@@ -150,8 +156,9 @@ impl Mismatch {
         self.0.count_ones()
     }
 
-    /// The reason for this mismatch, in the dimension order the frozen
-    /// reason vocabulary declares.
+    /// The reason for this mismatch, in this module's broadest-first
+    /// dimension priority (see the bit definitions above) — not the order
+    /// `PlatformReason::ALL` lists.
     fn reason(self) -> Option<PlatformReason> {
         if self.0 & Self::ARCHITECTURE != 0 {
             Some(PlatformReason::UnsupportedCpuArch)
@@ -402,11 +409,11 @@ impl PlatformRegistry {
 
         let mut nearest_count = u32::MAX;
         let mut nearest = Mismatch::default();
-        let mut outside_environment: Option<&PlatformSupportRow> = None;
+        let mut outside_environment: Vec<&PlatformSupportRow> = Vec::new();
         for row in self.rows.values() {
             let mismatch = Mismatch::between(row, detected);
-            if mismatch.is_environment_only() && outside_environment.is_none() {
-                outside_environment = Some(row);
+            if mismatch.is_environment_only() {
+                outside_environment.push(row);
             }
             if mismatch.count() == 0 {
                 return match row.support_level() {
@@ -433,8 +440,15 @@ impl PlatformRegistry {
         // Hardware matched a row but the machine shape is outside its
         // evidence: report the row rather than an unrelated reason, so a
         // caller can say precisely which claim does not transfer here.
-        if let Some(row) = outside_environment {
-            return RowMatch::OutsideValidatedEnvironment(row);
+        if !outside_environment.is_empty() {
+            return RowMatch::OutsideValidatedEnvironment {
+                // Exactly one row's hardware matches: name it. Several,
+                // and any choice would be arbitrary.
+                candidate: match outside_environment.as_slice() {
+                    [only] => Some(only),
+                    _ => None,
+                },
+            };
         }
         RowMatch::Unsupported(
             nearest

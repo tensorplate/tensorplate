@@ -553,6 +553,29 @@ impl PlatformSupportRow {
         if blank(&self.validation_environment.identity) {
             return Err(invalid("validation_environment identity must not be empty"));
         }
+        if self
+            .validation_environment
+            .machine_type
+            .as_deref()
+            .is_some_and(|machine_type| !is_canonical_identifier(machine_type))
+        {
+            return Err(invalid(
+                "validation_environment machine_type must be lowercase alphanumeric segments \
+                 separated by single hyphens",
+            ));
+        }
+        // A row that carries a support claim must say which machine shape
+        // the claim was validated on, or the claim silently covers every
+        // machine that happens to have the same hardware.
+        if matches!(
+            self.support_level,
+            SupportLevel::Production | SupportLevel::Preview
+        ) && self.validation_environment.machine_type.is_none()
+        {
+            return Err(invalid(
+                "a row carrying a support claim must declare its validation machine_type",
+            ));
+        }
         if self.evidence.as_ref().is_some_and(|e| blank(&e.location)) {
             return Err(invalid("evidence location must not be empty"));
         }

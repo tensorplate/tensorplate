@@ -449,6 +449,33 @@
         }
       },
       "$comment": "An exact accelerator SKU pins the host, so such a row names one vendor."
+    },
+    {
+      "if": {
+        "required": [
+          "support_level"
+        ],
+        "properties": {
+          "support_level": {
+            "enum": [
+              "Production",
+              "Preview"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "validation_environment": {
+            "required": [
+              "kind",
+              "identity",
+              "machine_type"
+            ]
+          }
+        }
+      },
+      "$comment": "A row carrying a claim names the machine shape the claim was validated on."
     }
   ]
 }

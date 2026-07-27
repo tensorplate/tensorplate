@@ -59,7 +59,8 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "physical",
-    "identity": "MacBook Pro, Apple M1 Pro 16GB (in lab)"
+    "identity": "MacBook Pro, Apple M1 Pro 16GB (in lab)",
+    "machine_type": "macbookpro18-3"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/macos26-m1pro-16gb/"

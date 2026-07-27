@@ -146,13 +146,20 @@ impl DetectedPlatform {
 /// OS-specific implementations stay out of the matching logic and tests
 /// can supply recorded identities instead of real hardware.
 pub trait HostProbe {
-    /// Detect host identity, or fail with a typed error. Detection that
-    /// cannot determine the platform fails rather than guessing.
+    /// Detect host identity, or fail with a typed error.
+    ///
+    /// A value that is readable but that no row names is **not** an
+    /// error: return it as [`DetectedArchitecture::Other`] or
+    /// [`DetectedVendor::Other`]. Failing instead would report an
+    /// unsupported machine as an undetectable one and make
+    /// [`crate::PlatformReason::UnsupportedCpuArch`] and
+    /// [`crate::PlatformReason::UnsupportedCpuVendor`] unreachable.
     ///
     /// # Errors
     ///
-    /// Returns an error when the host cannot be identified — an
-    /// unreadable source, or a value no supported platform reports.
+    /// Returns an error only when a detection source cannot be read, or
+    /// when what it reports cannot be interpreted at all — never merely
+    /// because the value is off-matrix.
     fn detect_host(&self) -> Result<HostIdentity, PlatformProbeError>;
 }
 

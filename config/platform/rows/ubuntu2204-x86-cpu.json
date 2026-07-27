@@ -50,7 +50,8 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GitHub-hosted ubuntu-22.04 runner"
+    "identity": "GitHub-hosted ubuntu-22.04 runner",
+    "machine_type": "github-hosted-ubuntu-2204"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/ubuntu2204-x86-cpu/"
