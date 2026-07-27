@@ -473,6 +473,14 @@ impl PlatformRegistry {
                 },
             };
         }
+        // `reason()` is `None` only for a mismatch of nothing or of
+        // environment alone, and both returned above — so this fallback is
+        // unreachable rather than a live fail-open path. It exists because
+        // the type system cannot say that.
+        debug_assert!(
+            nearest.reason().is_some(),
+            "every surviving mismatch has a reason"
+        );
         RowMatch::Unsupported(
             nearest
                 .reason()
