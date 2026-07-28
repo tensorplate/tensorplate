@@ -64,7 +64,8 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GCP a2-highgpu-1g (disposable), single GPU, non-partitioned"
+    "identity": "GCP a2-highgpu-1g (disposable), single GPU, non-partitioned",
+    "machine_type": "a2-highgpu-1g"
   },
   "evidence": {
     "location": "dist/release/v0.2.1/ubuntu2404-x86-a100-40g-a2hg1/"

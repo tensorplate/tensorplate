@@ -35,6 +35,73 @@ pub enum PlatformRegistryError {
     /// The roadmap target is well-formed but violates a target invariant.
     #[error("invalid roadmap target: {reason}")]
     InvalidRoadmapTarget { reason: &'static str },
+
+    /// A registry document could not be read.
+    #[error("cannot read platform registry path `{path}`: {detail}")]
+    Unreadable { path: String, detail: String },
+
+    /// A registry document is invalid, named by its source path so the
+    /// operator knows which file to fix.
+    #[error("invalid platform registry document `{path}`: {source}")]
+    InDocument {
+        path: String,
+        #[source]
+        source: Box<PlatformRegistryError>,
+    },
+
+    /// Two registry entries collide, so a lookup could not be answered
+    /// deterministically. Rejected at load rather than resolved by
+    /// picking a winner at query time.
+    #[error("ambiguous platform registry: {detail}")]
+    AmbiguousRegistry { detail: String },
+}
+
+impl PlatformRegistryError {
+    /// Attach the source path of the document that failed.
+    #[must_use]
+    pub fn in_document(path: &std::path::Path, source: Self) -> Self {
+        Self::InDocument {
+            path: path.display().to_string(),
+            source: Box::new(source),
+        }
+    }
+}
+
+/// Why platform detection failed.
+///
+/// Kept separate from [`PlatformRegistryError`] because the two are
+/// different kinds of failure with different operator responses: a bad
+/// registry document is invalid static config, while an unreadable
+/// hardware source is a runtime detection failure. Collapsing them would
+/// report a failed accelerator query as a config error.
+#[derive(Debug, thiserror::Error)]
+pub enum PlatformProbeError {
+    /// A detection source could not be read.
+    #[error("cannot read platform detection source `{source_name}`: {detail}")]
+    Unreadable { source_name: String, detail: String },
+
+    /// A source was readable but what it reported could not be
+    /// interpreted at all — malformed, truncated, or structurally
+    /// unexpected.
+    ///
+    /// This is **not** for a value that is merely off-matrix: a readable
+    /// architecture or vendor no row names is returned as
+    /// `DetectedArchitecture::Other` / `DetectedVendor::Other`, so the
+    /// registry can report it as unsupported rather than undetectable.
+    #[error("uninterpretable platform detail from `{source_name}`: {detail}")]
+    Unrecognized { source_name: String, detail: String },
+}
+
+impl From<PlatformProbeError> for ProtocolError {
+    fn from(value: PlatformProbeError) -> Self {
+        let code = match value {
+            // Readable, but not something this release can interpret.
+            PlatformProbeError::Unrecognized { .. } => ErrorCode::Unsupported,
+            // The runtime could not determine what it is running on.
+            PlatformProbeError::Unreadable { .. } => ErrorCode::Internal,
+        };
+        ProtocolError::new(code, "platform detection failed").with_context(value.to_string())
+    }
 }
 
 impl From<PlatformRegistryError> for ProtocolError {

@@ -283,9 +283,16 @@
         "identity": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact machine type or physical device identity."
+          "description": "Where the row's claim was validated, as prose: an exact machine type or physical device for a row scoped to one, or a statement of scope for a row whose claim is deliberately broader. Machine-comparable scoping lives in `machine_type`, not here."
+        },
+        "machine_type": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type) for rows whose evidence is scoped to one. A row that declares this matches only a host reporting the same value, because evidence does not transfer across machine shapes. Omitted where the row's claim is not shape-scoped: physical rows are identified by their exact accelerator SKU, and accelerator-less utility rows make a deliberately chassis-independent claim. Must be a value a host probe can actually report, or the row can never match."
         }
-      }
+      },
+      "description": "Exact machine type or physical device the row is validated on. `identity` is prose for humans; `machine_type` is the machine-comparable form used for matching."
     },
     "evidence": {
       "type": "object",

@@ -325,11 +325,23 @@ impl GateSemantics {
 }
 
 /// Exact machine type or physical device the row is validated on.
+///
+/// `identity` is prose for humans; `machine_type` is the
+/// machine-comparable form. Evidence does not transfer across machine
+/// shapes, so a row declaring a `machine_type` matches only a host that
+/// reports the same one — otherwise an accelerator on any machine would
+/// inherit a claim validated on one specific shape.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationEnvironment {
     pub kind: ValidationEnvironmentKind,
     pub identity: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub machine_type: Option<String>,
 }
 
 /// Where the row's evidence is filed.
@@ -540,6 +552,17 @@ impl PlatformSupportRow {
         }
         if blank(&self.validation_environment.identity) {
             return Err(invalid("validation_environment identity must not be empty"));
+        }
+        if self
+            .validation_environment
+            .machine_type
+            .as_deref()
+            .is_some_and(|machine_type| !is_canonical_identifier(machine_type))
+        {
+            return Err(invalid(
+                "validation_environment machine_type must be lowercase alphanumeric segments \
+                 separated by single hyphens",
+            ));
         }
         if self.evidence.as_ref().is_some_and(|e| blank(&e.location)) {
             return Err(invalid("evidence location must not be empty"));

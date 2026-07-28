@@ -8,6 +8,40 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform registry loading and the query API that resolves a detected
+  machine to exactly one support row. `PlatformRegistry` loads the
+  committed rows and roadmap targets and **fails closed**: one invalid
+  document means no registry, because a half-loaded registry would report
+  supported platforms as unsupported. Colliding entries — a duplicated row
+  id, two rows matching the same platform identity, or a roadmap target
+  shadowing a row id — are rejected at load rather than resolved by
+  picking a winner at query time. Roadmap targets load into a separate
+  catalog that matching never consults, so a target can never be read as
+  support. `resolve()` returns a typed `RowMatch`: supported, matched a
+  Planned row (`row_planned_not_validated`), or unsupported with a reason
+  drawn from the *nearest* row — the one the machine fails in the fewest
+  dimensions — so a machine one CPU vendor away from a row is told about
+  the vendor rather than about its accelerator. A partitioned accelerator
+  is rejected outright. Matching also honours machine shape: rows carry an
+  exact `machine_type` where their evidence is scoped to one — the cloud
+  rows, whose machine type a metadata probe reports; physical rows are
+  identified by their exact accelerator SKU, and the accelerator-less
+  utility rows make a deliberately chassis-independent claim — and a
+  machine whose hardware matches a shape-scoped row but whose shape is
+  outside that row's validated environment resolves to
+  `OutsideValidatedEnvironment` rather than inheriting the claim, because
+  evidence does not transfer across machine shapes. That outcome names the
+  row only when exactly one row's hardware matches; where several differ
+  only by shape, naming one would be arbitrary. Experimental rows get
+  their own non-deployable state rather than borrowing the Planned reason.
+  Detected CPU architecture and vendor are open values, so a host reporting
+  something no row names is reported as unsupported rather than as
+  undetectable. `candidates()` narrows on host identity alone and deliberately
+  returns a set, since several rows share an OS and CPU and differ only by
+  accelerator. `HostProbe` and `AcceleratorProbe` define the detection
+  seam so OS-specific probes stay out of the matching logic.
+  (V021-E01-F01-T03)
+
 - Platform support row registry: the schema-first artifact every later
   platform feature keys off. `config/schemas/platform_support_row.json`
   defines one exact platform row (OS with exact version and image
