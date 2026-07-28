@@ -80,23 +80,36 @@ impl SystemHostProbe {
     /// platform that does not have it. Getting this wrong reports a
     /// supported machine as unsupported.
     ///
-    /// Commands are asked only of the platforms they belong to. `sysctl`
-    /// exists on Linux too and exits non-zero for a macOS-only key, so
-    /// running it everywhere would turn every Linux host into a detection
-    /// failure the moment unexpected exits stopped being ignored.
+    /// A command is only ever run when this machine needs its answer —
+    /// `sw_vers` on macOS, the package query on a host that turned out to
+    /// be a Jetson. That is what makes every command failure meaningful:
+    /// a tool that is missing, unreadable, or failing is a broken source
+    /// rather than evidence of some other platform, because nothing is
+    /// asked speculatively. (`sysctl` exists on Linux too and exits
+    /// non-zero for a macOS-only key, so asking everywhere would make
+    /// every Linux host look broken.)
     pub fn sources(&self) -> Result<HostSources, PlatformProbeError> {
+        // Files first: one of them decides which commands are relevant.
+        let os_release = self.read("/etc/os-release")?;
+        let cpuinfo = self.read("/proc/cpuinfo")?;
+        let nv_tegra_release = self.read("/etc/nv_tegra_release")?;
+        let device_tree_model = self.read("/proc/device-tree/model")?;
+
         // Staged trees exercise the file-backed sources only; the command
         // ones would describe the machine running the test, not the tree.
         let commands = self.root.is_none();
         let apple = commands && cfg!(target_os = "macos");
-        let linux = commands && cfg!(target_os = "linux");
+        // The JetPack package version is only ever read for a machine that
+        // already identified itself as a Jetson, so it is only asked for
+        // there — and a Jetson that cannot answer it is broken.
+        let jetson = commands && cfg!(target_os = "linux") && nv_tegra_release.is_some();
 
         Ok(HostSources {
             uname_machine: run("uname", &["-m"], ExitPolicy::Strict)?,
-            os_release: self.read("/etc/os-release")?,
-            cpuinfo: self.read("/proc/cpuinfo")?,
-            nv_tegra_release: self.read("/etc/nv_tegra_release")?,
-            nvidia_jetpack_version: if linux {
+            os_release,
+            cpuinfo,
+            nv_tegra_release,
+            nvidia_jetpack_version: if jetson {
                 run(
                     "dpkg-query",
                     &["-W", "-f=${Version}", "nvidia-jetpack"],
@@ -105,7 +118,7 @@ impl SystemHostProbe {
             } else {
                 None
             },
-            device_tree_model: self.read("/proc/device-tree/model")?,
+            device_tree_model,
             sw_vers_product_name: if apple {
                 run("sw_vers", &["-productName"], ExitPolicy::Strict)?
             } else {
@@ -218,15 +231,18 @@ const DPKG_QUERY_NO_MATCH: ExitPolicy = ExitPolicy::AbsentOn(&[1]);
 
 /// Run a command and return its trimmed stdout.
 ///
-/// A tool that does not exist is `None` — that is how a platform says it
-/// has no `sw_vers`. Everything else is a failure unless `policy` names
-/// the exit code as this command's way of saying "absent": a tool present
-/// but not executable, killed by a signal, or exiting a code it has no
-/// documented meaning for is a broken machine, not a different one.
+/// Every command reaching here is one this machine needs — callers ask
+/// only for what the platform actually requires (see
+/// [`SystemHostProbe::sources`]). So **a missing binary is a failure**,
+/// not absence: `sw_vers` is not optional on macOS, and a service started
+/// with a restricted `PATH` must be told its tooling is unreachable
+/// rather than quietly reporting the host as an unsupported platform.
 ///
-/// Commands are only invoked on platforms they belong to (see
-/// [`SystemHostProbe::sources`]), so an unexpected exit here really is
-/// unexpected rather than a Linux box being asked a macOS question.
+/// The only non-failure outcome besides success is an exit code `policy`
+/// names as this command's way of saying "the thing you asked about is
+/// not installed". A tool present but not executable, killed by a signal,
+/// or exiting an undocumented code is a broken machine, not a different
+/// one.
 fn run(
     program: &str,
     args: &[&str],
@@ -234,11 +250,14 @@ fn run(
 ) -> Result<Option<String>, PlatformProbeError> {
     let output = match Command::new(program).args(args).output() {
         Ok(output) => output,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(PlatformProbeError::Unreadable {
                 source_name: program.to_string(),
-                detail: err.to_string(),
+                detail: if err.kind() == ErrorKind::NotFound {
+                    format!("`{program}` is not on PATH")
+                } else {
+                    err.to_string()
+                },
             })
         }
     };
@@ -411,12 +430,33 @@ mod tests {
     }
 
     #[test]
-    fn missing_commands_and_files_are_absence_not_failure() {
-        assert_eq!(
-            run("tp-definitely-not-a-real-binary", &[], ExitPolicy::Strict)
-                .expect("absent tool is not an error"),
-            None
-        );
+    fn a_missing_required_command_is_a_broken_source_not_another_platform() {
+        // Nothing is asked speculatively, so a tool that is not there is a
+        // tool this machine was supposed to have. The realistic case is a
+        // service started with a restricted PATH: reporting `None` would
+        // turn that into "your platform is unsupported".
+        for policy in [ExitPolicy::Strict, DPKG_QUERY_NO_MATCH] {
+            let err = run("tp-definitely-not-a-real-binary", &[], policy)
+                .expect_err("a required command that is missing must not read as absence");
+            match err {
+                PlatformProbeError::Unreadable {
+                    source_name,
+                    detail,
+                } => {
+                    assert_eq!(source_name, "tp-definitely-not-a-real-binary");
+                    assert!(detail.contains("PATH"), "says why: {detail}");
+                }
+                other @ PlatformProbeError::Unrecognized { .. } => {
+                    panic!("expected Unreadable, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_absence() {
+        // Files stay different from commands: no `/etc/os-release` is how
+        // macOS is recognized, so file absence remains meaningful.
         assert_eq!(
             read_lossy(Path::new("/tp/definitely/not/here")).expect("absent file is not an error"),
             None
