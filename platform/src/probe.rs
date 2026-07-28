@@ -73,43 +73,62 @@ impl SystemHostProbe {
     ///
     /// Returns [`PlatformProbeError::Unreadable`] when a source exists but
     /// cannot be read — a permission error, an unreadable device node, a
-    /// tool that is present but not executable. Only genuine *absence*
+    /// tool that is present but not executable, or a command that fails in
+    /// a way it has no documented meaning for. Only genuine *absence*
     /// becomes `None`, because absence is how platforms are told apart and
     /// a source that is merely unreadable must never be mistaken for a
     /// platform that does not have it. Getting this wrong reports a
     /// supported machine as unsupported.
+    ///
+    /// Commands are asked only of the platforms they belong to. `sysctl`
+    /// exists on Linux too and exits non-zero for a macOS-only key, so
+    /// running it everywhere would turn every Linux host into a detection
+    /// failure the moment unexpected exits stopped being ignored.
     pub fn sources(&self) -> Result<HostSources, PlatformProbeError> {
-        let staged = self.root.is_some();
+        // Staged trees exercise the file-backed sources only; the command
+        // ones would describe the machine running the test, not the tree.
+        let commands = self.root.is_none();
+        let apple = commands && cfg!(target_os = "macos");
+        let linux = commands && cfg!(target_os = "linux");
+
         Ok(HostSources {
-            uname_machine: run("uname", &["-m"])?,
+            uname_machine: run("uname", &["-m"], ExitPolicy::Strict)?,
             os_release: self.read("/etc/os-release")?,
             cpuinfo: self.read("/proc/cpuinfo")?,
             nv_tegra_release: self.read("/etc/nv_tegra_release")?,
-            nvidia_jetpack_version: if staged {
-                None
+            nvidia_jetpack_version: if linux {
+                run(
+                    "dpkg-query",
+                    &["-W", "-f=${Version}", "nvidia-jetpack"],
+                    DPKG_QUERY_NO_MATCH,
+                )?
             } else {
-                run("dpkg-query", &["-W", "-f=${Version}", "nvidia-jetpack"])?
+                None
             },
             device_tree_model: self.read("/proc/device-tree/model")?,
-            sw_vers_product_name: if staged {
-                None
+            sw_vers_product_name: if apple {
+                run("sw_vers", &["-productName"], ExitPolicy::Strict)?
             } else {
-                run("sw_vers", &["-productName"])?
+                None
             },
-            sw_vers_product_version: if staged {
-                None
+            sw_vers_product_version: if apple {
+                run("sw_vers", &["-productVersion"], ExitPolicy::Strict)?
             } else {
-                run("sw_vers", &["-productVersion"])?
+                None
             },
-            sw_vers_build_version: if staged {
-                None
+            sw_vers_build_version: if apple {
+                run("sw_vers", &["-buildVersion"], ExitPolicy::Strict)?
             } else {
-                run("sw_vers", &["-buildVersion"])?
+                None
             },
-            cpu_brand: if staged {
-                None
+            cpu_brand: if apple {
+                run(
+                    "sysctl",
+                    &["-n", "machdep.cpu.brand_string"],
+                    ExitPolicy::Strict,
+                )?
             } else {
-                run("sysctl", &["-n", "machdep.cpu.brand_string"])?
+                None
             },
             gce_machine_type: self.gce_machine_type()?,
         })
@@ -177,26 +196,73 @@ fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
     }
 }
 
+/// What a non-zero exit from a detection command means.
+///
+/// It is not the same answer for every command. `dpkg-query` exits 1 to
+/// say a package is not installed, which is a fact about the machine.
+/// `uname` exiting non-zero says nothing about the machine except that
+/// something is wrong with it. Reading the second as the first is how a
+/// broken source turns into "unsupported platform".
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExitPolicy {
+    /// Any non-zero exit is a broken source.
+    Strict,
+    /// These exit codes are the command's way of reporting absence;
+    /// anything else is a broken source.
+    AbsentOn(&'static [i32]),
+}
+
+/// `dpkg-query` exits 1 when no package matches, which is how a Jetson
+/// without the `nvidia-jetpack` package answers.
+const DPKG_QUERY_NO_MATCH: ExitPolicy = ExitPolicy::AbsentOn(&[1]);
+
 /// Run a command and return its trimmed stdout.
 ///
 /// A tool that does not exist is `None` — that is how a platform says it
-/// has no `sw_vers`. A tool that exists but cannot be executed is an
-/// error, because that is a broken machine rather than a different one. A
-/// tool that runs and exits non-zero is also `None`: `dpkg-query` exiting
-/// non-zero means the package is not installed, which is absence.
-fn run(program: &str, args: &[&str]) -> Result<Option<String>, PlatformProbeError> {
-    match Command::new(program).args(args).output() {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok((!text.is_empty()).then_some(text))
+/// has no `sw_vers`. Everything else is a failure unless `policy` names
+/// the exit code as this command's way of saying "absent": a tool present
+/// but not executable, killed by a signal, or exiting a code it has no
+/// documented meaning for is a broken machine, not a different one.
+///
+/// Commands are only invoked on platforms they belong to (see
+/// [`SystemHostProbe::sources`]), so an unexpected exit here really is
+/// unexpected rather than a Linux box being asked a macOS question.
+fn run(
+    program: &str,
+    args: &[&str],
+    policy: ExitPolicy,
+) -> Result<Option<String>, PlatformProbeError> {
+    let output = match Command::new(program).args(args).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(PlatformProbeError::Unreadable {
+                source_name: program.to_string(),
+                detail: err.to_string(),
+            })
         }
-        Ok(_) => Ok(None),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(PlatformProbeError::Unreadable {
-            source_name: program.to_string(),
-            detail: err.to_string(),
-        }),
+    };
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok((!text.is_empty()).then_some(text));
     }
+    if let (ExitPolicy::AbsentOn(accepted), Some(code)) = (policy, output.status.code()) {
+        if accepted.contains(&code) {
+            return Ok(None);
+        }
+    }
+    Err(PlatformProbeError::Unreadable {
+        source_name: program.to_string(),
+        detail: if let Some(code) = output.status.code() {
+            format!(
+                "`{program} {}` exited {code}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        } else {
+            format!("`{program} {}` was terminated by a signal", args.join(" "))
+        },
+    })
 }
 
 /// One bounded HTTP/1.0 GET against the metadata service.
@@ -297,9 +363,58 @@ mod tests {
     }
 
     #[test]
+    fn a_command_failing_in_an_undocumented_way_is_an_error() {
+        // `uname`, `sw_vers`, and `sysctl` have no "absent" exit code — if
+        // one of them fails, the machine is broken, and swallowing that
+        // reports it as an unsupported platform instead.
+        let err = run("sh", &["-c", "echo boom >&2; exit 3"], ExitPolicy::Strict)
+            .expect_err("a strict command must not swallow a non-zero exit");
+        match err {
+            PlatformProbeError::Unreadable {
+                source_name,
+                detail,
+            } => {
+                assert_eq!(source_name, "sh");
+                assert!(detail.contains("exited 3"), "names the exit code: {detail}");
+                assert!(detail.contains("boom"), "carries stderr: {detail}");
+            }
+            other @ PlatformProbeError::Unrecognized { .. } => {
+                panic!("expected Unreadable, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_package_querys_documented_absent_code_reads_as_absence() {
+        // dpkg-query exits 1 for "no package matches", which is a fact
+        // about the machine. Any other code is a broken source.
+        assert_eq!(
+            run("sh", &["-c", "exit 1"], DPKG_QUERY_NO_MATCH)
+                .expect("the documented absent code is absence"),
+            None
+        );
+        assert!(
+            run("sh", &["-c", "exit 2"], DPKG_QUERY_NO_MATCH).is_err(),
+            "an undocumented exit code from the package query is still a failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_killed_by_a_signal_is_an_error() {
+        let err = run("sh", &["-c", "kill -TERM $$"], DPKG_QUERY_NO_MATCH)
+            .expect_err("a signalled command has no exit code to accept");
+        assert!(
+            err.to_string().contains("signal"),
+            "says what happened: {err}"
+        );
+    }
+
+    #[test]
     fn missing_commands_and_files_are_absence_not_failure() {
         assert_eq!(
-            run("tp-definitely-not-a-real-binary", &[]).expect("absent tool is not an error"),
+            run("tp-definitely-not-a-real-binary", &[], ExitPolicy::Strict)
+                .expect("absent tool is not an error"),
             None
         );
         assert_eq!(
