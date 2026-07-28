@@ -22,7 +22,8 @@ tensorplate doctor [--skip-agent] [--output <human|json>]
 | `worker_state` / `worker_crash_loop` | Supervision summary, crash-loop flag. |
 | `host_facts` / `host_os` | Bounded host detection (arch, OS). |
 | `core_packages` | packaging. On the Debian package target, `tensorplate-common`, `-agent`, `-serving`, `-observability`, and `-cli` are installed and versioned. |
-| `path_layout` | packaging. Every directory under `/etc/tensorplate`, `/var/lib/tensorplate`, `/var/log/tensorplate`, `/run/tensorplate`, and `/usr/share/tensorplate/backends` is present, not world-writable, has the documented mode, and uses the expected owner/group on Linux. |
+| `path_layout` | packaging. Every directory under `/etc/tensorplate`, `/var/lib/tensorplate`, `/var/log/tensorplate`, `/run/tensorplate`, `/usr/share/tensorplate/backends`, and `/usr/share/tensorplate/platform` is present, not world-writable, has the documented mode, and uses the expected owner/group on Linux. |
+| `platform_registry` | packaging. The platform support registry at `/usr/share/tensorplate/platform` loads, and reports its row, supported-combination, and roadmap-target counts. `missing` when no registry is installed; **fails** when one is installed but any document in it is invalid — the registry loads whole or not at all, so a partial load is never reported as a smaller registry. |
 | `config_files` | packaging. Each `/etc/tensorplate/*.json` exists, has the documented file mode/ownership, and declares a recognized `schema_version`. |
 | `config_endpoints` | packaging. Installed agent, serving-worker, and observability configs keep first-run endpoints on a Unix socket, loopback, or in-process transport. |
 | `agent_systemd_unit` | packaging. `tensorplate-agent.service` is installed under a known systemd unit directory. |

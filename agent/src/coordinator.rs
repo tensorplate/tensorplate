@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, DeployFailureSummary, DeployStatus, DeploymentSummary,
     QuarantineSummary, ResponseError, SupervisionStatusSummary,
@@ -66,6 +67,7 @@ pub struct Coordinator {
     sink: Option<Arc<EventSink>>,
     supervisor: Option<Arc<WorkerSupervisor>>,
     backend_probes: BTreeMap<String, BackendProbeReport>,
+    platform_registry: Option<PlatformRegistry>,
 }
 
 /// Result of a successful deploy/rollback.
@@ -92,7 +94,29 @@ impl Coordinator {
             sink: None,
             supervisor: None,
             backend_probes: BTreeMap::new(),
+            platform_registry: None,
         }
+    }
+
+    /// Attach the platform support registry the agent loaded at startup.
+    ///
+    /// Loaded once and held, rather than re-read per query: re-reading
+    /// would let two answers in one agent lifetime disagree because a
+    /// package upgrade landed in between.
+    #[must_use]
+    pub fn with_platform_registry(mut self, registry: PlatformRegistry) -> Self {
+        self.platform_registry = Some(registry);
+        self
+    }
+
+    /// The platform support registry, or `None` when it could not be
+    /// loaded at startup.
+    ///
+    /// `None` is not "no platform is supported" — it means the agent has
+    /// no basis to judge, and callers must treat the two differently.
+    #[must_use]
+    pub fn platform_registry(&self) -> Option<&PlatformRegistry> {
+        self.platform_registry.as_ref()
     }
 
     /// Attach packaging backend probe reports. The agent main calls

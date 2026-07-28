@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tensorplate_observability::{InputSource, ObservabilityConfig, Service};
+use tensorplate_platform::PlatformRegistry;
+use tensorplate_protocol::install_paths::PLATFORM_REGISTRY_DIR;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -73,6 +75,32 @@ fn load_config(args: &[String]) -> Result<ObservabilityConfig, String> {
     Ok(ObservabilityConfig::default())
 }
 
+/// Load the installed platform support registry and attach it to the
+/// service.
+///
+/// Best-effort, and deliberately not fatal: observability reporting a
+/// device's health is more useful than observability refusing to start
+/// because a package it only reads from is missing. An absent registry
+/// stays absent rather than becoming an empty one.
+fn attach_platform_registry(service: Service) -> Service {
+    match PlatformRegistry::load_installed() {
+        Ok(registry) => {
+            eprintln!(
+                "platform registry: rows={} supported={} roadmap_targets={} dir={}",
+                registry.rows().count(),
+                registry.supported_rows().count(),
+                registry.roadmap_targets().count(),
+                PLATFORM_REGISTRY_DIR
+            );
+            service.with_platform_registry(registry)
+        }
+        Err(err) => {
+            eprintln!("platform registry: unavailable ({err})");
+            service
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -91,7 +119,7 @@ fn main() -> ExitCode {
         }
     };
     let service = match Service::new(cfg) {
-        Ok(s) => Arc::new(s),
+        Ok(s) => Arc::new(attach_platform_registry(s)),
         Err(err) => {
             eprintln!("observability service failed to start: {err}");
             return ExitCode::from(3);

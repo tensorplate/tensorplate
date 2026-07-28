@@ -36,7 +36,8 @@ use tensorplate_agent::{
     },
     worker,
 };
-use tensorplate_protocol::install_paths::BACKEND_DESCRIPTOR_DIR;
+use tensorplate_platform::PlatformRegistry;
+use tensorplate_protocol::install_paths::{BACKEND_DESCRIPTOR_DIR, PLATFORM_REGISTRY_DIR};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -137,6 +138,32 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
     out
 }
 
+/// Load the installed platform support registry once at startup.
+///
+/// Loading is best-effort in the same sense the backend probe is: the
+/// agent prefers to come up without a registry so `tensorplate doctor`
+/// can report why, rather than refusing to start and leaving the
+/// operator no local tooling. What the agent must never do is treat an
+/// absent registry as an empty one — hence `Option`, not a default.
+fn load_platform_registry() -> Option<PlatformRegistry> {
+    match PlatformRegistry::load_installed() {
+        Ok(registry) => {
+            eprintln!(
+                "platform registry: rows={} supported={} roadmap_targets={} dir={}",
+                registry.rows().count(),
+                registry.supported_rows().count(),
+                registry.roadmap_targets().count(),
+                PLATFORM_REGISTRY_DIR
+            );
+            Some(registry)
+        }
+        Err(err) => {
+            eprintln!("platform registry: unavailable ({err})");
+            None
+        }
+    }
+}
+
 fn seed_supervisor_from_state(
     supervisor: &WorkerSupervisor,
     store: &StateStore,
@@ -192,6 +219,9 @@ fn main() -> ExitCode {
     let backend_probes = probe_available_backends(&cfg);
     let mut coordinator =
         Coordinator::new(cfg.clone(), store.clone(), worker).with_backend_probes(backend_probes);
+    if let Some(registry) = load_platform_registry() {
+        coordinator = coordinator.with_platform_registry(registry);
+    }
     if let Some(supervisor) = supervisor.as_ref() {
         coordinator = coordinator.with_supervisor(supervisor.clone());
     }

@@ -39,6 +39,7 @@ access is a site policy and is left to the operator.
 | `/var/log/tensorplate/` | `tensorplate:tensorplate` | `0750` | postinst | On-disk JSON-lines logs when the observability service is configured for file retention. journald is preferred. |
 | `/run/tensorplate/` | `tensorplate:tensorplate` | `0750` | systemd `RuntimeDirectory=` for `tensorplate-agent.service`; postinst as fallback. | tmpfs; holds the agent control socket. |
 | `/usr/share/tensorplate/backends/` | `root:tensorplate` | `0750` | `tensorplate-common` postinst | Backend descriptors read by doctor / agent. |
+| `/usr/share/tensorplate/platform/` | `root:tensorplate` | `0750` | `tensorplate-common` postinst | Platform support registry (`rows/` and `roadmap_targets/`) read by the agent, `doctor`, and the observability service. |
 | `/usr/lib/tensorplate/` | `root:root` | `0755` | dpkg | Holds the agent-supervised `tensorplate-serving` binary and optional backend payloads. |
 
 ## Files
@@ -112,3 +113,9 @@ The Python/PyTorch backend descriptor is checked by the
 - `/usr/share/tensorplate/backends/` collects optional backend
   descriptors in a stable location so doctor probes do not have to
   walk arbitrary Python environments.
+- `/usr/share/tensorplate/platform/` holds one copy of the platform
+  support registry for the whole device. The agent, `doctor`, and the
+  observability service all read it from here rather than each shipping
+  a copy, so they cannot disagree about which platforms are supported.
+  It is package data: a device never edits it, and the registry either
+  loads whole or not at all.

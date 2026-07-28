@@ -3,3 +3,5 @@ packaging/scripts/install-paths.sh           usr/share/tensorplate/packaging/scr
 packaging/scripts/path-constants.sh          usr/share/tensorplate/packaging/scripts/
 packaging/scripts/upgrade-preflight.sh       usr/share/tensorplate/packaging/scripts/
 packaging/scripts/version-utils.sh           usr/share/tensorplate/packaging/scripts/
+config/platform/rows/                        usr/share/tensorplate/platform/
+config/platform/roadmap_targets/             usr/share/tensorplate/platform/

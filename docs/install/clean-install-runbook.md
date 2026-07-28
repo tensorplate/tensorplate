@@ -63,6 +63,7 @@ yet:
 - `observability_service_state = warning` until the unit is enabled in step 3
 - `serving_systemd_absent = ok`
 - `serving_binary_installed = ok`
+- `platform_registry = ok`
 - `python_pytorch_backend = missing` (informational; install in step 5
   if SmolVLA validation is in scope)
 - `cuda_runtime = ok` on a Jetson with JetPack

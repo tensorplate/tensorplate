@@ -13,6 +13,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use tensorplate_protocol::install_paths;
+
 use crate::error::PlatformRegistryError;
 use crate::identity::{DetectedPlatform, HostIdentity};
 use crate::reason::PlatformReason;
@@ -232,10 +234,11 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
 
 /// The loaded platform registry.
 ///
-/// Obtain one with [`PlatformRegistry::load`] (from the committed registry
-/// directory) or [`PlatformRegistry::from_documents`] (from in-memory
-/// documents, for tests and for consumers that ship the registry
-/// differently). Both fail closed.
+/// Obtain one with [`PlatformRegistry::load_installed`] (the installed
+/// registry, which is what consumers use), [`PlatformRegistry::load`]
+/// (an explicit directory), or [`PlatformRegistry::from_documents`] (from
+/// in-memory documents, for tests and for consumers that ship the registry
+/// differently). All three fail closed.
 #[derive(Clone, Debug)]
 pub struct PlatformRegistry {
     rows: BTreeMap<String, PlatformSupportRow>,
@@ -243,8 +246,26 @@ pub struct PlatformRegistry {
 }
 
 impl PlatformRegistry {
+    /// Load the registry from the location the packages install it to.
+    ///
+    /// This is the entry point every consumer uses. The agent, the CLI,
+    /// and the observability service each answer platform questions from
+    /// the same rows because they all resolve the registry through here
+    /// rather than each naming a path of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`], plus [`PlatformRegistryError::Unreadable`] when
+    /// the registry is not installed at all.
+    pub fn load_installed() -> Result<Self, PlatformRegistryError> {
+        Self::load(Path::new(install_paths::PLATFORM_REGISTRY_DIR))
+    }
+
     /// Load the registry from a directory containing `rows/` and
     /// `roadmap_targets/` subdirectories of JSON documents.
+    ///
+    /// Prefer [`Self::load_installed`] in consumers; this takes a path for
+    /// tests and for staged trees.
     ///
     /// # Errors
     ///

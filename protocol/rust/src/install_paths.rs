@@ -113,6 +113,15 @@ pub const BACKEND_DESCRIPTOR_DIR: &str = "/usr/share/tensorplate/backends";
 pub const PYTHON_PYTORCH_BACKEND_DESCRIPTOR: &str =
     "/usr/share/tensorplate/backends/python_pytorch/backend.json";
 
+/// Read-only directory holding the platform support registry: a `rows/`
+/// subdirectory of platform support rows and a `roadmap_targets/`
+/// subdirectory of non-row roadmap targets, each one JSON document.
+///
+/// Shipped by `tensorplate-common` so the agent, the CLI, and the
+/// observability service all read one registry rather than each carrying
+/// its own copy.
+pub const PLATFORM_REGISTRY_DIR: &str = "/usr/share/tensorplate/platform";
+
 /// Installed location of the serving worker binary (no systemd unit; the
 /// agent supervises this process — see V01-E09 and the F03 packaging
 /// note).
@@ -182,6 +191,7 @@ pub fn required_directories() -> &'static [&'static str] {
         LOG_DIR,
         RUN_DIR,
         BACKEND_DESCRIPTOR_DIR,
+        PLATFORM_REGISTRY_DIR,
     ]
 }
 
@@ -286,5 +296,21 @@ mod tests {
             Path::new(PYTHON_PYTORCH_BACKEND_DESCRIPTOR).starts_with(BACKEND_DESCRIPTOR_DIR),
             "backend descriptor must live under {BACKEND_DESCRIPTOR_DIR}"
         );
+    }
+
+    #[test]
+    fn platform_registry_is_installed_read_only_and_required() {
+        // Every consumer resolves the registry through this one constant,
+        // so a machine cannot end up with the agent reading one registry
+        // and `doctor` reading another.
+        assert!(
+            Path::new(PLATFORM_REGISTRY_DIR).starts_with("/usr/share"),
+            "the registry is read-only package data, not state"
+        );
+        assert!(
+            required_directories().contains(&PLATFORM_REGISTRY_DIR),
+            "the install scripts must create the registry directory"
+        );
+        assert_eq!(expected_dir_mode(PLATFORM_REGISTRY_DIR), mode::DIR_0750);
     }
 }

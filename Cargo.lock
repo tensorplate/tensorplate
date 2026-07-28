@@ -644,6 +644,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tensorplate-platform",
  "tensorplate-protocol",
  "thiserror",
  "uuid",
@@ -665,6 +666,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tensorplate-platform",
  "tensorplate-protocol",
  "thiserror",
  "uuid",
@@ -678,6 +680,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tensorplate-platform",
  "tensorplate-protocol",
  "thiserror",
 ]
