@@ -1,0 +1,21 @@
+{
+  "row_id": "macos26-m4pro-24gb",
+  "matches_row": true,
+  "provenance": "spec_authored",
+  "provenance_note": "Planned row; brand string per Apple silicon naming, OS version mirrors the M1 Pro lab host",
+  "sources": {
+    "uname_machine": "arm64",
+    "sw_vers_product_name": "macOS",
+    "sw_vers_product_version": "26.5.2",
+    "sw_vers_build_version": "25F84",
+    "cpu_brand": "Apple M4 Pro"
+  },
+  "expect": {
+    "architecture": "arm64",
+    "vendor": "apple",
+    "os_name": "macOS",
+    "os_version": "26",
+    "image_identity": null,
+    "machine_type": null
+  }
+}

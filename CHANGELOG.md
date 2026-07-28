@@ -8,6 +8,43 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Host identity detection: CPU architecture and vendor, and OS identity,
+  produced in the exact spelling a support row is written in. Detection is
+  a pure function of recorded source content — `/etc/os-release`,
+  `/proc/cpuinfo`, `/etc/nv_tegra_release`, `sw_vers`, the device tree —
+  so every committed row has a fixture proving its host identity is
+  detectable, with no hardware in the room. A row whose identity no probe
+  can produce is unmatchable on the very machine it describes, and nothing
+  about the row alone reveals that; the fixtures are therefore checked
+  against the registry's own comparison rather than against restated
+  expectations. Detection **normalizes to row granularity**, because a row
+  records the OS the project committed to validating and a machine reports
+  more than that: Linux says `aarch64` where a row says `arm64`, macOS
+  says `26.5.2` where a row says `26`, and Jetson reports L4T `r36.4.3`
+  where a row names the `r36.4.x` line. The precision is not discarded —
+  the exact version, build string, L4T patch, and device model come back
+  alongside the identity, because evidence recording needs what matching
+  deliberately ignores. An unrecognized architecture or vendor is reported
+  verbatim rather than as a detection failure, so an off-matrix machine is
+  called unsupported instead of undetectable — including on arm64 Linux,
+  where `/proc/cpuinfo` carries no `vendor_id` at all. A Jetson takes its
+  JetPack version from the `nvidia-jetpack` package where that is
+  installed and from its L4T line where it is not, so a device flashed
+  from the base BSP or running in an `l4t` container still matches the row
+  that describes it; an L4T line this release does not know is left
+  unmapped rather than guessed into a version that would match a row the
+  device was never validated against. On Compute Engine the
+  machine type is read from the metadata service, but only after the host
+  is recognized as an instance from firmware — a physical workstation
+  reports no machine type, which is what its row declares, and never pays
+  a network timeout to establish that. The metadata read is framed by
+  `Content-Length` and bounded by an overall deadline, so a complete
+  answer is used the moment it arrives rather than waiting for the peer to
+  close, a truncated one is refused rather than becoming half a machine
+  type, and a peer that trickles bytes cannot hold a service start open by
+  resetting a per-read timer.
+  (V021-E01-F02-T01, V021-E01-F02-T02)
+
 - The agent, `tensorplate doctor`, and the observability service now
   answer platform questions from one registry instead of each carrying
   its own. `tensorplate-common` installs the support rows and roadmap

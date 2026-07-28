@@ -1,0 +1,20 @@
+{
+  "row_id": "ubuntu2404-x86-a100-40g-a2hg1",
+  "matches_row": true,
+  "provenance": "spec_authored",
+  "provenance_note": "GCP A2 hosts are Intel",
+  "sources": {
+    "uname_machine": "x86_64",
+    "os_release": "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.1 LTS (Noble Numbat)\"\nID=ubuntu\nID_LIKE=debian\n",
+    "cpuinfo": "processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel name\t: Intel(R) Xeon(R) CPU @ 2.20GHz\n",
+    "gce_machine_type": "projects/928311501586/machineTypes/a2-highgpu-1g"
+  },
+  "expect": {
+    "architecture": "x86_64",
+    "vendor": "intel",
+    "os_name": "Ubuntu",
+    "os_version": "24.04",
+    "image_identity": null,
+    "machine_type": "a2-highgpu-1g"
+  }
+}
