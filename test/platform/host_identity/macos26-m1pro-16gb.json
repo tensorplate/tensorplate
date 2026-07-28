@@ -1,0 +1,21 @@
+{
+  "row_id": "macos26-m1pro-16gb",
+  "matches_row": true,
+  "provenance": "recorded",
+  "provenance_note": "captured 2026-07-28 on the in-lab MacBook Pro M1 Pro 16GB",
+  "sources": {
+    "uname_machine": "arm64",
+    "sw_vers_product_name": "macOS",
+    "sw_vers_product_version": "26.5.2",
+    "sw_vers_build_version": "25F84",
+    "cpu_brand": "Apple M1 Pro"
+  },
+  "expect": {
+    "architecture": "arm64",
+    "vendor": "apple",
+    "os_name": "macOS",
+    "os_version": "26",
+    "image_identity": null,
+    "machine_type": null
+  }
+}

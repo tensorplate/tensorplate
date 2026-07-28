@@ -27,18 +27,22 @@
 
 #![forbid(unsafe_code)]
 
+pub mod detect;
 pub mod error;
 pub mod identity;
+pub mod probe;
 pub mod reason;
 pub mod registry;
 pub mod roadmap;
 pub mod row;
 
+pub use detect::{identify, ExactHostFacts, HostReport, HostSources, L4tRelease};
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
     HostIdentity, HostProbe,
 };
+pub use probe::SystemHostProbe;
 pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};
