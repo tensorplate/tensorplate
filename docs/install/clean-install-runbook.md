@@ -34,8 +34,8 @@ What this does:
 - Creates the `tensorplate` system user and group
   (`tensorplate-common.postinst`).
 - Lays down `/etc/tensorplate/`, `/var/lib/tensorplate/{state,bundles/*,worker-configs}/`,
-  `/var/log/tensorplate/`, and `/usr/share/tensorplate/backends/`
-  with the documented permissions.
+  `/var/log/tensorplate/`, `/usr/share/tensorplate/backends/`, and
+  `/usr/share/tensorplate/platform/` with the documented permissions.
 - Installs the four config files at `/etc/tensorplate/*.json`.
 - Installs the systemd units for `tensorplate-agent` and
   `tensorplate-observability` but does **not** start them.

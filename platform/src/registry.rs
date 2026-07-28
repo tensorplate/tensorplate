@@ -255,8 +255,9 @@ impl PlatformRegistry {
     ///
     /// # Errors
     ///
-    /// As [`Self::load`], plus [`PlatformRegistryError::Unreadable`] when
-    /// the registry is not installed at all.
+    /// As [`Self::load`] — including [`PlatformRegistryError::Unreadable`]
+    /// when the registry is not installed, or is installed but not
+    /// readable by this process.
     pub fn load_installed() -> Result<Self, PlatformRegistryError> {
         Self::load(Path::new(install_paths::PLATFORM_REGISTRY_DIR))
     }

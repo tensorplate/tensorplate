@@ -39,7 +39,7 @@ access is a site policy and is left to the operator.
 | `/var/log/tensorplate/` | `tensorplate:tensorplate` | `0750` | postinst | On-disk JSON-lines logs when the observability service is configured for file retention. journald is preferred. |
 | `/run/tensorplate/` | `tensorplate:tensorplate` | `0750` | systemd `RuntimeDirectory=` for `tensorplate-agent.service`; postinst as fallback. | tmpfs; holds the agent control socket. |
 | `/usr/share/tensorplate/backends/` | `root:tensorplate` | `0750` | `tensorplate-common` postinst | Backend descriptors read by doctor / agent. |
-| `/usr/share/tensorplate/platform/` | `root:tensorplate` | `0750` | `tensorplate-common` postinst | Platform support registry (`rows/` and `roadmap_targets/`) read by the agent, `doctor`, and the observability service. |
+| `/usr/share/tensorplate/platform/` | `root:tensorplate` | `0750` | `tensorplate-common` payload; mode applied by `install-paths.sh` | Platform support registry (`rows/` and `roadmap_targets/`) read by the agent, `doctor`, and the observability service. Group-readable, not world-readable: a caller outside the `tensorplate` group can stat it but not read it. |
 | `/usr/lib/tensorplate/` | `root:root` | `0755` | dpkg | Holds the agent-supervised `tensorplate-serving` binary and optional backend payloads. |
 
 ## Files

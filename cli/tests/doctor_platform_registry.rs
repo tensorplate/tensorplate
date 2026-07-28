@@ -146,6 +146,46 @@ fn a_corrupt_row_fails_the_whole_registry() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_registry_this_account_cannot_read_is_not_reported_as_invalid() {
+    // The registry ships group-readable. An operator outside the
+    // `tensorplate` group can stat the directory but not read it, which
+    // says nothing about the rows inside. Calling that "invalid" would be
+    // a false claim about healthy data, and `fail` would flip doctor's
+    // exit code on a device whose only fault is the account being used.
+    use std::os::unix::fs::PermissionsExt;
+
+    let td = TempDir::new().expect("td");
+    let staged = stage_registry(td.path());
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o000)).expect("drop permissions");
+
+    let finding = platform_finding(td.path());
+
+    // Restore before asserting so a failure cannot leave an unremovable
+    // temp tree behind.
+    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).expect("restore permissions");
+
+    assert_eq!(
+        finding.status,
+        FindingStatus::Warning,
+        "unreadable is not invalid: {finding:?}"
+    );
+    assert!(
+        !finding.message.contains("invalid"),
+        "the message must not claim the registry is invalid: {}",
+        finding.message
+    );
+    assert!(
+        finding
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tensorplate"),
+        "the hint names the group to join: {finding:?}"
+    );
+}
+
 #[test]
 fn an_empty_registry_directory_fails_rather_than_reporting_zero_rows() {
     // A registry with no rows answers "unsupported" for every machine on

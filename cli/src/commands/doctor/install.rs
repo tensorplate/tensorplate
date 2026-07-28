@@ -107,8 +107,34 @@ fn probe_platform_registry(opts: &InstallProbeOptions) -> Vec<Finding> {
             FindingId::PlatformRegistry,
             Severity::Info,
             format!("no platform support registry at `{}`", directory.display()),
-            Some("install tensorplate-common to ship the platform support registry".into()),
+            Some(
+                "install tensorplate-common (reinstall it if already present) to ship the platform support registry"
+                    .into(),
+            ),
         )];
+    }
+    // The registry directory is group-readable, not world-readable, so a
+    // caller outside the `tensorplate` group can stat it but not read it.
+    // That says nothing about the rows inside, and calling it invalid
+    // would be a false claim about healthy data — on a device whose only
+    // fault is the account being used. It must also not fail `doctor`,
+    // which is the command an operator reaches for to find out why their
+    // access is wrong in the first place.
+    if let Err(err) = std::fs::read_dir(&directory) {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            return vec![Finding::warn(
+                FindingId::PlatformRegistry,
+                Severity::Warning,
+                format!(
+                    "platform support registry at `{}` is not readable by this account",
+                    directory.display()
+                ),
+                Some(
+                    "re-run as root or as a member of the `tensorplate` group; the registry itself was not inspected"
+                        .into(),
+                ),
+            )];
+        }
     }
     match PlatformRegistry::load(&directory) {
         Ok(registry) => vec![Finding::ok(
