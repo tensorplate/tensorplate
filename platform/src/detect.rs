@@ -318,21 +318,36 @@ fn jetson_os(
     if let Some(release) = release {
         exact.l4t_release = Some(release.exact());
     }
-
+    // Every committed Jetson row carries an image identity, so once this is
+    // a Jetson at all, both halves of that identity are required. Letting
+    // an unparsable L4T release or a damaged `/etc/os-release` fall through
+    // as `None` would produce an identity that matches no Jetson row and
+    // reaches the operator as "unsupported platform" — when the machine is
+    // a Jetson whose sources are broken, which is a different problem with
+    // a different fix.
+    let release = release.ok_or_else(|| PlatformProbeError::Unrecognized {
+        source_name: "/etc/nv_tegra_release".to_string(),
+        detail: format!(
+            "present but no `R<major> … REVISION: <major>.<minor>` could be read from `{}`",
+            tegra.lines().next().unwrap_or("").trim()
+        ),
+    })?;
     // The Ubuntu release under JetPack is part of the image identity, so a
     // row pins the base it was validated on.
     let ubuntu_base = sources
         .os_release
         .as_deref()
-        .and_then(|content| os_release_field(content, "VERSION_ID"));
-    let image_identity = match (release, ubuntu_base.as_deref()) {
-        (Some(release), Some(base)) => Some(format!(
-            "L4T {} (Ubuntu {} base)",
-            release.row_granularity(),
-            base
-        )),
-        _ => None,
-    };
+        .and_then(|content| os_release_field(content, "VERSION_ID"))
+        .ok_or_else(|| PlatformProbeError::Unrecognized {
+            source_name: "/etc/os-release".to_string(),
+            detail: "Jetson reported an L4T release but no Ubuntu VERSION_ID to base it on"
+                .to_string(),
+        })?;
+    let image_identity = Some(format!(
+        "L4T {} (Ubuntu {} base)",
+        release.row_granularity(),
+        ubuntu_base
+    ));
 
     // JetPack's own version comes from its package, which is the only
     // source that states it directly. Without that package the L4T release
@@ -343,12 +358,7 @@ fn jetson_os(
         .nvidia_jetpack_version
         .as_deref()
         .and_then(jetpack_version)
-        .or_else(|| release.map(|r| r.exact()))
-        .ok_or_else(|| PlatformProbeError::Unrecognized {
-            source_name: "/etc/nv_tegra_release".to_string(),
-            detail: "Jetson reported neither a JetPack package version nor a readable L4T release"
-                .to_string(),
-        })?;
+        .unwrap_or_else(|| release.exact());
 
     Ok((
         "JetPack".to_string(),

@@ -14,7 +14,9 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use tensorplate_platform::{identify, DetectedPlatform, HostSources, PlatformRegistry, RowMatch};
+use tensorplate_platform::{
+    identify, DetectedPlatform, HostSources, PlatformProbeError, PlatformRegistry, RowMatch,
+};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -249,6 +251,40 @@ fn the_lab_jetson_does_not_currently_match_the_row_it_should_validate() {
         !matches!(registry.resolve(&detected), RowMatch::Supported(_)),
         "an unvalidated L4T line must never resolve as supported"
     );
+}
+
+#[test]
+fn a_jetson_with_damaged_sources_fails_rather_than_looking_unsupported() {
+    // Every committed Jetson row carries an image identity, so a Jetson
+    // that cannot produce one matches nothing. Returning that as an
+    // ordinary no-match would tell the operator their Jetson is an
+    // unsupported platform, when the truth is that a source on it is
+    // broken — a different problem with a different fix.
+    let base = fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "jetson-orin-nano-8gb-jp62")
+        .map(|(_, f)| f)
+        .expect("the Jetson fixture exists");
+
+    let mut unparsable = sources_of(&base);
+    unparsable.nv_tegra_release = Some("# something else entirely\n".to_string());
+    let err = identify(&unparsable).expect_err("an unreadable L4T release is not a no-match");
+    assert!(
+        matches!(err, PlatformProbeError::Unrecognized { .. }),
+        "expected a typed probe failure, got {err:?}"
+    );
+
+    let mut no_base = sources_of(&base);
+    no_base.os_release = Some("NAME=\"Ubuntu\"\n".to_string());
+    let err = identify(&no_base).expect_err("a missing Ubuntu base is not a no-match");
+    assert!(
+        matches!(err, PlatformProbeError::Unrecognized { .. }),
+        "expected a typed probe failure, got {err:?}"
+    );
+
+    // The intact fixture still detects, so the guard rejects damage rather
+    // than everything.
+    assert!(identify(&sources_of(&base)).is_ok());
 }
 
 #[test]

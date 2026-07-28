@@ -7,11 +7,15 @@
 // pure — so the interesting logic stays testable from fixtures and this
 // module stays small enough to review by eye.
 //
-// Every source is best-effort: a missing file or an absent command yields
-// `None`, not an error, because absence is how platforms are told apart.
-// Detection fails only when what is present cannot be interpreted at all.
+// A source that is not there yields `None`, because absence is how
+// platforms are told apart — no `/etc/os-release` on macOS, no `sw_vers`
+// on Linux. A source that *is* there but cannot be read is an error.
+// Those two must never look alike: collapsing them would report a machine
+// whose `/etc/os-release` is unreadable as a machine that has no OS
+// identity, which reaches the operator as "your platform is unsupported"
+// when the truth is "I could not read it".
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -59,37 +63,56 @@ impl SystemHostProbe {
         }
     }
 
-    fn read(&self, absolute: &str) -> Option<String> {
+    fn read(&self, absolute: &str) -> Result<Option<String>, PlatformProbeError> {
         read_lossy(&self.path(absolute))
     }
 
     /// Gather every source this machine offers.
-    #[must_use]
-    pub fn sources(&self) -> HostSources {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlatformProbeError::Unreadable`] when a source exists but
+    /// cannot be read — a permission error, an unreadable device node, a
+    /// tool that is present but not executable. Only genuine *absence*
+    /// becomes `None`, because absence is how platforms are told apart and
+    /// a source that is merely unreadable must never be mistaken for a
+    /// platform that does not have it. Getting this wrong reports a
+    /// supported machine as unsupported.
+    pub fn sources(&self) -> Result<HostSources, PlatformProbeError> {
         let staged = self.root.is_some();
-        HostSources {
-            uname_machine: run("uname", &["-m"]),
-            os_release: self.read("/etc/os-release"),
-            cpuinfo: self.read("/proc/cpuinfo"),
-            nv_tegra_release: self.read("/etc/nv_tegra_release"),
-            nvidia_jetpack_version: (!staged)
-                .then(|| run("dpkg-query", &["-W", "-f=${Version}", "nvidia-jetpack"]))
-                .flatten(),
-            device_tree_model: self.read("/proc/device-tree/model"),
-            sw_vers_product_name: (!staged)
-                .then(|| run("sw_vers", &["-productName"]))
-                .flatten(),
-            sw_vers_product_version: (!staged)
-                .then(|| run("sw_vers", &["-productVersion"]))
-                .flatten(),
-            sw_vers_build_version: (!staged)
-                .then(|| run("sw_vers", &["-buildVersion"]))
-                .flatten(),
-            cpu_brand: (!staged)
-                .then(|| run("sysctl", &["-n", "machdep.cpu.brand_string"]))
-                .flatten(),
-            gce_machine_type: self.gce_machine_type(),
-        }
+        Ok(HostSources {
+            uname_machine: run("uname", &["-m"])?,
+            os_release: self.read("/etc/os-release")?,
+            cpuinfo: self.read("/proc/cpuinfo")?,
+            nv_tegra_release: self.read("/etc/nv_tegra_release")?,
+            nvidia_jetpack_version: if staged {
+                None
+            } else {
+                run("dpkg-query", &["-W", "-f=${Version}", "nvidia-jetpack"])?
+            },
+            device_tree_model: self.read("/proc/device-tree/model")?,
+            sw_vers_product_name: if staged {
+                None
+            } else {
+                run("sw_vers", &["-productName"])?
+            },
+            sw_vers_product_version: if staged {
+                None
+            } else {
+                run("sw_vers", &["-productVersion"])?
+            },
+            sw_vers_build_version: if staged {
+                None
+            } else {
+                run("sw_vers", &["-buildVersion"])?
+            },
+            cpu_brand: if staged {
+                None
+            } else {
+                run("sysctl", &["-n", "machdep.cpu.brand_string"])?
+            },
+            gce_machine_type: self.gce_machine_type()?,
+        })
     }
 
     /// Detect the host, keeping the exact facts alongside the identity.
@@ -98,7 +121,7 @@ impl SystemHostProbe {
     ///
     /// As [`crate::detect::identify`].
     pub fn detect(&self) -> Result<HostReport, PlatformProbeError> {
-        identify(&self.sources())
+        identify(&self.sources()?)
     }
 
     /// The machine type, on machines that have one.
@@ -107,18 +130,31 @@ impl SystemHostProbe {
     /// like a Compute Engine instance. A physical workstation must come
     /// back with no machine type — its row declares none — and must never
     /// pay a network timeout to find that out.
-    fn gce_machine_type(&self) -> Option<String> {
-        if !self.looks_like_gce() {
-            return None;
+    fn gce_machine_type(&self) -> Result<Option<String>, PlatformProbeError> {
+        if !self.looks_like_gce()? {
+            return Ok(None);
         }
+        // A machine that says it is an instance but will not answer is a
+        // broken source, not a machine without a shape: reporting `None`
+        // would strip it of the very field its row is scoped to and quietly
+        // make that row unmatchable.
         query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT)
+            .ok_or_else(|| PlatformProbeError::Unreadable {
+                source_name: "GCE metadata service".to_string(),
+                detail: format!(
+                    "host reports as a Compute Engine instance but {METADATA_PATH} did not answer within {}ms",
+                    METADATA_TIMEOUT.as_millis()
+                ),
+            })
+            .map(Some)
     }
 
-    fn looks_like_gce(&self) -> bool {
+    fn looks_like_gce(&self) -> Result<bool, PlatformProbeError> {
         // Set by the firmware, so it is readable without privileges and
         // without asking the network anything.
-        self.read("/sys/class/dmi/id/product_name")
-            .is_some_and(|name| name.trim() == "Google Compute Engine")
+        Ok(self
+            .read("/sys/class/dmi/id/product_name")?
+            .is_some_and(|name| name.trim() == "Google Compute Engine"))
     }
 }
 
@@ -128,21 +164,39 @@ impl HostProbe for SystemHostProbe {
     }
 }
 
-fn read_lossy(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+/// Read a source file. A file that is not there is `None`; a file that is
+/// there but unreadable is an error.
+fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(PlatformProbeError::Unreadable {
+            source_name: path.display().to_string(),
+            detail: err.to_string(),
+        }),
+    }
 }
 
-/// Run a command and return its trimmed stdout, or `None` if the binary is
-/// absent or it failed. A missing tool is a platform that does not have
-/// it, not an error.
-fn run(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
+/// Run a command and return its trimmed stdout.
+///
+/// A tool that does not exist is `None` — that is how a platform says it
+/// has no `sw_vers`. A tool that exists but cannot be executed is an
+/// error, because that is a broken machine rather than a different one. A
+/// tool that runs and exits non-zero is also `None`: `dpkg-query` exiting
+/// non-zero means the package is not installed, which is absence.
+fn run(program: &str, args: &[&str]) -> Result<Option<String>, PlatformProbeError> {
+    match Command::new(program).args(args).output() {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((!text.is_empty()).then_some(text))
+        }
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(PlatformProbeError::Unreadable {
+            source_name: program.to_string(),
+            detail: err.to_string(),
+        }),
     }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
 }
 
 /// One bounded HTTP/1.0 GET against the metadata service.
@@ -182,7 +236,7 @@ fn query_metadata(addr: &str, path: &str, timeout: Duration) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -199,8 +253,8 @@ mod tests {
         .expect("write product name");
 
         let probe = SystemHostProbe::with_root(&staging);
-        assert!(!probe.looks_like_gce());
-        assert_eq!(probe.gce_machine_type(), None);
+        assert!(!probe.looks_like_gce().expect("dmi readable"));
+        assert_eq!(probe.gce_machine_type().expect("no query attempted"), None);
 
         std::fs::remove_dir_all(&staging).ok();
     }
@@ -215,7 +269,9 @@ mod tests {
         )
         .expect("write product name");
 
-        assert!(SystemHostProbe::with_root(&staging).looks_like_gce());
+        assert!(SystemHostProbe::with_root(&staging)
+            .looks_like_gce()
+            .expect("dmi readable"));
 
         std::fs::remove_dir_all(&staging).ok();
     }
@@ -242,7 +298,41 @@ mod tests {
 
     #[test]
     fn missing_commands_and_files_are_absence_not_failure() {
-        assert_eq!(run("tp-definitely-not-a-real-binary", &[]), None);
-        assert_eq!(read_lossy(Path::new("/tp/definitely/not/here")), None);
+        assert_eq!(
+            run("tp-definitely-not-a-real-binary", &[]).expect("absent tool is not an error"),
+            None
+        );
+        assert_eq!(
+            read_lossy(Path::new("/tp/definitely/not/here")).expect("absent file is not an error"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_source_is_an_error_not_an_absent_one() {
+        // The distinction this whole module turns on: a machine whose
+        // `/etc/os-release` cannot be read must not look like a machine that
+        // has no `/etc/os-release`. The first is a broken source; the second
+        // is macOS. Collapsing them reports a supported host as unsupported.
+        use std::os::unix::fs::PermissionsExt;
+
+        let staging = std::env::temp_dir().join(format!("tp-probe-perm-{}", std::process::id()));
+        std::fs::create_dir_all(staging.join("etc")).expect("stage");
+        let path = staging.join("etc/os-release");
+        std::fs::write(&path, "NAME=\"Ubuntu\"\n").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let result = read_lossy(&path);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).ok();
+        std::fs::remove_dir_all(&staging).ok();
+
+        match result {
+            Err(PlatformProbeError::Unreadable { source_name, .. }) => {
+                assert!(source_name.contains("os-release"), "names the source");
+            }
+            other => panic!("an unreadable source must not read as absent: {other:?}"),
+        }
     }
 }
