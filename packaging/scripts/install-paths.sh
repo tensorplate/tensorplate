@@ -82,6 +82,7 @@ ensure_dir "${TP_BUNDLE_IMPORT_DIR}"     "${TP_IMPORT_DIR_MODE}" "${TP_SYSTEM_GR
 ensure_dir "${TP_WORKER_CONFIG_DIR}"     "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_LOG_DIR}"               "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_BACKEND_DESCRIPTOR_DIR}" "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
+ensure_dir "${TP_PLATFORM_REGISTRY_DIR}" "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 
 # /run/tensorplate is created at boot by systemd RuntimeDirectory= for
 # the agent unit. For real installs we still create it now so that

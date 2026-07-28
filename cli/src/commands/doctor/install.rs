@@ -19,9 +19,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::install_paths::{
     self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH, OBSERVABILITY_CONFIG_PATH,
-    PYTHON_PYTORCH_BACKEND_DESCRIPTOR, SERVING_BINARY_PATH, SERVING_WORKER_CONFIG_PATH,
+    PLATFORM_REGISTRY_DIR, PYTHON_PYTORCH_BACKEND_DESCRIPTOR, SERVING_BINARY_PATH,
+    SERVING_WORKER_CONFIG_PATH,
 };
 
 use super::finding::{Finding, FindingId, Severity};
@@ -80,9 +82,83 @@ pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
             "no tensorplate install layout detected",
         ));
     }
+    out.extend(probe_platform_registry(opts));
     out.extend(probe_python_pytorch_backend(opts));
     out.extend(probe_optional_runtimes(opts));
     out
+}
+
+/// Report whether the installed platform support registry loads.
+///
+/// The registry is read-only package data shared by the agent, this CLI,
+/// and the observability service, so a corrupt one is a device-wide
+/// static-config fault rather than one service's problem. Loading fails
+/// closed on a single bad row: reporting `12 of 13 rows` would let a
+/// supported machine be told it is unsupported, so the registry either
+/// loads whole or not at all and this probe says which.
+fn probe_platform_registry(opts: &InstallProbeOptions) -> Vec<Finding> {
+    // `prefixed` returns PLATFORM_REGISTRY_DIR unchanged when no prefix is
+    // set, so on a real install this reads exactly what
+    // `PlatformRegistry::load_installed` reads in the agent and the
+    // observability service.
+    let directory = prefixed(opts, PLATFORM_REGISTRY_DIR);
+    if !directory.exists() {
+        return vec![Finding::missing(
+            FindingId::PlatformRegistry,
+            Severity::Info,
+            format!("no platform support registry at `{}`", directory.display()),
+            Some(
+                "install tensorplate-common (reinstall it if already present) to ship the platform support registry"
+                    .into(),
+            ),
+        )];
+    }
+    // The registry directory is group-readable, not world-readable, so a
+    // caller outside the `tensorplate` group can stat it but not read it.
+    // That says nothing about the rows inside, and calling it invalid
+    // would be a false claim about healthy data — on a device whose only
+    // fault is the account being used. It must also not fail `doctor`,
+    // which is the command an operator reaches for to find out why their
+    // access is wrong in the first place.
+    if let Err(err) = std::fs::read_dir(&directory) {
+        if err.kind() == std::io::ErrorKind::PermissionDenied {
+            return vec![Finding::warn(
+                FindingId::PlatformRegistry,
+                Severity::Warning,
+                format!(
+                    "platform support registry at `{}` is not readable by this account",
+                    directory.display()
+                ),
+                Some(
+                    "re-run as root or as a member of the `tensorplate` group; the registry itself was not inspected"
+                        .into(),
+                ),
+            )];
+        }
+    }
+    match PlatformRegistry::load(&directory) {
+        Ok(registry) => vec![Finding::ok(
+            FindingId::PlatformRegistry,
+            Severity::Info,
+            format!(
+                "platform support registry at `{}` loaded ({} rows, {} supported combinations, {} roadmap targets)",
+                directory.display(),
+                registry.rows().count(),
+                registry.supported_rows().count(),
+                registry.roadmap_targets().count(),
+            ),
+            None,
+        )],
+        Err(err) => vec![Finding::fail(
+            FindingId::PlatformRegistry,
+            Severity::Critical,
+            format!(
+                "platform support registry at `{}` invalid: {err}",
+                directory.display()
+            ),
+            Some("reinstall tensorplate-common; the registry is package data and is not edited on the device".into()),
+        )],
+    }
 }
 
 fn probe_core_packages(opts: &InstallProbeOptions, any_install: bool) -> Vec<Finding> {

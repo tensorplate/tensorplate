@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::error::ErrorCode;
 use tensorplate_protocol::worker_status::ComponentState;
 use tensorplate_protocol::{
@@ -74,6 +75,7 @@ pub struct Service {
     control_loop: Option<Arc<Mutex<ControlLoopAggregator>>>,
     primary_source: InputSource,
     safe_state_sink_kind: SafeStateSinkKind,
+    platform_registry: Option<PlatformRegistry>,
 }
 
 fn component_labels(component: &str) -> MetricLabels {
@@ -246,7 +248,26 @@ impl Service {
             control_loop,
             primary_source,
             safe_state_sink_kind,
+            platform_registry: None,
         })
+    }
+
+    /// Attach the platform support registry the binary loaded at startup.
+    ///
+    /// The registry is not loaded by the constructor: doing so would make
+    /// every test's behaviour depend on whether the host running it
+    /// happens to have the packages installed.
+    #[must_use]
+    pub fn with_platform_registry(mut self, registry: PlatformRegistry) -> Self {
+        self.platform_registry = Some(registry);
+        self
+    }
+
+    /// The platform support registry, or `None` when it could not be
+    /// loaded. `None` means "no basis to judge", not "nothing supported".
+    #[must_use]
+    pub fn platform_registry(&self) -> Option<&PlatformRegistry> {
+        self.platform_registry.as_ref()
     }
 
     pub fn config(&self) -> &ObservabilityConfig {
@@ -646,6 +667,7 @@ impl Service {
             control_loop,
             primary_source,
             safe_state_sink_kind,
+            platform_registry: None,
         })
     }
 }

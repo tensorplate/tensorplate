@@ -250,7 +250,8 @@ sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_all.deb" \
 
 The install creates the `tensorplate` system user and group, lays out
 `/etc/tensorplate`, `/var/lib/tensorplate`, `/var/log/tensorplate`,
-`/run/tensorplate`, and `/usr/share/tensorplate/backends`, installs
+`/run/tensorplate`, `/usr/share/tensorplate/backends`, and
+`/usr/share/tensorplate/platform`, installs
 systemd units for the agent and observability service, and installs the
 serving worker without a standalone serving service.
 

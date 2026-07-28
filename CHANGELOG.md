@@ -8,6 +8,37 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The agent, `tensorplate doctor`, and the observability service now
+  answer platform questions from one registry instead of each carrying
+  its own. `tensorplate-common` installs the support rows and roadmap
+  targets to `/usr/share/tensorplate/platform`, and all three consumers
+  resolve them from that one `PLATFORM_REGISTRY_DIR` constant through the
+  same loader and the same fail-closed policy — the services via
+  `PlatformRegistry::load_installed()`, and `doctor` via the prefix-aware
+  form every install probe uses, which resolves to the same path — so no
+  consumer can form a second opinion about what is supported. The consumer crates depend on
+  `tensorplate-platform` and never on each other, which is asserted
+  rather than assumed. `doctor` reports a new `platform_registry` finding
+  that separates the states an operator can actually be in: no registry
+  installed (`missing`, and not a failure, so a clean dev host still
+  passes), a registry that loads (with its row, supported-combination,
+  and roadmap-target counts), a registry that is installed but not
+  readable by the calling account (`warning` — it ships group-readable,
+  and being outside the group says nothing about the rows inside, so
+  `doctor` neither calls it invalid nor fails on a device whose only
+  fault is which account is running the command), and a registry that is
+  readable but unusable (`fail`, naming the offending document where one
+  document is at fault). An empty registry directory reports as broken
+  rather than as a clean pass with zero rows, since a registry with no
+  rows answers "unsupported" for every machine.
+  The agent and the observability service load the registry once at
+  startup and log what they loaded; neither treats a registry it could
+  not load as an empty one, because "no basis to judge" and "nothing is
+  supported" are different answers. Loading is best-effort in both
+  services: they come up and let `doctor` report the problem rather than
+  refusing to start over package data they only read.
+  (V021-E01-F01-T03)
+
 - Platform registry loading and the query API that resolves a detected
   machine to exactly one support row. `PlatformRegistry` loads the
   committed rows and roadmap targets and **fails closed**: one invalid

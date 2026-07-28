@@ -49,6 +49,11 @@ pub enum FindingId {
     ServingSystemdAbsent,
     ServingBinaryInstalled,
     BackendDescriptor,
+    /// packaging: the installed platform support registry loads and every
+    /// row in it is valid. Reported separately from the path layout
+    /// because a present-but-unloadable registry is a different operator
+    /// problem from a missing directory.
+    PlatformRegistry,
 }
 
 impl FindingId {
@@ -87,6 +92,7 @@ impl FindingId {
             Self::ServingSystemdAbsent => "serving_systemd_absent",
             Self::ServingBinaryInstalled => "serving_binary_installed",
             Self::BackendDescriptor => "backend_descriptor",
+            Self::PlatformRegistry => "platform_registry",
         }
     }
 }
