@@ -18,6 +18,8 @@ use tensorplate_protocol::agent_control::{
 };
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
+use tensorplate_platform::{HostIdentity, PlatformRegistry, ProfileSelection, SystemHostProbe};
+
 use crate::args::DoctorArgs;
 use crate::client::AgentClient;
 use crate::config::ProfileMode;
@@ -48,7 +50,7 @@ pub fn run<W: Write, E: Write>(
     let mut findings = Vec::<Finding>::new();
     findings.push(probe_cli_version());
     findings.extend(probe_profile_compatibility(profile));
-    findings.extend(probe_runtime_environment());
+    findings.extend(probe_host_profile());
     findings.extend(probe_ros2_health_stub());
     // packaging install probes: filesystem layout, configs,
     // systemd units, serving binary, backend descriptor + runtime,
@@ -185,37 +187,153 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
     }
 }
 
-fn probe_runtime_environment() -> Vec<Finding> {
-    // Host facts only. Concrete CUDA / TensorRT / LibTorch / Python /
-    // PyTorch checks land in [`install::run`] (packaging) so the
-    // CLI / release validation harness reads them from a single source.
-    let arch = std::env::consts::ARCH;
-    let os = std::env::consts::OS;
+/// The host section, exposed for integration tests that assert on it.
+///
+/// See [`probe_host_profile`].
+/// The host section: what this machine reports about itself, and which
+/// support rows it could be.
+///
+/// Detection goes through `tensorplate-platform`, the same code the agent
+/// uses, rather than build-time constants. `std::env::consts::ARCH` names
+/// the target this binary was *compiled* for, which is not a fact about
+/// the machine it is running on — an `amd64` CLI on an arm64 host would
+/// report the wrong architecture and the operator would have no way to
+/// tell.
+pub fn host_section() -> Vec<Finding> {
+    probe_host_profile()
+}
+
+fn probe_host_profile() -> Vec<Finding> {
+    let report = match SystemHostProbe::new().detect() {
+        Ok(report) => report,
+        Err(err) => {
+            // A source that could not be read is not a platform that is
+            // unsupported. Say which it is.
+            return vec![
+                Finding::fail(
+                    FindingId::HostFacts,
+                    Severity::Warning,
+                    format!("host identity could not be detected: {err}"),
+                    Some("re-run as a user that can read /etc and /proc, or attach `tensorplate doctor --output json`".into()),
+                ),
+                Finding::skipped(
+                    FindingId::HostOs,
+                    Severity::Info,
+                    "skipped: host identity undetected",
+                    None,
+                ),
+                Finding::skipped(
+                    FindingId::PlatformProfile,
+                    Severity::Info,
+                    "skipped: host identity undetected",
+                    None,
+                ),
+            ];
+        }
+    };
+
+    let identity = &report.identity;
     let mut findings = vec![Finding::ok(
         FindingId::HostFacts,
         Severity::Info,
-        format!("host arch={arch}, os={os}"),
+        format!(
+            "host arch={} vendor={}",
+            identity.architecture.as_reported(),
+            identity.vendor.as_reported()
+        ),
         None,
     )];
-    if !matches!(os, "linux") {
-        findings.push(Finding::unsupported(
-            FindingId::HostOs,
-            Severity::Info,
-            format!("v0.1.0 validation targets Linux; running on {os}"),
+
+    // The exact strings alongside the row-comparable ones: an operator
+    // filing evidence needs the build, and matching deliberately does not.
+    let mut os = format!("{} {}", identity.os_name, identity.os_version);
+    if let Some(image) = identity.image_identity.as_deref() {
+        os.push_str(&format!(" ({image})"));
+    }
+    if let Some(machine_type) = identity.machine_type.as_deref() {
+        os.push_str(&format!(" on {machine_type}"));
+    }
+    let exact = [
+        report
+            .exact
+            .os_version
+            .as_deref()
+            .map(|v| format!("version {v}")),
+        report
+            .exact
+            .os_build
+            .as_deref()
+            .map(|b| format!("build {b}")),
+        report
+            .exact
+            .l4t_release
+            .as_deref()
+            .map(|l| format!("L4T {l}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        os.push_str(&format!(" [exact: {}]", exact.join(", ")));
+    }
+    findings.push(Finding::ok(FindingId::HostOs, Severity::Info, os, None));
+
+    findings.push(probe_platform_profile(identity));
+    findings
+}
+
+/// Which support rows this host could be.
+///
+/// Deliberately a *set*: rows sharing an OS and CPU profile differ only by
+/// accelerator, so host identity alone cannot name one. Reporting a single
+/// row here would assert a match that has not been established.
+fn probe_platform_profile(identity: &HostIdentity) -> Finding {
+    let registry = match PlatformRegistry::load_installed() {
+        Ok(registry) => registry,
+        Err(err) => {
+            return Finding::skipped(
+                FindingId::PlatformProfile,
+                Severity::Info,
+                format!("skipped: no platform registry to match against ({err})"),
+                Some("see the platform_registry finding".into()),
+            )
+        }
+    };
+    match registry.select_profile(identity) {
+        ProfileSelection::Candidates(rows) => {
+            let ids = rows
+                .iter()
+                .map(|row| row.row_id())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hint = (rows.len() > 1).then(|| {
+                "several rows share this host profile and differ only by accelerator; \
+                 accelerator identity is needed to name one"
+                    .to_string()
+            });
+            Finding::ok(
+                FindingId::PlatformProfile,
+                Severity::Info,
+                format!(
+                    "host matches {} candidate support row(s): {ids}",
+                    rows.len()
+                ),
+                hint,
+            )
+        }
+        // Not a failure of this machine or of doctor: an off-matrix host is
+        // a normal, reportable state, and the typed reason says which
+        // dimension put it there.
+        ProfileSelection::NoMatch(reason) => Finding::unsupported(
+            FindingId::PlatformProfile,
+            Severity::Warning,
+            format!("host matches no support row ({})", reason.as_str()),
             Some(
-                "development host checks pass; deploy to a Jetson Orin device for full validation"
+                "see docs/release/support-matrix.md for the platforms this release validates"
                     .into(),
             ),
-        ));
-    } else {
-        findings.push(Finding::ok(
-            FindingId::HostOs,
-            Severity::Info,
-            "running on Linux",
-            None,
-        ));
+        ),
     }
-    findings
 }
 
 fn probe_ros2_health_stub() -> Vec<Finding> {

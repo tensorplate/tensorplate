@@ -8,6 +8,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate doctor` gains a host section, and it reports what the
+  machine says about itself rather than what the binary was compiled for.
+  The old probe read `std::env::consts::ARCH`, which names the *build
+  target*: an `amd64` CLI on an arm64 host reported the wrong
+  architecture and an operator had no way to tell. Detection now goes
+  through `tensorplate-platform`, the same code the agent uses, so there
+  is one answer on a device instead of two. `host_facts` reports detected
+  architecture and vendor, `host_os` reports OS identity with the exact
+  version, build, and L4T release alongside it for evidence, and a new
+  `platform_profile` finding reports which support rows the host could
+  be. A host whose sources cannot be read is reported as undetected, not
+  as unsupported — those need different fixes.
+
+  Profile selection is deliberately a **set**: rows sharing an OS and CPU
+  profile differ only by accelerator, so naming one would assert a match
+  nobody has established; narrowing to a single row needs accelerator
+  identity. A host matching nothing returns a typed reason rather than an
+  empty list the caller has to interpret, and that reason never blames
+  the accelerator, because at host level nothing has looked at one.
+  (V021-E01-F02-T03)
+
 - Host identity detection: CPU architecture and vendor, and OS identity,
   produced in the exact spelling a support row is written in. Detection is
   a pure function of recorded source content — `/etc/os-release`,

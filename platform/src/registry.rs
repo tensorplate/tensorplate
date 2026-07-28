@@ -157,6 +157,17 @@ impl Mismatch {
         self.0 == Self::ENVIRONMENT
     }
 
+    /// The same mismatch judged on host identity alone.
+    ///
+    /// A host profile says nothing about what accelerator is fitted, so
+    /// the accelerator dimension must not contribute to a host-level
+    /// answer: reporting `unsupported_accelerator_sku` to a machine whose
+    /// accelerator has not been looked at yet would be a claim nothing
+    /// supports.
+    fn host_only(self) -> Self {
+        Self(self.0 & !Self::ACCELERATOR)
+    }
+
     /// Combine the dimensions of two equally-near rows, so a tie is
     /// resolved by dimension priority rather than by whichever row the
     /// iteration reached first.
@@ -229,6 +240,40 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
         (Some(a), Some(b)) => a.sku == b.sku,
         (None, None) => true,
         _ => false,
+    }
+}
+
+/// The platform profile a detected host selects.
+///
+/// Host identity narrows to a set, never to one row: rows sharing an OS
+/// and CPU profile differ only by accelerator. Callers that need one row
+/// supply accelerator identity and use [`PlatformRegistry::resolve`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProfileSelection<'a> {
+    /// Rows consistent with this host, ordered by row id. Never empty.
+    Candidates(Vec<&'a PlatformSupportRow>),
+    /// No row is consistent with this host, and why — judged on host
+    /// dimensions only.
+    NoMatch(PlatformReason),
+}
+
+impl ProfileSelection<'_> {
+    /// The candidate rows, empty when the host matched none.
+    #[must_use]
+    pub fn candidates(&self) -> &[&PlatformSupportRow] {
+        match self {
+            Self::Candidates(rows) => rows,
+            Self::NoMatch(_) => &[],
+        }
+    }
+
+    /// The reason this host matched no row, if it matched none.
+    #[must_use]
+    pub fn no_match_reason(&self) -> Option<PlatformReason> {
+        match self {
+            Self::Candidates(_) => None,
+            Self::NoMatch(reason) => Some(*reason),
+        }
     }
 }
 
@@ -401,6 +446,56 @@ impl PlatformRegistry {
             .values()
             .filter(|row| host_matches(row, host))
             .collect()
+    }
+
+    /// Select the platform profile for a detected host: the rows it could
+    /// be, or the typed reason it could be none of them.
+    ///
+    /// This is the host-level answer, and it is deliberately a *set*.
+    /// Several rows share an OS and CPU profile and differ only by
+    /// accelerator, so narrowing to one requires accelerator identity and
+    /// is [`Self::resolve`]'s job. Returning a set rather than guessing a
+    /// representative is what stops a host-level view from implying a
+    /// single-row match that has not been established.
+    ///
+    /// A host matching nothing gets a typed reason drawn from the nearest
+    /// row — the one it fails in the fewest host dimensions — with the
+    /// accelerator dimension excluded, since nothing has looked at an
+    /// accelerator yet.
+    #[must_use]
+    pub fn select_profile(&self, host: &HostIdentity) -> ProfileSelection<'_> {
+        let candidates = self.candidates(host);
+        if !candidates.is_empty() {
+            return ProfileSelection::Candidates(candidates);
+        }
+
+        let detected = DetectedPlatform::host_only(host.clone());
+        let mismatches: Vec<Mismatch> = self
+            .rows
+            .values()
+            .map(|row| Mismatch::between(row, &detected).host_only())
+            .filter(|mismatch| mismatch.count() > 0)
+            .collect();
+        let Some(nearest) = mismatches.iter().map(|m| m.count()).min() else {
+            // Unreachable with a loaded registry, which always holds at
+            // least one row, but answering with the shape rather than a
+            // panic keeps the failure legible if that ever changes.
+            return ProfileSelection::NoMatch(PlatformReason::UnsupportedOsVersion);
+        };
+        // Ties fold together so the answer comes from dimension priority
+        // rather than from whichever row iteration reached first.
+        let folded = mismatches
+            .iter()
+            .filter(|m| m.count() == nearest)
+            .fold(Mismatch(0), |acc, m| acc.union(*m));
+        ProfileSelection::NoMatch(
+            folded
+                .reason()
+                // An environment-only miss has no frozen reason: the host
+                // is outside every validated machine shape, which reads as
+                // an OS/environment mismatch at host level.
+                .unwrap_or(PlatformReason::UnsupportedOsVersion),
+        )
     }
 
     /// Resolve a fully detected machine to exactly one row, or to the

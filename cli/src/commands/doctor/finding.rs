@@ -54,6 +54,9 @@ pub enum FindingId {
     /// because a present-but-unloadable registry is a different operator
     /// problem from a missing directory.
     PlatformRegistry,
+    /// Which support rows the detected host profile could be, or the
+    /// typed reason it could be none of them.
+    PlatformProfile,
 }
 
 impl FindingId {
@@ -93,6 +96,7 @@ impl FindingId {
             Self::ServingBinaryInstalled => "serving_binary_installed",
             Self::BackendDescriptor => "backend_descriptor",
             Self::PlatformRegistry => "platform_registry",
+            Self::PlatformProfile => "platform_profile",
         }
     }
 }
