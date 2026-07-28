@@ -121,9 +121,14 @@ pub fn os_release_field(content: &str, key: &str) -> Option<String> {
             return None;
         }
         let value = value.trim();
+        // Both quote styles are valid shell syntax here, and a quote is
+        // never part of the value. Stripped only as a matched pair: a lone
+        // leading quote means a truncated file, and silently accepting
+        // `"Ubuntu` would compare a mangled name against the row's.
         let value = value
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
             .unwrap_or(value);
         if value.is_empty() {
             None
@@ -133,21 +138,41 @@ pub fn os_release_field(content: &str, key: &str) -> Option<String> {
     })
 }
 
-/// The x86 CPU vendor from `/proc/cpuinfo`.
+/// The CPU vendor from `/proc/cpuinfo`.
 ///
-/// Reads the `vendor_id` of the first core; every core on a host reports
-/// the same vendor, and a row names the host's vendor, not a core's.
+/// `vendor_id` is an **x86-only** field; the kernel never emits it on
+/// aarch64, which reports `CPU implementer` instead. Readable `cpuinfo`
+/// therefore always yields a vendor — a known one where a row names it,
+/// otherwise [`DetectedVendor::Other`] carrying whatever the machine did
+/// say. Failing instead would report an ordinary arm64 Linux host as
+/// *undetectable* rather than *unsupported*, and would make
+/// [`crate::PlatformReason::UnsupportedCpuVendor`] unreachable on every
+/// architecture except x86.
 #[must_use]
-pub fn cpuinfo_vendor(content: &str) -> Option<DetectedVendor> {
-    let raw = content.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        (key.trim() == "vendor_id").then(|| value.trim().to_string())
-    })?;
-    Some(match raw.as_str() {
-        "GenuineIntel" => DetectedVendor::Known(CpuVendor::Intel),
-        "AuthenticAMD" => DetectedVendor::Known(CpuVendor::Amd),
-        _ => DetectedVendor::Other(raw),
-    })
+pub fn cpuinfo_vendor(content: &str) -> DetectedVendor {
+    let field = |name: &str| {
+        content.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == name).then(|| value.trim().to_string())
+        })
+    };
+    // The first core's vendor: every core on a host reports the same one,
+    // and a row names the host's vendor, not a core's.
+    if let Some(raw) = field("vendor_id") {
+        return match raw.as_str() {
+            "GenuineIntel" => DetectedVendor::Known(CpuVendor::Intel),
+            "AuthenticAMD" => DetectedVendor::Known(CpuVendor::Amd),
+            _ => DetectedVendor::Other(raw),
+        };
+    }
+    // arm64. No committed row names a bare ARM implementer — Jetson is
+    // identified as `nvidia_soc` through its own branch, and Apple silicon
+    // never runs this path — so this is reported verbatim and left for the
+    // registry to call unsupported.
+    if let Some(implementer) = field("CPU implementer") {
+        return DetectedVendor::Other(format!("CPU implementer {implementer}"));
+    }
+    DetectedVendor::Other("unknown".to_string())
 }
 
 /// An L4T release parsed out of `/etc/nv_tegra_release`.
@@ -209,6 +234,29 @@ pub fn jetpack_version(package_version: &str) -> Option<String> {
     let trimmed = package_version.trim();
     let version = trimmed.split('-').next()?.trim();
     (!version.is_empty()).then(|| version.to_string())
+}
+
+/// The JetPack release an L4T line belongs to.
+///
+/// The `nvidia-jetpack` metapackage states the version directly, but it is
+/// not present on every JetPack device: a rootfs flashed from the base BSP,
+/// a Yocto/meta-tegra image, or an `l4t-base` container all carry the L4T
+/// release without it. Such a device is still the machine its row
+/// describes, so the L4T line it does report is mapped here rather than
+/// leaving it to resolve as an unsupported OS version.
+///
+/// Keyed on the L4T minor line, which is the granularity NVIDIA ships a
+/// JetPack release at. An L4T line this release has not been told about
+/// yields `None` — an honest "unknown", never a guess, because a wrong
+/// JetPack version would make a machine match a row it was never
+/// validated against.
+#[must_use]
+pub fn jetpack_for_l4t(release: L4tRelease) -> Option<&'static str> {
+    match (release.major, release.revision_major) {
+        // JetPack 6.2 ships L4T 36.4.x.
+        (36, 4) => Some("6.2"),
+        _ => None,
+    }
 }
 
 /// The macOS version at row granularity.
@@ -354,10 +402,21 @@ fn jetson_os(
     // is reported verbatim rather than guessed: an honest non-matching
     // value makes the machine unsupported, while a guess would make it
     // wrongly supported.
+    // The package states the JetPack version directly; without it the L4T
+    // line is mapped to the release it belongs to. Only when neither is
+    // available does the L4T string stand in, which will not match any row
+    // — correct, because at that point the JetPack version is genuinely
+    // unknown and guessing would match a row this device was never
+    // validated against.
+    exact.os_version = sources
+        .nvidia_jetpack_version
+        .as_ref()
+        .map(|raw| raw.trim().to_string());
     let version = sources
         .nvidia_jetpack_version
         .as_deref()
         .and_then(jetpack_version)
+        .or_else(|| jetpack_for_l4t(release).map(str::to_string))
         .unwrap_or_else(|| release.exact());
 
     Ok((
@@ -431,13 +490,16 @@ fn linux_os(
     })?;
     exact.os_version = os_release_field(os_release, "VERSION").or_else(|| Some(version.clone()));
 
+    // An absent `/proc/cpuinfo` is a Linux host that could not describe its
+    // CPU at all, which is a broken source rather than an unnamed vendor.
+    // A *readable* one always yields a vendor, even if no row names it.
     let vendor = sources
         .cpuinfo
         .as_deref()
-        .and_then(cpuinfo_vendor)
-        .ok_or_else(|| PlatformProbeError::Unrecognized {
+        .map(cpuinfo_vendor)
+        .ok_or_else(|| PlatformProbeError::Unreadable {
             source_name: "/proc/cpuinfo".to_string(),
-            detail: "no CPU vendor reported in /proc/cpuinfo".to_string(),
+            detail: "a Linux host reported no /proc/cpuinfo".to_string(),
         })?;
 
     Ok((name, version, None, vendor))

@@ -18,7 +18,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::detect::{identify, HostReport, HostSources};
 use crate::error::PlatformProbeError;
@@ -34,6 +34,10 @@ const METADATA_PATH: &str = "/computeMetadata/v1/instance/machine-type";
 /// on GCE, and detection must not stall a service start over it.
 const METADATA_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// Ceiling on the metadata response. The answer is a short resource name;
+/// an unbounded read from an unauthenticated endpoint is not on offer.
+const MAX_METADATA_RESPONSE: u64 = 8 * 1024;
+
 /// Reads host identity from the running machine.
 #[derive(Clone, Debug, Default)]
 pub struct SystemHostProbe {
@@ -48,7 +52,15 @@ impl SystemHostProbe {
         Self::default()
     }
 
-    /// Read system files under `root` instead of `/`.
+    /// Read system **files** under `root` instead of `/`.
+    ///
+    /// This stages the file-backed sources only. Commands and the metadata
+    /// service describe the machine running the test, not the tree, so
+    /// under a root they are not consulted at all — including `uname`.
+    /// [`Self::detect`] therefore fails on a staged tree rather than
+    /// returning an identity that is part fixture and part host; fixture
+    /// -driven detection goes through [`crate::detect::identify`] with
+    /// recorded [`HostSources`] instead.
     #[must_use]
     pub fn with_root(root: impl Into<std::path::PathBuf>) -> Self {
         Self {
@@ -105,7 +117,15 @@ impl SystemHostProbe {
         let jetson = commands && cfg!(target_os = "linux") && nv_tegra_release.is_some();
 
         Ok(HostSources {
-            uname_machine: run("uname", &["-m"], ExitPolicy::Strict)?,
+            // Deliberately absent under a staged root: borrowing the test
+            // host's architecture would let a staged arm64 tree detect as
+            // x86_64 and quietly prove nothing. Staged detection fails
+            // loudly instead.
+            uname_machine: if commands {
+                run("uname", &["-m"], ExitPolicy::Strict)?
+            } else {
+                None
+            },
             os_release,
             cpuinfo,
             nv_tegra_release,
@@ -143,7 +163,11 @@ impl SystemHostProbe {
             } else {
                 None
             },
-            gce_machine_type: self.gce_machine_type()?,
+            gce_machine_type: if commands {
+                self.gce_machine_type()?
+            } else {
+                None
+            },
         })
     }
 
@@ -171,14 +195,14 @@ impl SystemHostProbe {
         // would strip it of the very field its row is scoped to and quietly
         // make that row unmatchable.
         query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT)
-            .ok_or_else(|| PlatformProbeError::Unreadable {
+            .map(Some)
+            .map_err(|failure| PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
-                    "host reports as a Compute Engine instance but {METADATA_PATH} did not answer within {}ms",
+                    "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms)",
                     METADATA_TIMEOUT.as_millis()
                 ),
             })
-            .map(Some)
     }
 
     fn looks_like_gce(&self) -> Result<bool, PlatformProbeError> {
@@ -263,7 +287,23 @@ fn run(
     };
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!text.is_empty()).then_some(text));
+        if !text.is_empty() {
+            return Ok(Some(text));
+        }
+        // Succeeded and said nothing. For a command we only asked because
+        // this machine needs its answer, silence is a broken source — an
+        // empty `sw_vers -productName` would otherwise erase the macOS
+        // branch and report an ordinary Mac as an unsupported platform.
+        if policy == ExitPolicy::Strict {
+            return Err(PlatformProbeError::Unreadable {
+                source_name: program.to_string(),
+                detail: format!(
+                    "`{program} {}` succeeded but printed nothing",
+                    args.join(" ")
+                ),
+            });
+        }
+        return Ok(None);
     }
     if let (ExitPolicy::AbsentOn(accepted), Some(code)) = (policy, output.status.code()) {
         if accepted.contains(&code) {
@@ -284,40 +324,131 @@ fn run(
     })
 }
 
+/// Why a metadata query did not produce a machine type.
+///
+/// The distinction reaches the operator: a service that answered `403`
+/// instantly and a service that never answered need different fixes, and
+/// reporting both as a timeout sends the second search in the wrong
+/// direction.
+#[derive(Debug)]
+enum MetadataFailure {
+    /// The budget ran out before a complete answer arrived.
+    Timeout,
+    /// The service answered, but not with a machine type.
+    Answered(String),
+}
+
+impl std::fmt::Display for MetadataFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => write!(f, "no complete answer within the budget"),
+            Self::Answered(detail) => write!(f, "{detail}"),
+        }
+    }
+}
+
 /// One bounded HTTP/1.0 GET against the metadata service.
 ///
 /// Hand-rolled rather than pulling in an HTTP client: this is a single
-/// fixed request to a link-local address, and every phase carries a
-/// timeout so detection cannot hang a service start.
-fn query_metadata(addr: &str, path: &str, timeout: Duration) -> Option<String> {
-    let socket = addr.parse().ok()?;
-    let mut stream = std::net::TcpStream::connect_timeout(&socket, timeout).ok()?;
-    stream.set_read_timeout(Some(timeout)).ok()?;
-    stream.set_write_timeout(Some(timeout)).ok()?;
+/// fixed request to a link-local address. `budget` is an **overall
+/// deadline**, not a per-read timeout — a peer that trickles one byte at a
+/// time must not be able to hold a service start open indefinitely by
+/// resetting the clock on every read, and anything answering on an
+/// unauthenticated link-local address should be assumed willing to try.
+fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, MetadataFailure> {
+    let deadline = Instant::now() + budget;
+    let remaining = |deadline: Instant| deadline.checked_duration_since(Instant::now());
 
+    let socket = addr
+        .parse()
+        .map_err(|_| MetadataFailure::Answered(format!("`{addr}` is not an address")))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&socket, budget)
+        .map_err(|_| MetadataFailure::Timeout)?;
+
+    let left = remaining(deadline).ok_or(MetadataFailure::Timeout)?;
+    stream.set_write_timeout(Some(left)).ok();
     let request = format!(
         "GET {path} HTTP/1.0\r\nHost: metadata.google.internal\r\nMetadata-Flavor: Google\r\nConnection: close\r\n\r\n"
     );
-    stream.write_all(request.as_bytes()).ok()?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| MetadataFailure::Timeout)?;
 
     // Bounded read: the answer is a short resource name, and an unbounded
     // read from an unauthenticated endpoint is not something to offer.
+    let mut reader = stream.take(MAX_METADATA_RESPONSE);
     let mut buffer = Vec::new();
-    stream.take(8 * 1024).read_to_end(&mut buffer).ok()?;
-    let response = String::from_utf8_lossy(&buffer);
+    let mut chunk = [0_u8; 512];
+    // Out of budget, EOF, or a read error all stop the loop; anything
+    // already received still counts if it is a complete, self-describing
+    // answer.
+    while let Some(left) = remaining(deadline) {
+        reader.get_mut().set_read_timeout(Some(left)).ok();
+        match reader.read(&mut chunk) {
+            Ok(n) if n > 0 => {
+                buffer.extend_from_slice(&chunk[..n]);
+                // Stop as soon as the response is complete rather than
+                // waiting for the peer to close. Waiting for EOF would
+                // throw away a correct answer whenever the close lags.
+                if response_is_complete(&buffer) {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
 
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .or_else(|| response.split_once("\n\n"))?;
-    let status_ok = head
-        .lines()
-        .next()
-        .is_some_and(|line| line.contains(" 200"));
-    if !status_ok {
-        return None;
+    let response = String::from_utf8_lossy(&buffer);
+    let Some((head, body)) = split_response(&response) else {
+        return Err(MetadataFailure::Timeout);
+    };
+    let status = head.lines().next().unwrap_or_default();
+    if !status.split_whitespace().any(|token| token == "200") {
+        return Err(MetadataFailure::Answered(format!(
+            "metadata service answered `{}`",
+            status.trim()
+        )));
+    }
+    // A declared length that the body does not reach means a truncated
+    // answer. Accepting it would hand matching a half machine type, which
+    // silently makes a supported instance unsupported.
+    if let Some(declared) = content_length(head) {
+        if body.len() < declared {
+            return Err(MetadataFailure::Timeout);
+        }
     }
     let body = body.trim();
-    (!body.is_empty()).then(|| body.to_string())
+    if body.is_empty() {
+        return Err(MetadataFailure::Answered(
+            "metadata service answered 200 with an empty body".to_string(),
+        ));
+    }
+    Ok(body.to_string())
+}
+
+fn split_response(response: &str) -> Option<(&str, &str)> {
+    response
+        .split_once("\r\n\r\n")
+        .or_else(|| response.split_once("\n\n"))
+}
+
+fn content_length(head: &str) -> Option<usize> {
+    head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())?
+    })
+}
+
+/// Whether the bytes so far are a complete response, so reading can stop
+/// without waiting for the peer to close the socket.
+fn response_is_complete(buffer: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(buffer);
+    let Some((head, body)) = split_response(&text) else {
+        return false;
+    };
+    content_length(head).is_some_and(|declared| body.len() >= declared)
 }
 
 #[cfg(test)]
@@ -366,18 +497,110 @@ mod tests {
         // Port 9 discards; connecting must fail or time out rather than
         // producing a value or hanging.
         let started = std::time::Instant::now();
-        assert_eq!(
-            query_metadata(
-                "169.254.169.254:9",
-                METADATA_PATH,
-                Duration::from_millis(100)
-            ),
-            None
-        );
+        assert!(query_metadata(
+            "169.254.169.254:9",
+            METADATA_PATH,
+            Duration::from_millis(100)
+        )
+        .is_err());
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "detection must stay bounded, took {:?}",
             started.elapsed()
+        );
+    }
+
+    /// Serve one fixed reply on loopback, optionally holding the socket
+    /// open afterwards, and return the address.
+    fn serve_once(reply: &'static str, linger: Duration) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let _ = socket.write_all(reply.as_bytes());
+                let _ = socket.flush();
+                std::thread::sleep(linger);
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn a_complete_answer_is_used_even_if_the_peer_never_closes() {
+        // read_to_end only returns at EOF, so waiting for the close threw
+        // away a correct answer whenever the FIN lagged — and because a
+        // missing machine type is now a hard error, that failed detection
+        // outright on a healthy instance. Content-Length says when the
+        // answer is complete, so the close is irrelevant.
+        let addr = serve_once(
+            "HTTP/1.0 200 OK\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-standard-8",
+            Duration::from_secs(30),
+        );
+        let started = std::time::Instant::now();
+        let answer = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500));
+        assert_eq!(
+            answer.expect("a complete answer must be used"),
+            "projects/1/machineTypes/g2-standard-8"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "must not wait for the peer to close, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_truncated_answer_is_never_accepted() {
+        // Half a machine type is worse than none: it would match no row and
+        // report a healthy instance as unsupported, silently.
+        let addr = serve_once(
+            "HTTP/1.0 200 OK\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-stan",
+            Duration::from_secs(30),
+        );
+        assert!(
+            query_metadata(&addr, METADATA_PATH, Duration::from_millis(300)).is_err(),
+            "a body shorter than its declared length must be rejected"
+        );
+    }
+
+    #[test]
+    fn a_trickling_peer_cannot_outlast_the_budget() {
+        // The timeout is a deadline, not a per-read allowance: a peer that
+        // sends a byte at a time must not be able to reset the clock and
+        // hold a service start open indefinitely.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                for _ in 0..4096 {
+                    if socket.write_all(b"x").is_err() {
+                        return;
+                    }
+                    let _ = socket.flush();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        assert!(query_metadata(&addr, METADATA_PATH, Duration::from_millis(200)).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the budget is an overall deadline, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_non_200_answer_says_so_rather_than_blaming_a_timeout() {
+        let addr = serve_once(
+            "HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+            Duration::from_millis(10),
+        );
+        let err = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+            .expect_err("403 is not a machine type");
+        assert!(
+            err.to_string().contains("403"),
+            "an instant refusal must not read as a timeout: {err}"
         );
     }
 

@@ -26,11 +26,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   alongside the identity, because evidence recording needs what matching
   deliberately ignores. An unrecognized architecture or vendor is reported
   verbatim rather than as a detection failure, so an off-matrix machine is
-  called unsupported instead of undetectable. On Compute Engine the
+  called unsupported instead of undetectable — including on arm64 Linux,
+  where `/proc/cpuinfo` carries no `vendor_id` at all. A Jetson takes its
+  JetPack version from the `nvidia-jetpack` package where that is
+  installed and from its L4T line where it is not, so a device flashed
+  from the base BSP or running in an `l4t` container still matches the row
+  that describes it; an L4T line this release does not know is left
+  unmapped rather than guessed into a version that would match a row the
+  device was never validated against. On Compute Engine the
   machine type is read from the metadata service, but only after the host
   is recognized as an instance from firmware — a physical workstation
   reports no machine type, which is what its row declares, and never pays
-  a network timeout to establish that.
+  a network timeout to establish that. The metadata read is framed by
+  `Content-Length` and bounded by an overall deadline, so a complete
+  answer is used the moment it arrives rather than waiting for the peer to
+  close, a truncated one is refused rather than becoming half a machine
+  type, and a peer that trickles bytes cannot hold a service start open by
+  resetting a per-read timer.
   (V021-E01-F02-T01, V021-E01-F02-T02)
 
 - The agent, `tensorplate doctor`, and the observability service now

@@ -2,19 +2,18 @@
   "row_id": null,
   "matches_row": false,
   "provenance": "recorded",
-  "provenance_note": "docs/validation/sdk-e2e-validation.md records the in-lab Orin Nano as L4T R36 REV 5.0 on 2026-06-18, corroborated by two clean-room records (nvidia-l4t-core 36.5.0). The jetson-orin-nano-8gb-jp62 row is spec_authored and claims r36.4.x, so the device that is supposed to validate that row currently matches no committed row.",
+  "provenance_note": "docs/validation/sdk-e2e-validation.md records the in-lab Orin Nano as L4T R36 REV 5.0 on 2026-06-18, corroborated by two clean-room records (nvidia-l4t-core 36.5.0). The jetson-orin-nano-8gb-jp62 row is spec_authored and claims r36.4.x, so the device that is supposed to validate that row currently matches no committed row. The nvidia-jetpack package version was never recorded for this device, so this fixture does not claim one; the JetPack version is derived from the L4T line, and r36.5 maps to no known JetPack release.",
   "sources": {
     "uname_machine": "aarch64",
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",
     "nv_tegra_release": "# R36 (release), REVISION: 5.0, GCID: 41000000, BOARD: generic, EABI: aarch64, DATE: Thu Jan 15 19:24:38 UTC 2026\n",
-    "nvidia_jetpack_version": "6.2-b77",
     "device_tree_model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000"
   },
   "expect": {
     "architecture": "arm64",
     "vendor": "nvidia_soc",
     "os_name": "JetPack",
-    "os_version": "6.2",
+    "os_version": "r36.5.0",
     "image_identity": "L4T r36.5.x (Ubuntu 22.04 base)",
     "machine_type": null
   }

@@ -15,7 +15,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tensorplate_platform::{
-    identify, DetectedPlatform, HostSources, PlatformProbeError, PlatformRegistry, RowMatch,
+    identify, CpuArchitecture, DetectedPlatform, HostSources, PlatformProbeError, PlatformReason,
+    PlatformRegistry, RowMatch,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -285,6 +286,132 @@ fn a_jetson_with_damaged_sources_fails_rather_than_looking_unsupported() {
     // The intact fixture still detects, so the guard rejects damage rather
     // than everything.
     assert!(identify(&sources_of(&base)).is_ok());
+}
+
+#[test]
+fn an_off_matrix_machine_is_unsupported_not_undetectable() {
+    // The crate's own rule, in the form that keeps failing: a machine that
+    // is merely not on the matrix must come back as an identity the
+    // registry can reject with a typed reason, never as a detection error.
+    // `vendor_id` is x86-only, so an arm64 Linux host has no such line at
+    // all — requiring one made every arm64 Linux host undetectable and
+    // made UnsupportedCpuVendor unreachable off x86.
+    let registry = PlatformRegistry::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform"),
+    )
+    .expect("registry loads");
+
+    let arm_server = HostSources {
+        uname_machine: Some("aarch64".to_string()),
+        os_release: Some("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n".to_string()),
+        cpuinfo: Some("processor\t: 0\nCPU implementer\t: 0x41\nCPU part\t: 0xd0c\n".to_string()),
+        ..HostSources::default()
+    };
+    let report = identify(&arm_server).expect("an arm64 Linux host is detectable");
+    assert_eq!(
+        report.identity.architecture.known(),
+        Some(CpuArchitecture::Arm64)
+    );
+    assert_eq!(
+        report.identity.vendor.known(),
+        None,
+        "no row names a bare ARM implementer"
+    );
+    assert!(
+        report.identity.vendor.as_reported().contains("0x41"),
+        "the unnamed vendor is carried verbatim: {}",
+        report.identity.vendor.as_reported()
+    );
+    let detected = DetectedPlatform::host_only(report.identity);
+    assert!(
+        matches!(registry.resolve(&detected), RowMatch::Unsupported(_)),
+        "an arm64 Linux host must reach a typed no-match, not an error"
+    );
+
+    // And an x86 host whose vendor no row names reaches the vendor reason
+    // specifically — the reason this branch previously made unreachable.
+    let hygon = HostSources {
+        uname_machine: Some("x86_64".to_string()),
+        os_release: Some("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n".to_string()),
+        cpuinfo: Some("processor\t: 0\nvendor_id\t: HygonGenuine\n".to_string()),
+        ..HostSources::default()
+    };
+    let report = identify(&hygon).expect("an unnamed x86 vendor is detectable");
+    assert_eq!(report.identity.vendor.as_reported(), "HygonGenuine");
+    assert_eq!(
+        registry.resolve(&DetectedPlatform::host_only(report.identity)),
+        RowMatch::Unsupported(PlatformReason::UnsupportedCpuVendor),
+        "an unnamed vendor must reach the vendor reason"
+    );
+
+    // The same for an architecture no row names.
+    let riscv = HostSources {
+        uname_machine: Some("riscv64".to_string()),
+        ..arm_server.clone()
+    };
+    let report = identify(&riscv).expect("a riscv64 host is detectable");
+    assert_eq!(report.identity.architecture.known(), None);
+    assert_eq!(report.identity.architecture.as_reported(), "riscv64");
+    let detected = DetectedPlatform::host_only(report.identity);
+    assert!(
+        matches!(registry.resolve(&detected), RowMatch::Unsupported(_)),
+        "an unnamed architecture must reach a typed no-match, not an error"
+    );
+}
+
+#[test]
+fn a_jetson_without_the_jetpack_package_still_matches_its_row() {
+    // The nvidia-jetpack metapackage is absent on a BSP-flashed rootfs, a
+    // Yocto image, and inside l4t containers. Such a device is still the
+    // machine its row describes, so the L4T line it does report has to
+    // carry it — otherwise a correctly flashed Jetson resolves as an
+    // unsupported OS version.
+    let registry = PlatformRegistry::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform"),
+    )
+    .expect("registry loads");
+
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "jetson-orin-nano-8gb-jp62")
+        .map(|(_, f)| f)
+        .expect("the Jetson fixture exists");
+
+    let mut without_package = sources_of(&fixture);
+    without_package.nvidia_jetpack_version = None;
+
+    let report = identify(&without_package).expect("detection succeeds");
+    assert_eq!(
+        report.identity.os_version, "6.2",
+        "the L4T line names its JetPack release"
+    );
+    assert_eq!(
+        report.identity.image_identity.as_deref(),
+        Some("L4T r36.4.x (Ubuntu 22.04 base)")
+    );
+    assert!(
+        registry
+            .candidates(&report.identity)
+            .into_iter()
+            .any(|row| row.row_id() == "jetson-orin-nano-8gb-jp62"),
+        "the row must still be a candidate without the package"
+    );
+
+    // An L4T line this release has not been told about must not be guessed
+    // into a JetPack version, or a device would match a row it was never
+    // validated against.
+    let mut unknown_line = without_package.clone();
+    unknown_line.nv_tegra_release = Some("# R38 (release), REVISION: 1.0\n".to_string());
+    let report = identify(&unknown_line).expect("detection succeeds");
+    assert_ne!(
+        report.identity.os_version, "6.2",
+        "an unmapped L4T line must not borrow a JetPack version"
+    );
+    assert_eq!(registry.candidates(&report.identity).len(), 0);
 }
 
 #[test]
