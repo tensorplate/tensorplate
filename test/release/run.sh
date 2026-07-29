@@ -14,6 +14,7 @@ build_script="tools/release/build-release-artifacts.sh"
 source_install_script="packaging/scripts/build-install-from-source.sh"
 publish_apt_script="tools/release/publish-apt-repo.sh"
 publish_homebrew_script="tools/release/publish-homebrew-formula.sh"
+verify_homebrew_formulas="test/release/verify_homebrew_formulas.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -30,6 +31,7 @@ bash -n "$publish_apt_script"
 "$publish_apt_script" --help >/dev/null
 bash -n "$publish_homebrew_script"
 "$publish_homebrew_script" --help >/dev/null
+"$verify_homebrew_formulas"
 
 # Patch tags live on the per-minor maintenance line, not per-version
 # release branches.

@@ -8,6 +8,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Homebrew packaging templates now cover the complete macOS appliance:
+  agent, serving worker, CLI, observability, and the Python/PyTorch backend,
+  with `tensorplate` retained as the meta-formula so existing installs have a
+  continuous upgrade name. Release automation renders the entire graph from
+  one tagged source archive and checksum and submits it as one tap change,
+  preventing component versions from drifting. The CLI component explicitly
+  accepts the command path owned by the former CLI-only formula; the tap
+  migration will exercise that handoff before release. Service definitions,
+  macOS paths, and hardware smoke remain owned by the following macOS
+  lifecycle changes. (V021-E03-F01-T01)
+
 - `tensorplate doctor` gains a host section, and it reports what the
   machine says about itself rather than what the binary was compiled for.
   The old probe read `std::env::consts::ARCH`, which names the *build
