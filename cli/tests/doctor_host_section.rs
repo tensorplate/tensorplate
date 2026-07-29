@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tensorplate_cli::commands::doctor::finding::{Finding, FindingId, FindingStatus};
 use tensorplate_cli::commands::doctor::render_host_section;
-use tensorplate_platform::{identify, HostSources, PlatformRegistry};
+use tensorplate_platform::{
+    identify, HostSources, PlatformProbeError, PlatformRegistry, PlatformRegistryError,
+};
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -61,8 +63,13 @@ fn fixture(name: &str) -> Value {
 fn section_for(name: &str) -> Vec<Finding> {
     let report = identify(&sources_of(&fixture(name))).expect("fixture detects");
     let registry = registry();
-    render_host_section(Ok((&report, Some(&registry))))
+    render_host_section(Ok(&report), Ok(&registry))
 }
+
+/// A stand-in load failure for tests that do not care which one it was.
+static NO_REGISTRY: PlatformRegistryError = PlatformRegistryError::AmbiguousRegistry {
+    detail: String::new(),
+};
 
 fn render(findings: &[Finding]) -> String {
     findings
@@ -151,7 +158,7 @@ fn an_off_matrix_host_renders_a_typed_no_match_not_a_failure() {
     riscv.uname_machine = Some("riscv64".to_string());
     let report = identify(&riscv).expect("detects");
     let registry = registry();
-    let section = render_host_section(Ok((&report, Some(&registry))));
+    let section = render_host_section(Ok(&report), Ok(&registry));
 
     let profile = section
         .iter()
@@ -175,7 +182,11 @@ fn undetectable_host_identity_never_fails_doctor() {
     // The regression that would otherwise land on a sandboxed host: a
     // blocked `sysctl` must not flip doctor's exit code. `doctor` is what
     // an operator runs to diagnose exactly that.
-    let section = render_host_section(Err("sysctl: Operation not permitted"));
+    let err = PlatformProbeError::Unreadable {
+        source_name: "sysctl".to_string(),
+        detail: "Operation not permitted".to_string(),
+    };
+    let section = render_host_section(Err(&err), Err(&NO_REGISTRY));
     assert!(
         section.iter().all(|f| f.status != FindingStatus::Fail),
         "undetected identity must not produce a failing finding: {}",
@@ -192,7 +203,7 @@ fn undetectable_host_identity_never_fails_doctor() {
 #[test]
 fn a_missing_registry_skips_the_profile_without_touching_the_host_lines() {
     let report = identify(&sources_of(&fixture("macos26-m1pro-16gb"))).expect("detects");
-    let section = render_host_section(Ok((&report, None)));
+    let section = render_host_section(Ok(&report), Err(&NO_REGISTRY));
 
     let profile = section
         .iter()
@@ -204,6 +215,13 @@ fn a_missing_registry_skips_the_profile_without_touching_the_host_lines() {
         .as_deref()
         .unwrap_or_default()
         .contains("platform_registry"));
+    // Must not assert the registry is absent: it may be installed and
+    // merely unreadable, and "reinstall it" is then the wrong next step.
+    assert!(
+        !profile.message.contains("no platform registry"),
+        "the profile must not claim absence it cannot know: {}",
+        profile.message
+    );
 
     // The host facts are still reported: they do not depend on a registry.
     let facts = section
@@ -212,4 +230,43 @@ fn a_missing_registry_skips_the_profile_without_touching_the_host_lines() {
         .expect("host_facts");
     assert_eq!(facts.status, FindingStatus::Pass);
     assert!(facts.message.contains("apple"));
+}
+
+#[test]
+fn an_environment_only_miss_does_not_blame_the_os() {
+    // A host whose hardware this release validates but whose machine shape
+    // no row covers has a perfectly supported OS. Telling its operator the
+    // OS version is unsupported sends them to reinstall the wrong thing.
+    let mut on_unknown_shape = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    on_unknown_shape.gce_machine_type = Some("projects/1/machineTypes/g2-standard-16".to_string());
+    let report = identify(&on_unknown_shape).expect("detects");
+
+    // Against a registry of shape-scoped rows only, so the chassis-
+    // independent CPU row cannot absorb the host.
+    let scoped = ["ubuntu2404-x86-l4-g2s8", "ubuntu2404-x86-a100-40g-a2hg1"].map(|name| {
+        let path = repo_path(&format!("config/platform/rows/{name}.json"));
+        (path.clone(), std::fs::read_to_string(&path).expect("read"))
+    });
+    let registry = PlatformRegistry::from_documents(
+        scoped.iter().map(|(p, b)| (p.as_path(), b.as_str())),
+        std::iter::empty(),
+    )
+    .expect("loads");
+
+    let section = render_host_section(Ok(&report), Ok(&registry));
+    let profile = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformProfile)
+        .expect("a profile finding");
+    assert_eq!(profile.status, FindingStatus::Unsupported);
+    assert!(
+        !profile.message.contains("unsupported_os_version"),
+        "the OS is supported; only the machine shape is not: {}",
+        profile.message
+    );
+    assert!(
+        profile.message.contains("machine shape"),
+        "the message names what is actually wrong: {}",
+        profile.message
+    );
 }

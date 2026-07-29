@@ -19,7 +19,8 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
-    HostIdentity, HostReport, PlatformRegistry, ProfileSelection, SystemHostProbe,
+    HostIdentity, HostReport, PlatformProbeError, PlatformRegistry, PlatformRegistryError,
+    ProfileSelection, SystemHostProbe,
 };
 
 use crate::args::DoctorArgs;
@@ -197,22 +198,34 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
 /// goldens without the machine running the test leaking into the answer.
 #[must_use]
 pub fn render_host_section(
-    detected: Result<(&HostReport, Option<&PlatformRegistry>), &str>,
+    detected: Result<&HostReport, &PlatformProbeError>,
+    registry: Result<&PlatformRegistry, &PlatformRegistryError>,
 ) -> Vec<Finding> {
-    let (report, registry) = match detected {
-        Ok(pair) => pair,
-        Err(detail) => {
+    let report = match detected {
+        Ok(report) => report,
+        Err(err) => {
             // A source that could not be read is not a platform that is
             // unsupported. This is a warning, not a failure: `doctor` is
             // what an operator runs to find out why their access is wrong,
             // and a sandbox that blocks `sysctl` must not make it exit
             // non-zero.
+            // The two failures need different remedies, so they get
+            // different hints. Telling someone whose `/etc/nv_tegra_release`
+            // is malformed to re-run as root wastes their next ten minutes.
+            let hint = match err {
+                PlatformProbeError::Unreadable { .. } => {
+                    "a detection source could not be read — re-run as a user that can read /etc and /proc"
+                }
+                PlatformProbeError::Unrecognized { .. } => {
+                    "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"
+                }
+            };
             return vec![
                 Finding::warn(
                     FindingId::HostFacts,
                     Severity::Warning,
-                    format!("host identity could not be detected: {detail}"),
-                    Some("re-run as a user that can read /etc and /proc, or attach `tensorplate doctor --output json`".into()),
+                    format!("host identity could not be detected: {err}"),
+                    Some(hint.into()),
                 ),
                 Finding::skipped(
                     FindingId::HostOs,
@@ -277,12 +290,16 @@ pub fn render_host_section(
     findings.push(Finding::ok(FindingId::HostOs, Severity::Info, os, None));
 
     findings.push(match registry {
-        Some(registry) => render_platform_profile(registry, identity),
-        None => Finding::skipped(
+        Ok(registry) => render_platform_profile(registry, identity),
+        // Deliberately does not say the registry is absent: it may be
+        // installed and merely unreadable by this account, and sending an
+        // operator to reinstall a package that is already there is the
+        // wrong next step. `platform_registry` owns that diagnosis.
+        Err(err) => Finding::skipped(
             FindingId::PlatformProfile,
             Severity::Info,
-            "skipped: no platform registry to match against",
-            Some("see the platform_registry finding".into()),
+            format!("skipped: the platform registry could not be loaded ({err})"),
+            Some("see the platform_registry finding for what to do about it".into()),
         ),
     });
     findings
@@ -318,6 +335,20 @@ fn render_platform_profile(registry: &PlatformRegistry, identity: &HostIdentity)
         // Not a failure of this machine or of doctor: an off-matrix host is
         // a normal, reportable state, and the typed reason says which
         // dimension put it there.
+        // The host is one machine shape away from rows it otherwise
+        // matches. Saying "unsupported" without qualification would be
+        // read as "this hardware is not supported", which is not the
+        // claim: the hardware is, this chassis is not.
+        ProfileSelection::OutsideValidatedEnvironment => Finding::unsupported(
+            FindingId::PlatformProfile,
+            Severity::Warning,
+            "host hardware matches this release, but no row's evidence covers the machine shape it is running on"
+                .to_string(),
+            Some(
+                "support is recorded per validated machine shape; see the Validated on column in docs/release/support-matrix.md"
+                    .into(),
+            ),
+        ),
         ProfileSelection::NoMatch(reason) => Finding::unsupported(
             FindingId::PlatformProfile,
             Severity::Warning,
@@ -333,11 +364,8 @@ fn render_platform_profile(registry: &PlatformRegistry, identity: &HostIdentity)
 /// The host section for the machine this is running on.
 fn probe_host_profile() -> Vec<Finding> {
     let detected = SystemHostProbe::new().detect();
-    let registry = PlatformRegistry::load_installed().ok();
-    match &detected {
-        Ok(report) => render_host_section(Ok((report, registry.as_ref()))),
-        Err(err) => render_host_section(Err(&err.to_string())),
-    }
+    let registry = PlatformRegistry::load_installed();
+    render_host_section(detected.as_ref(), registry.as_ref())
 }
 
 fn probe_ros2_health_stub() -> Vec<Finding> {

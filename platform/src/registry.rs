@@ -252,6 +252,14 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
 pub enum ProfileSelection<'a> {
     /// Rows consistent with this host, ordered by row id. Never empty.
     Candidates(Vec<&'a PlatformSupportRow>),
+    /// The host differs from its nearest rows only in machine shape: its
+    /// architecture, vendor, and OS are ones this release validates, but
+    /// no row's evidence covers the shape it is running on.
+    ///
+    /// Separate from [`Self::NoMatch`] because the frozen reason
+    /// vocabulary has no value for it, and reusing one would tell an
+    /// operator something untrue about their OS or CPU.
+    OutsideValidatedEnvironment,
     /// No row is consistent with this host, and why — judged on host
     /// dimensions only.
     NoMatch(PlatformReason),
@@ -263,7 +271,7 @@ impl ProfileSelection<'_> {
     pub fn candidates(&self) -> &[&PlatformSupportRow] {
         match self {
             Self::Candidates(rows) => rows,
-            Self::NoMatch(_) => &[],
+            Self::NoMatch(_) | Self::OutsideValidatedEnvironment => &[],
         }
     }
 
@@ -271,7 +279,7 @@ impl ProfileSelection<'_> {
     #[must_use]
     pub fn no_match_reason(&self) -> Option<PlatformReason> {
         match self {
-            Self::Candidates(_) => None,
+            Self::Candidates(_) | Self::OutsideValidatedEnvironment => None,
             Self::NoMatch(reason) => Some(*reason),
         }
     }
@@ -489,13 +497,14 @@ impl PlatformRegistry {
             .iter()
             .filter(|m| m.count() == nearest)
             .fold(Mismatch(0), |acc, m| acc.union(*m));
-        ProfileSelection::NoMatch(
-            folded
-                .reason()
-                // An environment-only miss has no frozen reason: the host
-                // is outside every validated machine shape, which reads as
-                // an OS/environment mismatch at host level.
-                .unwrap_or(PlatformReason::UnsupportedOsVersion),
+        // An environment-only miss has no frozen reason, and borrowing one
+        // would be a false statement: a host one machine shape away from a
+        // row has a perfectly supported OS, and telling its operator the OS
+        // version is unsupported sends them to reinstall the wrong thing.
+        // It gets its own outcome, mirroring `RowMatch`.
+        folded.reason().map_or(
+            ProfileSelection::OutsideValidatedEnvironment,
+            ProfileSelection::NoMatch,
         )
     }
 

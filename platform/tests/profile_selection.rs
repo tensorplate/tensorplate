@@ -249,3 +249,47 @@ fn a_physical_row_is_never_a_candidate_on_a_cloud_host() {
         "a host with no cloud shape can still be the physical workstation"
     );
 }
+
+#[test]
+fn a_host_one_shape_away_is_not_told_its_os_is_unsupported() {
+    // The frozen reason vocabulary has no value for "wrong machine shape",
+    // and borrowing one says something false: this host's OS and CPU are
+    // exactly what a row validates. It gets its own outcome.
+    let l4 = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform/rows/ubuntu2404-x86-l4-g2s8.json"),
+    )
+    .expect("read the L4 row");
+    let registry = PlatformRegistry::from_documents(
+        [(std::path::Path::new("l4.json"), l4.as_str())],
+        std::iter::empty(),
+    )
+    .expect("loads");
+
+    let mut on_bigger_shape = ubuntu_2404_intel();
+    on_bigger_shape.gce_machine_type = Some("projects/1/machineTypes/g2-standard-16".to_string());
+    let identity = identify(&on_bigger_shape).expect("detects").identity;
+
+    let selection = registry.select_profile(&identity);
+    assert_eq!(
+        selection,
+        ProfileSelection::OutsideValidatedEnvironment,
+        "one shape away is an environment miss, not an OS one"
+    );
+    assert_eq!(
+        selection.no_match_reason(),
+        None,
+        "no frozen reason is borrowed for it"
+    );
+    assert!(selection.candidates().is_empty());
+
+    // A host that differs in more than shape still gets a typed reason.
+    let mut also_wrong_os = on_bigger_shape;
+    also_wrong_os.os_release = Some("NAME=\"Ubuntu\"\nVERSION_ID=\"26.04\"\n".to_string());
+    let identity = identify(&also_wrong_os).expect("detects").identity;
+    assert_eq!(
+        registry.select_profile(&identity).no_match_reason(),
+        Some(PlatformReason::UnsupportedOsVersion)
+    );
+}

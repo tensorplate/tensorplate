@@ -597,11 +597,15 @@ fn a_chassis_independent_row_makes_no_machine_shape_claim() {
 
 #[test]
 fn only_shape_scoped_rows_declare_a_machine_type() {
-    // Declaring a machine_type is what scopes a row's evidence, so the
+    // Declaring a machine_type pins a row to one exact shape, so the
     // committed registry declares one exactly where the claim is
     // shape-bound: the cloud rows. A value a probe cannot report would
-    // make its row permanently unmatchable, so physical rows rely on
-    // their exact accelerator SKU instead.
+    // make its row permanently unmatchable.
+    //
+    // Omitting it is NOT the same as placing no constraint. What an
+    // omitted machine_type means is decided by `validation_environment.kind`
+    // — a physical row still matches only a host reporting no shape. See
+    // `AcceptedShapes` in the registry.
     let registry = registry();
     let scoped: Vec<&str> = registry
         .rows()

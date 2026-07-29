@@ -139,6 +139,14 @@ string_only_enum! {
 
 string_only_enum! {
     /// Where a row is validated.
+    /// Whether a row's evidence was recorded on physical hardware or on a
+    /// cloud instance.
+    ///
+    /// This participates in **matching**, not only description. A
+    /// `physical` row with no machine type matches only a host reporting no
+    /// machine shape; a `cloud_instance` row with no machine type matches
+    /// any host. Changing this value changes which machines the row
+    /// matches — see `AcceptedShapes` in the registry.
     pub enum ValidationEnvironmentKind {
         Physical => "physical",
         CloudInstance => "cloud_instance",

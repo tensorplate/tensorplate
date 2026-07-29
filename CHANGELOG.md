@@ -35,7 +35,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   to a hypervisor — so a host reporting a cloud machine shape no longer
   sees physical rows offered as candidates. Rows that are deliberately
   chassis-independent declare `cloud_instance` with no machine type, which
-  is how the schema says "any instance", and they are unaffected.
+  is how the schema now documents "any instance", and they are
+  unaffected. `kind` is load-bearing for matching as a result, and the row
+  schema says so: changing it changes which machines a row matches.
+
+  A host whose hardware this release validates but whose machine shape no
+  row covers is reported as exactly that, rather than borrowing a frozen
+  reason that would tell its operator something untrue about their OS.
   (V021-E01-F02-T03)
 
 - Host identity detection: CPU architecture and vendor, and OS identity,
