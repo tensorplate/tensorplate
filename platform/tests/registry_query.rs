@@ -769,3 +769,58 @@ fn tied_dimensions_resolve_by_the_documented_priority() {
         "vendor outranks accelerator in the documented priority"
     );
 }
+
+#[test]
+fn a_physical_row_and_a_same_sku_cloud_row_are_not_ambiguous() {
+    // The load-time overlap check is documented as the exact negation of
+    // "resolution is unambiguous". Since a physical row and a shape-scoped
+    // cloud row accept disjoint sets of hosts, rejecting the pair would
+    // block a legitimate environment separation — the natural way to
+    // record the same accelerator validated both in a chassis and on an
+    // instance.
+    let physical = std::fs::read_to_string(
+        registry_dir().join("rows/ubuntu2404-x86-rtxpro6000we-physical.json"),
+    )
+    .expect("read the physical row");
+    let mut document: serde_json::Value = serde_json::from_str(&physical).expect("row parses");
+    document["row_id"] = serde_json::json!("ubuntu2404-x86-rtxpro6000we-cloud");
+    document["validation_environment"] = serde_json::json!({
+        "kind": "cloud_instance",
+        "identity": "GCP g4-standard-48 (disposable)",
+        "machine_type": "g4-standard-48",
+    });
+    let cloud = serde_json::to_string(&document).expect("serialize");
+
+    let registry = PlatformRegistry::from_documents(
+        [
+            (Path::new("physical.json"), physical.as_str()),
+            (Path::new("cloud.json"), cloud.as_str()),
+        ],
+        std::iter::empty(),
+    )
+    .expect("same accelerator in two environments is not ambiguous");
+    assert_eq!(registry.rows().count(), 2);
+
+    // And resolution really is unambiguous: each host reaches exactly one.
+    let shaped = HostIdentity {
+        machine_type: Some("g4-standard-48".to_string()),
+        ..identity_of(&registry, "ubuntu2404-x86-rtxpro6000we-cloud").host
+    };
+    let candidates: Vec<&str> = registry
+        .candidates(&shaped)
+        .into_iter()
+        .map(PlatformSupportRow::row_id)
+        .collect();
+    assert_eq!(candidates, vec!["ubuntu2404-x86-rtxpro6000we-cloud"]);
+
+    let unshaped = HostIdentity {
+        machine_type: None,
+        ..shaped
+    };
+    let candidates: Vec<&str> = registry
+        .candidates(&unshaped)
+        .into_iter()
+        .map(PlatformSupportRow::row_id)
+        .collect();
+    assert_eq!(candidates, vec!["ubuntu2404-x86-rtxpro6000we-physical"]);
+}

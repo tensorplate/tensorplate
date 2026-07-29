@@ -228,13 +228,13 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
         (Some(a), Some(b)) if a != b => return false,
         _ => {}
     }
-    // An absent machine type is a wildcard, so it overlaps everything.
-    match (
-        &left.validation_environment().machine_type,
-        &right.validation_environment().machine_type,
-    ) {
-        (Some(a), Some(b)) if a != b => return false,
-        _ => {}
+    // Environments overlap only where some host machine shape satisfies
+    // both. Derived from the same [`AcceptedShapes`] description matching
+    // uses, so the two cannot drift: a physical row and a shape-scoped
+    // cloud row accept disjoint sets of hosts, and rejecting that pair as
+    // ambiguous would block a legitimate environment-separated pair.
+    if !accepted_shapes(left).overlaps(accepted_shapes(right)) {
+        return false;
     }
     match (left.accelerator(), right.accelerator()) {
         (Some(a), Some(b)) => a.sku == b.sku,
@@ -437,9 +437,10 @@ impl PlatformRegistry {
     /// returns the candidate set. Use [`Self::resolve`] once accelerator
     /// identity is known.
     ///
-    /// Machine shape is part of host identity, so a host whose shape no
-    /// row names yields only the rows that are not shape-scoped, and a
-    /// host reporting a shape no row declares can yield none at all.
+    /// Machine shape is part of host identity. A host reporting a shape no
+    /// row declares can yield no candidates at all, and a host reporting a
+    /// cloud shape never yields a row validated on physical hardware —
+    /// see [`AcceptedShapes`] for what each row's environment admits.
     #[must_use]
     pub fn candidates(&self, host: &HostIdentity) -> Vec<&PlatformSupportRow> {
         self.rows
@@ -616,26 +617,64 @@ fn host_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
         && environment_matches(row, host)
 }
 
-/// A row scoped to a machine shape matches only a host reporting the same
-/// one; a row that names no shape is indifferent, exactly like an absent
-/// image identity.
-fn environment_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
-    let environment = row.validation_environment();
-    if let Some(required) = environment.machine_type.as_ref() {
-        return host.machine_type.as_ref() == Some(required);
+/// Which host machine shapes a row's validated environment accepts.
+///
+/// The single description both the matcher and the load-time overlap check
+/// are derived from. Keeping one source is the point: these two are
+/// documented as exact duals — the overlap check is the negation of
+/// "resolution is unambiguous" — and a change to one that misses the other
+/// either rejects legitimate rows at load or admits a genuinely ambiguous
+/// pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcceptedShapes<'a> {
+    /// Exactly this machine shape, and nothing else.
+    Only(&'a str),
+    /// Only a host that reports no machine shape. A row validated on
+    /// physical hardware makes no claim about a cloud instance: its
+    /// evidence was recorded in a chassis whose thermals, firmware, and
+    /// power delivery are the operator's, none of which transfer to a
+    /// hypervisor.
+    Unshaped,
+    /// Any host, shaped or not. How the schema expresses a deliberately
+    /// chassis-independent claim: `cloud_instance` with no machine type.
+    Any,
+}
+
+impl AcceptedShapes<'_> {
+    /// Whether some host satisfies both.
+    fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            // A shape-scoped row and an unshaped-only row share no host:
+            // one requires a machine shape, the other requires none.
+            (Self::Only(_), Self::Unshaped) | (Self::Unshaped, Self::Only(_)) => false,
+            (Self::Only(a), Self::Only(b)) => a == b,
+            _ => true,
+        }
     }
-    // A row with no machine type is not automatically a wildcard. A row
-    // validated on physical hardware makes no claim about a cloud
-    // instance: its evidence was recorded in a chassis whose thermals,
-    // firmware, and power delivery are the operator's, none of which
-    // transfer to a hypervisor. So a host that reports a cloud machine
-    // shape is outside a physical row's environment even though that row
-    // names no shape of its own.
-    //
-    // Rows that are deliberately chassis-independent — the accelerator-less
-    // utility rows — declare `cloud_instance` with no machine type, which
-    // is how the schema expresses "any instance", and they keep matching.
-    !(environment.kind == ValidationEnvironmentKind::Physical && host.machine_type.is_some())
+
+    fn admits(self, machine_type: Option<&str>) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Only(required) => machine_type == Some(required),
+            Self::Unshaped => machine_type.is_none(),
+        }
+    }
+}
+
+fn accepted_shapes(row: &PlatformSupportRow) -> AcceptedShapes<'_> {
+    let environment = row.validation_environment();
+    match (
+        environment.machine_type.as_deref(),
+        environment.kind == ValidationEnvironmentKind::Physical,
+    ) {
+        (Some(required), _) => AcceptedShapes::Only(required),
+        (None, true) => AcceptedShapes::Unshaped,
+        (None, false) => AcceptedShapes::Any,
+    }
+}
+
+fn environment_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
+    accepted_shapes(row).admits(host.machine_type.as_deref())
 }
 
 fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
