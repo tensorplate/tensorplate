@@ -8,6 +8,42 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate doctor` gains a host section, and it reports what the
+  machine says about itself rather than what the binary was compiled for.
+  The old probe read `std::env::consts::ARCH`, which names the *build
+  target*: an `amd64` CLI on an arm64 host reported the wrong
+  architecture and an operator had no way to tell. Detection now goes
+  through `tensorplate-platform`, the same code the agent uses, so there
+  is one answer on a device instead of two. `host_facts` reports detected
+  architecture and vendor, `host_os` reports OS identity with the exact
+  version, build, and L4T release alongside it for evidence, and a new
+  `platform_profile` finding reports which support rows the host could
+  be. A host whose sources cannot be read is reported as undetected, not
+  as unsupported — those need different fixes.
+
+  Profile selection is deliberately a **set**: rows sharing an OS and CPU
+  profile differ only by accelerator, so naming one would assert a match
+  nobody has established; narrowing to a single row needs accelerator
+  identity. A host matching nothing returns a typed reason rather than an
+  empty list the caller has to interpret, and that reason never blames
+  the accelerator, because at host level nothing has looked at one.
+
+  Matching also stops treating a row with no machine type as a wildcard. A
+  row validated on physical hardware makes no claim about a cloud
+  instance — its evidence was recorded in a chassis whose thermals,
+  firmware, and power delivery are the operator's, none of which transfer
+  to a hypervisor — so a host reporting a cloud machine shape no longer
+  sees physical rows offered as candidates. Rows that are deliberately
+  chassis-independent declare `cloud_instance` with no machine type, which
+  is how the schema now documents "any instance", and they are
+  unaffected. `kind` is load-bearing for matching as a result, and the row
+  schema says so: changing it changes which machines a row matches.
+
+  A host whose hardware this release validates but whose machine shape no
+  row covers is reported as exactly that, rather than borrowing a frozen
+  reason that would tell its operator something untrue about their OS.
+  (V021-E01-F02-T03)
+
 - The release-notes support matrix is generated from the platform registry
   instead of written by hand. `docs/release/support-matrix.md` is projected
   from the committed rows and guarded by a golden test, so the platforms a

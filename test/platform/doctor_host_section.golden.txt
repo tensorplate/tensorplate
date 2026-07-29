@@ -1,0 +1,40 @@
+## jetson-orin-nano-8gb-jp62
+[ok] info host_facts — host arch=arm64 vendor=nvidia_soc
+[ok] info host_os — JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) [exact: version 6.2-b77, L4T r36.4.3]
+[ok] info platform_profile — host matches 4 candidate support row(s): jetson-agx-orin-32gb, jetson-agx-orin-64gb, jetson-orin-nano-8gb-jp62, jetson-orin-nx-16gb
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
+## macos26-m1pro-16gb
+[ok] info host_facts — host arch=arm64 vendor=apple
+[ok] info host_os — macOS 26 [exact: version 26.5.2, build 25F84]
+[ok] info platform_profile — host matches 2 candidate support row(s): macos26-m1pro-16gb, macos26-m4pro-24gb
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
+## ubuntu2404-x86-a100-40g-a2hg1
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-highgpu-1g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2hg1, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
+## ubuntu2404-x86-l4-g2s8
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on g2-standard-8 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s8
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
+## ubuntu2404-x86-rtxpro6000se-g4s48
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-48 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s48
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
+## ubuntu2204-x86-cpu
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 22.04 [exact: version 22.04.5 LTS (Jammy Jellyfish)]
+[ok] info platform_profile — host matches 1 candidate support row(s): ubuntu2204-x86-cpu
+
+## ubuntu2404-x86-cpu
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info platform_profile — host matches 1 candidate support row(s): ubuntu2404-x86-cpu
+

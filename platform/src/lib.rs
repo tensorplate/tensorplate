@@ -46,7 +46,7 @@ pub use identity::{
 pub use matrix::render_support_matrix;
 pub use probe::SystemHostProbe;
 pub use reason::PlatformReason;
-pub use registry::{PlatformRegistry, RowMatch};
+pub use registry::{PlatformRegistry, ProfileSelection, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};
 pub use row::{
     Accelerator, BackendPackageSet, CpuArchitecture, CpuIdentity, CpuVendor, Evidence, Gate,
