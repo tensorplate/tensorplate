@@ -69,7 +69,24 @@ by hand, all of:
   wheel version is injected at build).
 
 Also add `docs/release/notes/vX.Y.Z.md` — a **hard tag prerequisite** the
-publish path requires (`release.yml` `--notes-file`; the preflight). Then
+publish path requires (`release.yml` `--notes-file`; the preflight). Its
+supported-environment section must **link
+[`docs/release/support-matrix.md`](support-matrix.md)**, not restate it.
+That file is generated from `config/platform/` and guarded by a golden
+test, so the platforms a release claims are the rows `doctor` matches and
+deploy admission enforces. Prose restating them drifts, and a release note
+that overstates supported hardware is a documented release blocker below.
+A row change invalidates more than this one file, so regenerate both
+goldens after any edit under `config/platform/`:
+
+```
+UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix
+UPDATE_GOLDEN=1 cargo test -p tensorplate-cli --test doctor_host_section
+```
+
+The second guards the `doctor` host section, whose candidate lists change
+whenever a row is added, removed, or rescoped.
+Then
 validate with `prepare --version X.Y.Z --dry-run` and `test/release/run.sh`.
 `preflight`/`cut` run `check_version_files`, which fails closed on any stale
 surface (including a partially bumped `Cargo.lock`), so a missed surface stops
