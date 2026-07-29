@@ -18,7 +18,9 @@ use tensorplate_protocol::agent_control::{
 };
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
-use tensorplate_platform::{HostIdentity, PlatformRegistry, ProfileSelection, SystemHostProbe};
+use tensorplate_platform::{
+    HostIdentity, HostReport, PlatformRegistry, ProfileSelection, SystemHostProbe,
+};
 
 use crate::args::DoctorArgs;
 use crate::client::AgentClient;
@@ -187,33 +189,29 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
     }
 }
 
-/// The host section, exposed for integration tests that assert on it.
+/// Render the host section from an already-detected host.
 ///
-/// See [`probe_host_profile`].
-/// The host section: what this machine reports about itself, and which
-/// support rows it could be.
-///
-/// Detection goes through `tensorplate-platform`, the same code the agent
-/// uses, rather than build-time constants. `std::env::consts::ARCH` names
-/// the target this binary was *compiled* for, which is not a fact about
-/// the machine it is running on — an `amd64` CLI on an arm64 host would
-/// report the wrong architecture and the operator would have no way to
-/// tell.
-pub fn host_section() -> Vec<Finding> {
-    probe_host_profile()
-}
-
-fn probe_host_profile() -> Vec<Finding> {
-    let report = match SystemHostProbe::new().detect() {
-        Ok(report) => report,
-        Err(err) => {
+/// Pure: no filesystem, no subprocesses, no network. Detection and
+/// registry loading happen in [`probe_host_profile`], so this can be
+/// driven from the committed host-identity fixtures and asserted against
+/// goldens without the machine running the test leaking into the answer.
+#[must_use]
+pub fn render_host_section(
+    detected: Result<(&HostReport, Option<&PlatformRegistry>), &str>,
+) -> Vec<Finding> {
+    let (report, registry) = match detected {
+        Ok(pair) => pair,
+        Err(detail) => {
             // A source that could not be read is not a platform that is
-            // unsupported. Say which it is.
+            // unsupported. This is a warning, not a failure: `doctor` is
+            // what an operator runs to find out why their access is wrong,
+            // and a sandbox that blocks `sysctl` must not make it exit
+            // non-zero.
             return vec![
-                Finding::fail(
+                Finding::warn(
                     FindingId::HostFacts,
                     Severity::Warning,
-                    format!("host identity could not be detected: {err}"),
+                    format!("host identity could not be detected: {detail}"),
                     Some("re-run as a user that can read /etc and /proc, or attach `tensorplate doctor --output json`".into()),
                 ),
                 Finding::skipped(
@@ -278,7 +276,15 @@ fn probe_host_profile() -> Vec<Finding> {
     }
     findings.push(Finding::ok(FindingId::HostOs, Severity::Info, os, None));
 
-    findings.push(probe_platform_profile(identity));
+    findings.push(match registry {
+        Some(registry) => render_platform_profile(registry, identity),
+        None => Finding::skipped(
+            FindingId::PlatformProfile,
+            Severity::Info,
+            "skipped: no platform registry to match against",
+            Some("see the platform_registry finding".into()),
+        ),
+    });
     findings
 }
 
@@ -287,18 +293,7 @@ fn probe_host_profile() -> Vec<Finding> {
 /// Deliberately a *set*: rows sharing an OS and CPU profile differ only by
 /// accelerator, so host identity alone cannot name one. Reporting a single
 /// row here would assert a match that has not been established.
-fn probe_platform_profile(identity: &HostIdentity) -> Finding {
-    let registry = match PlatformRegistry::load_installed() {
-        Ok(registry) => registry,
-        Err(err) => {
-            return Finding::skipped(
-                FindingId::PlatformProfile,
-                Severity::Info,
-                format!("skipped: no platform registry to match against ({err})"),
-                Some("see the platform_registry finding".into()),
-            )
-        }
-    };
+fn render_platform_profile(registry: &PlatformRegistry, identity: &HostIdentity) -> Finding {
     match registry.select_profile(identity) {
         ProfileSelection::Candidates(rows) => {
             let ids = rows
@@ -307,8 +302,7 @@ fn probe_platform_profile(identity: &HostIdentity) -> Finding {
                 .collect::<Vec<_>>()
                 .join(", ");
             let hint = (rows.len() > 1).then(|| {
-                "several rows share this host profile and differ only by accelerator; \
-                 accelerator identity is needed to name one"
+                "several rows share this host profile; accelerator identity is needed to name one"
                     .to_string()
             });
             Finding::ok(
@@ -333,6 +327,16 @@ fn probe_platform_profile(identity: &HostIdentity) -> Finding {
                     .into(),
             ),
         ),
+    }
+}
+
+/// The host section for the machine this is running on.
+fn probe_host_profile() -> Vec<Finding> {
+    let detected = SystemHostProbe::new().detect();
+    let registry = PlatformRegistry::load_installed().ok();
+    match &detected {
+        Ok(report) => render_host_section(Ok((report, registry.as_ref()))),
+        Err(err) => render_host_section(Err(&err.to_string())),
     }
 }
 

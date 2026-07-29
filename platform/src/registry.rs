@@ -19,7 +19,7 @@ use crate::error::PlatformRegistryError;
 use crate::identity::{DetectedPlatform, HostIdentity};
 use crate::reason::PlatformReason;
 use crate::roadmap::RoadmapTarget;
-use crate::row::{PlatformSupportRow, SupportLevel};
+use crate::row::{PlatformSupportRow, SupportLevel, ValidationEnvironmentKind};
 
 /// The outcome of resolving a detected machine against the registry.
 ///
@@ -620,12 +620,22 @@ fn host_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
 /// one; a row that names no shape is indifferent, exactly like an absent
 /// image identity.
 fn environment_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
-    row.validation_environment()
-        .machine_type
-        .as_ref()
-        .map_or(true, |required| {
-            host.machine_type.as_ref() == Some(required)
-        })
+    let environment = row.validation_environment();
+    if let Some(required) = environment.machine_type.as_ref() {
+        return host.machine_type.as_ref() == Some(required);
+    }
+    // A row with no machine type is not automatically a wildcard. A row
+    // validated on physical hardware makes no claim about a cloud
+    // instance: its evidence was recorded in a chassis whose thermals,
+    // firmware, and power delivery are the operator's, none of which
+    // transfer to a hypervisor. So a host that reports a cloud machine
+    // shape is outside a physical row's environment even though that row
+    // names no shape of its own.
+    //
+    // Rows that are deliberately chassis-independent — the accelerator-less
+    // utility rows — declare `cloud_instance` with no machine type, which
+    // is how the schema expresses "any instance", and they keep matching.
+    !(environment.kind == ValidationEnvironmentKind::Physical && host.machine_type.is_some())
 }
 
 fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {

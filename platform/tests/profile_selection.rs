@@ -206,3 +206,46 @@ fn selection_never_reaches_a_roadmap_target() {
     // And the architecture survived normalization into the selection.
     assert_eq!(identity.architecture.known(), Some(CpuArchitecture::X86_64));
 }
+
+#[test]
+fn a_physical_row_is_never_a_candidate_on_a_cloud_host() {
+    // A row validated on physical hardware makes no claim about a cloud
+    // instance: its evidence was recorded in a chassis whose thermals,
+    // firmware, and power delivery are the operator's, none of which
+    // transfer to a hypervisor. Before this, the physical RTX PRO 6000
+    // row was offered as a candidate on G4 — and doctor's multi-row hint
+    // then said the candidates "differ only by accelerator", which was
+    // doubly wrong.
+    let registry = registry();
+    let mut on_g4 = ubuntu_2404_intel();
+    on_g4.cpuinfo = Some("processor\t: 0\nvendor_id\t: AuthenticAMD\n".to_string());
+    on_g4.gce_machine_type = Some("projects/1/machineTypes/g4-standard-48".to_string());
+
+    let identity = identify(&on_g4).expect("detects").identity;
+    let selection = registry.select_profile(&identity);
+    let mut ids: Vec<&str> = selection
+        .candidates()
+        .iter()
+        .map(|row| row.row_id())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec!["ubuntu2404-x86-cpu", "ubuntu2404-x86-rtxpro6000se-g4s48"],
+        "the physical workstation row must not be offered on a cloud instance"
+    );
+
+    // The converse still holds: the physical row is a candidate on a host
+    // that reports no cloud shape.
+    let mut physical = ubuntu_2404_intel();
+    physical.cpuinfo = Some("processor\t: 0\nvendor_id\t: AuthenticAMD\n".to_string());
+    let identity = identify(&physical).expect("detects").identity;
+    let selection = registry.select_profile(&identity);
+    assert!(
+        selection
+            .candidates()
+            .iter()
+            .any(|row| row.row_id() == "ubuntu2404-x86-rtxpro6000we-physical"),
+        "a host with no cloud shape can still be the physical workstation"
+    );
+}

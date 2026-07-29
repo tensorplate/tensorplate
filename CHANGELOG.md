@@ -27,6 +27,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   identity. A host matching nothing returns a typed reason rather than an
   empty list the caller has to interpret, and that reason never blames
   the accelerator, because at host level nothing has looked at one.
+
+  Matching also stops treating a row with no machine type as a wildcard. A
+  row validated on physical hardware makes no claim about a cloud
+  instance — its evidence was recorded in a chassis whose thermals,
+  firmware, and power delivery are the operator's, none of which transfer
+  to a hypervisor — so a host reporting a cloud machine shape no longer
+  sees physical rows offered as candidates. Rows that are deliberately
+  chassis-independent declare `cloud_instance` with no machine type, which
+  is how the schema says "any instance", and they are unaffected.
   (V021-E01-F02-T03)
 
 - Host identity detection: CPU architecture and vendor, and OS identity,
