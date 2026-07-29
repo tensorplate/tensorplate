@@ -58,6 +58,38 @@ for component in \
   }
 done
 
+service_block() {
+  sed -n '/^  service do$/,/^  end$/p' "$1"
+}
+
+require_service_line() {
+  formula="$1"
+  expected_line="$2"
+  block="$(service_block "$formula")"
+  if ! grep -qF "$expected_line" <<EOF
+$block
+EOF
+  then
+    printf 'FAIL: %s service is missing: %s\n' "$formula" "$expected_line" >&2
+    exit 1
+  fi
+}
+
+for component in tensorplate-agent tensorplate-observability; do
+  formula="${templates}/${component}.rb"
+  config="${component#tensorplate-}"
+  require_service_line "$formula" \
+    "    run [opt_bin/\"${component}\", \"--config\", etc/\"tensorplate/${config}.json\"]"
+  require_service_line "$formula" "    run_at_load true"
+  require_service_line "$formula" "    keep_alive successful_exit: false"
+  require_service_line "$formula" "    throttle_interval 5"
+done
+
+if service_block "${templates}/tensorplate-serving.rb" | grep -q .; then
+  printf 'FAIL: serving worker must not define a Homebrew service\n' >&2
+  exit 1
+fi
+
 "$renderer" \
   --source-url "$release_url" \
   --sha256 "$release_sha" \
@@ -72,6 +104,15 @@ for name in "${expected[@]}"; do
     printf 'FAIL: placeholder release data remains in %s\n' "$name" >&2
     exit 1
   fi
+done
+
+for component in tensorplate-agent tensorplate-observability; do
+  template_block="$(service_block "${templates}/${component}.rb")"
+  rendered_block="$(service_block "${tmp}/Formula/${component}.rb")"
+  [[ "$rendered_block" == "$template_block" ]] || {
+    printf 'FAIL: rendered %s service differs from its template\n' "$component" >&2
+    exit 1
+  }
 done
 
 # Exercise the publisher against a local tap whose meta-formula is already

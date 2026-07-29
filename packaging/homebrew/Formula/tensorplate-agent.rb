@@ -15,6 +15,13 @@ class TensorplateAgent < Formula
     system "cargo", "install", *std_cargo_args(path: "agent")
   end
 
+  service do
+    run [opt_bin/"tensorplate-agent", "--config", etc/"tensorplate/agent.json"]
+    run_at_load true
+    keep_alive successful_exit: false
+    throttle_interval 5
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/tensorplate-agent --version")
   end
