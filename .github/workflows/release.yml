@@ -255,8 +255,10 @@ jobs:
           # architecture too, now that it is built per architecture.
           # debhelper always adds changelog.Debian.gz and copyright under
           # /usr/share/doc, so "empty" means nothing outside that.
+          # Field 6 is the path. $NF would be the link TARGET on a symlink
+          # line, which reads as an unrelated path and false-triggers here.
           meta="$(echo dist/amd64/tensorplate_*_amd64.deb)"
-          payload="$(dpkg-deb -c "$meta" | awk '$NF !~ /\/$/ {print $NF}' | grep -v '^\./usr/share/doc/' || true)"
+          payload="$(dpkg-deb -c "$meta" | awk '$6 !~ /\/$/ {print $6}' | grep -v '^\./usr/share/doc/' || true)"
           if [[ -n "$payload" ]]; then
             echo "::error::the tensorplate metapackage must ship no payload"
             printf '%s\n' "$payload"
