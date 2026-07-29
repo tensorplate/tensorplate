@@ -42,12 +42,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      # apt-utils and gnupg are not needed to run the suites, but several
+      # checks are guarded on the tools being present and silently skip
+      # without them. Install them so the checks actually execute.
       - name: Install check dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dpkg-dev shellcheck
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            dpkg-dev \
+            gnupg \
+            shellcheck
 
       - name: Packaging verification suite
         shell: bash
