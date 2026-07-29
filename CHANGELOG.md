@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The release-notes support matrix is generated from the platform registry
+  instead of written by hand. `docs/release/support-matrix.md` is projected
+  from the committed rows and guarded by a golden test, so the platforms a
+  release claims are the same rows `doctor` matches against and deploy
+  admission enforces — a sentence in a release note can no longer promise
+  something the software will not honour. The projection never invents a
+  claim the rows do not make: Planned rows are listed as planned and
+  nothing more, roadmap targets render in a separate non-support appendix
+  that no count includes, and Experimental rows get their own section
+  outside the supported set. Experimental has no rows in this release but
+  is a frozen schema value, so its rendering is goldened against a
+  synthetic row now rather than appearing unreviewed in a release note the
+  day a row first uses it. Output is ordered by row id so a support-level
+  change is a one-line diff rather than a reshuffle.
+  (V021-E01-F01-T04)
+
 - Host identity detection: CPU architecture and vendor, and OS identity,
   produced in the exact spelling a support row is written in. Detection is
   a pure function of recorded source content — `/etc/os-release`,
