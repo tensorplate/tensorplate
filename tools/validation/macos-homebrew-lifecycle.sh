@@ -180,6 +180,11 @@ formula_is_installed() {
   brew list --formula --versions "$1" >/dev/null 2>&1
 }
 
+linked_formula_version() {
+  brew info --json=v2 "$1" 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["linked_keg"] or "")'
+}
+
 remove_candidate_graph() {
   stop_candidate_services
   if formula_is_installed tensorplate; then
@@ -199,6 +204,7 @@ restore_baseline() {
   restore_tap
   cp "$baseline_formula" "${tap_repo}/Formula/tensorplate.rb"
   HOMEBREW_NO_AUTO_UPDATE=1 brew install --formula "${tap_name}/tensorplate" >/dev/null
+  brew link --overwrite "${tap_name}/tensorplate" >/dev/null
   rm -f "${tap_repo}/Formula/tensorplate.rb"
   if [[ -f "${tap_backup}/tensorplate.rb" ]]; then
     cp "${tap_backup}/tensorplate.rb" "${tap_repo}/Formula/tensorplate.rb"
@@ -209,7 +215,7 @@ cleanup() {
   status=$?
   set +e
   if [[ -n "$tap_repo" && -d "$tap_repo" && -n "$baseline_version" ]]; then
-    current_version="$(brew list --formula --versions tensorplate 2>/dev/null | awk 'NR == 1 {print $2}')"
+    current_version="$(linked_formula_version tensorplate)"
     if [[ "$candidate_active" == "1" || "$current_version" != "$baseline_version" ]]; then
       note "restoring baseline tensorplate ${baseline_version}"
       restore_baseline
@@ -425,10 +431,10 @@ install_candidate_clean() {
   fi
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew install --formula "${tap_name}/tensorplate"
-  installed="$(brew list --formula --versions tensorplate | awk 'NR == 1 {print $2}')"
+  candidate_active=1
+  installed="$(linked_formula_version tensorplate)"
   [[ "$installed" == "$candidate_version" ]] ||
     die "candidate install produced ${installed:-missing}; expected ${candidate_version}"
-  candidate_active=1
 }
 
 verify_packaged_closure() {
@@ -588,11 +594,12 @@ install_baseline() {
   restore_tap
   cp "$baseline_formula" "${tap_repo}/Formula/tensorplate.rb"
   HOMEBREW_NO_AUTO_UPDATE=1 brew install --formula "${tap_name}/tensorplate"
+  brew link --overwrite "${tap_name}/tensorplate"
   rm -f "${tap_repo}/Formula/tensorplate.rb"
   if [[ -f "${tap_backup}/tensorplate.rb" ]]; then
     cp "${tap_backup}/tensorplate.rb" "${tap_repo}/Formula/tensorplate.rb"
   fi
-  installed="$(brew list --formula --versions tensorplate | awk 'NR == 1 {print $2}')"
+  installed="$(linked_formula_version tensorplate)"
   [[ "$installed" == "$baseline_version" ]] ||
     die "baseline restore produced ${installed:-missing}; expected ${baseline_version}"
   tensorplate version
@@ -603,10 +610,10 @@ upgrade_from_baseline() {
   stage_candidate_tap
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew upgrade --formula "${tap_name}/tensorplate"
-  installed="$(brew list --formula --versions tensorplate | awk 'NR == 1 {print $2}')"
+  candidate_active=1
+  installed="$(linked_formula_version tensorplate)"
   [[ "$installed" == "$candidate_version" ]] ||
     die "upgrade produced ${installed:-missing}; expected ${candidate_version}"
-  candidate_active=1
   verify_packaged_closure
 }
 
@@ -616,7 +623,7 @@ rollback_to_baseline() {
   remove_candidate_graph
   install_baseline
   [[ "$(cat "$marker")" == "preserve-across-formula-rollback" ]]
-  [[ "$(brew list --formula --versions tensorplate | awk 'NR == 1 {print $2}')" == "$baseline_version" ]]
+  [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]]
 }
 
 write_summary() {
@@ -653,7 +660,7 @@ for formula_name in "${FORMULAE[@]}"; do
   fi
 done
 
-baseline_version="$(brew list --formula --versions tensorplate 2>/dev/null | awk 'NR == 1 {print $2}')"
+baseline_version="$(linked_formula_version tensorplate)"
 [[ -n "$baseline_version" ]] || die "the CLI-only tensorplate baseline must be installed"
 
 run_stage host-facts collect_host_facts
