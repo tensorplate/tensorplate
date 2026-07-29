@@ -546,7 +546,7 @@ uninstall_candidate() {
   done
   [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]]
   [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]]
-  ! command -v tensorplate >/dev/null 2>&1
+  [[ ! -e "$(brew --prefix)/bin/tensorplate" ]]
 }
 
 install_baseline() {
