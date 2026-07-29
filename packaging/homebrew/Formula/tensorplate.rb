@@ -7,7 +7,7 @@ class Tensorplate < Formula
   license "Apache-2.0"
 
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :tahoe
   depends_on "tensorplate-agent"
   depends_on "tensorplate-backend-python-pytorch"
   depends_on "tensorplate-cli"

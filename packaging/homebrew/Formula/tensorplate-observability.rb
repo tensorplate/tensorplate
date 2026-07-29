@@ -8,7 +8,7 @@ class TensorplateObservability < Formula
 
   depends_on "rust" => :build
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :tahoe
 
   def install
     system "cargo", "install", *std_cargo_args(path: "observability")

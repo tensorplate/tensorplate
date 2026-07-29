@@ -8,7 +8,7 @@ class TensorplateCli < Formula
 
   depends_on "rust" => :build
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :tahoe
 
   # The original tensorplate formula owned this path. Allow the component
   # formula to take it over while that formula becomes the appliance meta-formula.

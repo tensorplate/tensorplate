@@ -7,7 +7,7 @@ class TensorplateBackendPythonPytorch < Formula
   license "Apache-2.0"
 
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :tahoe
   depends_on "pytorch"
 
   def install

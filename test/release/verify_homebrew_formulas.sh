@@ -39,6 +39,8 @@ for name in "${expected[@]}"; do
   formula="${templates}/${name}"
   grep -qF "  url \"${placeholder_url}\"" "$formula"
   grep -qF "  sha256 \"${placeholder_sha}\"" "$formula"
+  grep -qF "  depends_on arch: :arm64" "$formula"
+  grep -qF "  depends_on macos: :tahoe" "$formula"
   if command -v ruby >/dev/null 2>&1; then
     ruby -c "$formula" >/dev/null
   fi

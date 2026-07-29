@@ -9,7 +9,7 @@ class TensorplateServing < Formula
   depends_on "cmake" => :build
   depends_on "ninja" => :build
   depends_on arch: :arm64
-  depends_on :macos
+  depends_on macos: :tahoe
   depends_on "nlohmann-json"
 
   def install
