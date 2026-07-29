@@ -380,11 +380,9 @@ PY
 
 ensure_candidate_formula_trust() {
   trust_json="$(brew trust --json=v1)"
-  missing_formulae=()
-  while IFS= read -r formula_name; do
-    [[ -n "$formula_name" ]] && missing_formulae+=("$formula_name")
-  done < <(
-    python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
+  missing_trust_file="${work_dir}/missing-formula-trust"
+  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" \
+    >"$missing_trust_file" <<'PY'
 import json
 import sys
 
@@ -398,7 +396,10 @@ for name in formula_names:
     if tap_name not in trusted_taps and full_name not in trusted_formulae:
         print(full_name)
 PY
-  )
+  missing_formulae=()
+  while IFS= read -r formula_name; do
+    [[ -n "$formula_name" ]] && missing_formulae+=("$formula_name")
+  done <"$missing_trust_file"
   [[ "${#missing_formulae[@]}" -gt 0 ]] || return 0
   brew trust --formula "${missing_formulae[@]}"
   trust_added+=("${missing_formulae[@]}")
