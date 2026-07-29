@@ -168,6 +168,7 @@ fn every_committed_row_is_selected_by_its_own_host_identity() {
             sw_vers_product_version: text("sw_vers_product_version"),
             sw_vers_build_version: text("sw_vers_build_version"),
             cpu_brand: text("cpu_brand"),
+            hw_memsize: text("hw_memsize"),
             gce_machine_type: text("gce_machine_type"),
         };
         let identity = identify(&sources).expect("detects").identity;

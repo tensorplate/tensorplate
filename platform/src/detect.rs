@@ -28,8 +28,13 @@
 // [`ExactHostFacts`] for evidence recording, which needs the precision
 // matching deliberately discards.
 
+use tensorplate_protocol::PlatformMemoryProfileName;
+
+use crate::capability::AcceleratorObservation;
 use crate::error::PlatformProbeError;
-use crate::identity::{DetectedArchitecture, DetectedVendor, HostIdentity};
+use crate::identity::{
+    AcceleratorIdentity, DetectedArchitecture, DetectedPlatform, DetectedVendor, HostIdentity,
+};
 use crate::row::{CpuArchitecture, CpuVendor};
 
 /// The recorded content of every source host identity is derived from.
@@ -60,6 +65,8 @@ pub struct HostSources {
     pub sw_vers_build_version: Option<String>,
     /// `sysctl -n machdep.cpu.brand_string`.
     pub cpu_brand: Option<String>,
+    /// `sysctl -n hw.memsize`, in bytes.
+    pub hw_memsize: Option<String>,
     /// Body of the GCE metadata machine-type response, e.g.
     /// `projects/1234/machineTypes/g2-standard-8`.
     pub gce_machine_type: Option<String>,
@@ -91,6 +98,28 @@ pub struct ExactHostFacts {
 pub struct HostReport {
     pub identity: HostIdentity,
     pub exact: ExactHostFacts,
+}
+
+/// A complete platform observation from one source-gathering pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformReport {
+    pub host: HostReport,
+    pub accelerator: Option<AcceleratorObservation>,
+}
+
+impl PlatformReport {
+    /// Project the observation onto the exact identity consumed by the
+    /// registry. Memory remains alongside it for capability resolution.
+    #[must_use]
+    pub fn detected_platform(&self) -> DetectedPlatform {
+        match &self.accelerator {
+            Some(observed) => DetectedPlatform::with_accelerator(
+                self.host.identity.clone(),
+                observed.identity.clone(),
+            ),
+            None => DetectedPlatform::host_only(self.host.identity.clone()),
+        }
+    }
 }
 
 /// Normalize a machine architecture string to the row vocabulary.
@@ -352,6 +381,62 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
         },
         exact,
     })
+}
+
+/// Detect host identity plus any accelerator facts available from the same
+/// sources.
+///
+/// Apple silicon reports its integrated accelerator identity through the CPU
+/// brand string and its shared memory pool through `hw.memsize`. Both sources
+/// are required once the host identifies as Apple: missing or malformed
+/// values are broken detection inputs, not an accelerator-less Mac.
+pub fn identify_platform(sources: &HostSources) -> Result<PlatformReport, PlatformProbeError> {
+    let host = identify(sources)?;
+    let accelerator = if host.identity.vendor.known() == Some(CpuVendor::Apple) {
+        let sku = sources
+            .cpu_brand
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| PlatformProbeError::Unrecognized {
+                source_name: "machdep.cpu.brand_string".to_string(),
+                detail: "Apple silicon reported no chip identity".to_string(),
+            })?;
+        let raw_memory = sources
+            .hw_memsize
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| PlatformProbeError::Unrecognized {
+                source_name: "hw.memsize".to_string(),
+                detail: "Apple silicon reported no unified-memory size".to_string(),
+            })?;
+        let memory_bytes =
+            raw_memory
+                .parse::<u64>()
+                .map_err(|_| PlatformProbeError::Unrecognized {
+                    source_name: "hw.memsize".to_string(),
+                    detail: format!("`{raw_memory}` is not a byte count"),
+                })?;
+        if memory_bytes == 0 {
+            return Err(PlatformProbeError::Unrecognized {
+                source_name: "hw.memsize".to_string(),
+                detail: "unified-memory size must be greater than zero".to_string(),
+            });
+        }
+        Some(AcceleratorObservation {
+            identity: AcceleratorIdentity {
+                sku: sku.to_string(),
+                partitioned: false,
+            },
+            memory_bytes,
+            memory_profile: PlatformMemoryProfileName::UnifiedMemory,
+        })
+    } else {
+        None
+    };
+
+    Ok(PlatformReport { host, accelerator })
 }
 
 type OsIdentity = (String, String, Option<String>, DetectedVendor);
