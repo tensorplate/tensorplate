@@ -14,6 +14,15 @@ harness="${repo_root}/tools/validation/macos-homebrew-lifecycle.sh"
 bash -n "$harness"
 "$harness" --help >/dev/null
 
+if grep -Fq 'if "$@"' "$harness"; then
+  printf 'FAIL: lifecycle stages must not mask intermediate command failures\n' >&2
+  exit 1
+fi
+
+printf '%s\n' '{"formulae":[{"name":"tensorplate","versions":{"stable":"0.2.1-rc.1"}}]}' |
+  python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print(f["name"], f["versions"]["stable"])' |
+  grep -Fxq 'tensorplate 0.2.1-rc.1'
+
 if "$harness" \
   --candidate-formula-dir /missing \
   --baseline-formula /missing \

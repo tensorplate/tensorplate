@@ -146,6 +146,9 @@ candidate_version=""
 candidate_active=0
 agent_config_backup=""
 trust_added=()
+active_stage=""
+active_stage_log=""
+active_stage_started=""
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -214,6 +217,14 @@ restore_baseline() {
 cleanup() {
   status=$?
   set +e
+  if [[ "$status" -ne 0 && -n "$active_stage" ]]; then
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\tfail\t%s\t%s\t%s\n' \
+      "$active_stage" "$active_stage_started" "$finished_at" \
+      "$(basename "$active_stage_log")" >>"$stage_results"
+    tail -n 40 "$active_stage_log" >&2 || true
+    printf 'error: stage %s failed with exit %s\n' "$active_stage" "$status" >&2
+  fi
   if [[ -n "$tap_repo" && -d "$tap_repo" && -n "$baseline_version" ]]; then
     current_version="$(linked_formula_version tensorplate)"
     if [[ "$candidate_active" == "1" || "$current_version" != "$baseline_version" ]]; then
@@ -234,24 +245,20 @@ cleanup() {
 trap cleanup EXIT
 
 run_stage() {
-  stage_name="$1"
+  active_stage="$1"
   shift
-  stage_log="${evidence_dir}/${stage_name}.log"
-  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  note "stage ${stage_name}"
-  if "$@" >"$stage_log" 2>&1; then
-    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '%s\tpass\t%s\t%s\t%s\n' \
-      "$stage_name" "$started_at" "$finished_at" "$(basename "$stage_log")" >>"$stage_results"
-    pass "$stage_name"
-  else
-    stage_status=$?
-    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf '%s\tfail\t%s\t%s\t%s\n' \
-      "$stage_name" "$started_at" "$finished_at" "$(basename "$stage_log")" >>"$stage_results"
-    tail -n 40 "$stage_log" >&2 || true
-    die "stage ${stage_name} failed with exit ${stage_status}"
-  fi
+  active_stage_log="${evidence_dir}/${active_stage}.log"
+  active_stage_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  note "stage ${active_stage}"
+  "$@" >"$active_stage_log" 2>&1
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\tpass\t%s\t%s\t%s\n' \
+    "$active_stage" "$active_stage_started" "$finished_at" \
+    "$(basename "$active_stage_log")" >>"$stage_results"
+  pass "$active_stage"
+  active_stage=""
+  active_stage_log=""
+  active_stage_started=""
 }
 
 stage_candidate_tap() {
@@ -415,7 +422,7 @@ record_formula_graph() {
   brew deps --tree "${tap_name}/tensorplate"
   for formula_name in "${FORMULAE[@]}"; do
     brew info --json=v2 "${tap_name}/${formula_name}" |
-      python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print(f"{f[\"name\"]} {f[\"versions\"][\"stable\"]}")'
+      python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print(f["name"], f["versions"]["stable"])'
   done
 }
 
