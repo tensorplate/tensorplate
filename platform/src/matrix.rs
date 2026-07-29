@@ -32,7 +32,7 @@ pub fn render_support_matrix(registry: &PlatformRegistry) -> String {
     out.push_str("# Platform support matrix\n\n");
     out.push_str(
         "Generated from `config/platform/`. Do not edit by hand — regenerate\n\
-         with `cargo test -p tensorplate-platform support_matrix`.\n\n",
+         with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.\n\n",
     );
 
     let by_level = |level: SupportLevel| {
@@ -102,11 +102,11 @@ fn write_supported_section(out: &mut String, label: &str, rows: &[&PlatformSuppo
 /// supported" rather than "no claim made".
 fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_classes: bool) {
     if with_model_classes {
-        out.push_str("| Row | OS | CPU | Accelerator | Model classes |\n");
-        out.push_str("| --- | --- | --- | --- | --- |\n");
+        out.push_str("| Row | OS | CPU | Accelerator | Validated on | Model classes |\n");
+        out.push_str("| --- | --- | --- | --- | --- | --- |\n");
     } else {
-        out.push_str("| Row | OS | CPU | Accelerator |\n");
-        out.push_str("| --- | --- | --- | --- |\n");
+        out.push_str("| Row | OS | CPU | Accelerator | Validated on |\n");
+        out.push_str("| --- | --- | --- | --- | --- |\n");
     }
     for row in rows {
         let os = match &row.os().image_identity {
@@ -124,18 +124,39 @@ fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_cl
         let accelerator = row
             .accelerator()
             .map_or_else(|| "none".to_string(), |a| a.sku.clone());
+        let environment = validated_on(row);
         if with_model_classes {
             let _ = writeln!(
                 out,
-                "| `{}` | {os} | {cpu} | {accelerator} | {} |",
+                "| `{}` | {os} | {cpu} | {accelerator} | {environment} | {} |",
                 row.row_id(),
                 model_classes(row)
             );
         } else {
-            let _ = writeln!(out, "| `{}` | {os} | {cpu} | {accelerator} |", row.row_id());
+            let _ = writeln!(
+                out,
+                "| `{}` | {os} | {cpu} | {accelerator} | {environment} |",
+                row.row_id()
+            );
         }
     }
     out.push('\n');
+}
+
+/// The environment a row's claim is scoped to.
+///
+/// This is part of the claim, not context: support does not transfer
+/// across machine shapes, so a row scoped to `g2-standard-8` supports that
+/// shape and no other. Omitting it would let the table read as support for
+/// any host with the shown OS, CPU, and accelerator, which is broader than
+/// what the registry enforces and broader than the evidence behind it. An
+/// abbreviated suffix in a row id is not a support boundary a reader can
+/// be expected to decode.
+fn validated_on(row: &PlatformSupportRow) -> String {
+    match &row.validation_environment().machine_type {
+        Some(machine_type) => format!("`{machine_type}` only"),
+        None => row.validation_environment().identity.clone(),
+    }
 }
 
 fn model_classes(row: &PlatformSupportRow) -> String {

@@ -1,7 +1,7 @@
 # Platform support matrix
 
 Generated from `config/platform/`. Do not edit by hand — regenerate
-with `cargo test -p tensorplate-platform support_matrix`.
+with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 ## Supported combinations
 
@@ -9,20 +9,20 @@ with `cargo test -p tensorplate-platform support_matrix`.
 
 ### Production
 
-| Row | OS | CPU | Accelerator | Model classes |
-| --- | --- | --- | --- | --- |
-| `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | `chunked_policy` (Production) |
-| `macos26-m1pro-16gb` | macOS 26 | arm64 (apple) | Apple M1 Pro | `chunked_policy` (Preview) |
-| `ubuntu2404-x86-a100-40g-a2hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA A100-SXM4-40GB | `chunked_policy` (Preview) |
-| `ubuntu2404-x86-l4-g2s8` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA L4 | `chunked_policy` (Preview) |
-| `ubuntu2404-x86-rtxpro6000se-g4s48` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Server Edition | `chunked_policy` (Production)<br>`autoregressive_action_tokens` (Production)<br>`flow_action_chunk` (Production) |
+| Row | OS | CPU | Accelerator | Validated on | Model classes |
+| --- | --- | --- | --- | --- | --- |
+| `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
+| `macos26-m1pro-16gb` | macOS 26 | arm64 (apple) | Apple M1 Pro | MacBook Pro, Apple M1 Pro 16GB (in lab) | `chunked_policy` (Preview) |
+| `ubuntu2404-x86-a100-40g-a2hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA A100-SXM4-40GB | `a2-highgpu-1g` only | `chunked_policy` (Preview) |
+| `ubuntu2404-x86-l4-g2s8` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA L4 | `g2-standard-8` only | `chunked_policy` (Preview) |
+| `ubuntu2404-x86-rtxpro6000se-g4s48` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-48` only | `chunked_policy` (Production)<br>`autoregressive_action_tokens` (Production)<br>`flow_action_chunk` (Production) |
 
 ### Preview
 
-| Row | OS | CPU | Accelerator | Model classes |
-| --- | --- | --- | --- | --- |
-| `ubuntu2204-x86-cpu` | Ubuntu 22.04 | x86_64 (amd, intel) | none | — |
-| `ubuntu2404-x86-cpu` | Ubuntu 24.04 | x86_64 (amd, intel) | none | — |
+| Row | OS | CPU | Accelerator | Validated on | Model classes |
+| --- | --- | --- | --- | --- | --- |
+| `ubuntu2204-x86-cpu` | Ubuntu 22.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 22.04 host; smoke validated on GitHub-hosted runners | — |
+| `ubuntu2404-x86-cpu` | Ubuntu 24.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 24.04 host; smoke validated on GitHub-hosted runners | — |
 
 ## Experimental
 
@@ -36,13 +36,13 @@ _No experimental rows in this release._
 Planned rows are defined but not validated. They carry no evidence
 and are excluded from supported combinations.
 
-| Row | OS | CPU | Accelerator |
-| --- | --- | --- | --- |
-| `jetson-agx-orin-32gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 32GB |
-| `jetson-agx-orin-64gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 64GB |
-| `jetson-orin-nx-16gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin NX 16GB |
-| `macos26-m4pro-24gb` | macOS 26 | arm64 (apple) | Apple M4 Pro |
-| `ubuntu2404-x86-rtxpro6000we-physical` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Workstation Edition |
+| Row | OS | CPU | Accelerator | Validated on |
+| --- | --- | --- | --- | --- |
+| `jetson-agx-orin-32gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 32GB | Jetson AGX Orin 32GB (hardware not yet in lab) |
+| `jetson-agx-orin-64gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 64GB | Jetson AGX Orin 64GB (hardware not yet in lab) |
+| `jetson-orin-nx-16gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin NX 16GB | Jetson Orin NX 16GB (hardware not yet in lab) |
+| `macos26-m4pro-24gb` | macOS 26 | arm64 (apple) | Apple M4 Pro | MacBook Pro, Apple M4 Pro 24GB (hardware not yet in lab) |
+| `ubuntu2404-x86-rtxpro6000we-physical` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Workstation Edition | AMD x86_64 workstation (hardware not yet in lab) |
 
 ## Roadmap targets (not supported)
 
