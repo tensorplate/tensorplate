@@ -169,6 +169,8 @@ grep -qF 'export TP_BACKEND_DESCRIPTOR_DIR="#{HOMEBREW_PREFIX}/share/tensorplate
   "${templates}/tensorplate-cli.rb"
 grep -qF 'export TP_PLATFORM_REGISTRY_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/platform"' \
   "${templates}/tensorplate-cli.rb"
+grep -qF 'export PYTHONPATH="#{formula_opt_libexec("tensorplate-backend-python-pytorch")}${PYTHONPATH:+:${PYTHONPATH}}"' \
+  "${templates}/tensorplate-cli.rb"
 
 if service_block "${templates}/tensorplate-serving.rb" | grep -q .; then
   printf 'FAIL: serving worker must not define a Homebrew service\n' >&2

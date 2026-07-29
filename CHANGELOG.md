@@ -13,7 +13,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   launchd restart and crash-loop behavior, network-denied runtime checks,
   CLI-only formula upgrade continuity, rollback, and uninstall. The
   accompanying runbook defines immutable RC/commit source pins and recovery
-  steps while preserving the operator's prior CLI-only installation.
+  steps while preserving the operator's prior CLI-only installation. The
+  packaged CLI also supplies the formula-managed backend module path so
+  doctor probes the same Python/PyTorch runtime as the agent.
   (V021-E03-F01-T04)
 
 - Homebrew now links the installed platform registry and Python/PyTorch
