@@ -15,6 +15,30 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeCapability:
+    """Normalized accelerator-runtime facts published by a backend."""
+
+    backend_name: str
+    framework_version: str
+    accelerator_runtime_version: str
+    accelerator_runtime_built: bool
+    accelerator_runtime_available: bool
+    unavailable_reason: str | None = None
+
+    def to_wire(self) -> dict[str, str | bool]:
+        record: dict[str, str | bool] = {
+            "backend_name": self.backend_name,
+            "framework_version": self.framework_version,
+            "accelerator_runtime_version": self.accelerator_runtime_version,
+            "accelerator_runtime_built": self.accelerator_runtime_built,
+            "accelerator_runtime_available": self.accelerator_runtime_available,
+        }
+        if self.unavailable_reason is not None:
+            record["unavailable_reason"] = self.unavailable_reason
+        return record
+
+
 class BackendError(Exception):
     """Raised by backend implementations to surface a typed sidecar error.
 
@@ -22,11 +46,19 @@ class BackendError(Exception):
     (see ``tensorplate_pytorch_backend.protocol``).
     """
 
-    def __init__(self, code: str, message: str, *, context: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        context: str | None = None,
+        runtime_capability: RuntimeCapability | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.code_message = message
         self.context = context
+        self.runtime_capability = runtime_capability
 
 
 @dataclass(slots=True)
@@ -69,5 +101,8 @@ class Backend(Protocol):
     @property
     def name(self) -> str: ...
 
+    @property
+    def runtime_capability(self) -> RuntimeCapability | None: ...
 
-__all__ = ["Backend", "BackendError", "NamedTensor"]
+
+__all__ = ["Backend", "BackendError", "NamedTensor", "RuntimeCapability"]

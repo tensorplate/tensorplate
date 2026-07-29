@@ -18,7 +18,7 @@
     "required": true,
     "import_module": "torch",
     "minimum_version": "2.1",
-    "supported_devices": ["cpu", "cuda"]
+    "supported_devices": ["cpu", "cuda", "mps"]
   },
   "entrypoint": {
     "kind": "console_script",

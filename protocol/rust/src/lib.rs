@@ -123,7 +123,8 @@ pub use platform_memory_profile::{
     PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION, PLATFORM_MEMORY_TELEMETRY_FIELD_NAMES,
 };
 pub use python_pytorch_ipc::{
-    IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
+    IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcRuntimeCapability,
+    IpcStatus, IpcTensor,
 };
 pub use supervision_event::{
     SupervisionAgentState, SupervisionEvent, SupervisionEventKind, SupervisionServingState,

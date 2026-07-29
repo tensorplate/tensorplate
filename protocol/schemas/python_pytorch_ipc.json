@@ -94,6 +94,83 @@
     "error": {
       "$ref": "https://tensorplate.com/schemas/v0.1/error.json"
     },
+    "runtime_capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Vendor-neutral accelerator-runtime facts collected inside the backend package. Present on load or health responses after a runtime probe, including rejected loads.",
+      "required": [
+        "backend_name",
+        "framework_version",
+        "accelerator_runtime_version",
+        "accelerator_runtime_built",
+        "accelerator_runtime_available"
+      ],
+      "properties": {
+        "backend_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "framework_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accelerator_runtime_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Version of the operating-system-provided accelerator runtime."
+        },
+        "accelerator_runtime_built": {
+          "type": "boolean",
+          "description": "Whether the installed framework was built with the configured accelerator runtime."
+        },
+        "accelerator_runtime_available": {
+          "type": "boolean",
+          "description": "Whether the configured accelerator runtime is usable on this host now."
+        },
+        "unavailable_reason": {
+          "type": "string",
+          "const": "accelerator_runtime_unavailable",
+          "description": "Typed platform reason required when accelerator_runtime_available is false."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "accelerator_runtime_available": {
+                "const": false
+              }
+            },
+            "required": ["accelerator_runtime_available"]
+          },
+          "then": {
+            "required": ["unavailable_reason"]
+          },
+          "else": {
+            "not": {
+              "required": ["unavailable_reason"]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "accelerator_runtime_available": {
+                "const": true
+              }
+            },
+            "required": ["accelerator_runtime_available"]
+          },
+          "then": {
+            "properties": {
+              "accelerator_runtime_built": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
     "metric": {
       "type": "object",
       "additionalProperties": false,
