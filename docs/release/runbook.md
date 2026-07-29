@@ -257,7 +257,8 @@ The build-only run must:
 
 - Build Rust release binaries.
 - Build the C++ serving worker.
-- Build the `amd64` CLI package (hosted job).
+- Build the complete `amd64` runtime package set — agent, serving worker,
+  observability, CLI, and the metapackage (hosted job).
 - Build the `tensorplate-python` wheel + sdist at the release version.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
@@ -299,7 +300,8 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Verify the tag commit is contained in `${TP_RELEASE_BRANCH}`.
 - Build Rust release binaries.
 - Build the C++ serving worker.
-- Build the `amd64` CLI package and the `tensorplate-python` wheel + sdist.
+- Build the complete `amd64` runtime package set and the
+  `tensorplate-python` wheel + sdist.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.

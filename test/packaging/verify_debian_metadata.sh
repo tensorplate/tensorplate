@@ -132,9 +132,11 @@ if ! grep -q '^override_dh_auto_configure:' "${debian}/rules"; then
   echo "FAIL: debian/rules must keep configure external to the package skeleton" >&2
   fail=1
 fi
-# The cli-only build profile lets the hosted amd64 release job build just
-# the workstation CLI. Runtime services and the Jetson metapackage must
-# opt out of that profile; the CLI and its arch-all companions must not.
+# The cli-only build profile builds just the workstation CLI without the
+# runtime services or the metapackage. The release workflow no longer uses
+# it — the hosted amd64 job builds the full runtime set — but it remains a
+# supported build mode, so the opt-outs must stay declared. Runtime services
+# and the metapackage opt out; the CLI and its arch-all companions must not.
 if [ "$(grep -c '^Build-Profiles: <!pkg\.tensorplate\.cli-only>$' "${debian}/control")" -ne 4 ]; then
   echo "FAIL: agent, serving, observability, and the metapackage must declare Build-Profiles: <!pkg.tensorplate.cli-only>" >&2
   fail=1

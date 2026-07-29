@@ -172,6 +172,31 @@ for package, artifact in amd64.items():
 # secondary architecture is carried per artifact, exactly as the desktop CLI
 # always was. Consumers keyed on target.architecture must not shift.
 assert manifest["target"]["architecture"] == "arm64"
+
+# install.sh selects packages by (architecture in ("all", host_arch)) and
+# requires EXACTLY ONE match per package. Now that a manifest carries two
+# runtime architectures, prove it stays unambiguously resolvable from either
+# host — an extra or missing match makes the installer refuse or, worse,
+# install the wrong architecture's binary.
+runtime_packages = [
+    "tensorplate-common",
+    "tensorplate-agent",
+    "tensorplate-serving",
+    "tensorplate-observability",
+    "tensorplate-cli",
+    "tensorplate-backend-python-pytorch",
+    "tensorplate",
+]
+for host_arch in ("arm64", "amd64"):
+    for package in runtime_packages:
+        matches = [
+            a for a in manifest["artifacts"]
+            if a.get("package") == package
+            and a.get("architecture") in ("all", host_arch)
+        ]
+        assert len(matches) == 1, (host_arch, package, [m["file"] for m in matches])
+        # And the one it resolves to is never the other architecture's build.
+        assert matches[0]["architecture"] in ("all", host_arch), (host_arch, matches[0])
 PY
 
 # A complete two-architecture release artifact set must verify clean. Without

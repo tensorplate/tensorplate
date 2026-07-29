@@ -55,7 +55,7 @@ packaging/
 | `tensorplate-cli` | Operator CLI. | `tensorplate` | no |
 | `tensorplate-backend-python-pytorch` | Python sidecar backend for SmolVLA / Python-native bundles. | `tensorplate-backend-python-pytorch` (entrypoint) | no — backend lifecycle is per-session by the serving worker |
 | `tensorplate-apt-source` | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component and never runs `apt update`. | — | no |
-| `tensorplate` | Jetson full-runtime metapackage (arm64 only): depends on agent, serving, observability, CLI, and common; ships no files. | — | no |
+| `tensorplate` | Full-runtime metapackage, built once per runtime architecture: depends on agent, serving, observability, CLI, and common; ships no files. | — | no |
 
 Core packages do **not** depend on `tensorplate-backend-python-pytorch`.
 Installing it later makes the Python module + console entrypoint

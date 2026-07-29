@@ -137,11 +137,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update
+          # cmake is deliberately NOT installed from apt: jammy ships 3.22
+          # and the tree requires 3.25. The runner image's preinstalled cmake
+          # is newer, which is also what cpp.yml relies on. Assert it rather
+          # than letting a runner-image change fail with an obscure error.
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             ca-certificates \
             clang-15 \
-            cmake \
             debhelper \
             dh-exec \
             dpkg-dev \
@@ -153,6 +156,18 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
           rustup show active-toolchain || rustup toolchain install
+
+      - name: Assert the toolchain meets the build tree's floor
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          required="$(sed -n 's/^cmake_minimum_required(VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -n1)"
+          have="$(cmake --version | head -n1 | awk '{print $3}')"
+          printf 'cmake: have %s, need >= %s (%s)\n' "$have" "$required" "$(command -v cmake)"
+          [[ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -n1)" == "$required" ]] || {
+            echo "::error::cmake $have is older than the required $required; jammy's apt cmake is 3.22, so this job depends on the runner image's newer preinstalled cmake"
+            exit 1
+          }
 
       - name: Build amd64 Rust binaries
         shell: bash
@@ -236,12 +251,15 @@ jobs:
             file build/release/tensorplate-serving
             exit 1
           }
-          # The metapackage must be an empty dependency bundle on this
+          # The metapackage must stay an empty dependency bundle on this
           # architecture too, now that it is built per architecture.
+          # debhelper always adds changelog.Debian.gz and copyright under
+          # /usr/share/doc, so "empty" means nothing outside that.
           meta="$(echo dist/amd64/tensorplate_*_amd64.deb)"
-          if dpkg-deb -c "$meta" | grep -vE '/$' | grep -q .; then
-            echo "::error::the tensorplate metapackage must ship no files"
-            dpkg-deb -c "$meta"
+          payload="$(dpkg-deb -c "$meta" | awk '$NF !~ /\/$/ {print $NF}' | grep -v '^\./usr/share/doc/' || true)"
+          if [[ -n "$payload" ]]; then
+            echo "::error::the tensorplate metapackage must ship no payload"
+            printf '%s\n' "$payload"
             exit 1
           fi
 
