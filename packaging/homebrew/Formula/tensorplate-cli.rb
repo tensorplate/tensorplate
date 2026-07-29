@@ -27,6 +27,12 @@ class TensorplateCli < Formula
       if [ "${TENSORPLATE_CLI_CONFIG+x}" != x ]; then
         export TENSORPLATE_CLI_CONFIG="#{etc}/tensorplate/cli.json"
       fi
+      if [ "${TP_BACKEND_DESCRIPTOR_DIR+x}" != x ]; then
+        export TP_BACKEND_DESCRIPTOR_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/backends"
+      fi
+      if [ "${TP_PLATFORM_REGISTRY_DIR+x}" != x ]; then
+        export TP_PLATFORM_REGISTRY_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/platform"
+      fi
       exec "#{libexec}/tensorplate" "$@"
     SH
     (bin/"tensorplate").chmod 0755

@@ -17,6 +17,9 @@ class TensorplateAgent < Formula
     config = buildpath/"packaging/homebrew/conf/agent.json.in"
     inreplace config, "@HOMEBREW_PREFIX@", HOMEBREW_PREFIX
     (etc/"tensorplate").install config => "agent.json"
+    (share/"tensorplate/platform").install \
+      "config/platform/rows",
+      "config/platform/roadmap_targets"
   end
 
   def post_install
@@ -37,6 +40,11 @@ class TensorplateAgent < Formula
 
   service do
     run [opt_bin/"tensorplate-agent", "--config", etc/"tensorplate/agent.json"]
+    environment_variables PATH:                         std_service_path_env,
+                          PYTHONPATH:                   formula_opt_libexec("tensorplate-backend-python-pytorch"),
+                          TP_BACKEND_DESCRIPTOR_DIR:    HOMEBREW_PREFIX/"share/tensorplate/backends",
+                          TP_PLATFORM_REGISTRY_DIR:     HOMEBREW_PREFIX/"share/tensorplate/platform",
+                          TP_PYTHON_PYTORCH_EXECUTABLE: formula_opt_libexec("pytorch")/"bin/python"
     working_dir var/"tensorplate"
     log_path var/"log/tensorplate/agent.log"
     error_log_path var/"log/tensorplate/agent.error.log"
@@ -52,6 +60,8 @@ class TensorplateAgent < Formula
     assert_equal 0750, (var/"run/tensorplate").stat.mode & 0777
     assert_match "#{HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock",
                  (etc/"tensorplate/agent.json").read
+    assert_predicate share/"tensorplate/platform/rows/macos26-m1pro-16gb.json", :file?
+    assert_predicate share/"tensorplate/platform/roadmap_targets/pkg-macos-notarized.json", :file?
   end
 
   private

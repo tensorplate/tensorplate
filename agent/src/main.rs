@@ -16,7 +16,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -38,7 +38,7 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{PlatformRegistry, SystemHostProbe};
-use tensorplate_protocol::install_paths::{BACKEND_DESCRIPTOR_DIR, PLATFORM_REGISTRY_DIR};
+use tensorplate_protocol::install_paths;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -54,6 +54,18 @@ fn print_usage() {
          Local control API speaks the v0.1 schema documented at\n  \
          protocol/schemas/agent_control.json."
     );
+}
+
+fn print_requested_info(args: &[String]) -> Option<ExitCode> {
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        print_version();
+        return Some(ExitCode::SUCCESS);
+    }
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage();
+        return Some(ExitCode::SUCCESS);
+    }
+    None
 }
 
 fn load_config(args: &[String]) -> Result<AgentConfig, String> {
@@ -111,7 +123,10 @@ fn build_supervisor(cfg: &AgentConfig) -> Result<Option<Arc<WorkerSupervisor>>, 
 /// Probing is best-effort: failures here never block agent startup.
 /// The agent prefers to come up degraded so the CLI doctor can
 /// surface the issue.
-fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeReport> {
+fn probe_available_backends(
+    cfg: &AgentConfig,
+    descriptor_dir: &Path,
+) -> BTreeMap<String, BackendProbeReport> {
     let mut out = BTreeMap::new();
     for backend in &cfg.available_backends {
         // The Vitis AI / Kria adapter and the in-tree mock backend
@@ -124,9 +139,7 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
         ) {
             continue;
         }
-        let descriptor_path = std::path::Path::new(BACKEND_DESCRIPTOR_DIR)
-            .join(backend)
-            .join("backend.json");
+        let descriptor_path = descriptor_dir.join(backend).join("backend.json");
         let report = probe_backend(&descriptor_path, &ProbeOptions::default());
         eprintln!(
             "backend probe: backend={} state={:?} descriptor={}",
@@ -146,15 +159,15 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
 /// can report why, rather than refusing to start and leaving the
 /// operator no local tooling. What the agent must never do is treat an
 /// absent registry as an empty one — hence `Option`, not a default.
-fn load_platform_registry() -> Option<PlatformRegistry> {
-    match PlatformRegistry::load_installed() {
+fn load_platform_registry(directory: &Path) -> Option<PlatformRegistry> {
+    match PlatformRegistry::load(directory) {
         Ok(registry) => {
             eprintln!(
                 "platform registry: rows={} supported={} roadmap_targets={} dir={}",
                 registry.rows().count(),
                 registry.supported_rows().count(),
                 registry.roadmap_targets().count(),
-                PLATFORM_REGISTRY_DIR
+                directory.display()
             );
             Some(registry)
         }
@@ -201,15 +214,18 @@ fn load_runtime_config(
 ) -> Result<
     (
         AgentConfig,
+        PathBuf,
         Option<PlatformRegistry>,
         Option<PlatformAdmission>,
     ),
     String,
 > {
     let mut config = load_config(args)?;
-    let registry = load_platform_registry();
+    let backend_descriptor_dir = install_paths::backend_descriptor_dir()?;
+    let platform_registry_dir = install_paths::platform_registry_dir()?;
+    let registry = load_platform_registry(&platform_registry_dir);
     let admission = evaluate_platform_admission(registry.as_ref(), &mut config);
-    Ok((config, registry, admission))
+    Ok((config, backend_descriptor_dir, registry, admission))
 }
 
 fn seed_supervisor_from_state(
@@ -228,21 +244,17 @@ fn seed_supervisor_from_state(
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        print_version();
-        return ExitCode::SUCCESS;
+    if let Some(exit_code) = print_requested_info(&args) {
+        return exit_code;
     }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_usage();
-        return ExitCode::SUCCESS;
-    }
-    let (cfg, platform_registry, platform_admission) = match load_runtime_config(&args) {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            eprintln!("config error: {err}");
-            return ExitCode::from(2);
-        }
-    };
+    let (cfg, backend_descriptor_dir, platform_registry, platform_admission) =
+        match load_runtime_config(&args) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                eprintln!("config error: {err}");
+                return ExitCode::from(2);
+            }
+        };
     let store = match StateStore::open(cfg.state_dir.clone()) {
         Ok(s) => Arc::new(s),
         Err(err) => {
@@ -264,7 +276,7 @@ fn main() -> ExitCode {
             return ExitCode::from(4);
         }
     };
-    let backend_probes = probe_available_backends(&cfg);
+    let backend_probes = probe_available_backends(&cfg, &backend_descriptor_dir);
     let mut coordinator =
         Coordinator::new(cfg.clone(), store.clone(), worker).with_backend_probes(backend_probes);
     if let Some(registry) = platform_registry {
@@ -314,9 +326,8 @@ fn main() -> ExitCode {
     // SIGTERM. Without an installed handler the default action is process
     // termination, which is safe because every durable mutation lands
     // through `StateStore::update`'s atomic-replace path before each
-    // phase advances. The `stop` flag below lets test harnesses ask the
-    // binary to exit cleanly; production termination is still owned by
-    // the process manager in v0.1.0.
+    // phase advances. The `stop` flag lets tests request a clean exit;
+    // production termination is still owned by the process manager.
     let stop = Arc::new(AtomicBool::new(false));
     while !stop.load(Ordering::Relaxed) {
         if let Some(supervisor) = supervisor.as_ref() {

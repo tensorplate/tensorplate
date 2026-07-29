@@ -18,6 +18,15 @@ creates its required state, runtime, and log directories under Homebrew's
 Agent and observability service output is routed to `var/log/tensorplate`;
 structured diagnostics use `events.ndjson`.
 
+The agent formula also installs the platform registry under
+`share/tensorplate/platform`. The Python/PyTorch component installs its
+backend descriptor under `share/tensorplate/backends/python_pytorch` and
+renders the descriptor's interpreter to the PyTorch formula's private
+Python. The agent and observability services plus the packaged CLI export the
+matching discovery paths; the agent also exports interpreter and module paths
+that are inherited by the serving worker and its sidecar. Native packages
+retain their `/usr/share/tensorplate` defaults.
+
 Validate the templates and renderer locally with:
 
 ```bash

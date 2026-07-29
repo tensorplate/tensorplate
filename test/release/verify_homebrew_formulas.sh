@@ -80,6 +80,16 @@ assert cli["log_source"]["path"] == f"{prefix}/var/log/tensorplate/events.ndjson
 assert observability["diagnostics_retention"]["file_path"] == cli["log_source"]["path"]
 PY
 
+python3 - packaging/backend-metadata/python_pytorch.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+descriptor = json.loads(Path(sys.argv[1]).read_text())
+assert "3.14" in descriptor["python"]["supported_versions"]
+assert descriptor["python"]["interpreter"] == "/usr/bin/python3"
+PY
+
 for component in \
   tensorplate-agent \
   tensorplate-serving \
@@ -124,6 +134,27 @@ for component in tensorplate-agent tensorplate-observability; do
   require_service_line "$formula" "    throttle_interval 5"
 done
 
+require_service_line "${templates}/tensorplate-observability.rb" \
+  "    environment_variables TP_PLATFORM_REGISTRY_DIR: HOMEBREW_PREFIX/\"share/tensorplate/platform\""
+
+agent_formula="${templates}/tensorplate-agent.rb"
+require_service_line "$agent_formula" \
+  "                          PYTHONPATH:                   formula_opt_libexec(\"tensorplate-backend-python-pytorch\"),"
+require_service_line "$agent_formula" \
+  "                          TP_BACKEND_DESCRIPTOR_DIR:    HOMEBREW_PREFIX/\"share/tensorplate/backends\","
+require_service_line "$agent_formula" \
+  "                          TP_PLATFORM_REGISTRY_DIR:     HOMEBREW_PREFIX/\"share/tensorplate/platform\","
+require_service_line "$agent_formula" \
+  "                          TP_PYTHON_PYTORCH_EXECUTABLE: formula_opt_libexec(\"pytorch\")/\"bin/python\""
+grep -qF '(share/"tensorplate/platform").install \' "$agent_formula"
+grep -qF '"config/platform/rows",' "$agent_formula"
+grep -qF '"config/platform/roadmap_targets"' "$agent_formula"
+
+backend_formula="${templates}/tensorplate-backend-python-pytorch.rb"
+grep -qF 'inreplace descriptor, "/usr/bin/python3", pytorch_python' "$backend_formula"
+grep -qF '(share/"tensorplate/backends/python_pytorch").install descriptor => "backend.json"' \
+  "$backend_formula"
+
 for component in tensorplate-agent tensorplate-cli tensorplate-observability; do
   formula="${templates}/${component}.rb"
   config="${component#tensorplate-}"
@@ -133,6 +164,10 @@ for component in tensorplate-agent tensorplate-cli tensorplate-observability; do
 done
 
 grep -qF 'export TENSORPLATE_CLI_CONFIG="#{etc}/tensorplate/cli.json"' \
+  "${templates}/tensorplate-cli.rb"
+grep -qF 'export TP_BACKEND_DESCRIPTOR_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/backends"' \
+  "${templates}/tensorplate-cli.rb"
+grep -qF 'export TP_PLATFORM_REGISTRY_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/platform"' \
   "${templates}/tensorplate-cli.rb"
 
 if service_block "${templates}/tensorplate-serving.rb" | grep -q .; then

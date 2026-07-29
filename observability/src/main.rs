@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use tensorplate_observability::{InputSource, ObservabilityConfig, Service};
 use tensorplate_platform::PlatformRegistry;
-use tensorplate_protocol::install_paths::PLATFORM_REGISTRY_DIR;
+use tensorplate_protocol::install_paths;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -83,14 +83,21 @@ fn load_config(args: &[String]) -> Result<ObservabilityConfig, String> {
 /// because a package it only reads from is missing. An absent registry
 /// stays absent rather than becoming an empty one.
 fn attach_platform_registry(service: Service) -> Service {
-    match PlatformRegistry::load_installed() {
+    let directory = match install_paths::platform_registry_dir() {
+        Ok(directory) => directory,
+        Err(err) => {
+            eprintln!("platform registry: unavailable ({err})");
+            return service;
+        }
+    };
+    match PlatformRegistry::load(&directory) {
         Ok(registry) => {
             eprintln!(
                 "platform registry: rows={} supported={} roadmap_targets={} dir={}",
                 registry.rows().count(),
                 registry.supported_rows().count(),
                 registry.roadmap_targets().count(),
-                PLATFORM_REGISTRY_DIR
+                directory.display()
             );
             service.with_platform_registry(registry)
         }

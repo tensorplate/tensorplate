@@ -33,6 +33,7 @@ class TensorplateObservability < Formula
 
   service do
     run [opt_bin/"tensorplate-observability", "--config", etc/"tensorplate/observability.json"]
+    environment_variables TP_PLATFORM_REGISTRY_DIR: HOMEBREW_PREFIX/"share/tensorplate/platform"
     working_dir var/"tensorplate"
     log_path var/"log/tensorplate/observability.log"
     error_log_path var/"log/tensorplate/observability.error.log"
