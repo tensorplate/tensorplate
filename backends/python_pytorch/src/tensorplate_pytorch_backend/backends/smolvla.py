@@ -12,7 +12,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from tensorplate_pytorch_backend.backends.base import Backend, BackendError, NamedTensor
+from tensorplate_pytorch_backend.accelerator import require_mps_runtime
+from tensorplate_pytorch_backend.backends.base import (
+    Backend,
+    BackendError,
+    NamedTensor,
+    RuntimeCapability,
+)
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -78,6 +84,7 @@ class SmolVLABackend(Backend):
         self._torch: Any | None = None
         self._np: Any | None = None
         self._tokenizer: Any | None = None
+        self._runtime_capability: RuntimeCapability | None = None
         self._obs_state_key = "observation.state"
         self._language_tokens_key = "observation.language.tokens"
         self._language_mask_key = "observation.language.attention_mask"
@@ -87,22 +94,19 @@ class SmolVLABackend(Backend):
     def name(self) -> str:
         return "smolvla"
 
+    @property
+    def runtime_capability(self) -> RuntimeCapability | None:
+        return self._runtime_capability
+
     def load(self, model_spec: dict[str, Any]) -> None:
+        self._runtime_capability = None
         try:
             import numpy as np
             import torch
-            from lerobot.configs.policies import PreTrainedConfig
-            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-            from lerobot.utils.constants import (
-                OBS_LANGUAGE_ATTENTION_MASK,
-                OBS_LANGUAGE_TOKENS,
-                OBS_STATE,
-            )
-            from transformers import AutoTokenizer
         except Exception as exc:
             raise BackendError(
                 ERR_LOAD_FAILED,
-                "SmolVLA dependencies are not importable",
+                "SmolVLA core dependencies are not importable",
                 context=repr(exc),
             ) from exc
 
@@ -114,6 +118,25 @@ class SmolVLABackend(Backend):
         self._default_task = _string_config(validation_config, "task", self._default_task)
         if not self._default_task.endswith("\n"):
             self._default_task = f"{self._default_task}\n"
+
+        if device == "mps":
+            self._runtime_capability = require_mps_runtime(torch)
+
+        try:
+            from lerobot.configs.policies import PreTrainedConfig
+            from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+            from lerobot.utils.constants import (
+                OBS_LANGUAGE_ATTENTION_MASK,
+                OBS_LANGUAGE_TOKENS,
+                OBS_STATE,
+            )
+            from transformers import AutoTokenizer
+        except Exception as exc:
+            raise BackendError(
+                ERR_LOAD_FAILED,
+                "SmolVLA model dependencies are not importable",
+                context=repr(exc),
+            ) from exc
 
         try:
             cfg = PreTrainedConfig.from_pretrained(model_id, cache_dir=cache_dir)
@@ -187,6 +210,7 @@ class SmolVLABackend(Backend):
         self._config = None
         self._device = None
         self._tokenizer = None
+        self._runtime_capability = None
         self._loaded = False
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()

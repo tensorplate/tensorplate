@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python/PyTorch sidecar now probes the configured Apple accelerator
+  runtime before SmolVLA model dependencies or weights are loaded. Load and
+  health responses publish a vendor-neutral runtime capability record with
+  framework and operating-system runtime versions, build state, and current
+  availability. An unavailable runtime rejects the load with the typed
+  `accelerator_runtime_unavailable` platform reason, while the shared
+  `tp::Error::Code` remains `unsupported`. The backend descriptor now
+  declares the supported Apple device target. (V021-E03-F02-T03)
+
 - Apple silicon detection now reads the exact chip identity and unified-memory
   size from `sysctl`, resolves the observation against the exact platform row,
   and publishes a vendor-neutral `PlatformCapability`. Its

@@ -111,6 +111,52 @@ fn python_pytorch_ipc_health_check_response_round_trip() {
 }
 
 #[test]
+fn python_pytorch_runtime_capability_matches_schema_conditionals() {
+    let schema_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../schemas/python_pytorch_ipc.json");
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&schema_path)
+            .unwrap_or_else(|e| panic!("read schema {}: {e}", schema_path.display())),
+    )
+    .expect("schema parses");
+    let validator = jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
+
+    let available: serde_json::Value =
+        serde_json::from_str(&load("python_pytorch_ipc_health_check_response.json"))
+            .expect("fixture parses");
+    assert!(
+        validator.is_valid(&available),
+        "available fixture must validate"
+    );
+
+    let mut unavailable = available.clone();
+    unavailable
+        .get_mut("runtime_capability")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("runtime capability object")
+        .insert(
+            "accelerator_runtime_available".into(),
+            serde_json::Value::Bool(false),
+        );
+    assert!(
+        !validator.is_valid(&unavailable),
+        "unavailable runtime without a typed reason must reject"
+    );
+    unavailable
+        .get_mut("runtime_capability")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("runtime capability object")
+        .insert(
+            "unavailable_reason".into(),
+            serde_json::Value::String("accelerator_runtime_unavailable".into()),
+        );
+    assert!(
+        validator.is_valid(&unavailable),
+        "unavailable runtime with its typed reason must validate"
+    );
+}
+
+#[test]
 fn unknown_schema_version_is_rejected_with_typed_error() {
     let raw = load("python_pytorch_ipc_unknown_version.json");
     let err = decode_with_version_check::<IpcMessage>(&raw).expect_err("must reject");

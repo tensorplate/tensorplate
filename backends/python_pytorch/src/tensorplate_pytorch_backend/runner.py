@@ -40,6 +40,7 @@ from tensorplate_pytorch_backend.backends import (
     BackendError,
     FixtureBackend,
     NamedTensor,
+    RuntimeCapability,
     SmolVLABackend,
 )
 
@@ -87,13 +88,20 @@ def _build_response_header(
 
 
 def _typed_error_response(
-    request: dict[str, Any], code: str, message: str, *, context: str | None = None
+    request: dict[str, Any],
+    code: str,
+    message: str,
+    *,
+    context: str | None = None,
+    runtime_capability: RuntimeCapability | None = None,
 ) -> codec.SidecarFrame:
     header = _build_response_header(request, status=protocol.STATUS_ERROR)
     error: dict[str, Any] = {"code": code, "message": message}
     if context is not None:
         error["context"] = context
     header["error"] = error
+    if runtime_capability is not None:
+        header["runtime_capability"] = runtime_capability.to_wire()
     return codec.SidecarFrame(header=header)
 
 
@@ -251,7 +259,13 @@ class SidecarRunner:
             )
         except BackendError as err:
             self._state.last_error = err.code_message
-            return _typed_error_response(header, err.code, err.code_message, context=err.context)
+            return _typed_error_response(
+                header,
+                err.code,
+                err.code_message,
+                context=err.context,
+                runtime_capability=err.runtime_capability,
+            )
         except Exception as exc:
             logger.exception("unexpected sidecar dispatch failure")
             self._state.last_error = str(exc)
@@ -302,9 +316,10 @@ class SidecarRunner:
         backend.load(model_spec)
         self._state.backend = backend
         self._state.backend_factory_name = backend.name
-        return codec.SidecarFrame(
-            header=_build_response_header(frame.header, status=protocol.STATUS_OK)
-        )
+        header = _build_response_header(frame.header, status=protocol.STATUS_OK)
+        if backend.runtime_capability is not None:
+            header["runtime_capability"] = backend.runtime_capability.to_wire()
+        return codec.SidecarFrame(header=header)
 
     def _handle_prime(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:
         backend = self._ensure_backend()
@@ -357,6 +372,8 @@ class SidecarRunner:
             "uptime_ns": time.monotonic_ns() - self._state.started_monotonic_ns,
             "last_error": self._state.last_error,
         }
+        if self._state.backend is not None and self._state.backend.runtime_capability is not None:
+            header["runtime_capability"] = self._state.backend.runtime_capability.to_wire()
         return codec.SidecarFrame(header=header)
 
 

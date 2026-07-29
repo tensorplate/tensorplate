@@ -17,7 +17,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from tensorplate_pytorch_backend.backends.base import Backend, BackendError, NamedTensor
+from tensorplate_pytorch_backend.backends.base import (
+    Backend,
+    BackendError,
+    NamedTensor,
+    RuntimeCapability,
+)
 from tensorplate_pytorch_backend.protocol import (
     ERR_NOT_READY,
     ERR_SHAPE_MISMATCH,
@@ -38,6 +43,10 @@ class FixtureBackend(Backend):
     @property
     def name(self) -> str:
         return "fixture"
+
+    @property
+    def runtime_capability(self) -> RuntimeCapability | None:
+        return None
 
     def load(self, model_spec: dict[str, Any]) -> None:
         if self.fail_load is not None:
