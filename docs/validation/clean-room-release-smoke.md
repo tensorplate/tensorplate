@@ -148,7 +148,8 @@ Any checksum mismatch blocks the release.
 Install core packages from the downloaded assets:
 
 ```bash
-# tensorplate-common is Architecture: all; the rest are arm64.
+# tensorplate-common is Architecture: all; the rest are per-architecture
+# and ${TP_ARCH} selects which set this host installs.
 sudo apt install "./tensorplate-common_${TP_DEBIAN_VERSION}_all.deb" \
   "./tensorplate-agent_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \
   "./tensorplate-serving_${TP_DEBIAN_VERSION}_${TP_ARCH}.deb" \

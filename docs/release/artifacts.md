@@ -9,8 +9,9 @@ A release publishes two complete runtime package sets: the primary target
 described by the manifest's `target` block (Jetson `arm64`), and a secondary
 set for Ubuntu `x86_64` built on its own native runner. The manifest's
 `target` block describes the primary target only; every artifact carries its
-own `architecture` and `target_os`, which is what `install.sh` selects on.
-The architecture-independent packages are shared between both sets.
+own `architecture`, which is what `install.sh` selects on, plus a `target_os`
+label for the reader. The architecture-independent packages are shared
+between both sets.
 
 Use these variables in examples:
 
@@ -75,13 +76,17 @@ tools/release/build-release-artifacts.sh \
 ```
 
 The release runner must match the target architecture. The script refuses
-to build `arm64` release packages on a non-`arm64` runner, which is what
-guarantees the Jetson packages were built on Jetson-class hardware with the
-right SDKs. The secondary Ubuntu `x86_64` set is therefore built by its own
-hosted job and pre-staged in the repository parent directory alongside the
-other Debian outputs; the release build collects it into the artifact set
-and labels it with the `x86_64` target OS. A missing member of that set
-fails the build rather than being silently dropped.
+to build `arm64` release packages on a non-`arm64` runner. That compares
+`dpkg --print-architecture` against the target and nothing more — the
+Jetson-class hardware and the TensorRT/CUDA SDKs come from the self-hosted
+runner's own configuration, and `TP_REQUIRE_TENSORRT_SDK=ON` is what fails
+the build when the SDK is missing.
+
+Because a release build cannot cross-compile, the secondary Ubuntu `x86_64`
+set is built by its own hosted job and pre-staged in the repository parent
+directory alongside the other Debian outputs; the release build collects it
+into the artifact set and labels it with the `x86_64` target OS. A missing
+member of that set fails the build rather than being silently dropped.
 
 The `x86_64` serving worker is built without the TensorRT adapter — a hosted
 runner has no CUDA/TensorRT SDK, and shipping the adapter without one
@@ -208,9 +213,11 @@ a missing package.
 
 Which packages may carry a second architecture at all is decided earlier, at
 manifest generation: only members of the declared secondary runtime set, and
-only at the declared secondary architecture. Any other foreign-architecture
-`.deb` in the artifacts directory aborts manifest generation as a staging
-mistake, so such a file never reaches a manifest for verification to judge.
+only at the declared secondary architecture. A `.deb` whose name matches a
+required package at any other architecture aborts manifest generation as a
+staging mistake, so it never reaches a manifest for verification to judge.
+A file whose name matches no required package is not examined at all and is
+simply never collected.
 
 ## Signing and Provenance
 

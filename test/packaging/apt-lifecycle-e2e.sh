@@ -132,7 +132,7 @@ pass "two-command install upgraded ${baseline_ver} -> ${cur_ver} in place; confi
 note "F. future-version discovery without re-bootstrap"
 # Build the FULL staging set (stubs are still staged from step D): the
 # discovery claim in docs/install/tensorplate-ready.md is about the
-# runtime metapackage, which is Architecture: arm64 and therefore not
+# runtime metapackage, which is Architecture: any and therefore not
 # covered by an arch-independent-only build.
 base="${cur_ver%%~*}"; base="${base%-*}"
 IFS=. read -r major minor patch <<<"$base"

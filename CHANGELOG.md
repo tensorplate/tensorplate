@@ -22,16 +22,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
   The release manifest keeps describing one primary target and gains no
   second target block. It never needed one: every artifact already
-  carries its own architecture and target OS, and that is what the
-  installer selects on — the same shape the desktop CLI has used all
-  along. What changed is the rule about *which* second-architecture
-  packages may appear. It was "the CLI, and nothing else"; it is now an
-  explicit set that verification asserts by package **and** architecture.
-  The old rule could not tell a complete second architecture from a
-  half-published one, because a name-only check is satisfied by the
-  arm64 sibling of any missing amd64 package. Collection fails loudly on
-  a missing member rather than dropping it, which was previously silent
-  and would have published a green, arm64-only release.
+  carries its own architecture, and that is what the installer selects
+  on — the same shape the desktop CLI has used all along.
+
+  What changed is the rule about *which* second-architecture packages may
+  appear. It was "the CLI, and nothing else"; it is now an explicit set,
+  and verification asserts that set by package **and** architecture.
+  Verification's package check was previously name-only, so it could not
+  tell a complete second architecture from a half-published one — the
+  arm64 sibling of any missing amd64 package satisfied it, and the sole
+  architecture-specific assertion covered the CLI. Collection had no
+  notion of the other x86_64 packages at all: it required the amd64 CLI
+  and failed without it, but an amd64 agent, serving worker, or
+  observability build staged beside it was dropped without a word, and a
+  release would have gone out green with them simply absent.
 
   The x86_64 serving worker ships without the TensorRT adapter. A hosted
   runner has no CUDA/TensorRT SDK, and building the adapter without one
@@ -53,9 +57,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   today — only the lower bound is compared — but the descriptor schema
   publicly promises rejection outside the range, and the descriptor is
   not among the files the release driver rewrites on a version bump, so
-  nothing would have caught it going stale. That is the same drift that
-  already left the Debian changelog a version ahead of
-  `packaging/VERSION`. (V021-E02-F01-T01)
+  a stale bound had nothing to catch it. The check asserts the range
+  admits the release line rather than only the current version, because
+  a bound one minor behind still brackets the version that precedes it.
+  (V021-E02-F01-T01)
 
 - `tensorplate doctor` gains a host section, and it reports what the
   machine says about itself rather than what the binary was compiled for.
