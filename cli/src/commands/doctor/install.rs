@@ -49,7 +49,8 @@ impl Default for InstallProbeOptions {
     fn default() -> Self {
         Self {
             prefix: None,
-            probe_backends: cfg!(target_os = "linux"),
+            probe_backends: cfg!(target_os = "linux")
+                || std::env::var_os(install_paths::BACKEND_DESCRIPTOR_DIR_ENV).is_some(),
             skip_systemd: !cfg!(target_os = "linux"),
         }
     }
@@ -97,11 +98,20 @@ pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
 /// supported machine be told it is unsupported, so the registry either
 /// loads whole or not at all and this probe says which.
 fn probe_platform_registry(opts: &InstallProbeOptions) -> Vec<Finding> {
-    // `prefixed` returns PLATFORM_REGISTRY_DIR unchanged when no prefix is
-    // set, so on a real install this reads exactly what
-    // `PlatformRegistry::load_installed` reads in the agent and the
-    // observability service.
-    let directory = prefixed(opts, PLATFORM_REGISTRY_DIR);
+    let directory = match platform_registry_path(opts) {
+        Ok(directory) => directory,
+        Err(err) => {
+            return vec![Finding::fail(
+                FindingId::PlatformRegistry,
+                Severity::Critical,
+                format!("platform support registry path is invalid: {err}"),
+                Some(format!(
+                    "unset {} or set it to an absolute directory",
+                    install_paths::PLATFORM_REGISTRY_DIR_ENV
+                )),
+            )];
+        }
+    };
     if !directory.exists() {
         return vec![Finding::missing(
             FindingId::PlatformRegistry,
@@ -268,6 +278,7 @@ fn any_install_present(opts: &InstallProbeOptions) -> bool {
         PYTHON_PYTORCH_BACKEND_DESCRIPTOR,
     ];
     candidates.iter().any(|p| prefixed(opts, p).exists())
+        || python_backend_descriptor_path(opts).is_ok_and(|path| path.exists())
 }
 
 fn skipped_service_states(reason: &str) -> Vec<Finding> {
@@ -320,6 +331,24 @@ fn prefixed(opts: &InstallProbeOptions, path: &str) -> PathBuf {
             p.join(stripped)
         })
         .unwrap_or_else(|| PathBuf::from(path))
+}
+
+fn platform_registry_path(opts: &InstallProbeOptions) -> Result<PathBuf, String> {
+    if opts.prefix.is_some() {
+        Ok(prefixed(opts, PLATFORM_REGISTRY_DIR))
+    } else {
+        install_paths::platform_registry_dir()
+    }
+}
+
+fn python_backend_descriptor_path(opts: &InstallProbeOptions) -> Result<PathBuf, String> {
+    if opts.prefix.is_some() {
+        Ok(prefixed(opts, PYTHON_PYTORCH_BACKEND_DESCRIPTOR))
+    } else {
+        Ok(install_paths::backend_descriptor_dir()?
+            .join("python_pytorch")
+            .join("backend.json"))
+    }
 }
 
 fn probe_path_layout(opts: &InstallProbeOptions) -> Vec<Finding> {
@@ -755,7 +784,28 @@ fn find_unit(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
 }
 
 fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
-    let descriptor = prefixed(opts, PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+    let descriptor = match python_backend_descriptor_path(opts) {
+        Ok(descriptor) => descriptor,
+        Err(err) => {
+            return vec![
+                Finding::fail(
+                    FindingId::PythonPytorchBackend,
+                    Severity::Critical,
+                    format!("Python/PyTorch backend descriptor path is invalid: {err}"),
+                    Some(format!(
+                        "unset {} or set it to an absolute directory",
+                        install_paths::BACKEND_DESCRIPTOR_DIR_ENV
+                    )),
+                ),
+                Finding::skipped(
+                    FindingId::PythonPytorchRuntime,
+                    Severity::Info,
+                    "skipped: backend descriptor path invalid",
+                    None,
+                ),
+            ];
+        }
+    };
     if !descriptor.exists() {
         return vec![
             Finding::missing(

@@ -314,7 +314,13 @@ impl PlatformRegistry {
     /// when the registry is not installed, or is installed but not
     /// readable by this process.
     pub fn load_installed() -> Result<Self, PlatformRegistryError> {
-        Self::load(Path::new(install_paths::PLATFORM_REGISTRY_DIR))
+        let directory = install_paths::platform_registry_dir().map_err(|detail| {
+            PlatformRegistryError::Unreadable {
+                path: install_paths::PLATFORM_REGISTRY_DIR_ENV.to_string(),
+                detail,
+            }
+        })?;
+        Self::load(&directory)
     }
 
     /// Load the registry from a directory containing `rows/` and

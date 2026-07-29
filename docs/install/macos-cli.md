@@ -73,6 +73,23 @@ default, which makes local commands use that UDS. An explicit `--config`
 argument still has highest precedence; `TENSORPLATE_CLI_CONFIG` remains the
 environment override.
 
+## Packaged runtime discovery
+
+The component formulas link read-only runtime data under:
+
+```text
+$(brew --prefix)/share/tensorplate/platform
+$(brew --prefix)/share/tensorplate/backends/python_pytorch/backend.json
+```
+
+The agent and observability launchd jobs plus the packaged CLI point discovery
+at those prefix-local paths. The agent also passes the Python/PyTorch backend
+module path and the PyTorch formula's private Python interpreter to every
+agent-owned serving worker. Operators do not need to set `PYTHONPATH` or a
+sidecar interpreter in their login shell. The backend descriptor records that
+exact interpreter, so doctor, the startup package probe, and the serving
+worker inspect and launch the same runtime.
+
 ## Logs
 
 launchd output is available at:

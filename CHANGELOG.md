@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Homebrew now links the installed platform registry and Python/PyTorch
+  backend descriptor into its shared prefix, points the descriptor at the
+  formula-managed PyTorch interpreter, and passes the corresponding discovery
+  and Python paths through the agent's launchd service. The agent, CLI, and
+  observability process resolve absolute descriptor and registry directory
+  overrides while retaining the native-package defaults. Python 3.14 joins
+  backend CI and descriptor support to match the current Homebrew PyTorch
+  runtime. (V021-E03-F01-T01, V021-E03-F02-T03)
+
 - The Python/PyTorch sidecar now probes the configured Apple accelerator
   runtime before SmolVLA model dependencies or weights are loaded. Load and
   health responses publish a vendor-neutral runtime capability record with
