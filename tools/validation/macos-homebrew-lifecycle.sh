@@ -252,22 +252,23 @@ stage_candidate_tap() {
   tap_staged=1
 }
 
-wait_for_file() {
-  target="$1"
-  attempts="${2:-30}"
-  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
-    [[ -e "$target" ]] && return 0
-    sleep 1
-  done
-  return 1
-}
-
 wait_for_service() {
   service_name="$1"
   attempts="${2:-30}"
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
     if brew services list | awk -v name="$service_name" \
       '$1 == name && $2 == "started" {found = 1} END {exit !found}'; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_agent_ready() {
+  attempts="${1:-30}"
+  for ((attempt = 1; attempt <= attempts; attempt += 1)); do
+    if tensorplate status --output json >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -428,7 +429,7 @@ start_services() {
   brew services start tensorplate-observability
   wait_for_service tensorplate-agent
   wait_for_service tensorplate-observability
-  wait_for_file "$(brew --prefix)/var/run/tensorplate/agent.sock"
+  wait_for_agent_ready
   [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "660" ]]
   if brew services list | awk '$1 == "tensorplate-serving" {found = 1} END {exit !found}'; then
     die "tensorplate-serving unexpectedly exposes a Homebrew service"
@@ -483,7 +484,7 @@ restart_services() {
   brew services restart tensorplate-observability
   wait_for_service tensorplate-agent
   wait_for_service tensorplate-observability
-  wait_for_file "$(brew --prefix)/var/run/tensorplate/agent.sock"
+  wait_for_agent_ready
   after_agent="$(
     launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
@@ -514,7 +515,7 @@ exercise_crash_loop() {
   agent_config_backup=""
   brew services restart tensorplate-agent
   wait_for_service tensorplate-agent
-  wait_for_file "$(brew --prefix)/var/run/tensorplate/agent.sock"
+  wait_for_agent_ready
   tensorplate status --output json
 }
 
