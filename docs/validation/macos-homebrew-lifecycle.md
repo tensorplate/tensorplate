@@ -41,11 +41,18 @@ Confirm that the baseline command and tap checkout are clean:
 ```bash
 tensorplate version
 git -C "$tap_repo" status --short
+brew trust --formula \
+  tensorplate/tap/tensorplate-agent \
+  tensorplate/tap/tensorplate-backend-python-pytorch \
+  tensorplate/tap/tensorplate-cli \
+  tensorplate/tap/tensorplate-observability \
+  tensorplate/tap/tensorplate-serving
 ```
 
 Before the mutating run, add `--preflight-only` to the command below. The
-preflight writes the host and formula-pin artifacts but does not alter
-packages, tap files, or services.
+preflight writes the host, formula-pin, baseline, and tap-trust artifacts but
+does not alter packages, tap files, or services. The harness disables
+Homebrew's automatic dependency removal for the entire run.
 
 ## Run
 
@@ -102,3 +109,14 @@ Inspect `brew services list`, `tensorplate version`, and the tap worktree
 before continuing. PyTorch and build dependencies may remain installed
 because they can be shared with other formulae; do not remove them
 automatically.
+
+After the run, remove the temporary component trust entries:
+
+```bash
+brew untrust --formula \
+  tensorplate/tap/tensorplate-agent \
+  tensorplate/tap/tensorplate-backend-python-pytorch \
+  tensorplate/tap/tensorplate-cli \
+  tensorplate/tap/tensorplate-observability \
+  tensorplate/tap/tensorplate-serving
+```

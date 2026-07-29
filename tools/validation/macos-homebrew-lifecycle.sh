@@ -347,6 +347,28 @@ print(json.dumps({
 PY
 }
 
+verify_tap_trust() {
+  trust_json="$(brew trust --json=v1)"
+  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
+import json
+import sys
+
+tap_name = sys.argv[1].lower()
+trusted = json.loads(sys.argv[2])
+formula_names = sys.argv[3:]
+trusted_taps = {item.lower() for item in trusted.get("taps", [])}
+trusted_formulae = {item.lower() for item in trusted.get("formulae", [])}
+missing = [
+    f"{tap_name}/{name}"
+    for name in formula_names
+    if tap_name not in trusted_taps and f"{tap_name}/{name}" not in trusted_formulae
+]
+if missing:
+    joined = " ".join(missing)
+    raise SystemExit(f"formula trust is missing; run `brew trust --formula {joined}`")
+PY
+}
+
 record_formula_graph() {
   brew deps --tree "${tap_name}/tensorplate"
   for formula_name in "${FORMULAE[@]}"; do
@@ -356,21 +378,21 @@ record_formula_graph() {
 }
 
 install_candidate_clean() {
-  if formula_is_installed tensorplate; then
-    brew uninstall --formula tensorplate
-  fi
   stage_candidate_tap
   candidate_version="$(
     brew info --json=v2 "${tap_name}/tensorplate" |
       python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])'
   )"
+  record_formula_graph
+  if formula_is_installed tensorplate; then
+    brew uninstall --formula tensorplate
+  fi
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew install --formula "${tap_name}/tensorplate"
   installed="$(brew list --formula --versions tensorplate | awk 'NR == 1 {print $2}')"
   [[ "$installed" == "$candidate_version" ]] ||
     die "candidate install produced ${installed:-missing}; expected ${candidate_version}"
   candidate_active=1
-  record_formula_graph
 }
 
 verify_packaged_closure() {
@@ -581,6 +603,7 @@ PY
 
 export HOMEBREW_NO_AUTO_UPDATE=1
 export HOMEBREW_NO_INSTALL_CLEANUP=1
+export HOMEBREW_NO_AUTOREMOVE=1
 
 tap_repo="$(brew --repository "$tap_name")"
 [[ -d "${tap_repo}/.git" ]] || die "tap repository not found: ${tap_repo}"
@@ -599,6 +622,7 @@ baseline_version="$(brew list --formula --versions tensorplate 2>/dev/null | awk
 run_stage host-facts collect_host_facts
 run_stage formula-pin capture_formula_pin
 run_stage baseline tensorplate version
+run_stage tap-trust verify_tap_trust
 if [[ "$preflight_only" == "1" ]]; then
   write_summary
   trap - EXIT
