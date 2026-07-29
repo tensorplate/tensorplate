@@ -31,7 +31,7 @@ listed for visibility only; no support claim attaches to them.
 
 | Row | OS | CPU | Accelerator | Validated on | Model classes |
 | --- | --- | --- | --- | --- | --- |
-| `ubuntu2404-x86-experimental` | Ubuntu 25.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 24.04 host; smoke validated on GitHub-hosted runners | — |
+| `ubuntu2404-x86-experimental` | Ubuntu 25.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 25.04 host | — |
 
 ## Planned
 

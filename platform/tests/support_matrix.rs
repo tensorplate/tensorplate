@@ -137,7 +137,14 @@ fn an_experimental_row_renders_in_its_own_excluded_section() {
     let mut document: serde_json::Value = serde_json::from_str(&base).expect("row parses");
     document["row_id"] = serde_json::json!("ubuntu2404-x86-experimental");
     document["support_level"] = serde_json::json!("Experimental");
+    // The OS and the environment move together. Bumping only the version
+    // would leave the copied environment describing 24.04, so the fixture
+    // meant to define Experimental rendering would publish a row whose
+    // own two cells disagree — and a future environment-projection
+    // regression could hide behind that inconsistency.
     document["os"]["version"] = serde_json::json!("25.04");
+    document["validation_environment"]["identity"] =
+        serde_json::json!("Any x86_64 Ubuntu 25.04 host");
     let experimental = serde_json::to_string(&document).expect("serialize");
 
     let rows = std::fs::read_dir(repo_path("config/platform/rows"))
