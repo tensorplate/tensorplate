@@ -7,6 +7,7 @@ repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$repo_root"
 
 templates="packaging/homebrew/Formula"
+configs="packaging/homebrew/conf"
 renderer="tools/release/render-homebrew-formulas.sh"
 publisher="tools/release/publish-homebrew-formula.sh"
 tmp="$(mktemp -d)"
@@ -46,6 +47,39 @@ for name in "${expected[@]}"; do
   fi
 done
 
+for name in agent cli observability; do
+  config="${configs}/${name}.json.in"
+  [[ -f "$config" ]] || {
+    printf 'FAIL: missing Homebrew config template %s\n' "$config" >&2
+    exit 1
+  }
+  grep -qF "@HOMEBREW_PREFIX@" "$config"
+  rendered_config="${tmp}/${name}.json"
+  sed "s|@HOMEBREW_PREFIX@|/opt/homebrew|g" "$config" >"$rendered_config"
+  python3 -m json.tool "$rendered_config" >/dev/null
+done
+
+python3 - \
+  "${tmp}/agent.json" \
+  "${tmp}/cli.json" \
+  "${tmp}/observability.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+agent, cli, observability = (json.loads(Path(p).read_text()) for p in sys.argv[1:])
+prefix = "/opt/homebrew"
+
+assert agent["transport"] == "unix_socket"
+assert agent["socket_path"] == f"{prefix}/var/run/tensorplate/agent.sock"
+assert agent["worker"]["serving_binary_path"] == (
+    f"{prefix}/opt/tensorplate-serving/libexec/tensorplate-serving"
+)
+assert cli["profiles"]["local"]["socket_path"] == agent["socket_path"]
+assert cli["log_source"]["path"] == f"{prefix}/var/log/tensorplate/events.ndjson"
+assert observability["diagnostics_retention"]["file_path"] == cli["log_source"]["path"]
+PY
+
 for component in \
   tensorplate-agent \
   tensorplate-serving \
@@ -80,10 +114,26 @@ for component in tensorplate-agent tensorplate-observability; do
   config="${component#tensorplate-}"
   require_service_line "$formula" \
     "    run [opt_bin/\"${component}\", \"--config\", etc/\"tensorplate/${config}.json\"]"
+  require_service_line "$formula" "    working_dir var/\"tensorplate\""
+  require_service_line "$formula" \
+    "    log_path var/\"log/tensorplate/${config}.log\""
+  require_service_line "$formula" \
+    "    error_log_path var/\"log/tensorplate/${config}.error.log\""
   require_service_line "$formula" "    run_at_load true"
   require_service_line "$formula" "    keep_alive successful_exit: false"
   require_service_line "$formula" "    throttle_interval 5"
 done
+
+for component in tensorplate-agent tensorplate-cli tensorplate-observability; do
+  formula="${templates}/${component}.rb"
+  config="${component#tensorplate-}"
+  grep -qF "packaging/homebrew/conf/${config}.json.in" "$formula"
+  grep -qF "(etc/\"tensorplate\").install config => \"${config}.json\"" "$formula"
+  grep -qF "def post_install" "$formula"
+done
+
+grep -qF 'export TENSORPLATE_CLI_CONFIG="#{etc}/tensorplate/cli.json"' \
+  "${templates}/tensorplate-cli.rb"
 
 if service_block "${templates}/tensorplate-serving.rb" | grep -q .; then
   printf 'FAIL: serving worker must not define a Homebrew service\n' >&2

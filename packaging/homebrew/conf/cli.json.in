@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "default_profile": "local",
+  "output": {
+    "mode": "human",
+    "color": "auto"
+  },
+  "timeout_ms": 30000,
+  "log_source": {
+    "kind": "file",
+    "path": "@HOMEBREW_PREFIX@/var/log/tensorplate/events.ndjson",
+    "tail_default": 100
+  },
+  "profiles": {
+    "local": {
+      "mode": "local",
+      "display_name": "this Mac",
+      "description": "Default profile for the locally installed tensorplate-agent.",
+      "socket_path": "@HOMEBREW_PREFIX@/var/run/tensorplate/agent.sock"
+    }
+  }
+}

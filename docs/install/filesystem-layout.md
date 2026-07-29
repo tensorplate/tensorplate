@@ -1,16 +1,20 @@
-# TensorPlate v0.1.0 filesystem layout
+# TensorPlate filesystem layout
 
-This document is the on-device contract owned by packaging. The
-single source of truth for the paths and modes is
+This document is the on-device contract owned by packaging. Linux package
+paths and modes are defined by
 [`protocol/rust/src/install_paths.rs`](../../protocol/rust/src/install_paths.rs);
 the shell sourcing helper at
 [`packaging/scripts/path-constants.sh`](../../packaging/scripts/path-constants.sh)
 mirrors it so maintainer scripts, integration tests, and `tensorplate
-doctor` install probes assert against identical values.
+doctor` install probes assert against identical values. macOS paths are
+prefix-rendered from [`packaging/homebrew/conf/`](../../packaging/homebrew/conf/)
+and enforced by the owning formulas.
 
 Operators reading this doc want to understand: where are configs, where
 is durable state, where do bundles live, what runs as which user, and
 what does `tensorplate doctor` check.
+
+## Linux package layout
 
 ## Users and groups
 
@@ -53,21 +57,51 @@ access is a site policy and is left to the operator.
 | `/run/tensorplate/agent.sock` | `tensorplate:tensorplate` | `0660` | n/a (socket) | Agent control Unix domain socket. Group membership grants CLI access. |
 | `/usr/share/tensorplate/backends/python_pytorch/backend.json` | `root:tensorplate` | `0644` | no | Python/PyTorch backend descriptor. Read by `tensorplate doctor`. |
 
+## macOS Homebrew layout
+
+Homebrew expands `${HOMEBREW_PREFIX}` to its installation prefix
+(`/opt/homebrew` on the supported Apple Silicon installation). Services run
+as the user that invoked `brew services`; no system user or group is created.
+The formula post-install hooks reject symlinked managed paths and fail with
+the exact path and required mode when a directory or file cannot be secured.
+
+| Path | Mode | Owner | Purpose |
+| --- | --- | --- | --- |
+| `${HOMEBREW_PREFIX}/etc/tensorplate/` | `0750` | Homebrew user | Installed runtime configs. |
+| `${HOMEBREW_PREFIX}/etc/tensorplate/agent.json` | `0640` | Homebrew user | UDS, state, staging, and serving-worker paths. |
+| `${HOMEBREW_PREFIX}/etc/tensorplate/observability.json` | `0640` | Homebrew user | Snapshot and structured-diagnostics paths. |
+| `${HOMEBREW_PREFIX}/etc/tensorplate/cli.json` | `0644` | Homebrew user | Local CLI profile; selected by the packaged CLI launcher unless the operator supplies a config. |
+| `${HOMEBREW_PREFIX}/var/tensorplate/` | `0750` | Homebrew user | Durable state root and service working directory. |
+| `${HOMEBREW_PREFIX}/var/tensorplate/state/` | `0750` | Homebrew user | Agent state and the observability snapshot. |
+| `${HOMEBREW_PREFIX}/var/tensorplate/bundles/staging/` | `0750` | Homebrew user | Verified bundle staging. |
+| `${HOMEBREW_PREFIX}/var/tensorplate/worker-configs/` | `0750` | Homebrew user | Agent-rendered serving configs. |
+| `${HOMEBREW_PREFIX}/var/run/tensorplate/` | `0750` | Homebrew user | Runtime directory for the agent control socket. |
+| `${HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock` | `0660` | Homebrew user | Local CLI-to-agent UDS; the agent applies the mode after binding. |
+| `${HOMEBREW_PREFIX}/var/log/tensorplate/` | `0750` | Homebrew user | launchd output and structured diagnostics. |
+| `${HOMEBREW_PREFIX}/var/log/tensorplate/{agent,agent.error,observability,observability.error}.log` | `0640` | Homebrew user | launchd standard output and standard error. |
+| `${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson` | `0640` | Homebrew user | Bounded structured events read by `tensorplate logs`. |
+
+The agent uses the stable
+`${HOMEBREW_PREFIX}/opt/tensorplate-serving/libexec/tensorplate-serving`
+path. This survives formula version changes and keeps the worker out of the
+operator's command path.
+
 ## Network surfaces
 
-The v0.1.0 default install does **not** open any non-loopback port.
+The default install does **not** open any non-loopback port.
 
-- Agent control: Unix domain socket at `/run/tensorplate/agent.sock`.
-  The reserved alternative `loopback_tcp` transport binds to
+- Agent control: Unix domain socket at `/run/tensorplate/agent.sock` for
+  Linux packages or `${HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock` for
+  Homebrew. The reserved alternative `loopback_tcp` transport binds to
   `127.0.0.1` only and rejects any other host in config validation.
 - Serving worker: loopback bind (`127.0.0.1`) on a fixed port owned by
   the agent. The agent rejects non-loopback `serving_bind_host` values
   in process mode.
 - Observability: in-process transport by default. The reserved
-  `unix_socket` listener path lives under `/run/tensorplate/` when
+  `unix_socket` listener stays within the platform runtime directory when
   enabled in a future release.
 
-## What `tensorplate doctor` checks
+## What `tensorplate doctor` checks on Linux packages
 
 For each directory, the `path_layout` family of findings asserts:
 
