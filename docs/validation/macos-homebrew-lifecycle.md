@@ -80,9 +80,11 @@ formula and calls the packaged backend capability probe. The deploy-smoke
 fixture exercises the package-installed `python_pytorch` sidecar boundary
 without claiming that the fixture is a real SmolVLA model.
 
-The offline stage runs the installed doctor and PyTorch MPS probe under a
-macOS sandbox that denies network access. It does not disable the Mac's
-network interface and therefore does not disrupt the operator session.
+The offline stage runs the installed doctor with its agent probe skipped and
+the PyTorch MPS probe under a macOS sandbox that denies network access. The
+agent probe is skipped because the sandbox denies local socket access along
+with external networking. The stage does not disable the Mac's network
+interface and therefore does not disrupt the operator session.
 
 ## Rollback and recovery
 

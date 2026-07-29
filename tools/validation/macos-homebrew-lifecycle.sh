@@ -569,7 +569,7 @@ exercise_crash_loop() {
 
 verify_offline_runtime() {
   profile='(version 1)(allow default)(deny network*)'
-  sandbox-exec -p "$profile" tensorplate doctor --output json
+  sandbox-exec -p "$profile" tensorplate doctor --skip-agent --output json
   sandbox-exec -p "$profile" \
     "$(brew --prefix pytorch)/libexec/bin/python" - <<'PY'
 import json
