@@ -75,6 +75,11 @@ The run is successful only when every stage in `summary.json` is `pass`.
 provisioning identifiers. Review every log for other local-only information
 before attaching the evidence directory to a pull request.
 
+The curated evidence from the completed Apple M1 Pro rehearsal is recorded in
+[`evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json`](./evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json).
+Raw launchctl logs are intentionally excluded because they contain
+operator-local paths and environment values.
+
 The MPS stage uses the Python interpreter inside the Homebrew PyTorch
 formula and calls the packaged backend capability probe. The deploy-smoke
 fixture exercises the package-installed `python_pytorch` sidecar boundary

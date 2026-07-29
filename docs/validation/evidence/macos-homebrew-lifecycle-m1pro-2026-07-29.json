@@ -1,0 +1,90 @@
+{
+  "schema_version": "1",
+  "result": "pass",
+  "started_at": "2026-07-29T23:51:46Z",
+  "finished_at": "2026-07-29T23:55:55Z",
+  "harness_revision": "1f3816c40c43227c4cd79edcb48ef95f384db26e",
+  "candidate": {
+    "declared_version": "0.2.1-rc.1",
+    "formula_count": 6,
+    "source_revision": "10d2f8c5987a09ea2c7393e18aa8110c5a634bf6",
+    "source_url": "https://github.com/tensorplate/tensorplate/archive/10d2f8c5987a09ea2c7393e18aa8110c5a634bf6.tar.gz",
+    "source_sha256": "67e57b75a0bb0f72f537c7486a7f820357c935ca5aedd7845cc0d42699e6089c"
+  },
+  "host": {
+    "architecture": "arm64",
+    "chip": "Apple M1 Pro",
+    "homebrew_version": "6.0.13-107-g9a1cb43",
+    "macos_build": "25F84",
+    "macos_version": "26.5.2",
+    "memory": "16 GB",
+    "model": "MacBook Pro"
+  },
+  "accelerator": {
+    "accelerator_runtime_available": true,
+    "accelerator_runtime_built": true,
+    "accelerator_runtime_version": "26.5.2",
+    "backend_name": "python_pytorch",
+    "framework_version": "2.13.0",
+    "python_version": "3.14.6"
+  },
+  "packaged_runtime": {
+    "formula_graph_closed": true,
+    "doctor_backend_descriptor": "ok",
+    "doctor_backend_runtime": "ok",
+    "agent_state_after_deploy": "ready",
+    "deployment_phase": "active",
+    "fixture_bundle_digest": "sha256:1a49076c2bb804e0540a705a3322ab2b4c9fb15597c8d5a00456f2526bbc9a0b",
+    "filesystem_modes": "pass",
+    "agent_socket_mode": "0660",
+    "launchd_jobs": [
+      "tensorplate-agent",
+      "tensorplate-observability"
+    ],
+    "serving_has_independent_launchd_job": false
+  },
+  "lifecycle": {
+    "clean_install": "pass",
+    "launchd_restart": "pass",
+    "launchd_crash_loop_recovery": "pass",
+    "network_denied_doctor_without_agent_probe": "pass",
+    "network_denied_mps_probe": "pass",
+    "uninstall": "pass",
+    "baseline_version": "0.1.2",
+    "upgrade": "0.1.2 -> 0.2.1-rc.1",
+    "rollback": "0.2.1-rc.1 -> 0.1.2",
+    "state_preserved_across_rollback": true
+  },
+  "stages": [
+    "host-facts",
+    "formula-pin",
+    "baseline",
+    "tap-trust",
+    "clean-install",
+    "packaged-closure",
+    "launchd-start",
+    "mps-capability",
+    "deploy-smoke",
+    "launchd-restart",
+    "launchd-crash-loop",
+    "offline-runtime",
+    "uninstall",
+    "baseline-restore",
+    "upgrade",
+    "rollback",
+    "tap-restored"
+  ],
+  "restored_state": {
+    "baseline_linked_version": "0.1.2",
+    "candidate_services_absent": true,
+    "tap_worktree_clean": true,
+    "temporary_formula_trust_removed": true,
+    "shared_dependency_left_installed": "pytorch 2.13.0"
+  },
+  "scope": {
+    "deploy_input": "checked-in dependency-free fixture bundle",
+    "real_model_claimed": false,
+    "raw_logs_committed": false,
+    "raw_logs_exclusion_reason": "launchctl output contains operator-local paths and environment values"
+  }
+}
