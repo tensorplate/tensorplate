@@ -52,6 +52,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             apt-utils \
+            build-essential \
+            debhelper \
+            dh-exec \
             dpkg-dev \
             gnupg \
             shellcheck
@@ -63,6 +66,17 @@ jobs:
       - name: Release driver checks
         shell: bash
         run: test/release/run.sh
+
+      # Which packages a binary-arch-only build emits is decided by debhelper
+      # from debian/control, and the release workflow's amd64 job depends on
+      # that answer. This runner IS x86_64, so it checks the real thing rather
+      # than reasoning about dpkg semantics. Kept out of run.sh because it
+      # writes .deb files to the repository parent.
+      - name: x86_64 runtime package set
+        shell: bash
+        env:
+          CI: 'true'
+        run: test/packaging/verify_arch_package_set.sh
 
   rehearse:
     name: channel lifecycle rehearsal (arm64)
