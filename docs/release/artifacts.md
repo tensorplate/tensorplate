@@ -5,9 +5,12 @@ TensorPlate public releases publish native Debian package artifacts,
 signature over those checksums. Release pages may also attach validated
 sample bundles, but the required assets are the `.deb` packages, installer,
 artifact manifest, `SHA256SUMS`, and `SHA256SUMS.cosign.bundle`.
-Releases may additionally attach desktop-only `tensorplate-cli` packages
-for architectures such as `amd64`; those assets are consumed by
-`install.sh --cli-only` and are not part of the Jetson runtime package set.
+A release publishes two complete runtime package sets: the primary target
+described by the manifest's `target` block (Jetson `arm64`), and a secondary
+set for Ubuntu `x86_64` built on its own native runner. The manifest's
+`target` block describes the primary target only; every artifact carries its
+own `architecture` and `target_os`, which is what `install.sh` selects on.
+The architecture-independent packages are shared between both sets.
 
 Use these variables in examples:
 
@@ -32,7 +35,7 @@ The release must include one `.deb` asset for each package:
 | `tensorplate-cli` | yes | Operator CLI binary `tensorplate`. |
 | `tensorplate-backend-python-pytorch` | yes | Optional backend package. It does not vendor PyTorch. |
 | `tensorplate-apt-source` | yes | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component. |
-| `tensorplate` | yes | Jetson full-runtime metapackage (arm64 only); empty payload, strict-versioned depends on the runtime set. |
+| `tensorplate` | yes | Full-runtime metapackage, built once per runtime architecture; empty payload, strict-versioned depends on the runtime set. |
 
 Expected asset names follow Debian binary-package naming:
 
@@ -45,7 +48,11 @@ tensorplate-cli_${TP_VERSION}-1_arm64.deb
 tensorplate-backend-python-pytorch_${TP_VERSION}-1_all.deb
 tensorplate-apt-source_${TP_VERSION}-1_all.deb
 tensorplate_${TP_VERSION}-1_arm64.deb
-tensorplate-cli_${TP_VERSION}-1_amd64.deb    # CLI-only desktop asset (required for publish-grade builds)
+tensorplate-agent_${TP_VERSION}-1_amd64.deb          # Ubuntu x86_64 runtime set;
+tensorplate-serving_${TP_VERSION}-1_amd64.deb        # all five are required for
+tensorplate-observability_${TP_VERSION}-1_amd64.deb  # publish-grade builds
+tensorplate-cli_${TP_VERSION}-1_amd64.deb
+tensorplate_${TP_VERSION}-1_amd64.deb
 install.sh
 tensorplate-${TP_TAG}-artifacts.json
 SHA256SUMS
@@ -68,11 +75,18 @@ tools/release/build-release-artifacts.sh \
 ```
 
 The release runner must match the target architecture. The script refuses
-to build `arm64` release packages on a non-`arm64` runner. If a separately
-built desktop `tensorplate-cli` package, such as `amd64`, is pre-staged in
-the repository parent directory with the other Debian outputs, the release
-build copies it into the artifact set and the manifest marks it as a
-desktop CLI asset.
+to build `arm64` release packages on a non-`arm64` runner, which is what
+guarantees the Jetson packages were built on Jetson-class hardware with the
+right SDKs. The secondary Ubuntu `x86_64` set is therefore built by its own
+hosted job and pre-staged in the repository parent directory alongside the
+other Debian outputs; the release build collects it into the artifact set
+and labels it with the `x86_64` target OS. A missing member of that set
+fails the build rather than being silently dropped.
+
+The `x86_64` serving worker is built without the TensorRT adapter — a hosted
+runner has no CUDA/TensorRT SDK, and shipping the adapter without one
+produces a backend that registers and only fails at engine load. The
+`python_pytorch` sidecar path is unaffected and needs no vendor SDK.
 
 For local diagnostics only, the equivalent steps are:
 
@@ -131,6 +145,15 @@ The manifest is JSON with this stable shape:
       "sha256": "<64-hex-digest>"
     },
     {
+      "file": "tensorplate-serving_X.Y.Z-1_amd64.deb",
+      "package": "tensorplate-serving",
+      "version": "X.Y.Z-1",
+      "architecture": "amd64",
+      "target_os": "Ubuntu 22.04 LTS / 24.04 LTS (x86_64)",
+      "size_bytes": 123,
+      "sha256": "<64-hex-digest>"
+    },
+    {
       "file": "install.sh",
       "kind": "installer",
       "version": "X.Y.Z",
@@ -177,8 +200,12 @@ tools/release/tensorplate-release.sh verify \
 Verification fails if the tag is not annotated, a required package is
 missing, manifest metadata drifts from the requested version/tag, or any
 checksum mismatches. The required runtime package set must include the
-target architecture or `all`; additional architecture-specific `.deb`
-assets are currently allowed only for `tensorplate-cli`.
+target architecture or `all`. A second architecture is admitted only for
+the packages that make up the declared secondary runtime set, and on the
+publish path all of them are required: verification asserts by
+`(package, architecture)` pair, so a half-published architecture cannot
+verify clean. Any other foreign-architecture `.deb` is rejected as a
+staging mistake.
 
 ## Signing and Provenance
 

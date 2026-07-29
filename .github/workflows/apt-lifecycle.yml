@@ -5,6 +5,11 @@ name: APT lifecycle
 # failure modes, bootstrap, signed-repo two-command upgrade with state
 # preservation, and staged future-version discovery.
 #
+# Also runs the packaging and release-driver check suites, which otherwise
+# execute only from the runbook or from inside a release build — meaning a
+# regression in release-gating logic would first surface during an actual
+# release.
+#
 # Path-filtered (and not a required check) so it runs only when packaging or
 # release tooling changes.
 
@@ -15,6 +20,7 @@ on:
       - 'tools/release/**'
       - 'tools/validation/**'
       - 'test/packaging/**'
+      - 'test/release/**'
       - '.github/workflows/apt-lifecycle.yml'
   workflow_dispatch:
 
@@ -26,6 +32,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  script-checks:
+    name: packaging + release driver checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Install check dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev shellcheck
+
+      - name: Packaging verification suite
+        shell: bash
+        run: test/packaging/run.sh
+
+      - name: Release driver checks
+        shell: bash
+        run: test/release/run.sh
+
   rehearse:
     name: channel lifecycle rehearsal (arm64)
     runs-on: ubuntu-22.04-arm

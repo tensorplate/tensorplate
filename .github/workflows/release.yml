@@ -114,11 +114,15 @@ jobs:
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
-  build_cli_amd64:
-    name: build amd64 CLI package
+  build_packages_amd64:
+    name: build amd64 runtime packages
     needs: meta
+    # Deliberately jammy, not noble: the runtime packages must install on
+    # both supported Ubuntu x86_64 releases, and glibc's floor is set by the
+    # oldest host a binary must run on. Building on noble would raise the
+    # floor to 2.39 and lock out 22.04, which is a claimed support row.
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
 
@@ -128,7 +132,7 @@ jobs:
         with:
           ref: ${{ needs.meta.outputs.checkout_ref }}
 
-      - name: Install CLI package build dependencies
+      - name: Install amd64 package build dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -136,34 +140,86 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             ca-certificates \
+            clang-15 \
+            cmake \
             debhelper \
             dh-exec \
             dpkg-dev \
             gnupg \
+            llvm-15 \
+            ninja-build \
+            nlohmann-json3-dev \
             pkg-config
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
           rustup show active-toolchain || rustup toolchain install
 
-      - name: Build amd64 CLI binary
-        shell: bash
-        run: cargo build --release --bin tensorplate
-
-      - name: Build tensorplate-cli amd64 package
+      - name: Build amd64 Rust binaries
         shell: bash
         run: |
           set -Eeuo pipefail
-          # The cli-only build profile excludes the runtime services and the
-          # Jetson metapackage, so a binary-arch build produces exactly the
-          # workstation CLI package without the Jetson toolchain.
-          DEB_BUILD_PROFILES=pkg.tensorplate.cli-only packaging/scripts/build-deb.sh -B
-          mkdir -p dist/cli-amd64
-          cp ../tensorplate-cli_*_amd64.deb dist/cli-amd64/
-          dpkg-deb --info dist/cli-amd64/tensorplate-cli_*_amd64.deb
+          cargo build --release \
+            --bin tensorplate-agent \
+            --bin tensorplate-observability \
+            --bin tensorplate
 
-      - name: Upload amd64 CLI package
+      - name: Build amd64 serving worker
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          set -Eeuo pipefail
+          # TensorRT stays OFF. A hosted runner has no CUDA/TensorRT SDK, and
+          # building the adapter without one produces a backend that
+          # registers, passes deploy admission, and only then returns
+          # Unsupported at engine load. Leaving it out means a TensorRT
+          # deploy fails at lookup instead — early, and for the real reason.
+          # The x86_64 deploy-smoke path is the python_pytorch sidecar, which
+          # is unconditional and needs no vendor SDK.
+          cmake -S . -B build/release \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_BUILD_TESTS=OFF \
+            -DTP_BUILD_EXAMPLES=OFF \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            -DTP_ENABLE_TENSORRT=OFF \
+            -DTP_REQUIRE_TENSORRT_SDK=OFF \
+            -DTP_ENABLE_LIBTORCH=OFF \
+            -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON
+          cmake --build build/release --target tp_serving_worker --parallel
+          if [[ -x build/release/serving_worker/tensorplate-serving ]]; then
+            install -m 0755 build/release/serving_worker/tensorplate-serving \
+              build/release/tensorplate-serving
+          fi
+          [[ -x build/release/tensorplate-serving ]] ||
+            { echo "::error::serving worker was not staged at build/release/tensorplate-serving"; exit 1; }
+
+      - name: Build amd64 runtime packages
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # Binary-arch only: the architecture-independent packages
+          # (tensorplate-common, the Python backend, the apt bootstrap) are
+          # shared and are built once by the primary job.
+          packaging/scripts/build-deb.sh -B
+          mkdir -p dist/amd64
+          # Copy per package name rather than a tensorplate-* wildcard:
+          # debhelper auto-generates -dbgsym packages from a RelWithDebInfo
+          # build, and those must not enter the release asset set.
+          for pkg in tensorplate tensorplate-agent tensorplate-serving \
+                     tensorplate-observability tensorplate-cli; do
+            cp "../${pkg}"_*_amd64.deb dist/amd64/
+          done
+          for deb in dist/amd64/*.deb; do
+            dpkg-deb --info "$deb"
+          done
+
+      - name: Upload amd64 runtime packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: tensorplate-cli-amd64-deb
-          path: dist/cli-amd64/*.deb
+          name: tensorplate-amd64-debs
+          path: dist/amd64/*.deb
           if-no-files-found: error
 
   build_sdk_python:
@@ -211,7 +267,7 @@ jobs:
 
   build_packages:
     name: build packages
-    needs: [meta, build_cli_amd64, build_sdk_python]
+    needs: [meta, build_packages_amd64, build_sdk_python]
     runs-on: [self-hosted, linux, ARM64, tensorplate-release]
     timeout-minutes: 120
     permissions:
@@ -282,21 +338,21 @@ jobs:
           }
           rustup show active-toolchain || rustup toolchain install
 
-      - name: Stage amd64 CLI package next to build outputs
+      - name: Stage amd64 runtime packages next to build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: tensorplate-cli-amd64-deb
-          path: ${{ runner.temp }}/cli-amd64
+          name: tensorplate-amd64-debs
+          path: ${{ runner.temp }}/amd64-debs
 
-      # build-release-artifacts.sh collects extra desktop CLI architectures
-      # from the repository parent directory, the same place
+      # build-release-artifacts.sh collects the secondary-architecture
+      # runtime set from the repository parent directory, the same place
       # dpkg-buildpackage drops the arm64 packages.
-      - name: Move amd64 CLI package into release collection scope
+      - name: Move amd64 runtime packages into release collection scope
         shell: bash
         run: |
           set -Eeuo pipefail
-          mv -f "${RUNNER_TEMP}/cli-amd64"/tensorplate-cli_*_amd64.deb ..
-          ls ../tensorplate-cli_*_amd64.deb
+          mv -f "${RUNNER_TEMP}/amd64-debs"/*_amd64.deb ..
+          ls ../*_amd64.deb
 
       - name: Stage tensorplate-python SDK distribution
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -386,8 +442,8 @@ jobs:
           set -Eeuo pipefail
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 9)) || {
-            echo "::error::expected at least nine .deb packages (runtime set, apt-source, metapackage, amd64 CLI) plus install.sh, manifest, and checksums"
+          ((${#deb_assets[@]} >= 13)) || {
+            echo "::error::expected at least thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums"
             find "$RELEASE_DIR" -maxdepth 2 -type f -print
             exit 1
           }
@@ -505,8 +561,8 @@ jobs:
 
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 9)) || {
-            echo "::error::expected at least nine .deb packages (runtime set, apt-source, metapackage, amd64 CLI) plus install.sh, manifest, and checksums"
+          ((${#deb_assets[@]} >= 13)) || {
+            echo "::error::expected at least thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums"
             exit 1
           }
           installer="${RELEASE_DIR}/install.sh"

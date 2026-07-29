@@ -20,6 +20,23 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-apt-source
   tensorplate
 )
+# A release publishes one primary runtime architecture (the target the
+# manifest describes) plus one secondary runtime architecture built on a
+# separate native runner. Every package below is required at the secondary
+# architecture on the publish path, and no other package may appear there:
+# an unlisted foreign-arch .deb is a staging mistake, not an extra asset.
+# The architecture-independent packages are shared and stay `all`.
+readonly SECONDARY_ARCH="amd64"
+readonly SECONDARY_ARCH_PACKAGES=(
+  tensorplate-agent
+  tensorplate-serving
+  tensorplate-observability
+  tensorplate-cli
+  tensorplate
+)
+# The secondary set is built on the oldest LTS it must run on, so its
+# shared-library floor admits both supported Ubuntu releases.
+readonly SECONDARY_TARGET_OS="Ubuntu 22.04 LTS / 24.04 LTS (x86_64)"
 readonly APPROVED_PREPARE_FILES=(
   CMakeLists.txt
   Cargo.toml
@@ -544,11 +561,14 @@ check_artifacts() {
     fi
   done
   if [[ "${ALLOW_SNAPSHOT_VERSION:-0}" -eq 0 ]]; then
-    if find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "tensorplate-cli_*_amd64.deb" | grep -q .; then
-      pass "amd64 desktop CLI artifact exists"
-    else
-      fail "missing required tensorplate-cli amd64 desktop asset in $ARTIFACTS_DIR"
-    fi
+    for pkg in "${SECONDARY_ARCH_PACKAGES[@]}"; do
+      if find "$ARTIFACTS_DIR" -maxdepth 1 -type f \
+        -name "${pkg}_*_${SECONDARY_ARCH}.deb" | grep -q .; then
+        pass "${SECONDARY_ARCH} artifact for $pkg exists"
+      else
+        fail "missing required ${pkg} ${SECONDARY_ARCH} asset in $ARTIFACTS_DIR"
+      fi
+    done
   fi
 
   [[ -f "$MANIFEST" ]] &&
@@ -837,7 +857,9 @@ cmd_cut() {
 }
 
 manifest_python() {
-  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" <<'PY'
+  local secondary_packages
+  secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" "$SECONDARY_ARCH" "${secondary_packages%,}" "$SECONDARY_TARGET_OS" <<'PY'
 import datetime
 import hashlib
 import json
@@ -845,7 +867,12 @@ import re
 import sys
 from pathlib import Path
 
-version, tag, artifacts_dir, manifest_path, checksums_path, target_os, target_arch, commit, branch, validation_report, clean_room_report = sys.argv[1:]
+(
+    version, tag, artifacts_dir, manifest_path, checksums_path, target_os,
+    target_arch, commit, branch, validation_report, clean_room_report,
+    secondary_arch, secondary_packages_raw, secondary_target_os,
+) = sys.argv[1:]
+secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 required = [
     "tensorplate-common",
@@ -870,6 +897,7 @@ def sha256(path):
 artifacts = []
 missing = []
 seen = set()
+secondary_matches = []
 for package in required:
     matches = sorted(root.glob(f"{package}_*.deb"))
     if not matches:
@@ -884,14 +912,23 @@ for package in required:
         arch = match.group("arch")
         if not (package_version == version or package_version.startswith(version + "-")):
             raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
-        if package != "tensorplate-cli" and arch not in (target_arch, "all"):
-            raise SystemExit(f"{path.name}: only tensorplate-cli may publish extra desktop architectures")
+        if arch not in (target_arch, "all"):
+            # A foreign architecture is admissible only for a package that
+            # the secondary runtime set declares. Anything else reaching the
+            # artifacts directory is a staging mistake, and signing it into
+            # the manifest would publish a package nobody built on purpose.
+            if arch != secondary_arch or package not in secondary_packages:
+                raise SystemExit(
+                    f"{path.name}: {package} is not published for architecture {arch}"
+                )
         key = (match.group("package"), arch)
         if key in seen:
             raise SystemExit(f"duplicate artifact for package/architecture: {key[0]} {key[1]}")
         seen.add(key)
         if arch in (target_arch, "all"):
             target_matches.append(path.name)
+        else:
+            secondary_matches.append(package)
         digest = sha256(path)
         artifacts.append(
             {
@@ -899,7 +936,7 @@ for package in required:
                 "package": match.group("package"),
                 "version": package_version,
                 "architecture": arch,
-                "target_os": target_os if arch in (target_arch, "all") else "Debian/Ubuntu desktop CLI",
+                "target_os": target_os if arch in (target_arch, "all") else secondary_target_os,
                 "size_bytes": path.stat().st_size,
                 "sha256": digest,
             }
@@ -949,13 +986,17 @@ for sdk_kind, sdk_pattern in (
     )
 
 snapshot = "~dev." in version or tag.startswith("snapshot-")
-# Releases ship the workstation CLI for Ubuntu AMD64; snapshot builds are
-# single-architecture local-source flows and may omit it.
-if not snapshot and not any(
-    a.get("package") == "tensorplate-cli" and a.get("architecture") == "amd64"
-    for a in artifacts
-):
-    raise SystemExit("release artifact set is missing the required tensorplate-cli amd64 desktop asset")
+# Releases ship a complete second runtime set for Ubuntu x86_64 alongside the
+# primary target; snapshot builds are single-architecture local-source flows
+# and may omit it. Assert the whole set, not a representative member — a
+# partial set would otherwise generate, verify, and publish clean.
+if not snapshot:
+    absent = sorted(secondary_packages - set(secondary_matches))
+    if absent:
+        raise SystemExit(
+            f"release artifact set is missing required {secondary_arch} packages: "
+            + ", ".join(absent)
+        )
 provenance = "local-source-snapshot" if snapshot else "github-release"
 release = {
     "project": "tensorplate",
@@ -1001,13 +1042,19 @@ PY
 }
 
 verify_manifest_python() {
-  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+  local secondary_packages
+  secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  python3 - "$1" "$2" "$3" "$4" "$5" "$SECONDARY_ARCH" "${secondary_packages%,}" <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-version, tag, artifacts_dir, manifest_path, checksums_path = sys.argv[1:]
+(
+    version, tag, artifacts_dir, manifest_path, checksums_path,
+    secondary_arch, secondary_packages_raw,
+) = sys.argv[1:]
+secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 manifest = json.loads(Path(manifest_path).read_text())
 if manifest.get("release", {}).get("version") != version:
@@ -1056,11 +1103,22 @@ missing = sorted(required - present)
 if missing:
     raise SystemExit("manifest is missing packages: " + ", ".join(missing))
 snapshot = "~dev." in version or tag.startswith("snapshot-")
-if not snapshot and not any(
-    artifact.get("package") == "tensorplate-cli" and artifact.get("architecture") == "amd64"
-    for artifact in manifest.get("artifacts", [])
-):
-    raise SystemExit("manifest is missing the required tensorplate-cli amd64 desktop asset")
+if not snapshot:
+    # The package-name check above is architecture-blind: a manifest holding
+    # an arm64 agent and an amd64 serving worker satisfies it. Assert the
+    # secondary runtime set by (package, architecture) so a half-published
+    # architecture cannot verify clean.
+    published = {
+        (artifact.get("package"), artifact.get("architecture"))
+        for artifact in manifest.get("artifacts", [])
+    }
+    absent = sorted(
+        pkg for pkg in secondary_packages if (pkg, secondary_arch) not in published
+    )
+    if absent:
+        raise SystemExit(
+            f"manifest is missing required {secondary_arch} packages: " + ", ".join(absent)
+        )
 if not any(artifact.get("file") == "install.sh" for artifact in manifest.get("artifacts", [])):
     raise SystemExit("manifest is missing install.sh")
 if not snapshot:
@@ -1167,10 +1225,12 @@ cmd_publish() {
     match="$(find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "${pkg}_*.deb" | head -n 1)"
     [[ -n "$match" ]] || die "missing artifact for $pkg"
   done
-  # Package-name checks above accept any architecture; the desktop CLI is
-  # additionally required as an amd64 asset on the publish path.
-  find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "tensorplate-cli_*_amd64.deb" | grep -q . ||
-    die "missing required tensorplate-cli amd64 desktop asset in $ARTIFACTS_DIR"
+  # Package-name checks above accept any architecture; the secondary runtime
+  # set is additionally required per package on the publish path.
+  for pkg in "${SECONDARY_ARCH_PACKAGES[@]}"; do
+    find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "${pkg}_*_${SECONDARY_ARCH}.deb" | grep -q . ||
+      die "missing required ${pkg} ${SECONDARY_ARCH} asset in $ARTIFACTS_DIR"
+  done
   assets+=("${deb_assets[@]}")
   local sdk_assets=("$ARTIFACTS_DIR"/tensorplate_python-*.whl "$ARTIFACTS_DIR"/tensorplate_python-*.tar.gz)
   ((${#sdk_assets[@]} == 2)) ||

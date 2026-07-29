@@ -8,6 +8,55 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Releases now publish a complete Ubuntu x86_64 runtime package set —
+  agent, serving worker, observability service, operator CLI, and the
+  `tensorplate` metapackage — alongside the Jetson arm64 set, instead of
+  an amd64 operator CLI on its own. The optional Python/PyTorch backend
+  and the other architecture-independent packages are shared between
+  both, so an x86_64 host installs the same appliance a Jetson does.
+
+  The packages are built on the **oldest Ubuntu LTS they must run on**,
+  not the newest they target. A shared-library floor is set by the build
+  host, so building on 24.04 would have raised it to a glibc no 22.04
+  machine has and quietly excluded a platform row that claims support.
+
+  The release manifest keeps describing one primary target and gains no
+  second target block. It never needed one: every artifact already
+  carries its own architecture and target OS, and that is what the
+  installer selects on — the same shape the desktop CLI has used all
+  along. What changed is the rule about *which* second-architecture
+  packages may appear. It was "the CLI, and nothing else"; it is now an
+  explicit set that verification asserts by package **and** architecture.
+  The old rule could not tell a complete second architecture from a
+  half-published one, because a name-only check is satisfied by the
+  arm64 sibling of any missing amd64 package. Collection fails loudly on
+  a missing member rather than dropping it, which was previously silent
+  and would have published a green, arm64-only release.
+
+  The x86_64 serving worker ships without the TensorRT adapter. A hosted
+  runner has no CUDA/TensorRT SDK, and building the adapter without one
+  yields a backend that registers, passes deploy admission, and only
+  then fails at engine load. Leaving it out means a TensorRT deploy
+  fails at lookup instead — earlier, and for the real reason. The
+  `python_pytorch` sidecar path is unconditional and unaffected.
+
+  The `tensorplate` metapackage becomes `Architecture: any` rather than
+  arm64-only, so `apt install tensorplate` installs the full runtime on
+  either architecture. It stays architecture-qualified rather than
+  becoming `all` because its strict `= ${binary:Version}` relations bind
+  runtime binaries built in the same run, which are per-architecture.
+  (V021-E02-F01-T01)
+
+- The Python/PyTorch backend descriptor's declared runtime range now
+  admits the 0.2 line, and a packaging check asserts the range brackets
+  the version the tree builds. The upper bound is inert in shipped code
+  today — only the lower bound is compared — but the descriptor schema
+  publicly promises rejection outside the range, and the descriptor is
+  not among the files the release driver rewrites on a version bump, so
+  nothing would have caught it going stale. That is the same drift that
+  already left the Debian changelog a version ahead of
+  `packaging/VERSION`. (V021-E02-F01-T01)
+
 - `tensorplate doctor` gains a host section, and it reports what the
   machine says about itself rather than what the binary was compiled for.
   The old probe read `std::env::consts::ARCH`, which names the *build

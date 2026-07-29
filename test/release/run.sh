@@ -84,8 +84,20 @@ for pkg in \
   tensorplate; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb"
 done
-printf 'fixture artifact for tensorplate-cli desktop\n' > "$tmp/artifacts/tensorplate-cli_0.1.0-1_amd64.deb"
+# The complete x86_64 runtime set ships alongside the arm64 target.
+for pkg in \
+  tensorplate-agent \
+  tensorplate-serving \
+  tensorplate-observability \
+  tensorplate-cli \
+  tensorplate; do
+  printf 'fixture amd64 artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_amd64.deb"
+done
 printf 'fixture installer\n' > "$tmp/artifacts/install.sh"
+# The SDK distribution rides in the same signed manifest, and verify requires
+# it on the publish path.
+printf 'fixture wheel\n' > "$tmp/artifacts/tensorplate_python-0.1.0-py3-none-any.whl"
+printf 'fixture sdist\n' > "$tmp/artifacts/tensorplate_python-0.1.0.tar.gz"
 
 "$script" manifest \
   --version 0.1.0 \
@@ -103,34 +115,91 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 checksums = Path(sys.argv[2]).read_text().splitlines()
 assert manifest["release"]["version"] == "0.1.0"
 assert manifest["release"]["tag"] == "v0.1.0"
-assert len(manifest["artifacts"]) == 10  # 8 packages + desktop CLI + install.sh
-assert len(checksums) == 11  # manifest self-digest + 10 artifacts
+assert len(manifest["artifacts"]) == 16  # 8 primary + 5 amd64 + install.sh + wheel + sdist
+assert len(checksums) == 17  # manifest self-digest + 16 artifacts
 assert any(artifact["file"] == "tensorplate-common_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
 assert any(artifact["file"] == "tensorplate-apt-source_0.1.0-1_all.deb" for artifact in manifest["artifacts"])
 assert any(artifact["file"] == "tensorplate_0.1.0-1_arm64.deb" for artifact in manifest["artifacts"])
-assert any(artifact["file"] == "tensorplate-cli_0.1.0-1_amd64.deb" for artifact in manifest["artifacts"])
+
+# The whole x86_64 runtime set is present, and none of it is mislabelled as
+# a desktop CLI asset: an operator reads target_os to decide what to install.
+amd64 = {a["package"]: a for a in manifest["artifacts"] if a.get("architecture") == "amd64"}
+assert set(amd64) == {
+    "tensorplate-agent",
+    "tensorplate-serving",
+    "tensorplate-observability",
+    "tensorplate-cli",
+    "tensorplate",
+}, sorted(amd64)
+for package, artifact in amd64.items():
+    assert "x86_64" in artifact["target_os"], (package, artifact["target_os"])
+    assert "CLI" not in artifact["target_os"], (package, artifact["target_os"])
+    assert "JetPack" not in artifact["target_os"], (package, artifact["target_os"])
+
+# The primary target block still describes the Jetson arm64 target; the
+# secondary architecture is carried per artifact, exactly as the desktop CLI
+# always was. Consumers keyed on target.architecture must not shift.
+assert manifest["target"]["architecture"] == "arm64"
 PY
 
-# Publish-grade releases require the amd64 desktop CLI: an arm64-only CLI
-# must not satisfy the requirement on either the manifest-generation or
-# the verification path (snapshot flows below stay exempt).
-mkdir -p "$tmp/artifacts-no-amd64"
-cp "$tmp/artifacts/"* "$tmp/artifacts-no-amd64/"
-rm "$tmp/artifacts-no-amd64/tensorplate-cli_0.1.0-1_amd64.deb"
+# A complete two-architecture release artifact set must verify clean. Without
+# this the rejection cases below would still pass if the gate rejected
+# everything.
+"$script" verify \
+  --skip-tag-verify \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --artifacts-dir "$tmp/artifacts" \
+  --manifest "$tmp/tensorplate-v0.1.0-artifacts.json" \
+  --checksums "$tmp/SHA256SUMS" >/dev/null
+
+# Publish-grade releases require the COMPLETE amd64 runtime set. A partial
+# set is the dangerous case: it generates and verifies clean under a rule
+# that only checks one representative package. Drop each member in turn
+# (snapshot flows below stay exempt).
+for missing in \
+  tensorplate-agent \
+  tensorplate-serving \
+  tensorplate-observability \
+  tensorplate-cli \
+  tensorplate; do
+  rm -rf "$tmp/artifacts-partial-amd64"
+  mkdir -p "$tmp/artifacts-partial-amd64"
+  cp "$tmp/artifacts/"* "$tmp/artifacts-partial-amd64/"
+  rm "$tmp/artifacts-partial-amd64/${missing}_0.1.0-1_amd64.deb"
+  if "$script" manifest \
+    --version 0.1.0 \
+    --tag v0.1.0 \
+    --artifacts-dir "$tmp/artifacts-partial-amd64" \
+    --manifest "$tmp/partial-amd64-artifacts.json" \
+    --checksums "$tmp/partial-amd64-SHA256SUMS" >/dev/null 2>&1; then
+    echo "FAIL: manifest must reject a release artifact set without ${missing} amd64" >&2
+    exit 1
+  fi
+done
+
+# A foreign-arch package that the secondary runtime set does not declare is
+# a staging mistake, not a bonus asset. Signing one into the manifest would
+# publish something nobody built on purpose.
+mkdir -p "$tmp/artifacts-stray-arch"
+cp "$tmp/artifacts/"* "$tmp/artifacts-stray-arch/"
+printf 'stray artifact\n' > "$tmp/artifacts-stray-arch/tensorplate-common_0.1.0-1_riscv64.deb"
 if "$script" manifest \
   --version 0.1.0 \
   --tag v0.1.0 \
-  --artifacts-dir "$tmp/artifacts-no-amd64" \
-  --manifest "$tmp/no-amd64-artifacts.json" \
-  --checksums "$tmp/no-amd64-SHA256SUMS" >/dev/null 2>&1; then
-  echo "FAIL: manifest must reject a release artifact set without the amd64 CLI" >&2
+  --artifacts-dir "$tmp/artifacts-stray-arch" \
+  --manifest "$tmp/stray-arch-artifacts.json" \
+  --checksums "$tmp/stray-arch-SHA256SUMS" >/dev/null 2>&1; then
+  echo "FAIL: manifest must reject an undeclared foreign-architecture package" >&2
   exit 1
 fi
 
+# verify's package-name check is architecture-blind: an arm64 serving worker
+# satisfies "tensorplate-serving is present". Strip only the amd64 serving
+# worker — leaving its arm64 sibling in place — and refresh the checksum
+# self-digest, so this exercises the per-architecture gate itself rather
+# than a checksum mismatch or a missing package name.
 python3 - "$tmp/tensorplate-v0.1.0-artifacts.json" "$tmp/SHA256SUMS" <<'PY'
-# Strip the amd64 CLI from an otherwise valid manifest and refresh the
-# checksum self-digest so verification exercises the amd64 gate itself
-# rather than a checksum mismatch.
 import hashlib
 import json
 import sys
@@ -142,8 +211,12 @@ tampered_checksums = checksums_path.with_name("tampered-SHA256SUMS")
 manifest = json.loads(manifest_path.read_text())
 manifest["artifacts"] = [
     a for a in manifest["artifacts"]
-    if not (a.get("package") == "tensorplate-cli" and a.get("architecture") == "amd64")
+    if not (a.get("package") == "tensorplate-serving" and a.get("architecture") == "amd64")
 ]
+assert any(
+    a.get("package") == "tensorplate-serving" and a.get("architecture") == "arm64"
+    for a in manifest["artifacts"]
+), "the arm64 sibling must survive or this tests the wrong rule"
 tampered_manifest.write_text(json.dumps(manifest, indent=2) + "\n")
 digest = hashlib.sha256(tampered_manifest.read_bytes()).hexdigest()
 lines = [f"{digest}  {tampered_manifest.name}\n"]
@@ -157,7 +230,7 @@ if "$script" verify \
   --artifacts-dir "$tmp/artifacts" \
   --manifest "$tmp/tampered-artifacts.json" \
   --checksums "$tmp/tampered-SHA256SUMS" >/dev/null 2>&1; then
-  echo "FAIL: verify must reject a manifest without the amd64 CLI" >&2
+  echo "FAIL: verify must reject a manifest missing the amd64 serving worker" >&2
   exit 1
 fi
 

@@ -3,9 +3,9 @@
 #
 # packaging: tensorplate runtime metapackage linter.
 #
-# Asserts the `tensorplate` metapackage stays an empty, Jetson-arm64-only
-# dependency bundle: strict-versioned depends on the runtime set, no
-# payload, no maintainer scripts, optional Python backend suggested but
+# Asserts the `tensorplate` metapackage stays an empty, architecture-
+# qualified dependency bundle: strict-versioned depends on the runtime set,
+# no payload, no maintainer scripts, optional Python backend suggested but
 # never pulled in, and no dependency on the apt bootstrap package.
 
 set -eu
@@ -22,8 +22,13 @@ if [ -z "${stanza}" ]; then
   echo "FAIL: tensorplate missing Package: stanza in debian/control" >&2
   fail=1
 else
-  if ! printf '%s\n' "${stanza}" | grep -q '^Architecture: arm64$'; then
-    echo "FAIL: tensorplate metapackage must be Architecture: arm64 (not published for AMD64)" >&2
+  # `any`, not `all`: the strict `= ${binary:Version}` relations below bind
+  # per-architecture runtime binaries, so the metapackage must be built in
+  # the same dpkg-buildpackage run as the binaries it pins. `all` would also
+  # offer the package on architectures that have no runtime set, where it
+  # would fail with unsatisfiable dependencies instead of simply not existing.
+  if ! printf '%s\n' "${stanza}" | grep -q '^Architecture: any$'; then
+    echo "FAIL: tensorplate metapackage must be Architecture: any (built per runtime architecture)" >&2
     fail=1
   fi
   if ! printf '%s\n' "${stanza}" | grep -q '^Section: metapackages$'; then
