@@ -72,15 +72,30 @@ for extra in install preinst postinst prerm postrm service conffiles; do
   fi
 done
 
-# Release tooling must require the metapackage in artifact, manifest,
-# and verify lists.
-if ! grep -Eq '^[[:space:]]+tensorplate$' "${repo_root}/tools/release/build-release-artifacts.sh"; then
-  echo "FAIL: build-release-artifacts.sh REQUIRED_PACKAGES must include tensorplate" >&2
-  fail=1
-fi
-if ! grep -Eq '^[[:space:]]+tensorplate$' "${repo_root}/tools/release/tensorplate-release.sh" ||
-   [ "$(grep -c '"tensorplate",' "${repo_root}/tools/release/tensorplate-release.sh")" -lt 2 ]; then
-  echo "FAIL: tensorplate-release.sh must require tensorplate in artifact, manifest, and verify lists" >&2
+# Release tooling must require the metapackage in artifact, manifest, and
+# verify lists. Scope each grep to the array it is about: both scripts now
+# declare more than one package array, and a bare file-wide grep for
+# `tensorplate` is satisfied by any of them — so removing the metapackage
+# from REQUIRED_PACKAGES would go unnoticed.
+array_block() {
+  awk -v name="$2" '
+    $0 ~ ("^readonly " name "=\\(") { inside = 1; next }
+    inside && /^\)/ { exit }
+    inside { print }
+  ' "$1"
+}
+
+for script in build-release-artifacts.sh tensorplate-release.sh; do
+  path="${repo_root}/tools/release/${script}"
+  for array in REQUIRED_PACKAGES SECONDARY_ARCH_PACKAGES; do
+    if ! array_block "${path}" "${array}" | grep -Eq '^[[:space:]]+tensorplate$'; then
+      echo "FAIL: ${script} ${array} must include tensorplate" >&2
+      fail=1
+    fi
+  done
+done
+if [ "$(grep -c '"tensorplate",' "${repo_root}/tools/release/tensorplate-release.sh")" -lt 2 ]; then
+  echo "FAIL: tensorplate-release.sh must require tensorplate in the manifest and verify lists" >&2
   fail=1
 fi
 

@@ -72,6 +72,38 @@ grep -q 'publish-github' docs/release/runbook.md
 grep -q 'gh release edit --draft=false --latest' docs/release/runbook.md
 grep -q 'Protected environments with \*\*required reviewers\*\*' docs/release/runbook.md
 
+# The secondary runtime set is declared in three places: the two release
+# scripts and the copy list in the release workflow's amd64 job. Nothing else
+# makes them agree, and drift is silent in the dangerous direction — a package
+# the workflow stops copying is simply never staged, and collection then fails
+# only at release time.
+array_block() {
+  awk -v name="$2" '
+    $0 ~ ("^readonly " name "=\\(") { inside = 1; next }
+    inside && /^\)/ { exit }
+    inside { print $1 }
+  ' "$1"
+}
+collect_set="$(array_block tools/release/build-release-artifacts.sh SECONDARY_ARCH_PACKAGES | sort)"
+enforce_set="$(array_block tools/release/tensorplate-release.sh SECONDARY_ARCH_PACKAGES | sort)"
+[ -n "$collect_set" ] || { echo "FAIL: SECONDARY_ARCH_PACKAGES not found in build-release-artifacts.sh" >&2; exit 1; }
+if [ "$collect_set" != "$enforce_set" ]; then
+  echo "FAIL: SECONDARY_ARCH_PACKAGES differs between the release scripts" >&2
+  diff <(echo "$collect_set") <(echo "$enforce_set") >&2 || true
+  exit 1
+fi
+workflow_copy_list="$(sed -n '/for pkg in tensorplate /,/^ *done$/p' .github/workflows/release.yml)"
+[ -n "$workflow_copy_list" ] || { echo "FAIL: could not find the amd64 copy list in release.yml" >&2; exit 1; }
+# Normalize everything that is not part of a package name to a single space
+# so line continuations and the loop's trailing `;` do not defeat the match.
+workflow_words=" $(printf '%s' "$workflow_copy_list" | tr -c 'A-Za-z0-9-' ' ' | tr -s ' ') "
+for pkg in $collect_set; do
+  case "$workflow_words" in
+    *" ${pkg} "*) ;;
+    *) echo "FAIL: release.yml's amd64 job does not copy ${pkg}" >&2; exit 1 ;;
+  esac
+done
+
 mkdir -p "$tmp/artifacts"
 for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_all.deb"
@@ -178,19 +210,37 @@ for missing in \
   fi
 done
 
-# A foreign-arch package that the secondary runtime set does not declare is
-# a staging mistake, not a bonus asset. Signing one into the manifest would
-# publish something nobody built on purpose.
+# A package at an architecture the secondary runtime set does not declare is
+# a staging mistake, not a bonus asset. The CLI is the discriminating case:
+# the previous rule let tensorplate-cli publish at ANY extra architecture, so
+# a fixture using any other package would be rejected by the old rule too and
+# would prove nothing about the new one.
 mkdir -p "$tmp/artifacts-stray-arch"
 cp "$tmp/artifacts/"* "$tmp/artifacts-stray-arch/"
-printf 'stray artifact\n' > "$tmp/artifacts-stray-arch/tensorplate-common_0.1.0-1_riscv64.deb"
+printf 'stray artifact\n' > "$tmp/artifacts-stray-arch/tensorplate-cli_0.1.0-1_riscv64.deb"
 if "$script" manifest \
   --version 0.1.0 \
   --tag v0.1.0 \
   --artifacts-dir "$tmp/artifacts-stray-arch" \
   --manifest "$tmp/stray-arch-artifacts.json" \
   --checksums "$tmp/stray-arch-SHA256SUMS" >/dev/null 2>&1; then
-  echo "FAIL: manifest must reject an undeclared foreign-architecture package" >&2
+  echo "FAIL: manifest must reject the CLI at an undeclared architecture" >&2
+  exit 1
+fi
+
+# And a package that is not in the secondary set at all, at the secondary
+# architecture. tensorplate-common is Architecture: all and is shared, so an
+# amd64 build of it means something went wrong in staging.
+mkdir -p "$tmp/artifacts-stray-pkg"
+cp "$tmp/artifacts/"* "$tmp/artifacts-stray-pkg/"
+printf 'stray artifact\n' > "$tmp/artifacts-stray-pkg/tensorplate-common_0.1.0-1_amd64.deb"
+if "$script" manifest \
+  --version 0.1.0 \
+  --tag v0.1.0 \
+  --artifacts-dir "$tmp/artifacts-stray-pkg" \
+  --manifest "$tmp/stray-pkg-artifacts.json" \
+  --checksums "$tmp/stray-pkg-SHA256SUMS" >/dev/null 2>&1; then
+  echo "FAIL: manifest must reject a package outside the secondary runtime set" >&2
   exit 1
 fi
 

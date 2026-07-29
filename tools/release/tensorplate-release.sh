@@ -927,8 +927,14 @@ for package in required:
         seen.add(key)
         if arch in (target_arch, "all"):
             target_matches.append(path.name)
-        else:
-            secondary_matches.append(package)
+        # Independent of the branch above, not an else: when the primary
+        # target IS the secondary architecture, one artifact satisfies both
+        # and an `else` would report the whole secondary set as absent.
+        # Record the name parsed from the filename rather than the required-
+        # list entry, so a malformed sibling like `foo_stale_1.0-1_amd64.deb`
+        # cannot stand in for the package it was globbed under.
+        if arch == secondary_arch:
+            secondary_matches.append(match.group("package"))
         digest = sha256(path)
         artifacts.append(
             {

@@ -215,6 +215,36 @@ jobs:
             dpkg-deb --info "$deb"
           done
 
+      - name: Assert amd64 package closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # dpkg-deb -c reads the real archive, so this is closure evidence
+          # rather than a filename check: the serving binary an operator gets
+          # from the package alone, with no source-tree fallback. Installing
+          # and running it needs a real root and is part of the hardware gate.
+          serving="$(echo dist/amd64/tensorplate-serving_*_amd64.deb)"
+          dpkg-deb -c "$serving" | grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' || {
+            echo "::error::tensorplate-serving amd64 package does not ship /usr/lib/tensorplate/tensorplate-serving"
+            dpkg-deb -c "$serving"
+            exit 1
+          }
+          # The staged binary must be an x86-64 ELF, not an arm64 one that
+          # leaked in from a stale build directory.
+          file build/release/tensorplate-serving | grep -q 'x86-64' || {
+            echo "::error::staged serving worker is not an x86-64 binary"
+            file build/release/tensorplate-serving
+            exit 1
+          }
+          # The metapackage must be an empty dependency bundle on this
+          # architecture too, now that it is built per architecture.
+          meta="$(echo dist/amd64/tensorplate_*_amd64.deb)"
+          if dpkg-deb -c "$meta" | grep -vE '/$' | grep -q .; then
+            echo "::error::the tensorplate metapackage must ship no files"
+            dpkg-deb -c "$meta"
+            exit 1
+          fi
+
       - name: Upload amd64 runtime packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

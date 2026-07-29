@@ -15,11 +15,20 @@ fi
 
 runtime_version="$("${repo_root}/packaging/version.sh")"
 
-# Validate JSON syntax with python3 (always present in our CI).
+# The release line this tree targets. The runtime-range check below asserts
+# the backend admits it, which is what catches a stale upper bound BEFORE
+# packaging/VERSION moves onto the line — at which point the version bracket
+# check catches it too. Update this when the release line moves.
+target_release_line="0.2"
+
+# Validate JSON syntax with python3 (always present in our CI). Values are
+# passed as arguments rather than spliced into the program text.
 if command -v python3 >/dev/null 2>&1; then
-  python3 -c "
+  python3 - "${descriptor}" "${runtime_version}" "${target_release_line}" <<'PY'
 import json, sys
-with open('${descriptor}') as f:
+
+descriptor_path, runtime, release_line = sys.argv[1:]
+with open(descriptor_path) as f:
     d = json.load(f)
 required = ['schema_version', 'backend_name', 'package_name', 'package_version']
 for k in required:
@@ -34,9 +43,10 @@ if py.get('interpreter') and not py['interpreter'].startswith('/'):
     print('python.interpreter must be absolute', file=sys.stderr)
     sys.exit(1)
 
-# The declared runtime range must bracket the version this tree builds.
-# The descriptor is not in the release driver's rewritten-file list, so a
-# version bump leaves it behind unless something fails loudly here.
+# The declared runtime range must admit the release line this tree targets and
+# bracket the version it currently builds. The descriptor is not in the release
+# driver's rewritten-file list, so a version bump leaves it behind unless
+# something fails loudly here.
 def key(v):
     core = v.split('-')[0].split('~')[0]
     return tuple(int(p) if p.isdigit() else 0 for p in core.split('.')[:3])
@@ -52,7 +62,6 @@ if not lo or not hi:
 if key(lo) >= key(hi):
     print(f'tensorplate_runtime_range min {lo} must precede max_exclusive {hi}', file=sys.stderr)
     sys.exit(1)
-runtime = '${runtime_version}'
 if not (key(lo) <= key(runtime) < key(hi)):
     print(
         f'packaging/VERSION {runtime} is outside the declared backend runtime '
@@ -60,8 +69,17 @@ if not (key(lo) <= key(runtime) < key(hi)):
         file=sys.stderr,
     )
     sys.exit(1)
+line_floor = f'{release_line}.0'
+if not (key(lo) <= key(line_floor) < key(hi)):
+    print(
+        f'the {release_line} release line is outside the declared backend runtime '
+        f'range [{lo}, {hi}); the backend must admit the line before the runtime '
+        f'version moves onto it',
+        file=sys.stderr,
+    )
+    sys.exit(1)
 print('descriptor OK:', d['package_name'], d['package_version'], f'[{lo}, {hi})')
-"
+PY
 else
   # Fallback: just check the shape with grep.
   for f in schema_version backend_name package_name package_version; do

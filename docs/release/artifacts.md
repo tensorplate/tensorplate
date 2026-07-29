@@ -200,12 +200,17 @@ tools/release/tensorplate-release.sh verify \
 Verification fails if the tag is not annotated, a required package is
 missing, manifest metadata drifts from the requested version/tag, or any
 checksum mismatches. The required runtime package set must include the
-target architecture or `all`. A second architecture is admitted only for
-the packages that make up the declared secondary runtime set, and on the
-publish path all of them are required: verification asserts by
-`(package, architecture)` pair, so a half-published architecture cannot
-verify clean. Any other foreign-architecture `.deb` is rejected as a
-staging mistake.
+target architecture or `all`. On the publish path every member of the
+secondary runtime set is also required, asserted by `(package,
+architecture)` pair, so a half-published architecture cannot verify clean —
+a name-only check would be satisfied by the primary-architecture sibling of
+a missing package.
+
+Which packages may carry a second architecture at all is decided earlier, at
+manifest generation: only members of the declared secondary runtime set, and
+only at the declared secondary architecture. Any other foreign-architecture
+`.deb` in the artifacts directory aborts manifest generation as a staging
+mistake, so such a file never reaches a manifest for verification to judge.
 
 ## Signing and Provenance
 
@@ -238,8 +243,10 @@ use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
 4. Download that workflow artifact on the validation target and exercise
    the installer locally. Build-only assets are unsigned, so pass
    `--allow-unsigned`: `sudo bash install.sh --allow-unsigned`, `sudo bash
-   install.sh --cli-only --allow-unsigned` when a desktop CLI asset is
-   present, and any optional backend path being released.
+   install.sh --cli-only --allow-unsigned`, and any optional backend path
+   being released. Publish-grade asset sets always carry both runtime
+   architectures, so exercise the installer on an Ubuntu x86_64 target as
+   well as the Jetson one rather than treating x86_64 as conditional.
 5. Push the annotated tag to sign `SHA256SUMS`, record build provenance,
    create the GitHub Release, and attach all assets including
    `SHA256SUMS.cosign.bundle`. Manual `workflow_dispatch publish=true` is
