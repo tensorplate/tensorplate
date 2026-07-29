@@ -8,6 +8,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Apple silicon detection now reads the exact chip identity and unified-memory
+  size from `sysctl`, resolves the observation against the exact platform row,
+  and publishes a vendor-neutral `PlatformCapability`. Its
+  `max_resident_model_memory` is the lesser of detected memory and the row
+  budget. Agent admission applies that ceiling before bundle capacity checks
+  and rejects Planned rows, unsupported chips, unsupported macOS versions, or
+  failed detection before staging and model load. Recorded/spec-authored
+  fixtures cover M1 Pro, M4 Pro, and two unsupported Apple chip identities.
+  (V021-E03-F02-T01, V021-E03-F02-T02)
+
 - Homebrew now installs prefix-rendered agent, CLI, and observability configs,
   secures their config/state/runtime/log paths during post-install, connects
   the packaged CLI to the local agent UDS, and routes launchd output plus

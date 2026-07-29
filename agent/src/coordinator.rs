@@ -45,6 +45,7 @@ use crate::bundle::{
 };
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
+use crate::platform_admission::PlatformAdmission;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
@@ -68,6 +69,7 @@ pub struct Coordinator {
     supervisor: Option<Arc<WorkerSupervisor>>,
     backend_probes: BTreeMap<String, BackendProbeReport>,
     platform_registry: Option<PlatformRegistry>,
+    platform_admission: Option<PlatformAdmission>,
 }
 
 /// Result of a successful deploy/rollback.
@@ -95,6 +97,7 @@ impl Coordinator {
             supervisor: None,
             backend_probes: BTreeMap::new(),
             platform_registry: None,
+            platform_admission: None,
         }
     }
 
@@ -117,6 +120,20 @@ impl Coordinator {
     #[must_use]
     pub fn platform_registry(&self) -> Option<&PlatformRegistry> {
         self.platform_registry.as_ref()
+    }
+
+    /// Attach the platform outcome evaluated at startup.
+    #[must_use]
+    pub fn with_platform_admission(mut self, admission: PlatformAdmission) -> Self {
+        self.platform_admission = Some(admission);
+        self
+    }
+
+    /// The cached platform admission outcome, when this platform has an
+    /// accelerator probe wired for deploy admission.
+    #[must_use]
+    pub fn platform_admission(&self) -> Option<&PlatformAdmission> {
+        self.platform_admission.as_ref()
     }
 
     /// Attach packaging backend probe reports. The agent main calls
@@ -208,6 +225,12 @@ impl Coordinator {
             failure: None,
         };
         self.store.begin_transaction(tx_record)?;
+
+        if let Some(admission) = &self.platform_admission {
+            if let Err(err) = admission.ensure_supported() {
+                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+            }
+        }
 
         // Phase: verified.
         let verified = match verify_with_probes(bundle_path, &self.config, &self.backend_probes) {

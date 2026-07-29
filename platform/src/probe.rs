@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::detect::{identify, HostReport, HostSources};
+use crate::detect::{identify, identify_platform, HostReport, HostSources, PlatformReport};
 use crate::error::PlatformProbeError;
 use crate::identity::{HostIdentity, HostProbe};
 
@@ -163,6 +163,11 @@ impl SystemHostProbe {
             } else {
                 None
             },
+            hw_memsize: if apple {
+                run("sysctl", &["-n", "hw.memsize"], ExitPolicy::Strict)?
+            } else {
+                None
+            },
             gce_machine_type: if commands {
                 self.gce_machine_type()?
             } else {
@@ -178,6 +183,15 @@ impl SystemHostProbe {
     /// As [`crate::detect::identify`].
     pub fn detect(&self) -> Result<HostReport, PlatformProbeError> {
         identify(&self.sources()?)
+    }
+
+    /// Detect the host and accelerator from one source-gathering pass.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::detect::identify_platform`].
+    pub fn detect_platform(&self) -> Result<PlatformReport, PlatformProbeError> {
+        identify_platform(&self.sources()?)
     }
 
     /// The machine type, on machines that have one.

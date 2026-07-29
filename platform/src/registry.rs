@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::install_paths;
 
+use crate::capability::PlatformCapability;
+use crate::detect::PlatformReport;
 use crate::error::PlatformRegistryError;
 use crate::identity::{DetectedPlatform, HostIdentity};
 use crate::reason::PlatformReason;
@@ -613,6 +615,29 @@ impl PlatformRegistry {
                 .reason()
                 .unwrap_or(PlatformReason::UnsupportedAcceleratorSku),
         )
+    }
+
+    /// Resolve a platform observation into its row-bounded memory capability.
+    ///
+    /// A capability exists only for a supported exact row with a matching
+    /// accelerator observation. Planned, experimental, outside-environment,
+    /// and unsupported outcomes never publish an admission limit.
+    #[must_use]
+    pub fn resolved_capability(&self, report: &PlatformReport) -> Option<PlatformCapability> {
+        let detected = report.detected_platform();
+        let RowMatch::Supported(row) = self.resolve(&detected) else {
+            return None;
+        };
+        let observed = report.accelerator.as_ref()?;
+        let declared = row.accelerator()?;
+        debug_assert_eq!(observed.identity.sku, declared.sku);
+        debug_assert_eq!(observed.memory_profile, declared.memory_profile);
+        Some(PlatformCapability::bounded(
+            row.row_id(),
+            declared.memory_profile,
+            observed.memory_bytes,
+            declared.memory_bytes,
+        ))
     }
 }
 

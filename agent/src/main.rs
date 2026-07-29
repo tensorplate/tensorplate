@@ -27,6 +27,7 @@ use tensorplate_agent::{
     backend_detection::{probe_backend, BackendProbeReport, ProbeOptions},
     config::AgentConfig,
     coordinator::Coordinator,
+    platform_admission::PlatformAdmission,
     recovery,
     server::Server,
     state::StateStore,
@@ -36,7 +37,7 @@ use tensorplate_agent::{
     },
     worker,
 };
-use tensorplate_platform::PlatformRegistry;
+use tensorplate_platform::{PlatformRegistry, SystemHostProbe};
 use tensorplate_protocol::install_paths::{BACKEND_DESCRIPTOR_DIR, PLATFORM_REGISTRY_DIR};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -164,6 +165,53 @@ fn load_platform_registry() -> Option<PlatformRegistry> {
     }
 }
 
+fn evaluate_platform_admission(
+    registry: Option<&PlatformRegistry>,
+    config: &mut AgentConfig,
+) -> Option<PlatformAdmission> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let Some(registry) = registry else {
+        return Some(PlatformAdmission::detection_failed(
+            "installed platform registry is unavailable",
+        ));
+    };
+    let admission = match SystemHostProbe::new().detect_platform() {
+        Ok(report) => PlatformAdmission::evaluate(registry, &report),
+        Err(err) => PlatformAdmission::detection_failed(err.to_string()),
+    };
+    admission.apply_memory_limit(config);
+    eprintln!(
+        "platform admission: row={} reason={} max_resident_model_memory={}",
+        admission.row_id().unwrap_or("none"),
+        admission
+            .reason()
+            .map_or("none", tensorplate_platform::PlatformReason::as_str),
+        admission.capability().map_or(
+            0,
+            tensorplate_platform::PlatformCapability::max_resident_model_memory
+        )
+    );
+    Some(admission)
+}
+
+fn load_runtime_config(
+    args: &[String],
+) -> Result<
+    (
+        AgentConfig,
+        Option<PlatformRegistry>,
+        Option<PlatformAdmission>,
+    ),
+    String,
+> {
+    let mut config = load_config(args)?;
+    let registry = load_platform_registry();
+    let admission = evaluate_platform_admission(registry.as_ref(), &mut config);
+    Ok((config, registry, admission))
+}
+
 fn seed_supervisor_from_state(
     supervisor: &WorkerSupervisor,
     store: &StateStore,
@@ -188,8 +236,8 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::SUCCESS;
     }
-    let cfg = match load_config(&args) {
-        Ok(c) => c,
+    let (cfg, platform_registry, platform_admission) = match load_runtime_config(&args) {
+        Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("config error: {err}");
             return ExitCode::from(2);
@@ -219,8 +267,11 @@ fn main() -> ExitCode {
     let backend_probes = probe_available_backends(&cfg);
     let mut coordinator =
         Coordinator::new(cfg.clone(), store.clone(), worker).with_backend_probes(backend_probes);
-    if let Some(registry) = load_platform_registry() {
+    if let Some(registry) = platform_registry {
         coordinator = coordinator.with_platform_registry(registry);
+    }
+    if let Some(admission) = platform_admission {
+        coordinator = coordinator.with_platform_admission(admission);
     }
     if let Some(supervisor) = supervisor.as_ref() {
         coordinator = coordinator.with_supervisor(supervisor.clone());

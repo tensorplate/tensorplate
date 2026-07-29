@@ -1,15 +1,15 @@
 {
-  "row_id": "macos26-m4pro-24gb",
-  "matches_row": true,
+  "row_id": null,
+  "matches_row": false,
   "provenance": "spec_authored",
-  "provenance_note": "Planned row; Apple M4 Pro and 24GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-us/121554); OS version mirrors the M1 Pro lab host",
+  "provenance_note": "Unsupported-chip fixture; Apple M3 Max and 36GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-gb/117736); no support or validation claim is attached",
   "sources": {
     "uname_machine": "arm64",
     "sw_vers_product_name": "macOS",
     "sw_vers_product_version": "26.5.2",
     "sw_vers_build_version": "25F84",
-    "cpu_brand": "Apple M4 Pro",
-    "hw_memsize": "25769803776"
+    "cpu_brand": "Apple M3 Max",
+    "hw_memsize": "38654705664"
   },
   "expect": {
     "architecture": "arm64",

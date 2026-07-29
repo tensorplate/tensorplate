@@ -38,6 +38,7 @@ pub mod config;
 pub mod control;
 pub mod coordinator;
 pub mod error;
+pub mod platform_admission;
 pub mod quarantine;
 pub mod recovery;
 pub mod rollback;
@@ -50,6 +51,7 @@ pub mod worker;
 pub use config::{AgentConfig, BackendCapability, ControlTransport};
 pub use coordinator::Coordinator;
 pub use error::{AgentError, AgentResult};
+pub use platform_admission::PlatformAdmission;
 pub use server::Server;
 pub use state::{StateStore, StateUpdate};
 pub use supervision::{

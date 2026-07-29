@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capability;
 pub mod detect;
 pub mod error;
 pub mod identity;
@@ -37,7 +38,11 @@ pub mod registry;
 pub mod roadmap;
 pub mod row;
 
-pub use detect::{identify, ExactHostFacts, HostReport, HostSources, L4tRelease};
+pub use capability::{AcceleratorObservation, PlatformCapability};
+pub use detect::{
+    identify, identify_platform, ExactHostFacts, HostReport, HostSources, L4tRelease,
+    PlatformReport,
+};
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
