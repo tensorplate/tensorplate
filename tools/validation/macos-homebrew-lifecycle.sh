@@ -145,6 +145,7 @@ baseline_version=""
 candidate_version=""
 candidate_active=0
 agent_config_backup=""
+trust_added=()
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -167,6 +168,12 @@ restore_agent_config() {
   cp "$agent_config_backup" "$(brew --prefix)/etc/tensorplate/agent.json"
   chmod 0640 "$(brew --prefix)/etc/tensorplate/agent.json"
   agent_config_backup=""
+}
+
+restore_formula_trust() {
+  [[ "${#trust_added[@]}" -gt 0 ]] || return 0
+  brew untrust --formula "${trust_added[@]}" >/dev/null 2>&1 || true
+  trust_added=()
 }
 
 formula_is_installed() {
@@ -214,6 +221,7 @@ cleanup() {
     restore_agent_config
     restore_tap
   fi
+  restore_formula_trust
   rm -rf "$work_dir"
   exit "$status"
 }
@@ -368,6 +376,32 @@ if missing:
     joined = " ".join(missing)
     raise SystemExit(f"formula trust is missing; run `brew trust --formula {joined}`")
 PY
+}
+
+ensure_candidate_formula_trust() {
+  trust_json="$(brew trust --json=v1)"
+  missing_formulae=()
+  while IFS= read -r formula_name; do
+    [[ -n "$formula_name" ]] && missing_formulae+=("$formula_name")
+  done < <(
+    python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
+import json
+import sys
+
+tap_name = sys.argv[1].lower()
+trusted = json.loads(sys.argv[2])
+formula_names = sys.argv[3:]
+trusted_taps = {item.lower() for item in trusted.get("taps", [])}
+trusted_formulae = {item.lower() for item in trusted.get("formulae", [])}
+for name in formula_names:
+    full_name = f"{tap_name}/{name}"
+    if tap_name not in trusted_taps and full_name not in trusted_formulae:
+        print(full_name)
+PY
+  )
+  [[ "${#missing_formulae[@]}" -gt 0 ]] || return 0
+  brew trust --formula "${missing_formulae[@]}"
+  trust_added+=("${missing_formulae[@]}")
 }
 
 record_formula_graph() {
@@ -564,6 +598,7 @@ install_baseline() {
 }
 
 upgrade_from_baseline() {
+  ensure_candidate_formula_trust
   stage_candidate_tap
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew upgrade --formula "${tap_name}/tensorplate"
@@ -645,6 +680,7 @@ run_stage upgrade upgrade_from_baseline
 run_stage rollback rollback_to_baseline
 # shellcheck disable=SC2016 # The expression is evaluated by bash -c.
 run_stage tap-restored bash -c '[[ -z "$(git -C "$1" status --porcelain)" ]]' _ "$tap_repo"
+restore_formula_trust
 write_summary
 
 trap - EXIT

@@ -89,7 +89,10 @@ network interface and therefore does not disrupt the operator session.
 The normal run stops both services, removes the candidate graph, restores the
 historical CLI-only formula, and verifies the original version. Homebrew
 preserves `etc` and `var` content across formula removal, and the run asserts
-that a state marker survives the rollback.
+that a state marker survives the rollback. Homebrew removes trust entries for
+formulae that disappear during uninstall; the harness re-adds only those
+missing component entries for the later upgrade stage and removes exactly
+the entries it added before exit.
 
 If the harness is interrupted outside its cleanup path:
 
