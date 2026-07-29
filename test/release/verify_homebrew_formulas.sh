@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
+set -Eeuo pipefail
+
+repo_root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$repo_root"
+
+templates="packaging/homebrew/Formula"
+renderer="tools/release/render-homebrew-formulas.sh"
+publisher="tools/release/publish-homebrew-formula.sh"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+expected=(
+  tensorplate-agent.rb
+  tensorplate-serving.rb
+  tensorplate-cli.rb
+  tensorplate-observability.rb
+  tensorplate-backend-python-pytorch.rb
+  tensorplate.rb
+)
+placeholder_url="https://github.com/tensorplate/tensorplate/archive/refs/tags/v0.0.0.tar.gz"
+placeholder_sha="0000000000000000000000000000000000000000000000000000000000000000"
+release_url="https://github.com/tensorplate/tensorplate/archive/refs/tags/v0.2.1.tar.gz"
+release_sha="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+bash -n "$renderer"
+"$renderer" --help >/dev/null
+
+actual="$(find "$templates" -maxdepth 1 -type f -name '*.rb' -exec basename {} \; | sort)"
+wanted="$(printf '%s\n' "${expected[@]}" | sort)"
+[[ "$actual" == "$wanted" ]] || {
+  printf 'FAIL: formula template set differs from the managed graph\n' >&2
+  exit 1
+}
+
+for name in "${expected[@]}"; do
+  formula="${templates}/${name}"
+  grep -qF "  url \"${placeholder_url}\"" "$formula"
+  grep -qF "  sha256 \"${placeholder_sha}\"" "$formula"
+  if command -v ruby >/dev/null 2>&1; then
+    ruby -c "$formula" >/dev/null
+  fi
+done
+
+for component in \
+  tensorplate-agent \
+  tensorplate-serving \
+  tensorplate-cli \
+  tensorplate-observability \
+  tensorplate-backend-python-pytorch; do
+  grep -qF "depends_on \"${component}\"" "${templates}/tensorplate.rb" || {
+    printf 'FAIL: meta-formula is missing dependency %s\n' "$component" >&2
+    exit 1
+  }
+done
+
+"$renderer" \
+  --source-url "$release_url" \
+  --sha256 "$release_sha" \
+  --output-dir "$tmp/Formula" >/dev/null
+
+for name in "${expected[@]}"; do
+  rendered="${tmp}/Formula/${name}"
+  grep -qF "  url \"${release_url}\"" "$rendered"
+  grep -qF "  sha256 \"${release_sha}\"" "$rendered"
+  if grep -qF "$placeholder_url" "$rendered" ||
+     grep -qF "$placeholder_sha" "$rendered"; then
+    printf 'FAIL: placeholder release data remains in %s\n' "$name" >&2
+    exit 1
+  fi
+done
+
+# Exercise the publisher against a local tap whose meta-formula is already
+# current but whose five component files are absent. This pins the atomic
+# graph behavior: untracked component files must prevent a false no-op.
+printf 'source archive fixture\n' >"${tmp}/source.tar.gz"
+publisher_sha="$(sha256sum "${tmp}/source.tar.gz" | awk '{print $1}')"
+"$renderer" \
+  --source-url "$release_url" \
+  --sha256 "$publisher_sha" \
+  --output-dir "$tmp/current-formulas" >/dev/null
+
+mkdir -p "$tmp/tap-origin/Formula"
+cp "$tmp/current-formulas/tensorplate.rb" "$tmp/tap-origin/Formula/"
+git init -b main "$tmp/tap-origin" >/dev/null
+git -C "$tmp/tap-origin" config user.name "Formula Test"
+git -C "$tmp/tap-origin" config user.email "formula-test@example.invalid"
+git -C "$tmp/tap-origin" add Formula/tensorplate.rb
+git -C "$tmp/tap-origin" commit -m "Seed partial formula graph" >/dev/null
+
+mkdir -p "$tmp/fake-bin"
+cat >"$tmp/fake-bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+output=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "-o" ]]; then
+    output="${2:-}"
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$output" ]]
+cp "$FAKE_TARBALL" "$output"
+EOF
+cat >"$tmp/fake-bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case "${1:-} ${2:-}" in
+  "auth setup-git")
+    exit 0
+    ;;
+  "repo clone")
+    exec "$REAL_GIT" clone --depth=1 "$FAKE_TAP_SOURCE" "${4:-}"
+    ;;
+  "pr list")
+    exit 0
+    ;;
+  "pr create")
+    printf 'https://example.invalid/formula-graph\n'
+    ;;
+  "pr merge")
+    exit 0
+    ;;
+  *)
+    printf 'unexpected fake gh command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$tmp/fake-bin/curl" "$tmp/fake-bin/gh"
+
+GH_TOKEN="fixture" \
+FAKE_TARBALL="${tmp}/source.tar.gz" \
+FAKE_TAP_SOURCE="${tmp}/tap-origin" \
+REAL_GIT="$(command -v git)" \
+PATH="${tmp}/fake-bin:${PATH}" \
+  "$publisher" \
+    --tag v0.2.1 \
+    --source-repo tensorplate/tensorplate \
+    --tap-repo tensorplate/homebrew-tap >/dev/null 2>&1
+
+for name in "${expected[@]}"; do
+  git -C "$tmp/tap-origin" cat-file -e "bump-tensorplate-0.2.1:Formula/${name}"
+done
+
+printf 'homebrew formula template checks green\n'

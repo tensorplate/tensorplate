@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Open (or update) an auto-merge formula-bump pull request in the TensorPlate
+# Open (or update) an auto-merge formula-graph pull request in the TensorPlate
 # Homebrew tap for a released tag. The script computes the source-tarball
-# sha256, rewrites the formula's url + sha256, pushes a branch to the tap, and
-# opens a PR with auto-merge armed so the tap's own CI (audit +
+# sha256, renders every component and meta-formula from the checked-in
+# templates, pushes a branch to the tap, and opens a PR with auto-merge armed
+# so the tap's own CI (audit +
 # build-from-source + `brew test` on Apple Silicon) gates the actual merge.
 #
 # Completion means "PR opened with auto-merge armed", not "merged": go-live is
@@ -30,8 +31,9 @@ Options:
                             Defaults to tensorplate/tensorplate.
   --tap-repo OWNER/REPO     Homebrew tap repository. Defaults to
                             tensorplate/homebrew-tap.
-  --formula-path PATH       Formula file within the tap. Defaults to
-                            Formula/tensorplate.rb.
+  --formula-path PATH       Compatibility option naming the meta-formula path
+                            in the tap. The complete graph is rendered beside
+                            it. Defaults to Formula/tensorplate.rb.
   --help|-h                 Show this help.
 
 Environment:
@@ -67,10 +69,21 @@ done
 [[ -n "$TAG" ]] || die "--tag is required"
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
   die "the Homebrew tap only tracks final vX.Y.Z releases; got '$TAG'"
+[[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+  die "--source-repo must be OWNER/REPO"
+[[ "$TAP_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+  die "--tap-repo must be OWNER/REPO"
+[[ "$FORMULA_PATH" =~ ^[A-Za-z0-9._/-]+$ && "$FORMULA_PATH" != /* &&
+  "$FORMULA_PATH" != *".."* && "$(basename "$FORMULA_PATH")" == "tensorplate.rb" ]] ||
+  die "--formula-path must be a relative path ending in tensorplate.rb"
 [[ -n "${GH_TOKEN:-}" ]] || die "GH_TOKEN must be set to a tap-scoped token"
 for tool in gh git curl sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "required command not found: $tool"
 done
+
+script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+renderer="${script_dir}/render-homebrew-formulas.sh"
+[[ -x "$renderer" ]] || die "formula renderer is missing or not executable: $renderer"
 
 version="${TAG#v}"
 tarball_url="https://github.com/${SOURCE_REPO}/archive/refs/tags/${TAG}.tar.gz"
@@ -92,39 +105,36 @@ note "cloning ${TAP_REPO}"
 gh repo clone "$TAP_REPO" "$tap_dir" -- --depth=1 >/dev/null 2>&1 ||
   die "could not clone ${TAP_REPO} (token scope?)"
 
-formula="${tap_dir}/${FORMULA_PATH}"
-[[ -f "$formula" ]] || die "formula not found in tap: ${FORMULA_PATH}"
-
-note "rewriting ${FORMULA_PATH} url + sha256"
-# Replace the top-level release url and sha256 lines (two-space indented).
-# `head "...git"` is left untouched because it does not start with `url `.
-sed -i \
-  -e "s|^\(  url \).*|\1\"${tarball_url}\"|" \
-  -e "s|^\(  sha256 \).*|\1\"${sha256}\"|" \
-  "$formula"
-
-grep -qF "\"${tarball_url}\"" "$formula" || die "url rewrite did not apply"
-grep -qF "\"${sha256}\"" "$formula" || die "sha256 rewrite did not apply"
+formula_path="${FORMULA_PATH%/*}"
+if [[ "$formula_path" == "$FORMULA_PATH" ]]; then
+  formula_path="."
+fi
+note "rendering the complete formula graph into ${formula_path}"
+"$renderer" \
+  --source-url "$tarball_url" \
+  --sha256 "$sha256" \
+  --output-dir "${tap_dir}/${formula_path}" >/dev/null
 
 git -C "$tap_dir" config user.name "tensorplate-release-bot"
 git -C "$tap_dir" config user.email "release-bot@users.noreply.github.com"
+git -C "$tap_dir" add "$formula_path"
 
-if git -C "$tap_dir" diff --quiet -- "$FORMULA_PATH"; then
-  note "formula already points at ${TAG}; nothing to publish"
+if git -C "$tap_dir" diff --cached --quiet -- "$formula_path"; then
+  note "formula graph already points at ${TAG}; nothing to publish"
   exit 0
 fi
 
 branch="bump-tensorplate-${version}"
-title="tensorplate ${version}"
-body="Automated formula bump to \`${TAG}\` from the TensorPlate release pipeline.
+title="tensorplate formula graph ${version}"
+body="Automated component and meta-formula bump to \`${TAG}\` from the TensorPlate release pipeline.
 
 - url: ${tarball_url}
 - sha256: ${sha256}
+- formulas: tensorplate-agent, tensorplate-serving, tensorplate-cli, tensorplate-observability, tensorplate-backend-python-pytorch, tensorplate
 
 Auto-merge is armed; the tap CI (audit + build-from-source + \`brew test\` on Apple Silicon) gates the merge."
 
 git -C "$tap_dir" checkout -b "$branch"
-git -C "$tap_dir" add "$FORMULA_PATH"
 git -C "$tap_dir" commit -m "$title" >/dev/null
 note "pushing ${branch} to ${TAP_REPO}"
 # Plain force-push: this branch is owned entirely by the release automation

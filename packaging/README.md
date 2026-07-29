@@ -37,6 +37,9 @@ packaging/
 │   ├── tensorplate.sources         Deb822 stable-channel source installed to /etc/apt/sources.list.d/.
 │   └── tensorplate-archive-keyring.asc  Armored archive key, dearmored into the package at build time.
 ├── conf/                           Default config installed under /etc/tensorplate/.
+├── homebrew/                       Source formula graph for the macOS Homebrew tap.
+│   ├── Formula/                    Five component formulas plus the tensorplate meta-formula.
+│   └── README.md                   Rendering and validation notes.
 ├── scripts/                        Shared helpers used by maintainer scripts and tests.
 │   ├── install.sh                  Release installer published with GitHub Release assets.
 │   ├── build-install-from-source.sh Build/install unreleased branch snapshots through install.sh.
@@ -62,6 +65,12 @@ Installing it later makes the Python module + console entrypoint
 discoverable by the descriptor interpreter; after PyTorch is installed
 and the agent is restarted, SmolVLA-class deploys can pass the startup
 backend probe.
+
+The Homebrew graph mirrors the five appliance components and keeps the
+existing `tensorplate` install name as a meta-formula. Release automation
+renders every formula from the same source tag and checksum, then proposes
+the graph as one tap change. Service definitions and macOS-specific paths are
+layered onto these templates with their owning runtime changes.
 
 ## Building
 
