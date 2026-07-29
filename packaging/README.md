@@ -69,8 +69,10 @@ backend probe.
 The Homebrew graph mirrors the five appliance components and keeps the
 existing `tensorplate` install name as a meta-formula. Release automation
 renders every formula from the same source tag and checksum, then proposes
-the graph as one tap change. Service definitions and macOS-specific paths are
-layered onto these templates with their owning runtime changes.
+the graph as one tap change. The agent and observability formulas define
+independent launchd jobs; serving deliberately has no job because the agent
+owns its lifecycle. macOS-specific paths are layered onto these templates
+with their owning runtime changes.
 
 ## Building
 

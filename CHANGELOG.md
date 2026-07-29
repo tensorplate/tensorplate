@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Homebrew installs launchd service definitions for the agent and
+  observability processes. Both start when loaded, restart after unsuccessful
+  exits with launchd throttling, and remain independent; the serving worker
+  deliberately has no launchd job because the agent retains its bounded
+  restart and crash-loop ownership. (V021-E03-F01-T02)
+
 - Homebrew packaging templates now cover the complete macOS appliance:
   agent, serving worker, CLI, observability, and the Python/PyTorch backend,
   with `tensorplate` retained as the meta-formula so existing installs have a

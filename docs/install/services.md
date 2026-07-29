@@ -1,8 +1,10 @@
-# TensorPlate v0.1.0 systemd services
+# TensorPlate service supervision
 
 This page is the packaging service lifecycle contract.
 
-## What is installed
+## Linux systemd services
+
+### What is installed
 
 | Unit | Package | Type | Notes |
 | --- | --- | --- | --- |
@@ -14,7 +16,7 @@ runs only as a child of the agent. Operators that try
 `systemctl start tensorplate-serving` get `Unit not found` — that is the
 intended behavior.
 
-## Enable / start
+### Enable / start
 
 The packages enable the units but do **not** start them at install
 time. After `tensorplate doctor` reports a green pass, run:
@@ -28,7 +30,7 @@ Either order works: the observability unit declares no dependency on
 the agent so a hung agent does not prevent missing-heartbeat
 detection.
 
-## Restart policy
+### Restart policy
 
 Both units use `Restart=on-failure` with a bounded `RestartSec=5` and
 `StartLimitBurst=5` within `StartLimitIntervalSec=60`. The start-limit
@@ -41,7 +43,7 @@ Inside the agent, V01-E09 supervises the serving worker with its own
 bounded backoff + crash-loop detector. The two layers do not race:
 systemd restarts only the agent process; the agent owns the worker.
 
-## Hardening defaults
+### Hardening defaults
 
 The unit files apply the same default sandbox to both services:
 
@@ -65,14 +67,14 @@ without forking the unit; the v0.1.0 install does not assume any
 non-default loosening (e.g. `MemoryDenyWriteExecute=true` is **not**
 enabled because backend adapters JIT code on some platforms).
 
-## EnvironmentFile
+### EnvironmentFile
 
 Both units source `/etc/default/tensorplate-<unit-name>` if it
 exists. The packages do not ship these files; they are reserved for
 operator overrides (e.g. `RUST_LOG=info`). The leading `-` in
 `EnvironmentFile=-/etc/default/tensorplate-*` makes the file optional.
 
-## Lifecycle expectations
+### Lifecycle expectations
 
 - `systemctl restart tensorplate-agent` triggers a graceful shutdown:
   the agent flushes desired-state, gives the supervised serving
@@ -90,7 +92,7 @@ operator overrides (e.g. `RUST_LOG=info`). The leading `-` in
   restart on `configure`. Operator-visible side effect: the current
   serving worker is stopped and re-warmed by the new agent process.
 
-## Debugging
+### Debugging
 
 ```bash
 systemctl status tensorplate-agent
@@ -103,3 +105,24 @@ The `tensorplate doctor` install probes also surface the same state
 through stable finding IDs (`agent_service_state`,
 `observability_service_state`, `serving_systemd_absent` — see
 `docs/cli/doctor.md`).
+
+## macOS Homebrew services
+
+The Homebrew agent and observability formulas each generate a launchd job.
+They run independently, start when loaded through `brew services`, restart
+after an unsuccessful exit, and use a five-second launch throttle. The stable
+commands are:
+
+```bash
+brew services start tensorplate-agent
+brew services start tensorplate-observability
+brew services list
+```
+
+The serving formula deliberately defines no service. The agent launches the
+formula-installed serving worker for the active deployment and applies the
+same in-process bounded-backoff and crash-loop contract used on Linux.
+
+Homebrew uses the formula's stable `opt_bin` path in each generated service,
+so an upgrade can move the versioned Cellar directory without leaving a
+launchd job pointing at the old keg.
