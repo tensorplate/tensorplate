@@ -47,6 +47,54 @@ brew services restart tensorplate-agent
 brew services restart tensorplate-observability
 ```
 
+## Files, permissions, and local control
+
+All mutable paths live under the active Homebrew prefix. View it with:
+
+```bash
+brew --prefix
+```
+
+The installed configs are under `$(brew --prefix)/etc/tensorplate`, durable
+state is under `$(brew --prefix)/var/tensorplate`, and the agent socket is:
+
+```text
+$(brew --prefix)/var/run/tensorplate/agent.sock
+```
+
+Formula post-install hooks create the required directories with mode `0750`,
+set service configs to `0640`, set the CLI config to `0644`, and fail with the
+affected path if those modes cannot be enforced. The agent binds the socket
+with mode `0660`. Services and the interactive CLI run as the same Homebrew
+user, so no macOS system account or group membership change is required.
+
+The packaged `tensorplate` launcher selects the installed CLI config by
+default, which makes local commands use that UDS. An explicit `--config`
+argument still has highest precedence; `TENSORPLATE_CLI_CONFIG` remains the
+environment override.
+
+## Logs
+
+launchd output is available at:
+
+```text
+$(brew --prefix)/var/log/tensorplate/agent.log
+$(brew --prefix)/var/log/tensorplate/agent.error.log
+$(brew --prefix)/var/log/tensorplate/observability.log
+$(brew --prefix)/var/log/tensorplate/observability.error.log
+```
+
+Structured events are retained at
+`$(brew --prefix)/var/log/tensorplate/events.ndjson` and can be read with:
+
+```bash
+tensorplate logs
+tensorplate logs --follow
+```
+
+See [`filesystem-layout.md`](./filesystem-layout.md) for the complete mode
+contract.
+
 ## Notes and limitations
 
 - **The tap is required.** Plain `brew install tensorplate` without the

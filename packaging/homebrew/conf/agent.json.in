@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "transport": "unix_socket",
+  "socket_path": "@HOMEBREW_PREFIX@/var/run/tensorplate/agent.sock",
+  "state_dir": "@HOMEBREW_PREFIX@/var/tensorplate/state",
+  "staging_dir": "@HOMEBREW_PREFIX@/var/tensorplate/bundles/staging",
+  "available_backends": ["python_pytorch"],
+  "backend_capabilities": {
+    "python_pytorch": {
+      "async": true,
+      "deterministic_latency": true,
+      "control_loop_integration": true,
+      "supported_precision": ["auto", "fp32", "fp16", "bfloat16"],
+      "supported_artifact_kinds": ["python_pytorch_entry", "weights", "tokenizer"]
+    }
+  },
+  "device_family": "any",
+  "worker": {
+    "mode": "process",
+    "serving_binary_path": "@HOMEBREW_PREFIX@/opt/tensorplate-serving/libexec/tensorplate-serving",
+    "serving_config_dir": "@HOMEBREW_PREFIX@/var/tensorplate/worker-configs",
+    "serving_bind_host": "127.0.0.1",
+    "serving_bind_port": 18080,
+    "serving_candidate_bind_port": 18081
+  }
+}

@@ -71,8 +71,9 @@ existing `tensorplate` install name as a meta-formula. Release automation
 renders every formula from the same source tag and checksum, then proposes
 the graph as one tap change. The agent and observability formulas define
 independent launchd jobs; serving deliberately has no job because the agent
-owns its lifecycle. macOS-specific paths are layered onto these templates
-with their owning runtime changes.
+owns its lifecycle. Prefix-rendered configs, state, runtime socket, and log
+paths are installed from `packaging/homebrew/conf/`; formula post-install
+checks enforce their modes before a service can be started.
 
 ## Building
 

@@ -10,8 +10,13 @@ The agent and observability templates also define independent Homebrew
 services. Each starts when its launchd job is loaded, restarts after an
 unsuccessful exit, and uses a five-second launch throttle. The serving worker
 has no service definition: the agent owns and supervises that process.
-macOS filesystem paths, installed configuration, and post-install behavior
-are layered onto these templates by their owning runtime changes.
+
+`conf/` contains the three prefix-rendered runtime configs. The owning
+component formula installs each config under Homebrew's `etc/tensorplate`,
+creates its required state, runtime, and log directories under Homebrew's
+`var`, and fails post-install if it cannot enforce the documented modes.
+Agent and observability service output is routed to `var/log/tensorplate`;
+structured diagnostics use `events.ndjson`.
 
 Validate the templates and renderer locally with:
 

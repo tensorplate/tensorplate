@@ -19,6 +19,15 @@ fn packaging_config_path() -> PathBuf {
         .join("observability.json")
 }
 
+fn homebrew_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("packaging")
+        .join("homebrew")
+        .join("conf")
+        .join("observability.json.in")
+}
+
 #[test]
 fn shipped_observability_config_parses_and_validates() {
     let raw = fs::read_to_string(packaging_config_path()).expect("read observability.json");
@@ -43,4 +52,27 @@ fn shipped_observability_config_parses_and_validates() {
     // layout.
     let snap_path = cfg.snapshot.path.as_ref().expect("snapshot.path set");
     assert!(snap_path.starts_with(tensorplate_protocol::install_paths::STATE_INNER_DIR));
+}
+
+#[test]
+fn homebrew_observability_config_uses_prefix_local_state_and_logs() {
+    let p = homebrew_config_path();
+    let raw = fs::read_to_string(p)
+        .expect("read Homebrew observability config")
+        .replace("@HOMEBREW_PREFIX@", "/opt/homebrew");
+    let cfg = ObservabilityConfig::parse_json(&raw)
+        .expect("Homebrew observability config should validate");
+
+    assert_eq!(
+        cfg.snapshot.path.as_deref(),
+        Some(std::path::Path::new(
+            "/opt/homebrew/var/tensorplate/state/observability-snapshot.json"
+        ))
+    );
+    assert_eq!(
+        cfg.diagnostics_retention.file_path.as_deref(),
+        Some(std::path::Path::new(
+            "/opt/homebrew/var/log/tensorplate/events.ndjson"
+        ))
+    );
 }

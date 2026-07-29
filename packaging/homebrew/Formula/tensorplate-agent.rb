@@ -13,10 +13,33 @@ class TensorplateAgent < Formula
 
   def install
     system "cargo", "install", *std_cargo_args(path: "agent")
+
+    config = buildpath/"packaging/homebrew/conf/agent.json.in"
+    inreplace config, "@HOMEBREW_PREFIX@", HOMEBREW_PREFIX
+    (etc/"tensorplate").install config => "agent.json"
+  end
+
+  def post_install
+    [
+      etc/"tensorplate",
+      var/"tensorplate",
+      var/"tensorplate/state",
+      var/"tensorplate/bundles",
+      var/"tensorplate/bundles/staging",
+      var/"tensorplate/worker-configs",
+      var/"run/tensorplate",
+      var/"log/tensorplate",
+    ].each { |path| secure_directory(path) }
+    secure_file(etc/"tensorplate/agent.json", 0640)
+    secure_log(var/"log/tensorplate/agent.log")
+    secure_log(var/"log/tensorplate/agent.error.log")
   end
 
   service do
     run [opt_bin/"tensorplate-agent", "--config", etc/"tensorplate/agent.json"]
+    working_dir var/"tensorplate"
+    log_path var/"log/tensorplate/agent.log"
+    error_log_path var/"log/tensorplate/agent.error.log"
     run_at_load true
     keep_alive successful_exit: false
     throttle_interval 5
@@ -24,5 +47,43 @@ class TensorplateAgent < Formula
 
   test do
     assert_match version.to_s, shell_output("#{bin}/tensorplate-agent --version")
+    assert_predicate etc/"tensorplate/agent.json", :file?
+    assert_equal 0640, (etc/"tensorplate/agent.json").stat.mode & 0777
+    assert_equal 0750, (var/"run/tensorplate").stat.mode & 0777
+    assert_match "#{HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock",
+                 (etc/"tensorplate/agent.json").read
+  end
+
+  private
+
+  def secure_directory(path)
+    odie "TensorPlate path #{path} must not be a symlink" if path.symlink?
+
+    path.mkpath
+    path.chmod 0750
+    actual = path.stat.mode & 0777
+    return if path.directory? && actual == 0750
+
+    odie "TensorPlate requires directory #{path} with mode 0750; found #{format("%04o", actual)}"
+  rescue SystemCallError => e
+    odie "TensorPlate could not secure directory #{path}: #{e.message}"
+  end
+
+  def secure_file(path, mode)
+    odie "TensorPlate path #{path} must be a regular file" unless path.file?
+    odie "TensorPlate path #{path} must not be a symlink" if path.symlink?
+
+    path.chmod mode
+    actual = path.stat.mode & 0777
+    return if actual == mode
+
+    odie "TensorPlate requires file #{path} with mode #{format("%04o", mode)}; found #{format("%04o", actual)}"
+  rescue SystemCallError => e
+    odie "TensorPlate could not secure file #{path}: #{e.message}"
+  end
+
+  def secure_log(path)
+    path.write("") unless path.exist?
+    secure_file(path, 0640)
   end
 end

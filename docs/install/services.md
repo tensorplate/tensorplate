@@ -120,9 +120,11 @@ brew services list
 ```
 
 The serving formula deliberately defines no service. The agent launches the
-formula-installed serving worker for the active deployment and applies the
-same in-process bounded-backoff and crash-loop contract used on Linux.
+formula-installed serving worker for the active deployment and remains its
+sole process owner.
 
 Homebrew uses the formula's stable `opt_bin` path in each generated service,
 so an upgrade can move the versioned Cellar directory without leaving a
-launchd job pointing at the old keg.
+launchd job pointing at the old keg. Standard output and standard error are
+routed to the paths documented in
+[`filesystem-layout.md`](./filesystem-layout.md).

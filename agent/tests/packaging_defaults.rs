@@ -20,6 +20,15 @@ fn packaging_agent_config_path() -> PathBuf {
         .join("agent.json")
 }
 
+fn homebrew_agent_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("packaging")
+        .join("homebrew")
+        .join("conf")
+        .join("agent.json.in")
+}
+
 #[test]
 fn shipped_agent_config_parses_and_validates() {
     let p = packaging_agent_config_path();
@@ -109,4 +118,32 @@ fn shipped_agent_config_is_loopback_only() {
         )),
         "process worker must launch the package-installed serving binary"
     );
+}
+
+#[test]
+fn homebrew_agent_config_uses_prefix_local_paths() {
+    let p = homebrew_agent_config_path();
+    let raw = fs::read_to_string(p)
+        .expect("read Homebrew agent config")
+        .replace("@HOMEBREW_PREFIX@", "/opt/homebrew");
+    let cfg = AgentConfig::parse_json(&raw).expect("Homebrew agent config should validate");
+
+    assert_eq!(cfg.transport, ControlTransport::UnixSocket);
+    assert_eq!(
+        cfg.socket_path.as_deref(),
+        Some(std::path::Path::new(
+            "/opt/homebrew/var/run/tensorplate/agent.sock"
+        ))
+    );
+    assert!(cfg.state_dir.starts_with("/opt/homebrew/var/tensorplate"));
+    assert!(cfg.staging_dir.starts_with("/opt/homebrew/var/tensorplate"));
+    assert_eq!(cfg.worker.mode, WorkerControlMode::Process);
+    assert_eq!(
+        cfg.worker.serving_binary_path.as_deref(),
+        Some(std::path::Path::new(
+            "/opt/homebrew/opt/tensorplate-serving/libexec/tensorplate-serving"
+        ))
+    );
+    assert_eq!(cfg.available_backends, ["python_pytorch"]);
+    assert!(cfg.supervision.is_none());
 }
