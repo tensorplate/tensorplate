@@ -81,12 +81,16 @@ if not (key(lo) <= key(line_floor) < key(hi)):
 print('descriptor OK:', d['package_name'], d['package_version'], f'[{lo}, {hi})')
 PY
 else
-  # Fallback: just check the shape with grep.
-  for f in schema_version backend_name package_name package_version; do
+  # Fallback: just check the shape with grep. The range comparison needs a
+  # version parser, so this path can only assert the fields exist — say so
+  # rather than printing a plain ok that reads like the full check ran.
+  for f in schema_version backend_name package_name package_version \
+           tensorplate_runtime_range max_exclusive; do
     if ! grep -q "\"${f}\"" "${descriptor}"; then
       echo "FAIL: descriptor missing field ${f}" >&2
       exit 1
     fi
   done
-  echo "verify_descriptor: ok (grep fallback; python3 not installed)"
+  echo "verify_descriptor: fields present (grep fallback; python3 not installed" \
+       "— the runtime-range bracket check did NOT run)"
 fi
