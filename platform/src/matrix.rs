@@ -17,6 +17,21 @@
 
 use std::fmt::Write as _;
 
+/// Escape a value for a Markdown table cell.
+///
+/// Several row fields are free prose the schema does not constrain —
+/// `validation_environment.identity`, accelerator family and SKU, model
+/// class row names. An unescaped pipe in any of them ends the cell early,
+/// shifting every value after it one column left, so a reader sees a
+/// support claim attached to the wrong field. This is a published document
+/// derived from committed JSON, so the escaping has to happen here rather
+/// than relying on authors.
+fn cell(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace(['\n', '\r'], " ")
+}
+
 use crate::registry::PlatformRegistry;
 use crate::roadmap::RoadmapTarget;
 use crate::row::{PlatformSupportRow, SupportLevel};
@@ -109,10 +124,10 @@ fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_cl
         out.push_str("| --- | --- | --- | --- | --- |\n");
     }
     for row in rows {
-        let os = match &row.os().image_identity {
+        let os = cell(&match &row.os().image_identity {
             Some(image) => format!("{} {} ({image})", row.os().name, row.os().version),
             None => format!("{} {}", row.os().name, row.os().version),
-        };
+        });
         let vendors = row
             .cpu()
             .vendors
@@ -123,7 +138,7 @@ fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_cl
         let cpu = format!("{} ({vendors})", row.cpu().architecture.as_str());
         let accelerator = row
             .accelerator()
-            .map_or_else(|| "none".to_string(), |a| a.sku.clone());
+            .map_or_else(|| "none".to_string(), |a| cell(&a.sku));
         let environment = validated_on(row);
         if with_model_classes {
             let _ = writeln!(
@@ -155,7 +170,7 @@ fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_cl
 fn validated_on(row: &PlatformSupportRow) -> String {
     match &row.validation_environment().machine_type {
         Some(machine_type) => format!("`{machine_type}` only"),
-        None => row.validation_environment().identity.clone(),
+        None => cell(&row.validation_environment().identity),
     }
 }
 
@@ -168,7 +183,7 @@ fn model_classes(row: &PlatformSupportRow) -> String {
         .map(|pointer| {
             format!(
                 "`{}` ({})",
-                pointer.model_class_row,
+                cell(&pointer.model_class_row),
                 pointer.support_level.as_str()
             )
         })
@@ -197,9 +212,9 @@ fn write_roadmap_section(out: &mut String, targets: &[&RoadmapTarget]) {
             out,
             "| `{}` — {} | {} | {} |",
             target.target_id(),
-            target.target(),
-            target.intended_release(),
-            target.blocking_dependency()
+            cell(target.target()),
+            cell(target.intended_release()),
+            cell(target.blocking_dependency())
         );
     }
 }

@@ -76,8 +76,16 @@ That file is generated from `config/platform/` and guarded by a golden
 test, so the platforms a release claims are the rows `doctor` matches and
 deploy admission enforces. Prose restating them drifts, and a release note
 that overstates supported hardware is a documented release blocker below.
-Regenerate after any row change with
-`UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
+A row change invalidates more than this one file, so regenerate both
+goldens after any edit under `config/platform/`:
+
+```
+UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix
+UPDATE_GOLDEN=1 cargo test -p tensorplate-cli --test doctor_host_section
+```
+
+The second guards the `doctor` host section, whose candidate lists change
+whenever a row is added, removed, or rescoped.
 Then
 validate with `prepare --version X.Y.Z --dry-run` and `test/release/run.sh`.
 `preflight`/`cut` run `check_version_files`, which fails closed on any stale

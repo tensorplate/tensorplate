@@ -190,10 +190,56 @@ fn an_experimental_row_renders_in_its_own_excluded_section() {
         rendered.contains("Experimental rows are **not** supported combinations"),
         "the section says so in words, not only by placement"
     );
+    // Derived, not hard-coded: the documented regeneration step is run
+    // exactly when the registry changes, so a literal here would make that
+    // step fail on the one change that requires it — rewriting the goldens
+    // and then exiting non-zero on an unrelated assertion.
+    let baseline = committed_registry().supported_rows().count();
     assert_eq!(
         registry.supported_rows().count(),
-        7,
+        baseline,
         "an experimental row must not change the supported total"
     );
-    assert!(rendered.contains("7 supported combination(s)"));
+    assert!(rendered.contains(&format!("{baseline} supported combination(s)")));
+}
+
+#[test]
+fn a_pipe_in_free_prose_cannot_forge_a_table_cell() {
+    // `validation_environment.identity` and the accelerator SKU are free
+    // prose the schema does not constrain. An unescaped pipe ends the cell
+    // early, shifting every later value one column left, so a reader sees
+    // a support claim attached to the wrong field.
+    let base = std::fs::read_to_string(repo_path("config/platform/rows/ubuntu2404-x86-cpu.json"))
+        .expect("read a committed row");
+    let mut document: serde_json::Value = serde_json::from_str(&base).expect("row parses");
+    document["row_id"] = serde_json::json!("ubuntu2404-x86-hostile");
+    document["os"]["version"] = serde_json::json!("25.10");
+    document["validation_environment"]["identity"] =
+        serde_json::json!("8x H100 | 2TB RAM | Production ready");
+    let hostile = serde_json::to_string(&document).expect("serialize");
+
+    let path = PathBuf::from("rows/ubuntu2404-x86-hostile.json");
+    let registry =
+        PlatformRegistry::from_documents([(path.as_path(), hostile.as_str())], std::iter::empty())
+            .expect("the row loads");
+
+    let rendered = render_support_matrix(&registry);
+    let row_line = rendered
+        .lines()
+        .find(|line| line.contains("ubuntu2404-x86-hostile"))
+        .expect("the row renders");
+    assert_eq!(
+        row_line.matches(" | ").count(),
+        rendered
+            .lines()
+            .find(|line| line.starts_with("| Row |"))
+            .expect("a header")
+            .matches(" | ")
+            .count(),
+        "the row must have exactly the header's column count: {row_line}"
+    );
+    assert!(
+        row_line.contains(r"8x H100 \| 2TB RAM \| Production ready"),
+        "the pipes are escaped, not dropped: {row_line}"
+    );
 }
