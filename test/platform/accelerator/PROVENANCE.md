@@ -22,14 +22,15 @@ discrete NVIDIA card. So none of these files came off a machine we own.
 | `ubuntu2404-x86-l4-g2s8.txt` | `NVIDIA L4` | NVIDIA L4 product documentation; the name has no memory suffix. |
 | `ubuntu2404-x86-a100-40g-a2hg1.txt` | `NVIDIA A100-SXM4-40GB` | NVIDIA A100 documentation; SXM4 boards encode form factor and capacity in the name. |
 | `ubuntu2404-x86-rtxpro6000se-g4s48.txt` | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | NVIDIA RTX PRO 6000 Blackwell product naming. |
+| `ubuntu2404-x86-rtxpro6000we-physical.txt` | `NVIDIA RTX PRO 6000 Blackwell Workstation Edition` | NVIDIA RTX PRO 6000 Blackwell product naming. This row is **Planned**: no such card is in the fleet and none is scheduled, so this string has the weakest provenance of any here. |
 | `unsupported-a100-80gb.txt` | `NVIDIA A100-SXM4-80GB` | Same family as the supported A100, one capacity away. |
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
 | `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The supported A100 with `mig.mode.current` set to `Enabled`. |
 
 UUIDs are synthetic. Driver versions are plausible for the generation and are
-not asserted on. Framebuffer sizes are approximately what each card reports
-and are deliberately **not** the row's nominal capacity — see below.
+not asserted on. Framebuffer sizes are approximately what each card reports,
+which is not the same as the row's nominal capacity — see below.
 
 ### These must be replaced with recorded output
 
@@ -48,8 +49,11 @@ this pipeline.
 
 An L4's row records 24 GiB (`25769803776` bytes). The card reports roughly
 `23034` MiB, because the row records nominal capacity and the tool reports
-the usable framebuffer. They are different numbers for every card here.
+the usable framebuffer.
 
-That is why memory is recorded but never matched on. Making it a match
-dimension would make every supported card miss its own row, and the
-mismatch is not a rounding error that a tolerance would paper over.
+They do **not** always differ: an A100 40GB reports exactly its nominal
+40 GiB. That is the point — the two numbers *may* differ, and for at least
+one supported card they do, which is enough to disqualify memory as a match
+dimension. Matching on it would make that card miss its own row, and the
+gap is far too large for a tolerance to paper over. An equality that happens
+to hold for one card is not a property to build on.

@@ -16,6 +16,8 @@
 
 use std::path::PathBuf;
 
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
+
 use tensorplate_platform::{
     identify_accelerator, AcceleratorSources, DetectedArchitecture, DetectedPlatform,
     DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow, RowMatch,
@@ -75,14 +77,22 @@ fn host_of(row: &PlatformSupportRow) -> HostIdentity {
     }
 }
 
-/// Rows that name a discrete NVIDIA accelerator, which is what this
-/// detection path exists for.
+/// Rows with a discrete accelerator, which is what this detection path
+/// exists for.
+///
+/// Selected on the row's own `memory_profile`, never on the SKU string.
+/// Deriving the coverage set from the very value the fixtures exist to
+/// check would let a row opt out of coverage by spelling its SKU
+/// differently — and a row nobody has a fixture for is a row nobody has
+/// checked is detectable. A future non-NVIDIA discrete row fails here
+/// loudly, which is the right outcome: someone must decide which probe
+/// covers it.
 fn gpu_rows(registry: &PlatformRegistry) -> Vec<&PlatformSupportRow> {
     registry
         .rows()
         .filter(|row| {
             row.accelerator()
-                .is_some_and(|a| a.sku.starts_with("NVIDIA "))
+                .is_some_and(|a| a.memory_profile == PlatformMemoryProfileName::DiscreteGpu)
         })
         .collect()
 }
@@ -132,15 +142,15 @@ fn every_gpu_row_has_a_fixture() {
 }
 
 #[test]
-fn an_off_matrix_sku_is_unsupported_and_never_a_nearest_match() {
+fn an_off_matrix_sku_is_unsupported_against_every_row_not_just_one() {
     // The failure this guards against is a near-miss resolving to its
-    // closest row: an A100 80GB is one capacity away from a supported
-    // A100, and answering `Supported` there would claim evidence that was
-    // collected on different silicon.
+    // closest row. Pairing every off-matrix card with a single row's host
+    // would only ever exercise the near-miss for that one row: an RTX 6000
+    // Ada is a near-miss for the RTX PRO rows, not for the A100. So each
+    // one is resolved against the host of every GPU row.
     let registry = registry();
-    let a100 = registry
-        .row("ubuntu2404-x86-a100-40g-a2hg1")
-        .expect("the A100 row is committed");
+    let gpu_rows = gpu_rows(&registry);
+    assert!(gpu_rows.len() > 1, "this case needs more than one GPU row");
 
     for (name, text) in fixtures() {
         if !name.starts_with("unsupported-") {
@@ -150,15 +160,18 @@ fn an_off_matrix_sku_is_unsupported_and_never_a_nearest_match() {
             .unwrap_or_else(|e| panic!("{name}: detection failed: {e}"))
             .unwrap_or_else(|| panic!("{name}: fixture reported no accelerator"));
 
-        // Pair it with a host whose every other dimension is supported, so
-        // the accelerator is the only thing that can put it off matrix.
-        let detected = DetectedPlatform::with_accelerator(host_of(a100), report.identity.clone());
-        match registry.resolve(&detected) {
-            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku) => {}
-            other => panic!(
-                "{name}: `{}` must be unsupported_accelerator_sku, got {other:?}",
-                report.identity.sku
-            ),
+        for row in &gpu_rows {
+            let detected =
+                DetectedPlatform::with_accelerator(host_of(row), report.identity.clone());
+            match registry.resolve(&detected) {
+                RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku) => {}
+                other => panic!(
+                    "{name}: `{}` against the {} host must be unsupported_accelerator_sku, \
+                     got {other:?}",
+                    report.identity.sku,
+                    row.row_id()
+                ),
+            }
         }
     }
 }
@@ -192,6 +205,25 @@ fn a_partitioned_device_is_rejected_before_its_sku_is_considered() {
     match registry.resolve(&detected) {
         RowMatch::Unsupported(PlatformReason::MigModeEnabled) => {}
         other => panic!("a partitioned supported card must report mig_mode_enabled, got {other:?}"),
+    }
+
+    // The ordering claim needs a card that would fail the SKU comparison
+    // too. If partitioning were checked after the SKU, this would come
+    // back unsupported_accelerator_sku and the operator would be sent to
+    // replace hardware that is fine.
+    let off_matrix = std::fs::read_to_string(fixture_dir().join("unsupported-a100-80gb.txt"))
+        .expect("read off-matrix fixture")
+        .replace("Disabled", "Enabled");
+    let report = identify_accelerator(&sources(&off_matrix))
+        .expect("detection succeeds")
+        .expect("one device");
+    assert!(report.identity.partitioned);
+    let detected = DetectedPlatform::with_accelerator(host_of(row), report.identity);
+    match registry.resolve(&detected) {
+        RowMatch::Unsupported(PlatformReason::MigModeEnabled) => {}
+        other => {
+            panic!("partitioning must be reported before the SKU is considered, got {other:?}")
+        }
     }
 }
 

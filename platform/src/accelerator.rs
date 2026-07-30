@@ -122,34 +122,34 @@ fn parse_device(line: &str) -> Result<AcceleratorReport, PlatformProbeError> {
             ),
         });
     }
-    let name = fields[0];
-    if name.is_empty() {
+    // The product name goes through the same no-value filter as every
+    // other column. It is the one field that becomes a match key, so
+    // letting a sentinel through would turn "I could not read this card"
+    // into the affirmative claim "this card is off-matrix" — the exact
+    // collapse of unreadable into unsupported this module exists to avoid.
+    let Some(name) = optional(fields[0]) else {
         return Err(PlatformProbeError::Unrecognized {
             source_name: "nvidia-smi".to_string(),
-            detail: format!("device reported an empty product name: `{line}`"),
+            detail: format!(
+                "device reported no usable product name (`{}`); the name is what a row is \
+                 matched on, so an unreadable one is not an unsupported card",
+                fields[0]
+            ),
         });
-    }
+    };
 
-    let mig_mode = optional(fields[4]);
-    // `Enabled` is the only value that means partitioned. A device that
-    // cannot partition reports `[N/A]`, which must not be read as unknown
-    // and must never be read as enabled: partitioning is rejected before
-    // any SKU comparison, so a false positive makes a supported card
-    // unsupported.
-    let partitioned = mig_mode
-        .as_deref()
-        .is_some_and(|mode| mode.eq_ignore_ascii_case("Enabled"));
+    let (partitioned, mig_mode) = parse_mig_mode(fields[4], line)?;
 
     Ok(AcceleratorReport {
         identity: AcceleratorIdentity {
             // Verbatim: the row records exactly what this tool prints, so
             // any normalization here would be a second spelling of the
             // same fact and a way for the two to drift apart.
-            sku: name.to_string(),
+            sku: name.clone(),
             partitioned,
         },
         exact: ExactAcceleratorFacts {
-            reported_name: name.to_string(),
+            reported_name: name,
             memory_total_bytes: optional(fields[1]).and_then(|mib| mebibytes_to_bytes(&mib)),
             driver_version: optional(fields[2]),
             uuid: optional(fields[3]),
@@ -158,14 +158,52 @@ fn parse_device(line: &str) -> Result<AcceleratorReport, PlatformProbeError> {
     })
 }
 
+/// Interpret `mig.mode.current` into (partitioned, recorded value).
+///
+/// Whitelisted rather than "Enabled or else false". Partitioning is
+/// rejected before any SKU comparison, so a value this code does not
+/// understand defaulting to *not partitioned* is the one direction that
+/// fails open: a partitioned card would resolve to its row and be served
+/// at a capacity that row's evidence was never collected at. An
+/// uninterpretable MIG state is therefore an error, not a `false`.
+fn parse_mig_mode(field: &str, line: &str) -> Result<(bool, Option<String>), PlatformProbeError> {
+    // Deliberately NOT `optional()`. That filter treats every bracketed
+    // value as "no value", which is right for evidence columns and wrong
+    // here: `[N/A]` means this card cannot partition, while
+    // `[Unknown Error]` means the state could not be read. Collapsing them
+    // would put an unreadable partitioning state back into the
+    // not-partitioned bucket, which is the direction that fails open.
+    let value = field.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("[N/A]") || value.eq_ignore_ascii_case("N/A")
+    {
+        // The card has no MIG at all. Recording the sentinel would put a
+        // meaningless string into release evidence.
+        return Ok((false, None));
+    }
+    let value = value.to_string();
+    match value.to_ascii_lowercase().as_str() {
+        "enabled" => Ok((true, Some(value))),
+        "disabled" => Ok((false, Some(value))),
+        _ => Err(PlatformProbeError::Unrecognized {
+            source_name: "nvidia-smi".to_string(),
+            detail: format!(
+                "unrecognized mig.mode.current `{value}` in `{line}`; an uninterpretable \
+                 partitioning state must not read as unpartitioned"
+            ),
+        }),
+    }
+}
+
 /// A field the tool had no value for. `nvidia-smi` prints `[N/A]` and
 /// variants rather than leaving a column empty.
 fn optional(field: &str) -> Option<String> {
     let value = field.trim();
+    // Bracketed sentinels are how this tool says it could not read a
+    // field on an otherwise successful query. They are values about the
+    // TOOL, never about the card.
     if value.is_empty()
-        || value.eq_ignore_ascii_case("[N/A]")
         || value.eq_ignore_ascii_case("N/A")
-        || value.eq_ignore_ascii_case("[Not Supported]")
+        || (value.starts_with('[') && value.ends_with(']'))
     {
         return None;
     }
@@ -249,6 +287,21 @@ impl NvidiaSmiProbe {
             }
         };
         if !output.status.success() {
+            // The documented "no devices" answer is a fact about the
+            // machine, not a broken source — the same distinction the host
+            // probe draws for `dpkg-query`. A GCP image with drivers baked
+            // in, booted on a shape with no GPU, is a real CPU-only host
+            // and must be free to match a CPU-only row.
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            if said.to_ascii_lowercase().contains("no devices were found") {
+                return Ok(AcceleratorSources {
+                    nvidia_smi_query: None,
+                });
+            }
             return Err(PlatformProbeError::Unreadable {
                 source_name: program.to_string(),
                 detail: if let Some(code) = output.status.code() {
@@ -291,6 +344,21 @@ mod tests {
         AcceleratorSources {
             nvidia_smi_query: Some(text.to_string()),
         }
+    }
+
+    /// A throwaway executable standing in for `nvidia-smi`, so the probe's
+    /// own command handling is exercised rather than only the parser.
+    #[cfg(unix)]
+    fn write_stub(body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "tp-nvidia-smi-stub-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
     }
 
     #[test]
@@ -338,10 +406,93 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_product_name_is_refused() {
-        // An empty SKU would compare equal to nothing and read as
-        // "unsupported accelerator", hiding a broken source.
-        assert!(identify_accelerator(&sources(", 24564, 550.54.15, GPU-aaa, [N/A]\n")).is_err());
+    fn a_name_the_tool_could_not_read_is_refused_rather_than_becoming_a_sku() {
+        // The one field that becomes a match key. Letting a sentinel
+        // through turns "I could not read this card" into the affirmative
+        // claim "this card is off-matrix", which is the collapse of
+        // unreadable into unsupported that detection exists to avoid — and
+        // it would be recorded as the product name in release evidence.
+        for name in [
+            "",
+            "[N/A]",
+            "N/A",
+            "[Not Supported]",
+            "[Unknown Error]",
+            "[Insufficient Permissions]",
+        ] {
+            let err = identify_accelerator(&sources(&format!(
+                "{name}, 24564, 550.54.15, GPU-aaa, [N/A]\n"
+            )))
+            .expect_err("an unreadable product name is not a SKU");
+            assert!(
+                matches!(err, PlatformProbeError::Unrecognized { .. }),
+                "`{name}` must be Unrecognized, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_uninterpretable_partitioning_state_is_an_error_not_unpartitioned() {
+        // The one direction that fails OPEN. Partitioning is rejected
+        // before any SKU comparison, so a MIG value this code does not
+        // understand defaulting to `false` would let a partitioned card
+        // resolve to its row and be served at a capacity that row's
+        // evidence was never collected at.
+        for mode in ["[Unknown Error]", "Pending", "Enabling", "yes", "1"] {
+            let line = format!("NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-a, {mode}\n");
+            match identify_accelerator(&sources(&line)) {
+                Err(PlatformProbeError::Unrecognized { detail, .. }) => {
+                    assert!(detail.contains(mode), "names the value: {detail}");
+                }
+                other => panic!("`{mode}` must not read as unpartitioned, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_with_the_userland_but_no_gpu_has_no_accelerator_rather_than_a_broken_one() {
+        // A cloud image with drivers baked in, booted on a shape with no
+        // GPU, is a real CPU-only host. Reporting it as unreadable would
+        // stop it matching the CPU-only row it actually is.
+        let stub = write_stub("echo 'No devices were found' >&2; exit 6");
+        assert_eq!(
+            NvidiaSmiProbe::with_program(stub.to_string_lossy())
+                .sources()
+                .expect("the documented no-devices answer is absence")
+                .nvidia_smi_query,
+            None
+        );
+        std::fs::remove_file(&stub).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_asks_for_exactly_the_columns_the_parser_reads_back() {
+        // Nothing else binds QUERY_FIELDS to the positional indices in
+        // `parse_device`. Reorder the query and every column silently
+        // shifts: the MIG flag would be read from a different field and a
+        // partitioned card could resolve to its row.
+        let stub = write_stub(
+            "printf '%s' \"$*\" > \"$0.argv\";              echo 'NVIDIA L4, 23034, 550.54.15, GPU-a, Disabled'",
+        );
+        let report = NvidiaSmiProbe::with_program(stub.to_string_lossy())
+            .detect()
+            .expect("stub answers")
+            .expect("one device");
+        assert_eq!(report.identity.sku, "NVIDIA L4");
+
+        let argv = std::fs::read_to_string(format!("{}.argv", stub.display())).expect("argv");
+        assert!(
+            argv.contains(&format!("--query-gpu={QUERY_FIELDS}")),
+            "the query must ask for exactly the columns parse_device indexes: {argv}"
+        );
+        assert!(
+            argv.contains("--format=csv,noheader,nounits"),
+            "nounits is what makes memory.total a bare MiB count: {argv}"
+        );
+        std::fs::remove_file(&stub).ok();
+        std::fs::remove_file(format!("{}.argv", stub.display())).ok();
     }
 
     #[test]
@@ -365,6 +516,7 @@ mod tests {
             ("Enabled", true),
             ("enabled", true),
             ("Disabled", false),
+            ("disabled", false),
             ("[N/A]", false),
         ] {
             let report = identify_accelerator(&sources(&format!(
