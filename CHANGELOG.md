@@ -37,12 +37,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   could not look" into "your platform is unsupported" is the collapse this
   codebase refuses everywhere else.
 
-  One rejection deliberately carries no typed reason. A machine whose
-  hardware matches a row but whose machine shape no row's evidence covers
-  has no value in the frozen vocabulary, and the nearest candidates all
-  name a dimension that is fine — an operator told their OS version is
-  unsupported, when their OS is correct and their chassis is not, goes and
-  reinstalls the wrong thing. (V021-E02-F02-T02, V021-E02-F02-T03)
+  Two rejections deliberately carry no typed reason, for the same cause.
+  A machine whose machine shape no row's evidence covers, and a machine
+  matching an Experimental row, have no value in the frozen vocabulary.
+  The nearest candidates each name a dimension that is fine: an operator
+  told their OS version is unsupported, when their OS is correct and their
+  chassis is not, reinstalls the wrong thing — and one told a row is
+  "awaiting validation" waits for an evidence run that is never coming,
+  because an Experimental integration is not awaiting one.
+
+  Where a reason does apply it reaches the caller, not just the log line.
+  The typed reason is projected into the error record's context, which the
+  CLI already renders and the durable store already keeps, so
+  `missing_driver_runtime` and `missing_backend_package` are readable by a
+  machine rather than only legible in prose.
+  (V021-E02-F02-T02, V021-E02-F02-T03)
 
 - Discrete NVIDIA accelerators are now detected by exact SKU, so a card
   either resolves to the row whose evidence was collected on it or is

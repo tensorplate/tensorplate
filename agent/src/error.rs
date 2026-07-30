@@ -58,7 +58,7 @@ pub enum AgentError {
     /// dimension that is fine.
     #[error("platform cannot admit this deploy: {detail}")]
     PlatformNotAdmissible {
-        reason: Option<&'static str>,
+        reason: Option<tensorplate_platform::PlatformReason>,
         detail: String,
     },
 
@@ -128,7 +128,20 @@ impl AgentError {
                 (ErrorCode::Internal, true)
             }
         };
-        ErrorRecord::new(code, self.to_string()).recoverable(recoverable)
+        let record = ErrorRecord::new(code, self.to_string()).recoverable(recoverable);
+        // The typed platform reason is the machine-readable half of this
+        // rejection, and `to_string()` renders only the prose. Without
+        // this projection `missing_driver_runtime` and
+        // `missing_backend_package` exist inside this crate and nowhere a
+        // CLI or the durable store can read them. `context` is already
+        // carried to the wire and rendered by the CLI.
+        match self {
+            AgentError::PlatformNotAdmissible {
+                reason: Some(reason),
+                ..
+            } => record.with_context(reason.as_str()),
+            _ => record,
+        }
     }
 
     /// Stable [`ErrorCode`] for this error.

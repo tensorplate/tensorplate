@@ -232,9 +232,7 @@ impl Coordinator {
                 admission.verdict()
             {
                 let err = AgentError::PlatformNotAdmissible {
-                    reason: rejection
-                        .reason()
-                        .map(tensorplate_platform::PlatformReason::as_str),
+                    reason: rejection.reason(),
                     detail: rejection.detail().to_string(),
                 };
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
@@ -258,9 +256,7 @@ impl Coordinator {
                 admission.admit(registry, verified.manifest.backend_hint.as_str())
             {
                 let err = AgentError::PlatformNotAdmissible {
-                    reason: rejection
-                        .reason()
-                        .map(tensorplate_platform::PlatformReason::as_str),
+                    reason: rejection.reason(),
                     detail: rejection.detail().to_string(),
                 };
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err);

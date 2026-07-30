@@ -14,10 +14,14 @@
 // driver.
 //
 // Every rejection carries a typed reason from the frozen platform
-// vocabulary — except one. A machine whose hardware matches a row but
-// whose machine shape no row's evidence covers has no value in that
-// vocabulary, and borrowing the nearest one would send an operator to
-// reinstall an OS that is fine.
+// vocabulary — except two, and both for the same reason. A machine whose
+// machine shape no row's evidence covers, and a machine matching an
+// Experimental row, have no value in that vocabulary. Borrowing the
+// nearest one names a dimension that is actually fine: an operator told
+// their OS is unsupported reinstalls an OS that is correct, and one told a
+// row is "awaiting validation" waits for an evidence run that is never
+// coming. `registry.rs` draws the second distinction explicitly; this
+// module must not undo it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -47,15 +51,16 @@ pub enum PlatformRejection {
         reason: PlatformReason,
         detail: String,
     },
-    /// The hardware matches a row but the machine shape it is running on
-    /// is not one any row's evidence covers.
+    /// A refusal the frozen vocabulary has no value for.
     ///
-    /// Deliberately not carrying a [`PlatformReason`]: the frozen
-    /// vocabulary has no value for "wrong machine shape", and the nearest
-    /// candidates all name a dimension that is actually fine. Telling an
-    /// operator their OS version is unsupported when their OS is correct
-    /// and their chassis is not sends them to fix the wrong thing.
-    OutsideValidatedEnvironment { detail: String },
+    /// Deliberately carries no [`PlatformReason`]. Two cases reach here:
+    /// a machine whose hardware matches a row but whose machine shape no
+    /// row's evidence covers, and a machine matching an Experimental row.
+    /// The nearest frozen reasons both name a dimension that is fine —
+    /// `unsupported_os_version` for a correct OS in an uncovered chassis,
+    /// `row_planned_not_validated` for an integration that is not awaiting
+    /// validation at all and never will be.
+    NoFrozenReason { detail: String },
 }
 
 impl PlatformRejection {
@@ -64,7 +69,7 @@ impl PlatformRejection {
     pub fn reason(&self) -> Option<PlatformReason> {
         match self {
             Self::Reason { reason, .. } => Some(*reason),
-            Self::OutsideValidatedEnvironment { .. } => None,
+            Self::NoFrozenReason { .. } => None,
         }
     }
 
@@ -72,7 +77,7 @@ impl PlatformRejection {
     #[must_use]
     pub fn detail(&self) -> &str {
         match self {
-            Self::Reason { detail, .. } | Self::OutsideValidatedEnvironment { detail } => detail,
+            Self::Reason { detail, .. } | Self::NoFrozenReason { detail } => detail,
         }
     }
 }
@@ -117,17 +122,22 @@ pub fn evaluate_platform(
             })
         }
         RowMatch::Experimental(row) => {
-            return PlatformVerdict::Rejected(PlatformRejection::Reason {
-                reason: PlatformReason::RowPlannedNotValidated,
+            // NOT row_planned_not_validated. `registry.rs` states that
+            // Experimental is "deliberately not reported as Planned: the
+            // frozen reason for Planned means a row awaiting hardware
+            // validation, which an Experimental integration is not".
+            // Borrowing it here would tell an operator to wait for an
+            // evidence run that is never coming.
+            return PlatformVerdict::Rejected(PlatformRejection::NoFrozenReason {
                 detail: format!(
                     "this machine matches row `{}`, an Experimental integration that is not a \
-                     supported combination",
+                     supported combination and is not awaiting validation",
                     row.row_id()
                 ),
-            })
+            });
         }
         RowMatch::OutsideValidatedEnvironment { candidate } => {
-            return PlatformVerdict::Rejected(PlatformRejection::OutsideValidatedEnvironment {
+            return PlatformVerdict::Rejected(PlatformRejection::NoFrozenReason {
                 detail: match candidate {
                     Some(row) => format!(
                         "this machine's hardware matches row `{}`, but that row's evidence was \

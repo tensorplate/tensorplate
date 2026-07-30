@@ -186,22 +186,26 @@ fn settle_platform_admission(registry: &PlatformRegistry) -> Option<PlatformAdmi
     // omission.
     let observed = ObservedStack {
         components: BTreeMap::new(),
-        installed_packages: installed_tensorplate_packages(),
+        installed_packages: installed_packages(),
     };
     let verdict = evaluate_platform(registry, &detected, &observed);
     eprintln!("platform admission: {verdict:?}");
     Some(PlatformAdmission::new(verdict, observed.installed_packages))
 }
 
-/// Package names dpkg reports as installed. An unreadable package
-/// database yields an empty set, which can only make admission stricter.
-fn installed_tensorplate_packages() -> BTreeSet<String> {
+/// Package names dpkg reports as installed.
+///
+/// Queried without a name pattern. A `tensorplate*` glob would cover
+/// today's rows, which only require our own packages — but a row is free
+/// to require a driver or runtime package, and a glob that silently
+/// excluded it would report an installed package as missing and refuse a
+/// deploy that should have been admitted.
+///
+/// An unreadable package database yields an empty set. That can only make
+/// admission stricter: a missing package is a rejection, never a pass.
+fn installed_packages() -> BTreeSet<String> {
     let Ok(output) = std::process::Command::new("dpkg-query")
-        .args([
-            "-W",
-            "-f=${binary:Package} ${db:Status-Status}\n",
-            "tensorplate*",
-        ])
+        .args(["-W", "-f=${binary:Package} ${db:Status-Status}\n"])
         .output()
     else {
         return BTreeSet::new();

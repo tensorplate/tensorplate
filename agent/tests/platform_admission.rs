@@ -10,6 +10,8 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -169,15 +171,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
 /// `kernel_driver_stack` replaced, so a stack requirement can be exercised
 /// before any evidence run has recorded one.
 fn staged_registry_with_components(components: &[(&str, &str)]) -> PlatformRegistry {
-    let src = repo_root().join("config/platform");
-    let staging = std::env::temp_dir().join(format!(
-        "tp-admission-registry-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    copy_dir(&src, &staging);
-
+    let staging = stage_registry();
     let row_path = staging.join("rows/ubuntu2404-x86-a100-40g-a2hg1.json");
     let mut row: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&row_path).expect("read row"))
@@ -197,6 +191,19 @@ fn staged_registry_with_components(components: &[(&str, &str)]) -> PlatformRegis
     .expect("write row");
 
     PlatformRegistry::load(&staging).expect("staged registry loads")
+}
+
+/// A writable copy of the committed registry, so a case can exercise a row
+/// shape no committed row declares yet.
+fn stage_registry() -> PathBuf {
+    let staging = std::env::temp_dir().join(format!(
+        "tp-admission-registry-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    copy_dir(&repo_root().join("config/platform"), &staging);
+    staging
 }
 
 fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
@@ -297,9 +304,7 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
     let detected = DetectedPlatform::with_accelerator(host, report.identity);
 
     match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Rejected(
-            rejection @ PlatformRejection::OutsideValidatedEnvironment { .. },
-        ) => {
+        PlatformVerdict::Rejected(rejection @ PlatformRejection::NoFrozenReason { .. }) => {
             assert_eq!(
                 rejection.reason(),
                 None,
@@ -314,5 +319,141 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
         other => {
             panic!("a host on an uncovered machine shape must be refused as such, got {other:?}")
         }
+    }
+}
+
+#[test]
+fn an_experimental_row_does_not_borrow_the_planned_reason() {
+    // `registry.rs` states that Experimental is deliberately not reported
+    // as Planned, because the frozen reason for Planned means a row
+    // awaiting hardware validation — which an Experimental integration is
+    // not, and never will be. Borrowing it tells an operator to wait for
+    // an evidence run that is not coming.
+    let staged = staged_registry_with_support_level("Experimental");
+    let row = staged
+        .row("ubuntu2404-x86-a100-40g-a2hg1")
+        .expect("staged row");
+    let detected = detected_from_fixture(row, "ubuntu2404-x86-a100-40g-a2hg1");
+
+    match evaluate_platform(&staged, &detected, &ObservedStack::default()) {
+        PlatformVerdict::Rejected(rejection) => {
+            assert_eq!(
+                rejection.reason(),
+                None,
+                "an Experimental row must not borrow a frozen reason, got {:?}",
+                rejection.reason()
+            );
+            assert!(
+                rejection.detail().contains("Experimental"),
+                "the detail must say what is actually true: {}",
+                rejection.detail()
+            );
+        }
+        other @ PlatformVerdict::Admitted { .. } => {
+            panic!("an Experimental row is not a supported combination, got {other:?}")
+        }
+    }
+}
+
+/// The committed registry with the A100 row's `support_level` replaced, so
+/// a level no row currently declares can still be exercised.
+fn staged_registry_with_support_level(level: &str) -> PlatformRegistry {
+    let staging = stage_registry();
+    let row_path = staging.join("rows/ubuntu2404-x86-a100-40g-a2hg1.json");
+    let mut row: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&row_path).expect("read row"))
+            .expect("row parses");
+    row["support_level"] = serde_json::Value::String(level.to_string());
+    std::fs::write(
+        &row_path,
+        serde_json::to_string_pretty(&row).expect("serialize"),
+    )
+    .expect("write row");
+    PlatformRegistry::load(&staging).expect("staged registry loads")
+}
+
+#[test]
+fn the_typed_reason_reaches_the_error_record_a_caller_can_read() {
+    // The acceptance criterion is that these rejections are TYPED. The
+    // Display impl renders only the prose, so without projecting the
+    // reason into the record the spellings live inside this crate and
+    // nowhere a CLI or the durable store can see them — which would make
+    // the criterion true of an internal enum and false of the contract
+    // that actually reports it.
+    use tensorplate_agent::error::AgentError;
+
+    for reason in [
+        PlatformReason::MigModeEnabled,
+        PlatformReason::MissingDriverRuntime,
+        PlatformReason::MissingBackendPackage,
+        PlatformReason::UnsupportedAcceleratorSku,
+    ] {
+        let record = AgentError::PlatformNotAdmissible {
+            reason: Some(reason),
+            detail: "detail".to_string(),
+        }
+        .to_record();
+        assert_eq!(
+            record.context.as_deref(),
+            Some(reason.as_str()),
+            "the typed reason must be readable off the record, not only in prose"
+        );
+    }
+
+    // A refusal the frozen vocabulary has no value for carries no reason,
+    // and must not invent one to fill the slot.
+    let record = AgentError::PlatformNotAdmissible {
+        reason: None,
+        detail: "machine shape".to_string(),
+    }
+    .to_record();
+    assert_eq!(record.context, None);
+}
+
+#[test]
+fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
+    // Everything above tests `evaluate_platform` directly. The acceptance
+    // criterion is about admission at DEPLOY, so without this the wiring
+    // could be absent and every case above would still pass — the verdict
+    // would simply never be consulted.
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+    use tensorplate_agent::error::AgentError;
+
+    let harness = common::Harness::new();
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
+    let verdict = evaluate_platform(&registry, &detected, &ObservedStack::default());
+    assert!(matches!(verdict, PlatformVerdict::Rejected(_)));
+
+    let coordinator = Arc::new(
+        Coordinator::new(
+            harness.config.clone(),
+            harness.store.clone(),
+            harness.worker.clone(),
+        )
+        .with_platform_admission(PlatformAdmission::new(verdict, BTreeSet::new()))
+        .with_platform_registry(registry),
+    );
+
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "mig",
+        common::BundleSpec {
+            backend_hint: Some("python_pytorch"),
+            ..Default::default()
+        },
+    );
+
+    match coordinator.deploy("d-mig", &bundle, BTreeMap::default(), None, None) {
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(
+                reason,
+                Some(PlatformReason::MigModeEnabled),
+                "the deploy path must carry the machine-level reason through"
+            );
+            assert!(!detail.is_empty());
+        }
+        other => panic!("a partitioned machine must not deploy, got {other:?}"),
     }
 }
