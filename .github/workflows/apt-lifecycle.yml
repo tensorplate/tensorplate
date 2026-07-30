@@ -100,6 +100,61 @@ jobs:
         env:
           CI: 'true'
 
+  cpu-only-smoke:
+    name: Ubuntu 22.04 x86_64 CPU-only smoke
+    # ubuntu-22.04 IS the row under test: Ubuntu 22.04, x86_64, no accelerator.
+    # The row declares validation_environment.kind=cloud_instance with no
+    # machine_type, which is how the schema spells "any instance", so a hosted
+    # runner matches it and the smoke resolves the row by live detection.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build and packaging dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          # cmake comes from the runner image, not apt: jammy ships 3.22 and the
+          # tree requires 3.25 (same reason as the release workflow's amd64 job).
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang-15 \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            llvm-15 \
+            ninja-build \
+            nlohmann-json3-dev \
+            pkg-config \
+            python3
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cpu-smoke-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: CPU-only Preview smoke
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: sudo --preserve-env=CI,CC,CXX,PATH bash test/packaging/verify_cpu_only_smoke.sh
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ubuntu2204-x86-cpu-smoke-evidence
+          path: dist/smoke/
+          if-no-files-found: warn
+
   rehearse:
     name: channel lifecycle rehearsal (${{ matrix.arch }})
     strategy:
