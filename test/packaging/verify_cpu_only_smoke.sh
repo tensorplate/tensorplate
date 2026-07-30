@@ -69,8 +69,11 @@ cargo build --release \
   --bin tensorplate
 # TensorRT stays off: this host has no accelerator and the x86_64 serving
 # package is built without the adapter (see the release workflow).
+# -gdwarf-4: clang emits DWARF 5, whose .debug_addr section jammy's dwz (0.14)
+# cannot read, and dh_dwz turns that into a hard dpkg-buildpackage failure.
 cmake -S . -B build/release -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_CXX_FLAGS=-gdwarf-4 \
   -DTP_BUILD_TESTS=OFF -DTP_BUILD_EXAMPLES=OFF -DTP_ENABLE_SANITIZERS=OFF \
   -DTP_ENABLE_TENSORRT=OFF -DTP_REQUIRE_TENSORRT_SDK=OFF \
   -DTP_ENABLE_LIBTORCH=OFF -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON >/dev/null
