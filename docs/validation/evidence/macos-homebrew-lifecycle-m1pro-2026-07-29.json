@@ -9,7 +9,83 @@
     "formula_count": 6,
     "source_revision": "10d2f8c5987a09ea2c7393e18aa8110c5a634bf6",
     "source_url": "https://github.com/tensorplate/tensorplate/archive/10d2f8c5987a09ea2c7393e18aa8110c5a634bf6.tar.gz",
-    "source_sha256": "67e57b75a0bb0f72f537c7486a7f820357c935ca5aedd7845cc0d42699e6089c"
+    "source_sha256": "67e57b75a0bb0f72f537c7486a7f820357c935ca5aedd7845cc0d42699e6089c",
+    "formula_versions": {
+      "tensorplate": "0.2.1-rc.1",
+      "tensorplate-agent": "0.2.1-rc.1",
+      "tensorplate-backend-python-pytorch": "0.2.1-rc.1",
+      "tensorplate-cli": "0.2.1-rc.1",
+      "tensorplate-observability": "0.2.1-rc.1",
+      "tensorplate-serving": "0.2.1-rc.1"
+    },
+    "resolved_dependency_graph": {
+      "tensorplate": [
+        "tensorplate-agent",
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-cli",
+        "tensorplate-observability",
+        "tensorplate-serving"
+      ],
+      "tensorplate-agent": [
+        "tensorplate-serving"
+      ],
+      "tensorplate-backend-python-pytorch": [
+        "pytorch"
+      ],
+      "tensorplate-cli": [],
+      "tensorplate-observability": [],
+      "tensorplate-serving": [
+        "nlohmann-json"
+      ],
+      "pytorch": [
+        "abseil",
+        "eigen",
+        "libomp",
+        "libuv",
+        "libyaml",
+        "numpy",
+        "onnx",
+        "openblas",
+        "protobuf",
+        "pybind11",
+        "sleef"
+      ],
+      "numpy": [
+        "openblas"
+      ],
+      "onnx": [
+        "abseil",
+        "protobuf"
+      ],
+      "openblas": [
+        "gcc",
+        "libomp"
+      ],
+      "protobuf": [
+        "abseil"
+      ],
+      "gcc": [
+        "gmp",
+        "isl",
+        "libmpc",
+        "mpfr",
+        "zstd"
+      ],
+      "isl": [
+        "gmp"
+      ],
+      "libmpc": [
+        "gmp",
+        "mpfr"
+      ],
+      "mpfr": [
+        "gmp"
+      ],
+      "zstd": [
+        "lz4",
+        "xz"
+      ]
+    }
   },
   "host": {
     "architecture": "arm64",
