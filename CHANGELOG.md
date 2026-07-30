@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Ubuntu x86_64 CPU-only row now has a live smoke, and it is the only
+  packaging check that installs real binaries and runs the real CLI. The
+  others stub the runtime so they can rehearse packaging shape cheaply, which
+  cannot tell you whether the installed appliance comes up. This one builds
+  the runtime, installs the package set, starts the agent and observability,
+  and then requires a **green** `tensorplate doctor` — absent CUDA and
+  TensorRT are informational findings on this row, so a non-zero exit means
+  something real.
+
+  It resolves the row by **live detection** rather than from a recorded
+  fixture: the runner is Ubuntu 22.04 on x86_64 with no accelerator, which is
+  the row itself, and the row declares no machine type, which is how the
+  schema spells "any instance". The smoke refuses to run anywhere else, since
+  a green result on the wrong host would say nothing about the row. It also
+  asserts the row is Preview in the *installed* registry and that nothing
+  doctor prints describes this host as Production, and it records host facts,
+  package versions, and the doctor output as evidence.
+  (V021-E02-F01-T04)
+
 - The systemd supervision contract and the package rollback procedure now
   have tests that run them rather than read them. A new packaging check
   drives the shipped units against a real systemd: the agent reaches active

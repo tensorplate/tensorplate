@@ -57,8 +57,11 @@ sudo apt install \
 sudo /usr/bin/python3 -m pip install --upgrade pip wheel
 sudo /usr/bin/python3 -m pip install <jetson torch wheel URL>
 
-# x86_64 CPU host (development):
-sudo /usr/bin/python3 -m pip install torch>=2.1
+# x86_64 CPU host (development, and the ubuntu*-x86-cpu rows): use the CPU
+# index. Plain `pip install torch` on Linux resolves to the CUDA build and
+# pulls gigabytes of NVIDIA wheels onto a host with no accelerator.
+sudo /usr/bin/python3 -m pip install \
+  --index-url https://download.pytorch.org/whl/cpu 'torch>=2.1'
 ```
 
 For the JetPack 6.2 / CUDA 12.6 release validation target, the tested wheel

@@ -104,6 +104,22 @@ for pkg in $collect_set; do
   esac
 done
 
+# The amd64 C++ build must pin the DWARF version. jammy's dwz (0.14) cannot
+# read DWARF 5's .debug_addr section, and dh_dwz turns that into a hard
+# dpkg-buildpackage failure — so dropping this flag breaks the release job at
+# package-build time, which no PR check exercises because that job only runs
+# on release tags.
+# Strip comment lines before matching: the comment explaining WHY the flag is
+# there also contains the flag, so a bare search is satisfied by the prose and
+# would keep passing after the real argument was deleted.
+amd64_cxx_build="$(sed -n '/Build amd64 serving worker/,/cmake --build/p' .github/workflows/release.yml |
+  grep -v '^[[:space:]]*#')"
+[ -n "$amd64_cxx_build" ] || { echo "FAIL: could not find the amd64 serving worker build in release.yml" >&2; exit 1; }
+printf '%s\n' "$amd64_cxx_build" | grep -Eq '^[[:space:]]*-DCMAKE_CXX_FLAGS=.*-gdwarf-[0-9]' || {
+  echo "FAIL: the amd64 serving worker build must pass -gdwarf-<n> via CMAKE_CXX_FLAGS; jammy's dwz cannot read DWARF 5's .debug_addr and dh_dwz turns that into a hard package-build failure" >&2
+  exit 1
+}
+
 mkdir -p "$tmp/artifacts"
 for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
   printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_all.deb"
