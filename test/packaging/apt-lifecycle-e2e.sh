@@ -176,14 +176,23 @@ apt-get remove -y -qq tensorplate >"${work}/meta-remove.log" 2>&1 ||
 # trips its Pre-Depends on tensorplate-common (= same version) and dpkg refuses
 # before running any maintainer script — a real refusal, but not the preflight's,
 # so it would not exercise the guard under test.
-baseline_set=(
-  "${work}"/tensorplate-common_"${baseline_ver}"_all.deb
+#
+# It also cannot be one dpkg -i over the whole set: dpkg unpacks every archive
+# in a run before configuring any of them, and a Pre-Depends must be CONFIGURED
+# first, so the runtime packages' Pre-Depends on tensorplate-common can never be
+# satisfied from within the same invocation. Downgrade common on its own first
+# (it ships files only and has no maintainer scripts), which both satisfies the
+# Pre-Depends and leaves the 0.1.1 preflight helper in place.
+runtime_set=(
   "${work}"/tensorplate-agent_"${baseline_ver}"_*.deb
   "${work}"/tensorplate-serving_"${baseline_ver}"_*.deb
   "${work}"/tensorplate-observability_"${baseline_ver}"_*.deb
   "${work}"/tensorplate-cli_"${baseline_ver}"_*.deb
 )
-if dpkg -i "${baseline_set[@]}" >"${work}/downgrade.log" 2>&1; then
+dpkg -i "${work}"/tensorplate-common_"${baseline_ver}"_all.deb \
+  >"${work}/common-downgrade.log" 2>&1 ||
+  { tail -10 "${work}/common-downgrade.log" >&2; die "downgrading tensorplate-common should be allowed; it ships no maintainer scripts"; }
+if dpkg -i "${runtime_set[@]}" >"${work}/downgrade.log" 2>&1; then
   die "the upgrade preflight must refuse a downgrade of an installed newer runtime"
 fi
 grep -q 'upgrade aborted' "${work}/downgrade.log" ||
@@ -194,7 +203,7 @@ pass "downgrade refused by the upgrade preflight"
 # compares versions and never inspects state. This is why rollback cannot be a
 # downgrade at all.
 mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
-if dpkg -i "${baseline_set[@]}" >"${work}/downgrade2.log" 2>&1; then
+if dpkg -i "${runtime_set[@]}" >"${work}/downgrade2.log" 2>&1; then
   die "setting state aside must not unlock a downgrade; the preflight compares versions only"
 fi
 grep -q 'upgrade aborted' "${work}/downgrade2.log" ||
@@ -207,7 +216,7 @@ pass "downgrade still refused with durable state set aside"
 apt-get remove -y -qq tensorplate-agent tensorplate-serving \
   tensorplate-observability tensorplate-cli >"${work}/rollback-remove.log" 2>&1 ||
   { tail -15 "${work}/rollback-remove.log" >&2; die "removing the runtime set failed"; }
-dpkg -i "${baseline_set[@]}" >"${work}/rollback.log" 2>&1 ||
+dpkg -i "${runtime_set[@]}" >"${work}/rollback.log" 2>&1 ||
   { tail -20 "${work}/rollback.log" >&2; die "rollback install of ${baseline_ver} failed"; }
 for pkg in tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli; do
   got="$(dpkg-query -W -f '${Version}' "$pkg")"

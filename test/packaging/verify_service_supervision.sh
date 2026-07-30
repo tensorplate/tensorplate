@@ -212,10 +212,16 @@ await_property "$AGENT_UNIT" ActiveState 30 active >/dev/null || die "agent did 
 systemctl stop "$AGENT_UNIT"
 await_property "$AGENT_UNIT" ActiveState "$STOP_WAIT" inactive >/dev/null || die "agent did not stop"
 state="$(systemctl show -p ActiveState --value "$OBS_UNIT")"
-[[ "$state" == "active" ]] ||
-  die "observability went ${state} when the agent stopped; the two must be independent"
-[[ "$(systemctl show -p MainPID --value "$OBS_UNIT")" == "$obs_pid" ]] ||
-  die "observability was restarted by the agent's lifecycle"
+obs_pid_after="$(systemctl show -p MainPID --value "$OBS_UNIT")"
+if [[ "$state" != "active" || "$obs_pid_after" != "$obs_pid" ]]; then
+  printf 'observability: ActiveState=%s Result=%s NRestarts=%s MainPID=%s (was %s)\n' \
+    "$state" "$(systemctl show -p Result --value "$OBS_UNIT")" \
+    "$(systemctl show -p NRestarts --value "$OBS_UNIT")" "$obs_pid_after" "$obs_pid" >&2
+  journalctl -u "$OBS_UNIT" --no-pager -n 40 >&2 || true
+  printf 'ls -la /run/tensorplate:\n' >&2
+  ls -la /run/tensorplate >&2 2>/dev/null || printf '  (absent)\n' >&2
+  die "observability was disturbed by the agent's lifecycle (state=${state}); the two must be independent"
+fi
 pass "observability survived the agent stopping"
 
 note "6. the serving worker has no unit"
