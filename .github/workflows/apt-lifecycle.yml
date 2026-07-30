@@ -5,6 +5,11 @@ name: APT lifecycle
 # failure modes, bootstrap, signed-repo two-command upgrade with state
 # preservation, and staged future-version discovery.
 #
+# Also runs the packaging and release-driver check suites, which otherwise
+# execute only from the runbook or from inside a release build — meaning a
+# regression in release-gating logic would first surface during an actual
+# release.
+#
 # Path-filtered (and not a required check) so it runs only when packaging or
 # release tooling changes.
 
@@ -15,6 +20,12 @@ on:
       - 'tools/release/**'
       - 'tools/validation/**'
       - 'test/packaging/**'
+      - 'test/release/**'
+      # The drift guard in test/release/run.sh reads the amd64 copy list
+      # out of release.yml, so a change to release.yml alone must trigger
+      # it — otherwise the guard cannot fire on the edit that causes the
+      # drift it exists to catch.
+      - '.github/workflows/release.yml'
       - '.github/workflows/apt-lifecycle.yml'
   workflow_dispatch:
 
@@ -26,6 +37,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  script-checks:
+    name: packaging + release driver checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      # apt-utils and gnupg are not needed to run the suites, but several
+      # checks are guarded on the tools being present and silently skip
+      # without them. Install them so the checks actually execute.
+      - name: Install check dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            build-essential \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            shellcheck
+
+      - name: Packaging verification suite
+        shell: bash
+        run: test/packaging/run.sh
+
+      - name: Release driver checks
+        shell: bash
+        run: test/release/run.sh
+
+      # Which packages a binary-arch-only build emits is decided by debhelper
+      # from debian/control, and the release workflow's amd64 job depends on
+      # that answer. This runner IS x86_64, so it checks the real thing rather
+      # than reasoning about dpkg semantics. Kept out of run.sh because it
+      # writes .deb files to the repository parent.
+      - name: x86_64 runtime package set
+        shell: bash
+        env:
+          CI: 'true'
+        run: test/packaging/verify_arch_package_set.sh
+
   rehearse:
     name: channel lifecycle rehearsal (arm64)
     runs-on: ubuntu-22.04-arm
