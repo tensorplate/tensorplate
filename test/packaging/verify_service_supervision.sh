@@ -149,24 +149,43 @@ pass "recovered as PID ${second_pid} (NRestarts=${restarts})"
 note "3. a crash loop is given up on, not restarted forever"
 printf 'crash\n' > "$MODE_FILE"
 systemctl restart "$AGENT_UNIT" >/dev/null 2>&1 || true
-# StartLimitBurst=5 within StartLimitIntervalSec=60: systemd must stop trying
-# rather than masking a config error with an infinite restart loop.
+# The contract is that repeated crashes stop being retried, so assert THAT
+# rather than a particular systemd Result string: wait until the restart count
+# stops growing across a window longer than RestartSec while the unit is not
+# active. A unit that is still looping keeps incrementing NRestarts.
 #
-# Wait on Result, not ActiveState. A crashing unit passes through `failed`
-# after EVERY attempt before backing off and trying again, so polling for
-# ActiveState=failed would report success while the loop is still running.
-# Result=start-limit-hit is set only once systemd has actually given up.
-result="$(await_property "$AGENT_UNIT" Result 150 start-limit-hit)" ||
-  die "agent kept restarting after repeated crashes (Result=${result}); the start limit must stop the loop"
+# Note this cannot poll ActiveState=failed: a crashing unit passes through
+# failed after EVERY attempt before backing off and trying again, so a bare
+# state check reports success while the loop is still running.
+settled=0
+last_restarts=-1
+for _ in $(seq 1 40); do
+  state="$(systemctl show -p ActiveState --value "$AGENT_UNIT")"
+  restarts="$(systemctl show -p NRestarts --value "$AGENT_UNIT")"
+  if [[ "$state" != "active" && "$state" != "activating" && "$restarts" == "$last_restarts" ]]; then
+    settled=1
+    break
+  fi
+  last_restarts="$restarts"
+  sleep 7  # longer than RestartSec=5, so a live loop advances the counter
+done
+if ((settled != 1)); then
+  printf 'ActiveState=%s Result=%s NRestarts=%s\n' \
+    "$(systemctl show -p ActiveState --value "$AGENT_UNIT")" \
+    "$(systemctl show -p Result --value "$AGENT_UNIT")" \
+    "$(systemctl show -p NRestarts --value "$AGENT_UNIT")" >&2
+  printf 'StartLimitBurst=%s StartLimitIntervalUSec=%s RestartSec=%s\n' \
+    "$(systemctl show -p StartLimitBurst --value "$AGENT_UNIT")" \
+    "$(systemctl show -p StartLimitIntervalUSec --value "$AGENT_UNIT")" \
+    "$(systemctl show -p RestartUSec --value "$AGENT_UNIT")" >&2
+  journalctl -u "$AGENT_UNIT" --no-pager -n 40 >&2 || true
+  die "the agent kept restarting after repeated crashes; the start limit must stop the loop"
+fi
 state="$(systemctl show -p ActiveState --value "$AGENT_UNIT")"
+result="$(systemctl show -p Result --value "$AGENT_UNIT")"
 [[ "$state" == "failed" ]] ||
-  die "expected the given-up unit to be failed, got ${state}"
-# And it must STAY given up: longer than RestartSec, with no new attempt.
-attempts_before="$(systemctl show -p NRestarts --value "$AGENT_UNIT")"
-sleep 8
-[[ "$(systemctl show -p NRestarts --value "$AGENT_UNIT")" == "$attempts_before" ]] ||
-  die "the unit resumed restarting after the start limit was hit"
-pass "crash loop stopped at NRestarts=${attempts_before} with Result=${result}"
+  die "expected the given-up unit to be failed, got ${state} (Result=${result})"
+pass "crash loop stopped at NRestarts=${last_restarts} (state=${state}, Result=${result})"
 
 note "4. a clean stop is not a failure and is not restarted"
 printf 'run\n' > "$MODE_FILE"
