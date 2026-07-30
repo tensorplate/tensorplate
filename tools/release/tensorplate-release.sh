@@ -910,18 +910,29 @@ for package in required:
             raise SystemExit(f"artifact name is not Debian-like: {path.name}")
         package_version = match.group("version")
         arch = match.group("arch")
+        # The glob that found this file is a PREFIX match, so the name parsed
+        # from the filename is not necessarily the required-list entry that
+        # matched it: `tensorplate-agent_stale_X-1_amd64.deb` is globbed under
+        # `tensorplate-agent`. Every decision below must use the parsed name,
+        # or a stray file rides into the manifest under a sibling's identity.
+        parsed_package = match.group("package")
         if not (package_version == version or package_version.startswith(version + "-")):
             raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
+        if parsed_package != package and parsed_package not in required:
+            raise SystemExit(
+                f"{path.name}: file name does not match a published package "
+                f"(parsed {parsed_package!r} while globbing {package!r})"
+            )
         if arch not in (target_arch, "all"):
             # A foreign architecture is admissible only for a package that
             # the secondary runtime set declares. Anything else reaching the
             # artifacts directory is a staging mistake, and signing it into
             # the manifest would publish a package nobody built on purpose.
-            if arch != secondary_arch or package not in secondary_packages:
+            if arch != secondary_arch or parsed_package not in secondary_packages:
                 raise SystemExit(
-                    f"{path.name}: {package} is not published for architecture {arch}"
+                    f"{path.name}: {parsed_package} is not published for architecture {arch}"
                 )
-        key = (match.group("package"), arch)
+        key = (parsed_package, arch)
         if key in seen:
             raise SystemExit(f"duplicate artifact for package/architecture: {key[0]} {key[1]}")
         seen.add(key)
@@ -930,16 +941,13 @@ for package in required:
         # Independent of the branch above, not an else: when the primary
         # target IS the secondary architecture, one artifact satisfies both
         # and an `else` would report the whole secondary set as absent.
-        # Record the name parsed from the filename rather than the required-
-        # list entry, so a malformed sibling like `foo_stale_1.0-1_amd64.deb`
-        # cannot stand in for the package it was globbed under.
         if arch == secondary_arch:
-            secondary_matches.append(match.group("package"))
+            secondary_matches.append(parsed_package)
         digest = sha256(path)
         artifacts.append(
             {
                 "file": path.name,
-                "package": match.group("package"),
+                "package": parsed_package,
                 "version": package_version,
                 "architecture": arch,
                 "target_os": target_os if arch in (target_arch, "all") else secondary_target_os,

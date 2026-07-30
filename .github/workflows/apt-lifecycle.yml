@@ -21,6 +21,11 @@ on:
       - 'tools/validation/**'
       - 'test/packaging/**'
       - 'test/release/**'
+      # The drift guard in test/release/run.sh reads the amd64 copy list
+      # out of release.yml, so a change to release.yml alone must trigger
+      # it — otherwise the guard cannot fire on the edit that causes the
+      # drift it exists to catch.
+      - '.github/workflows/release.yml'
       - '.github/workflows/apt-lifecycle.yml'
   workflow_dispatch:
 

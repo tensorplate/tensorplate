@@ -80,7 +80,7 @@ grep -q 'Protected environments with \*\*required reviewers\*\*' docs/release/ru
 array_block() {
   awk -v name="$2" '
     $0 ~ ("^readonly " name "=\\(") { inside = 1; next }
-    inside && /^\)/ { exit }
+    inside && /^[[:space:]]*\)/ { exit }
     inside { print $1 }
   ' "$1"
 }

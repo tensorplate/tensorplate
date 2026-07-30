@@ -162,6 +162,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           required="$(sed -n 's/^cmake_minimum_required(VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -n1)"
+          # An anchor that stops matching (indentation, a case change)
+          # would leave this empty, and an empty floor compares as the
+          # smallest version — the guard would pass without comparing.
+          [[ "$required" =~ ^[0-9]+\.[0-9]+ ]] || {
+            echo "::error::could not parse the cmake floor from CMakeLists.txt"
+            exit 1
+          }
           have="$(cmake --version | head -n1 | awk '{print $3}')"
           printf 'cmake: have %s, need >= %s (%s)\n' "$have" "$required" "$(command -v cmake)"
           [[ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -n1)" == "$required" ]] || {
@@ -255,10 +262,23 @@ jobs:
           # architecture too, now that it is built per architecture.
           # debhelper always adds changelog.Debian.gz and copyright under
           # /usr/share/doc, so "empty" means nothing outside that.
+          # Resolve to exactly one archive first. A glob that matched nothing
+          # or matched twice would make dpkg-deb fail, and with the failure
+          # swallowed the assertion would pass while inspecting nothing —
+          # unfalsifiable precisely when the archive is missing or ambiguous.
+          shopt -s nullglob
+          metas=(dist/amd64/tensorplate_*_amd64.deb)
+          shopt -u nullglob
+          ((${#metas[@]} == 1)) || {
+            echo "::error::expected exactly one amd64 metapackage; found ${#metas[@]}"
+            exit 1
+          }
           # Field 6 is the path. $NF would be the link TARGET on a symlink
           # line, which reads as an unrelated path and false-triggers here.
-          meta="$(echo dist/amd64/tensorplate_*_amd64.deb)"
-          payload="$(dpkg-deb -c "$meta" | awk '$6 !~ /\/$/ {print $6}' | grep -v '^\./usr/share/doc/' || true)"
+          # grep -v exits 1 when everything is filtered, which is the passing
+          # case, so only its empty output may be tolerated — not dpkg-deb's.
+          meta_contents="$(dpkg-deb -c "${metas[0]}")"
+          payload="$(printf '%s\n' "$meta_contents" | awk '$6 !~ /\/$/ {print $6}' | { grep -v '^\./usr/share/doc/' || true; })"
           if [[ -n "$payload" ]]; then
             echo "::error::the tensorplate metapackage must ship no payload"
             printf '%s\n' "$payload"

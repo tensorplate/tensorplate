@@ -78,9 +78,12 @@ done
 # `tensorplate` is satisfied by any of them — so removing the metapackage
 # from REQUIRED_PACKAGES would go unnoticed.
 array_block() {
+  # Terminate on a closing paren at any indentation: with a `^)`-only
+  # anchor, a cosmetically indented `  )` would let the block run on into
+  # the next array and satisfy the grep from the wrong declaration.
   awk -v name="$2" '
     $0 ~ ("^readonly " name "=\\(") { inside = 1; next }
-    inside && /^\)/ { exit }
+    inside && /^[[:space:]]*\)/ { exit }
     inside { print }
   ' "$1"
 }

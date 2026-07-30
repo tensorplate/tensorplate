@@ -59,24 +59,39 @@ expected_absent_packages=(
   tensorplate-apt-source
 )
 
+stub_paths=(
+  target/release/tensorplate
+  target/release/tensorplate-agent
+  target/release/tensorplate-observability
+  build/release/tensorplate-serving
+)
 created=()
+saved_dir="$(mktemp -d)"
 cleanup() {
-  local f
+  local f stub
   for f in "${created[@]:-}"; do
     [[ -n "$f" ]] && rm -f -- "$f"
   done
-  rm -rf -- "${repo_root}/target/release/.arch-set-stub" 2>/dev/null || true
+  # Put back whatever the stubs displaced. Leaving a 4-instruction stub named
+  # tensorplate-agent in a developer's target/release would be discovered much
+  # later and blamed on something else.
+  for stub in "${stub_paths[@]}"; do
+    if [[ -f "${saved_dir}/$(basename "$stub")" ]]; then
+      mv -f "${saved_dir}/$(basename "$stub")" "$stub"
+    else
+      rm -f -- "$stub"
+    fi
+  done
+  rm -rf -- "$saved_dir"
 }
 trap cleanup EXIT
 
 note "staging stub ELF binaries"
 stub_src="$(mktemp -d)/stub.c"
 printf 'int main(void) { return 0; }\n' > "$stub_src"
-for stub in target/release/tensorplate \
-            target/release/tensorplate-agent \
-            target/release/tensorplate-observability \
-            build/release/tensorplate-serving; do
+for stub in "${stub_paths[@]}"; do
   mkdir -p "$(dirname "$stub")"
+  [[ -f "$stub" ]] && mv -f "$stub" "${saved_dir}/$(basename "$stub")"
   # -g so debhelper has debug info to split into a -dbgsym package.
   cc -g -o "$stub" "$stub_src"
 done
@@ -89,7 +104,10 @@ if ! packaging/scripts/build-deb.sh -B >"$build_log" 2>&1; then
 fi
 
 shopt -s nullglob
-for deb in "${repo_parent}"/tensorplate*_"${version}"_*.deb; do
+# Ubuntu writes automatic debug packages as .ddeb, Debian as .deb; collect
+# both so neither is left behind in the repository parent.
+for deb in "${repo_parent}"/tensorplate*_"${version}"_*.deb \
+           "${repo_parent}"/tensorplate*_"${version}"_*.ddeb; do
   created+=("$deb")
 done
 shopt -u nullglob
@@ -110,12 +128,37 @@ for pkg in "${expected_absent_packages[@]}"; do
   pass "${pkg} correctly left to the primary build"
 done
 
+# The built set must be EXACTLY the expected one. Without this, adding a
+# sixth Architecture: any package to debian/control would build here and be
+# silently absent from the release: the workflow's copy loop names only the
+# five it knows, and every other check asserts presence rather than
+# exhaustiveness. This is the only place that sees the real built set, so it
+# is the only place that can notice.
+shopt -s nullglob
+built=()
+for deb in "${repo_parent}"/*_"${version}"_"${host_arch}".deb; do
+  name="$(basename -- "$deb")"
+  case "$name" in
+    *-dbgsym_*) continue ;;
+  esac
+  built+=("${name%%_*}")
+done
+shopt -u nullglob
+expected_sorted="$(printf '%s\n' "${expected_arch_packages[@]}" | sort)"
+built_sorted="$(printf '%s\n' "${built[@]:-}" | sort)"
+if [[ "$expected_sorted" != "$built_sorted" ]]; then
+  printf 'expected:\n%s\nbuilt:\n%s\n' "$expected_sorted" "$built_sorted" >&2
+  die "the ${host_arch} build set does not match the declared runtime set; a new arch-dependent package must be added to SECONDARY_ARCH_PACKAGES in both release scripts and to the copy loop in release.yml"
+fi
+pass "built set is exactly the declared ${host_arch} runtime set"
+
 # The metapackage must stay an empty dependency bundle on this architecture.
 # debhelper always adds changelog.Debian.gz and copyright under /usr/share/doc,
 # so "empty" means no payload outside that. Field 6 is the path; $NF would be
 # the link target on a symlink line.
 meta="${repo_parent}/tensorplate_${version}_${host_arch}.deb"
-payload="$(dpkg-deb -c "$meta" | awk '$6 !~ /\/$/ {print $6}' | grep -v '^\./usr/share/doc/' || true)"
+meta_contents="$(dpkg-deb -c "$meta")"
+payload="$(printf '%s\n' "$meta_contents" | awk '$6 !~ /\/$/ {print $6}' | { grep -v '^\./usr/share/doc/' || true; })"
 [[ -z "$payload" ]] || die "the tensorplate metapackage must ship no payload; found: ${payload}"
 pass "metapackage ships no payload on ${host_arch}"
 
@@ -130,12 +173,14 @@ pass "serving binary ships from the package"
 # packages cannot enter the asset set. Prove the globs it uses exclude them,
 # using whatever dbgsym packages this build actually produced.
 shopt -s nullglob
-dbgsyms=("${repo_parent}"/tensorplate*-dbgsym_"${version}"_*.deb)
+dbgsyms=("${repo_parent}"/tensorplate*-dbgsym_"${version}"_*.deb
+         "${repo_parent}"/tensorplate*-dbgsym_"${version}"_*.ddeb)
 shopt -u nullglob
 if ((${#dbgsyms[@]} > 0)); then
   for pkg in "${expected_arch_packages[@]}"; do
     shopt -s nullglob
-    matched=("${repo_parent}/${pkg}"_*_"${host_arch}".deb)
+    matched=("${repo_parent}/${pkg}"_*_"${host_arch}".deb
+             "${repo_parent}/${pkg}"_*_"${host_arch}".ddeb)
     shopt -u nullglob
     for hit in "${matched[@]}"; do
       case "$(basename -- "$hit")" in
