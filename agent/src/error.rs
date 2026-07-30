@@ -49,6 +49,19 @@ pub enum AgentError {
     #[error("backend `{backend}` is unrunnable on this device: {reason}")]
     BackendUnrunnable { backend: String, reason: String },
 
+    /// The machine itself cannot honour a deploy: it matches no support
+    /// row, matches one that carries no claim, is partitioned, or is
+    /// missing a driver/runtime component or backend package the matched
+    /// row requires. `reason` is the frozen platform reason where one
+    /// applies — a machine-shape miss deliberately has none, because the
+    /// vocabulary has no value for it and the nearest ones all name a
+    /// dimension that is fine.
+    #[error("platform cannot admit this deploy: {detail}")]
+    PlatformNotAdmissible {
+        reason: Option<&'static str>,
+        detail: String,
+    },
+
     #[error("bundle requires capability `{0}` not published by backend `{1}`")]
     UnsupportedCapability(String, String),
 
@@ -104,6 +117,7 @@ impl AgentError {
             | AgentError::UnsupportedHardware(_)
             | AgentError::UnsupportedBackend(_)
             | AgentError::BackendUnrunnable { .. }
+            | AgentError::PlatformNotAdmissible { .. }
             | AgentError::UnsupportedCapability(_, _)
             | AgentError::Unavailable(_) => (ErrorCode::Unsupported, false),
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),

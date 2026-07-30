@@ -8,6 +8,42 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A deploy is now refused before anything is staged when the machine
+  itself cannot honour it. A partitioned accelerator is the case this
+  exists for: the card is supported and the host is supported, and serving
+  it anyway would serve at a capacity the matched row's evidence was never
+  collected at. `mig_mode_enabled` is reported, and the same card
+  unpartitioned is admitted — the control that keeps the check from being a
+  blanket refusal.
+
+  Requirements come from the matched row, never from a constant in the
+  agent. Driver and runtime components are compared against what the row
+  records, and the packages a backend path needs are the ones that row
+  declares for that path. Rows record no components until their first
+  evidence run, so the stack check is deliberately silent today rather than
+  inventing a requirement — an empty list means "not yet recorded", not
+  "nothing required".
+
+  A backend path a row never declared is refused rather than waved through.
+  An absent package set is not a row with nothing to require; it is a row
+  that never claimed to serve that path, which is exactly the deploy that
+  has no evidence behind it.
+
+  The two halves are asked at different times because they have different
+  inputs: whether this machine matches a row at all is settled once at
+  startup, while which packages matter depends on the backend the bundle
+  names. Detection failing is **not** a rejection — an agent that cannot
+  read its own hardware has no basis to refuse a deploy, and turning "I
+  could not look" into "your platform is unsupported" is the collapse this
+  codebase refuses everywhere else.
+
+  One rejection deliberately carries no typed reason. A machine whose
+  hardware matches a row but whose machine shape no row's evidence covers
+  has no value in the frozen vocabulary, and the nearest candidates all
+  name a dimension that is fine — an operator told their OS version is
+  unsupported, when their OS is correct and their chassis is not, goes and
+  reinstalls the wrong thing. (V021-E02-F02-T02, V021-E02-F02-T03)
+
 - Discrete NVIDIA accelerators are now detected by exact SKU, so a card
   either resolves to the row whose evidence was collected on it or is
   reported unsupported — never to the nearest thing. An A100 80GB is one

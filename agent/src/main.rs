@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_agent::{
     backend_detection::{probe_backend, BackendProbeReport, ProbeOptions},
@@ -36,7 +36,12 @@ use tensorplate_agent::{
     },
     worker,
 };
-use tensorplate_platform::PlatformRegistry;
+use tensorplate_platform::{
+    AcceleratorProbe, DetectedPlatform, HostProbe, NvidiaSmiProbe, PlatformRegistry,
+    SystemHostProbe,
+};
+
+use tensorplate_agent::platform_admission::{evaluate_platform, ObservedStack, PlatformAdmission};
 use tensorplate_protocol::install_paths::{BACKEND_DESCRIPTOR_DIR, PLATFORM_REGISTRY_DIR};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -145,6 +150,71 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
 /// can report why, rather than refusing to start and leaving the
 /// operator no local tooling. What the agent must never do is treat an
 /// absent registry as an empty one — hence `Option`, not a default.
+/// Settle the bundle-independent platform verdict at startup.
+///
+/// Detection failing is NOT a rejection: an agent that cannot read its own
+/// hardware has no basis to refuse a deploy, and turning "I could not look"
+/// into "your platform is unsupported" is the collapse this codebase
+/// refuses everywhere else. The verdict is simply absent, and admission
+/// stays silent — doctor is what an operator runs to diagnose that.
+fn settle_platform_admission(registry: &PlatformRegistry) -> Option<PlatformAdmission> {
+    let host = match SystemHostProbe::new().detect_host() {
+        Ok(host) => host,
+        Err(err) => {
+            eprintln!(
+                "platform admission: host identity unreadable, deploy admission disabled: {err}"
+            );
+            return None;
+        }
+    };
+    let accelerator = match NvidiaSmiProbe::new().detect_accelerator() {
+        Ok(accelerator) => accelerator,
+        Err(err) => {
+            eprintln!(
+                "platform admission: accelerator identity unreadable, deploy admission disabled: {err}"
+            );
+            return None;
+        }
+    };
+    let detected = match accelerator {
+        Some(accelerator) => DetectedPlatform::with_accelerator(host, accelerator),
+        None => DetectedPlatform::host_only(host),
+    };
+    // The driver/runtime stack and package set are observations the row is
+    // compared against. Rows record no components until their first
+    // evidence run, so this is empty today by construction rather than by
+    // omission.
+    let observed = ObservedStack {
+        components: BTreeMap::new(),
+        installed_packages: installed_tensorplate_packages(),
+    };
+    let verdict = evaluate_platform(registry, &detected, &observed);
+    eprintln!("platform admission: {verdict:?}");
+    Some(PlatformAdmission::new(verdict, observed.installed_packages))
+}
+
+/// Package names dpkg reports as installed. An unreadable package
+/// database yields an empty set, which can only make admission stricter.
+fn installed_tensorplate_packages() -> BTreeSet<String> {
+    let Ok(output) = std::process::Command::new("dpkg-query")
+        .args([
+            "-W",
+            "-f=${binary:Package} ${db:Status-Status}\n",
+            "tensorplate*",
+        ])
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, status) = line.split_once(' ')?;
+            (status.trim() == "installed").then(|| name.to_string())
+        })
+        .collect()
+}
+
 fn load_platform_registry() -> Option<PlatformRegistry> {
     match PlatformRegistry::load_installed() {
         Ok(registry) => {
@@ -220,6 +290,11 @@ fn main() -> ExitCode {
     let mut coordinator =
         Coordinator::new(cfg.clone(), store.clone(), worker).with_backend_probes(backend_probes);
     if let Some(registry) = load_platform_registry() {
+        // Settle the machine-level question once. A deploy then compares
+        // against this rather than re-probing hardware on every request.
+        if let Some(admission) = settle_platform_admission(&registry) {
+            coordinator = coordinator.with_platform_admission(admission);
+        }
         coordinator = coordinator.with_platform_registry(registry);
     }
     if let Some(supervisor) = supervisor.as_ref() {

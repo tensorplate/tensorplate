@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Deploy admission against the real committed registry.
+//
+// The rejections here are the ones that must happen before anything is
+// staged: a partitioned accelerator, a driver stack that does not match
+// what the matched row records, and a backend whose packages are not
+// installed. Every requirement is read from the row — none is written
+// down twice, here or in the agent.
+
+#![allow(clippy::expect_used, clippy::panic)]
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+
+use tensorplate_agent::platform_admission::{
+    check_backend_packages, evaluate_platform, ObservedStack, PlatformAdmission, PlatformRejection,
+    PlatformVerdict,
+};
+use tensorplate_platform::{
+    identify_accelerator, AcceleratorSources, DetectedArchitecture, DetectedPlatform,
+    DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow,
+};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+fn registry() -> PlatformRegistry {
+    PlatformRegistry::load(&repo_root().join("config/platform")).expect("registry loads")
+}
+
+/// The A100 row, which is the one the MIG fixtures are written against.
+fn a100(registry: &PlatformRegistry) -> &PlatformSupportRow {
+    registry
+        .row("ubuntu2404-x86-a100-40g-a2hg1")
+        .expect("the A100 row is committed")
+}
+
+fn host_of(row: &PlatformSupportRow) -> HostIdentity {
+    let cpu = row.cpu();
+    HostIdentity {
+        architecture: DetectedArchitecture::Known(cpu.architecture),
+        vendor: DetectedVendor::Known(*cpu.vendors.first().expect("a row names a vendor")),
+        os_name: row.os().name.clone(),
+        os_version: row.os().version.clone(),
+        image_identity: row.os().image_identity.clone(),
+        machine_type: row.validation_environment().machine_type.clone(),
+    }
+}
+
+/// Detect from one of the committed accelerator fixtures, so admission is
+/// driven by the same recorded text detection is.
+fn detected_from_fixture(row: &PlatformSupportRow, fixture: &str) -> DetectedPlatform {
+    let text = std::fs::read_to_string(
+        repo_root()
+            .join("test/platform/accelerator")
+            .join(format!("{fixture}.txt")),
+    )
+    .expect("read fixture");
+    let report = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(text),
+    })
+    .expect("detection succeeds")
+    .expect("one device");
+    DetectedPlatform::with_accelerator(host_of(row), report.identity)
+}
+
+#[test]
+fn a_partitioned_accelerator_is_refused_with_mig_mode_enabled() {
+    // The card is supported and the host is supported; only the
+    // partitioning is wrong. Serving it anyway would serve at a capacity
+    // the row's evidence was never collected at.
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
+    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
+        PlatformVerdict::Rejected(PlatformRejection::Reason { reason, detail }) => {
+            assert_eq!(reason, PlatformReason::MigModeEnabled);
+            assert!(!detail.is_empty(), "a rejection must say why");
+        }
+        other => panic!("a partitioned accelerator must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_same_card_unpartitioned_is_admitted() {
+    // The control for the case above. Without it, a check that refused
+    // everything would look correct.
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
+    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
+        PlatformVerdict::Admitted { row_id } => {
+            assert_eq!(row_id, "ubuntu2404-x86-a100-40g-a2hg1");
+        }
+        other @ PlatformVerdict::Rejected(_) => {
+            panic!("a non-partitioned supported card must be admitted, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn an_off_matrix_card_is_refused_with_the_sku_reason() {
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "unsupported-a100-80gb");
+    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
+        PlatformVerdict::Rejected(PlatformRejection::Reason { reason, .. }) => {
+            assert_eq!(reason, PlatformReason::UnsupportedAcceleratorSku);
+        }
+        other => panic!("an off-matrix card must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
+    // The committed rows record no components yet — those are captured at
+    // the first evidence run — so the requirement under test is taken from
+    // a row that does declare one. That is the point: the check has no
+    // version of its own to compare against.
+    let registry = registry();
+    let row = a100(&registry);
+    let detected = detected_from_fixture(row, "ubuntu2404-x86-a100-40g-a2hg1");
+
+    // A row with no recorded stack must not invent a requirement.
+    assert!(
+        row.kernel_driver_stack().components.is_empty(),
+        "this case assumes the committed row has no recorded stack yet"
+    );
+    assert!(matches!(
+        evaluate_platform(&registry, &detected, &ObservedStack::default()),
+        PlatformVerdict::Admitted { .. }
+    ));
+
+    // And a row that does record one is enforced against what the machine
+    // reports. Exercised through a registry loaded from a row carrying
+    // components, so the requirement is genuinely row-sourced.
+    let staged = staged_registry_with_components(&[("nvidia_driver", "550.54.15")]);
+    let detected = detected_from_fixture(a100(&staged), "ubuntu2404-x86-a100-40g-a2hg1");
+
+    let matching = ObservedStack {
+        components: BTreeMap::from([("nvidia_driver".to_string(), "550.54.15".to_string())]),
+        installed_packages: BTreeSet::new(),
+    };
+    assert!(matches!(
+        evaluate_platform(&staged, &detected, &matching),
+        PlatformVerdict::Admitted { .. }
+    ));
+
+    for observed in [
+        ObservedStack::default(),
+        ObservedStack {
+            components: BTreeMap::from([("nvidia_driver".to_string(), "535.104.5".to_string())]),
+            installed_packages: BTreeSet::new(),
+        },
+    ] {
+        match evaluate_platform(&staged, &detected, &observed) {
+            PlatformVerdict::Rejected(PlatformRejection::Reason { reason, detail }) => {
+                assert_eq!(reason, PlatformReason::MissingDriverRuntime);
+                assert!(
+                    detail.contains("nvidia_driver") && detail.contains("550.54.15"),
+                    "the rejection must name the component and the version the row records: {detail}"
+                );
+            }
+            other => panic!("a mismatched driver stack must be refused, got {other:?}"),
+        }
+    }
+}
+
+/// A registry loaded from the committed rows with the A100 row's
+/// `kernel_driver_stack` replaced, so a stack requirement can be exercised
+/// before any evidence run has recorded one.
+fn staged_registry_with_components(components: &[(&str, &str)]) -> PlatformRegistry {
+    let src = repo_root().join("config/platform");
+    let staging = std::env::temp_dir().join(format!(
+        "tp-admission-registry-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&staging);
+    copy_dir(&src, &staging);
+
+    let row_path = staging.join("rows/ubuntu2404-x86-a100-40g-a2hg1.json");
+    let mut row: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&row_path).expect("read row"))
+            .expect("row parses");
+    row["kernel_driver_stack"]["components"] = serde_json::Value::Array(
+        components
+            .iter()
+            .map(|(component, version)| {
+                serde_json::json!({ "component": component, "version": version })
+            })
+            .collect(),
+    );
+    std::fs::write(
+        &row_path,
+        serde_json::to_string_pretty(&row).expect("serialize"),
+    )
+    .expect("write row");
+
+    PlatformRegistry::load(&staging).expect("staged registry loads")
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create dir");
+    for entry in std::fs::read_dir(from).expect("read dir") {
+        let entry = entry.expect("dir entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy");
+        }
+    }
+}
+
+#[test]
+fn a_backend_path_the_row_declares_requires_its_packages() {
+    let registry = registry();
+    let row = a100(&registry);
+
+    // The row declares tensorplate-backend-python-pytorch for this path.
+    let installed = BTreeSet::from(["tensorplate-backend-python-pytorch".to_string()]);
+    assert!(check_backend_packages(row, "python_pytorch", &installed).is_ok());
+
+    match check_backend_packages(row, "python_pytorch", &BTreeSet::new()) {
+        Err(PlatformRejection::Reason { reason, detail }) => {
+            assert_eq!(reason, PlatformReason::MissingBackendPackage);
+            assert!(
+                detail.contains("tensorplate-backend-python-pytorch"),
+                "the rejection must name the package the row requires: {detail}"
+            );
+        }
+        other => panic!("a missing backend package must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_backend_path_the_row_never_claimed_is_refused_rather_than_waved_through() {
+    // A row that declares no package set for a path is not a row with
+    // nothing to require — it is a row that never claimed to serve that
+    // path at all. Treating an absent set as "no requirement" would admit
+    // exactly the deploy that has no evidence behind it.
+    let registry = registry();
+    let row = a100(&registry);
+    match check_backend_packages(row, "vitis_ai", &BTreeSet::new()) {
+        Err(PlatformRejection::Reason { reason, detail }) => {
+            assert_eq!(reason, PlatformReason::MissingBackendPackage);
+            assert!(detail.contains("vitis_ai"), "names the path: {detail}");
+        }
+        other => panic!("an undeclared backend path must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_rejected_machine_stays_rejected_whatever_backend_a_bundle_names() {
+    // The startup verdict is not something a bundle can talk its way past.
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
+    let verdict = evaluate_platform(&registry, &detected, &ObservedStack::default());
+    let admission = PlatformAdmission::new(
+        verdict,
+        BTreeSet::from(["tensorplate-backend-python-pytorch".to_string()]),
+    );
+
+    for backend in ["python_pytorch", "tensorrt", "anything"] {
+        match admission.admit(&registry, backend) {
+            Err(rejection) => assert_eq!(
+                rejection.reason(),
+                Some(PlatformReason::MigModeEnabled),
+                "the machine-level reason must survive, not be replaced by a package one"
+            ),
+            Ok(()) => panic!("a partitioned machine must not admit `{backend}`"),
+        }
+    }
+}
+
+#[test]
+fn a_machine_shape_miss_carries_no_borrowed_reason() {
+    // The frozen vocabulary has no value for "wrong machine shape", and
+    // the nearest candidates all name a dimension that is fine. An
+    // operator told their OS version is unsupported, when their OS is
+    // correct and their chassis is not, goes and reinstalls the wrong
+    // thing.
+    let registry = registry();
+    let row = a100(&registry);
+    let mut host = host_of(row);
+    host.machine_type = Some("a2-ultragpu-1g".to_string());
+    let report = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(
+            std::fs::read_to_string(
+                repo_root().join("test/platform/accelerator/ubuntu2404-x86-a100-40g-a2hg1.txt"),
+            )
+            .expect("read fixture"),
+        ),
+    })
+    .expect("detection succeeds")
+    .expect("one device");
+    let detected = DetectedPlatform::with_accelerator(host, report.identity);
+
+    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
+        PlatformVerdict::Rejected(
+            rejection @ PlatformRejection::OutsideValidatedEnvironment { .. },
+        ) => {
+            assert_eq!(
+                rejection.reason(),
+                None,
+                "a machine-shape miss must not borrow a frozen reason"
+            );
+            assert!(
+                rejection.detail().contains("machine shape"),
+                "the detail must say what is actually wrong: {}",
+                rejection.detail()
+            );
+        }
+        other => {
+            panic!("a host on an uncovered machine shape must be refused as such, got {other:?}")
+        }
+    }
+}
