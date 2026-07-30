@@ -107,6 +107,22 @@ dpkg -i \
 dpkg -l 'tensorplate*' > "${evidence}/packages.txt"
 pass "package set installed at ${version}"
 
+# The row declares a python_pytorch backend path over apt, and the backend
+# package deliberately does not depend on PyTorch — the operator provides it.
+# Doctor probes the backend runtime unconditionally on Linux, so without this
+# the probe reports a critical failure and doctor exits non-zero. Installing it
+# turns that into positive evidence that the row's declared path works.
+note "2b. provide PyTorch for the declared backend path"
+/usr/bin/python3 -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
+# The CPU index matters: plain `pip install torch` on Linux resolves to the
+# CUDA build and pulls gigabytes of NVIDIA wheels onto an accelerator-less host.
+/usr/bin/python3 -m pip install --quiet \
+  --index-url https://download.pytorch.org/whl/cpu 'torch>=2.1' ||
+  die "installing the CPU PyTorch wheel failed"
+/usr/bin/python3 -c 'import torch; print("torch", torch.__version__)' > "${evidence}/torch.txt" ||
+  die "torch is not importable by the descriptor's interpreter"
+pass "PyTorch available to /usr/bin/python3: $(cat "${evidence}/torch.txt")"
+
 note "3. package closure and the per-architecture agent config"
 [[ -x "$TP_SERVING_BINARY_PATH" ]] || die "serving binary missing at ${TP_SERVING_BINARY_PATH}"
 [[ -r "$TP_PYTHON_PYTORCH_BACKEND_DESCRIPTOR" ]] ||
@@ -187,7 +203,7 @@ assert expected_row in profile["message"], \
 
 for required_ok in ("platform_registry", "agent_reachable", "agent_socket",
                     "serving_binary_installed", "python_pytorch_backend",
-                    "path_layout", "config_files"):
+                    "python_pytorch_runtime", "path_layout", "config_files"):
     f = by_id[required_ok]
     assert f["status"] == "ok", f"{required_ok} is {f['status']}: {f['message']}"
 
