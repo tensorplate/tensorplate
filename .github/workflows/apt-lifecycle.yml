@@ -83,9 +83,38 @@ jobs:
           CI: 'true'
         run: test/packaging/verify_arch_package_set.sh
 
+  supervision:
+    name: systemd supervision contract
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Drives the shipped units against the runner's own systemd. The units
+      # are architecture-independent, so one runner covers the contract both
+      # architectures inherit; verify_systemd_units.sh only reads them as text.
+      - name: Service supervision contract
+        shell: bash
+        run: sudo --preserve-env=CI bash test/packaging/verify_service_supervision.sh
+        env:
+          CI: 'true'
+
   rehearse:
-    name: channel lifecycle rehearsal (arm64)
-    runs-on: ubuntu-22.04-arm
+    name: channel lifecycle rehearsal (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+          # x86_64 became possible once the runtime metapackage stopped being
+          # arm64-only: the rehearsal's two-command install and future-version
+          # discovery steps both resolve `tensorplate`, which simply did not
+          # exist for this architecture before.
+          - arch: amd64
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Checkout with tags

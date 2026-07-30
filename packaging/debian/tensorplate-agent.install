@@ -1,2 +1,10 @@
+#!/usr/bin/dh-exec
 target/release/tensorplate-agent             usr/bin/
-packaging/conf/agent.json                    etc/tensorplate/
+# The agent config is per-architecture. It declares device_family and the
+# backends this build actually contains, and the agent reads both into its
+# deploy compatibility check — so one shared file would make an architecture
+# either reject bundles that correctly target it or advertise a backend that
+# is not compiled in. Both variants install to the same conffile path, so an
+# existing host sees a byte-identical file and dpkg does not prompt.
+[!amd64] packaging/conf/agent.json           etc/tensorplate/
+[amd64] packaging/conf/agent.amd64.json   => etc/tensorplate/agent.json

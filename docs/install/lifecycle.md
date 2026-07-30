@@ -45,22 +45,43 @@ observability units automatically (the units land via
 durable state; the previous deployment is still available for
 `tensorplate rollback`.
 
-## Unsupported downgrade
+## Downgrade and rollback
 
-`apt install tensorplate-agent=<older-version>` is refused by the
-upgrade preflight. To revert manually:
+`apt install tensorplate-agent=<older-version>` is refused by the upgrade
+preflight, and `--allow-downgrades` does not change that: the preflight
+compares the incoming version against the installed one and aborts, without
+looking at durable state. Setting state aside therefore does not unlock a
+downgrade — the guard is about version ordering, not about what state exists.
+
+Rolling back means removing the runtime set and installing the older version
+as a fresh install. `apt remove` keeps `/etc/tensorplate` conffiles and
+everything under `/var/lib/tensorplate`, so operator config and durable state
+survive the cycle:
 
 ```bash
-sudo systemctl stop tensorplate-agent
-sudo systemctl stop tensorplate-observability
+sudo systemctl stop tensorplate-agent tensorplate-observability
 # Move durable state aside so the older agent cannot misinterpret it.
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
-sudo apt install --allow-downgrades tensorplate-*=<older-version>
+# `remove`, not `purge`: this keeps /etc/tensorplate and /var/lib/tensorplate.
+sudo apt remove -y tensorplate tensorplate-agent tensorplate-serving \
+  tensorplate-observability tensorplate-cli
+sudo apt install ./tensorplate-common_<older-version>_all.deb \
+  ./tensorplate-agent_<older-version>_<arch>.deb \
+  ./tensorplate-serving_<older-version>_<arch>.deb \
+  ./tensorplate-observability_<older-version>_<arch>.deb \
+  ./tensorplate-cli_<older-version>_<arch>.deb
+tensorplate doctor
+sudo systemctl enable --now tensorplate-agent tensorplate-observability
 ```
 
-The older agent will report "no active deployment" until you decide
-whether to restore `state.bak` (manually verify the schema_version of
-each journal first) or to redeploy from a known-good bundle.
+The older agent will report "no active deployment" until you decide whether
+to restore `state.bak` (manually verify the schema_version of each journal
+first) or to redeploy from a known-good bundle.
+
+`<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
+`test/packaging/apt-lifecycle-e2e.sh` rehearses this procedure, and asserts
+that the downgrade guard stays armed both with and without durable state
+present.
 
 ## Remove
 

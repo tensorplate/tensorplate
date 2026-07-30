@@ -8,6 +8,46 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The systemd supervision contract and the package rollback procedure now
+  have tests that run them rather than read them. A new packaging check
+  drives the shipped units against a real systemd: the agent reaches active
+  and writes to the documented log path, a `SIGKILL` is recovered, a crash
+  **loop** is given up on instead of retried forever, a clean stop is not
+  treated as a failure, observability survives the agent stopping, and no
+  serving unit exists. The unit-text check additionally asserts there are no
+  architecture-specific unit files and that both units agree on the
+  supervision directives, so the parity claim is verified rather than
+  assumed — the units were already single-source, what was missing was
+  evidence.
+
+  **The documented rollback could not work.** `upgrade-preflight.sh` refuses
+  a downgrade on the version comparison alone and never inspects durable
+  state, so the published instruction to move state aside and then
+  `apt install --allow-downgrades` was refused all the same. Rolling back
+  means removing the runtime set — which keeps `/etc/tensorplate` and
+  everything under `/var/lib/tensorplate` — and installing the older version
+  as a fresh install. Both documents now say that, and the lifecycle
+  rehearsal proves the guard stays armed with and without state present
+  before exercising the procedure that works.
+
+  `install-paths.sh` now verifies the layout it just applied instead of
+  trusting it. Its ownership changes are deliberately tolerant, because the
+  system group is not guaranteed to exist for every path when they run — so
+  a failed `chgrp` used to leave the agent unable to read its own state and
+  report nothing. A half-applied layout is now a dpkg configure failure that
+  names the directory, the observed value, and the command that fixes it.
+
+  The agent config becomes per-architecture. It declares `device_family` and
+  the backends the build actually contains, and the agent reads both into its
+  deploy compatibility check, so one shared file would make x86_64 reject
+  bundles that correctly target it while advertising a TensorRT backend that
+  build does not contain. Both variants install to the same conffile path, so
+  existing hosts see a byte-identical file and dpkg does not prompt.
+
+  The channel lifecycle rehearsal now runs on x86_64 as well as arm64, which
+  became possible only once the runtime metapackage stopped being arm64-only.
+  (V021-E02-F01-T02, V021-E02-F01-T03)
+
 - Releases now publish a complete Ubuntu x86_64 runtime package set —
   agent, serving worker, observability service, operator CLI, and the
   `tensorplate` metapackage — alongside the Jetson arm64 set, instead of
