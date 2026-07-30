@@ -19,6 +19,12 @@ if grep -Fq 'if "$@"' "$harness"; then
   exit 1
 fi
 
+if grep -Fq 'state/lifecycle-marker"' "$harness"; then
+  printf 'FAIL: lifecycle rollback marker must not use a persistent fixed path\n' >&2
+  exit 1
+fi
+grep -Fq 'state/lifecycle-marker.XXXXXX' "$harness"
+
 printf '%s\n' '{"formulae":[{"name":"tensorplate","versions":{"stable":"0.2.1-rc.1"}}]}' |
   python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print(f["name"], f["versions"]["stable"])' |
   grep -Fxq 'tensorplate 0.2.1-rc.1'

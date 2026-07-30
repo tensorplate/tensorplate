@@ -149,6 +149,7 @@ trust_added=()
 active_stage=""
 active_stage_log=""
 active_stage_started=""
+lifecycle_marker=""
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -238,6 +239,7 @@ cleanup() {
     restore_agent_config
     restore_tap
   fi
+  [[ -z "$lifecycle_marker" ]] || rm -f "$lifecycle_marker"
   restore_formula_trust
   rm -rf "$work_dir"
   exit "$status"
@@ -625,12 +627,16 @@ upgrade_from_baseline() {
 }
 
 rollback_to_baseline() {
-  marker="$(brew --prefix)/var/tensorplate/state/lifecycle-marker"
-  printf 'preserve-across-formula-rollback\n' >"$marker"
+  lifecycle_marker="$(
+    mktemp "$(brew --prefix)/var/tensorplate/state/lifecycle-marker.XXXXXX"
+  )"
+  printf 'preserve-across-formula-rollback\n' >"$lifecycle_marker"
   remove_candidate_graph
   install_baseline
-  [[ "$(cat "$marker")" == "preserve-across-formula-rollback" ]]
+  [[ "$(cat "$lifecycle_marker")" == "preserve-across-formula-rollback" ]]
   [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]]
+  rm -f "$lifecycle_marker"
+  lifecycle_marker=""
 }
 
 write_summary() {
