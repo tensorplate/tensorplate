@@ -60,6 +60,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Wait for a path to appear. Type=simple reports `active` as soon as systemd
+# has forked ExecStart, which is BEFORE the process runs its first line — so
+# anything the service itself produces has to be waited for, not sampled.
+await_file() {
+  local path="$1" deadline="$2" i
+  for ((i = 0; i < deadline; i++)); do
+    [[ -e "$path" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 # Wait until `systemctl show -p <prop>` reports one of the given values.
 await_property() {
   local unit="$1" prop="$2" deadline="$3"; shift 3
@@ -113,8 +125,13 @@ state="$(await_property "$AGENT_UNIT" ActiveState 30 active)" ||
   die "agent did not reach active (state=${state}); $(systemctl status "$AGENT_UNIT" --no-pager 2>&1 | tail -5)"
 first_pid="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
 [[ -n "$first_pid" && "$first_pid" != "0" ]] || die "agent has no MainPID while active"
-[[ -f "${TP_LOG_DIR}/supervision.log" ]] ||
-  die "no log written under ${TP_LOG_DIR}; LogsDirectory= must make the documented path writable"
+if ! await_file "${TP_LOG_DIR}/supervision.log" 20; then
+  printf 'ls -la %s:\n' "$TP_LOG_DIR" >&2
+  ls -la "$TP_LOG_DIR" >&2 || true
+  printf 'journal for %s:\n' "$AGENT_UNIT" >&2
+  journalctl -u "$AGENT_UNIT" --no-pager -n 30 >&2 || true
+  die "no log written under ${TP_LOG_DIR}; LogsDirectory= must make the documented path writable by the service"
+fi
 pass "agent active as PID ${first_pid}, logs at ${TP_LOG_DIR}"
 
 note "2. a hard crash is recovered"
