@@ -160,4 +160,51 @@ installed="$(apt-cache policy tensorplate | awk '/Installed:/{print $2}')"
   die "installed runtime version changed without an upgrade command; installed=$installed"
 pass "future runtime version ${staging_ver} discovered by plain apt update (installed stays ${cur_ver}); bootstrap untouched"
 
+note "G. package rollback to the previous version"
+# lifecycle.md is explicit that there is no rollback path THROUGH apt: the
+# upgrade preflight refuses a downgrade so an older agent cannot misread newer
+# durable state. Prove the guard is armed, and that it is armed on the VERSION
+# comparison alone — the preflight never inspects state, so setting state aside
+# does not unlock a downgrade. Rollback therefore has to remove the packages
+# and install the older ones as a fresh install.
+if dpkg -i "${work}"/tensorplate-agent_"${baseline_ver}"_*.deb >"${work}/downgrade.log" 2>&1; then
+  die "the upgrade preflight must refuse a downgrade of an installed newer agent"
+fi
+grep -q 'downgrade' "${work}/downgrade.log" ||
+  { tail -10 "${work}/downgrade.log" >&2; die "the downgrade refusal did not name the reason"; }
+pass "downgrade refused with an actionable message"
+
+# Same attempt with durable state moved aside: still refused, because the guard
+# is about version ordering rather than about what state happens to exist.
+systemctl stop tensorplate-agent tensorplate-observability >/dev/null 2>&1 || true
+mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
+if dpkg -i "${work}"/tensorplate-agent_"${baseline_ver}"_*.deb >"${work}/downgrade2.log" 2>&1; then
+  die "setting state aside must not unlock a downgrade; the preflight compares versions only"
+fi
+pass "downgrade still refused with state set aside"
+
+# The rollback that works: remove the runtime set, then install the previous
+# version fresh. `remove` keeps /etc conffiles and /var/lib, so operator config
+# and the set-aside state survive.
+apt-get remove -y -qq tensorplate tensorplate-agent tensorplate-serving \
+  tensorplate-observability tensorplate-cli >"${work}/rollback-remove.log" 2>&1 ||
+  { tail -15 "${work}/rollback-remove.log" >&2; die "removing the runtime set failed"; }
+dpkg -i "${work}"/tensorplate-common_"${baseline_ver}"_all.deb >/dev/null 2>&1 || true
+dpkg -i "${work}"/tensorplate-agent_"${baseline_ver}"_*.deb \
+        "${work}"/tensorplate-serving_"${baseline_ver}"_*.deb \
+        "${work}"/tensorplate-observability_"${baseline_ver}"_*.deb \
+        "${work}"/tensorplate-cli_"${baseline_ver}"_*.deb \
+  >"${work}/rollback.log" 2>&1 ||
+  { tail -15 "${work}/rollback.log" >&2; die "rollback install of ${baseline_ver} failed"; }
+for pkg in tensorplate-agent tensorplate-serving tensorplate-observability tensorplate-cli; do
+  got="$(dpkg-query -W -f '${Version}' "$pkg")"
+  [[ "$got" == "$baseline_ver" ]] ||
+    die "${pkg} is ${got} after rollback; expected ${baseline_ver}"
+done
+[[ "$(cat /etc/tensorplate/marker.conf)" == "custom-operator-setting" ]] ||
+  die "operator config under /etc/tensorplate was lost by the rollback"
+[[ -f /var/lib/tensorplate/state.bak/marker ]] ||
+  die "the set-aside state was not preserved for the operator to restore"
+pass "rolled back to ${baseline_ver}; operator config kept and prior state preserved for review"
+
 note "apt lifecycle rehearsal complete"

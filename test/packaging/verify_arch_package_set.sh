@@ -169,6 +169,29 @@ dpkg-deb -c "$serving" | grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$'
   die "tensorplate-serving must ship /usr/lib/tensorplate/tensorplate-serving"
 pass "serving binary ships from the package"
 
+# The agent config is selected per architecture by a dh-exec filter, which is
+# only exercised by a real build. Read it back out of the archive: a filter
+# that silently matched the wrong line would ship a config declaring a device
+# family this host is not and a backend this build does not contain.
+agent_deb="${repo_parent}/tensorplate-agent_${version}_${host_arch}.deb"
+agent_conf="$(dpkg-deb --fsys-tarfile "$agent_deb" | tar -xO ./etc/tensorplate/agent.json)"
+[[ -n "$agent_conf" ]] || die "tensorplate-agent must ship /etc/tensorplate/agent.json"
+case "$host_arch" in
+  amd64)
+    printf '%s' "$agent_conf" | grep -q '"device_family": "x86_64"' ||
+      die "the ${host_arch} agent config must declare device_family x86_64"
+    if printf '%s' "$agent_conf" | grep -q '"tensorrt"'; then
+      die "the ${host_arch} agent config must not advertise tensorrt; that build has no TensorRT adapter"
+    fi
+    pass "agent config is the ${host_arch} variant"
+    ;;
+  *)
+    printf '%s' "$agent_conf" | grep -q '"device_family": "jetson-orin"' ||
+      die "the ${host_arch} agent config must keep device_family jetson-orin"
+    pass "agent config is the default variant on ${host_arch}"
+    ;;
+esac
+
 # The release job copies by explicit package name so auto-generated -dbgsym
 # packages cannot enter the asset set. Prove the globs it uses exclude them,
 # using whatever dbgsym packages this build actually produced.

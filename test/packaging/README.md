@@ -16,7 +16,8 @@ packaging verification suite.
 | `verify_descriptor.sh` | Validates the shipped backend descriptor's required fields, absolute interpreter path, and that its declared `tensorplate_runtime_range` both admits the release line this tree targets and brackets `packaging/VERSION`. The descriptor is not rewritten by the release driver on a version bump, so this is what makes the drift loud. |
 | `verify_arch_package_set.sh` | Runs `dpkg-buildpackage -B` with stub ELF binaries and asserts debhelper emits exactly the five arch-dependent runtime packages for the host architecture, leaves the three `Architecture: all` packages to the primary build, keeps the metapackage payload-free, ships the serving binary from the package, and that the release job's copy globs exclude auto-generated `-dbgsym` packages. Not in `run.sh`: it writes `.deb` files to the repository parent. |
 | `verify_installer.sh` | Syntax-checks `packaging/scripts/install.sh`, runs `shellcheck` when available, and exercises installer self-check, supported OS, unsupported OS, `--force-os`, hardware warning, `--strict-hardware`, and `--cli-only` paths with fixtures. |
-| `run.sh` | Orchestrator. Runs every verifier except `verify_arch_package_set.sh` and exits non-zero on the first failure. |
+| `verify_service_supervision.sh` | Drives the shipped systemd units against a real systemd: the agent reaches active and logs to the documented path, a hard crash is recovered, a crash LOOP is given up on rather than restarted forever, a clean stop is not restarted, observability survives the agent stopping, and no serving unit is registered. Mutates the host; refuses to run unless `CI=true` or `TP_SUPERVISION_ALLOW=1`. Not in `run.sh`. |
+| `run.sh` | Orchestrator. Runs every verifier except the host-mutating `verify_arch_package_set.sh` and `verify_service_supervision.sh`, and exits non-zero on the first failure. |
 
 ## Running
 
