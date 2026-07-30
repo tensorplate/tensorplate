@@ -6,6 +6,19 @@
 # start, run, and detect missing heartbeats independently from the
 # agent and the serving worker. The unit therefore declares no Wants=,
 # Requires=, or After= dependency on the agent unit.
+#
+# It also does not share the agent's runtime directory. /run/tensorplate is
+# the agent's: it holds the agent control socket, and systemd removes a
+# RuntimeDirectory= when its unit stops. While both units declared it,
+# stopping the agent deleted the directory that observability named in
+# ReadWritePaths=, and observability could then not start at all — it failed
+# at step NAMESPACE with 226/NAMESPACE. That is the independence invariant
+# broken by a shared path rather than by an ordering dependency.
+#
+# This service needs no runtime directory today: its listener transport is
+# in_process and its snapshot lives under StateDirectory=. When the reserved
+# Unix-socket listener lands it must declare a runtime directory it OWNS,
+# never the agent's.
 
 [Unit]
 Description=TensorPlate observability service (independent health monitor)
@@ -29,8 +42,6 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 
-RuntimeDirectory=tensorplate
-RuntimeDirectoryMode=0750
 StateDirectory=tensorplate
 StateDirectoryMode=0750
 LogsDirectory=tensorplate
@@ -41,7 +52,7 @@ TimeoutStopSec=10
 
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate
+ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

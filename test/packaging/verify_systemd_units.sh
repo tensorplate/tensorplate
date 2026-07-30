@@ -39,11 +39,9 @@ for unit in "${debian}/tensorplate-agent.service" "${debian}/tensorplate-observa
   require_line "${unit}" '^User=tensorplate$'
   require_line "${unit}" '^Group=tensorplate$'
   require_line "${unit}" '^Type=simple$'
-  require_line "${unit}" '^RuntimeDirectory=tensorplate$'
   require_line "${unit}" '^ProtectSystem=strict$'
   require_line "${unit}" '^ReadWritePaths=.*/var/lib/tensorplate'
   require_line "${unit}" '^ReadWritePaths=.*/var/log/tensorplate'
-  require_line "${unit}" '^ReadWritePaths=.*/run/tensorplate'
   require_line "${unit}" '^NoNewPrivileges=true$'
   require_line "${unit}" '^ProtectHome=true$'
   require_line "${unit}" '^PrivateTmp=true$'
@@ -56,6 +54,17 @@ done
 require_line "${debian}/tensorplate-agent.service" '^PrivateDevices=false$'
 forbid_line "${debian}/tensorplate-agent.service" '^PrivateDevices=true$'
 require_line "${debian}/tensorplate-observability.service" '^PrivateDevices=true$'
+
+# /run/tensorplate belongs to the agent: it holds the agent control socket, and
+# systemd deletes a RuntimeDirectory= when its unit stops. Observability must
+# therefore neither declare it nor name it in ReadWritePaths=, or the two units
+# share a path whose lifetime one of them controls — stopping the agent left
+# observability unable to start at all (226/NAMESPACE). The asymmetry is the
+# fix, so assert both halves of it.
+require_line "${debian}/tensorplate-agent.service" '^RuntimeDirectory=tensorplate$'
+require_line "${debian}/tensorplate-agent.service" '^ReadWritePaths=.*/run/tensorplate'
+forbid_line "${debian}/tensorplate-observability.service" '^RuntimeDirectory='
+forbid_line "${debian}/tensorplate-observability.service" '^ReadWritePaths=.*/run/tensorplate'
 
 # Observability must NOT order itself after the agent.
 forbid_line "${debian}/tensorplate-observability.service" '(After|Requires|Wants|BindsTo)=tensorplate-agent'
