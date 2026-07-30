@@ -1,0 +1,1 @@
+NVIDIA RTX 6000 Ada Generation, 49140, 550.54.15, GPU-8c2f5a63-4d19-4e7b-b085-9a3c1e6d4f27, [N/A]
