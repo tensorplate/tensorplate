@@ -8,6 +8,43 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Discrete NVIDIA accelerators are now detected by exact SKU, so a card
+  either resolves to the row whose evidence was collected on it or is
+  reported unsupported — never to the nearest thing. An A100 80GB is one
+  capacity away from a supported A100 and must not inherit its claim.
+
+  Read from `nvidia-smi` rather than NVML. NVML means linking a vendor SDK
+  into a crate the agent, CLI, and observability all depend on, and the
+  value needed is a string the tool already prints; the command boundary
+  is also what keeps vendor types out of the public contract. The product
+  name is carried through **verbatim**, because a row records exactly what
+  the tool prints and any normalization would be a second spelling of the
+  same fact for the two to drift apart on.
+
+  Memory is recorded but never matched on. A row records nominal capacity
+  and the tool reports the usable framebuffer, and for an L4 those are
+  different numbers — matching on it would make a supported card miss its
+  own row. The reported framebuffer, driver version, device UUID, and MIG
+  mode are kept alongside identity for evidence recording, the same split
+  host detection already uses.
+
+  Absence and failure stay distinct, as everywhere else in detection. No
+  `nvidia-smi` means no discrete accelerator, which is how the CPU-only
+  rows are told apart from the GPU ones. A tool that is present and fails
+  is an error: a host whose driver will not load is a broken GPU machine,
+  and reporting it as a machine without a GPU would resolve it to a
+  CPU-only row and tell an operator with a broken driver that their
+  platform is fine. More than one accelerator is refused rather than
+  narrowed to the first, because every row this release claims is
+  single-GPU.
+
+  Fixtures cover every row naming an NVIDIA card, three off-matrix SKUs,
+  and a partitioned device, and they are checked by resolving against the
+  real registry rather than against hand-written expectations. **They are
+  transcribed, not recorded** — no GPU in the validation fleet has been
+  reached yet — and their provenance says so; the first G2 and A2 runs
+  replace them, and a mismatch corrects the row. (V021-E02-F02-T01)
+
 - The Ubuntu x86_64 CPU-only row now has a live smoke, and it is the only
   packaging check that installs real binaries and runs the real CLI. The
   others stub the runtime so they can rehearse packaging shape cheaply, which
