@@ -33,6 +33,7 @@ class TensorplateCli < Formula
       if [ "${TP_PLATFORM_REGISTRY_DIR+x}" != x ]; then
         export TP_PLATFORM_REGISTRY_DIR="#{HOMEBREW_PREFIX}/share/tensorplate/platform"
       fi
+      export PYTHONPATH="#{formula_opt_libexec("tensorplate-backend-python-pytorch")}${PYTHONPATH:+:${PYTHONPATH}}"
       exec "#{libexec}/tensorplate" "$@"
     SH
     (bin/"tensorplate").chmod 0755

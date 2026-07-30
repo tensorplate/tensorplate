@@ -13,6 +13,7 @@ packaging verification suite.
 | `verify_ready_check.sh` | Runs `tools/validation/tensorplate-ready-check.sh` against known-good and known-bad source/keyring fixtures (missing keyring, armored keyring, version-pinned URI, Signed-By mismatch) and asserts the correct verdict. |
 | `verify_systemd_units.sh` | Parses `packaging/debian/*.service` and asserts the v0.1.0 invariants: `User=tensorplate`, `Group=tensorplate`, loopback-only `ReadWritePaths=`, hardening directives present, no `tensorplate-serving.service`. |
 | `verify_lifecycle_scripts.sh` | Runs `version-utils.sh` and `upgrade-preflight.sh` against known-good and known-bad config fixtures and asserts each returns the correct exit code. |
+| `verify_macos_homebrew_lifecycle.sh` | Syntax-checks the guarded M1 Pro Homebrew lifecycle harness, verifies its mutation opt-in, and runs shellcheck when available. The hardware run itself is manual. |
 | `verify_descriptor.sh` | Validates the shipped backend descriptor against the JSON schema using `jq` (or falls back to a structural check). |
 | `verify_installer.sh` | Syntax-checks `packaging/scripts/install.sh`, runs `shellcheck` when available, and exercises installer self-check, supported OS, unsupported OS, `--force-os`, hardware warning, `--strict-hardware`, and `--cli-only` paths with fixtures. |
 | `run.sh` | Orchestrator. Runs every verifier and exits non-zero on the first failure. |

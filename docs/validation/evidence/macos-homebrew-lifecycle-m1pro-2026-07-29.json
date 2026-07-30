@@ -1,0 +1,167 @@
+{
+  "schema_version": "1",
+  "result": "pass",
+  "started_at": "2026-07-30T00:07:54Z",
+  "finished_at": "2026-07-30T00:12:05Z",
+  "harness_revision": "165d02fde34d5c1743b5f8370d62eac8cc863474",
+  "candidate": {
+    "declared_version": "0.2.1-rc.1",
+    "formula_count": 6,
+    "source_revision": "10d2f8c5987a09ea2c7393e18aa8110c5a634bf6",
+    "source_url": "https://github.com/tensorplate/tensorplate/archive/10d2f8c5987a09ea2c7393e18aa8110c5a634bf6.tar.gz",
+    "source_sha256": "67e57b75a0bb0f72f537c7486a7f820357c935ca5aedd7845cc0d42699e6089c",
+    "formula_versions": {
+      "tensorplate": "0.2.1-rc.1",
+      "tensorplate-agent": "0.2.1-rc.1",
+      "tensorplate-backend-python-pytorch": "0.2.1-rc.1",
+      "tensorplate-cli": "0.2.1-rc.1",
+      "tensorplate-observability": "0.2.1-rc.1",
+      "tensorplate-serving": "0.2.1-rc.1"
+    },
+    "resolved_dependency_graph": {
+      "tensorplate": [
+        "tensorplate-agent",
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-cli",
+        "tensorplate-observability",
+        "tensorplate-serving"
+      ],
+      "tensorplate-agent": [
+        "tensorplate-serving"
+      ],
+      "tensorplate-backend-python-pytorch": [
+        "pytorch"
+      ],
+      "tensorplate-cli": [],
+      "tensorplate-observability": [],
+      "tensorplate-serving": [
+        "nlohmann-json"
+      ],
+      "pytorch": [
+        "abseil",
+        "eigen",
+        "libomp",
+        "libuv",
+        "libyaml",
+        "numpy",
+        "onnx",
+        "openblas",
+        "protobuf",
+        "pybind11",
+        "sleef"
+      ],
+      "numpy": [
+        "openblas"
+      ],
+      "onnx": [
+        "abseil",
+        "protobuf"
+      ],
+      "openblas": [
+        "gcc",
+        "libomp"
+      ],
+      "protobuf": [
+        "abseil"
+      ],
+      "gcc": [
+        "gmp",
+        "isl",
+        "libmpc",
+        "mpfr",
+        "zstd"
+      ],
+      "isl": [
+        "gmp"
+      ],
+      "libmpc": [
+        "gmp",
+        "mpfr"
+      ],
+      "mpfr": [
+        "gmp"
+      ],
+      "zstd": [
+        "lz4",
+        "xz"
+      ]
+    }
+  },
+  "host": {
+    "architecture": "arm64",
+    "chip": "Apple M1 Pro",
+    "homebrew_version": "6.0.13-107-g9a1cb43",
+    "macos_build": "25F84",
+    "macos_version": "26.5.2",
+    "memory": "16 GB",
+    "model": "MacBook Pro"
+  },
+  "accelerator": {
+    "accelerator_runtime_available": true,
+    "accelerator_runtime_built": true,
+    "accelerator_runtime_version": "26.5.2",
+    "backend_name": "python_pytorch",
+    "framework_version": "2.13.0",
+    "python_version": "3.14.6"
+  },
+  "packaged_runtime": {
+    "formula_graph_closed": true,
+    "doctor_backend_descriptor": "ok",
+    "doctor_backend_runtime": "ok",
+    "agent_state_after_deploy": "ready",
+    "deployment_phase": "active",
+    "fixture_bundle_digest": "sha256:1a49076c2bb804e0540a705a3322ab2b4c9fb15597c8d5a00456f2526bbc9a0b",
+    "filesystem_modes": "pass",
+    "agent_socket_mode": "0660",
+    "launchd_jobs": [
+      "tensorplate-agent",
+      "tensorplate-observability"
+    ],
+    "serving_has_independent_launchd_job": false
+  },
+  "lifecycle": {
+    "clean_install": "pass",
+    "launchd_restart": "pass",
+    "launchd_crash_loop_recovery": "pass",
+    "network_denied_doctor_without_agent_probe": "pass",
+    "network_denied_mps_probe": "pass",
+    "uninstall": "pass",
+    "baseline_version": "0.1.2",
+    "upgrade": "0.1.2 -> 0.2.1-rc.1",
+    "rollback": "0.2.1-rc.1 -> 0.1.2",
+    "state_preserved_across_rollback": true
+  },
+  "stages": [
+    "host-facts",
+    "formula-pin",
+    "baseline",
+    "tap-trust",
+    "clean-install",
+    "packaged-closure",
+    "launchd-start",
+    "mps-capability",
+    "deploy-smoke",
+    "launchd-restart",
+    "launchd-crash-loop",
+    "offline-runtime",
+    "uninstall",
+    "baseline-restore",
+    "upgrade",
+    "rollback",
+    "tap-restored"
+  ],
+  "restored_state": {
+    "baseline_linked_version": "0.1.2",
+    "candidate_services_absent": true,
+    "lifecycle_markers_absent": true,
+    "tap_worktree_clean": true,
+    "temporary_formula_trust_removed": true,
+    "shared_dependency_left_installed": "pytorch 2.13.0"
+  },
+  "scope": {
+    "deploy_input": "checked-in dependency-free fixture bundle",
+    "real_model_claimed": false,
+    "raw_logs_committed": false,
+    "raw_logs_exclusion_reason": "launchctl output contains operator-local paths and environment values"
+  }
+}

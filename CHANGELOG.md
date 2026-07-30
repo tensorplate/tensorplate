@@ -8,6 +8,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A guarded Apple M1 Pro Homebrew lifecycle harness now records redacted,
+  stage-by-stage evidence for clean install, packaged-only deploy smoke,
+  launchd restart and crash-loop behavior, network-denied runtime checks,
+  CLI-only formula upgrade continuity, rollback, and uninstall. The
+  accompanying runbook defines immutable RC/commit source pins and recovery
+  steps while preserving the operator's prior CLI-only installation. The
+  packaged CLI also supplies the formula-managed backend module path so
+  doctor probes the same Python/PyTorch runtime as the agent.
+  (V021-E03-F01-T04)
+
 - Homebrew now links the installed platform registry and Python/PyTorch
   backend descriptor into its shared prefix, points the descriptor at the
   formula-managed PyTorch interpreter, and passes the corresponding discovery
