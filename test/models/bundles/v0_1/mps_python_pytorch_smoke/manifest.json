@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "name": "mps-python-pytorch-smoke",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp32",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "mps-smoke.json",
+      "digest": "sha256:d189c7eabc4cd5a77c91222eab51ed7030c98f36a897c47265ce63d787e42492",
+      "byte_size": 58,
+      "description": "Package validation configuration for the MPS-backed fixture."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "any",
+    "memory_estimate_bytes": 1048576
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.1.0"
+  }
+}

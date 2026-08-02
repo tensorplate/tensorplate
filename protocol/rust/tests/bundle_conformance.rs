@@ -108,6 +108,20 @@ fn smolvla_python_pytorch_uses_named_multi_input_and_action_output() {
 }
 
 #[test]
+fn mps_python_pytorch_smoke_bundle_has_verified_config_artifact() {
+    let root = fixtures_root().join("mps_python_pytorch_smoke");
+    let d = parse_bundle(&root).expect("MPS smoke fixture must parse");
+    assert_eq!(d.manifest.model_class, ModelClass::Custom);
+    assert_eq!(d.manifest.backend_hint, "python_pytorch");
+    let model_artifact = d
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.role == ArtifactRole::Model)
+        .expect("model artifact present");
+    assert!(model_artifact.relative_path.ends_with("mps-smoke.json"));
+}
+
+#[test]
 fn language_reserved_parses_without_requiring_runtime() {
     let root = fixtures_root().join("language_reserved");
     let d = parse_bundle(&root).expect("language fixture must parse");

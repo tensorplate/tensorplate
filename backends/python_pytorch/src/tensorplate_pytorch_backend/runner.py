@@ -39,10 +39,12 @@ from tensorplate_pytorch_backend.backends import (
     Backend,
     BackendError,
     FixtureBackend,
+    MpsFixtureBackend,
     NamedTensor,
     RuntimeCapability,
     SmolVLABackend,
 )
+from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 
 logger = logging.getLogger("tensorplate.sidecar")
 
@@ -54,7 +56,11 @@ logger = logging.getLogger("tensorplate.sidecar")
 # V01-E05-F04 keeps the fixture as the default; SmolVLA is opt-in so host
 # CI stays dependency-free while Jetson validation can exercise a real VLA.
 def default_backend_factories() -> dict[str, type[Backend]]:
-    return {"fixture": FixtureBackend, "smolvla": SmolVLABackend}
+    return {
+        "fixture": FixtureBackend,
+        "mps_fixture": MpsFixtureBackend,
+        "smolvla": SmolVLABackend,
+    }
 
 
 @dataclass(slots=True)
@@ -295,16 +301,36 @@ class SidecarRunner:
         # The sidecar protocol carries a ModelSpec object on load. The
         # `backend_hint` on that ModelSpec is always `python_pytorch`
         # (the C++ adapter only forwards python_pytorch bundles), so we
-        # discriminate by an optional `profile_id` or fall back to the
-        # default factory. v0.1.0 ships only the fixture backend.
+        # discriminate by an optional `profile_id`, a sidecar-private
+        # artifact setting, or the default factory.
         profile_id = model_spec.get("profile_id")
-        if profile_id and profile_id in self._factories:
-            return self._factories[profile_id]
-        if self._default_backend_name in self._factories:
-            return self._factories[self._default_backend_name]
+        if profile_id is not None and (not isinstance(profile_id, str) or not profile_id):
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "model_spec.profile_id must be a non-empty string when present",
+            )
+        try:
+            configured_name = read_artifact_config(model_spec).get("backend_profile")
+        except ArtifactConfigError as exc:
+            raise BackendError(protocol.ERR_CONFIG_INVALID, str(exc)) from exc
+        if configured_name is not None and (
+            not isinstance(configured_name, str) or not configured_name
+        ):
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "sidecar config backend_profile must be a non-empty string when present",
+            )
+        if profile_id and configured_name and profile_id != configured_name:
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "model_spec.profile_id conflicts with sidecar config backend_profile",
+            )
+        requested_name = profile_id or configured_name or self._default_backend_name
+        if requested_name in self._factories:
+            return self._factories[requested_name]
         raise BackendError(
             protocol.ERR_CONFIG_INVALID,
-            f"no python_pytorch sidecar backend registered for profile_id={profile_id!r}",
+            f"no python_pytorch sidecar backend registered for {requested_name!r}",
         )
 
     def _handle_load(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:

@@ -16,61 +16,58 @@ import pytest
 from tensorplate_pytorch_backend.backends.base import BackendError
 from tensorplate_pytorch_backend.backends.smolvla import (
     _optional_int_config,
-    _read_validation_config,
     _string_config,
 )
+from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 from tensorplate_pytorch_backend.protocol import ERR_CONFIG_INVALID
 
 # ---------------------------------------------------------------------------
-# _read_validation_config
+# read_artifact_config
 # ---------------------------------------------------------------------------
 
 
 def test_read_validation_config_no_artifact_path_returns_empty() -> None:
-    assert _read_validation_config({}) == {}
+    assert read_artifact_config({}) == {}
 
 
 def test_read_validation_config_empty_artifact_path_returns_empty() -> None:
-    assert _read_validation_config({"artifact_path": ""}) == {}
+    assert read_artifact_config({"artifact_path": ""}) == {}
 
 
 def test_read_validation_config_non_string_artifact_path_returns_empty() -> None:
-    assert _read_validation_config({"artifact_path": 42}) == {}
+    assert read_artifact_config({"artifact_path": 42}) == {}
 
 
 def test_read_validation_config_non_json_suffix_returns_empty(tmp_path: Path) -> None:
     artifact = tmp_path / "model.bin"
     artifact.write_bytes(b"\x00\x01")
-    assert _read_validation_config({"artifact_path": str(artifact)}) == {}
+    assert read_artifact_config({"artifact_path": str(artifact)}) == {}
 
 
 def test_read_validation_config_missing_file_raises(tmp_path: Path) -> None:
     artifact = tmp_path / "missing.json"
-    with pytest.raises(BackendError) as exc_info:
-        _read_validation_config({"artifact_path": str(artifact)})
-    assert getattr(exc_info.value, "code", None) == ERR_CONFIG_INVALID
+    with pytest.raises(ArtifactConfigError):
+        read_artifact_config({"artifact_path": str(artifact)})
 
 
 def test_read_validation_config_invalid_json_raises(tmp_path: Path) -> None:
     artifact = tmp_path / "broken.json"
     artifact.write_text("{not json", encoding="utf-8")
-    with pytest.raises(BackendError) as exc_info:
-        _read_validation_config({"artifact_path": str(artifact)})
-    assert getattr(exc_info.value, "code", None) == ERR_CONFIG_INVALID
+    with pytest.raises(ArtifactConfigError):
+        read_artifact_config({"artifact_path": str(artifact)})
 
 
 def test_read_validation_config_non_object_raises(tmp_path: Path) -> None:
     artifact = tmp_path / "list.json"
     artifact.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
-    with pytest.raises(BackendError) as exc_info:
-        _read_validation_config({"artifact_path": str(artifact)})
-    assert getattr(exc_info.value, "code", None) == ERR_CONFIG_INVALID
+    with pytest.raises(ArtifactConfigError):
+        read_artifact_config({"artifact_path": str(artifact)})
 
 
 def test_read_validation_config_returns_parsed_object(tmp_path: Path) -> None:
     artifact = tmp_path / "cfg.json"
     artifact.write_text(json.dumps({"model_id": "x", "num_steps": 4}), encoding="utf-8")
-    parsed = _read_validation_config({"artifact_path": str(artifact)})
+    parsed = read_artifact_config({"artifact_path": str(artifact)})
     assert parsed == {"model_id": "x", "num_steps": 4}
 
 

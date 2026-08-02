@@ -56,34 +56,44 @@ Homebrew's automatic dependency removal for the entire run.
 
 ## Run
 
-Use the checked-in dependency-free fixture bundle as the deploy input. The
-bundle is test data; the CLI, agent, serving worker, backend module,
-interpreter, descriptor, and platform registry must all resolve from the
-installed formulae, never from the source checkout.
+Use the checked-in MPS smoke fixture as the deploy input. Its verified model
+artifact selects a package-private backend that performs and synchronizes a
+PyTorch tensor operation on `mps` during load. The deployment cannot become
+active if MPS is unavailable or the tensor operation fails. The bundle is
+test data; the CLI, agent, serving worker, backend module, interpreter,
+descriptor, and platform registry must all resolve from the installed
+formulae, never from the source checkout.
 
 ```bash
 TP_HOMEBREW_LIFECYCLE_ALLOW=1 \
   tools/validation/macos-homebrew-lifecycle.sh \
     --candidate-formula-dir /private/tmp/tensorplate-candidate/Formula \
     --baseline-formula /private/tmp/tensorplate-baseline.rb \
-    --bundle-dir test/models/bundles/v0_1/smolvla_python_pytorch \
+    --bundle-dir test/models/bundles/v0_1/mps_python_pytorch_smoke \
     --evidence-dir /private/tmp/tensorplate-macos-evidence
 ```
 
-The run is successful only when every stage in `summary.json` is `pass`.
-`host-facts.json` deliberately excludes serial numbers, hardware UUIDs, and
-provisioning identifiers. Review every log for other local-only information
-before attaching the evidence directory to a pull request.
+The run is successful only when every stage in `summary.json` and
+`sanitized-transcript.json` is `pass`. `host-facts.json` deliberately
+excludes serial numbers, hardware UUIDs, and provisioning identifiers.
+Attach the summary, sanitized transcript, host facts, formula pin, deploy
+input, and deploy result to the pull request. Keep the raw `*.log` files
+local; the transcript contains only allowlisted structured results and
+excludes operator paths and environment values.
 
-The curated evidence from the completed Apple M1 Pro rehearsal is recorded in
+The curated evidence from the earlier Apple M1 Pro rehearsal is retained at
 [`evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json`](./evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json).
-Raw launchctl logs are intentionally excluded because they contain
-operator-local paths and environment values.
+It predates the MPS-backed deploy fixture and sanitized transcript, so it does
+not close the corrected hardware gate. A new dated evidence record and
+transcript will be committed after the feature-head rerun. Raw launchctl logs
+remain excluded because they contain operator-local paths and environment
+values.
 
-The MPS stage uses the Python interpreter inside the Homebrew PyTorch
-formula and calls the packaged backend capability probe. The deploy-smoke
-fixture exercises the package-installed `python_pytorch` sidecar boundary
-without claiming that the fixture is a real SmolVLA model.
+The MPS capability stage uses the Python interpreter inside the Homebrew
+PyTorch formula and calls the packaged backend probe. The separate
+deploy-smoke stage proves the package-installed sidecar itself loads through
+MPS and reaches an active, ready deployment. The fixture is not a real model
+and makes no SmolVLA support claim.
 
 The offline stage runs the installed doctor with its agent probe skipped and
 the PyTorch MPS probe under a macOS sandbox that denies network access. The

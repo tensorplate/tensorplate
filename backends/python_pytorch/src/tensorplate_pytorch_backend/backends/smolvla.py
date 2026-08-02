@@ -7,9 +7,7 @@ methods so the default fixture backend remains dependency-free on host CI.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import Any
 
 from tensorplate_pytorch_backend.accelerator import require_mps_runtime
@@ -19,6 +17,7 @@ from tensorplate_pytorch_backend.backends.base import (
     NamedTensor,
     RuntimeCapability,
 )
+from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -26,24 +25,6 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_NOT_READY,
     ERR_SHAPE_MISMATCH,
 )
-
-
-def _read_validation_config(model_spec: dict[str, Any]) -> dict[str, Any]:
-    artifact_path = model_spec.get("artifact_path")
-    if not isinstance(artifact_path, str) or not artifact_path:
-        return {}
-    path = Path(artifact_path)
-    if path.suffix != ".json":
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config not found: {path}") from None
-    except json.JSONDecodeError as exc:
-        raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config JSON invalid: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise BackendError(ERR_CONFIG_INVALID, "SmolVLA config must be a JSON object")
-    return raw
 
 
 def _string_config(config: dict[str, Any], key: str, default: str) -> str:
@@ -110,7 +91,10 @@ class SmolVLABackend(Backend):
                 context=repr(exc),
             ) from exc
 
-        validation_config = _read_validation_config(model_spec)
+        try:
+            validation_config = read_artifact_config(model_spec)
+        except ArtifactConfigError as exc:
+            raise BackendError(ERR_CONFIG_INVALID, str(exc)) from exc
         model_id = _string_config(validation_config, "model_id", "lerobot/smolvla_base")
         cache_dir = _string_config(validation_config, "cache_dir", "/var/lib/tensorplate/hf-cache")
         device = _string_config(validation_config, "device", "cuda")
