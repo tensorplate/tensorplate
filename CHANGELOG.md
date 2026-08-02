@@ -11,8 +11,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - The macOS lifecycle deploy gate now uses a verified bundle artifact to
   select an MPS-backed sidecar fixture whose load performs and synchronizes a
   real PyTorch tensor operation on the MPS device. The gate rejects any other
-  backend profile, requires the deployment and serving supervisor to reach
-  ready state, and emits an allowlisted per-stage transcript without
+  backend profile, requires an active deployment with ready CLI state and a
+  serving endpoint whose health names the expected deployment, uses a unique
+  deployment identifier per rehearsal, checks supervisor health when
+  configured, and emits an allowlisted per-stage transcript without
   operator paths or environment values. macOS install guidance now states
   the exact supported row and removes the entire six-formula graph before
   untapping. (V021-E03-F01-T04, V021-E03-F02-T03)
