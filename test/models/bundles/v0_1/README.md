@@ -12,6 +12,7 @@ artifacts authored outside the repo.
 | ------------------------------------ | ---------- | ---------------- | --------------------------------------------------------------------- |
 | `vision_tensorrt/` | `vision` | `tensorrt` | Jetson Orin FP16 vision detector; n=1 named input. |
 | `smolvla_python_pytorch/` | `vla` | `python_pytorch` | SmolVLA-style multi-input + named action chunk output + `vla` block. |
+| `mps_python_pytorch_smoke/` | `custom` | `python_pytorch` | Package-validation fixture whose load performs and synchronizes an MPS tensor operation. |
 | `language_reserved/` | `language` | `libtorch` | Reserved language block (tokenizer + empty generation_config). Parses cleanly; v0.1.0 never executes generation. |
 | `vitis_synthetic/` | `vision` | `vitis_ai` | `.xmodel` placeholder + Vitis INT8 calibration metadata. Parser-only. |
 

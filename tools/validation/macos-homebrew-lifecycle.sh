@@ -43,7 +43,7 @@ Required inputs:
                            source archive and checksum.
   --baseline-formula       Historical CLI-only tensorplate.rb used to restore
                            the starting version after the rehearsal.
-  --bundle-dir             Deploy-smoke fixture with manifest.json.
+  --bundle-dir             MPS deploy-smoke fixture with manifest.json.
   --evidence-dir           New or empty directory for redacted run artifacts.
   --preflight-only         Validate the host and immutable formula pin without
                            changing Homebrew packages, tap files, or services.
@@ -371,6 +371,45 @@ print(json.dumps({
 PY
 }
 
+capture_deploy_input() {
+  python3 - "$bundle_dir" >"${evidence_dir}/deploy-input.json" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+bundle_dir = pathlib.Path(sys.argv[1]).resolve()
+manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+if manifest.get("backend_hint") != "python_pytorch":
+    raise SystemExit("deploy-smoke bundle must declare backend_hint=python_pytorch")
+model_artifacts = [
+    item for item in manifest.get("artifacts", [])
+    if isinstance(item, dict) and item.get("role") == "model"
+]
+if len(model_artifacts) != 1:
+    raise SystemExit("deploy-smoke bundle must declare exactly one model artifact")
+artifact = model_artifacts[0]
+artifact_path = (bundle_dir / artifact["path"]).resolve()
+if bundle_dir not in artifact_path.parents:
+    raise SystemExit("deploy-smoke model artifact escapes the bundle root")
+config = json.loads(artifact_path.read_text(encoding="utf-8"))
+if config.get("backend_profile") != "mps_fixture" or config.get("device") != "mps":
+    raise SystemExit("deploy-smoke config must select the MPS fixture on device=mps")
+actual_digest = "sha256:" + hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+if actual_digest != artifact.get("digest"):
+    raise SystemExit("deploy-smoke model artifact digest does not match its manifest")
+print(json.dumps({
+    "bundle_name": manifest.get("name"),
+    "bundle_version": manifest.get("version"),
+    "backend_hint": manifest.get("backend_hint"),
+    "backend_profile": config["backend_profile"],
+    "device": config["device"],
+    "model_artifact": artifact["path"],
+    "model_artifact_digest": actual_digest,
+}, indent=2, sort_keys=True))
+PY
+}
+
 verify_tap_trust() {
   trust_json="$(brew trust --json=v1)"
   python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
@@ -510,15 +549,53 @@ PY
 
 deploy_smoke() {
   smoke_bundle="${work_dir}/deploy-smoke"
+  deploy_output="${work_dir}/deploy-output.json"
+  status_output="${work_dir}/status-output.json"
   cp -R "$bundle_dir" "$smoke_bundle"
   cd /private/tmp
   tensorplate doctor --output json
   tensorplate deploy "$smoke_bundle" \
     --deployment-id wave-2b-macos-deploy-smoke \
-    --output json
-  tensorplate status --output json
+    --output json >"$deploy_output"
+  tensorplate status --output json >"$status_output"
   tensorplate logs --component agent --tail 100
   cd - >/dev/null
+  python3 - "$deploy_output" "$status_output" "${evidence_dir}/deploy-input.json" \
+    >"${evidence_dir}/deploy-result.json" <<'PY'
+import json
+import sys
+
+deploy_path, status_path, input_path = sys.argv[1:]
+deploy = json.load(open(deploy_path, encoding="utf-8"))["payload"]
+status = json.load(open(status_path, encoding="utf-8"))["payload"]
+deploy_input = json.load(open(input_path, encoding="utf-8"))
+agent = status.get("agent") or {}
+active = agent.get("active") or {}
+supervision = agent.get("supervision") or {}
+expected_deployment = "wave-2b-macos-deploy-smoke"
+checks = {
+    "deployment_phase": deploy.get("phase") == "active",
+    "deployment_id": deploy.get("deployment_id") == expected_deployment,
+    "agent_state": agent.get("agent_state") == "ready",
+    "active_deployment": active.get("deployment_id") == expected_deployment,
+    "active_backend": active.get("backend") == "python_pytorch",
+    "serving_state": supervision.get("serving_state") == "ready",
+    "crash_loop_absent": supervision.get("crash_loop") is False,
+}
+failed = [name for name, passed in checks.items() if not passed]
+if failed:
+    raise SystemExit("deploy-smoke readiness checks failed: " + ", ".join(failed))
+print(json.dumps({
+    "deployment_id": expected_deployment,
+    "deployment_phase": "active",
+    "agent_state": "ready",
+    "serving_state": "ready",
+    "backend": "python_pytorch",
+    "backend_profile": deploy_input["backend_profile"],
+    "device": deploy_input["device"],
+    "mps_tensor_operation_required_for_load": True,
+}, indent=2, sort_keys=True))
+PY
 }
 
 restart_services() {
@@ -658,6 +735,74 @@ print(json.dumps({
 PY
 }
 
+write_sanitized_transcript() {
+  python3 - "$stage_results" "$evidence_dir" "$baseline_version" "$candidate_version" \
+    >"${evidence_dir}/sanitized-transcript.json" <<'PY'
+import csv
+import json
+import pathlib
+import sys
+
+stages_path, evidence_path, baseline_version, candidate_version = sys.argv[1:]
+evidence_dir = pathlib.Path(evidence_path)
+with open(stages_path, encoding="utf-8", newline="") as handle:
+    stages = list(csv.DictReader(handle, delimiter="\t"))
+
+def load_json(name):
+    path = evidence_dir / name
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+details = {
+    "host-facts": load_json("host-facts.json"),
+    "formula-pin": load_json("formula-pin.json"),
+    "deploy-input": load_json("deploy-input.json"),
+    "baseline": {"linked_version": baseline_version},
+    "tap-trust": {"candidate_formula_graph_trusted": True},
+    "clean-install": {"candidate_version": candidate_version},
+    "packaged-closure": {"all_six_formulae_installed": True},
+    "launchd-start": {
+        "agent": "started",
+        "observability": "started",
+        "serving_has_independent_job": False,
+    },
+    "mps-capability": load_json("mps-capability.log"),
+    "deploy-smoke": load_json("deploy-result.json"),
+    "launchd-restart": {"agent": "restarted", "observability": "restarted"},
+    "launchd-crash-loop": {"agent_recovered": True},
+    "offline-runtime": {"network_denied_doctor": "pass", "network_denied_mps": "pass"},
+    "uninstall": {"all_six_formulae_absent": True, "launchd_jobs_absent": True},
+    "baseline-restore": {"linked_version": baseline_version},
+    "upgrade": {"from": baseline_version, "to": candidate_version},
+    "rollback": {
+        "from": candidate_version,
+        "to": baseline_version,
+        "state_preserved": True,
+    },
+    "tap-restored": {"worktree_clean": True},
+}
+transcript = []
+for stage in stages:
+    transcript.append({
+        "stage": stage["stage"],
+        "status": stage["status"],
+        "started_at": stage["started_at"],
+        "finished_at": stage["finished_at"],
+        "summary": details.get(stage["stage"], {"completed": stage["status"] == "pass"}),
+    })
+print(json.dumps({
+    "schema_version": "1",
+    "result": "pass" if transcript and all(item["status"] == "pass" for item in transcript) else "fail",
+    "redaction": {
+        "raw_command_output_included": False,
+        "operator_paths_included": False,
+        "environment_values_included": False,
+        "policy": "allowlisted structured results only",
+    },
+    "stages": transcript,
+}, indent=2, sort_keys=True))
+PY
+}
+
 export HOMEBREW_NO_AUTO_UPDATE=1
 export HOMEBREW_NO_INSTALL_CLEANUP=1
 export HOMEBREW_NO_AUTOREMOVE=1
@@ -678,10 +823,12 @@ baseline_version="$(linked_formula_version tensorplate)"
 
 run_stage host-facts collect_host_facts
 run_stage formula-pin capture_formula_pin
+run_stage deploy-input capture_deploy_input
 run_stage baseline tensorplate version
 run_stage tap-trust verify_tap_trust
 if [[ "$preflight_only" == "1" ]]; then
   write_summary
+  write_sanitized_transcript
   trap - EXIT
   rm -rf "$work_dir"
   pass "macOS Homebrew lifecycle preflight complete; evidence: ${evidence_dir}"
@@ -703,6 +850,7 @@ run_stage rollback rollback_to_baseline
 run_stage tap-restored bash -c '[[ -z "$(git -C "$1" status --porcelain)" ]]' _ "$tap_repo"
 restore_formula_trust
 write_summary
+write_sanitized_transcript
 
 trap - EXIT
 rm -rf "$work_dir"

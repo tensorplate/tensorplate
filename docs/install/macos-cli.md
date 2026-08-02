@@ -1,8 +1,9 @@
 # TensorPlate on macOS (Apple Silicon)
 
-TensorPlate's Homebrew channel provides the complete appliance on macOS 26:
-the agent, serving worker, CLI, observability service, and Python/PyTorch
-backend. It supports Apple Silicon only.
+TensorPlate's Homebrew channel provides the complete appliance on the
+validated macOS row: Apple M1 Pro, 16 GB unified memory, and macOS 26 or
+newer. The appliance includes the agent, serving worker, CLI, observability
+service, and Python/PyTorch backend.
 
 ## Install
 
@@ -116,11 +117,12 @@ contract.
 
 - **The tap is required.** Plain `brew install tensorplate` without the
   tap is not supported: the formula is not in `homebrew/core`.
-- **macOS 26 and Apple Silicon only.** Earlier macOS releases and Intel Macs
-  are not supported.
-- **Built from source.** The formula compiles the CLI from the pinned
-  release tag using Homebrew's Rust toolchain (build-time dependency
-  only). Prebuilt bottles are follow-up work.
+- **Exact supported row.** Apple M1 Pro with 16 GB unified memory on macOS 26
+  or newer is supported. Intel Macs and all other M-series rows fail closed;
+  M4 support is planned but is not yet validated.
+- **Built from source.** The component formula graph compiles the Rust
+  services and CLI, builds the Python/PyTorch sidecar package, and installs
+  their pinned runtime dependencies. Prebuilt bottles are follow-up work.
 
 ## Upgrade and uninstall
 
@@ -128,6 +130,16 @@ contract.
 brew upgrade tensorplate    # after a new TensorPlate release bumps the formula
 brew services stop tensorplate-agent
 brew services stop tensorplate-observability
-brew uninstall tensorplate
+brew uninstall tensorplate \
+  tensorplate-agent \
+  tensorplate-backend-python-pytorch \
+  tensorplate-cli \
+  tensorplate-observability \
+  tensorplate-serving
 brew untap tensorplate/tap  # optional
 ```
+
+The meta-formula does not own the component kegs after installation, so
+uninstall every component before untapping. Homebrew may retain configuration
+and state under its prefix; review those paths separately before removing
+operator data.
