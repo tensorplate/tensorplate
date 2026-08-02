@@ -81,13 +81,16 @@ input, and deploy result to the pull request. Keep the raw `*.log` files
 local; the transcript contains only allowlisted structured results and
 excludes operator paths and environment values.
 
-The curated evidence from the earlier Apple M1 Pro rehearsal is retained at
-[`evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json`](./evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json).
-It predates the MPS-backed deploy fixture and sanitized transcript, so it does
-not close the corrected hardware gate. A new dated evidence record and
-transcript will be committed after the feature-head rerun. Raw launchctl logs
-remain excluded because they contain operator-local paths and environment
-values.
+The corrected Apple M1 Pro evidence is committed as the
+[`curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-02.json)
+and its
+[`sanitized transcript`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-02-transcript.json).
+Both were produced from the immutable merged feature head recorded in the
+formula pin. The
+[`earlier rehearsal`](./evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json)
+is retained as historical evidence, but it predates the MPS-backed deploy
+fixture and sanitized transcript. Raw launchctl logs remain excluded because
+they contain operator-local paths and environment values.
 
 The MPS capability stage uses the Python interpreter inside the Homebrew
 PyTorch formula and calls the packaged backend probe. The separate
