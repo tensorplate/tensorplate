@@ -136,6 +136,7 @@ mkdir -p "$evidence_dir"
 evidence_dir="$(cd "$evidence_dir" && pwd)"
 work_dir="$(mktemp -d)"
 stage_results="${evidence_dir}/stages.tsv"
+smoke_deployment_id="wave-2b-macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
 printf 'stage\tstatus\tstarted_at\tfinished_at\tlog\n' >"$stage_results"
 
 tap_repo=""
@@ -555,32 +556,65 @@ deploy_smoke() {
   cd /private/tmp
   tensorplate doctor --output json
   tensorplate deploy "$smoke_bundle" \
-    --deployment-id wave-2b-macos-deploy-smoke \
+    --deployment-id "$smoke_deployment_id" \
     --output json >"$deploy_output"
   tensorplate status --output json >"$status_output"
   tensorplate logs --component agent --tail 100
   cd - >/dev/null
   python3 - "$deploy_output" "$status_output" "${evidence_dir}/deploy-input.json" \
+    "$smoke_deployment_id" \
     >"${evidence_dir}/deploy-result.json" <<'PY'
 import json
 import sys
+import urllib.parse
+import urllib.request
 
-deploy_path, status_path, input_path = sys.argv[1:]
+deploy_path, status_path, input_path, expected_deployment = sys.argv[1:]
 deploy = json.load(open(deploy_path, encoding="utf-8"))["payload"]
 status = json.load(open(status_path, encoding="utf-8"))["payload"]
 deploy_input = json.load(open(input_path, encoding="utf-8"))
 agent = status.get("agent") or {}
 active = agent.get("active") or {}
-supervision = agent.get("supervision") or {}
-expected_deployment = "wave-2b-macos-deploy-smoke"
+supervision = agent.get("supervision")
+serving_url = active.get("serving_url")
+serving_parts = urllib.parse.urlsplit(serving_url) if isinstance(serving_url, str) else None
+serving_url_valid = (
+    serving_parts is not None
+    and serving_parts.scheme == "http"
+    and serving_parts.hostname == "127.0.0.1"
+    and serving_parts.path == "/infer"
+)
+serving_health = {}
+if serving_url_valid:
+    health_url = urllib.parse.urlunsplit(
+        (serving_parts.scheme, serving_parts.netloc, "/health", "", "")
+    )
+    try:
+        with urllib.request.urlopen(health_url, timeout=5) as response:
+            serving_health = json.load(response)
+    except (OSError, ValueError, json.JSONDecodeError):
+        serving_health = {}
+supervision_healthy = (
+    supervision is None
+    or (
+        isinstance(supervision, dict)
+        and supervision.get("serving_state") == "ready"
+        and supervision.get("crash_loop") is False
+    )
+)
 checks = {
     "deployment_phase": deploy.get("phase") == "active",
     "deployment_id": deploy.get("deployment_id") == expected_deployment,
+    "status_severity": status.get("severity") == "ready",
     "agent_state": agent.get("agent_state") == "ready",
     "active_deployment": active.get("deployment_id") == expected_deployment,
     "active_backend": active.get("backend") == "python_pytorch",
-    "serving_state": supervision.get("serving_state") == "ready",
-    "crash_loop_absent": supervision.get("crash_loop") is False,
+    "active_serving_url": serving_url_valid,
+    "serving_health_state": serving_health.get("state") == "ready",
+    "serving_health_deployment": (
+        serving_health.get("active_model_id") == expected_deployment
+    ),
+    "supervision_healthy_when_configured": supervision_healthy,
 }
 failed = [name for name, passed in checks.items() if not passed]
 if failed:
@@ -588,8 +622,12 @@ if failed:
 print(json.dumps({
     "deployment_id": expected_deployment,
     "deployment_phase": "active",
+    "status_severity": "ready",
     "agent_state": "ready",
-    "serving_state": "ready",
+    "serving_endpoint": "ready",
+    "supervision_state": (
+        "not_configured" if supervision is None else supervision["serving_state"]
+    ),
     "backend": "python_pytorch",
     "backend_profile": deploy_input["backend_profile"],
     "device": deploy_input["device"],
