@@ -29,8 +29,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::agent_control::{
-    AgentRunState, AgentStatus, DeployFailureSummary, DeployStatus, DeploymentSummary,
-    QuarantineSummary, ResponseError, SupervisionStatusSummary,
+    is_valid_deployment_id, AgentRunState, AgentStatus, DeployFailureSummary, DeployStatus,
+    DeploymentSummary, QuarantineSummary, ResponseError, SupervisionStatusSummary,
 };
 use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, TransactionRecord};
 use tensorplate_protocol::deploy_transaction::DeployState;
@@ -207,8 +207,10 @@ impl Coordinator {
         correlation_id: Option<String>,
         expected_bundle_digest: Option<&str>,
     ) -> AgentResult<DeployOutcome> {
-        if deployment_id.is_empty() {
-            return Err(AgentError::Config("deployment_id must be non-empty".into()));
+        if !is_valid_deployment_id(deployment_id) {
+            return Err(AgentError::Config(
+                "deployment_id must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved".into(),
+            ));
         }
 
         let transaction_id = new_transaction_id();

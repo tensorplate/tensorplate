@@ -58,10 +58,10 @@ pub mod worker_control;
 pub mod worker_status;
 
 pub use agent_control::{
-    AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse, DeployFailureSummary,
-    DeployRequest, DeployStatus, DeploymentSummary, QuarantineSummary, RecoveryAction,
-    RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
-    SupervisionStatusSummary,
+    is_valid_deployment_id, AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse,
+    DeployFailureSummary, DeployRequest, DeployStatus, DeploymentSummary, QuarantineSummary,
+    RecoveryAction, RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
+    SupervisionStatusSummary, MAX_DEPLOYMENT_ID_BYTES,
 };
 pub use agent_state::{
     AgentState, AgentStateError, DeploymentRecord, ErrorRecord, QuarantineRecord, TransactionKind,
