@@ -18,6 +18,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
+use tensorplate_protocol::is_valid_deployment_id;
 
 use crate::args::{DeployArgs, InferArgs, OutputMode, Subcommand};
 use crate::error::{CliError, CliResult, ExitCode};
@@ -950,9 +951,9 @@ pub fn route_deploy<O: Write, E: Write>(
     crate::commands::deploy::validate_local_bundle(&opts.bundle_path)?;
     let deployment_id = match &opts.deployment_id {
         Some(id) => {
-            if !is_safe_path_segment(id) {
+            if !is_valid_deployment_id(id) {
                 return Err(CliError::Usage(format!(
-                    "deployment id `{id}` must be a plain name (letters, digits, `-`, `_`, `.`)"
+                    "deployment id `{id}` must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved"
                 )));
             }
             id.clone()
@@ -1026,14 +1027,6 @@ fn import_dir_for(entry: &DeviceEntry) -> String {
     )
 }
 
-fn is_safe_path_segment(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-}
-
 // ── Import pruning ─────────────────────────────────────────────────────────
 
 /// Result of a `device prune`.
@@ -1069,7 +1062,7 @@ pub fn prune_imports(
         let is_protected = protected.contains(name);
         let within_keep = keep.map_or(false, |k| index < k);
         let newer_than_cutoff = cutoff.map_or(false, |c| *mtime >= c);
-        if is_protected || within_keep || newer_than_cutoff || !is_safe_path_segment(name) {
+        if is_protected || within_keep || newer_than_cutoff || !is_valid_deployment_id(name) {
             kept.push(name.clone());
             continue;
         }
@@ -1118,7 +1111,7 @@ fn protected_import_names(
             .and_then(|a| a.get(key))
             .and_then(|record| record.get("deployment_id"))
             .and_then(Value::as_str)
-            .filter(|id| is_safe_path_segment(id))
+            .filter(|id| is_valid_deployment_id(id))
         {
             protected.insert(id.to_string());
         }
@@ -1128,7 +1121,7 @@ fn protected_import_names(
         .and_then(|tx| tx.get("bundle_path"))
         .and_then(Value::as_str)
         .and_then(|path| import_name_from_path(import_dir, path))
-        .filter(|name| is_safe_path_segment(name))
+        .filter(|name| is_valid_deployment_id(name))
     {
         protected.insert(name);
     }
@@ -1741,12 +1734,12 @@ mod tests {
     }
 
     #[test]
-    fn safe_path_segment_rejects_traversal() {
-        assert!(is_safe_path_segment("deploy-abc_1.2"));
-        assert!(!is_safe_path_segment(".."));
-        assert!(!is_safe_path_segment("."));
-        assert!(!is_safe_path_segment("a/b"));
-        assert!(!is_safe_path_segment(""));
+    fn deployment_id_policy_rejects_traversal() {
+        assert!(is_valid_deployment_id("deploy-abc_1.2"));
+        assert!(!is_valid_deployment_id(".."));
+        assert!(!is_valid_deployment_id("."));
+        assert!(!is_valid_deployment_id("a/b"));
+        assert!(!is_valid_deployment_id(""));
     }
 
     #[test]

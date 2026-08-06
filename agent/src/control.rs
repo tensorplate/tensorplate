@@ -291,4 +291,44 @@ mod tests {
         assert_eq!(r.status, ResponseStatus::Error);
         assert!(r.error.is_some());
     }
+
+    #[test]
+    fn deploy_rejects_unsafe_id_before_staging() {
+        let td = TempDir::new().expect("td");
+        let state = td.path().join("state");
+        let staging = td.path().join("staging");
+        let escaped = td.path().join("escaped");
+        let bundle = write_bundle(td.path(), "unsafe-id");
+        let cfg = config(state.clone(), staging);
+        let store = Arc::new(StateStore::open(&state).expect("open"));
+        let worker = Arc::new(MockWorkerControl::new());
+        let coord = Arc::new(Coordinator::new(cfg, store, worker));
+
+        let response = dispatch(
+            &coord,
+            ControlRequest::deploy(
+                None,
+                DeployRequest {
+                    bundle_path: bundle.display().to_string(),
+                    deployment_id: "../escaped".into(),
+                    expected_bundle_digest: None,
+                    labels: Default::default(),
+                },
+            ),
+        )
+        .expect("response");
+
+        assert_eq!(response.status, ResponseStatus::Error);
+        assert_eq!(
+            response.error.as_ref().expect("error").code,
+            tensorplate_protocol::ErrorCode::ConfigInvalid
+        );
+        assert!(!escaped.exists());
+        assert!(coord
+            .state()
+            .snapshot()
+            .expect("snapshot")
+            .in_flight_transaction
+            .is_none());
+    }
 }

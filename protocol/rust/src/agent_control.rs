@@ -15,6 +15,23 @@ use crate::error::ErrorCode;
 use crate::supervision_event::{SupervisionAgentState, SupervisionServingState};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
+/// Maximum encoded length of a deployment identifier.
+///
+/// The identifier becomes one filesystem path segment and part of a worker
+/// config filename, so keep it comfortably below common component limits.
+pub const MAX_DEPLOYMENT_ID_BYTES: usize = 128;
+
+/// Return whether `value` is safe to use as one filesystem path segment.
+#[must_use]
+pub fn is_valid_deployment_id(value: &str) -> bool {
+    (1..=MAX_DEPLOYMENT_ID_BYTES).contains(&value.len())
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 /// Operation discriminator.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,6 +168,10 @@ pub enum ControlRequestError {
     EmptyBundlePath,
     #[error("deploy.deployment_id must be non-empty")]
     EmptyDeploymentId,
+    #[error(
+        "deploy.deployment_id must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved"
+    )]
+    InvalidDeploymentId,
     #[error("deploy.expected_bundle_digest, if present, must follow the `algo:hex` form")]
     InvalidExpectedDigest,
 }
@@ -184,6 +205,9 @@ impl ValidatePayload for ControlRequest {
                 }
                 if d.deployment_id.is_empty() {
                     return Err(invalid(ControlRequestError::EmptyDeploymentId));
+                }
+                if !is_valid_deployment_id(&d.deployment_id) {
+                    return Err(invalid(ControlRequestError::InvalidDeploymentId));
                 }
                 if let Some(ref dg) = d.expected_bundle_digest {
                     if !looks_like_digest(dg) {
@@ -465,14 +489,15 @@ mod tests {
     #![allow(clippy::expect_used, clippy::default_trait_access)]
 
     use super::{
-        AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse, DeployRequest,
-        DeployStatus, ResponseError, ResponseStatus, RollbackRequest, SupervisionStatusSummary,
-        SCHEMA_VERSION,
+        is_valid_deployment_id, AgentRunState, AgentStatus, ControlOp, ControlRequest,
+        ControlResponse, DeployRequest, DeployStatus, ResponseError, ResponseStatus,
+        RollbackRequest, SupervisionStatusSummary, MAX_DEPLOYMENT_ID_BYTES, SCHEMA_VERSION,
     };
     use crate::deploy_transaction::DeployState;
     use crate::error::ErrorCode;
     use crate::supervision_event::{SupervisionAgentState, SupervisionServingState};
     use crate::{decode_with_version_check, DecodeError};
+    use serde_json::json;
 
     #[test]
     fn deploy_request_round_trips() {
@@ -498,6 +523,55 @@ mod tests {
         );
         let err = decode_with_version_check::<ControlRequest>(&raw).expect_err("rejected");
         assert!(matches!(err, DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn deployment_id_policy_rejects_path_components_and_unbounded_values() {
+        assert!(is_valid_deployment_id("deploy-abc_1.2"));
+        for invalid in ["", ".", "..", "../state", "a/b", "a\\b", "with space"] {
+            assert!(
+                !is_valid_deployment_id(invalid),
+                "{invalid:?} must be rejected"
+            );
+        }
+        assert!(is_valid_deployment_id(&"a".repeat(MAX_DEPLOYMENT_ID_BYTES)));
+        assert!(!is_valid_deployment_id(
+            &"a".repeat(MAX_DEPLOYMENT_ID_BYTES + 1)
+        ));
+    }
+
+    #[test]
+    fn deploy_request_rejects_unsafe_deployment_id() {
+        let raw = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","op":"deploy","deploy":{{"bundle_path":"/tmp/bundle","deployment_id":"../state"}}}}"#
+        );
+        let err = decode_with_version_check::<ControlRequest>(&raw).expect_err("rejected");
+        assert!(matches!(err, DecodeError::InvalidPayload(_)));
+    }
+
+    #[test]
+    fn deployment_id_schema_matches_policy() {
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/agent_control.json"))
+                .expect("parse schema");
+        let validator =
+            jsonschema::JSONSchema::compile(&schema).expect("schema compiles as Draft-07");
+        let request = |deployment_id: &str| {
+            json!({
+                "schema_version": SCHEMA_VERSION,
+                "op": "deploy",
+                "deploy": {
+                    "bundle_path": "/tmp/bundle",
+                    "deployment_id": deployment_id
+                }
+            })
+        };
+
+        assert!(validator.is_valid(&request("deploy-abc_1.2")));
+        for invalid in [".", "..", "../state", "a/b"] {
+            assert!(!validator.is_valid(&request(invalid)));
+        }
+        assert!(!validator.is_valid(&request(&"a".repeat(MAX_DEPLOYMENT_ID_BYTES + 1))));
     }
 
     #[test]

@@ -6,6 +6,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- Deployment identifiers are now constrained to one bounded,
+  filesystem-safe path segment at protocol, agent, and CLI boundaries before
+  the agent creates transaction state or derives a staging path. Local and
+  device-routed deploys share the same policy.
+
 ### Added
 
 - The macOS lifecycle deploy gate now uses a verified bundle artifact to
