@@ -49,6 +49,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         gce_machine_type: text("gce_machine_type"),
+        proc_meminfo: text("proc_meminfo"),
     }
 }
 

@@ -6,6 +6,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- A Jetson is no longer refused every deploy. `nvidia-smi` is the only
+  accelerator probe and JetPack does not ship it, so detection reported no
+  accelerator — which was read as the affirmative fact "this machine has no
+  accelerator" and mismatched every row that declares one. Every Jetson
+  resolved to no row at all, and deploy admission refused it before the
+  bundle was opened, on hardware that had been working.
+
+  A Jetson's accelerator is part of the SoC: no separate device exists to
+  enumerate, so the absence of the vendor tool is not evidence of absent
+  hardware. Its identity is instead derived from what the board reports
+  about itself — `/proc/device-tree/model` names the module, and `MemTotal`
+  separates two modules of one family that report the same model string.
+
+  The derived SKU is then compared verbatim, exactly as a discrete card's
+  is. That is what makes the derivation safe in the direction that matters:
+  a SKU derived wrongly matches no row and the machine is refused, rather
+  than being handed a row belonging to a different board. An Orin NX 8GB
+  produces `Jetson Orin NX 8GB`, which no row names, and is reported
+  unsupported.
+
+  On a machine that reports as a Jetson, a model or memory total that
+  cannot be read is an error rather than an absent accelerator. A Jetson
+  always has one, so reporting none would be the same collapse one layer
+  down. (V021-E02-F02-T02)
+
 ### Added
 
 - A deploy is now refused before anything is staged when the machine

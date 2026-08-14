@@ -37,8 +37,8 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    AcceleratorProbe, DetectedPlatform, HostProbe, NvidiaSmiProbe, PlatformRegistry,
-    SystemHostProbe,
+    identify, identify_jetson_accelerator, AcceleratorProbe, DetectedPlatform, NvidiaSmiProbe,
+    PlatformRegistry, SystemHostProbe,
 };
 
 use tensorplate_agent::platform_admission::{evaluate_platform, ObservedStack, PlatformAdmission};
@@ -158,8 +158,19 @@ fn probe_available_backends(cfg: &AgentConfig) -> BTreeMap<String, BackendProbeR
 /// refuses everywhere else. The verdict is simply absent, and admission
 /// stays silent — doctor is what an operator runs to diagnose that.
 fn settle_platform_admission(registry: &PlatformRegistry) -> Option<PlatformAdmission> {
-    let host = match SystemHostProbe::new().detect_host() {
-        Ok(host) => host,
+    // Gathered once, because the accelerator on an integrated part is
+    // identified from the same sources the host is.
+    let sources = match SystemHostProbe::new().sources() {
+        Ok(sources) => sources,
+        Err(err) => {
+            eprintln!(
+                "platform admission: host sources unreadable, deploy admission disabled: {err}"
+            );
+            return None;
+        }
+    };
+    let host = match identify(&sources) {
+        Ok(report) => report.identity,
         Err(err) => {
             eprintln!(
                 "platform admission: host identity unreadable, deploy admission disabled: {err}"
@@ -167,8 +178,21 @@ fn settle_platform_admission(registry: &PlatformRegistry) -> Option<PlatformAdmi
             return None;
         }
     };
+    // A discrete card is enumerated by the vendor tool. An integrated one
+    // is not: no separate device exists and no tool prints its SKU, so it
+    // is derived from what the board reports about itself. Absence of the
+    // vendor tool is therefore not absence of an accelerator.
     let accelerator = match NvidiaSmiProbe::new().detect_accelerator() {
-        Ok(accelerator) => accelerator,
+        Ok(Some(accelerator)) => Some(accelerator),
+        Ok(None) => match identify_jetson_accelerator(&sources) {
+            Ok(accelerator) => accelerator,
+            Err(err) => {
+                eprintln!(
+                    "platform admission: integrated accelerator unreadable, deploy admission disabled: {err}"
+                );
+                return None;
+            }
+        },
         Err(err) => {
             eprintln!(
                 "platform admission: accelerator identity unreadable, deploy admission disabled: {err}"

@@ -2,12 +2,13 @@
   "row_id": null,
   "matches_row": false,
   "provenance": "recorded",
-  "provenance_note": "docs/validation/sdk-e2e-validation.md records the in-lab Orin Nano as L4T R36 REV 5.0 on 2026-06-18, corroborated by two clean-room records (nvidia-l4t-core 36.5.0). The jetson-orin-nano-8gb-jp62 row is spec_authored and claims r36.4.x, so the device that is supposed to validate that row currently matches no committed row. The nvidia-jetpack package version was never recorded for this device, so this fixture does not claim one; the JetPack version is derived from the L4T line, and r36.5 maps to no known JetPack release.",
+  "provenance_note": "docs/validation/sdk-e2e-validation.md records the in-lab Orin Nano as L4T R36 REV 5.0 on 2026-06-18, corroborated by two clean-room records (nvidia-l4t-core 36.5.0). The jetson-orin-nano-8gb-jp62 row is spec_authored and claims r36.4.x, so the device that is supposed to validate that row currently matches no committed row. The nvidia-jetpack package version was never recorded for this device, so this fixture does not claim one; the JetPack version is derived from the L4T line, and r36.5 maps to no known JetPack release. MemTotal is spec-authored from the module's nominal capacity minus a plausible carveout; the first Jetson evidence run replaces it with the recorded value.",
   "sources": {
     "uname_machine": "aarch64",
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",
     "nv_tegra_release": "# R36 (release), REVISION: 5.0, GCID: 41000000, BOARD: generic, EABI: aarch64, DATE: Thu Jan 15 19:24:38 UTC 2026\n",
-    "device_tree_model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000"
+    "device_tree_model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000",
+    "proc_meminfo": "MemTotal:       7689557 kB\nMemFree:         1234567 kB\n"
   },
   "expect": {
     "architecture": "arm64",
