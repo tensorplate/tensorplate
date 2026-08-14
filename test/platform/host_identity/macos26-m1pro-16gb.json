@@ -8,7 +8,8 @@
     "sw_vers_product_name": "macOS",
     "sw_vers_product_version": "26.5.2",
     "sw_vers_build_version": "25F84",
-    "cpu_brand": "Apple M1 Pro"
+    "cpu_brand": "Apple M1 Pro",
+    "hw_memsize": "17179869184"
   },
   "expect": {
     "architecture": "arm64",

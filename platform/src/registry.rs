@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::install_paths;
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
 
 use crate::error::PlatformRegistryError;
 use crate::identity::{DetectedPlatform, HostIdentity};
@@ -378,6 +379,9 @@ impl PlatformRegistry {
                 detail: "the registry declares no platform support rows".to_string(),
             });
         }
+        if let Some(detail) = no_unified_family_is_ambiguous(&loaded_rows) {
+            return Err(PlatformRegistryError::AmbiguousRegistry { detail });
+        }
 
         let mut loaded_targets = BTreeMap::new();
         for (path, body) in targets {
@@ -701,12 +705,112 @@ fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
             })
 }
 
+/// The premise `unified_capacity_matches` rests on: within one accelerator
+/// family, no two unified-memory rows declare capacities close enough for
+/// one machine's reported total to fall in both windows.
+///
+/// Two windows `[0.85a, a]` and `[0.85b, b]` with `a < b` overlap exactly
+/// when `a >= 0.85b`, which is the comparison below.
+///
+/// Checked at load rather than assumed, because the check is what makes the
+/// window safe. A family that violates it would silently hand a board the
+/// claim of its larger sibling; refusing the registry is the only answer
+/// that cannot do that quietly. It has already earned its place once: the
+/// first version of the window assumed 2x variant spacing and this check
+/// rejected the committed Apple rows, which are 1.5x apart.
+fn no_unified_family_is_ambiguous(rows: &BTreeMap<String, PlatformSupportRow>) -> Option<String> {
+    let unified: Vec<(&str, &str, u64)> = rows
+        .values()
+        .filter_map(|row| {
+            let accelerator = row.accelerator()?;
+            (accelerator.memory_profile == PlatformMemoryProfileName::UnifiedMemory).then_some((
+                row.row_id(),
+                accelerator.family.as_str(),
+                accelerator.memory_bytes,
+            ))
+        })
+        .collect();
+    for (index, (left_id, left_family, left_bytes)) in unified.iter().enumerate() {
+        for (right_id, right_family, right_bytes) in unified.iter().skip(index + 1) {
+            if left_family != right_family {
+                continue;
+            }
+            let (smaller, larger) = if left_bytes <= right_bytes {
+                (left_bytes, right_bytes)
+            } else {
+                (right_bytes, left_bytes)
+            };
+            if u128::from(*smaller) * 100 >= u128::from(*larger) * 85 {
+                return Some(format!(
+                    "unified-memory rows `{left_id}` and `{right_id}` in family `{left_family}` \
+                     declare capacities too close to tell apart ({smaller} and {larger} bytes); a \
+                     reported memory total could match both"
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn accelerator_matches(row: &PlatformSupportRow, detected: &DetectedPlatform) -> bool {
     match (row.accelerator(), detected.accelerator.as_ref()) {
         (Some(row_accelerator), Some(observed)) => row_accelerator.sku == observed.sku,
+        // A unified-memory accelerator is part of the SoC the host identity
+        // already named. There is no second device to enumerate, and no
+        // vendor tool prints its row SKU: `/proc/device-tree/model` reports
+        // a developer-kit name, not `Jetson Orin Nano 8GB Super`. So the
+        // absence of a probed accelerator is not evidence of absent
+        // hardware here, and must not be read as a mismatch — that reading
+        // refused every deploy on every Jetson and every Mac.
+        //
+        // What the host cannot settle is capacity: two boards of one family
+        // report the same model string and differ only in memory. That is
+        // the one dimension checked here.
+        (Some(row_accelerator), None)
+            if row_accelerator.memory_profile == PlatformMemoryProfileName::UnifiedMemory =>
+        {
+            unified_capacity_matches(
+                row_accelerator.memory_bytes,
+                detected.host.total_memory_bytes,
+            )
+        }
         (None, None) => true,
         _ => false,
     }
+}
+
+/// Whether a reported system memory total is the one a unified-memory row
+/// declares.
+///
+/// Reported total is always **below** nominal on these platforms: firmware
+/// and the GPU carveout are taken before the kernel counts what is left.
+/// So this is a window, not an equality — and deliberately not the
+/// tolerance that was rejected for discrete accelerators, where reported
+/// framebuffer and nominal capacity diverge by far more than any tolerance
+/// could bridge and memory is therefore never matched on at all.
+///
+/// The window is `[nominal * 85%, nominal]`, sized by how much memory
+/// firmware can plausibly reserve — not by how far apart product variants
+/// happen to sit. Apple reports the full installed total, so a Mac lands
+/// exactly at nominal; a Jetson carves out a few percent and lands just
+/// below. 15% is comfortably above both and far below the smallest gap
+/// between two shipping variants.
+///
+/// Sizing it the other way — widest window that cannot hold two variants —
+/// was the first attempt and was wrong: it assumed variants differ by 2x,
+/// which holds for Jetson (8/16, 32/64) but not for Apple silicon, whose
+/// 16GB and 24GB parts are 1.5x apart. `no_unified_family_is_ambiguous`
+/// caught that at load, which is why the premise is checked there rather
+/// than trusted here.
+///
+/// A host that reports no total does not match. Capacity is the only
+/// dimension separating these rows; guessing when it is unreadable would
+/// hand a machine a claim recorded on a different board.
+fn unified_capacity_matches(nominal_bytes: u64, reported_bytes: Option<u64>) -> bool {
+    let Some(reported) = reported_bytes else {
+        return false;
+    };
+    reported <= nominal_bytes && u128::from(reported) * 100 >= u128::from(nominal_bytes) * 85
 }
 
 fn read_json_documents(directory: &Path) -> Result<Vec<(PathBuf, String)>, PlatformRegistryError> {

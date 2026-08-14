@@ -16,8 +16,18 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tensorplate_platform::{
     identify, CpuArchitecture, DetectedPlatform, HostSources, PlatformProbeError, PlatformReason,
-    PlatformRegistry, RowMatch,
+    PlatformRegistry, PlatformSupportRow, RowMatch,
 };
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
+
+fn registry() -> PlatformRegistry {
+    PlatformRegistry::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform"),
+    )
+    .expect("registry loads")
+}
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -58,6 +68,8 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         gce_machine_type: text("gce_machine_type"),
+        proc_meminfo: text("proc_meminfo"),
+        hw_memsize: text("hw_memsize"),
     }
 }
 
@@ -455,4 +467,95 @@ fn exact_facts_keep_the_precision_matching_discards() {
         Some("NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super"),
         "the device-tree NUL terminator is stripped"
     );
+}
+
+#[test]
+fn a_unified_memory_machine_resolves_to_its_row_with_no_accelerator_probe() {
+    // The defect this guards: `nvidia-smi` is the only accelerator probe,
+    // and no Jetson or Mac ships one. Detection therefore reports no
+    // accelerator on those platforms, which was read as "this machine has
+    // no accelerator" and mismatched every row that declares one — so
+    // every deploy on every Jetson and every Mac was refused, on hardware
+    // that had been working.
+    //
+    // Driven from the committed host fixtures, exactly as the agent builds
+    // its identity: host sources only, `DetectedPlatform::host_only`, no
+    // accelerator supplied.
+    let registry = registry();
+    let mut checked = 0;
+    for (name, fixture) in fixtures() {
+        let Some(row_id) = fixture["row_id"].as_str() else {
+            continue;
+        };
+        let Some(row) = registry.row(row_id) else {
+            continue;
+        };
+        let Some(accelerator) = row.accelerator() else {
+            continue;
+        };
+        if accelerator.memory_profile != PlatformMemoryProfileName::UnifiedMemory {
+            continue;
+        }
+        let identity = identify(&sources_of(&fixture))
+            .unwrap_or_else(|e| panic!("{name}: detection failed: {e}"))
+            .identity;
+        assert!(
+            identity.total_memory_bytes.is_some(),
+            "{name}: a unified-memory fixture must carry a memory source, or the case below \
+             passes for the wrong reason"
+        );
+        let detected = DetectedPlatform::host_only(identity);
+        let matched = match registry.resolve(&detected) {
+            RowMatch::Supported(matched) | RowMatch::PlannedNotValidated(matched) => matched,
+            other => panic!(
+                "{name}: a unified-memory machine must reach its own row without an accelerator \
+                 probe, got {other:?}"
+            ),
+        };
+        assert_eq!(
+            matched.row_id(),
+            row_id,
+            "{name}: resolved to the wrong row"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "expected the Jetson and macOS fixtures to exercise this; checked {checked}"
+    );
+}
+
+#[test]
+fn a_unified_memory_row_is_not_matched_on_a_capacity_it_never_declared() {
+    // The control for the case above. Capacity is the only dimension
+    // separating two boards of one family, so a machine reporting a
+    // sibling's memory must not inherit this row's claim, and a machine
+    // that cannot report memory at all must not match on hope.
+    let registry = registry();
+    let (name, fixture) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+    let base = identify(&sources_of(&fixture))
+        .unwrap_or_else(|e| panic!("{name}: detection failed: {e}"))
+        .identity;
+    let nominal = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .and_then(PlatformSupportRow::accelerator)
+        .expect("the row declares a unified accelerator")
+        .memory_bytes;
+
+    for (label, reported) in [
+        ("a sibling board's capacity", Some(nominal * 2)),
+        ("far below any carveout", Some(nominal / 2)),
+        ("no memory source at all", None),
+    ] {
+        let mut identity = base.clone();
+        identity.total_memory_bytes = reported;
+        let detected = DetectedPlatform::host_only(identity);
+        assert!(
+            !matches!(registry.resolve(&detected), RowMatch::Supported(_)),
+            "{label}: must not resolve to a supported row"
+        );
+    }
 }

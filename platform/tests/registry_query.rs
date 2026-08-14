@@ -17,6 +17,7 @@ use tensorplate_platform::{
     DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow, RowMatch,
     SupportLevel,
 };
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
 
 fn registry_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -42,6 +43,7 @@ fn host(
         os_version: os_version.to_string(),
         image_identity: image_identity.map(str::to_string),
         machine_type: None,
+        total_memory_bytes: None,
     }
 }
 
@@ -50,6 +52,20 @@ fn accelerator(sku: &str) -> AcceleratorIdentity {
         sku: sku.to_string(),
         partitioned: false,
     }
+}
+
+/// What a machine running `row` would report as its total memory.
+///
+/// Deliberately NOT the row's nominal figure: firmware and the GPU
+/// carveout are taken before the kernel counts what is left, so a real
+/// unified-memory board always reports less. Using nominal here would let
+/// an equality check pass and hide that matching has to accept a window.
+/// Discrete-accelerator rows report `None`, because capacity is never a
+/// match dimension for one.
+fn reported_total_for(row: &PlatformSupportRow) -> Option<u64> {
+    let accelerator = row.accelerator()?;
+    (accelerator.memory_profile == PlatformMemoryProfileName::UnifiedMemory)
+        .then(|| accelerator.memory_bytes - accelerator.memory_bytes / 12)
 }
 
 /// The detected identity of a committed row, derived from the row itself
@@ -63,6 +79,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
         os_version: row.os().version.clone(),
         image_identity: row.os().image_identity.clone(),
         machine_type: row.validation_environment().machine_type.clone(),
+        total_memory_bytes: reported_total_for(row),
     };
     match row.accelerator() {
         Some(a) => DetectedPlatform::with_accelerator(host, accelerator(&a.sku)),
@@ -739,6 +756,7 @@ fn genuinely_unknown_cpu_values_are_reportable() {
         os_version: "24.04".to_string(),
         image_identity: None,
         machine_type: None,
+        total_memory_bytes: None,
     });
     assert_eq!(
         registry.resolve(&unknown_arch).reason(),
@@ -752,6 +770,7 @@ fn genuinely_unknown_cpu_values_are_reportable() {
         os_version: "24.04".to_string(),
         image_identity: None,
         machine_type: None,
+        total_memory_bytes: None,
     });
     assert_eq!(
         registry.resolve(&unknown_vendor).reason(),

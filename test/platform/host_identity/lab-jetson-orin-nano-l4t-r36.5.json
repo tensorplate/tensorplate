@@ -7,7 +7,8 @@
     "uname_machine": "aarch64",
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",
     "nv_tegra_release": "# R36 (release), REVISION: 5.0, GCID: 41000000, BOARD: generic, EABI: aarch64, DATE: Thu Jan 15 19:24:38 UTC 2026\n",
-    "device_tree_model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000"
+    "device_tree_model": "NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super\u0000",
+    "proc_meminfo": "MemTotal:       7689557 kB\nMemFree:         1234567 kB\nMemAvailable:    2345678 kB\n"
   },
   "expect": {
     "architecture": "arm64",

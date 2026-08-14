@@ -63,6 +63,11 @@ pub struct HostSources {
     /// Body of the GCE metadata machine-type response, e.g.
     /// `projects/1234/machineTypes/g2-standard-8`.
     pub gce_machine_type: Option<String>,
+    /// `/proc/meminfo`. Read for its `MemTotal` line.
+    pub proc_meminfo: Option<String>,
+    /// `sysctl -n hw.memsize`, a bare byte count. The macOS source for the
+    /// same fact `/proc/meminfo` carries on Linux.
+    pub hw_memsize: Option<String>,
 }
 
 /// What the machine reported before normalization, kept for evidence
@@ -341,6 +346,12 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
         .as_deref()
         .and_then(machine_type_from_metadata);
 
+    let total_memory_bytes = sources
+        .proc_meminfo
+        .as_deref()
+        .and_then(mem_total_from_meminfo)
+        .or_else(|| sources.hw_memsize.as_deref().and_then(bytes_from_sysctl));
+
     Ok(HostReport {
         identity: HostIdentity {
             architecture,
@@ -349,9 +360,36 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
             os_version,
             image_identity,
             machine_type,
+            total_memory_bytes,
         },
         exact,
     })
+}
+
+/// `MemTotal` from `/proc/meminfo`, in bytes.
+///
+/// The kernel prints this in kibibytes with an explicit `kB` unit that has
+/// meant KiB since the file existed. A line whose unit is anything else is
+/// a file this parser does not understand, and is read as absent rather
+/// than converted on a guess.
+#[must_use]
+pub fn mem_total_from_meminfo(body: &str) -> Option<u64> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with("MemTotal:"))?
+        .strip_prefix("MemTotal:")?;
+    let mut fields = line.split_whitespace();
+    let value: u64 = fields.next()?.parse().ok()?;
+    match fields.next() {
+        Some("kB") => value.checked_mul(1024),
+        _ => None,
+    }
+}
+
+/// A bare byte count, as `sysctl -n` prints it.
+#[must_use]
+pub fn bytes_from_sysctl(body: &str) -> Option<u64> {
+    body.trim().parse().ok()
 }
 
 type OsIdentity = (String, String, Option<String>, DetectedVendor);

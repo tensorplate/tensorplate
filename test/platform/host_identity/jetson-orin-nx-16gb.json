@@ -8,7 +8,8 @@
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",
     "nv_tegra_release": "# R36 (release), REVISION: 4.3, GCID: 38968081, BOARD: generic, EABI: aarch64, DATE: Wed Jan  8 01:51:37 UTC 2025\n",
     "nvidia_jetpack_version": "6.2-b77",
-    "device_tree_model": "NVIDIA Jetson Orin NX Engineering Reference Developer Kit\u0000"
+    "device_tree_model": "NVIDIA Jetson Orin NX Engineering Reference Developer Kit\u0000",
+    "proc_meminfo": "MemTotal:       15379114 kB\nMemFree:         1234567 kB\nMemAvailable:    2345678 kB\n"
   },
   "expect": {
     "architecture": "arm64",

@@ -23,6 +23,7 @@ use tensorplate_platform::{
     identify_accelerator, AcceleratorSources, DetectedArchitecture, DetectedPlatform,
     DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow,
 };
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -48,7 +49,17 @@ fn host_of(row: &PlatformSupportRow) -> HostIdentity {
         os_version: row.os().version.clone(),
         image_identity: row.os().image_identity.clone(),
         machine_type: row.validation_environment().machine_type.clone(),
+        total_memory_bytes: reported_total_for(row),
     }
+}
+
+/// What a machine running `row` reports as total memory: below nominal for
+/// a unified-memory board, absent for a discrete one where capacity is
+/// never matched on.
+fn reported_total_for(row: &PlatformSupportRow) -> Option<u64> {
+    let accelerator = row.accelerator()?;
+    (accelerator.memory_profile == PlatformMemoryProfileName::UnifiedMemory)
+        .then(|| accelerator.memory_bytes - accelerator.memory_bytes / 12)
 }
 
 /// Detect from one of the committed accelerator fixtures, so admission is

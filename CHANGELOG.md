@@ -6,6 +6,39 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- A machine whose accelerator lives on the SoC is no longer refused every
+  deploy. `nvidia-smi` is the only accelerator probe, and neither JetPack
+  nor macOS ships one, so detection reported no accelerator on those
+  platforms — which was read as the affirmative fact "this machine has no
+  accelerator" and mismatched every row that declares one. Every Jetson and
+  every Mac resolved to no row at all, and deploy admission refused them
+  before the bundle was opened. On hardware that had been working.
+
+  A unified-memory accelerator is part of the SoC the host identity already
+  named. There is no second device to enumerate and no vendor tool that
+  prints the row's SKU, so the absence of a probed accelerator is not
+  evidence of absent hardware there. What the host cannot settle on its own
+  is capacity — two boards of one family report the same model string and
+  differ only in memory — so total system memory is now read from
+  `/proc/meminfo`, or `hw.memsize` on macOS, and is the one dimension
+  checked.
+
+  Capacity is matched as a window rather than an equality, because firmware
+  and the GPU carveout are taken before the kernel counts what is left.
+  This is deliberately not the tolerance rejected for discrete
+  accelerators, where reported framebuffer and nominal capacity diverge by
+  far more than any tolerance could bridge and memory is therefore never
+  matched on at all.
+
+  The window's width is guarded rather than trusted: the registry now
+  refuses to load a family whose rows sit close enough for one reported
+  total to fall in two windows. That check earned its place immediately —
+  the first window was sized on the assumption that variants differ by 2x,
+  which holds for Jetson and not for Apple silicon, whose 16GB and 24GB
+  parts are 1.5x apart. (V021-E02-F02-T02)
+
 ### Added
 
 - A deploy is now refused before anything is staged when the machine
