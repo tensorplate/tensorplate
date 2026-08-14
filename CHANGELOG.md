@@ -36,10 +36,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   an unrecognized Jetson would go from refused to not gated at all, on
   exactly the hardware the gate exists for.
 
-  An error is reserved for a source that cannot be read at all on a machine
-  reporting as a Jetson. That is a broken probe rather than an unknown
-  board, and an agent that cannot see its hardware has no basis to refuse a
-  deploy. (V021-E02-F02-T02)
+  Deriving an identity for a Jetson cannot fail at all, and that is the
+  whole safety argument rather than a judgement about which inputs are bad
+  enough to error on. The agent reads any probe error as "hardware
+  unreadable, admission disabled", so any error on this path would take a
+  Jetson from refused to not gated. A genuinely unreadable file cannot
+  reach this code in any case: the probe maps one to an `Unreadable` error
+  and propagates it before these sources are assembled, so an absent source
+  here is a signal rather than a failure. (V021-E02-F02-T02)
 
 ### Added
 

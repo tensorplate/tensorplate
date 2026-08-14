@@ -488,7 +488,6 @@ fn a_jetson_reaches_its_row_without_a_vendor_tool() {
             .unwrap_or_else(|e| panic!("{name}: detection failed: {e}"))
             .identity;
         let accelerator = identify_jetson_accelerator(&sources)
-            .unwrap_or_else(|e| panic!("{name}: accelerator derivation failed: {e}"))
             .unwrap_or_else(|| panic!("{name}: a Jetson must yield an accelerator identity"));
 
         let expected = registry
@@ -532,9 +531,7 @@ fn a_jetson_module_does_not_inherit_a_sibling_module_row() {
     sources.device_tree_model =
         Some("NVIDIA Jetson Orin NX Engineering Reference Developer Kit\0".to_string());
     let identity = identify(&sources).expect("detects").identity;
-    let accelerator = identify_jetson_accelerator(&sources)
-        .expect("derivation succeeds")
-        .expect("a Jetson yields an identity");
+    let accelerator = identify_jetson_accelerator(&sources).expect("a Jetson yields an identity");
     assert_eq!(
         accelerator.sku, "Jetson Orin NX 8GB",
         "the module name must come from the board, not from its capacity"
@@ -550,9 +547,17 @@ fn a_jetson_module_does_not_inherit_a_sibling_module_row() {
 }
 
 #[test]
-fn a_jetson_that_cannot_report_itself_is_an_error_not_an_absent_accelerator() {
-    // A Jetson always has an accelerator. Reporting none would be the same
-    // collapse that refused every Jetson deploy, one layer down.
+fn a_jetson_that_cannot_report_itself_is_refused_not_left_ungated() {
+    // This case previously asserted the opposite — that unreadable sources
+    // produce an Err — and that assertion pinned a fail-open into the
+    // suite. The caller reads any probe error as "admission disabled", so
+    // erroring here takes a Jetson from refused to not gated at all.
+    //
+    // A genuinely unreadable file cannot reach this function: the probe
+    // maps one to `PlatformProbeError::Unreadable` and propagates it before
+    // these sources are assembled. What arrives as `None` is an ABSENT
+    // source, which is a signal, not a failure.
+    let registry = committed_registry();
     let (_, nano) = fixtures()
         .into_iter()
         .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
@@ -568,19 +573,45 @@ fn a_jetson_that_cannot_report_itself_is_an_error_not_an_absent_accelerator() {
             "no memory total",
             Box::new(|s: &mut HostSources| s.proc_meminfo = None),
         ),
+        (
+            "meminfo with no MemTotal line",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemFree:         1234567 kB\n".to_string());
+            }),
+        ),
+        (
+            "MemTotal in a unit this does not read",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemTotal:       7689557 KiB\n".to_string());
+            }),
+        ),
+        (
+            "a model that is NUL and whitespace only",
+            Box::new(|s: &mut HostSources| s.device_tree_model = Some("   \0".to_string())),
+        ),
     ] {
         let mut sources = sources_of(&nano);
         mutate(&mut sources);
+
+        let accelerator = identify_jetson_accelerator(&sources)
+            .unwrap_or_else(|| panic!("{label}: a Jetson must still report an accelerator"));
+        let identity = identify(&sources)
+            .expect("host identity still detects")
+            .identity;
+        let detected = DetectedPlatform::with_accelerator(identity, accelerator);
         assert!(
-            identify_jetson_accelerator(&sources).is_err(),
-            "{label}: must be an error, not Ok(None)"
+            matches!(
+                registry.resolve(&detected),
+                RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+            ),
+            "{label}: must be refused; anything else lets the agent skip the gate"
         );
     }
 
-    // And a machine that is not a Jetson yields no identity and no error.
+    // And a machine that is not a Jetson yields no identity at all.
     let mut not_jetson = sources_of(&nano);
     not_jetson.nv_tegra_release = None;
-    assert!(matches!(identify_jetson_accelerator(&not_jetson), Ok(None)));
+    assert!(identify_jetson_accelerator(&not_jetson).is_none());
 }
 
 #[test]
@@ -621,7 +652,6 @@ fn a_jetson_board_with_no_row_is_refused_not_left_ungated() {
         let mut sources = sources_of(&nano);
         mutate(&mut sources);
         let accelerator = identify_jetson_accelerator(&sources)
-            .unwrap_or_else(|e| panic!("{label}: must not error — that disables the gate: {e}"))
             .unwrap_or_else(|| panic!("{label}: a Jetson must still report an accelerator"));
 
         let identity = identify(&sources).expect("detects").identity;
@@ -650,7 +680,6 @@ fn the_super_variant_is_a_trailing_word_not_a_substring() {
         let mut sources = sources_of(&nano);
         sources.device_tree_model = Some(format!("{model}\0"));
         identify_jetson_accelerator(&sources)
-            .expect("derivation succeeds")
             .expect("a Jetson yields an identity")
             .sku
     };
@@ -698,7 +727,6 @@ fn the_capacity_band_rejects_what_is_outside_it() {
         let mut sources = sources_of(&nano);
         sources.proc_meminfo = Some(format!("MemTotal:       {kb} kB\n"));
         identify_jetson_accelerator(&sources)
-            .expect("derivation succeeds")
             .expect("a Jetson yields an identity")
             .sku
     };

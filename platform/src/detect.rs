@@ -526,53 +526,71 @@ fn linux_os(
 /// `accelerator_matches`. It can fail to identify a board; it cannot hand
 /// one board another board's row.
 ///
-/// Returns `None` for a host that is not a Jetson.
+/// Returns `None` only for a host that is not a Jetson. **A Jetson always
+/// gets an identity, and this never fails.**
 ///
-/// **A board this cannot name is not an error.** It yields an identity
-/// carrying what the board actually reported, which no row names, so the
-/// machine is refused with `unsupported_accelerator_sku` — the same answer
-/// an off-matrix discrete card gets. Erroring instead would be a fail-open:
-/// the caller treats a probe error as "hardware unreadable, admission
-/// disabled", so an unrecognized Jetson would go from *refused* to *not
-/// gated at all*. Refusing hardware nobody has a row for is the point of
-/// the gate; skipping the gate on exactly that hardware inverts it.
+/// That is the whole safety argument, and it is deliberately not a
+/// judgement call about which inputs are "bad enough" to error on. The
+/// caller reads a probe error as "hardware unreadable, admission disabled",
+/// so ANY error here takes a Jetson from *refused* to *not gated at all* —
+/// on exactly the hardware the gate exists for. Refusing to name a board
+/// must never be able to skip the gate, so there is no path that can.
 ///
-/// # Errors
+/// A board this cannot name yields an identity describing what it saw. No
+/// row is written in dev-kit names, raw byte counts, or parentheses, so
+/// such an identity is unmatchable by construction and the machine is
+/// refused with `unsupported_accelerator_sku` — the same answer an
+/// off-matrix discrete card gets.
 ///
-/// [`PlatformProbeError::Unrecognized`] only when a source cannot be read
-/// at all on a machine that reports as a Jetson. That is a broken probe
-/// rather than an unknown board, and the caller is right to treat it as
-/// "cannot read this machine" — an agent that cannot see its hardware has
-/// no basis to refuse a deploy.
-pub fn identify_jetson_accelerator(
-    sources: &HostSources,
-) -> Result<Option<AcceleratorIdentity>, PlatformProbeError> {
+/// Note this cannot mask a genuinely unreadable source: [`SystemHostProbe`]
+/// maps a file it cannot read to [`PlatformProbeError::Unreadable`] and
+/// propagates it before these sources are assembled. A `None` reaching here
+/// means the source was *absent*, which [`HostSources`] documents as a
+/// signal rather than a failure.
+///
+/// [`SystemHostProbe`]: crate::probe::SystemHostProbe
+#[must_use]
+pub fn identify_jetson_accelerator(sources: &HostSources) -> Option<AcceleratorIdentity> {
     // `/etc/nv_tegra_release` is the same signal `jetson_os` keys on: it is
     // present only on Jetson.
-    if sources.nv_tegra_release.is_none() {
-        return Ok(None);
-    }
+    sources.nv_tegra_release.as_ref()?;
+
     let model = sources
         .device_tree_model
         .as_deref()
-        .and_then(device_tree_string)
-        .ok_or_else(|| PlatformProbeError::Unrecognized {
-            source_name: "/proc/device-tree/model".to_string(),
-            detail: "a Jetson reported no board model".to_string(),
-        })?;
+        .and_then(device_tree_string);
     let reported = sources
         .proc_meminfo
         .as_deref()
-        .and_then(mem_total_from_meminfo)
-        .ok_or_else(|| PlatformProbeError::Unrecognized {
-            source_name: "/proc/meminfo".to_string(),
-            detail: "a Jetson reported no readable MemTotal".to_string(),
-        })?;
+        .and_then(mem_total_from_meminfo);
 
-    // Both sources read. From here a board this does not recognize gets an
-    // unmatchable identity, never an error.
-    let sku = if let (Some(module), Some(capacity_gb)) =
-        (jetson_module(&model), jetson_module_capacity_gb(reported))
+    let sku = if let (Some(model), Some(reported)) = (model.as_deref(), reported) {
+        recognized_jetson_sku(model, reported)
+            .unwrap_or_else(|| format!("{model} ({reported} bytes)"))
+    } else {
+        // One or both sources absent. Still an accelerator, still not one
+        // this can name, so still unmatchable — never an error.
+        format!(
+            "Jetson (unidentified: model={}, memory={})",
+            model.as_deref().unwrap_or("absent"),
+            reported.map_or_else(|| "absent".to_string(), |bytes| format!("{bytes} bytes")),
+        )
+    };
+
+    Some(AcceleratorIdentity {
+        sku,
+        // Jetson modules do not partition. The row records this as
+        // `not_applicable`; reporting `true` here would reject every board.
+        partitioned: false,
+    })
+}
+
+/// The row SKU for a board this recognizes, or `None` for one it does not.
+fn recognized_jetson_sku(model: &str, reported_bytes: u64) -> Option<String> {
+    let (module, capacity_gb) = (
+        jetson_module(model)?,
+        jetson_module_capacity_gb(reported_bytes)?,
+    );
     {
         // `Super` is a module variant and the row spells it after the
         // capacity. Matched as a trailing word rather than anywhere in
@@ -583,20 +601,8 @@ pub fn identify_jetson_accelerator(
         } else {
             ""
         };
-        format!("Jetson {module} {capacity_gb}GB{suffix}")
-    } else {
-        // Carry what the board said. No row is written in dev-kit names or
-        // raw byte counts, so this is unmatchable by construction, and it
-        // tells an operator exactly what the machine reported.
-        format!("{model} ({reported} bytes)")
-    };
-
-    Ok(Some(AcceleratorIdentity {
-        sku,
-        // Jetson modules do not partition. The row records this as
-        // `not_applicable`; reporting `true` here would reject every board.
-        partitioned: false,
-    }))
+        Some(format!("Jetson {module} {capacity_gb}GB{suffix}"))
+    }
 }
 
 /// The module name inside a Jetson board model string.

@@ -184,15 +184,9 @@ fn settle_platform_admission(registry: &PlatformRegistry) -> Option<PlatformAdmi
     // vendor tool is therefore not absence of an accelerator.
     let accelerator = match NvidiaSmiProbe::new().detect_accelerator() {
         Ok(Some(accelerator)) => Some(accelerator),
-        Ok(None) => match identify_jetson_accelerator(&sources) {
-            Ok(accelerator) => accelerator,
-            Err(err) => {
-                eprintln!(
-                    "platform admission: integrated accelerator unreadable, deploy admission disabled: {err}"
-                );
-                return None;
-            }
-        },
+        // Never fails: a Jetson it cannot name still yields an unmatchable
+        // identity, so an unknown board is refused rather than ungated.
+        Ok(None) => identify_jetson_accelerator(&sources),
         Err(err) => {
             eprintln!(
                 "platform admission: accelerator identity unreadable, deploy admission disabled: {err}"
