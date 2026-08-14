@@ -168,12 +168,6 @@ impl SystemHostProbe {
             } else {
                 None
             },
-            proc_meminfo: self.read("/proc/meminfo")?,
-            hw_memsize: if apple {
-                run("sysctl", &["-n", "hw.memsize"], ExitPolicy::Strict)?
-            } else {
-                None
-            },
         })
     }
 

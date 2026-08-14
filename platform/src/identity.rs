@@ -98,15 +98,6 @@ pub struct HostIdentity {
     /// accelerator in an unvalidated chassis does not inherit a claim
     /// recorded on one specific shape.
     pub machine_type: Option<String>,
-    /// Total system memory the machine reports, where a source for it
-    /// exists.
-    ///
-    /// Matching reads this for one purpose only: a unified-memory
-    /// accelerator has no separate device to probe, so capacity is the
-    /// only dimension that tells two boards of one family apart. It is
-    /// never consulted for a discrete accelerator, whose usable
-    /// framebuffer is not its row's nominal capacity.
-    pub total_memory_bytes: Option<u64>,
 }
 
 /// What the accelerator reports about itself. Absent on hosts with no

@@ -169,8 +169,6 @@ fn every_committed_row_is_selected_by_its_own_host_identity() {
             sw_vers_build_version: text("sw_vers_build_version"),
             cpu_brand: text("cpu_brand"),
             gce_machine_type: text("gce_machine_type"),
-            proc_meminfo: text("proc_meminfo"),
-            hw_memsize: text("hw_memsize"),
         };
         let identity = identify(&sources).expect("detects").identity;
         let selection = registry.select_profile(&identity);

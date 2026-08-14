@@ -8,8 +8,7 @@
     "sw_vers_product_name": "macOS",
     "sw_vers_product_version": "26.5.2",
     "sw_vers_build_version": "25F84",
-    "cpu_brand": "Apple M4 Pro",
-    "hw_memsize": "25769803776"
+    "cpu_brand": "Apple M4 Pro"
   },
   "expect": {
     "architecture": "arm64",

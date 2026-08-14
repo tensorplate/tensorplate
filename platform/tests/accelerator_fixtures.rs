@@ -74,11 +74,6 @@ fn host_of(row: &PlatformSupportRow) -> HostIdentity {
         os_version: row.os().version.clone(),
         image_identity: row.os().image_identity.clone(),
         machine_type: row.validation_environment().machine_type.clone(),
-        // These cases vary the accelerator against a discrete-GPU row, and
-        // capacity is never a match dimension for one. Left absent so a
-        // case that started depending on it would fail rather than pass on
-        // a value invented here.
-        total_memory_bytes: None,
     }
 }
 
