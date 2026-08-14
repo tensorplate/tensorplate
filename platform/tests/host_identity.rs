@@ -568,12 +568,6 @@ fn a_jetson_that_cannot_report_itself_is_an_error_not_an_absent_accelerator() {
             "no memory total",
             Box::new(|s: &mut HostSources| s.proc_meminfo = None),
         ),
-        (
-            "a capacity no module ships in",
-            Box::new(|s: &mut HostSources| {
-                s.proc_meminfo = Some("MemTotal:       99999999 kB\n".to_string());
-            }),
-        ),
     ] {
         let mut sources = sources_of(&nano);
         mutate(&mut sources);
@@ -587,4 +581,145 @@ fn a_jetson_that_cannot_report_itself_is_an_error_not_an_absent_accelerator() {
     let mut not_jetson = sources_of(&nano);
     not_jetson.nv_tegra_release = None;
     assert!(matches!(identify_jetson_accelerator(&not_jetson), Ok(None)));
+}
+
+#[test]
+fn a_jetson_board_with_no_row_is_refused_not_left_ungated() {
+    // The regression this guards is a fail-OPEN, and it is the one this
+    // change first shipped. `settle_platform_admission` treats a probe
+    // error as "hardware unreadable, admission disabled", so returning Err
+    // for a board nobody has a row for would take that machine from
+    // refused to not gated at all — inverting the gate on exactly the
+    // hardware it exists for.
+    let registry = committed_registry();
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+
+    for (label, mutate) in [
+        (
+            "a module no row names",
+            Box::new(|s: &mut HostSources| {
+                s.device_tree_model = Some("NVIDIA Jetson Thor Developer Kit\0".to_string());
+                s.proc_meminfo = Some("MemTotal:      125829120 kB\n".to_string());
+            }) as Box<dyn Fn(&mut HostSources)>,
+        ),
+        (
+            "a capacity no module ships in",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemTotal:      125829120 kB\n".to_string());
+            }),
+        ),
+        (
+            "a board model with no Jetson token",
+            Box::new(|s: &mut HostSources| {
+                s.device_tree_model = Some("Some Other ARM64 Board\0".to_string());
+            }),
+        ),
+    ] {
+        let mut sources = sources_of(&nano);
+        mutate(&mut sources);
+        let accelerator = identify_jetson_accelerator(&sources)
+            .unwrap_or_else(|e| panic!("{label}: must not error — that disables the gate: {e}"))
+            .unwrap_or_else(|| panic!("{label}: a Jetson must still report an accelerator"));
+
+        let identity = identify(&sources).expect("detects").identity;
+        let detected = DetectedPlatform::with_accelerator(identity, accelerator);
+        assert!(
+            matches!(
+                registry.resolve(&detected),
+                RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+            ),
+            "{label}: must be refused, never admitted and never ungated"
+        );
+    }
+}
+
+#[test]
+fn the_super_variant_is_a_trailing_word_not_a_substring() {
+    // `Super` names a module variant and the row spells it last. Testing it
+    // as a substring anywhere would let an unrelated board name acquire the
+    // variant and land on a Production row it is not.
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+
+    let sku_for = |model: &str| {
+        let mut sources = sources_of(&nano);
+        sources.device_tree_model = Some(format!("{model}\0"));
+        identify_jetson_accelerator(&sources)
+            .expect("derivation succeeds")
+            .expect("a Jetson yields an identity")
+            .sku
+    };
+
+    assert_eq!(
+        sku_for("NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super"),
+        "Jetson Orin Nano 8GB Super"
+    );
+    assert_eq!(
+        sku_for("NVIDIA Jetson Orin Nano Developer Kit"),
+        "Jetson Orin Nano 8GB",
+        "a board that is not the Super variant must not acquire it"
+    );
+    // The discriminating case: the module name extracts cleanly as `Orin
+    // Nano` (the kit description stops it), the capacity is 8GB, and the
+    // word `Super` appears AFTER the module rather than as the trailing
+    // variant. Under a substring test this composes
+    // `Jetson Orin Nano 8GB Super` — the committed Production row — and a
+    // board that is not the Super variant inherits its claim. Under the
+    // trailing-word test it composes `Jetson Orin Nano 8GB`, which names no
+    // row, so the board is refused.
+    let trailing_other_word = sku_for("NVIDIA Jetson Orin Nano Developer Kit Super Edition");
+    assert_eq!(
+        trailing_other_word, "Jetson Orin Nano 8GB",
+        "`Super` before another trailing word is not the variant suffix"
+    );
+    assert!(
+        committed_registry().rows().all(|row| row
+            .accelerator()
+            .map_or(true, |accelerator| accelerator.sku != trailing_other_word)),
+        "`{trailing_other_word}` must name no committed row, so the board is refused"
+    );
+}
+
+#[test]
+fn the_capacity_band_rejects_what_is_outside_it() {
+    // The band is load bearing: it is what stops a reported total being
+    // rounded onto a capacity the module does not have. Asserted at both
+    // edges so widening or deleting it fails here.
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+    let sku_for_kb = |kb: u64| {
+        let mut sources = sources_of(&nano);
+        sources.proc_meminfo = Some(format!("MemTotal:       {kb} kB\n"));
+        identify_jetson_accelerator(&sources)
+            .expect("derivation succeeds")
+            .expect("a Jetson yields an identity")
+            .sku
+    };
+
+    // 8 GiB nominal is 8388608 kB; the band admits [80%, 100%].
+    assert_eq!(
+        sku_for_kb(8_388_608),
+        "Jetson Orin Nano 8GB Super",
+        "at nominal"
+    );
+    assert_eq!(
+        sku_for_kb(6_710_887),
+        "Jetson Orin Nano 8GB Super",
+        "at the floor"
+    );
+    assert!(
+        !sku_for_kb(6_710_886).starts_with("Jetson Orin Nano 8GB"),
+        "one byte below the floor must not be rounded onto 8GB"
+    );
+    assert!(
+        !sku_for_kb(8_388_609).starts_with("Jetson Orin Nano 8GB"),
+        "above nominal is a different module, not this one"
+    );
 }

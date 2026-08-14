@@ -28,10 +28,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   produces `Jetson Orin NX 8GB`, which no row names, and is reported
   unsupported.
 
-  On a machine that reports as a Jetson, a model or memory total that
-  cannot be read is an error rather than an absent accelerator. A Jetson
-  always has one, so reporting none would be the same collapse one layer
-  down. (V021-E02-F02-T02)
+  A board this cannot name is refused, not left ungated. It yields an
+  identity carrying what the board actually reported, which no row names,
+  so the machine gets `unsupported_accelerator_sku` — the same answer an
+  off-matrix discrete card gets. Erroring instead would be a fail-open: the
+  agent reads a probe error as "hardware unreadable, admission disabled", so
+  an unrecognized Jetson would go from refused to not gated at all, on
+  exactly the hardware the gate exists for.
+
+  An error is reserved for a source that cannot be read at all on a machine
+  reporting as a Jetson. That is a broken probe rather than an unknown
+  board, and an agent that cannot see its hardware has no basis to refuse a
+  deploy. (V021-E02-F02-T02)
 
 ### Added
 

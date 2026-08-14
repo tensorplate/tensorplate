@@ -526,15 +526,24 @@ fn linux_os(
 /// `accelerator_matches`. It can fail to identify a board; it cannot hand
 /// one board another board's row.
 ///
-/// Returns `None` for a host that is not a Jetson. On a host that IS a
-/// Jetson, a source that is missing or unreadable is an error rather than
-/// an absent accelerator: a Jetson always has one, so reporting none would
-/// be the same collapse that refused every Jetson deploy.
+/// Returns `None` for a host that is not a Jetson.
+///
+/// **A board this cannot name is not an error.** It yields an identity
+/// carrying what the board actually reported, which no row names, so the
+/// machine is refused with `unsupported_accelerator_sku` — the same answer
+/// an off-matrix discrete card gets. Erroring instead would be a fail-open:
+/// the caller treats a probe error as "hardware unreadable, admission
+/// disabled", so an unrecognized Jetson would go from *refused* to *not
+/// gated at all*. Refusing hardware nobody has a row for is the point of
+/// the gate; skipping the gate on exactly that hardware inverts it.
 ///
 /// # Errors
 ///
-/// [`PlatformProbeError::Unrecognized`] when the board reports as a Jetson
-/// but its model or memory cannot be read.
+/// [`PlatformProbeError::Unrecognized`] only when a source cannot be read
+/// at all on a machine that reports as a Jetson. That is a broken probe
+/// rather than an unknown board, and the caller is right to treat it as
+/// "cannot read this machine" — an agent that cannot see its hardware has
+/// no basis to refuse a deploy.
 pub fn identify_jetson_accelerator(
     sources: &HostSources,
 ) -> Result<Option<AcceleratorIdentity>, PlatformProbeError> {
@@ -551,10 +560,6 @@ pub fn identify_jetson_accelerator(
             source_name: "/proc/device-tree/model".to_string(),
             detail: "a Jetson reported no board model".to_string(),
         })?;
-    let module = jetson_module(&model).ok_or_else(|| PlatformProbeError::Unrecognized {
-        source_name: "/proc/device-tree/model".to_string(),
-        detail: format!("no Jetson module name in board model `{model}`"),
-    })?;
     let reported = sources
         .proc_meminfo
         .as_deref()
@@ -563,20 +568,31 @@ pub fn identify_jetson_accelerator(
             source_name: "/proc/meminfo".to_string(),
             detail: "a Jetson reported no readable MemTotal".to_string(),
         })?;
-    let capacity_gb =
-        jetson_module_capacity_gb(reported).ok_or_else(|| PlatformProbeError::Unrecognized {
-            source_name: "/proc/meminfo".to_string(),
-            detail: format!("{reported} bytes is not a Jetson module capacity"),
-        })?;
-    // `Super` is a module variant, not a board one, and the row spells it
-    // after the capacity.
-    let suffix = if model.contains("Super") {
-        " Super"
+
+    // Both sources read. From here a board this does not recognize gets an
+    // unmatchable identity, never an error.
+    let sku = if let (Some(module), Some(capacity_gb)) =
+        (jetson_module(&model), jetson_module_capacity_gb(reported))
+    {
+        // `Super` is a module variant and the row spells it after the
+        // capacity. Matched as a trailing word rather than anywhere in
+        // the string, so a board whose name merely contains it does not
+        // acquire the variant.
+        let suffix = if model.split_whitespace().last() == Some("Super") {
+            " Super"
+        } else {
+            ""
+        };
+        format!("Jetson {module} {capacity_gb}GB{suffix}")
     } else {
-        ""
+        // Carry what the board said. No row is written in dev-kit names or
+        // raw byte counts, so this is unmatchable by construction, and it
+        // tells an operator exactly what the machine reported.
+        format!("{model} ({reported} bytes)")
     };
+
     Ok(Some(AcceleratorIdentity {
-        sku: format!("Jetson {module} {capacity_gb}GB{suffix}"),
+        sku,
         // Jetson modules do not partition. The row records this as
         // `not_applicable`; reporting `true` here would reject every board.
         partitioned: false,
