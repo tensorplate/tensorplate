@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/platform_support_row.json",
   "title": "TensorPlate Platform Support Row",
-  "description": "One exact platform support row: the unit the registry stores, `doctor` matches against, and release evidence is filed under. Every field is exact-version \u2014 a row names a specific OS version, driver/runtime stack, CPU architecture, accelerator SKU, and validation environment, and covers an explicit CPU vendor set, so evidence never transfers between rows. Non-exact future targets use the separate roadmap_target.json schema and are never rows. Memory accounting references the platform memory profile records by property name (`unified_memory` / `discrete_gpu`) rather than re-specifying them. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors. Free-text fields must also carry a non-whitespace character; that rule is enforced by consumers rather than by a `pattern`, because regex dialects disagree about which code points count as whitespace (U+FEFF and U+3000 among them) and a cross-language contract must not depend on that.",
+  "description": "One platform support row: the unit the registry stores, `doctor` matches against, and release evidence is filed under. Accelerator rows match an exact SKU by default; a narrowly defined family row can provide a lower-priority compatibility envelope, while an exact row always wins. Other fields remain exact-version, so evidence never transfers between rows. Non-exact future targets use the separate roadmap_target.json schema and are never rows. Memory accounting references the platform memory profile records by property name (`unified_memory` / `discrete_gpu`) rather than re-specifying them. This schema versions independently of the cross-process protocol; consumers reject other schema_version values as static-config errors. Free-text fields must also carry a non-whitespace character; that rule is enforced by consumers rather than by a `pattern`, because regex dialects disagree about which code points count as whitespace (U+FEFF and U+3000 among them) and a cross-language contract must not depend on that.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -128,7 +128,7 @@
         "memory_profile",
         "partitioning"
       ],
-      "description": "Absent on accelerator-less rows. Names the exact SKU: a near-miss SKU never matches this row.",
+      "description": "Absent on accelerator-less rows. Exact SKU matching is the default; a family policy is a lower-priority compatibility envelope.",
       "properties": {
         "family": {
           "type": "string",
@@ -137,7 +137,16 @@
         "sku": {
           "type": "string",
           "minLength": 1,
-          "description": "Exact SKU as reported by the platform, recorded at first run."
+          "description": "Exact SKU as reported by the platform, or the canonical family name when match_policy is `family`."
+        },
+        "match_policy": {
+          "type": "string",
+          "enum": [
+            "exact",
+            "family"
+          ],
+          "default": "exact",
+          "description": "Matching policy. `exact` is the default. `family` is reserved for the Apple M-series compatibility envelope and loses to an exact row."
         },
         "memory_bytes": {
           "type": "integer",
@@ -290,7 +299,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
-          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type) for rows whose evidence is scoped to one. A row that declares this matches only a host reporting the same value, because evidence does not transfer across machine shapes. Omitting it does NOT make the row match every host: what an omitted value means is decided by `kind` \u2014 see its description. Physical rows are additionally identified by their exact accelerator SKU. Must be a value a host probe can actually report, or the row can never match."
+          "description": "Exact machine-comparable shape identifier (e.g. a cloud machine type) for rows whose evidence is scoped to one. A row that declares this matches only a host reporting the same value, because evidence does not transfer across machine shapes. Omitting it does NOT make the row match every host: what an omitted value means is decided by `kind` \u2014 see its description. Physical rows are additionally identified by their accelerator matching policy. Must be a value a host probe can actually report, or the row can never match."
         }
       },
       "description": "Where the row's claim was validated. `identity` is prose for humans. The machine-comparable scoping used for matching is `machine_type` together with `kind`: both participate, and an omitted `machine_type` is interpreted according to `kind` rather than as a wildcard."
@@ -449,7 +458,61 @@
           }
         }
       },
-      "$comment": "An exact accelerator SKU pins the host, so such a row names one vendor."
+      "$comment": "An accelerator row names one host CPU vendor."
+    },
+    {
+      "if": {
+        "required": [
+          "accelerator"
+        ],
+        "properties": {
+          "accelerator": {
+            "required": [
+              "match_policy"
+            ],
+            "properties": {
+              "match_policy": {
+                "const": "family"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "evidence"
+          ]
+        },
+        "properties": {
+          "support_level": {
+            "const": "Preview"
+          },
+          "provenance": {
+            "const": "spec_authored"
+          },
+          "cpu": {
+            "properties": {
+              "vendors": {
+                "const": [
+                  "apple"
+                ]
+              }
+            }
+          },
+          "accelerator": {
+            "properties": {
+              "family": {
+                "const": "Apple M-series"
+              },
+              "sku": {
+                "const": "Apple M-series"
+              }
+            }
+          }
+        }
+      },
+      "$comment": "Family matching is deliberately limited to an evidence-free, spec-authored Apple M-series Preview envelope; hardware evidence belongs to exact rows."
     }
   ]
 }

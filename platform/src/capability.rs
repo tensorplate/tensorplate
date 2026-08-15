@@ -4,7 +4,7 @@
 // records.
 //
 // Detection records what the machine reports. The registry then bounds that
-// observation by the exact support row before it becomes an admission limit.
+// observation by the resolved support row before it becomes an admission limit.
 // Keeping those two values distinct prevents a machine with more memory than
 // the validated row from silently broadening the row's support claim.
 
@@ -20,7 +20,7 @@ pub struct AcceleratorObservation {
     pub memory_profile: PlatformMemoryProfileName,
 }
 
-/// Capability record resolved from an observation and an exact support row.
+/// Capability record resolved from an observation and a support row.
 ///
 /// The fields are read-only because `max_resident_model_memory` is valid only
 /// after the registry has bounded detected memory by the row budget.

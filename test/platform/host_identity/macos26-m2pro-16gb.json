@@ -2,14 +2,14 @@
   "row_id": "macos26-apple-m-series-preview",
   "matches_row": true,
   "provenance": "spec_authored",
-  "provenance_note": "Compatibility fixture; Apple M4 Pro and 24GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-us/121554); this is not hardware-validation evidence",
+  "provenance_note": "Compatibility fixture; Apple M2 Pro and 16GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-ca/111838); this is not hardware-validation evidence",
   "sources": {
     "uname_machine": "arm64",
     "sw_vers_product_name": "macOS",
     "sw_vers_product_version": "26.5.2",
     "sw_vers_build_version": "25F84",
-    "cpu_brand": "Apple M4 Pro",
-    "hw_memsize": "25769803776"
+    "cpu_brand": "Apple M2 Pro",
+    "hw_memsize": "17179869184"
   },
   "expect": {
     "architecture": "arm64",

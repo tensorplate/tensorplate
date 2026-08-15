@@ -79,42 +79,65 @@ fn m1_pro_resolves_to_the_production_row_and_publishes_unified_memory() {
 }
 
 #[test]
-fn exact_m4_pro_resolves_as_planned_without_publishing_admission_capacity() {
+fn m4_pro_resolves_to_the_family_preview_with_a_conservative_memory_ceiling() {
     let report =
         identify_platform(&sources("macos26-m4pro-24gb")).expect("M4 Pro detection succeeds");
     let registry = registry();
     let detected = report.detected_platform();
-    let matched = registry.resolve(&detected);
-    assert!(matches!(
-        matched,
-        RowMatch::PlannedNotValidated(row) if row.row_id() == "macos26-m4pro-24gb"
-    ));
+    let RowMatch::Supported(row) = registry.resolve(&detected) else {
+        panic!("M4 Pro must resolve to the M-series Preview row");
+    };
+    assert_eq!(row.row_id(), "macos26-apple-m-series-preview");
+
+    let capability = registry
+        .resolved_capability(&report)
+        .expect("the family Preview row publishes a bounded capability");
     assert_eq!(
-        matched.reason(),
-        Some(PlatformReason::RowPlannedNotValidated)
+        capability.detected_memory_bytes(),
+        24_u64 * 1024 * 1024 * 1024
     );
-    assert!(
-        registry.resolved_capability(&report).is_none(),
-        "a Planned row cannot publish a deploy admission limit"
+    assert_eq!(
+        capability.row_memory_budget_bytes(),
+        16_u64 * 1024 * 1024 * 1024
+    );
+    assert_eq!(
+        capability.max_resident_model_memory(),
+        16_u64 * 1024 * 1024 * 1024,
+        "a larger M-series pool cannot exceed the compatibility envelope"
     );
 }
 
 #[test]
-fn two_other_apple_chips_are_rejected_as_exact_sku_misses() {
+fn other_recognized_m_series_chips_use_the_family_preview() {
     let registry = registry();
-    for name in [
-        "macos26-m2pro-16gb-unsupported",
-        "macos26-m3max-36gb-unsupported",
-    ] {
+    for name in ["macos26-m2pro-16gb", "macos26-m3max-36gb"] {
         let report =
             identify_platform(&sources(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
+        let RowMatch::Supported(row) = registry.resolve(&report.detected_platform()) else {
+            panic!("{name} must resolve to the M-series Preview row");
+        };
+        assert_eq!(row.row_id(), "macos26-apple-m-series-preview");
         assert_eq!(
-            registry.resolve(&report.detected_platform()),
-            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku),
-            "{name} must not borrow the nearest Apple row"
+            registry
+                .resolved_capability(&report)
+                .expect("family row publishes capacity")
+                .max_resident_model_memory(),
+            16_u64 * 1024 * 1024 * 1024,
+            "{name} stays inside the conservative family budget"
         );
-        assert!(registry.resolved_capability(&report).is_none());
     }
+}
+
+#[test]
+fn apple_chips_outside_the_m_series_family_fail_closed() {
+    let report = identify_platform(&sources("macos26-apple-a17pro-unsupported"))
+        .expect("the non-M-series Apple identity is detectable");
+    let registry = registry();
+    assert_eq!(
+        registry.resolve(&report.detected_platform()),
+        RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+    );
+    assert!(registry.resolved_capability(&report).is_none());
 }
 
 #[test]

@@ -115,7 +115,7 @@ fn an_installed_registry_loads_and_reports_its_contents() {
     // that stops being a supported combination changes what `doctor`
     // prints rather than passing silently.
     assert!(
-        finding.message.contains("12 rows") && finding.message.contains("7 supported"),
+        finding.message.contains("12 rows") && finding.message.contains("8 supported"),
         "counts come from the query API: {}",
         finding.message
     );
