@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use common::{vision_bundle, Harness};
 use serde_json::Value;
+use tensorplate_agent::platform_admission::ObservedStack;
 use tensorplate_agent::{AgentError, Coordinator, PlatformAdmission};
 use tensorplate_platform::{identify_platform, HostSources, PlatformReason, PlatformRegistry};
 
@@ -45,12 +46,13 @@ fn sources(name: &str) -> HostSources {
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
         gce_machine_type: text("gce_machine_type"),
+        proc_meminfo: text("proc_meminfo"),
     }
 }
 
 fn admission(name: &str) -> PlatformAdmission {
     let report = identify_platform(&sources(name)).expect("platform detects");
-    PlatformAdmission::evaluate(&registry(), &report)
+    PlatformAdmission::evaluate(&registry(), &report, &ObservedStack::default())
 }
 
 #[test]
@@ -109,8 +111,17 @@ fn rejected_platform_fails_before_bundle_staging_or_worker_prepare() {
     let err = coordinator
         .deploy("unsupported-apple", &bundle, BTreeMap::new(), None, None)
         .expect_err("unsupported chip must fail before model load");
+    // Carries the typed reason, not only prose. `to_record()` renders
+    // `Display` alone, so a reason that stays inside the crate never
+    // reaches `ErrorRecord.context` and no caller can read it by machine.
     assert!(
-        matches!(err, AgentError::UnsupportedHardware(ref detail) if detail.contains("unsupported_accelerator_sku")),
+        matches!(
+            err,
+            AgentError::PlatformNotAdmissible {
+                reason: Some(PlatformReason::UnsupportedAcceleratorSku),
+                ..
+            }
+        ),
         "unexpected error: {err}"
     );
     assert!(

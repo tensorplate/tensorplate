@@ -155,7 +155,7 @@ Description: TensorPlate APT repository source bootstrap
 
 Package: tensorplate
 Section: metapackages
-Architecture: arm64
+Architecture: any
 Build-Profiles: <!pkg.tensorplate.cli-only>
 Depends:
  ${misc:Depends},
@@ -166,13 +166,16 @@ Depends:
  tensorplate-cli (= ${binary:Version}),
 Suggests:
  tensorplate-backend-python-pytorch (>= ${source:Version}),
-Description: TensorPlate full Jetson runtime (metapackage)
- Installs the complete TensorPlate runtime for a Jetson device: the
- device agent, serving worker, observability service, operator CLI,
- and shared packaging helpers. `sudo apt install tensorplate` is the
- supported runtime install on TensorPlate-ready Jetson images.
+Description: TensorPlate full runtime (metapackage)
+ Installs the complete TensorPlate runtime for one device: the device
+ agent, serving worker, observability service, operator CLI, and shared
+ packaging helpers. `sudo apt install tensorplate` is the supported
+ runtime install on TensorPlate-ready Jetson images and on Ubuntu
+ x86_64 hosts.
  .
- This metapackage ships no files itself and is published for Jetson
- arm64 only. The optional Python/PyTorch backend stays a separate,
- suggested package. Workstation users who only need the CLI should
- install tensorplate-cli instead.
+ This metapackage ships no files itself. It is architecture-qualified
+ rather than architecture-independent because its strict
+ `= ${binary:Version}` relations bind the runtime binaries built in the
+ same run, which are per-architecture. The optional Python/PyTorch
+ backend stays a separate, suggested package. Users who only need the
+ operator CLI should install tensorplate-cli instead.

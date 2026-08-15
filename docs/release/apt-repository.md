@@ -6,7 +6,7 @@ The stable TensorPlate APT channel:
 | --- | --- |
 | URL | `https://packages.tensorplate.com/apt` |
 | Suite / component | `jammy` / `main` |
-| Architectures | `arm64` (Jetson runtime + CLI), `amd64` (workstation CLI) |
+| Architectures | `arm64` (Jetson runtime + CLI), `amd64` (Ubuntu x86_64 runtime + CLI) |
 
 Hosts configure it once through the `tensorplate-apt-source` bootstrap
 package (archive keyring + Deb822 source file); after that, new TensorPlate
@@ -52,7 +52,9 @@ of the hosting bucket is recoverable without rebuilding any package.
 - [ ] `sudo apt update` on a clean configured host succeeds with **no**
       trust warnings (`NO_PUBKEY`, "is not signed", insecure-repository).
 - [ ] `apt-cache policy tensorplate` shows the released version as
-      candidate on Jetson arm64; `tensorplate-cli` on amd64.
+      candidate on both Jetson arm64 and Ubuntu x86_64. The metapackage is
+      built per runtime architecture, so checking only one leaves the other
+      architecture's channel unverified.
 - [ ] A host installed from the previous release sees the new version via
       plain `apt update` (no bootstrap reinstall).
 - [ ] `gpgv --keyring /usr/share/keyrings/tensorplate-archive-keyring.gpg

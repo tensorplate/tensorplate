@@ -16,6 +16,18 @@ readonly REQUIRED_PACKAGES=(
   tensorplate-apt-source
   tensorplate
 )
+# The complete runtime set for the secondary architecture, built on its own
+# native runner and staged into the repository parent before this script
+# collects. Kept in lockstep with SECONDARY_ARCH_PACKAGES in
+# tools/release/tensorplate-release.sh, which is what enforces it.
+readonly SECONDARY_ARCH="amd64"
+readonly SECONDARY_ARCH_PACKAGES=(
+  tensorplate-agent
+  tensorplate-serving
+  tensorplate-observability
+  tensorplate-cli
+  tensorplate
+)
 readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 
 usage() {
@@ -300,30 +312,31 @@ for pkg in "${REQUIRED_PACKAGES[@]}"; do
     die "expected exactly one ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb or ${pkg}_${VERSION}-*_all.deb in $repo_parent; found ${#matches[@]}"
   debs+=("${matches[0]}")
 done
-mapfile -t candidates < <(find "$repo_parent" -maxdepth 1 -type f -name "tensorplate-cli_${VERSION}-*_*.deb" | sort)
-for candidate in "${candidates[@]}"; do
-  candidate_name="$(basename -- "$candidate")"
-  case "$candidate_name" in
-    tensorplate-cli_${VERSION}-*_${TARGET_ARCH}.deb|tensorplate-cli_${VERSION}-*_all.deb)
-      ;;
-    tensorplate-cli_${VERSION}-*_*.deb)
-      debs+=("$candidate")
-      ;;
-  esac
-done
-
-# Releases ship the workstation CLI for Ubuntu AMD64 from the same asset
-# set (the release workflow's hosted amd64 job stages the package), and
-# manifest generation rejects release artifact sets without it. Only
-# single-architecture local-source snapshots may omit it.
-if [[ "$TARGET_ARCH" != "amd64" ]]; then
-  if ! find "$repo_parent" -maxdepth 1 -type f -name "tensorplate-cli_${VERSION}-*_amd64.deb" | grep -q .; then
-    if ((SNAPSHOT)); then
-      note "WARNING: no tensorplate-cli amd64 package staged; snapshot artifacts omit the desktop CLI"
-    else
-      die "missing tensorplate-cli_${VERSION}-*_amd64.deb in $repo_parent; the release workflow's amd64 CLI job must stage it before release artifact builds"
+# Collect the secondary-architecture runtime set staged alongside the
+# primary build. Matching per package name (rather than a `tensorplate-*`
+# wildcard) keeps auto-generated -dbgsym packages out of the release, and
+# keeps the exactly-one assertion above scoped to the primary target.
+if [[ "$TARGET_ARCH" != "$SECONDARY_ARCH" ]]; then
+  for pkg in "${SECONDARY_ARCH_PACKAGES[@]}"; do
+    mapfile -t matches < <(find "$repo_parent" -maxdepth 1 -type f \
+      -name "${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb" | sort)
+    if ((${#matches[@]} == 1)); then
+      debs+=("${matches[0]}")
+      continue
     fi
-  fi
+    if ((${#matches[@]} > 1)); then
+      die "expected at most one ${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; found ${#matches[@]}"
+    fi
+    # Releases ship the complete x86_64 runtime set from the same asset set
+    # (the release workflow's hosted amd64 job stages the packages), and
+    # manifest generation rejects release artifact sets without it. Only
+    # single-architecture local-source snapshots may omit it.
+    if ((SNAPSHOT)); then
+      note "WARNING: no ${pkg} ${SECONDARY_ARCH} package staged; snapshot artifacts omit it"
+    else
+      die "missing ${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; the release workflow's ${SECONDARY_ARCH} packaging job must stage it before release artifact builds"
+    fi
+  done
 fi
 cp "${debs[@]}" "$ARTIFACTS_DIR/"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"

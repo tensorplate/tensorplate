@@ -21,13 +21,13 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_agent::{
     backend_detection::{probe_backend, BackendProbeReport, ProbeOptions},
     config::AgentConfig,
     coordinator::Coordinator,
-    platform_admission::PlatformAdmission,
+    platform_admission::{ObservedStack, PlatformAdmission},
     recovery,
     server::Server,
     state::StateStore,
@@ -37,8 +37,12 @@ use tensorplate_agent::{
     },
     worker,
 };
-use tensorplate_platform::{PlatformRegistry, SystemHostProbe};
+use tensorplate_platform::{
+    AcceleratorObservation, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry, PlatformReport,
+    SystemHostProbe,
+};
 use tensorplate_protocol::install_paths;
+use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -178,20 +182,27 @@ fn load_platform_registry(directory: &Path) -> Option<PlatformRegistry> {
     }
 }
 
+/// Settle the bundle-independent platform verdict at startup.
+///
+/// Runs on every platform. It was macOS-only while Apple silicon was the
+/// only integrated part wired up; Ubuntu/NVIDIA and Jetson now resolve
+/// through the same path, and gating by target would leave the platforms
+/// with the most rows ungated.
+///
+/// A detection failure is recorded as a REJECTION rather than as an absent
+/// verdict. "I could not look" must not become "your platform is
+/// unsupported" — so the rejection carries no frozen reason — but it must
+/// also not become "deploy anything". An absent verdict skips the gate
+/// entirely, on exactly the hardware nobody has characterised.
 fn evaluate_platform_admission(
     registry: Option<&PlatformRegistry>,
     config: &mut AgentConfig,
-) -> Option<PlatformAdmission> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
+) -> PlatformAdmission {
     let Some(registry) = registry else {
-        return Some(PlatformAdmission::detection_failed(
-            "installed platform registry is unavailable",
-        ));
+        return PlatformAdmission::detection_failed("installed platform registry is unavailable");
     };
-    let admission = match SystemHostProbe::new().detect_platform() {
-        Ok(report) => PlatformAdmission::evaluate(registry, &report),
+    let admission = match observe_platform() {
+        Ok((report, observed)) => PlatformAdmission::evaluate(registry, &report, &observed),
         Err(err) => PlatformAdmission::detection_failed(err.to_string()),
     };
     admission.apply_memory_limit(config);
@@ -206,7 +217,58 @@ fn evaluate_platform_admission(
             tensorplate_platform::PlatformCapability::max_resident_model_memory
         )
     );
-    Some(admission)
+    admission
+}
+
+/// Packages dpkg reports as installed.
+///
+/// Queried without a name glob. A `tensorplate*` glob would cover today's
+/// rows, but a row may require a driver or runtime package, and the glob
+/// would then report an installed package as missing.
+fn installed_packages() -> BTreeSet<String> {
+    let Ok(output) = std::process::Command::new("dpkg-query")
+        .args(["-W", "-f=${binary:Package} ${db:Status-Status}\n"])
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, status) = line.split_once(' ')?;
+            (status.trim() == "installed").then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Everything the verdict is computed from, gathered once.
+///
+/// An integrated accelerator is already in the platform report: it is
+/// identified from the same sources the host is. A discrete card is not —
+/// it is a separate device the vendor tool enumerates — so it is asked for
+/// only when the report carries none.
+fn observe_platform() -> Result<(PlatformReport, ObservedStack), PlatformProbeError> {
+    let mut report = SystemHostProbe::new().detect_platform()?;
+    if report.accelerator.is_none() {
+        if let Some(card) = NvidiaSmiProbe::new().detect()? {
+            report.accelerator = Some(AcceleratorObservation {
+                // Recorded, never matched on: a discrete card's usable
+                // framebuffer is not its row's nominal capacity, which is
+                // why the row is matched on SKU alone. It is carried so a
+                // resolved capability can bound the memory ceiling.
+                memory_bytes: card.exact.memory_total_bytes.unwrap_or(0),
+                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+                identity: card.identity,
+            });
+        }
+    }
+    // Rows record no driver components until their first evidence run, so
+    // this is empty today by construction rather than by omission.
+    let observed = ObservedStack {
+        components: BTreeMap::new(),
+        installed_packages: installed_packages(),
+    };
+    Ok((report, observed))
 }
 
 fn load_runtime_config(
@@ -216,7 +278,7 @@ fn load_runtime_config(
         AgentConfig,
         PathBuf,
         Option<PlatformRegistry>,
-        Option<PlatformAdmission>,
+        PlatformAdmission,
     ),
     String,
 > {
@@ -282,9 +344,9 @@ fn main() -> ExitCode {
     if let Some(registry) = platform_registry {
         coordinator = coordinator.with_platform_registry(registry);
     }
-    if let Some(admission) = platform_admission {
-        coordinator = coordinator.with_platform_admission(admission);
-    }
+    // Always present: a detection failure is itself a verdict, so there is
+    // no path on which the agent runs with no platform gate at all.
+    coordinator = coordinator.with_platform_admission(platform_admission);
     if let Some(supervisor) = supervisor.as_ref() {
         coordinator = coordinator.with_supervisor(supervisor.clone());
     }

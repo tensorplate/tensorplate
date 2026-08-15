@@ -5,6 +5,11 @@ name: APT lifecycle
 # failure modes, bootstrap, signed-repo two-command upgrade with state
 # preservation, and staged future-version discovery.
 #
+# Also runs the packaging and release-driver check suites, which otherwise
+# execute only from the runbook or from inside a release build — meaning a
+# regression in release-gating logic would first surface during an actual
+# release.
+#
 # Path-filtered (and not a required check) so it runs only when packaging or
 # release tooling changes.
 
@@ -15,7 +20,20 @@ on:
       - 'tools/release/**'
       - 'tools/validation/**'
       - 'test/packaging/**'
+      - 'test/release/**'
+      # The drift guard in test/release/run.sh reads the amd64 copy list
+      # out of release.yml, so a change to release.yml alone must trigger
+      # it — otherwise the guard cannot fire on the edit that causes the
+      # drift it exists to catch.
+      - '.github/workflows/release.yml'
       - '.github/workflows/apt-lifecycle.yml'
+      # The CPU-only smoke is the only job that resolves a platform row by
+      # LIVE detection against real installed binaries. Without these, a
+      # change to detection or to the rows themselves cannot trigger the
+      # one job that exercises them on a real install — the smoke was
+      # dispatched by hand four times during #150 for exactly this reason.
+      - 'platform/**'
+      - 'config/platform/**'
   workflow_dispatch:
 
 permissions:
@@ -26,9 +44,139 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  script-checks:
+    name: packaging + release driver checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      # apt-utils and gnupg are not needed to run the suites, but several
+      # checks are guarded on the tools being present and silently skip
+      # without them. Install them so the checks actually execute.
+      - name: Install check dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            apt-utils \
+            build-essential \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            shellcheck
+
+      - name: Packaging verification suite
+        shell: bash
+        run: test/packaging/run.sh
+
+      - name: Release driver checks
+        shell: bash
+        run: test/release/run.sh
+
+      # Which packages a binary-arch-only build emits is decided by debhelper
+      # from debian/control, and the release workflow's amd64 job depends on
+      # that answer. This runner IS x86_64, so it checks the real thing rather
+      # than reasoning about dpkg semantics. Kept out of run.sh because it
+      # writes .deb files to the repository parent.
+      - name: x86_64 runtime package set
+        shell: bash
+        env:
+          CI: 'true'
+        run: test/packaging/verify_arch_package_set.sh
+
+  supervision:
+    name: systemd supervision contract
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Drives the shipped units against the runner's own systemd. The units
+      # are architecture-independent, so one runner covers the contract both
+      # architectures inherit; verify_systemd_units.sh only reads them as text.
+      - name: Service supervision contract
+        shell: bash
+        run: sudo --preserve-env=CI bash test/packaging/verify_service_supervision.sh
+        env:
+          CI: 'true'
+
+  cpu-only-smoke:
+    name: Ubuntu 22.04 x86_64 CPU-only smoke
+    # ubuntu-22.04 IS the row under test: Ubuntu 22.04, x86_64, no accelerator.
+    # The row declares validation_environment.kind=cloud_instance with no
+    # machine_type, which is how the schema spells "any instance", so a hosted
+    # runner matches it and the smoke resolves the row by live detection.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build and packaging dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          # cmake comes from the runner image, not apt: jammy ships 3.22 and the
+          # tree requires 3.25 (same reason as the release workflow's amd64 job).
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang-15 \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            llvm-15 \
+            ninja-build \
+            nlohmann-json3-dev \
+            pkg-config \
+            python3
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cpu-smoke-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: CPU-only Preview smoke
+        shell: bash
+        env:
+          CC: clang
+          CXX: clang++
+        run: sudo --preserve-env=CI,CC,CXX,PATH bash test/packaging/verify_cpu_only_smoke.sh
+
+      - name: Upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ubuntu2204-x86-cpu-smoke-evidence
+          path: dist/smoke/
+          if-no-files-found: warn
+
   rehearse:
-    name: channel lifecycle rehearsal (arm64)
-    runs-on: ubuntu-22.04-arm
+    name: channel lifecycle rehearsal (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+          # x86_64 became possible once the runtime metapackage stopped being
+          # arm64-only: the rehearsal's two-command install and future-version
+          # discovery steps both resolve `tensorplate`, which simply did not
+          # exist for this architecture before.
+          - arch: amd64
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - name: Checkout with tags

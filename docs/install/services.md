@@ -48,13 +48,26 @@ systemd restarts only the agent process; the agent owns the worker.
 The unit files apply the same default sandbox to both services:
 
 - `User=tensorplate`, `Group=tensorplate`
-- `ProtectSystem=strict` + `ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate`
-- `RuntimeDirectory=tensorplate` so systemd recreates `/run/tensorplate`
-  on every boot (no stale-socket cleanup required)
+- `ProtectSystem=strict` + `ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate`
 - `NoNewPrivileges=true`, `ProtectHome=true`, `PrivateTmp=true`,
   `ProtectKernel*=true`
 - `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`
 - `LockPersonality=true`, `RestrictRealtime=true`, `RestrictSUIDSGID=true`
+- `Restart=on-failure` with `RestartSec=5`, bounded by
+  `StartLimitBurst=5` / `StartLimitIntervalSec=60`, so a hard crash is
+  recovered but a crash loop is given up on instead of masking a config
+  error forever
+
+`/run/tensorplate` is the **agent's** alone. Only
+`tensorplate-agent.service` declares `RuntimeDirectory=tensorplate` and names
+the path in `ReadWritePaths=`, because that is where the agent control socket
+lives and systemd deletes a `RuntimeDirectory=` when its unit stops. Both
+units used to declare it, which meant stopping the agent removed a directory
+observability still named — and observability could then not start at all,
+failing at step `NAMESPACE`. Observability needs no runtime directory: its
+listener transport is `in_process` and its snapshot lives under
+`StateDirectory=`. If the reserved Unix-socket listener lands, it must declare
+a runtime directory it owns rather than the agent's.
 
 `tensorplate-agent.service` explicitly keeps `PrivateDevices=false`
 because it supervises `tensorplate-serving` as a child process and the

@@ -126,6 +126,22 @@ The release owner stops immediately unless all prerequisites are true:
   a required reviewer (a reviewer-less environment publishes without a hold).
 - Clean-room validation target is ready.
 - No release blocker is open without a signed conditional pass.
+- **Every Production row rests on a recorded run.** Verify with:
+
+  ```
+  cargo test -p tensorplate-platform --test registry_fixtures -- --ignored
+  ```
+
+  This is deliberately not a PR-blocking check, because a row may sit at
+  Production with spec-authored values for an entire development cycle
+  while its evidence run is scheduled. It is blocking *here*: a Production
+  claim whose match key nobody has observed on the hardware must not ship.
+  The failure names each offending row.
+
+  Two ways to clear it, both honest — record the evidence, or downgrade the
+  row until it exists. Downgrading is cheaper than it sounds:
+  `is_supported_combination` admits Production **and** Preview, so a Preview
+  row still deploys. It changes the published claim, not what runs.
 
 ### 2. Verify The Release Runner
 
@@ -257,7 +273,8 @@ The build-only run must:
 
 - Build Rust release binaries.
 - Build the C++ serving worker.
-- Build the `amd64` CLI package (hosted job).
+- Build the complete `amd64` runtime package set — agent, serving worker,
+  observability, CLI, and the metapackage (hosted job).
 - Build the `tensorplate-python` wheel + sdist at the release version.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
@@ -281,8 +298,9 @@ sudo bash install.sh --local-artifacts "$(pwd)" --allow-unsigned
 sudo bash install.sh --local-artifacts "$(pwd)" --cli-only --allow-unsigned
 ```
 
-Run the `--cli-only` smoke only when the artifact bundle includes a
-matching desktop CLI package for that host architecture.
+Publish-grade bundles always carry the `amd64` runtime set, so run both the
+full-runtime and `--cli-only` smokes on an Ubuntu x86_64 host. Only a
+single-architecture local-source snapshot can lack a matching package.
 
 ### 5. Watch CI Build And Publish Assets
 
@@ -299,7 +317,8 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
 - Verify the tag commit is contained in `${TP_RELEASE_BRANCH}`.
 - Build Rust release binaries.
 - Build the C++ serving worker.
-- Build the `amd64` CLI package and the `tensorplate-python` wheel + sdist.
+- Build the complete `amd64` runtime package set and the
+  `tensorplate-python` wheel + sdist.
 - Run `test/packaging/run.sh`.
 - Build all required `.deb` packages.
 - Generate `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS`.

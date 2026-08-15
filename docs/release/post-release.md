@@ -69,18 +69,29 @@ Rollback should preserve user state unless the operator explicitly purges
 packages. Follow the lifecycle policy in
 [`docs/install/lifecycle.md`](../install/lifecycle.md).
 
-Package rollback procedure:
+Package rollback procedure. The runtime set must be REMOVED first: the
+upgrade preflight refuses a downgrade on the version comparison alone, so
+installing the older packages over the newer ones is rejected even with
+`--allow-downgrades`. `remove` keeps `/etc/tensorplate` and
+`/var/lib/tensorplate`, so operator config and durable state survive.
 
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
+sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
+sudo apt remove -y tensorplate tensorplate-agent tensorplate-serving \
+  tensorplate-observability tensorplate-cli
 sudo apt install ./tensorplate-common_<previous-version>_all.deb \
-  ./tensorplate-agent_<previous-version>_arm64.deb \
-  ./tensorplate-serving_<previous-version>_arm64.deb \
-  ./tensorplate-observability_<previous-version>_arm64.deb \
-  ./tensorplate-cli_<previous-version>_arm64.deb
+  ./tensorplate-agent_<previous-version>_<arch>.deb \
+  ./tensorplate-serving_<previous-version>_<arch>.deb \
+  ./tensorplate-observability_<previous-version>_<arch>.deb \
+  ./tensorplate-cli_<previous-version>_<arch>.deb
 tensorplate doctor
 sudo systemctl enable --now tensorplate-agent tensorplate-observability
 ```
+
+`<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64. See
+[`docs/install/lifecycle.md`](../install/lifecycle.md) for what happens to
+the set-aside state.
 
 Deployment rollback uses the CLI path from
 [`docs/cli/deploy-rollback.md`](../cli/deploy-rollback.md):

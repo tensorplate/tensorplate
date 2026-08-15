@@ -42,6 +42,7 @@ fn sources(name: &str) -> HostSources {
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
         gce_machine_type: text("gce_machine_type"),
+        proc_meminfo: text("proc_meminfo"),
     }
 }
 

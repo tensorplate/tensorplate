@@ -27,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod accelerator;
 pub mod capability;
 pub mod detect;
 pub mod error;
@@ -38,10 +39,14 @@ pub mod registry;
 pub mod roadmap;
 pub mod row;
 
+pub use accelerator::{
+    identify_accelerator, AcceleratorReport, AcceleratorSources, ExactAcceleratorFacts,
+    NvidiaSmiProbe,
+};
 pub use capability::{AcceleratorObservation, PlatformCapability};
 pub use detect::{
-    identify, identify_platform, ExactHostFacts, HostReport, HostSources, L4tRelease,
-    PlatformReport,
+    identify, identify_jetson_accelerator, identify_platform, ExactHostFacts, HostReport,
+    HostSources, L4tRelease, PlatformReport,
 };
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{

@@ -10,7 +10,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tensorplate_platform::{CpuVendor, PlatformSupportRow, RoadmapTarget, SupportLevel};
+use tensorplate_platform::{
+    CpuVendor, PlatformSupportRow, Provenance, RoadmapTarget, SupportLevel,
+};
 use tensorplate_protocol::{PlatformMemoryProfile, PlatformMemoryProfileName};
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -160,6 +162,49 @@ fn planned_rows_carry_no_claims() {
             "{name}: Planned rows are not supported combinations"
         );
     }
+}
+
+/// The tag gate: a Production claim must rest on a recorded run.
+///
+/// **Ignored on purpose, and expected to FAIL when run today.** All five
+/// committed Production rows are `spec_authored` with evidence directories
+/// that do not exist, so this cannot be a PR-blocking check without
+/// blocking every PR. It is a release-prep step instead — see the pre-tag
+/// checklist in `docs/release/runbook.md`.
+///
+/// It exists because the guard below is weaker than it reads.
+/// `production_rows_declare_where_evidence_is_filed` asserts a row DECLARES
+/// an evidence location containing its row id; it does not check the
+/// directory exists or that anything was ever recorded. Every Production
+/// row satisfies it while resting on a SKU string transcribed from a
+/// datasheet.
+///
+/// Two ways to make this pass, and both are honest: record the evidence, or
+/// downgrade the row until it exists. Downgrading costs less than it
+/// sounds — `is_supported_combination` admits Production AND Preview, so a
+/// Preview row still deploys. It changes what is published, not what runs.
+#[test]
+#[ignore = "run at release prep: fails until Production claims rest on recorded evidence"]
+fn production_claims_rest_on_recorded_evidence() {
+    let mut unbacked = Vec::new();
+    for (name, row) in committed_rows() {
+        if row.support_level() != SupportLevel::Production {
+            continue;
+        }
+        if row.provenance() != Provenance::Recorded {
+            unbacked.push(format!(
+                "  {name}: Production but provenance is `{}`",
+                row.provenance().as_str()
+            ));
+        }
+    }
+    assert!(
+        unbacked.is_empty(),
+        "Production claims without a recorded run:\n{}\n\nRecord the evidence, or downgrade \
+         the row until it exists. A Preview row still deploys, so downgrading changes the \
+         published claim rather than what runs.",
+        unbacked.join("\n")
+    );
 }
 
 #[test]
