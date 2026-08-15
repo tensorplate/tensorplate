@@ -72,13 +72,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   declares the supported Apple device target. (V021-E03-F02-T03)
 
 - Apple silicon detection now reads the exact chip identity and unified-memory
-  size from `sysctl`, resolves the observation against the exact platform row,
-  and publishes a vendor-neutral `PlatformCapability`. Its
+  size from `sysctl`, resolves exact rows before a narrowly recognized Apple
+  M-series Preview compatibility row, and publishes a vendor-neutral
+  `PlatformCapability`. Its
   `max_resident_model_memory` is the lesser of detected memory and the row
   budget. Agent admission applies that ceiling before bundle capacity checks
   and rejects Planned rows, unsupported chips, unsupported macOS versions, or
-  failed detection before staging and model load. Recorded/spec-authored
-  fixtures cover M1 Pro, M4 Pro, and two unsupported Apple chip identities.
+  failed detection before staging and model load. The M1 Pro 16 GB exact row
+  remains the current evidence-backed hardware-validation target; M2 Pro, M3
+  Max, and M4 Pro fixtures exercise family compatibility without asserting
+  per-SKU hardware validation, and a non-M-series Apple fixture proves the
+  boundary fails closed. Family rows are constrained to Preview,
+  `spec_authored`, and evidence-free so validation evidence can attach only to
+  exact hardware rows.
   (V021-E03-F02-T01, V021-E03-F02-T02)
 
 - Homebrew now installs prefix-rendered agent, CLI, and observability configs,
@@ -488,12 +494,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (V021-E01-F01-T03)
 
 - Platform registry loading and the query API that resolves a detected
-  machine to exactly one support row. `PlatformRegistry` loads the
+  machine to exactly one support row. Exact accelerator rows take precedence
+  over explicitly declared lower-priority family compatibility rows.
+  `PlatformRegistry` loads the
   committed rows and roadmap targets and **fails closed**: one invalid
   document means no registry, because a half-loaded registry would report
   supported platforms as unsupported. Colliding entries — a duplicated row
-  id, two rows matching the same platform identity, or a roadmap target
-  shadowing a row id — are rejected at load rather than resolved by
+  id, two rows matching the same platform identity at the same priority, or
+  a roadmap target shadowing a row id — are rejected at load rather than resolved by
   picking a winner at query time. Roadmap targets load into a separate
   catalog that matching never consults, so a target can never be read as
   support. `resolve()` returns a typed `RowMatch`: supported, matched a
@@ -523,13 +531,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Platform support row registry: the schema-first artifact every later
   platform feature keys off. `config/schemas/platform_support_row.json`
-  defines one exact platform row (OS with exact version and image
+  defines one platform row (OS with exact version and image
   identity, kernel/driver stack, CPU architecture and vendor, accelerator
-  SKU with its required memory size, memory profile reference and
-  partition posture, backend
-  package sets per channel, model-class row pointers, per-signal gate
-  semantics, support level, provenance, validation environment, and
-  evidence location), and the deliberately smaller
+  accelerator identity with exact matching by default and an explicit,
+  lower-priority family policy, required memory size, memory profile reference,
+  and partition posture, backend package sets per channel, model-class row
+  pointers, per-signal gate semantics, support level, provenance, validation
+  environment, and evidence location), and the deliberately smaller
   `config/schemas/roadmap_target.json` describes future targets that are
   not exact enough to be rows — a target has no row id, support level,
   model-class rows, gate semantics, or evidence, is never matched against
@@ -546,7 +554,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   explicitly — vendor support is decided by registry membership, never an
   out-of-band allowlist.
 - The committed registry under `config/platform/`: all twelve v0.2.1 rows
-  (five Production, two Preview, five Planned) and all four roadmap
+  (five Production, three Preview, four Planned) and all four roadmap
   targets, including the deploy-smoke rows' Preview model-class pointers
   so diagnosis renders posture from the registry rather than a hardcoded
   list. Every row is currently marked `spec_authored` — no v0.2.1

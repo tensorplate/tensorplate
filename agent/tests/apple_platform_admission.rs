@@ -80,26 +80,22 @@ fn supported_memory_bounds_agent_capacity_without_raising_a_smaller_limit() {
 }
 
 #[test]
-fn planned_and_unknown_chips_keep_the_registry_reason() {
-    let planned = admission("macos26-m4pro-24gb");
-    assert_eq!(
-        planned.reason(),
-        Some(PlatformReason::RowPlannedNotValidated)
-    );
-    assert_eq!(planned.row_id(), Some("macos26-m4pro-24gb"));
-
-    let unknown = admission("macos26-m2pro-16gb-unsupported");
-    assert_eq!(
-        unknown.reason(),
-        Some(PlatformReason::UnsupportedAcceleratorSku)
-    );
-    assert_eq!(unknown.row_id(), None);
+fn recognized_m_series_chips_use_the_family_preview_admission() {
+    for name in ["macos26-m2pro-16gb", "macos26-m4pro-24gb"] {
+        let supported = admission(name);
+        assert_eq!(supported.reason(), None, "{name}");
+        assert_eq!(
+            supported.row_id(),
+            Some("macos26-apple-m-series-preview"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
 fn rejected_platform_fails_before_bundle_staging_or_worker_prepare() {
     let harness = Harness::new();
-    let rejected = admission("macos26-m3max-36gb-unsupported");
+    let rejected = admission("macos26-apple-a17pro-unsupported");
     let coordinator = Coordinator::new(
         harness.config.clone(),
         harness.store.clone(),

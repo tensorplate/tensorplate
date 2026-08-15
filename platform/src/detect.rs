@@ -21,12 +21,13 @@
 // | `os_version` (macOS) | `26.5.2` | `26` |
 // | `image_identity` (Jetson) | L4T `r36.4.3` | `L4T r36.4.x (…)` |
 //
-// Matching is exact string equality, so detection must produce the row's
-// spelling or the row can never match — including on the very hardware it
-// describes. Normalizing here, once, is what keeps that true. The
-// unnormalized strings are not thrown away: they are carried in
-// [`ExactHostFacts`] for evidence recording, which needs the precision
-// matching deliberately discards.
+// Host-field matching is exact string equality, so detection must produce the
+// row's spelling or the row can never match — including on the very hardware
+// it describes. Accelerator identity is also preserved verbatim so exact rows
+// and narrow family policies can evaluate the same observation. Normalizing
+// host facts here, once, is what keeps that true. The unnormalized strings are
+// not thrown away: they are carried in [`ExactHostFacts`] for evidence
+// recording, which needs the precision matching deliberately discards.
 
 use tensorplate_protocol::PlatformMemoryProfileName;
 

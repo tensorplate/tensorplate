@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1",
-  "row_id": "macos26-m4pro-24gb",
+  "row_id": "macos26-apple-m-series-preview",
   "os": {
     "name": "macOS",
     "version": "26"
@@ -16,8 +16,9 @@
   },
   "accelerator": {
     "family": "Apple M-series",
-    "sku": "Apple M4 Pro",
-    "memory_bytes": 25769803776,
+    "sku": "Apple M-series",
+    "match_policy": "family",
+    "memory_bytes": 17179869184,
     "memory_profile": "unified_memory",
     "partitioning": "not_applicable"
   },
@@ -30,7 +31,12 @@
       ]
     }
   ],
-  "model_class_rows": [],
+  "model_class_rows": [
+    {
+      "model_class_row": "chunked_policy",
+      "support_level": "Preview"
+    }
+  ],
   "gate_semantics": {
     "thermal": {
       "gate": "context_only"
@@ -50,10 +56,10 @@
       "reason": "GPU utilization is not exposed without privileged access"
     }
   },
-  "support_level": "Planned",
+  "support_level": "Preview",
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "physical",
-    "identity": "MacBook Pro, Apple M4 Pro 24GB (hardware not yet in lab)"
+    "identity": "Apple M-series compatibility envelope; MacBook Pro, Apple M1 Pro 16GB is the current in-lab validation target"
   }
 }

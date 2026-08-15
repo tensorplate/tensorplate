@@ -1,8 +1,8 @@
 {
-  "row_id": null,
-  "matches_row": false,
+  "row_id": "macos26-apple-m-series-preview",
+  "matches_row": true,
   "provenance": "spec_authored",
-  "provenance_note": "Unsupported-chip fixture; Apple M3 Max and 36GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-gb/117736); no support or validation claim is attached",
+  "provenance_note": "Compatibility fixture; Apple M3 Max and 36GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-gb/117736); this is not hardware-validation evidence",
   "sources": {
     "uname_machine": "arm64",
     "sw_vers_product_name": "macOS",

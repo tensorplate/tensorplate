@@ -48,7 +48,8 @@ for formula_name in \
   tensorplate-serving; do
   grep -Fq "$formula_name" <<<"$uninstall_block"
 done
-grep -Fq 'Apple M1 Pro with 16 GB unified memory' "$macos_install_doc"
+grep -Fq 'M-series compatibility is Preview' "$macos_install_doc"
+grep -Fq 'current hardware-validation target is an Apple M1 Pro' "$macos_install_doc"
 
 printf '%s\n' '{"formulae":[{"name":"tensorplate","versions":{"stable":"0.2.1-rc.1"}}]}' |
   python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print(f["name"], f["versions"]["stable"])' |

@@ -1,11 +1,13 @@
 # macOS Homebrew Lifecycle Validation
 
-This runbook validates the complete Homebrew appliance on the supported
-in-lab MacBook Pro: Apple M1 Pro, 16 GB unified memory, and macOS 26 or
-newer. It covers formula-graph closure, launchd behavior, filesystem and UDS
-contracts, packaged-only discovery, the PyTorch MPS capability, deploy smoke,
-offline checks, upgrade continuity from the CLI-only formula, rollback, and
-uninstall.
+This runbook validates the complete Homebrew appliance on the current
+in-lab Apple M-series target: a MacBook Pro with Apple M1 Pro, 16 GB unified
+memory, and macOS 26. The M1 Pro run backs that exact row and is the currently
+available hardware target for the broader M-series Preview compatibility
+envelope; it does not claim per-SKU validation for other M-series chips. It
+covers formula-graph closure, launchd behavior, filesystem and UDS contracts,
+packaged-only discovery, the PyTorch MPS capability, deploy smoke, offline
+checks, upgrade continuity from the CLI-only formula, rollback, and uninstall.
 
 The harness mutates Homebrew state. Close unrelated Homebrew work first and
 run it only on the validation Mac. It refuses a dirty TensorPlate tap

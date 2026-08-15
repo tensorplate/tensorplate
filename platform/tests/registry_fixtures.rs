@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tensorplate_platform::{
-    CpuVendor, PlatformSupportRow, Provenance, RoadmapTarget, SupportLevel,
+    AcceleratorMatchPolicy, CpuVendor, PlatformSupportRow, Provenance, RoadmapTarget, SupportLevel,
 };
 use tensorplate_protocol::{PlatformMemoryProfile, PlatformMemoryProfileName};
 
@@ -99,15 +99,15 @@ fn every_committed_row_decodes_and_validates() {
 #[test]
 fn the_registry_holds_twelve_rows_at_the_declared_levels() {
     let rows = committed_rows();
-    assert_eq!(rows.len(), 12, "twelve exact rows are committed");
+    assert_eq!(rows.len(), 12, "twelve rows are committed");
     let count = |level: SupportLevel| {
         rows.iter()
             .filter(|(_, r)| r.support_level() == level)
             .count()
     };
     assert_eq!(count(SupportLevel::Production), 5, "five Production rows");
-    assert_eq!(count(SupportLevel::Preview), 2, "two Preview rows");
-    assert_eq!(count(SupportLevel::Planned), 5, "five Planned rows");
+    assert_eq!(count(SupportLevel::Preview), 3, "three Preview rows");
+    assert_eq!(count(SupportLevel::Planned), 4, "four Planned rows");
     assert_eq!(
         count(SupportLevel::Experimental),
         0,
@@ -133,7 +133,7 @@ fn row_ids_are_unique_and_match_the_matrix() {
         "jetson-orin-nx-16gb",
         "jetson-agx-orin-32gb",
         "jetson-agx-orin-64gb",
-        "macos26-m4pro-24gb",
+        "macos26-apple-m-series-preview",
     ]
     .into_iter()
     .collect();
@@ -376,6 +376,15 @@ fn a_valid_cpu_row_value() -> serde_json::Value {
     serde_json::from_str(&body).expect("parses")
 }
 
+fn a_valid_family_row_value() -> serde_json::Value {
+    let body = read_dir_sorted("config/platform/rows")
+        .into_iter()
+        .find(|(name, _)| name == "macos26-apple-m-series-preview.json")
+        .expect("the Apple M-series family row is committed")
+        .1;
+    serde_json::from_str(&body).expect("parses")
+}
+
 fn assert_row_verdicts_agree(cases: Vec<(&str, serde_json::Value, bool)>) {
     let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
     for (label, instance, expected_valid) in cases {
@@ -541,6 +550,23 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
     multi_vendor_with_accelerator["cpu"]["vendors"] = serde_json::json!(["intel", "amd"]);
     let mut unknown_memory_profile = a_valid_row_value();
     unknown_memory_profile["accelerator"]["memory_profile"] = serde_json::json!("hbm");
+    let mut family_with_display_sku = a_valid_family_row_value();
+    family_with_display_sku["accelerator"]["sku"] = serde_json::json!("Apple M4 Pro");
+    let mut family_with_other_vendor = a_valid_family_row_value();
+    family_with_other_vendor["cpu"]["vendors"] = serde_json::json!(["intel"]);
+    let mut other_family = a_valid_family_row_value();
+    other_family["accelerator"]["family"] = serde_json::json!("Apple A-series");
+    other_family["accelerator"]["sku"] = serde_json::json!("Apple A-series");
+    let mut unknown_match_policy = a_valid_family_row_value();
+    unknown_match_policy["accelerator"]["match_policy"] = serde_json::json!("prefix");
+    let mut experimental_family = a_valid_family_row_value();
+    experimental_family["support_level"] = serde_json::json!("Experimental");
+    let mut recorded_family = a_valid_family_row_value();
+    recorded_family["provenance"] = serde_json::json!("recorded");
+    let mut evidenced_family = a_valid_family_row_value();
+    evidenced_family["evidence"] = serde_json::json!({
+        "location": "dist/release/v0.2.1/macos26-apple-m-series-preview/"
+    });
 
     assert_row_verdicts_agree(vec![
         (
@@ -559,6 +585,26 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
             false,
         ),
         ("unknown memory profile", unknown_memory_profile, false),
+        ("canonical family row", a_valid_family_row_value(), true),
+        (
+            "family row with a display SKU",
+            family_with_display_sku,
+            false,
+        ),
+        (
+            "family row with a non-Apple vendor",
+            family_with_other_vendor,
+            false,
+        ),
+        ("unsupported accelerator family", other_family, false),
+        (
+            "unknown accelerator match policy",
+            unknown_match_policy,
+            false,
+        ),
+        ("Experimental family row", experimental_family, false),
+        ("recorded family row", recorded_family, false),
+        ("family row carrying evidence", evidenced_family, false),
     ]);
 }
 
@@ -667,6 +713,8 @@ fn explicit_null_is_not_absence() {
     null_reason["gate_semantics"]["thermal"]["reason"] = serde_json::Value::Null;
     let mut null_accelerator = a_valid_row_value();
     null_accelerator["accelerator"] = serde_json::Value::Null;
+    let mut null_match_policy = a_valid_family_row_value();
+    null_match_policy["accelerator"]["match_policy"] = serde_json::Value::Null;
 
     assert_row_verdicts_agree(vec![
         ("null evidence", null_evidence, false),
@@ -674,6 +722,7 @@ fn explicit_null_is_not_absence() {
         ("null memory_bytes", null_memory, false),
         ("null gate reason", null_reason, false),
         ("null accelerator", null_accelerator, false),
+        ("null accelerator match policy", null_match_policy, false),
     ]);
 }
 
@@ -818,6 +867,13 @@ fn enum_spellings_are_welded_to_their_serialized_form() {
         [Partitioning::Unsupported, Partitioning::NotApplicable]
     );
     assert_welded!(
+        AcceleratorMatchPolicy,
+        [
+            AcceleratorMatchPolicy::Exact,
+            AcceleratorMatchPolicy::Family
+        ]
+    );
+    assert_welded!(
         GateValue,
         [
             GateValue::LoadBearing,
@@ -876,7 +932,7 @@ fn cpu_vendor_sets_are_exact() {
             assert_eq!(
                 vendors.len(),
                 1,
-                "{name}: an exact accelerator SKU pins one host vendor"
+                "{name}: an accelerator identity pins one host vendor"
             );
         }
         if row.row_id().ends_with("-x86-cpu") {
@@ -898,7 +954,10 @@ fn deploy_smoke_rows_declare_preview_model_pointers() {
     for (name, row) in committed_rows() {
         let expected_preview = matches!(
             row.row_id(),
-            "ubuntu2404-x86-l4-g2s8" | "ubuntu2404-x86-a100-40g-a2hg1" | "macos26-m1pro-16gb"
+            "ubuntu2404-x86-l4-g2s8"
+                | "ubuntu2404-x86-a100-40g-a2hg1"
+                | "macos26-m1pro-16gb"
+                | "macos26-apple-m-series-preview"
         );
         if !expected_preview {
             continue;

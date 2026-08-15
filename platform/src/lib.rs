@@ -2,20 +2,20 @@
 
 //! `tensorplate-platform` — the platform support row registry types.
 //!
-//! This crate owns platform identity for TensorPlate: the exact support
+//! This crate owns platform identity for TensorPlate: the support
 //! rows the registry stores, the roadmap targets that are deliberately not
 //! rows, and the typed platform-reason vocabulary that `doctor`, deploy
 //! admission, and status will emit once they are wired to it.
 //!
-//! The organizing rule is **exactness**. A row names one OS version, one
-//! driver stack, one CPU architecture, one accelerator SKU, and one
-//! validation environment, because evidence recorded on one row never
-//! transfers to another. CPU vendors are the one set-valued identity: a
-//! row with an accelerator names exactly one, while an accelerator-less
-//! utility row states the vendors it actually covers. Anything not exact
-//! enough to be a row is a [`RoadmapTarget`] instead, and roadmap targets
-//! are never matched against a detected platform and never counted as
-//! supported.
+//! The organizing rule is **explicit scope**. A row names one OS version,
+//! driver stack, CPU architecture, and validation environment. Accelerator
+//! matching is exact by default; an explicit family row may define a broader,
+//! lower-priority Preview compatibility envelope without transferring its
+//! representative hardware evidence to every member SKU. CPU vendors are the
+//! other set-valued identity: a row with an accelerator names exactly one,
+//! while an accelerator-less utility row states the vendors it actually
+//! covers. Roadmap targets are never matched against a detected platform and
+//! never counted as supported.
 //!
 //! Schemas under `config/schemas/` are the language-neutral source of
 //! truth; the types here mirror them and version on the same config-schema
@@ -59,8 +59,9 @@ pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, ProfileSelection, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};
 pub use row::{
-    Accelerator, BackendPackageSet, CpuArchitecture, CpuIdentity, CpuVendor, Evidence, Gate,
-    GateSemantics, GateValue, KernelDriverStack, ModelClassRowRef, OsIdentity, PackageChannel,
-    Partitioning, PlatformSupportRow, Provenance, StackComponent, SupportLevel,
-    ValidationEnvironment, ValidationEnvironmentKind, PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
+    Accelerator, AcceleratorMatchPolicy, BackendPackageSet, CpuArchitecture, CpuIdentity,
+    CpuVendor, Evidence, Gate, GateSemantics, GateValue, KernelDriverStack, ModelClassRowRef,
+    OsIdentity, PackageChannel, Partitioning, PlatformSupportRow, Provenance, StackComponent,
+    SupportLevel, ValidationEnvironment, ValidationEnvironmentKind,
+    PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
 };

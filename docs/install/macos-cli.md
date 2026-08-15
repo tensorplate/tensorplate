@@ -1,9 +1,10 @@
 # TensorPlate on macOS (Apple Silicon)
 
-TensorPlate's Homebrew channel provides the complete appliance on the
-validated macOS row: Apple M1 Pro, 16 GB unified memory, and macOS 26 or
-newer. The appliance includes the agent, serving worker, CLI, observability
-service, and Python/PyTorch backend.
+TensorPlate's Homebrew channel provides the complete appliance on Apple
+M-series Macs running macOS 26. M-series compatibility is Preview; the
+current hardware-validation target is an Apple M1 Pro MacBook Pro with 16 GB
+unified memory. The appliance includes the agent, serving worker, CLI,
+observability service, and Python/PyTorch backend.
 
 ## Install
 
@@ -117,9 +118,12 @@ contract.
 
 - **The tap is required.** Plain `brew install tensorplate` without the
   tap is not supported: the formula is not in `homebrew/core`.
-- **Exact supported row.** Apple M1 Pro with 16 GB unified memory on macOS 26
-  or newer is supported. Intel Macs and all other M-series rows fail closed;
-  M4 support is planned but is not yet validated.
+- **M-series Preview.** Recognized Apple M-series chips on macOS 26 use a
+  conservative Preview compatibility row. The exact M1 Pro 16 GB row remains
+  the current evidence-backed hardware-validation target and takes precedence.
+  Other M-series chips are not yet individually hardware-validated, and their
+  admission capacity is capped at 16 GiB even when more unified memory is
+  detected. Intel Macs and Apple chips outside the M-series fail closed.
 - **Built from source.** The component formula graph compiles the Rust
   services and CLI, builds the Python/PyTorch sidecar package, and installs
   their pinned runtime dependencies. Prebuilt bottles are follow-up work.
