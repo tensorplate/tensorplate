@@ -289,6 +289,12 @@ wait_for_service() {
   return 1
 }
 
+# The attempt count is this function's own optional argument, not the
+# script's. A bash function does not inherit positional parameters, so
+# calling it bare is what selects the default -- which is every call
+# site here. SC2120 (and SC2119 at each call) warns about the shape
+# rather than a defect.
+# shellcheck disable=SC2120
 wait_for_agent_ready() {
   attempts="${1:-30}"
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
