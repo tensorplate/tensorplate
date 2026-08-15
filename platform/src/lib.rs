@@ -42,7 +42,9 @@ pub use accelerator::{
     identify_accelerator, AcceleratorReport, AcceleratorSources, ExactAcceleratorFacts,
     NvidiaSmiProbe,
 };
-pub use detect::{identify, ExactHostFacts, HostReport, HostSources, L4tRelease};
+pub use detect::{
+    identify, identify_jetson_accelerator, ExactHostFacts, HostReport, HostSources, L4tRelease,
+};
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,

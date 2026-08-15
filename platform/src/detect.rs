@@ -29,7 +29,7 @@
 // matching deliberately discards.
 
 use crate::error::PlatformProbeError;
-use crate::identity::{DetectedArchitecture, DetectedVendor, HostIdentity};
+use crate::identity::{AcceleratorIdentity, DetectedArchitecture, DetectedVendor, HostIdentity};
 use crate::row::{CpuArchitecture, CpuVendor};
 
 /// The recorded content of every source host identity is derived from.
@@ -63,6 +63,9 @@ pub struct HostSources {
     /// Body of the GCE metadata machine-type response, e.g.
     /// `projects/1234/machineTypes/g2-standard-8`.
     pub gce_machine_type: Option<String>,
+    /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
+    /// Jetson's module capacity is told from its sibling's.
+    pub proc_meminfo: Option<String>,
 }
 
 /// What the machine reported before normalization, kept for evidence
@@ -503,4 +506,156 @@ fn linux_os(
         })?;
 
     Ok((name, version, None, vendor))
+}
+
+/// The Jetson module's accelerator identity, derived from what the board
+/// reports about itself.
+///
+/// A Jetson's accelerator is part of the SoC: there is no second device to
+/// enumerate and `nvidia-smi` is not shipped, so nothing produces a SKU the
+/// way it does for a discrete card. Two sources together do identify the
+/// module, and both are already read for other reasons —
+/// `/proc/device-tree/model` names the board, and `MemTotal` separates two
+/// modules of one board family that report the same model string.
+///
+/// Unlike the Apple path, which carries `machdep.cpu.brand_string` through
+/// verbatim, this composes the SKU. That is forced: no Jetson source prints
+/// `Jetson Orin Nano 8GB Super`. The composition is safe in the direction
+/// that matters — a SKU this derives wrongly matches no row and the machine
+/// is refused, because the result is still compared verbatim by
+/// `accelerator_matches`. It can fail to identify a board; it cannot hand
+/// one board another board's row.
+///
+/// Returns `None` only for a host that is not a Jetson. **A Jetson always
+/// gets an identity, and this never fails.**
+///
+/// That is the whole safety argument, and it is deliberately not a
+/// judgement call about which inputs are "bad enough" to error on. The
+/// caller reads a probe error as "hardware unreadable, admission disabled",
+/// so ANY error here takes a Jetson from *refused* to *not gated at all* —
+/// on exactly the hardware the gate exists for. Refusing to name a board
+/// must never be able to skip the gate, so there is no path that can.
+///
+/// A board this cannot name yields an identity describing what it saw. No
+/// row is written in dev-kit names, raw byte counts, or parentheses, so
+/// such an identity is unmatchable by construction and the machine is
+/// refused with `unsupported_accelerator_sku` — the same answer an
+/// off-matrix discrete card gets.
+///
+/// Note this cannot mask a genuinely unreadable source: [`SystemHostProbe`]
+/// maps a file it cannot read to [`PlatformProbeError::Unreadable`] and
+/// propagates it before these sources are assembled. A `None` reaching here
+/// means the source was *absent*, which [`HostSources`] documents as a
+/// signal rather than a failure.
+///
+/// [`SystemHostProbe`]: crate::probe::SystemHostProbe
+#[must_use]
+pub fn identify_jetson_accelerator(sources: &HostSources) -> Option<AcceleratorIdentity> {
+    // `/etc/nv_tegra_release` is the same signal `jetson_os` keys on: it is
+    // present only on Jetson.
+    sources.nv_tegra_release.as_ref()?;
+
+    let model = sources
+        .device_tree_model
+        .as_deref()
+        .and_then(device_tree_string);
+    let reported = sources
+        .proc_meminfo
+        .as_deref()
+        .and_then(mem_total_from_meminfo);
+
+    let sku = if let (Some(model), Some(reported)) = (model.as_deref(), reported) {
+        recognized_jetson_sku(model, reported)
+            .unwrap_or_else(|| format!("{model} ({reported} bytes)"))
+    } else {
+        // One or both sources absent. Still an accelerator, still not one
+        // this can name, so still unmatchable — never an error.
+        format!(
+            "Jetson (unidentified: model={}, memory={})",
+            model.as_deref().unwrap_or("absent"),
+            reported.map_or_else(|| "absent".to_string(), |bytes| format!("{bytes} bytes")),
+        )
+    };
+
+    Some(AcceleratorIdentity {
+        sku,
+        // Jetson modules do not partition. The row records this as
+        // `not_applicable`; reporting `true` here would reject every board.
+        partitioned: false,
+    })
+}
+
+/// The row SKU for a board this recognizes, or `None` for one it does not.
+fn recognized_jetson_sku(model: &str, reported_bytes: u64) -> Option<String> {
+    let (module, capacity_gb) = (
+        jetson_module(model)?,
+        jetson_module_capacity_gb(reported_bytes)?,
+    );
+    {
+        // `Super` is a module variant and the row spells it after the
+        // capacity. Matched as a trailing word rather than anywhere in
+        // the string, so a board whose name merely contains it does not
+        // acquire the variant.
+        let suffix = if model.split_whitespace().last() == Some("Super") {
+            " Super"
+        } else {
+            ""
+        };
+        Some(format!("Jetson {module} {capacity_gb}GB{suffix}"))
+    }
+}
+
+/// The module name inside a Jetson board model string.
+///
+/// The model reads like `NVIDIA Jetson Orin Nano Engineering Reference
+/// Developer Kit Super`, and the row names the module: `Orin Nano`. So the
+/// words between `Jetson` and the kit description are the module, and the
+/// kit description is what the row does not carry.
+fn jetson_module(model: &str) -> Option<String> {
+    let after = model.split("Jetson ").nth(1)?;
+    let module: Vec<&str> = after
+        .split_whitespace()
+        .take_while(|word| !matches!(*word, "Engineering" | "Developer" | "Reference" | "Kit"))
+        .collect();
+    (!module.is_empty()).then(|| module.join(" "))
+}
+
+/// The module capacity a reported total corresponds to, in GB as the row
+/// spells it.
+///
+/// Reported total is always below nominal — firmware and the GPU carveout
+/// are taken before the kernel counts what is left — so this rounds up to
+/// the module capacity that contains it. Only the capacities Jetson modules
+/// actually ship in are accepted: a total that lands outside them is not a
+/// board this knows, and saying so is better than naming a capacity that
+/// does not exist.
+fn jetson_module_capacity_gb(reported_bytes: u64) -> Option<u64> {
+    const SHIPPING_CAPACITIES_GB: [u64; 5] = [4, 8, 16, 32, 64];
+    const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+    SHIPPING_CAPACITIES_GB.into_iter().find(|gb| {
+        let nominal = gb * BYTES_PER_GB;
+        // The same window the carveout justifies, applied to one capacity
+        // at a time rather than used to choose between rows.
+        reported_bytes <= nominal && u128::from(reported_bytes) * 100 >= u128::from(nominal) * 80
+    })
+}
+
+/// `MemTotal` from `/proc/meminfo`, in bytes.
+///
+/// The kernel prints this in kibibytes with a `kB` unit that has meant KiB
+/// since the file existed. A line whose unit is anything else is a file this
+/// parser does not understand, and is read as absent rather than converted
+/// on a guess.
+#[must_use]
+pub fn mem_total_from_meminfo(body: &str) -> Option<u64> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with("MemTotal:"))?
+        .strip_prefix("MemTotal:")?;
+    let mut fields = line.split_whitespace();
+    let value: u64 = fields.next()?.parse().ok()?;
+    match fields.next() {
+        Some("kB") => value.checked_mul(1024),
+        _ => None,
+    }
 }

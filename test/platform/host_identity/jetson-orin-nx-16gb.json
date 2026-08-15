@@ -2,13 +2,14 @@
   "row_id": "jetson-orin-nx-16gb",
   "matches_row": true,
   "provenance": "spec_authored",
-  "provenance_note": "Planned row",
+  "provenance_note": "Planned row MemTotal is spec-authored from the module's nominal capacity minus a plausible carveout; the first Jetson evidence run replaces it with the recorded value.",
   "sources": {
     "uname_machine": "aarch64",
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",
     "nv_tegra_release": "# R36 (release), REVISION: 4.3, GCID: 38968081, BOARD: generic, EABI: aarch64, DATE: Wed Jan  8 01:51:37 UTC 2025\n",
     "nvidia_jetpack_version": "6.2-b77",
-    "device_tree_model": "NVIDIA Jetson Orin NX Engineering Reference Developer Kit\u0000"
+    "device_tree_model": "NVIDIA Jetson Orin NX Engineering Reference Developer Kit\u0000",
+    "proc_meminfo": "MemTotal:       15379114 kB\nMemFree:         1234567 kB\n"
   },
   "expect": {
     "architecture": "arm64",

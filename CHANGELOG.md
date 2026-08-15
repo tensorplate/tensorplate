@@ -6,6 +6,45 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- A Jetson is no longer refused every deploy. `nvidia-smi` is the only
+  accelerator probe and JetPack does not ship it, so detection reported no
+  accelerator — which was read as the affirmative fact "this machine has no
+  accelerator" and mismatched every row that declares one. Every Jetson
+  resolved to no row at all, and deploy admission refused it before the
+  bundle was opened, on hardware that had been working.
+
+  A Jetson's accelerator is part of the SoC: no separate device exists to
+  enumerate, so the absence of the vendor tool is not evidence of absent
+  hardware. Its identity is instead derived from what the board reports
+  about itself — `/proc/device-tree/model` names the module, and `MemTotal`
+  separates two modules of one family that report the same model string.
+
+  The derived SKU is then compared verbatim, exactly as a discrete card's
+  is. That is what makes the derivation safe in the direction that matters:
+  a SKU derived wrongly matches no row and the machine is refused, rather
+  than being handed a row belonging to a different board. An Orin NX 8GB
+  produces `Jetson Orin NX 8GB`, which no row names, and is reported
+  unsupported.
+
+  A board this cannot name is refused, not left ungated. It yields an
+  identity carrying what the board actually reported, which no row names,
+  so the machine gets `unsupported_accelerator_sku` — the same answer an
+  off-matrix discrete card gets. Erroring instead would be a fail-open: the
+  agent reads a probe error as "hardware unreadable, admission disabled", so
+  an unrecognized Jetson would go from refused to not gated at all, on
+  exactly the hardware the gate exists for.
+
+  Deriving an identity for a Jetson cannot fail at all, and that is the
+  whole safety argument rather than a judgement about which inputs are bad
+  enough to error on. The agent reads any probe error as "hardware
+  unreadable, admission disabled", so any error on this path would take a
+  Jetson from refused to not gated. A genuinely unreadable file cannot
+  reach this code in any case: the probe maps one to an `Unreadable` error
+  and propagates it before these sources are assembled, so an absent source
+  here is a signal rather than a failure. (V021-E02-F02-T02)
+
 ### Added
 
 - A deploy is now refused before anything is staged when the machine

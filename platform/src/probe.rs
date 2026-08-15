@@ -168,6 +168,7 @@ impl SystemHostProbe {
             } else {
                 None
             },
+            proc_meminfo: self.read("/proc/meminfo")?,
         })
     }
 

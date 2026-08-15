@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tensorplate_platform::{
-    identify, CpuArchitecture, DetectedPlatform, HostSources, PlatformProbeError, PlatformReason,
-    PlatformRegistry, RowMatch,
+    identify, identify_jetson_accelerator, CpuArchitecture, DetectedPlatform, HostSources,
+    PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -58,6 +58,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         gce_machine_type: text("gce_machine_type"),
+        proc_meminfo: text("proc_meminfo"),
     }
 }
 
@@ -454,5 +455,299 @@ fn exact_facts_keep_the_precision_matching_discards() {
         report.exact.device_model.as_deref(),
         Some("NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super"),
         "the device-tree NUL terminator is stripped"
+    );
+}
+
+/// The registry every case below resolves against.
+fn committed_registry() -> PlatformRegistry {
+    PlatformRegistry::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform"),
+    )
+    .expect("registry loads")
+}
+
+#[test]
+fn a_jetson_reaches_its_row_without_a_vendor_tool() {
+    // The defect this guards: nvidia-smi is the only accelerator probe and
+    // JetPack does not ship it, so detection reported no accelerator and
+    // every row declaring one mismatched. Every Jetson resolved to no row,
+    // and deploy admission refused hardware that had been working.
+    let registry = committed_registry();
+    let mut checked = 0;
+    for (name, fixture) in fixtures() {
+        let sources = sources_of(&fixture);
+        if sources.nv_tegra_release.is_none() {
+            continue;
+        }
+        let Some(row_id) = fixture["row_id"].as_str() else {
+            continue; // the lab device, which matches no row by design
+        };
+        let identity = identify(&sources)
+            .unwrap_or_else(|e| panic!("{name}: detection failed: {e}"))
+            .identity;
+        let accelerator = identify_jetson_accelerator(&sources)
+            .unwrap_or_else(|| panic!("{name}: a Jetson must yield an accelerator identity"));
+
+        let expected = registry
+            .row(row_id)
+            .and_then(tensorplate_platform::PlatformSupportRow::accelerator)
+            .expect("a Jetson row declares an accelerator");
+        assert_eq!(
+            accelerator.sku, expected.sku,
+            "{name}: derivation must produce the exact string the row is written in"
+        );
+
+        let detected = DetectedPlatform::with_accelerator(identity, accelerator);
+        let matched = match registry.resolve(&detected) {
+            RowMatch::Supported(row) | RowMatch::PlannedNotValidated(row) => row,
+            other => panic!("{name}: expected its own row, got {other:?}"),
+        };
+        assert_eq!(
+            matched.row_id(),
+            row_id,
+            "{name}: resolved to the wrong row"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 4, "expected every Jetson row; checked {checked}");
+}
+
+#[test]
+fn a_jetson_module_does_not_inherit_a_sibling_module_row() {
+    // The control, and the defect the first attempt at this fix shipped:
+    // matching an integrated accelerator on capacity alone compared nothing
+    // else about the board, so an Orin NX resolved to the Orin Nano's
+    // Production row. The module name must be part of the identity.
+    let registry = committed_registry();
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+    let mut sources = sources_of(&nano);
+
+    // Same JetPack, same 8GB class, different module. No row names it.
+    sources.device_tree_model =
+        Some("NVIDIA Jetson Orin NX Engineering Reference Developer Kit\0".to_string());
+    let identity = identify(&sources).expect("detects").identity;
+    let accelerator = identify_jetson_accelerator(&sources).expect("a Jetson yields an identity");
+    assert_eq!(
+        accelerator.sku, "Jetson Orin NX 8GB",
+        "the module name must come from the board, not from its capacity"
+    );
+    let detected = DetectedPlatform::with_accelerator(identity, accelerator);
+    assert!(
+        matches!(
+            registry.resolve(&detected),
+            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+        ),
+        "a module no row names must be unsupported, never its sibling's row"
+    );
+}
+
+#[test]
+fn a_jetson_that_cannot_report_itself_is_refused_not_left_ungated() {
+    // This case previously asserted the opposite — that unreadable sources
+    // produce an Err — and that assertion pinned a fail-open into the
+    // suite. The caller reads any probe error as "admission disabled", so
+    // erroring here takes a Jetson from refused to not gated at all.
+    //
+    // A genuinely unreadable file cannot reach this function: the probe
+    // maps one to `PlatformProbeError::Unreadable` and propagates it before
+    // these sources are assembled. What arrives as `None` is an ABSENT
+    // source, which is a signal, not a failure.
+    let registry = committed_registry();
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+
+    for (label, mutate) in [
+        (
+            "no board model",
+            Box::new(|s: &mut HostSources| s.device_tree_model = None)
+                as Box<dyn Fn(&mut HostSources)>,
+        ),
+        (
+            "no memory total",
+            Box::new(|s: &mut HostSources| s.proc_meminfo = None),
+        ),
+        (
+            "meminfo with no MemTotal line",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemFree:         1234567 kB\n".to_string());
+            }),
+        ),
+        (
+            "MemTotal in a unit this does not read",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemTotal:       7689557 KiB\n".to_string());
+            }),
+        ),
+        (
+            "a model that is NUL and whitespace only",
+            Box::new(|s: &mut HostSources| s.device_tree_model = Some("   \0".to_string())),
+        ),
+    ] {
+        let mut sources = sources_of(&nano);
+        mutate(&mut sources);
+
+        let accelerator = identify_jetson_accelerator(&sources)
+            .unwrap_or_else(|| panic!("{label}: a Jetson must still report an accelerator"));
+        let identity = identify(&sources)
+            .expect("host identity still detects")
+            .identity;
+        let detected = DetectedPlatform::with_accelerator(identity, accelerator);
+        assert!(
+            matches!(
+                registry.resolve(&detected),
+                RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+            ),
+            "{label}: must be refused; anything else lets the agent skip the gate"
+        );
+    }
+
+    // And a machine that is not a Jetson yields no identity at all.
+    let mut not_jetson = sources_of(&nano);
+    not_jetson.nv_tegra_release = None;
+    assert!(identify_jetson_accelerator(&not_jetson).is_none());
+}
+
+#[test]
+fn a_jetson_board_with_no_row_is_refused_not_left_ungated() {
+    // The regression this guards is a fail-OPEN, and it is the one this
+    // change first shipped. `settle_platform_admission` treats a probe
+    // error as "hardware unreadable, admission disabled", so returning Err
+    // for a board nobody has a row for would take that machine from
+    // refused to not gated at all — inverting the gate on exactly the
+    // hardware it exists for.
+    let registry = committed_registry();
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+
+    for (label, mutate) in [
+        (
+            "a module no row names",
+            Box::new(|s: &mut HostSources| {
+                s.device_tree_model = Some("NVIDIA Jetson Thor Developer Kit\0".to_string());
+                s.proc_meminfo = Some("MemTotal:      125829120 kB\n".to_string());
+            }) as Box<dyn Fn(&mut HostSources)>,
+        ),
+        (
+            "a capacity no module ships in",
+            Box::new(|s: &mut HostSources| {
+                s.proc_meminfo = Some("MemTotal:      125829120 kB\n".to_string());
+            }),
+        ),
+        (
+            "a board model with no Jetson token",
+            Box::new(|s: &mut HostSources| {
+                s.device_tree_model = Some("Some Other ARM64 Board\0".to_string());
+            }),
+        ),
+    ] {
+        let mut sources = sources_of(&nano);
+        mutate(&mut sources);
+        let accelerator = identify_jetson_accelerator(&sources)
+            .unwrap_or_else(|| panic!("{label}: a Jetson must still report an accelerator"));
+
+        let identity = identify(&sources).expect("detects").identity;
+        let detected = DetectedPlatform::with_accelerator(identity, accelerator);
+        assert!(
+            matches!(
+                registry.resolve(&detected),
+                RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+            ),
+            "{label}: must be refused, never admitted and never ungated"
+        );
+    }
+}
+
+#[test]
+fn the_super_variant_is_a_trailing_word_not_a_substring() {
+    // `Super` names a module variant and the row spells it last. Testing it
+    // as a substring anywhere would let an unrelated board name acquire the
+    // variant and land on a Production row it is not.
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+
+    let sku_for = |model: &str| {
+        let mut sources = sources_of(&nano);
+        sources.device_tree_model = Some(format!("{model}\0"));
+        identify_jetson_accelerator(&sources)
+            .expect("a Jetson yields an identity")
+            .sku
+    };
+
+    assert_eq!(
+        sku_for("NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super"),
+        "Jetson Orin Nano 8GB Super"
+    );
+    assert_eq!(
+        sku_for("NVIDIA Jetson Orin Nano Developer Kit"),
+        "Jetson Orin Nano 8GB",
+        "a board that is not the Super variant must not acquire it"
+    );
+    // The discriminating case: the module name extracts cleanly as `Orin
+    // Nano` (the kit description stops it), the capacity is 8GB, and the
+    // word `Super` appears AFTER the module rather than as the trailing
+    // variant. Under a substring test this composes
+    // `Jetson Orin Nano 8GB Super` — the committed Production row — and a
+    // board that is not the Super variant inherits its claim. Under the
+    // trailing-word test it composes `Jetson Orin Nano 8GB`, which names no
+    // row, so the board is refused.
+    let trailing_other_word = sku_for("NVIDIA Jetson Orin Nano Developer Kit Super Edition");
+    assert_eq!(
+        trailing_other_word, "Jetson Orin Nano 8GB",
+        "`Super` before another trailing word is not the variant suffix"
+    );
+    assert!(
+        committed_registry().rows().all(|row| row
+            .accelerator()
+            .map_or(true, |accelerator| accelerator.sku != trailing_other_word)),
+        "`{trailing_other_word}` must name no committed row, so the board is refused"
+    );
+}
+
+#[test]
+fn the_capacity_band_rejects_what_is_outside_it() {
+    // The band is load bearing: it is what stops a reported total being
+    // rounded onto a capacity the module does not have. Asserted at both
+    // edges so widening or deleting it fails here.
+    let (_, nano) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("jetson-orin-nano-8gb-jp62"))
+        .expect("the Orin Nano fixture is committed");
+    let sku_for_kb = |kb: u64| {
+        let mut sources = sources_of(&nano);
+        sources.proc_meminfo = Some(format!("MemTotal:       {kb} kB\n"));
+        identify_jetson_accelerator(&sources)
+            .expect("a Jetson yields an identity")
+            .sku
+    };
+
+    // 8 GiB nominal is 8388608 kB; the band admits [80%, 100%].
+    assert_eq!(
+        sku_for_kb(8_388_608),
+        "Jetson Orin Nano 8GB Super",
+        "at nominal"
+    );
+    assert_eq!(
+        sku_for_kb(6_710_887),
+        "Jetson Orin Nano 8GB Super",
+        "at the floor"
+    );
+    assert!(
+        !sku_for_kb(6_710_886).starts_with("Jetson Orin Nano 8GB"),
+        "one byte below the floor must not be rounded onto 8GB"
+    );
+    assert!(
+        !sku_for_kb(8_388_609).starts_with("Jetson Orin Nano 8GB"),
+        "above nominal is a different module, not this one"
     );
 }
