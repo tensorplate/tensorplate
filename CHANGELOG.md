@@ -20,7 +20,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   gate closes. Settling the verdict now returns a verdict rather than an
   option, so there is no path on which the agent runs ungated.
 
-### Fixed
+- Per-deployment platform admission now checks the matched row's backend
+  package requirements after bundle verification and before staging. Package
+  inventory comes from Homebrew formulas on macOS and the Debian package
+  database on Linux, preserving the same fail-closed gate on both lanes.
 
 - Deployment identifiers are now constrained to one bounded,
   filesystem-safe path segment at protocol, agent, and CLI boundaries before

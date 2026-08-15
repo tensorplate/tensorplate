@@ -241,6 +241,15 @@ impl Coordinator {
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err)
             }
         };
+        if let (Some(admission), Some(registry)) =
+            (&self.platform_admission, self.platform_registry.as_ref())
+        {
+            if let Err(err) =
+                admission.admit_backend(registry, verified.manifest.backend_hint.as_str())
+            {
+                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+            }
+        }
         if let Some(expected) = expected_bundle_digest {
             if !crate::bundle::bundle_digests_equal(expected, &verified.manifest_digest) {
                 let err = AgentError::BundleIntegrity {

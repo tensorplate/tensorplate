@@ -496,3 +496,62 @@ fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
         other => panic!("a partitioned machine must not deploy, got {other:?}"),
     }
 }
+
+#[test]
+fn the_coordinator_applies_backend_admission_after_bundle_verification() {
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let harness = common::Harness::new();
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
+    let admission = PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default());
+    assert!(matches!(admission, PlatformAdmission::Supported { .. }));
+
+    let coordinator = Arc::new(
+        Coordinator::new(
+            harness.config.clone(),
+            harness.store.clone(),
+            harness.worker.clone(),
+        )
+        .with_platform_admission(admission)
+        .with_platform_registry(registry),
+    );
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "undeclared-backend",
+        common::BundleSpec {
+            backend_hint: Some("mock"),
+            ..Default::default()
+        },
+    );
+
+    match coordinator.deploy(
+        "undeclared-backend",
+        &bundle,
+        BTreeMap::default(),
+        None,
+        None,
+    ) {
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
+            assert!(
+                detail.contains("mock"),
+                "the rejection names the backend: {detail}"
+            );
+        }
+        other => panic!("an undeclared backend must not deploy, got {other:?}"),
+    }
+    assert!(
+        !harness
+            .config
+            .staging_dir
+            .join("undeclared-backend")
+            .exists(),
+        "backend admission must happen before staging"
+    );
+    assert!(
+        harness.worker.calls().expect("worker calls").is_empty(),
+        "backend admission must happen before worker prepare"
+    );
+}

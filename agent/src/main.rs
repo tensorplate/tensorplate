@@ -220,11 +220,26 @@ fn evaluate_platform_admission(
     admission
 }
 
-/// Packages dpkg reports as installed.
+/// Packages the host's native package manager reports as installed.
 ///
-/// Queried without a name glob. A `tensorplate*` glob would cover today's
-/// rows, but a row may require a driver or runtime package, and the glob
-/// would then report an installed package as missing.
+/// The platform rows use Homebrew package names on macOS and Debian package
+/// names on the Linux targets. Querying the wrong database is indistinguishable
+/// from an empty database and would reject every otherwise valid deployment.
+#[cfg(target_os = "macos")]
+fn installed_packages() -> BTreeSet<String> {
+    let Ok(output) = std::process::Command::new("brew")
+        .args(["list", "--formula"])
+        .output()
+    else {
+        return BTreeSet::new();
+    };
+    if !output.status.success() {
+        return BTreeSet::new();
+    }
+    parse_homebrew_packages(&output.stdout)
+}
+
+#[cfg(not(target_os = "macos"))]
 fn installed_packages() -> BTreeSet<String> {
     let Ok(output) = std::process::Command::new("dpkg-query")
         .args(["-W", "-f=${binary:Package} ${db:Status-Status}\n"])
@@ -232,7 +247,25 @@ fn installed_packages() -> BTreeSet<String> {
     else {
         return BTreeSet::new();
     };
-    String::from_utf8_lossy(&output.stdout)
+    if !output.status.success() {
+        return BTreeSet::new();
+    }
+    parse_dpkg_packages(&output.stdout)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_homebrew_packages(stdout: &[u8]) -> BTreeSet<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
+    String::from_utf8_lossy(stdout)
         .lines()
         .filter_map(|line| {
             let (name, status) = line.split_once(' ')?;
@@ -413,4 +446,27 @@ fn main() -> ExitCode {
     }
     server.shutdown();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_dpkg_packages, parse_homebrew_packages};
+
+    #[test]
+    fn homebrew_inventory_uses_formula_names() {
+        let installed = parse_homebrew_packages(
+            b"tensorplate-agent\ntensorplate-backend-python-pytorch\npython@3.14\n",
+        );
+        assert!(installed.contains("tensorplate-backend-python-pytorch"));
+        assert!(!installed.contains(""));
+    }
+
+    #[test]
+    fn dpkg_inventory_keeps_only_installed_packages() {
+        let installed = parse_dpkg_packages(
+            b"tensorplate-agent installed\ntensorplate-backend-python-pytorch not-installed\n",
+        );
+        assert!(installed.contains("tensorplate-agent"));
+        assert!(!installed.contains("tensorplate-backend-python-pytorch"));
+    }
 }
