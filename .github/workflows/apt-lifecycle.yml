@@ -27,6 +27,13 @@ on:
       # drift it exists to catch.
       - '.github/workflows/release.yml'
       - '.github/workflows/apt-lifecycle.yml'
+      # The CPU-only smoke is the only job that resolves a platform row by
+      # LIVE detection against real installed binaries. Without these, a
+      # change to detection or to the rows themselves cannot trigger the
+      # one job that exercises them on a real install — the smoke was
+      # dispatched by hand four times during #150 for exactly this reason.
+      - 'platform/**'
+      - 'config/platform/**'
   workflow_dispatch:
 
 permissions:

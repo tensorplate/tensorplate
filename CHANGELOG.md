@@ -8,6 +8,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A change to platform detection now triggers the job that tests platform
+  detection. The APT lifecycle workflow is path-filtered to packaging and
+  release paths, but the Ubuntu CPU-only smoke it runs is the only job that
+  resolves a support row by **live detection against real installed
+  binaries** — and `platform/**` was not in the filter. So the one check
+  that would catch a detection regression on a real install could not be
+  triggered by a detection change, and fired only when a pull request
+  happened to touch packaging as well.
+
+
 - A Jetson is no longer refused every deploy. `nvidia-smi` is the only
   accelerator probe and JetPack does not ship it, so detection reported no
   accelerator — which was read as the affirmative fact "this machine has no
