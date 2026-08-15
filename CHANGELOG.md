@@ -6,7 +6,241 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- A Jetson is no longer refused every deploy. `nvidia-smi` is the only
+  accelerator probe and JetPack does not ship it, so detection reported no
+  accelerator — which was read as the affirmative fact "this machine has no
+  accelerator" and mismatched every row that declares one. Every Jetson
+  resolved to no row at all, and deploy admission refused it before the
+  bundle was opened, on hardware that had been working.
+
+  A Jetson's accelerator is part of the SoC: no separate device exists to
+  enumerate, so the absence of the vendor tool is not evidence of absent
+  hardware. Its identity is instead derived from what the board reports
+  about itself — `/proc/device-tree/model` names the module, and `MemTotal`
+  separates two modules of one family that report the same model string.
+
+  The derived SKU is then compared verbatim, exactly as a discrete card's
+  is. That is what makes the derivation safe in the direction that matters:
+  a SKU derived wrongly matches no row and the machine is refused, rather
+  than being handed a row belonging to a different board. An Orin NX 8GB
+  produces `Jetson Orin NX 8GB`, which no row names, and is reported
+  unsupported.
+
+  A board this cannot name is refused, not left ungated. It yields an
+  identity carrying what the board actually reported, which no row names,
+  so the machine gets `unsupported_accelerator_sku` — the same answer an
+  off-matrix discrete card gets. Erroring instead would be a fail-open: the
+  agent reads a probe error as "hardware unreadable, admission disabled", so
+  an unrecognized Jetson would go from refused to not gated at all, on
+  exactly the hardware the gate exists for.
+
+  Deriving an identity for a Jetson cannot fail at all, and that is the
+  whole safety argument rather than a judgement about which inputs are bad
+  enough to error on. The agent reads any probe error as "hardware
+  unreadable, admission disabled", so any error on this path would take a
+  Jetson from refused to not gated. A genuinely unreadable file cannot
+  reach this code in any case: the probe maps one to an `Unreadable` error
+  and propagates it before these sources are assembled, so an absent source
+  here is a signal rather than a failure. (V021-E02-F02-T02)
+
 ### Added
+
+- A deploy is now refused before anything is staged when the machine
+  itself cannot honour it. A partitioned accelerator is the case this
+  exists for: the card is supported and the host is supported, and serving
+  it anyway would serve at a capacity the matched row's evidence was never
+  collected at. `mig_mode_enabled` is reported, and the same card
+  unpartitioned is admitted — the control that keeps the check from being a
+  blanket refusal.
+
+  Requirements come from the matched row, never from a constant in the
+  agent. Driver and runtime components are compared against what the row
+  records, and the packages a backend path needs are the ones that row
+  declares for that path. Rows record no components until their first
+  evidence run, so the stack check is deliberately silent today rather than
+  inventing a requirement — an empty list means "not yet recorded", not
+  "nothing required".
+
+  A backend path a row never declared is refused rather than waved through.
+  An absent package set is not a row with nothing to require; it is a row
+  that never claimed to serve that path, which is exactly the deploy that
+  has no evidence behind it.
+
+  The two halves are asked at different times because they have different
+  inputs: whether this machine matches a row at all is settled once at
+  startup, while which packages matter depends on the backend the bundle
+  names. Detection failing is **not** a rejection — an agent that cannot
+  read its own hardware has no basis to refuse a deploy, and turning "I
+  could not look" into "your platform is unsupported" is the collapse this
+  codebase refuses everywhere else.
+
+  Two rejections deliberately carry no typed reason, for the same cause.
+  A machine whose machine shape no row's evidence covers, and a machine
+  matching an Experimental row, have no value in the frozen vocabulary.
+  The nearest candidates each name a dimension that is fine: an operator
+  told their OS version is unsupported, when their OS is correct and their
+  chassis is not, reinstalls the wrong thing — and one told a row is
+  "awaiting validation" waits for an evidence run that is never coming,
+  because an Experimental integration is not awaiting one.
+
+  Where a reason does apply it reaches the caller, not just the log line.
+  The typed reason is projected into the error record's context, which the
+  CLI already renders and the durable store already keeps, so
+  `missing_driver_runtime` and `missing_backend_package` are readable by a
+  machine rather than only legible in prose.
+  (V021-E02-F02-T02, V021-E02-F02-T03)
+
+- Discrete NVIDIA accelerators are now detected by exact SKU, so a card
+  either resolves to the row whose evidence was collected on it or is
+  reported unsupported — never to the nearest thing. An A100 80GB is one
+  capacity away from a supported A100 and must not inherit its claim.
+
+  Read from `nvidia-smi` rather than NVML. NVML means linking a vendor SDK
+  into a crate the agent, CLI, and observability all depend on, and the
+  value needed is a string the tool already prints; the command boundary
+  is also what keeps vendor types out of the public contract. The product
+  name is carried through **verbatim**, because a row records exactly what
+  the tool prints and any normalization would be a second spelling of the
+  same fact for the two to drift apart on.
+
+  Memory is recorded but never matched on. A row records nominal capacity
+  and the tool reports the usable framebuffer, and for an L4 those are
+  different numbers — matching on it would make a supported card miss its
+  own row. The reported framebuffer, driver version, device UUID, and MIG
+  mode are kept alongside identity for evidence recording, the same split
+  host detection already uses.
+
+  Absence and failure stay distinct, as everywhere else in detection. No
+  `nvidia-smi` means no discrete accelerator, which is how the CPU-only
+  rows are told apart from the GPU ones. A tool that is present and fails
+  is an error: a host whose driver will not load is a broken GPU machine,
+  and reporting it as a machine without a GPU would resolve it to a
+  CPU-only row and tell an operator with a broken driver that their
+  platform is fine. More than one accelerator is refused rather than
+  narrowed to the first, because every row this release claims is
+  single-GPU.
+
+  Fixtures cover every row naming an NVIDIA card, three off-matrix SKUs,
+  and a partitioned device, and they are checked by resolving against the
+  real registry rather than against hand-written expectations. **They are
+  transcribed, not recorded** — no GPU in the validation fleet has been
+  reached yet — and their provenance says so; the first G2 and A2 runs
+  replace them, and a mismatch corrects the row. (V021-E02-F02-T01)
+
+- The Ubuntu x86_64 CPU-only row now has a live smoke, and it is the only
+  packaging check that installs real binaries and runs the real CLI. The
+  others stub the runtime so they can rehearse packaging shape cheaply, which
+  cannot tell you whether the installed appliance comes up. This one builds
+  the runtime, installs the package set, starts the agent and observability,
+  and then requires a **green** `tensorplate doctor` — absent CUDA and
+  TensorRT are informational findings on this row, so a non-zero exit means
+  something real.
+
+  It resolves the row by **live detection** rather than from a recorded
+  fixture: the runner is Ubuntu 22.04 on x86_64 with no accelerator, which is
+  the row itself, and the row declares no machine type, which is how the
+  schema spells "any instance". The smoke refuses to run anywhere else, since
+  a green result on the wrong host would say nothing about the row. It also
+  asserts the row is Preview in the *installed* registry and that nothing
+  doctor prints describes this host as Production, and it records host facts,
+  package versions, and the doctor output as evidence.
+  (V021-E02-F01-T04)
+
+- The systemd supervision contract and the package rollback procedure now
+  have tests that run them rather than read them. A new packaging check
+  drives the shipped units against a real systemd: the agent reaches active
+  and writes to the documented log path, a `SIGKILL` is recovered, a crash
+  **loop** is given up on instead of retried forever, a clean stop is not
+  treated as a failure, observability survives the agent stopping, and no
+  serving unit exists. The unit-text check additionally asserts there are no
+  architecture-specific unit files and that both units agree on the
+  supervision directives, so the parity claim is verified rather than
+  assumed — the units were already single-source, what was missing was
+  evidence.
+
+  **The documented rollback could not work.** `upgrade-preflight.sh` refuses
+  a downgrade on the version comparison alone and never inspects durable
+  state, so the published instruction to move state aside and then
+  `apt install --allow-downgrades` was refused all the same. Rolling back
+  means removing the runtime set — which keeps `/etc/tensorplate` and
+  everything under `/var/lib/tensorplate` — and installing the older version
+  as a fresh install. Both documents now say that, and the lifecycle
+  rehearsal proves the guard stays armed with and without state present
+  before exercising the procedure that works.
+
+  `install-paths.sh` now verifies the layout it just applied instead of
+  trusting it. Its ownership changes are deliberately tolerant, because the
+  system group is not guaranteed to exist for every path when they run — so
+  a failed `chgrp` used to leave the agent unable to read its own state and
+  report nothing. A half-applied layout is now a dpkg configure failure that
+  names the directory, the observed value, and the command that fixes it.
+
+  The agent config becomes per-architecture. It declares `device_family` and
+  the backends the build actually contains, and the agent reads both into its
+  deploy compatibility check, so one shared file would make x86_64 reject
+  bundles that correctly target it while advertising a TensorRT backend that
+  build does not contain. Both variants install to the same conffile path, so
+  existing hosts see a byte-identical file and dpkg does not prompt.
+
+  The channel lifecycle rehearsal now runs on x86_64 as well as arm64, which
+  became possible only once the runtime metapackage stopped being arm64-only.
+  (V021-E02-F01-T02, V021-E02-F01-T03)
+
+- Releases now publish a complete Ubuntu x86_64 runtime package set —
+  agent, serving worker, observability service, operator CLI, and the
+  `tensorplate` metapackage — alongside the Jetson arm64 set, instead of
+  an amd64 operator CLI on its own. The optional Python/PyTorch backend
+  and the other architecture-independent packages are shared between
+  both, so an x86_64 host installs the same appliance a Jetson does.
+
+  The packages are built on the **oldest Ubuntu LTS they must run on**,
+  not the newest they target. A shared-library floor is set by the build
+  host, so building on 24.04 would have raised it to a glibc no 22.04
+  machine has and quietly excluded a platform row that claims support.
+
+  The release manifest keeps describing one primary target and gains no
+  second target block. It never needed one: every artifact already
+  carries its own architecture, and that is what the installer selects
+  on — the same shape the desktop CLI has used all along.
+
+  What changed is the rule about *which* second-architecture packages may
+  appear. It was "the CLI, and nothing else"; it is now an explicit set,
+  and verification asserts that set by package **and** architecture.
+  Verification's package check was previously name-only, so it could not
+  tell a complete second architecture from a half-published one — the
+  arm64 sibling of any missing amd64 package satisfied it, and the sole
+  architecture-specific assertion covered the CLI. Collection had no
+  notion of the other x86_64 packages at all: it required the amd64 CLI
+  and failed without it, but an amd64 agent, serving worker, or
+  observability build staged beside it was dropped without a word, and a
+  release would have gone out green with them simply absent.
+
+  The x86_64 serving worker ships without the TensorRT adapter. A hosted
+  runner has no CUDA/TensorRT SDK, and building the adapter without one
+  yields a backend that registers, passes deploy admission, and only
+  then fails at engine load. Leaving it out means a TensorRT deploy
+  fails at lookup instead — earlier, and for the real reason. The
+  `python_pytorch` sidecar path is unconditional and unaffected.
+
+  The `tensorplate` metapackage becomes `Architecture: any` rather than
+  arm64-only, so `apt install tensorplate` installs the full runtime on
+  either architecture. It stays architecture-qualified rather than
+  becoming `all` because its strict `= ${binary:Version}` relations bind
+  runtime binaries built in the same run, which are per-architecture.
+  (V021-E02-F01-T01)
+
+- The Python/PyTorch backend descriptor's declared runtime range now
+  admits the 0.2 line, and a packaging check asserts the range brackets
+  the version the tree builds. The upper bound is inert in shipped code
+  today — only the lower bound is compared — but the descriptor schema
+  publicly promises rejection outside the range, and the descriptor is
+  not among the files the release driver rewrites on a version bump, so
+  a stale bound had nothing to catch it. The check asserts the range
+  admits the release line rather than only the current version, because
+  a bound one minor behind still brackets the version that precedes it.
+  (V021-E02-F01-T01)
 
 - `tensorplate doctor` gains a host section, and it reports what the
   machine says about itself rather than what the binary was compiled for.

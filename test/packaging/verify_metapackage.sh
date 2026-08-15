@@ -3,9 +3,9 @@
 #
 # packaging: tensorplate runtime metapackage linter.
 #
-# Asserts the `tensorplate` metapackage stays an empty, Jetson-arm64-only
-# dependency bundle: strict-versioned depends on the runtime set, no
-# payload, no maintainer scripts, optional Python backend suggested but
+# Asserts the `tensorplate` metapackage stays an empty, architecture-
+# qualified dependency bundle: strict-versioned depends on the runtime set,
+# no payload, no maintainer scripts, optional Python backend suggested but
 # never pulled in, and no dependency on the apt bootstrap package.
 
 set -eu
@@ -22,8 +22,13 @@ if [ -z "${stanza}" ]; then
   echo "FAIL: tensorplate missing Package: stanza in debian/control" >&2
   fail=1
 else
-  if ! printf '%s\n' "${stanza}" | grep -q '^Architecture: arm64$'; then
-    echo "FAIL: tensorplate metapackage must be Architecture: arm64 (not published for AMD64)" >&2
+  # `any`, not `all`: the strict `= ${binary:Version}` relations below bind
+  # per-architecture runtime binaries, so the metapackage must be built in
+  # the same dpkg-buildpackage run as the binaries it pins. `all` would also
+  # offer the package on architectures that have no runtime set, where it
+  # would fail with unsatisfiable dependencies instead of simply not existing.
+  if ! printf '%s\n' "${stanza}" | grep -q '^Architecture: any$'; then
+    echo "FAIL: tensorplate metapackage must be Architecture: any (built per runtime architecture)" >&2
     fail=1
   fi
   if ! printf '%s\n' "${stanza}" | grep -q '^Section: metapackages$'; then
@@ -67,15 +72,33 @@ for extra in install preinst postinst prerm postrm service conffiles; do
   fi
 done
 
-# Release tooling must require the metapackage in artifact, manifest,
-# and verify lists.
-if ! grep -Eq '^[[:space:]]+tensorplate$' "${repo_root}/tools/release/build-release-artifacts.sh"; then
-  echo "FAIL: build-release-artifacts.sh REQUIRED_PACKAGES must include tensorplate" >&2
-  fail=1
-fi
-if ! grep -Eq '^[[:space:]]+tensorplate$' "${repo_root}/tools/release/tensorplate-release.sh" ||
-   [ "$(grep -c '"tensorplate",' "${repo_root}/tools/release/tensorplate-release.sh")" -lt 2 ]; then
-  echo "FAIL: tensorplate-release.sh must require tensorplate in artifact, manifest, and verify lists" >&2
+# Release tooling must require the metapackage in artifact, manifest, and
+# verify lists. Scope each grep to the array it is about: both scripts now
+# declare more than one package array, and a bare file-wide grep for
+# `tensorplate` is satisfied by any of them — so removing the metapackage
+# from REQUIRED_PACKAGES would go unnoticed.
+array_block() {
+  # Terminate on a closing paren at any indentation: with a `^)`-only
+  # anchor, a cosmetically indented `  )` would let the block run on into
+  # the next array and satisfy the grep from the wrong declaration.
+  awk -v name="$2" '
+    $0 ~ ("^readonly " name "=\\(") { inside = 1; next }
+    inside && /^[[:space:]]*\)/ { exit }
+    inside { print }
+  ' "$1"
+}
+
+for script in build-release-artifacts.sh tensorplate-release.sh; do
+  path="${repo_root}/tools/release/${script}"
+  for array in REQUIRED_PACKAGES SECONDARY_ARCH_PACKAGES; do
+    if ! array_block "${path}" "${array}" | grep -Eq '^[[:space:]]+tensorplate$'; then
+      echo "FAIL: ${script} ${array} must include tensorplate" >&2
+      fail=1
+    fi
+  done
+done
+if [ "$(grep -c '"tensorplate",' "${repo_root}/tools/release/tensorplate-release.sh")" -lt 2 ]; then
+  echo "FAIL: tensorplate-release.sh must require tensorplate in the manifest and verify lists" >&2
   fail=1
 fi
 

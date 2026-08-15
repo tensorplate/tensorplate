@@ -5,9 +5,13 @@ TensorPlate public releases publish native Debian package artifacts,
 signature over those checksums. Release pages may also attach validated
 sample bundles, but the required assets are the `.deb` packages, installer,
 artifact manifest, `SHA256SUMS`, and `SHA256SUMS.cosign.bundle`.
-Releases may additionally attach desktop-only `tensorplate-cli` packages
-for architectures such as `amd64`; those assets are consumed by
-`install.sh --cli-only` and are not part of the Jetson runtime package set.
+A release publishes two complete runtime package sets: the primary target
+described by the manifest's `target` block (Jetson `arm64`), and a secondary
+set for Ubuntu `x86_64` built on its own native runner. The manifest's
+`target` block describes the primary target only; every artifact carries its
+own `architecture`, which is what `install.sh` selects on, plus a `target_os`
+label for the reader. The architecture-independent packages are shared
+between both sets.
 
 Use these variables in examples:
 
@@ -32,7 +36,7 @@ The release must include one `.deb` asset for each package:
 | `tensorplate-cli` | yes | Operator CLI binary `tensorplate`. |
 | `tensorplate-backend-python-pytorch` | yes | Optional backend package. It does not vendor PyTorch. |
 | `tensorplate-apt-source` | yes | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component. |
-| `tensorplate` | yes | Jetson full-runtime metapackage (arm64 only); empty payload, strict-versioned depends on the runtime set. |
+| `tensorplate` | yes | Full-runtime metapackage, built once per runtime architecture; empty payload, strict-versioned depends on the runtime set. |
 
 Expected asset names follow Debian binary-package naming:
 
@@ -45,7 +49,11 @@ tensorplate-cli_${TP_VERSION}-1_arm64.deb
 tensorplate-backend-python-pytorch_${TP_VERSION}-1_all.deb
 tensorplate-apt-source_${TP_VERSION}-1_all.deb
 tensorplate_${TP_VERSION}-1_arm64.deb
-tensorplate-cli_${TP_VERSION}-1_amd64.deb    # CLI-only desktop asset (required for publish-grade builds)
+tensorplate-agent_${TP_VERSION}-1_amd64.deb          # Ubuntu x86_64 runtime set;
+tensorplate-serving_${TP_VERSION}-1_amd64.deb        # all five are required for
+tensorplate-observability_${TP_VERSION}-1_amd64.deb  # publish-grade builds
+tensorplate-cli_${TP_VERSION}-1_amd64.deb
+tensorplate_${TP_VERSION}-1_amd64.deb
 install.sh
 tensorplate-${TP_TAG}-artifacts.json
 SHA256SUMS
@@ -68,11 +76,22 @@ tools/release/build-release-artifacts.sh \
 ```
 
 The release runner must match the target architecture. The script refuses
-to build `arm64` release packages on a non-`arm64` runner. If a separately
-built desktop `tensorplate-cli` package, such as `amd64`, is pre-staged in
-the repository parent directory with the other Debian outputs, the release
-build copies it into the artifact set and the manifest marks it as a
-desktop CLI asset.
+to build `arm64` release packages on a non-`arm64` runner. That compares
+`dpkg --print-architecture` against the target and nothing more — the
+Jetson-class hardware and the TensorRT/CUDA SDKs come from the self-hosted
+runner's own configuration, and `TP_REQUIRE_TENSORRT_SDK=ON` is what fails
+the build when the SDK is missing.
+
+Because a release build cannot cross-compile, the secondary Ubuntu `x86_64`
+set is built by its own hosted job and pre-staged in the repository parent
+directory alongside the other Debian outputs; the release build collects it
+into the artifact set and labels it with the `x86_64` target OS. A missing
+member of that set fails the build rather than being silently dropped.
+
+The `x86_64` serving worker is built without the TensorRT adapter — a hosted
+runner has no CUDA/TensorRT SDK, and shipping the adapter without one
+produces a backend that registers and only fails at engine load. The
+`python_pytorch` sidecar path is unaffected and needs no vendor SDK.
 
 For local diagnostics only, the equivalent steps are:
 
@@ -131,6 +150,15 @@ The manifest is JSON with this stable shape:
       "sha256": "<64-hex-digest>"
     },
     {
+      "file": "tensorplate-serving_X.Y.Z-1_amd64.deb",
+      "package": "tensorplate-serving",
+      "version": "X.Y.Z-1",
+      "architecture": "amd64",
+      "target_os": "Ubuntu 22.04 LTS / 24.04 LTS (x86_64)",
+      "size_bytes": 123,
+      "sha256": "<64-hex-digest>"
+    },
+    {
       "file": "install.sh",
       "kind": "installer",
       "version": "X.Y.Z",
@@ -177,8 +205,19 @@ tools/release/tensorplate-release.sh verify \
 Verification fails if the tag is not annotated, a required package is
 missing, manifest metadata drifts from the requested version/tag, or any
 checksum mismatches. The required runtime package set must include the
-target architecture or `all`; additional architecture-specific `.deb`
-assets are currently allowed only for `tensorplate-cli`.
+target architecture or `all`. On the publish path every member of the
+secondary runtime set is also required, asserted by `(package,
+architecture)` pair, so a half-published architecture cannot verify clean —
+a name-only check would be satisfied by the primary-architecture sibling of
+a missing package.
+
+Which packages may carry a second architecture at all is decided earlier, at
+manifest generation: only members of the declared secondary runtime set, and
+only at the declared secondary architecture. A `.deb` whose name matches a
+required package at any other architecture aborts manifest generation as a
+staging mistake, so it never reaches a manifest for verification to judge.
+A file whose name matches no required package is not examined at all and is
+simply never collected.
 
 ## Signing and Provenance
 
@@ -211,8 +250,10 @@ use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
 4. Download that workflow artifact on the validation target and exercise
    the installer locally. Build-only assets are unsigned, so pass
    `--allow-unsigned`: `sudo bash install.sh --allow-unsigned`, `sudo bash
-   install.sh --cli-only --allow-unsigned` when a desktop CLI asset is
-   present, and any optional backend path being released.
+   install.sh --cli-only --allow-unsigned`, and any optional backend path
+   being released. Publish-grade asset sets always carry both runtime
+   architectures, so exercise the installer on an Ubuntu x86_64 target as
+   well as the Jetson one rather than treating x86_64 as conditional.
 5. Push the annotated tag to sign `SHA256SUMS`, record build provenance,
    create the GitHub Release, and attach all assets including
    `SHA256SUMS.cosign.bundle`. Manual `workflow_dispatch publish=true` is

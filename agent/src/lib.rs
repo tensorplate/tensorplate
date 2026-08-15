@@ -38,6 +38,7 @@ pub mod config;
 pub mod control;
 pub mod coordinator;
 pub mod error;
+pub mod platform_admission;
 pub mod quarantine;
 pub mod recovery;
 pub mod rollback;

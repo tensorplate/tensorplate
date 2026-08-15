@@ -67,6 +67,7 @@ pub struct Coordinator {
     sink: Option<Arc<EventSink>>,
     supervisor: Option<Arc<WorkerSupervisor>>,
     backend_probes: BTreeMap<String, BackendProbeReport>,
+    platform_admission: Option<crate::platform_admission::PlatformAdmission>,
     platform_registry: Option<PlatformRegistry>,
 }
 
@@ -94,6 +95,7 @@ impl Coordinator {
             sink: None,
             supervisor: None,
             backend_probes: BTreeMap::new(),
+            platform_admission: None,
             platform_registry: None,
         }
     }
@@ -128,6 +130,17 @@ impl Coordinator {
     #[must_use]
     pub fn with_backend_probes(mut self, probes: BTreeMap<String, BackendProbeReport>) -> Self {
         self.backend_probes = probes;
+        self
+    }
+
+    /// Attach the platform verdict settled at startup, so deploy admission
+    /// is a comparison rather than a re-probe.
+    #[must_use]
+    pub fn with_platform_admission(
+        mut self,
+        admission: crate::platform_admission::PlatformAdmission,
+    ) -> Self {
+        self.platform_admission = Some(admission);
         self
     }
 
@@ -209,6 +222,23 @@ impl Coordinator {
         };
         self.store.begin_transaction(tx_record)?;
 
+        // Refuse a machine that cannot honour any deploy before the bundle
+        // is even parsed. This is where a partitioned accelerator is turned
+        // away: the card is fine, its configuration is not, and serving it
+        // at a partitioned capacity would be serving at a capacity the
+        // matched row's evidence was never collected at.
+        if let Some(admission) = &self.platform_admission {
+            if let crate::platform_admission::PlatformVerdict::Rejected(rejection) =
+                admission.verdict()
+            {
+                let err = AgentError::PlatformNotAdmissible {
+                    reason: rejection.reason(),
+                    detail: rejection.detail().to_string(),
+                };
+                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+            }
+        }
+
         // Phase: verified.
         let verified = match verify_with_probes(bundle_path, &self.config, &self.backend_probes) {
             Ok(v) => v,
@@ -216,6 +246,22 @@ impl Coordinator {
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err)
             }
         };
+
+        // Which packages a row requires depends on the backend path the
+        // bundle names, so this half waits until the bundle is parsed.
+        if let (Some(admission), Some(registry)) =
+            (&self.platform_admission, self.platform_registry.as_ref())
+        {
+            if let Err(rejection) =
+                admission.admit(registry, verified.manifest.backend_hint.as_str())
+            {
+                let err = AgentError::PlatformNotAdmissible {
+                    reason: rejection.reason(),
+                    detail: rejection.detail().to_string(),
+                };
+                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+            }
+        }
         if let Some(expected) = expected_bundle_digest {
             if !crate::bundle::bundle_digests_equal(expected, &verified.manifest_digest) {
                 let err = AgentError::BundleIntegrity {

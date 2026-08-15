@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "transport": "unix_socket",
+  "socket_path": "/run/tensorplate/agent.sock",
+  "state_dir": "/var/lib/tensorplate/state",
+  "staging_dir": "/var/lib/tensorplate/bundles/staging",
+  "available_backends": ["python_pytorch"],
+  "backend_capabilities": {
+    "python_pytorch": {
+      "async": true,
+      "deterministic_latency": true,
+      "control_loop_integration": true,
+      "supported_precision": ["auto", "fp32", "fp16", "bfloat16"],
+      "supported_artifact_kinds": ["python_pytorch_entry", "weights", "tokenizer"]
+    }
+  },
+  "device_family": "x86_64",
+  "worker": {
+    "mode": "process",
+    "serving_binary_path": "/usr/lib/tensorplate/tensorplate-serving",
+    "serving_config_dir": "/var/lib/tensorplate/worker-configs",
+    "serving_bind_host": "127.0.0.1",
+    "serving_bind_port": 18080,
+    "serving_candidate_bind_port": 18081
+  }
+}

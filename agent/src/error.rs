@@ -49,6 +49,19 @@ pub enum AgentError {
     #[error("backend `{backend}` is unrunnable on this device: {reason}")]
     BackendUnrunnable { backend: String, reason: String },
 
+    /// The machine itself cannot honour a deploy: it matches no support
+    /// row, matches one that carries no claim, is partitioned, or is
+    /// missing a driver/runtime component or backend package the matched
+    /// row requires. `reason` is the frozen platform reason where one
+    /// applies — a machine-shape miss deliberately has none, because the
+    /// vocabulary has no value for it and the nearest ones all name a
+    /// dimension that is fine.
+    #[error("platform cannot admit this deploy: {detail}")]
+    PlatformNotAdmissible {
+        reason: Option<tensorplate_platform::PlatformReason>,
+        detail: String,
+    },
+
     #[error("bundle requires capability `{0}` not published by backend `{1}`")]
     UnsupportedCapability(String, String),
 
@@ -104,6 +117,7 @@ impl AgentError {
             | AgentError::UnsupportedHardware(_)
             | AgentError::UnsupportedBackend(_)
             | AgentError::BackendUnrunnable { .. }
+            | AgentError::PlatformNotAdmissible { .. }
             | AgentError::UnsupportedCapability(_, _)
             | AgentError::Unavailable(_) => (ErrorCode::Unsupported, false),
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),
@@ -114,7 +128,20 @@ impl AgentError {
                 (ErrorCode::Internal, true)
             }
         };
-        ErrorRecord::new(code, self.to_string()).recoverable(recoverable)
+        let record = ErrorRecord::new(code, self.to_string()).recoverable(recoverable);
+        // The typed platform reason is the machine-readable half of this
+        // rejection, and `to_string()` renders only the prose. Without
+        // this projection `missing_driver_runtime` and
+        // `missing_backend_package` exist inside this crate and nowhere a
+        // CLI or the durable store can read them. `context` is already
+        // carried to the wire and rendered by the CLI.
+        match self {
+            AgentError::PlatformNotAdmissible {
+                reason: Some(reason),
+                ..
+            } => record.with_context(reason.as_str()),
+            _ => record,
+        }
     }
 
     /// Stable [`ErrorCode`] for this error.
