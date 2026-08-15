@@ -6,6 +6,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- A release-prep check that a Production support claim rests on a recorded
+  run. The existing guard asserts only that a Production row *declares* an
+  evidence location containing its row id — not that the directory exists,
+  nor that anything was ever recorded. Every committed Production row
+  satisfies it while resting on a SKU string transcribed from a datasheet.
+
+  The new check is ignored by default and fails when run, which is its
+  point: it is a tag prerequisite in the release runbook rather than a
+  PR-blocking test, because a row may legitimately sit at Production with
+  spec-authored values while its evidence run is scheduled. What must not
+  happen is shipping one. The failure names each offending row.
+
+  Either resolution is honest: record the evidence, or downgrade the row
+  until it exists. Downgrading is cheap — a Preview row is still a supported
+  combination and still deploys, so it changes the published claim rather
+  than what runs.
+
 ### Fixed
 
 - A change to platform detection now triggers the job that tests platform
