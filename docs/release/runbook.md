@@ -126,6 +126,22 @@ The release owner stops immediately unless all prerequisites are true:
   a required reviewer (a reviewer-less environment publishes without a hold).
 - Clean-room validation target is ready.
 - No release blocker is open without a signed conditional pass.
+- **Every Production row rests on a recorded run.** Verify with:
+
+  ```
+  cargo test -p tensorplate-platform --test registry_fixtures -- --ignored
+  ```
+
+  This is deliberately not a PR-blocking check, because a row may sit at
+  Production with spec-authored values for an entire development cycle
+  while its evidence run is scheduled. It is blocking *here*: a Production
+  claim whose match key nobody has observed on the hardware must not ship.
+  The failure names each offending row.
+
+  Two ways to clear it, both honest — record the evidence, or downgrade the
+  row until it exists. Downgrading is cheaper than it sounds:
+  `is_supported_combination` admits Production **and** Preview, so a Preview
+  row still deploys. It changes the published claim, not what runs.
 
 ### 2. Verify The Release Runner
 
