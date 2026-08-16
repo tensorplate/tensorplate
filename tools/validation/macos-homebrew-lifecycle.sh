@@ -520,6 +520,52 @@ verify_packaged_closure() {
   [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]]
 }
 
+verify_m1_exact_row() {
+  prefix="$(brew --prefix)"
+  doctor_output="${work_dir}/doctor-m1-exact-row.json"
+  tensorplate doctor --output json >"$doctor_output"
+  python3 - \
+    "$doctor_output" \
+    "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" \
+    "${prefix}/share/tensorplate/platform/rows/macos26-apple-m-series-preview.json" \
+    >"${evidence_dir}/m1-exact-row.json" <<'PY'
+import json
+import sys
+
+doctor_path, exact_path, family_path = sys.argv[1:]
+payload = json.load(open(doctor_path, encoding="utf-8"))["payload"]
+findings = {item["id"]: item for item in payload["findings"]}
+profile = findings["platform_profile"]
+exact = json.load(open(exact_path, encoding="utf-8"))
+family = json.load(open(family_path, encoding="utf-8"))
+
+exact_row = "macos26-m1pro-16gb"
+family_row = "macos26-apple-m-series-preview"
+message = profile["message"]
+checks = {
+    "doctor_has_no_failures": payload["failing"] == 0,
+    "platform_profile_ok": profile["status"] == "ok",
+    "exact_row_selected": exact_row in message,
+    "family_row_not_selected": family_row not in message,
+    "exact_row_production": exact["support_level"] == "Production",
+    "family_row_preview": family["support_level"] == "Preview",
+    "family_row_16_gib_ceiling": family["accelerator"]["memory_bytes"] == 17179869184,
+}
+failed = [name for name, passed in checks.items() if not passed]
+if failed:
+    raise SystemExit("M1 exact-row checks failed: " + ", ".join(failed))
+print(json.dumps({
+    "detected_target": "Apple M1 Pro, 16 GB",
+    "selected_row": exact_row,
+    "selected_support_level": exact["support_level"],
+    "family_fallback_row": family_row,
+    "family_fallback_selected": False,
+    "family_fallback_support_level": family["support_level"],
+    "family_fallback_memory_ceiling_bytes": family["accelerator"]["memory_bytes"],
+}, indent=2, sort_keys=True))
+PY
+}
+
 start_services() {
   brew services start tensorplate-agent
   brew services start tensorplate-observability
@@ -804,6 +850,7 @@ details = {
     "tap-trust": {"candidate_formula_graph_trusted": True},
     "clean-install": {"candidate_version": candidate_version},
     "packaged-closure": {"all_six_formulae_installed": True},
+    "m1-exact-row": load_json("m1-exact-row.json"),
     "launchd-start": {
         "agent": "started",
         "observability": "started",
@@ -881,6 +928,7 @@ fi
 run_stage clean-install install_candidate_clean
 run_stage packaged-closure verify_packaged_closure
 run_stage launchd-start start_services
+run_stage m1-exact-row verify_m1_exact_row
 run_stage mps-capability probe_mps
 run_stage deploy-smoke deploy_smoke
 run_stage launchd-restart restart_services
