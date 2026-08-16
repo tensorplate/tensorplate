@@ -50,7 +50,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   accompanying runbook defines immutable RC/commit source pins and recovery
   steps while preserving the operator's prior CLI-only installation. The
   packaged CLI also supplies the formula-managed backend module path so
-  doctor probes the same Python/PyTorch runtime as the agent.
+  doctor probes the same Python/PyTorch runtime as the agent. The current-head
+  gate also captures the packaged agent's admission decision and requires the
+  M1 Pro exact Production row to win over the M-series Preview fallback while
+  preserving both rows' 16 GiB ceiling.
   (V021-E03-F01-T04)
 
 - Homebrew now links the installed platform registry and Python/PyTorch

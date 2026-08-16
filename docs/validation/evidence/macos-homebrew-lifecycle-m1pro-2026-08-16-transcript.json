@@ -1,0 +1,258 @@
+{
+  "redaction": {
+    "environment_values_included": false,
+    "operator_paths_included": false,
+    "policy": "allowlisted structured results only",
+    "raw_command_output_included": false
+  },
+  "result": "pass",
+  "schema_version": "1",
+  "stages": [
+    {
+      "finished_at": "2026-08-16T19:51:09Z",
+      "stage": "host-facts",
+      "started_at": "2026-08-16T19:51:08Z",
+      "status": "pass",
+      "summary": {
+        "architecture": "arm64",
+        "chip": "Apple M1 Pro",
+        "homebrew_version": "6.0.13-107-g9a1cb43",
+        "macos_build": "25F84",
+        "macos_version": "26.5.2",
+        "memory": "16 GB",
+        "model": "MacBook Pro"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:51:09Z",
+      "stage": "formula-pin",
+      "started_at": "2026-08-16T19:51:09Z",
+      "status": "pass",
+      "summary": {
+        "declared_version": "0.2.1-rc.4",
+        "formulae": {
+          "tensorplate": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          },
+          "tensorplate-agent": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          },
+          "tensorplate-backend-python-pytorch": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          },
+          "tensorplate-cli": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          },
+          "tensorplate-observability": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          },
+          "tensorplate-serving": {
+            "declared_version": "0.2.1-rc.4",
+            "sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+            "url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+          }
+        },
+        "source_sha256": "30a50907a99e0f42808ed003fd128b43b7abc44ed9edff026419b1703ea6eeed",
+        "source_url": "https://github.com/tensorplate/tensorplate/archive/141ad8df6d2c086a3dd6d84b01ebe01af5eeeaa2.tar.gz"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:51:09Z",
+      "stage": "deploy-input",
+      "started_at": "2026-08-16T19:51:09Z",
+      "status": "pass",
+      "summary": {
+        "backend_hint": "python_pytorch",
+        "backend_profile": "mps_fixture",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "device": "mps",
+        "model_artifact": "mps-smoke.json",
+        "model_artifact_digest": "sha256:d189c7eabc4cd5a77c91222eab51ed7030c98f36a897c47265ce63d787e42492"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:51:09Z",
+      "stage": "baseline",
+      "started_at": "2026-08-16T19:51:09Z",
+      "status": "pass",
+      "summary": {
+        "linked_version": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:51:10Z",
+      "stage": "tap-trust",
+      "started_at": "2026-08-16T19:51:09Z",
+      "status": "pass",
+      "summary": {
+        "candidate_formula_graph_trusted": true
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:29Z",
+      "stage": "clean-install",
+      "started_at": "2026-08-16T19:51:10Z",
+      "status": "pass",
+      "summary": {
+        "candidate_version": "0.2.1-rc.4"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:31Z",
+      "stage": "packaged-closure",
+      "started_at": "2026-08-16T19:52:29Z",
+      "status": "pass",
+      "summary": {
+        "all_six_formulae_installed": true
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:37Z",
+      "stage": "launchd-start",
+      "started_at": "2026-08-16T19:52:31Z",
+      "status": "pass",
+      "summary": {
+        "agent": "started",
+        "observability": "started",
+        "serving_has_independent_job": false
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:38Z",
+      "stage": "m1-exact-row",
+      "started_at": "2026-08-16T19:52:37Z",
+      "status": "pass",
+      "summary": {
+        "detected_target": "Apple M1 Pro, 16 GB",
+        "family_fallback_memory_ceiling_bytes": 17179869184,
+        "family_fallback_row": "macos26-apple-m-series-preview",
+        "family_fallback_selected": false,
+        "family_fallback_support_level": "Preview",
+        "selected_memory_ceiling_bytes": 17179869184,
+        "selected_row": "macos26-m1pro-16gb",
+        "selected_support_level": "Production"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:39Z",
+      "stage": "mps-capability",
+      "started_at": "2026-08-16T19:52:38Z",
+      "status": "pass",
+      "summary": {
+        "accelerator_runtime_available": true,
+        "accelerator_runtime_built": true,
+        "accelerator_runtime_version": "26.5.2",
+        "backend_name": "python_pytorch",
+        "framework_version": "2.13.0",
+        "python_version": "3.14.7"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:43Z",
+      "stage": "deploy-smoke",
+      "started_at": "2026-08-16T19:52:39Z",
+      "status": "pass",
+      "summary": {
+        "agent_state": "ready",
+        "backend": "python_pytorch",
+        "backend_profile": "mps_fixture",
+        "deployment_id": "wave-2b-macos-deploy-smoke-20260816T195108Z",
+        "deployment_phase": "active",
+        "device": "mps",
+        "mps_tensor_operation_required_for_load": true,
+        "serving_endpoint": "ready",
+        "status_severity": "ready",
+        "supervision_state": "not_configured"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:52:47Z",
+      "stage": "launchd-restart",
+      "started_at": "2026-08-16T19:52:43Z",
+      "status": "pass",
+      "summary": {
+        "agent": "restarted",
+        "observability": "restarted"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:53:05Z",
+      "stage": "launchd-crash-loop",
+      "started_at": "2026-08-16T19:52:47Z",
+      "status": "pass",
+      "summary": {
+        "agent_recovered": true
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:53:07Z",
+      "stage": "offline-runtime",
+      "started_at": "2026-08-16T19:53:05Z",
+      "status": "pass",
+      "summary": {
+        "network_denied_doctor": "pass",
+        "network_denied_mps": "pass"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:53:17Z",
+      "stage": "uninstall",
+      "started_at": "2026-08-16T19:53:07Z",
+      "status": "pass",
+      "summary": {
+        "all_six_formulae_absent": true,
+        "launchd_jobs_absent": true
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:53:37Z",
+      "stage": "baseline-restore",
+      "started_at": "2026-08-16T19:53:17Z",
+      "status": "pass",
+      "summary": {
+        "linked_version": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:54:51Z",
+      "stage": "upgrade",
+      "started_at": "2026-08-16T19:53:37Z",
+      "status": "pass",
+      "summary": {
+        "from": "0.1.2",
+        "to": "0.2.1-rc.4"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:55:00Z",
+      "stage": "rollback",
+      "started_at": "2026-08-16T19:54:51Z",
+      "status": "pass",
+      "summary": {
+        "from": "0.2.1-rc.4",
+        "state_preserved": true,
+        "to": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-16T19:55:00Z",
+      "stage": "tap-restored",
+      "started_at": "2026-08-16T19:55:00Z",
+      "status": "pass",
+      "summary": {
+        "worktree_clean": true
+      }
+    }
+  ]
+}
