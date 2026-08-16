@@ -8,6 +8,9 @@ envelope; it does not claim per-SKU validation for other M-series chips. It
 covers formula-graph closure, launchd behavior, filesystem and UDS contracts,
 packaged-only discovery, the PyTorch MPS capability, deploy smoke, offline
 checks, upgrade continuity from the CLI-only formula, rollback, and uninstall.
+The installed-registry stage also proves that live M1 Pro detection selects
+the exact Production row instead of the lower-priority M-series Preview
+fallback, while retaining the fallback's 16 GiB admission ceiling.
 
 The harness mutates Homebrew state. Close unrelated Homebrew work first and
 run it only on the validation Mac. It refuses a dirty TensorPlate tap
