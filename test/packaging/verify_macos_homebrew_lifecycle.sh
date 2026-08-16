@@ -34,8 +34,10 @@ grep -Fq 'serving_health.get("active_model_id") == expected_deployment' "$harnes
 grep -Fq '"supervision_healthy_when_configured": supervision_healthy' "$harness"
 grep -Fq 'sanitized-transcript.json' "$harness"
 grep -Fq 'run_stage m1-exact-row verify_m1_exact_row' "$harness"
-grep -Fq '"family_row_not_selected": family_row not in message' "$harness"
+grep -Fq '"family_row_not_selected": selected_row != family_row' "$harness"
 grep -Fq '"family_row_16_gib_ceiling"' "$harness"
+grep -Fq 'current-run agent log contains no platform admission decision' "$harness"
+grep -Fq 'agent_error_log_start="$(stat -f' "$harness"
 
 macos_install_doc="${repo_root}/docs/install/macos-cli.md"
 uninstall_block="$(

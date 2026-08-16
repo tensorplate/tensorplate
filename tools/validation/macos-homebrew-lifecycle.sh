@@ -151,6 +151,7 @@ active_stage=""
 active_stage_log=""
 active_stage_started=""
 lifecycle_marker=""
+agent_error_log_start=0
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -523,30 +524,45 @@ verify_packaged_closure() {
 verify_m1_exact_row() {
   prefix="$(brew --prefix)"
   doctor_output="${work_dir}/doctor-m1-exact-row.json"
+  current_run_agent_log="${work_dir}/agent-error-current-run.log"
   tensorplate doctor --output json >"$doctor_output"
+  tail -c "+$((agent_error_log_start + 1))" \
+    "${prefix}/var/log/tensorplate/agent.error.log" >"$current_run_agent_log"
   python3 - \
     "$doctor_output" \
+    "$current_run_agent_log" \
     "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" \
     "${prefix}/share/tensorplate/platform/rows/macos26-apple-m-series-preview.json" \
     >"${evidence_dir}/m1-exact-row.json" <<'PY'
 import json
+import re
 import sys
 
-doctor_path, exact_path, family_path = sys.argv[1:]
+doctor_path, agent_log_path, exact_path, family_path = sys.argv[1:]
 payload = json.load(open(doctor_path, encoding="utf-8"))["payload"]
 findings = {item["id"]: item for item in payload["findings"]}
 profile = findings["platform_profile"]
 exact = json.load(open(exact_path, encoding="utf-8"))
 family = json.load(open(family_path, encoding="utf-8"))
+agent_log = open(agent_log_path, encoding="utf-8").read()
 
 exact_row = "macos26-m1pro-16gb"
 family_row = "macos26-apple-m-series-preview"
-message = profile["message"]
+matches = re.findall(
+    r"platform admission: row=(\S+) reason=(\S+) "
+    r"max_resident_model_memory=(\d+)",
+    agent_log,
+)
+if not matches:
+    raise SystemExit("current-run agent log contains no platform admission decision")
+selected_row, reason, memory_ceiling = matches[-1]
 checks = {
     "doctor_has_no_failures": payload["failing"] == 0,
     "platform_profile_ok": profile["status"] == "ok",
-    "exact_row_selected": exact_row in message,
-    "family_row_not_selected": family_row not in message,
+    "exact_row_selected": selected_row == exact_row,
+    "family_row_not_selected": selected_row != family_row,
+    "admission_reason_clear": reason == "none",
+    "admission_memory_ceiling": int(memory_ceiling) == exact["accelerator"]["memory_bytes"],
     "exact_row_production": exact["support_level"] == "Production",
     "family_row_preview": family["support_level"] == "Preview",
     "family_row_16_gib_ceiling": family["accelerator"]["memory_bytes"] == 17179869184,
@@ -556,8 +572,9 @@ if failed:
     raise SystemExit("M1 exact-row checks failed: " + ", ".join(failed))
 print(json.dumps({
     "detected_target": "Apple M1 Pro, 16 GB",
-    "selected_row": exact_row,
+    "selected_row": selected_row,
     "selected_support_level": exact["support_level"],
+    "selected_memory_ceiling_bytes": int(memory_ceiling),
     "family_fallback_row": family_row,
     "family_fallback_selected": False,
     "family_fallback_support_level": family["support_level"],
@@ -567,6 +584,12 @@ PY
 }
 
 start_services() {
+  agent_error_log="$(brew --prefix)/var/log/tensorplate/agent.error.log"
+  if [[ -f "$agent_error_log" ]]; then
+    agent_error_log_start="$(stat -f '%z' "$agent_error_log")"
+  else
+    agent_error_log_start=0
+  fi
   brew services start tensorplate-agent
   brew services start tensorplate-observability
   wait_for_service tensorplate-agent
