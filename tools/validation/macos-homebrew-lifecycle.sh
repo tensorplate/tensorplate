@@ -511,11 +511,12 @@ verify_packaged_closure() {
     "${prefix}/etc/tensorplate" \
     "${prefix}/var/tensorplate" \
     "${prefix}/var/tensorplate/state" \
-    "${prefix}/var/run/tensorplate" \
     "${prefix}/var/log/tensorplate"; do
     [[ "$(stat -f '%Lp' "$directory")" == "750" ]] ||
       die "unexpected mode for ${directory}"
   done
+  [[ "$(stat -f '%Lp' "${prefix}/var/run/tensorplate")" == "700" ]] ||
+    die "unexpected mode for ${prefix}/var/run/tensorplate"
   [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/agent.json")" == "640" ]]
   [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/observability.json")" == "640" ]]
   [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]]
@@ -595,7 +596,7 @@ start_services() {
   wait_for_service tensorplate-agent
   wait_for_service tensorplate-observability
   wait_for_agent_ready
-  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "660" ]]
+  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "600" ]]
   if brew services list | awk '$1 == "tensorplate-serving" {found = 1} END {exit !found}'; then
     die "tensorplate-serving unexpectedly exposes a Homebrew service"
   fi

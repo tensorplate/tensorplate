@@ -75,8 +75,8 @@ the exact path and required mode when a directory or file cannot be secured.
 | `${HOMEBREW_PREFIX}/var/tensorplate/state/` | `0750` | Homebrew user | Agent state and the observability snapshot. |
 | `${HOMEBREW_PREFIX}/var/tensorplate/bundles/staging/` | `0750` | Homebrew user | Verified bundle staging. |
 | `${HOMEBREW_PREFIX}/var/tensorplate/worker-configs/` | `0750` | Homebrew user | Agent-rendered serving configs. |
-| `${HOMEBREW_PREFIX}/var/run/tensorplate/` | `0750` | Homebrew user | Runtime directory for the agent control socket. |
-| `${HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock` | `0660` | Homebrew user | Local CLI-to-agent UDS; the agent applies the mode after binding. |
+| `${HOMEBREW_PREFIX}/var/run/tensorplate/` | `0700` | Homebrew user | Owner-only runtime directory for the agent control socket. |
+| `${HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock` | `0600` | Homebrew user | Owner-only local CLI-to-agent UDS; the agent applies the mode after binding. |
 | `${HOMEBREW_PREFIX}/var/log/tensorplate/` | `0750` | Homebrew user | launchd output and structured diagnostics. |
 | `${HOMEBREW_PREFIX}/var/log/tensorplate/{agent,agent.error,observability,observability.error}.log` | `0640` | Homebrew user | launchd standard output and standard error. |
 | `${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson` | `0640` | Homebrew user | Bounded structured events read by `tensorplate logs`. |

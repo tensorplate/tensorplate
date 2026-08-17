@@ -30,9 +30,9 @@ class TensorplateAgent < Formula
       var/"tensorplate/bundles",
       var/"tensorplate/bundles/staging",
       var/"tensorplate/worker-configs",
-      var/"run/tensorplate",
       var/"log/tensorplate",
-    ].each { |path| secure_directory(path) }
+    ].each { |path| secure_directory(path, 0750) }
+    secure_directory(var/"run/tensorplate", 0700)
     secure_file(etc/"tensorplate/agent.json", 0640)
     secure_log(var/"log/tensorplate/agent.log")
     secure_log(var/"log/tensorplate/agent.error.log")
@@ -57,7 +57,7 @@ class TensorplateAgent < Formula
     assert_match version.to_s, shell_output("#{bin}/tensorplate-agent --version")
     assert_predicate etc/"tensorplate/agent.json", :file?
     assert_equal 0640, (etc/"tensorplate/agent.json").stat.mode & 0777
-    assert_equal 0750, (var/"run/tensorplate").stat.mode & 0777
+    assert_equal 0700, (var/"run/tensorplate").stat.mode & 0777
     assert_match "#{HOMEBREW_PREFIX}/var/run/tensorplate/agent.sock",
                  (etc/"tensorplate/agent.json").read
     assert_predicate share/"tensorplate/platform/rows/macos26-m1pro-16gb.json", :file?
@@ -66,15 +66,15 @@ class TensorplateAgent < Formula
 
   private
 
-  def secure_directory(path)
+  def secure_directory(path, mode)
     odie "TensorPlate path #{path} must not be a symlink" if path.symlink?
 
     path.mkpath
-    path.chmod 0750
+    path.chmod mode
     actual = path.stat.mode & 0777
-    return if path.directory? && actual == 0750
+    return if path.directory? && actual == mode
 
-    odie "TensorPlate requires directory #{path} with mode 0750; found #{format("%04o", actual)}"
+    odie "TensorPlate requires directory #{path} with mode #{format("%04o", mode)}; found #{format("%04o", actual)}"
   rescue SystemCallError => e
     odie "TensorPlate could not secure directory #{path}: #{e.message}"
   end

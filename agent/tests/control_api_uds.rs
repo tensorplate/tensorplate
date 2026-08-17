@@ -42,7 +42,7 @@ fn rt(socket: &Path, req: &ControlRequest) -> ControlResponse {
 }
 
 #[test]
-fn socket_permissions_allow_owner_and_group_only() {
+fn socket_permissions_match_the_platform_trust_boundary() {
     let h = Harness::new();
     let socket = h.config.socket_path.clone().expect("socket");
     let mut server = Server::start(&h.config, h.coord.clone()).expect("start");
@@ -52,7 +52,10 @@ fn socket_permissions_allow_owner_and_group_only() {
         .permissions()
         .mode()
         & 0o777;
-    assert_eq!(mode, tensorplate_protocol::install_paths::mode::SOCKET_0660);
+    assert_eq!(
+        mode,
+        tensorplate_protocol::install_paths::mode::agent_socket()
+    );
 
     server.shutdown();
 }

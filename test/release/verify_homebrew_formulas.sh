@@ -138,6 +138,8 @@ require_service_line "${templates}/tensorplate-observability.rb" \
   "    environment_variables TP_PLATFORM_REGISTRY_DIR: HOMEBREW_PREFIX/\"share/tensorplate/platform\""
 
 agent_formula="${templates}/tensorplate-agent.rb"
+grep -qF 'secure_directory(var/"run/tensorplate", 0700)' "$agent_formula"
+grep -qF 'assert_equal 0700, (var/"run/tensorplate").stat.mode & 0777' "$agent_formula"
 require_service_line "$agent_formula" \
   "                          PYTHONPATH:                   formula_opt_libexec(\"tensorplate-backend-python-pytorch\"),"
 require_service_line "$agent_formula" \

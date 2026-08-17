@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Homebrew now confines the agent control surface to the installing user: the
+  runtime directory is `0700` and the Unix-domain socket is `0600`. Native
+  Linux packages retain their dedicated `tensorplate`-group authorization
+  boundary and `0660` socket. The architecture and lifecycle checks now pin
+  both package-specific trust models. (V021-E03-F01-T03)
+
 - A detection failure no longer leaves a machine ungated. Both platform
   lanes wired deploy admission independently, and they disagreed on this
   point: one recorded a failure to read the hardware as a rejection, the

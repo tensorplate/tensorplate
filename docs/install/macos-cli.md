@@ -64,11 +64,12 @@ state is under `$(brew --prefix)/var/tensorplate`, and the agent socket is:
 $(brew --prefix)/var/run/tensorplate/agent.sock
 ```
 
-Formula post-install hooks create the required directories with mode `0750`,
-set service configs to `0640`, set the CLI config to `0644`, and fail with the
-affected path if those modes cannot be enforced. The agent binds the socket
-with mode `0660`. Services and the interactive CLI run as the same Homebrew
-user, so no macOS system account or group membership change is required.
+Formula post-install hooks create the runtime socket directory with mode
+`0700` and other managed directories with mode `0750`, set service configs to
+`0640`, set the CLI config to `0644`, and fail with the affected path if those
+modes cannot be enforced. The agent binds the socket with mode `0600`.
+Services and the interactive CLI run as the same Homebrew user, so no macOS
+system account, shared group access, or group membership change is required.
 
 The packaged `tensorplate` launcher selects the installed CLI config by
 default, which makes local commands use that UDS. An explicit `--config`
