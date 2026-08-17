@@ -1,0 +1,126 @@
+{
+  "schema_version": "1",
+  "result": "pass",
+  "started_at": "2026-08-17T19:42:17Z",
+  "finished_at": "2026-08-17T19:46:39Z",
+  "harness_revision": "073c518ca57190209a491588d7ada715637b64f7",
+  "candidate": {
+    "declared_version": "0.2.1-rc.5",
+    "formula_count": 6,
+    "source_revision": "073c518ca57190209a491588d7ada715637b64f7",
+    "source_url": "https://github.com/tensorplate/tensorplate/archive/073c518ca57190209a491588d7ada715637b64f7.tar.gz",
+    "source_sha256": "59b99dbd22833dc331ff812746cc90d470ad806af94f2da551fe975868a0074d",
+    "formula_versions": {
+      "tensorplate": "0.2.1-rc.5",
+      "tensorplate-agent": "0.2.1-rc.5",
+      "tensorplate-backend-python-pytorch": "0.2.1-rc.5",
+      "tensorplate-cli": "0.2.1-rc.5",
+      "tensorplate-observability": "0.2.1-rc.5",
+      "tensorplate-serving": "0.2.1-rc.5"
+    }
+  },
+  "host": {
+    "architecture": "arm64",
+    "chip": "Apple M1 Pro",
+    "homebrew_version": "6.0.13-107-g9a1cb43",
+    "macos_build": "25F84",
+    "macos_version": "26.5.2",
+    "memory": "16 GB",
+    "model": "MacBook Pro"
+  },
+  "platform_admission": {
+    "detected_target": "Apple M1 Pro, 16 GB",
+    "selected_row": "macos26-m1pro-16gb",
+    "selected_support_level": "Production",
+    "selected_memory_ceiling_bytes": 17179869184,
+    "family_fallback_row": "macos26-apple-m-series-preview",
+    "family_fallback_selected": false,
+    "family_fallback_support_level": "Preview",
+    "family_fallback_memory_ceiling_bytes": 17179869184
+  },
+  "accelerator": {
+    "accelerator_runtime_available": true,
+    "accelerator_runtime_built": true,
+    "accelerator_runtime_version": "26.5.2",
+    "backend_name": "python_pytorch",
+    "framework_version": "2.13.0",
+    "python_version": "3.14.7"
+  },
+  "deploy_input": {
+    "backend_hint": "python_pytorch",
+    "backend_profile": "mps_fixture",
+    "bundle_name": "mps-python-pytorch-smoke",
+    "bundle_version": "0.1.0",
+    "device": "mps",
+    "model_artifact": "mps-smoke.json",
+    "model_artifact_digest": "sha256:d189c7eabc4cd5a77c91222eab51ed7030c98f36a897c47265ce63d787e42492"
+  },
+  "packaged_runtime": {
+    "formula_graph_closed": true,
+    "all_six_formulae_installed": true,
+    "runtime_directory_mode": "0700",
+    "agent_socket_mode": "0600",
+    "permission_assertions_source": "packaged-closure and launchd-start stages",
+    "deployment_id": "wave-2b-macos-deploy-smoke-20260817T194216Z",
+    "deployment_phase": "active",
+    "agent_state": "ready",
+    "status_severity": "ready",
+    "serving_endpoint": "ready",
+    "serving_health_named_expected_deployment": true,
+    "mps_tensor_operation_required_for_load": true,
+    "supervision_state": "not_configured",
+    "launchd_jobs": [
+      "tensorplate-agent",
+      "tensorplate-observability"
+    ],
+    "serving_has_independent_launchd_job": false
+  },
+  "lifecycle": {
+    "clean_install": "pass",
+    "launchd_restart": "pass",
+    "launchd_crash_loop_recovery": "pass",
+    "network_denied_doctor_without_agent_probe": "pass",
+    "network_denied_mps_probe": "pass",
+    "uninstall": "pass",
+    "baseline_version": "0.1.2",
+    "upgrade": "0.1.2 -> 0.2.1-rc.5",
+    "rollback": "0.2.1-rc.5 -> 0.1.2",
+    "state_preserved_across_rollback": true
+  },
+  "stages": [
+    "host-facts",
+    "formula-pin",
+    "deploy-input",
+    "baseline",
+    "tap-trust",
+    "clean-install",
+    "packaged-closure",
+    "launchd-start",
+    "m1-exact-row",
+    "mps-capability",
+    "deploy-smoke",
+    "launchd-restart",
+    "launchd-crash-loop",
+    "offline-runtime",
+    "uninstall",
+    "baseline-restore",
+    "upgrade",
+    "rollback",
+    "tap-restored"
+  ],
+  "restored_state": {
+    "baseline_linked_version": "0.1.2",
+    "candidate_services_absent": true,
+    "tap_worktree_clean": true,
+    "temporary_formula_trust_removed": true
+  },
+  "scope": {
+    "hardware_validation_target": "Apple M1 Pro, 16 GB",
+    "m_series_per_sku_validation_claimed": false,
+    "deploy_input": "checked-in MPS-backed validation fixture bundle",
+    "real_model_claimed": false,
+    "raw_logs_committed": false,
+    "raw_logs_exclusion_reason": "raw service and launchctl output contains operator-local paths and environment values",
+    "sanitized_transcript": "macos-homebrew-lifecycle-m1pro-2026-08-17-transcript.json"
+  }
+}

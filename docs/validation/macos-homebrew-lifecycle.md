@@ -86,12 +86,15 @@ input, and deploy result to the pull request. Keep the raw `*.log` files
 local; the transcript contains only allowlisted structured results and
 excludes operator paths and environment values.
 
-The current post-reconciliation Apple M1 Pro evidence is committed as the
-[`curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-16.json)
+The current post-hardening Apple M1 Pro evidence is committed as the
+[`curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17.json)
 and its
-[`sanitized transcript`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-16-transcript.json).
-Both were produced from the immutable merged feature head recorded in the
-formula pin and include the installed-agent exact-row decision. The
+[`sanitized transcript`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17-transcript.json).
+Both were produced from the immutable implementation head recorded in the
+formula pin and include the installed-agent exact-row decision plus the
+owner-only runtime-directory and agent-socket assertions. The evidence-only
+descendant does not alter the validated runtime. The
+[`previous post-reconciliation run`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-16.json),
 [`previous corrected rehearsal`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-02.json)
 and
 [`initial rehearsal`](./evidence/macos-homebrew-lifecycle-m1pro-2026-07-29.json)
