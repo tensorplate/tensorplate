@@ -78,8 +78,13 @@ rationale:
 
 - The agent and CLI run on the same device in v0.1.0. UDS keeps the
   attack surface off the loopback interface entirely.
-- Restrictive socket permissions (`0o600`, owner-only) match the trust
-  model: only operators on the device may mutate state.
+- Socket permissions follow the package trust boundary. Homebrew uses an
+  owner-only runtime directory (`0o700`) and socket (`0o600`) because the
+  agent service and interactive CLI run as the same macOS user. Native Linux
+  packages use a `tensorplate`-owned runtime directory (`0o750`) and socket
+  (`0o660`), where membership in the dedicated `tensorplate` group is the
+  explicit operator authorization boundary. Neither channel grants world
+  access.
 - The wire format is **newline-delimited JSON**: one request per
   connection, one response, then close. This avoids reinventing HTTP and
   keeps the test surface small.

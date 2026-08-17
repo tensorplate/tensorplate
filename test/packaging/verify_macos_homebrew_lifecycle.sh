@@ -38,6 +38,8 @@ grep -Fq '"family_row_not_selected": selected_row != family_row' "$harness"
 grep -Fq '"family_row_16_gib_ceiling"' "$harness"
 grep -Fq 'current-run agent log contains no platform admission decision' "$harness"
 grep -Fq 'agent_error_log_start="$(stat -f' "$harness"
+grep -Fq 'var/run/tensorplate")" == "700"' "$harness"
+grep -Fq 'var/run/tensorplate/agent.sock")" == "600"' "$harness"
 
 macos_install_doc="${repo_root}/docs/install/macos-cli.md"
 uninstall_block="$(

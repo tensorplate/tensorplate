@@ -149,8 +149,24 @@ pub mod mode {
     pub const FILE_0640: u32 = 0o0640;
     /// Mode for the CLI config which operators may read directly.
     pub const FILE_0644: u32 = 0o0644;
-    /// Mode for the agent control socket. Group-readable, world-unreadable.
+    /// Owner-only mode for a same-user agent control socket.
+    pub const SOCKET_0600: u32 = 0o0600;
+    /// Group-accessible mode for the native-package agent control socket.
     pub const SOCKET_0660: u32 = 0o0660;
+
+    /// Agent control socket mode for the compiled platform.
+    ///
+    /// Homebrew services and the interactive CLI share one macOS user, so the
+    /// socket is owner-only there. Native Linux packages use the dedicated
+    /// `tensorplate` group to grant local operators access.
+    #[must_use]
+    pub const fn agent_socket() -> u32 {
+        if cfg!(target_os = "macos") {
+            SOCKET_0600
+        } else {
+            SOCKET_0660
+        }
+    }
 }
 
 /// Convenience helper returning the canonical config path for the agent.
@@ -341,7 +357,17 @@ mod tests {
         assert_eq!(mode::DIR_1775, 0o1775);
         assert_eq!(mode::FILE_0640, 0o0640);
         assert_eq!(mode::FILE_0644, 0o0644);
+        assert_eq!(mode::SOCKET_0600, 0o0600);
         assert_eq!(mode::SOCKET_0660, 0o0660);
+    }
+
+    #[test]
+    fn agent_socket_mode_matches_the_platform_trust_model() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(mode::agent_socket(), mode::SOCKET_0600);
+
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(mode::agent_socket(), mode::SOCKET_0660);
     }
 
     #[test]
