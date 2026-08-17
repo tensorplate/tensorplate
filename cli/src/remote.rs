@@ -1027,6 +1027,20 @@ fn import_dir_for(entry: &DeviceEntry) -> String {
     )
 }
 
+/// Whether an existing import name can be joined beneath the import root.
+///
+/// New deployment IDs follow the stricter bounded protocol policy. Cleanup
+/// also has to recognize safe names created by older clients, or those legacy
+/// directories can never be reclaimed.
+fn is_safe_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
 // ── Import pruning ─────────────────────────────────────────────────────────
 
 /// Result of a `device prune`.
@@ -1062,7 +1076,7 @@ pub fn prune_imports(
         let is_protected = protected.contains(name);
         let within_keep = keep.map_or(false, |k| index < k);
         let newer_than_cutoff = cutoff.map_or(false, |c| *mtime >= c);
-        if is_protected || within_keep || newer_than_cutoff || !is_valid_deployment_id(name) {
+        if is_protected || within_keep || newer_than_cutoff || !is_safe_path_segment(name) {
             kept.push(name.clone());
             continue;
         }
@@ -1111,7 +1125,7 @@ fn protected_import_names(
             .and_then(|a| a.get(key))
             .and_then(|record| record.get("deployment_id"))
             .and_then(Value::as_str)
-            .filter(|id| is_valid_deployment_id(id))
+            .filter(|id| is_safe_path_segment(id))
         {
             protected.insert(id.to_string());
         }
@@ -1121,7 +1135,7 @@ fn protected_import_names(
         .and_then(|tx| tx.get("bundle_path"))
         .and_then(Value::as_str)
         .and_then(|path| import_name_from_path(import_dir, path))
-        .filter(|name| is_valid_deployment_id(name))
+        .filter(|name| is_safe_path_segment(name))
     {
         protected.insert(name);
     }
@@ -1698,6 +1712,40 @@ mod tests {
             rm_args[0][2],
             "/var/lib/tensorplate/bundles/import/deploy-c"
         );
+    }
+
+    #[test]
+    fn prune_protects_active_and_reclaims_stale_safe_legacy_names() {
+        let active = "a".repeat(tensorplate_protocol::MAX_DEPLOYMENT_ID_BYTES + 1);
+        let stale = "b".repeat(tensorplate_protocol::MAX_DEPLOYMENT_ID_BYTES + 1);
+        for legacy in [&active, &stale] {
+            assert!(is_safe_path_segment(legacy));
+            assert!(!is_valid_deployment_id(legacy));
+        }
+        let status = serde_json::json!({
+            "schema_version": "0.1",
+            "command": "status",
+            "status": "ok",
+            "payload": {"agent": {"active": {"deployment_id": active}}},
+        })
+        .to_string();
+        let listed = format!("999000 {active}\n999100 {stale}\n");
+        let runner = ScriptedRunner::new(vec![
+            ScriptedRunner::out(0, &status),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(0, &listed),
+            ScriptedRunner::out(0, ""),
+        ]);
+
+        let report = prune_imports(&runner, &entry("host"), None, Some(1)).unwrap();
+
+        assert_eq!(report.deleted, vec![stale.clone()]);
+        assert_eq!(report.kept, vec![active]);
+        let expected = format!("/var/lib/tensorplate/bundles/import/{stale}");
+        assert!(runner.raw_args.borrow().iter().any(|args| {
+            args.first().map(String::as_str) == Some("rm")
+                && args.get(2).map(String::as_str) == Some(expected.as_str())
+        }));
     }
 
     #[test]

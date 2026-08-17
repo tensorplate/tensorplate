@@ -40,7 +40,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Deployment identifiers are now constrained to one bounded,
   filesystem-safe path segment at protocol, agent, and CLI boundaries before
   the agent creates transaction state or derives a staging path. Local and
-  device-routed deploys share the same policy.
+  device-routed deploys share the same policy. Import pruning continues to
+  recognize longer filesystem-safe names created by older clients, so stale
+  legacy imports remain reclaimable.
 
 ### Added
 
@@ -548,7 +550,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   platform feature keys off. `config/schemas/platform_support_row.json`
   defines one platform row (OS with exact version and image
   identity, kernel/driver stack, CPU architecture and vendor, accelerator
-  accelerator identity with exact matching by default and an explicit,
+  identity with exact matching by default and an explicit,
   lower-priority family policy, required memory size, memory profile reference,
   and partition posture, backend package sets per channel, model-class row
   pointers, per-signal gate semantics, support level, provenance, validation

@@ -16,7 +16,7 @@ what does `tensorplate doctor` check.
 
 ## Linux package layout
 
-## Users and groups
+### Users and groups
 
 | Identity | Purpose |
 | --- | --- |
@@ -27,7 +27,7 @@ Removing a tensorplate package never removes the `tensorplate` user or
 group. Adding the user to `video`, `render`, or `dialout` for hardware
 access is a site policy and is left to the operator.
 
-## Directories
+### Directories
 
 | Path | Owner:Group | Mode | Created by | Purpose |
 | --- | --- | --- | --- | --- |
@@ -46,7 +46,7 @@ access is a site policy and is left to the operator.
 | `/usr/share/tensorplate/platform/` | `root:tensorplate` | `0750` | `tensorplate-common` payload; mode applied by `install-paths.sh` | Platform support registry (`rows/` and `roadmap_targets/`) read by the agent, `doctor`, and the observability service. Group-readable, not world-readable: a caller outside the `tensorplate` group can stat it but not read it. |
 | `/usr/lib/tensorplate/` | `root:root` | `0755` | dpkg | Holds the agent-supervised `tensorplate-serving` binary and optional backend payloads. |
 
-## Files
+### Files
 
 | Path | Owner:Group | Mode | Conffile? | Purpose |
 | --- | --- | --- | --- | --- |
