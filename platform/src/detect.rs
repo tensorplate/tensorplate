@@ -433,7 +433,7 @@ pub fn identify_platform(sources: &HostSources) -> Result<PlatformReport, Platfo
                 sku: sku.to_string(),
                 partitioned: false,
             },
-            memory_bytes,
+            memory_bytes: Some(memory_bytes),
             memory_profile: PlatformMemoryProfileName::UnifiedMemory,
         })
     } else {
@@ -455,8 +455,7 @@ pub fn identify_platform(sources: &HostSources) -> Result<PlatformReport, Platfo
                 memory_bytes: sources
                     .proc_meminfo
                     .as_deref()
-                    .and_then(mem_total_from_meminfo)
-                    .unwrap_or(0),
+                    .and_then(mem_total_from_meminfo),
                 memory_profile: PlatformMemoryProfileName::UnifiedMemory,
             }
         })

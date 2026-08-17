@@ -52,7 +52,7 @@ fn m1_pro_resolves_to_the_production_row_and_publishes_unified_memory() {
         identify_platform(&sources("macos26-m1pro-16gb")).expect("M1 Pro detection succeeds");
     let observed = report.accelerator.as_ref().expect("Apple accelerator");
     assert_eq!(observed.identity.sku, "Apple M1 Pro");
-    assert_eq!(observed.memory_bytes, 17_179_869_184);
+    assert_eq!(observed.memory_bytes, Some(17_179_869_184));
     assert_eq!(
         observed.memory_profile,
         PlatformMemoryProfileName::UnifiedMemory
@@ -73,7 +73,7 @@ fn m1_pro_resolves_to_the_production_row_and_publishes_unified_memory() {
         capability.memory_profile(),
         PlatformMemoryProfileName::UnifiedMemory
     );
-    assert_eq!(capability.detected_memory_bytes(), 17_179_869_184);
+    assert_eq!(capability.detected_memory_bytes(), Some(17_179_869_184));
     assert_eq!(capability.row_memory_budget_bytes(), 17_179_869_184);
     assert_eq!(capability.max_resident_model_memory(), 17_179_869_184);
 }
@@ -94,7 +94,7 @@ fn m4_pro_resolves_to_the_family_preview_with_a_conservative_memory_ceiling() {
         .expect("the family Preview row publishes a bounded capability");
     assert_eq!(
         capability.detected_memory_bytes(),
-        24_u64 * 1024 * 1024 * 1024
+        Some(24_u64 * 1024 * 1024 * 1024)
     );
     assert_eq!(
         capability.row_memory_budget_bytes(),

@@ -16,7 +16,9 @@ use crate::identity::AcceleratorIdentity;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorObservation {
     pub identity: AcceleratorIdentity,
-    pub memory_bytes: u64,
+    /// Memory reported by the accelerator probe. Absence means the probe
+    /// retained a usable identity but could not read a trustworthy capacity.
+    pub memory_bytes: Option<u64>,
     pub memory_profile: PlatformMemoryProfileName,
 }
 
@@ -28,7 +30,7 @@ pub struct AcceleratorObservation {
 pub struct PlatformCapability {
     row_id: String,
     memory_profile: PlatformMemoryProfileName,
-    detected_memory_bytes: u64,
+    detected_memory_bytes: Option<u64>,
     row_memory_budget_bytes: u64,
     max_resident_model_memory: u64,
 }
@@ -37,7 +39,7 @@ impl PlatformCapability {
     pub(crate) fn bounded(
         row_id: &str,
         memory_profile: PlatformMemoryProfileName,
-        detected_memory_bytes: u64,
+        detected_memory_bytes: Option<u64>,
         row_memory_budget_bytes: u64,
     ) -> Self {
         Self {
@@ -45,7 +47,13 @@ impl PlatformCapability {
             memory_profile,
             detected_memory_bytes,
             row_memory_budget_bytes,
-            max_resident_model_memory: detected_memory_bytes.min(row_memory_budget_bytes),
+            // A missing reading adds no tighter machine-observed bound. The
+            // validated row budget still caps admission, so this neither
+            // collapses capacity to zero nor leaves deployment unbounded.
+            max_resident_model_memory: detected_memory_bytes
+                .map_or(row_memory_budget_bytes, |detected| {
+                    detected.min(row_memory_budget_bytes)
+                }),
         }
     }
 
@@ -60,7 +68,7 @@ impl PlatformCapability {
     }
 
     #[must_use]
-    pub fn detected_memory_bytes(&self) -> u64 {
+    pub fn detected_memory_bytes(&self) -> Option<u64> {
         self.detected_memory_bytes
     }
 

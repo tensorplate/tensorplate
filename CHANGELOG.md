@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A supported discrete NVIDIA GPU whose framebuffer size cannot be read now
+  retains the validated platform row's memory budget as its deploy ceiling.
+  Missing framebuffer evidence no longer becomes a zero-byte limit that
+  rejects every bundle with a positive memory estimate, while the row budget
+  continues to prevent admission from becoming unbounded. (V021-E02-F02-T01)
+
 - Homebrew now confines the agent control surface to the installing user: the
   runtime directory is `0700` and the Unix-domain socket is `0600`. Native
   Linux packages retain their dedicated `tensorplate`-group authorization

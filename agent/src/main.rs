@@ -289,7 +289,7 @@ fn observe_platform() -> Result<(PlatformReport, ObservedStack), PlatformProbeEr
                 // framebuffer is not its row's nominal capacity, which is
                 // why the row is matched on SKU alone. It is carried so a
                 // resolved capability can bound the memory ceiling.
-                memory_bytes: card.exact.memory_total_bytes.unwrap_or(0),
+                memory_bytes: card.exact.memory_total_bytes,
                 memory_profile: PlatformMemoryProfileName::DiscreteGpu,
                 identity: card.identity,
             });

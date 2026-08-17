@@ -69,7 +69,7 @@ fn report_of(
             let declared = row.accelerator().expect("a row with an accelerator");
             AcceleratorObservation {
                 identity,
-                memory_bytes: declared.memory_bytes,
+                memory_bytes: Some(declared.memory_bytes),
                 memory_profile: declared.memory_profile,
             }
         }),
@@ -127,6 +127,61 @@ fn the_same_card_unpartitioned_is_admitted() {
             panic!("a non-partitioned supported card must be admitted, got {other:?}")
         }
     }
+}
+
+#[test]
+fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacity() {
+    let registry = registry();
+    let row = registry
+        .row("ubuntu2404-x86-l4-g2s8")
+        .expect("the L4 row is committed");
+    let declared = row.accelerator().expect("the L4 row has an accelerator");
+    let report = PlatformReport {
+        host: HostReport {
+            identity: host_of(row),
+            exact: ExactHostFacts::default(),
+        },
+        accelerator: Some(AcceleratorObservation {
+            identity: AcceleratorIdentity {
+                sku: declared.sku.clone(),
+                partitioned: false,
+            },
+            memory_bytes: None,
+            memory_profile: declared.memory_profile,
+        }),
+    };
+
+    let admission = PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default());
+    let PlatformAdmission::Supported {
+        capability: Some(capability),
+        ..
+    } = &admission
+    else {
+        panic!("a supported L4 with an unreadable framebuffer must remain admitted");
+    };
+    assert_eq!(capability.detected_memory_bytes(), None);
+    assert_eq!(
+        capability.max_resident_model_memory(),
+        declared.memory_bytes,
+        "an absent reading adds no tighter bound than the validated row budget"
+    );
+
+    let harness = common::Harness::new();
+    let mut config = harness.config.clone();
+    config.device_memory_bytes = None;
+    admission.apply_memory_limit(&mut config);
+    assert_eq!(config.device_memory_bytes, Some(declared.memory_bytes));
+
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "unknown-framebuffer",
+        common::BundleSpec {
+            memory_estimate_bytes: Some(1024 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    tensorplate_agent::bundle::verify(&bundle, &config)
+        .expect("a positive estimate below the row budget must remain admissible");
 }
 
 #[test]
