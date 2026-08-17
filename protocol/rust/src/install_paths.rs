@@ -156,15 +156,15 @@ pub mod mode {
 
     /// Agent control socket mode for the compiled platform.
     ///
-    /// Homebrew services and the interactive CLI share one macOS user, so the
-    /// socket is owner-only there. Native Linux packages use the dedicated
-    /// `tensorplate` group to grant local operators access.
+    /// Native Linux packages use the dedicated `tensorplate` group to grant
+    /// local operators access. Homebrew services and the interactive CLI share
+    /// one macOS user, and every non-Linux target defaults to owner-only access.
     #[must_use]
     pub const fn agent_socket() -> u32 {
-        if cfg!(target_os = "macos") {
-            SOCKET_0600
-        } else {
+        if cfg!(target_os = "linux") {
             SOCKET_0660
+        } else {
+            SOCKET_0600
         }
     }
 }
@@ -363,11 +363,11 @@ mod tests {
 
     #[test]
     fn agent_socket_mode_matches_the_platform_trust_model() {
-        #[cfg(target_os = "macos")]
-        assert_eq!(mode::agent_socket(), mode::SOCKET_0600);
-
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         assert_eq!(mode::agent_socket(), mode::SOCKET_0660);
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(mode::agent_socket(), mode::SOCKET_0600);
     }
 
     #[test]
