@@ -53,8 +53,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             llvm-15 \
@@ -154,8 +154,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             llvm-15 \
@@ -228,8 +228,8 @@ jobs:
 
       - name: Install clang-format
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-format-15
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends clang-format-15
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
       - name: Check formatting
         shell: bash
@@ -272,8 +272,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             clang-tidy-15

@@ -80,8 +80,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             apt-utils \
             build-essential \
             debhelper \
@@ -180,10 +180,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
+          timeout 600 sudo apt-get update
           # cmake comes from the runner image, not apt: jammy ships 3.22 and the
           # tree requires 3.25 (same reason as the release workflow's amd64 job).
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             build-essential \
             clang-15 \
             debhelper \
@@ -264,8 +264,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          timeout 600 sudo apt-get update
+          timeout 600 sudo apt-get install -y --no-install-recommends \
             apt-utils \
             build-essential \
             debhelper \
