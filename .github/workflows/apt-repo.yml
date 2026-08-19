@@ -134,8 +134,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             apt-utils \
             dpkg-dev \
             gnupg \

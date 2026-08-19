@@ -53,8 +53,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             llvm-15 \
@@ -154,8 +154,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             llvm-15 \
@@ -204,7 +204,10 @@ jobs:
   format:
     name: clang-format
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    # Budgeted for the retrying apt wrapper's worst case (~19 min of bounded
+    # attempts across two calls), not for the ~2 min this job actually takes.
+    # At 10 a job that was recovering got cut off mid-retry.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # A stalled mirror is what costs time here, not a failing one: apt
@@ -228,8 +231,8 @@ jobs:
 
       - name: Install clang-format
         run: |
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends clang-format-15
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends clang-format-15
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
       - name: Check formatting
         shell: bash
@@ -272,8 +275,8 @@ jobs:
 
       - name: Install build tools
         run: |
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             ninja-build \
             clang-15 \
             clang-tidy-15

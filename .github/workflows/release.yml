@@ -155,12 +155,12 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout 600 sudo apt-get update
+          tools/ci/apt-get.sh update
           # cmake is deliberately NOT installed from apt: jammy ships 3.22
           # and the tree requires 3.25. The runner image's preinstalled cmake
           # is newer, which is also what cpp.yml relies on. Assert it rather
           # than letting a runner-image change fail with an obscure error.
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             build-essential \
             ca-certificates \
             clang-15 \
@@ -429,8 +429,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             build-essential \
             ca-certificates \
             clang \
@@ -814,8 +814,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout 600 sudo apt-get update
-          timeout 600 sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             apt-utils \
             dpkg-dev \
             gnupg \
