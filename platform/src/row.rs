@@ -795,6 +795,14 @@ pub enum AdmissionPosture {
 }
 
 impl AdmissionPosture {
+    /// Every posture, in floor order.
+    ///
+    /// Exists so the agent config schema and this enum can be asserted to
+    /// agree: adding a variant here without declaring it in
+    /// `config/schemas/agent.json` fails that test rather than shipping an
+    /// operator override the schema rejects and the runtime accepts.
+    pub const ALL: [Self; 2] = [Self::TechnicalPrerequisites, Self::ValidatedRowRequired];
+
     /// The strictest posture a machine matching `row` may be judged at.
     ///
     /// A row that gates on thermal, power or throttle as

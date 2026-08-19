@@ -54,15 +54,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   edge row's requirement is a property of the hardware rather than a default
   that can be switched off. An unrecognised posture is a startup error, not
   a silent fallback — a value a future release adds must not be quietly
-  ignored by an older agent running at a strictness nobody chose.
+  ignored by an older agent running at a strictness nobody chose. The
+  option is declared in `config/schemas/agent.json`, which sets
+  `additionalProperties: false` — without that, schema-aware validators
+  would reject the override while the agent accepted it.
 
   **Nothing consults the posture yet and behaviour is unchanged.** It is
   reported, with its provenance, so an operator can see which strictness
   they are running at and whether it came from the row or from their own
   configuration. That is what lets them pin it, and what keeps a future
   change to the default from being a silent behaviour change on upgrade.
-
-### Added
 
 - The PCI bus is now read, so an accelerator that is physically present can
   be told from one that is absent. `nvidia-smi` needs a working driver to

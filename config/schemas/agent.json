@@ -97,6 +97,11 @@
       "enum": ["any", "jetson-orin", "jetson-thor", "kria", "x86_64"],
       "default": "any"
     },
+    "admission_posture": {
+      "type": "string",
+      "enum": ["technical_prerequisites", "validated_row_required"],
+      "description": "How strictly this machine must be judged before a deploy is admitted. Omit to let the matched platform row's own floor decide. A value here can only make admission stricter: it is resolved as the maximum of this and the row's floor, so an edge row's requirement cannot be switched off by configuration. An unrecognised value is a startup error, not a silent fallback."
+    },
     "worker": {
       "type": "object",
       "additionalProperties": false,
