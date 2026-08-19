@@ -45,8 +45,8 @@ pub use accelerator::{
 };
 pub use capability::{AcceleratorObservation, PlatformCapability};
 pub use detect::{
-    identify, identify_jetson_accelerator, identify_platform, ExactHostFacts, HostReport,
-    HostSources, L4tRelease, PlatformReport,
+    identify, identify_jetson_accelerator, identify_platform, nvidia_pci_functions, ExactHostFacts,
+    HostReport, HostSources, L4tRelease, PlatformReport,
 };
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{

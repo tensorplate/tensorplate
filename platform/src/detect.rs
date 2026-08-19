@@ -74,6 +74,21 @@ pub struct HostSources {
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
     /// Jetson's module capacity is told from its sibling's.
     pub proc_meminfo: Option<String>,
+    /// The PCI bus, one line per function: `<address> <vendor> <device>
+    /// <class>`, assembled from `/sys/bus/pci/devices/*/{vendor,device,
+    /// class}`.
+    ///
+    /// `None` on a machine with no PCI bus at all — a Mac, a Jetson —
+    /// which is a signal rather than a failure, the same as every other
+    /// source here.
+    ///
+    /// This is the only way to learn that an accelerator is PHYSICALLY
+    /// PRESENT when its driver cannot say so. `nvidia-smi` needs a working
+    /// driver to answer, so a card whose driver is missing or broken is
+    /// indistinguishable from no card at all — and a GPU host in that state
+    /// currently resolves to the CPU-only row and deploys as though it had
+    /// no accelerator.
+    pub pci_devices: Option<String>,
 }
 
 /// What the machine reported before normalization, kept for evidence
@@ -94,6 +109,13 @@ pub struct ExactHostFacts {
     pub reported_machine: Option<String>,
     /// Device model string where the platform has one.
     pub device_model: Option<String>,
+    /// PCI addresses of NVIDIA display or 3D controllers physically
+    /// present, whether or not a driver can talk to them.
+    ///
+    /// Empty on a machine with a PCI bus and no such device; also empty
+    /// where the bus could not be enumerated, which is why the raw source
+    /// is kept in [`HostSources::pci_devices`] rather than only this.
+    pub nvidia_pci_functions: Vec<String>,
 }
 
 /// A detected host: the row-comparable identity plus the exact facts that
@@ -368,6 +390,16 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
         .device_tree_model
         .as_deref()
         .and_then(device_tree_string);
+
+    // Recorded, never matched on. It exists so a later change can tell an
+    // accelerator that is absent from one whose driver cannot answer;
+    // nothing consults it yet, and adding it here rather than to
+    // `HostIdentity` is what keeps matching unchanged.
+    exact.nvidia_pci_functions = sources
+        .pci_devices
+        .as_deref()
+        .map(nvidia_pci_functions)
+        .unwrap_or_default();
 
     let machine_type = sources
         .gce_machine_type
@@ -765,4 +797,42 @@ pub fn mem_total_from_meminfo(body: &str) -> Option<u64> {
         Some("kB") => value.checked_mul(1024),
         _ => None,
     }
+}
+
+/// NVIDIA's PCI vendor id. Stable since the company existed; a device
+/// reporting it is an NVIDIA part regardless of what any driver says.
+const NVIDIA_PCI_VENDOR: &str = "0x10de";
+
+/// PCI addresses of NVIDIA display or 3D controllers in an enumeration.
+///
+/// Reads only the vendor and class columns. The class is checked because a
+/// vendor match alone would also count an audio function — a discrete card
+/// commonly presents an HDMI audio device on the same board, and counting
+/// it would report two accelerators where the machine has one.
+///
+/// A line this cannot parse is skipped rather than failing the whole
+/// enumeration: this fact is evidence, and one malformed line should not
+/// discard the devices either side of it. Nothing matches on the result,
+/// so a skipped line cannot admit a machine it should not.
+#[must_use]
+pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let address = fields.next()?;
+            let vendor = fields.next()?;
+            let _device = fields.next()?;
+            let class = fields.next()?;
+            if !vendor.eq_ignore_ascii_case(NVIDIA_PCI_VENDOR) {
+                return None;
+            }
+            // PCI base class 0x03 is "display controller"; the subclass
+            // separates VGA (0x00) from 3D (0x02). Both are the device an
+            // accelerator presents, and neither is the audio function
+            // (base class 0x04) on the same board.
+            let digits = class.trim_start_matches("0x");
+            digits.len().ge(&2).then_some(())?;
+            (&digits[..2] == "03").then(|| address.to_string())
+        })
+        .collect()
 }

@@ -174,6 +174,7 @@ impl SystemHostProbe {
                 None
             },
             proc_meminfo: self.read("/proc/meminfo")?,
+            pci_devices: self.pci_devices()?,
         })
     }
 
@@ -193,6 +194,54 @@ impl SystemHostProbe {
     /// As [`crate::detect::identify_platform`].
     pub fn detect_platform(&self) -> Result<PlatformReport, PlatformProbeError> {
         identify_platform(&self.sources()?)
+    }
+
+    /// The PCI bus as one line per function: `<address> <vendor> <device>
+    /// <class>`.
+    ///
+    /// The first directory enumeration in this module, so it repeats the
+    /// discipline every single-file read here already follows: a bus that
+    /// is not there is `None` (a Mac and a Jetson have no
+    /// `/sys/bus/pci/devices`, and that is a signal), while a bus that is
+    /// there and cannot be read is an error. Collapsing those would report
+    /// a machine whose sysfs is unreadable as a machine with no devices.
+    ///
+    /// A single function that disappears mid-enumeration is skipped rather
+    /// than failing: hot-unplug is real, and this fact is evidence rather
+    /// than something matching depends on.
+    fn pci_devices(&self) -> Result<Option<String>, PlatformProbeError> {
+        let root = self.path("/sys/bus/pci/devices");
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(PlatformProbeError::Unreadable {
+                    source_name: root.display().to_string(),
+                    detail: err.to_string(),
+                })
+            }
+        };
+        let mut lines = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| PlatformProbeError::Unreadable {
+                source_name: root.display().to_string(),
+                detail: err.to_string(),
+            })?;
+            let address = entry.file_name().to_string_lossy().into_owned();
+            let field = |name: &str| -> Option<String> {
+                std::fs::read_to_string(entry.path().join(name))
+                    .ok()
+                    .map(|value| value.trim().to_string())
+            };
+            let (Some(vendor), Some(device), Some(class)) =
+                (field("vendor"), field("device"), field("class"))
+            else {
+                continue;
+            };
+            lines.push(format!("{address} {vendor} {device} {class}"));
+        }
+        lines.sort();
+        Ok(Some(lines.join("\n")))
     }
 
     /// The machine type, on machines that have one.

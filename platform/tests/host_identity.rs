@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tensorplate_platform::{
-    identify, identify_jetson_accelerator, CpuArchitecture, DetectedPlatform, HostSources,
-    PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
+    identify, identify_jetson_accelerator, nvidia_pci_functions, CpuArchitecture, DetectedPlatform,
+    HostSources, PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -60,6 +60,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         hw_memsize: text("hw_memsize"),
         gce_machine_type: text("gce_machine_type"),
         proc_meminfo: text("proc_meminfo"),
+        pci_devices: text("pci_devices"),
     }
 }
 
@@ -751,4 +752,72 @@ fn the_capacity_band_rejects_what_is_outside_it() {
         !sku_for_kb(8_388_609).starts_with("Jetson Orin Nano 8GB"),
         "above nominal is a different module, not this one"
     );
+}
+
+#[test]
+fn a_card_with_no_working_driver_is_still_visible_on_the_bus() {
+    // The whole point of reading PCI. `nvidia-smi` needs a working driver
+    // to answer, so a card whose driver is missing or broken looks exactly
+    // like no card at all — and such a host currently resolves to the
+    // CPU-only row and deploys as though it had no accelerator.
+    //
+    // The bus does not care about drivers.
+    let bus = "\
+0000:00:03.0 0x1af4 0x1000 0x020000
+0000:00:04.0 0x10de 0x27b8 0x030000
+0000:00:04.1 0x10de 0x22bc 0x040300";
+    let found = nvidia_pci_functions(bus);
+    assert_eq!(
+        found,
+        vec!["0000:00:04.0"],
+        "the display controller is the accelerator; the audio function on \
+         the same board is not a second one"
+    );
+}
+
+#[test]
+fn the_bus_reading_never_reaches_matching() {
+    // This PR records the fact and gates nothing on it. If a later change
+    // wires it into `HostIdentity`, this fails and whoever did it has to
+    // say so deliberately.
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(_, f)| f["row_id"].as_str() == Some("ubuntu2404-x86-l4-g2s8"))
+        .expect("the L4 fixture is committed");
+
+    let mut with_gpu = sources_of(&fixture);
+    with_gpu.pci_devices = Some("0000:00:04.0 0x10de 0x27b8 0x030000".to_string());
+    let mut without = sources_of(&fixture);
+    without.pci_devices = None;
+
+    let seen = identify(&with_gpu).expect("detects");
+    let unseen = identify(&without).expect("detects");
+
+    assert_eq!(
+        seen.exact.nvidia_pci_functions,
+        vec!["0000:00:04.0"],
+        "the fact is recorded"
+    );
+    assert!(unseen.exact.nvidia_pci_functions.is_empty());
+    assert_eq!(
+        seen.identity, unseen.identity,
+        "and it changes no value matching reads"
+    );
+}
+
+#[test]
+fn a_machine_with_no_pci_bus_is_not_a_machine_with_no_devices() {
+    // A Mac and a Jetson have no /sys/bus/pci/devices at all. Absence is a
+    // signal here exactly as it is for every other source; the distinction
+    // that matters is between that and a bus that exists but cannot be
+    // read, which the probe raises rather than reporting as empty.
+    assert!(nvidia_pci_functions("").is_empty());
+    assert!(
+        nvidia_pci_functions("0000:00:03.0 0x1af4 0x1000 0x020000").is_empty(),
+        "a bus with no NVIDIA display controller yields none"
+    );
+    // A malformed line is skipped, not fatal: this is evidence, and one bad
+    // line must not discard the devices either side of it.
+    let ragged = "garbage\n0000:00:04.0 0x10de 0x27b8 0x030000\nalso garbage";
+    assert_eq!(nvidia_pci_functions(ragged), vec!["0000:00:04.0"]);
 }

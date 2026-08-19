@@ -6,6 +6,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- The PCI bus is now read, so an accelerator that is physically present can
+  be told from one that is absent. `nvidia-smi` needs a working driver to
+  answer, which makes a card with a missing or broken driver
+  indistinguishable from no card at all — and such a host resolves to the
+  CPU-only row and deploys as though it had no accelerator, silently.
+
+  Nothing consumes the reading yet and matching is unchanged: it is
+  recorded alongside the other exact facts, which matching never reads.
+  Distinguishing the two cases needs a decision about what to do with the
+  answer, and that decision belongs with the admission work rather than
+  with the observation.
+
+  Vendor and device class are both checked. A discrete card commonly
+  presents an HDMI audio function on the same board under the same vendor,
+  so a vendor-only match would report two accelerators where the machine
+  has one.
+
+  A machine with no PCI bus at all — a Mac, a Jetson — reports absence,
+  which is a signal rather than a failure, exactly as every other source
+  here. A bus that exists and cannot be read is an error: collapsing those
+  would report an unreadable sysfs as a machine with no devices.
+
 ### Fixed
 
 - A supported discrete NVIDIA GPU whose framebuffer size cannot be read now
