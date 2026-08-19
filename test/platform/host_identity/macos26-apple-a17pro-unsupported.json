@@ -1,0 +1,22 @@
+{
+  "row_id": null,
+  "matches_row": false,
+  "provenance": "spec_authored",
+  "provenance_note": "Fail-closed fixture for an Apple chip outside the M-series family; this is not hardware-validation evidence",
+  "sources": {
+    "uname_machine": "arm64",
+    "sw_vers_product_name": "macOS",
+    "sw_vers_product_version": "26.5.2",
+    "sw_vers_build_version": "25F84",
+    "cpu_brand": "Apple A17 Pro",
+    "hw_memsize": "17179869184"
+  },
+  "expect": {
+    "architecture": "arm64",
+    "vendor": "apple",
+    "os_name": "macOS",
+    "os_version": "26",
+    "image_identity": null,
+    "machine_type": null
+  }
+}

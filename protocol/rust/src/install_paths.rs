@@ -109,6 +109,10 @@ pub const AGENT_SOCKET_PATH: &str = "/run/tensorplate/agent.sock";
 /// at `<BACKEND_DESCRIPTOR_DIR>/<backend>/backend.json`.
 pub const BACKEND_DESCRIPTOR_DIR: &str = "/usr/share/tensorplate/backends";
 
+/// Optional override for package channels whose read-only data does not live
+/// under the native-package prefix.
+pub const BACKEND_DESCRIPTOR_DIR_ENV: &str = "TP_BACKEND_DESCRIPTOR_DIR";
+
 /// Descriptor path for the Python/PyTorch backend.
 pub const PYTHON_PYTORCH_BACKEND_DESCRIPTOR: &str =
     "/usr/share/tensorplate/backends/python_pytorch/backend.json";
@@ -121,6 +125,10 @@ pub const PYTHON_PYTORCH_BACKEND_DESCRIPTOR: &str =
 /// observability service all read one registry rather than each carrying
 /// its own copy.
 pub const PLATFORM_REGISTRY_DIR: &str = "/usr/share/tensorplate/platform";
+
+/// Optional override for package channels whose platform registry does not
+/// live under the native-package prefix.
+pub const PLATFORM_REGISTRY_DIR_ENV: &str = "TP_PLATFORM_REGISTRY_DIR";
 
 /// Installed location of the serving worker binary (no systemd unit; the
 /// agent supervises this process — see V01-E09 and the F03 packaging
@@ -141,8 +149,24 @@ pub mod mode {
     pub const FILE_0640: u32 = 0o0640;
     /// Mode for the CLI config which operators may read directly.
     pub const FILE_0644: u32 = 0o0644;
-    /// Mode for the agent control socket. Group-readable, world-unreadable.
+    /// Owner-only mode for a same-user agent control socket.
+    pub const SOCKET_0600: u32 = 0o0600;
+    /// Group-accessible mode for the native-package agent control socket.
     pub const SOCKET_0660: u32 = 0o0660;
+
+    /// Agent control socket mode for the compiled platform.
+    ///
+    /// Native Linux packages use the dedicated `tensorplate` group to grant
+    /// local operators access. Homebrew services and the interactive CLI share
+    /// one macOS user, and every non-Linux target defaults to owner-only access.
+    #[must_use]
+    pub const fn agent_socket() -> u32 {
+        if cfg!(target_os = "linux") {
+            SOCKET_0660
+        } else {
+            SOCKET_0600
+        }
+    }
 }
 
 /// Convenience helper returning the canonical config path for the agent.
@@ -155,6 +179,52 @@ pub fn agent_config_path() -> PathBuf {
 #[must_use]
 pub fn agent_state_dir() -> PathBuf {
     PathBuf::from(STATE_DIR)
+}
+
+fn resolve_directory_override(
+    env_name: &str,
+    value: Option<std::ffi::OsString>,
+    default: &str,
+) -> Result<PathBuf, String> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(PathBuf::from(default));
+    };
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!(
+            "{env_name} must be an absolute path (got `{}`)",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+/// Resolve the backend descriptor directory for the active package channel.
+///
+/// # Errors
+///
+/// Returns an error when [`BACKEND_DESCRIPTOR_DIR_ENV`] is set to a relative
+/// path.
+pub fn backend_descriptor_dir() -> Result<PathBuf, String> {
+    resolve_directory_override(
+        BACKEND_DESCRIPTOR_DIR_ENV,
+        std::env::var_os(BACKEND_DESCRIPTOR_DIR_ENV),
+        BACKEND_DESCRIPTOR_DIR,
+    )
+}
+
+/// Resolve the platform registry directory for the active package channel.
+///
+/// # Errors
+///
+/// Returns an error when [`PLATFORM_REGISTRY_DIR_ENV`] is set to a relative
+/// path.
+pub fn platform_registry_dir() -> Result<PathBuf, String> {
+    resolve_directory_override(
+        PLATFORM_REGISTRY_DIR_ENV,
+        std::env::var_os(PLATFORM_REGISTRY_DIR_ENV),
+        PLATFORM_REGISTRY_DIR,
+    )
 }
 
 /// Convenience helper returning the canonical staging directory.
@@ -287,7 +357,17 @@ mod tests {
         assert_eq!(mode::DIR_1775, 0o1775);
         assert_eq!(mode::FILE_0640, 0o0640);
         assert_eq!(mode::FILE_0644, 0o0644);
+        assert_eq!(mode::SOCKET_0600, 0o0600);
         assert_eq!(mode::SOCKET_0660, 0o0660);
+    }
+
+    #[test]
+    fn agent_socket_mode_matches_the_platform_trust_model() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(mode::agent_socket(), mode::SOCKET_0660);
+
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(mode::agent_socket(), mode::SOCKET_0600);
     }
 
     #[test]
@@ -312,5 +392,32 @@ mod tests {
             "the install scripts must create the registry directory"
         );
         assert_eq!(expected_dir_mode(PLATFORM_REGISTRY_DIR), mode::DIR_0750);
+    }
+
+    #[test]
+    fn install_directory_override_defaults_and_validates() {
+        assert_eq!(
+            resolve_directory_override("TP_TEST_DIR", None, PLATFORM_REGISTRY_DIR)
+                .expect("default resolves"),
+            Path::new(PLATFORM_REGISTRY_DIR)
+        );
+        assert_eq!(
+            resolve_directory_override(
+                "TP_TEST_DIR",
+                Some(std::ffi::OsString::from(
+                    "/opt/homebrew/share/tensorplate/platform",
+                )),
+                PLATFORM_REGISTRY_DIR,
+            )
+            .expect("absolute override resolves"),
+            Path::new("/opt/homebrew/share/tensorplate/platform")
+        );
+        assert!(resolve_directory_override(
+            "TP_TEST_DIR",
+            Some(std::ffi::OsString::from("share/tensorplate/platform")),
+            PLATFORM_REGISTRY_DIR,
+        )
+        .expect_err("relative override is rejected")
+        .contains("must be an absolute path"));
     }
 }

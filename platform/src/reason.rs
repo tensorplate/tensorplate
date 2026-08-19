@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", try_from = "String")]
 pub enum PlatformReason {
-    /// The accelerator SKU is not the exact SKU any row names. Never a
-    /// nearest match: a near-miss SKU is unsupported, not degraded.
+    /// The accelerator SKU matches neither an exact row nor an explicit
+    /// family row. Never a nearest match: a near miss is unsupported, not
+    /// degraded.
     UnsupportedAcceleratorSku,
     /// The OS version is below the row's floor or is not the exact version
     /// a row names.

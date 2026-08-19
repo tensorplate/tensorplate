@@ -48,6 +48,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_product_version: text("sw_vers_product_version"),
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
+        hw_memsize: text("hw_memsize"),
         gce_machine_type: text("gce_machine_type"),
         proc_meminfo: text("proc_meminfo"),
     }
@@ -92,24 +93,32 @@ fn render(findings: &[Finding]) -> String {
         .join("\n")
 }
 
-/// Every Production row, plus the two CPU-only Preview rows, so the
-/// operator-facing output for each is reviewed as a diff.
-const GOLDEN_ROWS: [&str; 7] = [
-    "jetson-orin-nano-8gb-jp62",
-    "macos26-m1pro-16gb",
-    "ubuntu2404-x86-a100-40g-a2hg1",
-    "ubuntu2404-x86-l4-g2s8",
-    "ubuntu2404-x86-rtxpro6000se-g4s48",
-    "ubuntu2204-x86-cpu",
-    "ubuntu2404-x86-cpu",
+/// Every supported row and a representative fixture for it, so the
+/// operator-facing output for each is reviewed as a diff. Family rows use a
+/// member SKU because their canonical display identity is not a detected SKU.
+const GOLDEN_ROWS: [(&str, &str); 8] = [
+    ("jetson-orin-nano-8gb-jp62", "jetson-orin-nano-8gb-jp62"),
+    ("macos26-apple-m-series-preview", "macos26-m2pro-16gb"),
+    ("macos26-m1pro-16gb", "macos26-m1pro-16gb"),
+    (
+        "ubuntu2404-x86-a100-40g-a2hg1",
+        "ubuntu2404-x86-a100-40g-a2hg1",
+    ),
+    ("ubuntu2404-x86-l4-g2s8", "ubuntu2404-x86-l4-g2s8"),
+    (
+        "ubuntu2404-x86-rtxpro6000se-g4s48",
+        "ubuntu2404-x86-rtxpro6000se-g4s48",
+    ),
+    ("ubuntu2204-x86-cpu", "ubuntu2204-x86-cpu"),
+    ("ubuntu2404-x86-cpu", "ubuntu2404-x86-cpu"),
 ];
 
 #[test]
 fn the_host_section_for_every_supported_row_matches_its_golden() {
     let mut rendered = String::new();
-    for name in GOLDEN_ROWS {
-        rendered.push_str(&format!("## {name}\n"));
-        rendered.push_str(&render(&section_for(name)));
+    for (row_id, fixture_name) in GOLDEN_ROWS {
+        rendered.push_str(&format!("## {row_id}\n"));
+        rendered.push_str(&render(&section_for(fixture_name)));
         rendered.push_str("\n\n");
     }
 
@@ -134,8 +143,8 @@ fn the_host_section_for_every_supported_row_matches_its_golden() {
 fn a_supported_row_is_named_as_a_candidate() {
     // The claim that matters per row: the machine the row describes sees
     // its own row offered.
-    for name in GOLDEN_ROWS {
-        let section = section_for(name);
+    for (row_id, fixture_name) in GOLDEN_ROWS {
+        let section = section_for(fixture_name);
         let profile = section
             .iter()
             .find(|f| f.id == FindingId::PlatformProfile)
@@ -143,11 +152,11 @@ fn a_supported_row_is_named_as_a_candidate() {
         assert_eq!(
             profile.status,
             FindingStatus::Pass,
-            "{name}: a committed row's own host must match something"
+            "{row_id}: a committed row's representative host must match something"
         );
         assert!(
-            profile.message.contains(name),
-            "{name}: its own row must be among the candidates: {}",
+            profile.message.contains(row_id),
+            "{row_id}: its own row must be among the candidates: {}",
             profile.message
         );
     }

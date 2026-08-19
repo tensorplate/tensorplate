@@ -20,6 +20,7 @@ mod common;
 
 use common::{vision_bundle, Harness};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use tensorplate_agent::server::Server;
@@ -38,6 +39,25 @@ fn rt(socket: &Path, req: &ControlRequest) -> ControlResponse {
     let mut line = String::new();
     reader.read_line(&mut line).expect("read");
     serde_json::from_str(&line).expect("decode")
+}
+
+#[test]
+fn socket_permissions_match_the_platform_trust_boundary() {
+    let h = Harness::new();
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, h.coord.clone()).expect("start");
+
+    let mode = std::fs::metadata(socket)
+        .expect("socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode,
+        tensorplate_protocol::install_paths::mode::agent_socket()
+    );
+
+    server.shutdown();
 }
 
 #[test]

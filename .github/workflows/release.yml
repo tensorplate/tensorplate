@@ -886,9 +886,9 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
   publish-homebrew:
-    name: publish the Homebrew formula bump
+    name: publish the Homebrew formula graph
     needs: [meta, publish-release]
-    # Opens (or updates) an auto-merge formula-bump PR in the Homebrew tap.
+    # Opens (or updates) an auto-merge formula-graph PR in the Homebrew tap.
     # Completion means "PR opened with auto-merge armed", not "merged": the
     # tap's own CI (audit + build-from-source + `brew test` on Apple
     # Silicon) gates the actual merge, so go-live is eventually consistent.
@@ -908,7 +908,7 @@ jobs:
         with:
           ref: ${{ needs.meta.outputs.checkout_ref }}
 
-      - name: Open auto-merge formula-bump PR
+      - name: Open auto-merge formula-graph PR
         shell: bash
         # HOMEBREW_TAP_TOKEN is a fine-grained PAT or GitHub App token with
         # contents + pull_requests write scoped to the tap repo only.

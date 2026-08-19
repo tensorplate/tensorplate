@@ -351,10 +351,12 @@ mod tests {
     #[cfg(unix)]
     fn write_stub(body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        static NEXT_STUB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         let path = std::env::temp_dir().join(format!(
-            "tp-nvidia-smi-stub-{}-{:?}",
+            "tp-nvidia-smi-stub-{}-{}",
             std::process::id(),
-            std::thread::current().id()
+            NEXT_STUB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");

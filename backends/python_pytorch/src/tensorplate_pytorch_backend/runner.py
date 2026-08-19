@@ -39,9 +39,12 @@ from tensorplate_pytorch_backend.backends import (
     Backend,
     BackendError,
     FixtureBackend,
+    MpsFixtureBackend,
     NamedTensor,
+    RuntimeCapability,
     SmolVLABackend,
 )
+from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 
 logger = logging.getLogger("tensorplate.sidecar")
 
@@ -53,7 +56,11 @@ logger = logging.getLogger("tensorplate.sidecar")
 # V01-E05-F04 keeps the fixture as the default; SmolVLA is opt-in so host
 # CI stays dependency-free while Jetson validation can exercise a real VLA.
 def default_backend_factories() -> dict[str, type[Backend]]:
-    return {"fixture": FixtureBackend, "smolvla": SmolVLABackend}
+    return {
+        "fixture": FixtureBackend,
+        "mps_fixture": MpsFixtureBackend,
+        "smolvla": SmolVLABackend,
+    }
 
 
 @dataclass(slots=True)
@@ -87,13 +94,20 @@ def _build_response_header(
 
 
 def _typed_error_response(
-    request: dict[str, Any], code: str, message: str, *, context: str | None = None
+    request: dict[str, Any],
+    code: str,
+    message: str,
+    *,
+    context: str | None = None,
+    runtime_capability: RuntimeCapability | None = None,
 ) -> codec.SidecarFrame:
     header = _build_response_header(request, status=protocol.STATUS_ERROR)
     error: dict[str, Any] = {"code": code, "message": message}
     if context is not None:
         error["context"] = context
     header["error"] = error
+    if runtime_capability is not None:
+        header["runtime_capability"] = runtime_capability.to_wire()
     return codec.SidecarFrame(header=header)
 
 
@@ -251,7 +265,13 @@ class SidecarRunner:
             )
         except BackendError as err:
             self._state.last_error = err.code_message
-            return _typed_error_response(header, err.code, err.code_message, context=err.context)
+            return _typed_error_response(
+                header,
+                err.code,
+                err.code_message,
+                context=err.context,
+                runtime_capability=err.runtime_capability,
+            )
         except Exception as exc:
             logger.exception("unexpected sidecar dispatch failure")
             self._state.last_error = str(exc)
@@ -281,16 +301,36 @@ class SidecarRunner:
         # The sidecar protocol carries a ModelSpec object on load. The
         # `backend_hint` on that ModelSpec is always `python_pytorch`
         # (the C++ adapter only forwards python_pytorch bundles), so we
-        # discriminate by an optional `profile_id` or fall back to the
-        # default factory. v0.1.0 ships only the fixture backend.
+        # discriminate by an optional `profile_id`, a sidecar-private
+        # artifact setting, or the default factory.
         profile_id = model_spec.get("profile_id")
-        if profile_id and profile_id in self._factories:
-            return self._factories[profile_id]
-        if self._default_backend_name in self._factories:
-            return self._factories[self._default_backend_name]
+        if profile_id is not None and (not isinstance(profile_id, str) or not profile_id):
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "model_spec.profile_id must be a non-empty string when present",
+            )
+        try:
+            configured_name = read_artifact_config(model_spec).get("backend_profile")
+        except ArtifactConfigError as exc:
+            raise BackendError(protocol.ERR_CONFIG_INVALID, str(exc)) from exc
+        if configured_name is not None and (
+            not isinstance(configured_name, str) or not configured_name
+        ):
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "sidecar config backend_profile must be a non-empty string when present",
+            )
+        if profile_id and configured_name and profile_id != configured_name:
+            raise BackendError(
+                protocol.ERR_CONFIG_INVALID,
+                "model_spec.profile_id conflicts with sidecar config backend_profile",
+            )
+        requested_name = profile_id or configured_name or self._default_backend_name
+        if requested_name in self._factories:
+            return self._factories[requested_name]
         raise BackendError(
             protocol.ERR_CONFIG_INVALID,
-            f"no python_pytorch sidecar backend registered for profile_id={profile_id!r}",
+            f"no python_pytorch sidecar backend registered for {requested_name!r}",
         )
 
     def _handle_load(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:
@@ -302,9 +342,10 @@ class SidecarRunner:
         backend.load(model_spec)
         self._state.backend = backend
         self._state.backend_factory_name = backend.name
-        return codec.SidecarFrame(
-            header=_build_response_header(frame.header, status=protocol.STATUS_OK)
-        )
+        header = _build_response_header(frame.header, status=protocol.STATUS_OK)
+        if backend.runtime_capability is not None:
+            header["runtime_capability"] = backend.runtime_capability.to_wire()
+        return codec.SidecarFrame(header=header)
 
     def _handle_prime(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:
         backend = self._ensure_backend()
@@ -357,6 +398,8 @@ class SidecarRunner:
             "uptime_ns": time.monotonic_ns() - self._state.started_monotonic_ns,
             "last_error": self._state.last_error,
         }
+        if self._state.backend is not None and self._state.backend.runtime_capability is not None:
+            header["runtime_capability"] = self._state.backend.runtime_capability.to_wire()
         return codec.SidecarFrame(header=header)
 
 

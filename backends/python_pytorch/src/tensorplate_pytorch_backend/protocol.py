@@ -59,6 +59,9 @@ ERR_TIMEOUT: Final[str] = "timeout"
 ERR_INFERENCE_FAILED: Final[str] = "inference_failed"
 ERR_INTERNAL: Final[str] = "internal"
 
+# Vendor-neutral platform reason carried by a runtime capability record.
+REASON_ACCELERATOR_RUNTIME_UNAVAILABLE: Final[str] = "accelerator_runtime_unavailable"
+
 
 __all__ = [
     "ERR_CONFIG_INVALID",
@@ -87,6 +90,7 @@ __all__ = [
     "KIND_READY_EVENT",
     "KIND_UNLOAD",
     "KIND_UNLOAD_RESPONSE",
+    "REASON_ACCELERATOR_RUNTIME_UNAVAILABLE",
     "REQUEST_TO_RESPONSE",
     "SCHEMA_VERSION",
     "STATUS_ERROR",

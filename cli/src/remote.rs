@@ -18,6 +18,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
+use tensorplate_protocol::is_valid_deployment_id;
 
 use crate::args::{DeployArgs, InferArgs, OutputMode, Subcommand};
 use crate::error::{CliError, CliResult, ExitCode};
@@ -950,9 +951,9 @@ pub fn route_deploy<O: Write, E: Write>(
     crate::commands::deploy::validate_local_bundle(&opts.bundle_path)?;
     let deployment_id = match &opts.deployment_id {
         Some(id) => {
-            if !is_safe_path_segment(id) {
+            if !is_valid_deployment_id(id) {
                 return Err(CliError::Usage(format!(
-                    "deployment id `{id}` must be a plain name (letters, digits, `-`, `_`, `.`)"
+                    "deployment id `{id}` must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved"
                 )));
             }
             id.clone()
@@ -1026,11 +1027,17 @@ fn import_dir_for(entry: &DeviceEntry) -> String {
     )
 }
 
-fn is_safe_path_segment(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && s.chars()
+/// Whether an existing import name can be joined beneath the import root.
+///
+/// New deployment IDs follow the stricter bounded protocol policy. Cleanup
+/// also has to recognize safe names created by older clients, or those legacy
+/// directories can never be reclaimed.
+fn is_safe_path_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
@@ -1708,6 +1715,40 @@ mod tests {
     }
 
     #[test]
+    fn prune_protects_active_and_reclaims_stale_safe_legacy_names() {
+        let active = "a".repeat(tensorplate_protocol::MAX_DEPLOYMENT_ID_BYTES + 1);
+        let stale = "b".repeat(tensorplate_protocol::MAX_DEPLOYMENT_ID_BYTES + 1);
+        for legacy in [&active, &stale] {
+            assert!(is_safe_path_segment(legacy));
+            assert!(!is_valid_deployment_id(legacy));
+        }
+        let status = serde_json::json!({
+            "schema_version": "0.1",
+            "command": "status",
+            "status": "ok",
+            "payload": {"agent": {"active": {"deployment_id": active}}},
+        })
+        .to_string();
+        let listed = format!("999000 {active}\n999100 {stale}\n");
+        let runner = ScriptedRunner::new(vec![
+            ScriptedRunner::out(0, &status),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(0, &listed),
+            ScriptedRunner::out(0, ""),
+        ]);
+
+        let report = prune_imports(&runner, &entry("host"), None, Some(1)).unwrap();
+
+        assert_eq!(report.deleted, vec![stale.clone()]);
+        assert_eq!(report.kept, vec![active]);
+        let expected = format!("/var/lib/tensorplate/bundles/import/{stale}");
+        assert!(runner.raw_args.borrow().iter().any(|args| {
+            args.first().map(String::as_str) == Some("rm")
+                && args.get(2).map(String::as_str) == Some(expected.as_str())
+        }));
+    }
+
+    #[test]
     fn list_import_dirs_fails_when_find_fails() {
         let runner = ScriptedRunner::new(vec![ScriptedRunner::err(1, "find: Permission denied\n")]);
 
@@ -1741,12 +1782,12 @@ mod tests {
     }
 
     #[test]
-    fn safe_path_segment_rejects_traversal() {
-        assert!(is_safe_path_segment("deploy-abc_1.2"));
-        assert!(!is_safe_path_segment(".."));
-        assert!(!is_safe_path_segment("."));
-        assert!(!is_safe_path_segment("a/b"));
-        assert!(!is_safe_path_segment(""));
+    fn deployment_id_policy_rejects_traversal() {
+        assert!(is_valid_deployment_id("deploy-abc_1.2"));
+        assert!(!is_valid_deployment_id(".."));
+        assert!(!is_valid_deployment_id("."));
+        assert!(!is_valid_deployment_id("a/b"));
+        assert!(!is_valid_deployment_id(""));
     }
 
     #[test]

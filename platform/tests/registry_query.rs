@@ -13,9 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use tensorplate_platform::{
-    AcceleratorIdentity, CpuArchitecture, CpuVendor, DetectedArchitecture, DetectedPlatform,
-    DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow, RowMatch,
-    SupportLevel,
+    AcceleratorIdentity, AcceleratorMatchPolicy, CpuArchitecture, CpuVendor, DetectedArchitecture,
+    DetectedPlatform, DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry,
+    PlatformSupportRow, RowMatch, SupportLevel,
 };
 
 fn registry_dir() -> PathBuf {
@@ -65,7 +65,13 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
         machine_type: row.validation_environment().machine_type.clone(),
     };
     match row.accelerator() {
-        Some(a) => DetectedPlatform::with_accelerator(host, accelerator(&a.sku)),
+        Some(a) => {
+            let sku = match a.match_policy {
+                AcceleratorMatchPolicy::Exact => a.sku.as_str(),
+                AcceleratorMatchPolicy::Family => "Apple M2 Pro",
+            };
+            DetectedPlatform::with_accelerator(host, accelerator(sku))
+        }
         None => DetectedPlatform::host_only(host),
     }
 }
@@ -81,8 +87,8 @@ fn the_committed_registry_loads_completely() {
     );
     assert_eq!(
         registry.supported_rows().count(),
-        7,
-        "five Production plus two Preview rows are supported combinations"
+        8,
+        "five Production plus three Preview rows are supported combinations"
     );
 }
 
@@ -151,6 +157,27 @@ fn colliding_registry_entries_are_rejected_at_load() {
         ambiguous.to_string().contains("can both match"),
         "reason should name the collision: {ambiguous}"
     );
+}
+
+#[test]
+fn duplicate_family_rows_are_rejected_at_load() {
+    let row =
+        std::fs::read_to_string(registry_dir().join("rows/macos26-apple-m-series-preview.json"))
+            .expect("read the family row");
+    let twin = row.replace(
+        "\"row_id\": \"macos26-apple-m-series-preview\"",
+        "\"row_id\": \"macos26-apple-m-series-twin\"",
+    );
+
+    let error = PlatformRegistry::from_documents(
+        [
+            (Path::new("family.json"), row.as_str()),
+            (Path::new("twin.json"), twin.as_str()),
+        ],
+        std::iter::empty(),
+    )
+    .expect_err("two family rows at the same priority are ambiguous");
+    assert!(error.to_string().contains("same priority"));
 }
 
 #[test]
@@ -337,6 +364,71 @@ fn every_committed_row_resolves_from_its_own_identity() {
             );
             assert_eq!(matched.reason(), None);
         }
+    }
+}
+
+#[test]
+fn exact_apple_row_precedes_the_m_series_family_fallback() {
+    let registry = registry();
+
+    let exact = identity_of(&registry, "macos26-m1pro-16gb");
+    assert!(matches!(
+        registry.resolve(&exact),
+        RowMatch::Supported(row) if row.row_id() == "macos26-m1pro-16gb"
+    ));
+
+    let family = identity_of(&registry, "macos26-apple-m-series-preview");
+    assert!(matches!(
+        registry.resolve(&family),
+        RowMatch::Supported(row) if row.row_id() == "macos26-apple-m-series-preview"
+    ));
+}
+
+#[test]
+fn exact_apple_row_also_precedes_a_family_environment_miss() {
+    let registry = registry();
+    let mut detected = identity_of(&registry, "macos26-m1pro-16gb");
+    detected.host.machine_type = Some("virtualized-mac".to_string());
+
+    assert_eq!(
+        registry.resolve(&detected),
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(registry.row("macos26-m1pro-16gb").expect("committed"))
+        },
+        "the lower-priority family row must not make the exact environment miss ambiguous"
+    );
+}
+
+#[test]
+fn apple_family_matching_covers_each_documented_variant_form() {
+    let registry = registry();
+    let host = identity_of(&registry, "macos26-apple-m-series-preview").host;
+    for sku in ["Apple M1", "Apple M2 Pro", "Apple M3 Max", "Apple M4 Ultra"] {
+        let detected = DetectedPlatform::with_accelerator(host.clone(), accelerator(sku));
+        assert!(matches!(
+            registry.resolve(&detected),
+            RowMatch::Supported(row) if row.row_id() == "macos26-apple-m-series-preview"
+        ));
+    }
+}
+
+#[test]
+fn apple_family_matching_rejects_near_miss_brand_strings() {
+    let registry = registry();
+    let host = identity_of(&registry, "macos26-apple-m-series-preview").host;
+    for sku in [
+        "Apple M",
+        "Apple M01",
+        "Apple M2 Extreme",
+        "Apple M2 Pro engineering sample",
+        "apple M2 Pro",
+    ] {
+        let detected = DetectedPlatform::with_accelerator(host.clone(), accelerator(sku));
+        assert_eq!(
+            registry.resolve(&detected),
+            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku),
+            "`{sku}` must not be normalized into the family"
+        );
     }
 }
 

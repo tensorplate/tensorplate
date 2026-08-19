@@ -7,12 +7,17 @@ methods so the default fixture backend remains dependency-free on host CI.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import Any
 
-from tensorplate_pytorch_backend.backends.base import Backend, BackendError, NamedTensor
+from tensorplate_pytorch_backend.accelerator import require_mps_runtime
+from tensorplate_pytorch_backend.backends.base import (
+    Backend,
+    BackendError,
+    NamedTensor,
+    RuntimeCapability,
+)
+from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -20,24 +25,6 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_NOT_READY,
     ERR_SHAPE_MISMATCH,
 )
-
-
-def _read_validation_config(model_spec: dict[str, Any]) -> dict[str, Any]:
-    artifact_path = model_spec.get("artifact_path")
-    if not isinstance(artifact_path, str) or not artifact_path:
-        return {}
-    path = Path(artifact_path)
-    if path.suffix != ".json":
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config not found: {path}") from None
-    except json.JSONDecodeError as exc:
-        raise BackendError(ERR_CONFIG_INVALID, f"SmolVLA config JSON invalid: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise BackendError(ERR_CONFIG_INVALID, "SmolVLA config must be a JSON object")
-    return raw
 
 
 def _string_config(config: dict[str, Any], key: str, default: str) -> str:
@@ -78,6 +65,7 @@ class SmolVLABackend(Backend):
         self._torch: Any | None = None
         self._np: Any | None = None
         self._tokenizer: Any | None = None
+        self._runtime_capability: RuntimeCapability | None = None
         self._obs_state_key = "observation.state"
         self._language_tokens_key = "observation.language.tokens"
         self._language_mask_key = "observation.language.attention_mask"
@@ -87,10 +75,38 @@ class SmolVLABackend(Backend):
     def name(self) -> str:
         return "smolvla"
 
+    @property
+    def runtime_capability(self) -> RuntimeCapability | None:
+        return self._runtime_capability
+
     def load(self, model_spec: dict[str, Any]) -> None:
+        self._runtime_capability = None
         try:
             import numpy as np
             import torch
+        except Exception as exc:
+            raise BackendError(
+                ERR_LOAD_FAILED,
+                "SmolVLA core dependencies are not importable",
+                context=repr(exc),
+            ) from exc
+
+        try:
+            validation_config = read_artifact_config(model_spec)
+        except ArtifactConfigError as exc:
+            raise BackendError(ERR_CONFIG_INVALID, str(exc)) from exc
+        model_id = _string_config(validation_config, "model_id", "lerobot/smolvla_base")
+        cache_dir = _string_config(validation_config, "cache_dir", "/var/lib/tensorplate/hf-cache")
+        device = _string_config(validation_config, "device", "cuda")
+        num_steps = _optional_int_config(validation_config, "num_steps")
+        self._default_task = _string_config(validation_config, "task", self._default_task)
+        if not self._default_task.endswith("\n"):
+            self._default_task = f"{self._default_task}\n"
+
+        if device == "mps":
+            self._runtime_capability = require_mps_runtime(torch)
+
+        try:
             from lerobot.configs.policies import PreTrainedConfig
             from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
             from lerobot.utils.constants import (
@@ -102,18 +118,9 @@ class SmolVLABackend(Backend):
         except Exception as exc:
             raise BackendError(
                 ERR_LOAD_FAILED,
-                "SmolVLA dependencies are not importable",
+                "SmolVLA model dependencies are not importable",
                 context=repr(exc),
             ) from exc
-
-        validation_config = _read_validation_config(model_spec)
-        model_id = _string_config(validation_config, "model_id", "lerobot/smolvla_base")
-        cache_dir = _string_config(validation_config, "cache_dir", "/var/lib/tensorplate/hf-cache")
-        device = _string_config(validation_config, "device", "cuda")
-        num_steps = _optional_int_config(validation_config, "num_steps")
-        self._default_task = _string_config(validation_config, "task", self._default_task)
-        if not self._default_task.endswith("\n"):
-            self._default_task = f"{self._default_task}\n"
 
         try:
             cfg = PreTrainedConfig.from_pretrained(model_id, cache_dir=cache_dir)
@@ -187,6 +194,7 @@ class SmolVLABackend(Backend):
         self._config = None
         self._device = None
         self._tokenizer = None
+        self._runtime_capability = None
         self._loaded = False
         if self._torch is not None and self._torch.cuda.is_available():
             self._torch.cuda.empty_cache()

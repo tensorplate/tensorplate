@@ -1,39 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Refusing a deploy the platform cannot honour, before anything is staged.
+// Platform-row admission state owned by the agent.
 //
-// Two questions, asked at different times because they have different
-// inputs. Whether this machine matches a support row at all is a fact
-// about the machine, so it is settled once at startup. Whether the
-// packages a row requires for a given backend path are installed depends
-// on which backend the bundle names, so it is asked per deploy.
+// Detection and matching stay in tensorplate-platform. The agent keeps only
+// the resolved outcome: either a supported row with its bounded capability,
+// or the typed reason deployment must fail before model load.
 //
-// Evaluation is pure and takes what was observed as an argument. The
-// agent gathers observations at startup; tests supply them directly,
-// which is the only way to exercise a driver-version mismatch without the
-// driver.
+// Two questions, settled at different times because they have different
+// inputs. Whether this machine matches a row at all is a fact about the
+// machine, so it is settled once at startup. Whether the packages a row
+// requires for a given backend path are installed depends on which backend
+// the bundle names, so it is asked per deploy.
 //
-// Every rejection carries a typed reason from the frozen platform
-// vocabulary — except two, and both for the same reason. A machine whose
-// machine shape no row's evidence covers, and a machine matching an
-// Experimental row, have no value in that vocabulary. Borrowing the
-// nearest one names a dimension that is actually fine: an operator told
-// their OS is unsupported reinstalls an OS that is correct, and one told a
-// row is "awaiting validation" waits for an evidence run that is never
-// coming. `registry.rs` draws the second distinction explicitly; this
-// module must not undo it.
+// **A detection failure is a rejection, not a bypass.** An agent that
+// cannot read its own hardware must not deploy as though the check passed;
+// `detection_failed` records the failure as a rejection so startup stays
+// diagnosable while deployment stays closed. Returning "no admission" there
+// would leave the machine ungated, which inverts the gate on exactly the
+// hardware nobody has characterised.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    DetectedPlatform, PlatformReason, PlatformRegistry, PlatformSupportRow, RowMatch,
+    PlatformCapability, PlatformReason, PlatformRegistry, PlatformReport, PlatformSupportRow,
+    RowMatch,
 };
+
+use crate::config::AgentConfig;
+use crate::error::{AgentError, AgentResult};
 
 /// What was observed about this machine's driver and runtime stack, and
 /// which packages are installed.
 ///
-/// Supplied rather than probed, so the evaluation below is testable
-/// without the hardware or the packages it describes.
+/// Supplied rather than probed, so evaluation is testable without the
+/// hardware or the packages it describes.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObservedStack {
     /// Component identifier to version, in the row's vocabulary
@@ -43,130 +43,200 @@ pub struct ObservedStack {
     pub installed_packages: BTreeSet<String>,
 }
 
-/// Why the platform cannot admit a deploy.
+/// Cached platform outcome evaluated once at agent startup.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PlatformRejection {
-    /// One of the frozen typed platform reasons.
-    Reason {
-        reason: PlatformReason,
+pub enum PlatformAdmission {
+    Supported {
+        row_id: String,
+        capability: Option<PlatformCapability>,
+        /// Carried so a per-deploy package check is a comparison rather
+        /// than a re-probe.
+        installed_packages: BTreeSet<String>,
+    },
+    Rejected {
+        row_id: Option<String>,
+        /// `None` where the frozen vocabulary has no value for this
+        /// outcome. Two cases reach that: an Experimental row, and a
+        /// machine whose shape no row's evidence covers. Borrowing the
+        /// nearest reason would name a dimension that is actually fine —
+        /// `registry.rs` draws the first distinction explicitly and this
+        /// module must not undo it.
+        reason: Option<PlatformReason>,
         detail: String,
     },
-    /// A refusal the frozen vocabulary has no value for.
-    ///
-    /// Deliberately carries no [`PlatformReason`]. Two cases reach here:
-    /// a machine whose hardware matches a row but whose machine shape no
-    /// row's evidence covers, and a machine matching an Experimental row.
-    /// The nearest frozen reasons both name a dimension that is fine —
-    /// `unsupported_os_version` for a correct OS in an uncovered chassis,
-    /// `row_planned_not_validated` for an integration that is not awaiting
-    /// validation at all and never will be.
-    NoFrozenReason { detail: String },
 }
 
-impl PlatformRejection {
-    /// The frozen reason, where this rejection has one.
+impl PlatformAdmission {
+    /// Evaluate one observation against the installed registry.
+    ///
+    /// Driver and runtime requirements come from the matched row, never
+    /// from a constant here. A row whose evidence run has not happened yet
+    /// declares no components, and this check is silent for it rather than
+    /// inventing a requirement — an empty list means "not yet recorded",
+    /// not "nothing required".
+    #[must_use]
+    pub fn evaluate(
+        registry: &PlatformRegistry,
+        report: &PlatformReport,
+        observed: &ObservedStack,
+    ) -> Self {
+        let detected = report.detected_platform();
+        match registry.resolve(&detected) {
+            RowMatch::Supported(row) => {
+                if let Some(detail) = first_stack_mismatch(row, observed) {
+                    return Self::Rejected {
+                        row_id: Some(row.row_id().to_string()),
+                        reason: Some(PlatformReason::MissingDriverRuntime),
+                        detail,
+                    };
+                }
+                Self::Supported {
+                    row_id: row.row_id().to_string(),
+                    capability: registry.resolved_capability(report),
+                    installed_packages: observed.installed_packages.clone(),
+                }
+            }
+            RowMatch::PlannedNotValidated(row) => Self::Rejected {
+                row_id: Some(row.row_id().to_string()),
+                reason: Some(PlatformReason::RowPlannedNotValidated),
+                detail: format!(
+                    "platform row `{}` is planned but not validated",
+                    row.row_id()
+                ),
+            },
+            RowMatch::Experimental(row) => Self::Rejected {
+                row_id: Some(row.row_id().to_string()),
+                reason: None,
+                detail: format!(
+                    "platform row `{}` is experimental and not deployable",
+                    row.row_id()
+                ),
+            },
+            RowMatch::OutsideValidatedEnvironment { candidate } => Self::Rejected {
+                row_id: candidate.map(|row| row.row_id().to_string()),
+                reason: None,
+                detail: candidate.map_or_else(
+                    || "platform is outside every validated environment".to_string(),
+                    |row| {
+                        format!(
+                            "platform is outside the validated environment for row `{}`",
+                            row.row_id()
+                        )
+                    },
+                ),
+            },
+            RowMatch::Unsupported(reason) => Self::Rejected {
+                row_id: None,
+                reason: Some(reason),
+                detail: format!("platform is unsupported: {reason}"),
+            },
+        }
+    }
+
+    /// Record a detection failure so startup stays diagnosable while
+    /// deployment still fails closed.
+    #[must_use]
+    pub fn detection_failed(detail: impl Into<String>) -> Self {
+        Self::Rejected {
+            row_id: None,
+            reason: None,
+            detail: format!("platform detection failed: {}", detail.into()),
+        }
+    }
+
+    /// Apply a supported row's memory ceiling to the existing agent limit.
+    ///
+    /// An explicitly smaller configured limit remains in force. A larger
+    /// configured value is reduced to the detected-and-row-bounded maximum.
+    pub fn apply_memory_limit(&self, config: &mut AgentConfig) {
+        let Self::Supported {
+            capability: Some(capability),
+            ..
+        } = self
+        else {
+            return;
+        };
+        let resolved = capability.max_resident_model_memory();
+        config.device_memory_bytes = Some(
+            config
+                .device_memory_bytes
+                .map_or(resolved, |configured| configured.min(resolved)),
+        );
+    }
+
+    /// Reject an unsupported outcome before bundle preparation or model
+    /// load.
+    ///
+    /// # Errors
+    ///
+    /// [`AgentError::PlatformNotAdmissible`] carrying the typed reason
+    /// where the frozen vocabulary has one. The reason is projected rather
+    /// than only rendered, so a caller reads it off the error record
+    /// instead of parsing prose.
+    pub fn ensure_supported(&self) -> AgentResult<()> {
+        match self {
+            Self::Supported { .. } => Ok(()),
+            Self::Rejected { reason, detail, .. } => Err(AgentError::PlatformNotAdmissible {
+                reason: *reason,
+                detail: detail.clone(),
+            }),
+        }
+    }
+
+    /// Admit a deploy of `backend_path` on this machine.
+    ///
+    /// # Errors
+    ///
+    /// The startup rejection when this machine is not admissible at all, or
+    /// [`PlatformReason::MissingBackendPackage`] for this backend path.
+    pub fn admit_backend(
+        &self,
+        registry: &PlatformRegistry,
+        backend_path: &str,
+    ) -> AgentResult<()> {
+        let Self::Supported {
+            row_id,
+            installed_packages,
+            ..
+        } = self
+        else {
+            return self.ensure_supported();
+        };
+        // Looked up rather than held, so this value does not borrow the
+        // registry and the coordinator can own both.
+        let Some(row) = registry.row(row_id) else {
+            return Err(AgentError::PlatformNotAdmissible {
+                reason: Some(PlatformReason::MissingDriverRuntime),
+                detail: format!(
+                    "row `{row_id}` was admitted at startup but is no longer in the registry"
+                ),
+            });
+        };
+        check_backend_packages(row, backend_path, installed_packages)
+    }
+
+    #[must_use]
+    pub fn row_id(&self) -> Option<&str> {
+        match self {
+            Self::Supported { row_id, .. } => Some(row_id),
+            Self::Rejected { row_id, .. } => row_id.as_deref(),
+        }
+    }
+
     #[must_use]
     pub fn reason(&self) -> Option<PlatformReason> {
         match self {
-            Self::Reason { reason, .. } => Some(*reason),
-            Self::NoFrozenReason { .. } => None,
+            Self::Supported { .. } => None,
+            Self::Rejected { reason, .. } => *reason,
         }
     }
 
-    /// Operator-facing detail.
     #[must_use]
-    pub fn detail(&self) -> &str {
+    pub fn capability(&self) -> Option<&PlatformCapability> {
         match self {
-            Self::Reason { detail, .. } | Self::NoFrozenReason { detail } => detail,
+            Self::Supported { capability, .. } => capability.as_ref(),
+            Self::Rejected { .. } => None,
         }
-    }
-}
-
-/// The bundle-independent platform verdict, settled once at startup.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PlatformVerdict {
-    /// This machine is a row that carries a claim, and every driver and
-    /// runtime component that row declares is present at the version it
-    /// declares.
-    Admitted {
-        row_id: String,
-    },
-    Rejected(PlatformRejection),
-}
-
-/// Settle the bundle-independent half: does this machine match a row that
-/// carries a claim, and does its driver/runtime stack match what that row
-/// records?
-///
-/// Component requirements come from the matched row, never from a constant
-/// here. A row whose evidence run has not happened yet declares no
-/// components, and this check is silent for it rather than inventing a
-/// requirement — an empty list means "not yet recorded", not "nothing
-/// required".
-#[must_use]
-pub fn evaluate_platform(
-    registry: &PlatformRegistry,
-    detected: &DetectedPlatform,
-    observed: &ObservedStack,
-) -> PlatformVerdict {
-    let row = match registry.resolve(detected) {
-        RowMatch::Supported(row) => row,
-        RowMatch::PlannedNotValidated(row) => {
-            return PlatformVerdict::Rejected(PlatformRejection::Reason {
-                reason: PlatformReason::RowPlannedNotValidated,
-                detail: format!(
-                    "this machine matches row `{}`, which is defined but carries no validation \
-                     evidence",
-                    row.row_id()
-                ),
-            })
-        }
-        RowMatch::Experimental(row) => {
-            // NOT row_planned_not_validated. `registry.rs` states that
-            // Experimental is "deliberately not reported as Planned: the
-            // frozen reason for Planned means a row awaiting hardware
-            // validation, which an Experimental integration is not".
-            // Borrowing it here would tell an operator to wait for an
-            // evidence run that is never coming.
-            return PlatformVerdict::Rejected(PlatformRejection::NoFrozenReason {
-                detail: format!(
-                    "this machine matches row `{}`, an Experimental integration that is not a \
-                     supported combination and is not awaiting validation",
-                    row.row_id()
-                ),
-            });
-        }
-        RowMatch::OutsideValidatedEnvironment { candidate } => {
-            return PlatformVerdict::Rejected(PlatformRejection::NoFrozenReason {
-                detail: match candidate {
-                    Some(row) => format!(
-                        "this machine's hardware matches row `{}`, but that row's evidence was \
-                         recorded on a different machine shape",
-                        row.row_id()
-                    ),
-                    None => "this machine's hardware matches a supported row, but no row's \
-                             evidence covers the machine shape it is running on"
-                        .to_string(),
-                },
-            })
-        }
-        RowMatch::Unsupported(reason) => {
-            return PlatformVerdict::Rejected(PlatformRejection::Reason {
-                reason,
-                detail: format!("this machine matches no support row ({})", reason.as_str()),
-            })
-        }
-    };
-
-    if let Some(missing) = first_stack_mismatch(row, observed) {
-        return PlatformVerdict::Rejected(PlatformRejection::Reason {
-            reason: PlatformReason::MissingDriverRuntime,
-            detail: missing,
-        });
-    }
-
-    PlatformVerdict::Admitted {
-        row_id: row.row_id().to_string(),
     }
 }
 
@@ -196,30 +266,28 @@ fn first_stack_mismatch(row: &PlatformSupportRow, observed: &ObservedStack) -> O
     None
 }
 
-/// Per-deploy: are the packages the matched row requires for `backend_path`
-/// installed?
+/// Are the packages the matched row requires for `backend_path` installed?
 ///
-/// Asked here rather than at startup because which backend path matters is
-/// the bundle's choice. A row that declares no package set for the path a
-/// bundle names is not a pass — it is a row that never claimed to serve
-/// that path, which is exactly the case a deploy must not slip through.
+/// A row that declares no package set for the path a bundle names is not a
+/// pass — it is a row that never claimed to serve that path, which is
+/// exactly the deploy that has no evidence behind it.
 ///
 /// # Errors
 ///
-/// Returns [`PlatformRejection`] naming
+/// [`AgentError::PlatformNotAdmissible`] naming
 /// [`PlatformReason::MissingBackendPackage`].
 pub fn check_backend_packages(
     row: &PlatformSupportRow,
     backend_path: &str,
     installed: &BTreeSet<String>,
-) -> Result<(), PlatformRejection> {
+) -> AgentResult<()> {
     let Some(set) = row
         .backend_packages()
         .iter()
         .find(|set| set.backend_path == backend_path)
     else {
-        return Err(PlatformRejection::Reason {
-            reason: PlatformReason::MissingBackendPackage,
+        return Err(AgentError::PlatformNotAdmissible {
+            reason: Some(PlatformReason::MissingBackendPackage),
             detail: format!(
                 "row `{}` declares no package set for backend path `{backend_path}`",
                 row.row_id()
@@ -235,8 +303,8 @@ pub fn check_backend_packages(
     if missing.is_empty() {
         return Ok(());
     }
-    Err(PlatformRejection::Reason {
-        reason: PlatformReason::MissingBackendPackage,
+    Err(AgentError::PlatformNotAdmissible {
+        reason: Some(PlatformReason::MissingBackendPackage),
         detail: format!(
             "row `{}` requires {} for backend path `{backend_path}`; not installed: {}",
             row.row_id(),
@@ -244,57 +312,4 @@ pub fn check_backend_packages(
             missing.join(", ")
         ),
     })
-}
-
-/// The platform verdict plus the observations it was reached from, held by
-/// the coordinator so deploy admission is O(1) rather than re-probing.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlatformAdmission {
-    verdict: PlatformVerdict,
-    installed_packages: BTreeSet<String>,
-}
-
-impl PlatformAdmission {
-    #[must_use]
-    pub fn new(verdict: PlatformVerdict, installed_packages: BTreeSet<String>) -> Self {
-        Self {
-            verdict,
-            installed_packages,
-        }
-    }
-
-    #[must_use]
-    pub fn verdict(&self) -> &PlatformVerdict {
-        &self.verdict
-    }
-
-    /// Admit a deploy of `backend_path`, or say why not.
-    ///
-    /// # Errors
-    ///
-    /// Returns the startup verdict's rejection when this machine is not
-    /// admissible at all, or a package rejection for this backend path.
-    pub fn admit(
-        &self,
-        registry: &PlatformRegistry,
-        backend_path: &str,
-    ) -> Result<(), PlatformRejection> {
-        let PlatformVerdict::Admitted { row_id } = &self.verdict else {
-            let PlatformVerdict::Rejected(rejection) = &self.verdict else {
-                unreachable!("verdict is either admitted or rejected")
-            };
-            return Err(rejection.clone());
-        };
-        // The row is looked up rather than held, so the admission value
-        // does not borrow the registry and the coordinator can own both.
-        let Some(row) = registry.row(row_id) else {
-            return Err(PlatformRejection::Reason {
-                reason: PlatformReason::MissingDriverRuntime,
-                detail: format!(
-                    "row `{row_id}` was admitted at startup but is no longer in the registry"
-                ),
-            });
-        };
-        check_backend_packages(row, backend_path, &self.installed_packages)
-    }
 }

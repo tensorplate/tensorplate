@@ -13,11 +13,13 @@ import socket
 import threading
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from tensorplate_pytorch_backend import codec, protocol
+from tensorplate_pytorch_backend.backends.base import BackendError
 from tensorplate_pytorch_backend.runner import SidecarRunner, default_backend_factories
 
 
@@ -80,10 +82,41 @@ def _model_spec() -> dict[str, Any]:
     }
 
 
-def test_default_backend_factories_include_fixture_and_smolvla() -> None:
+def test_default_backend_factories_include_supported_profiles() -> None:
     factories = default_backend_factories()
     assert "fixture" in factories
+    assert "mps_fixture" in factories
     assert "smolvla" in factories
+
+
+def test_artifact_config_selects_backend_profile(tmp_path: Path) -> None:
+    config = tmp_path / "model.json"
+    config.write_text('{"backend_profile":"smolvla"}', encoding="utf-8")
+    client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        runner = SidecarRunner(server)
+        spec = _model_spec()
+        spec["artifact_path"] = str(config)
+        assert runner._resolve_factory(spec).__name__ == "SmolVLABackend"
+    finally:
+        client.close()
+        server.close()
+
+
+def test_unknown_artifact_backend_profile_fails_closed(tmp_path: Path) -> None:
+    config = tmp_path / "model.json"
+    config.write_text('{"backend_profile":"unknown"}', encoding="utf-8")
+    client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        runner = SidecarRunner(server)
+        spec = _model_spec()
+        spec["artifact_path"] = str(config)
+        with pytest.raises(BackendError) as caught:
+            runner._resolve_factory(spec)
+        assert caught.value.code == protocol.ERR_CONFIG_INVALID
+    finally:
+        client.close()
+        server.close()
 
 
 def test_load_prime_infer_unload_happy_path(

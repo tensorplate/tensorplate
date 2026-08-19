@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The platform registry: the loaded set of exact support rows, the
-// separate roadmap-target catalog, and the query API that resolves a
-// detected machine to a row.
+// The platform registry: the loaded support rows, the separate
+// roadmap-target catalog, and the query API that resolves a detected machine
+// to an exact row or a lower-priority family compatibility envelope.
 //
 // Two rules shape everything here. The registry **fails closed on load**:
 // one invalid row means no registry at all, because a partially-loaded
@@ -15,11 +15,15 @@ use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::install_paths;
 
+use crate::capability::PlatformCapability;
+use crate::detect::PlatformReport;
 use crate::error::PlatformRegistryError;
 use crate::identity::{DetectedPlatform, HostIdentity};
 use crate::reason::PlatformReason;
 use crate::roadmap::RoadmapTarget;
-use crate::row::{PlatformSupportRow, SupportLevel, ValidationEnvironmentKind};
+use crate::row::{
+    AcceleratorMatchPolicy, CpuVendor, PlatformSupportRow, SupportLevel, ValidationEnvironmentKind,
+};
 
 /// The outcome of resolving a detected machine against the registry.
 ///
@@ -95,6 +99,14 @@ impl RowMatch<'_> {
     #[must_use]
     pub fn is_supported(&self) -> bool {
         matches!(self, Self::Supported(_))
+    }
+}
+
+fn matched_row(row: &PlatformSupportRow) -> RowMatch<'_> {
+    match row.support_level() {
+        SupportLevel::Planned => RowMatch::PlannedNotValidated(row),
+        SupportLevel::Experimental => RowMatch::Experimental(row),
+        SupportLevel::Production | SupportLevel::Preview => RowMatch::Supported(row),
     }
 }
 
@@ -199,15 +211,12 @@ impl Mismatch {
     }
 }
 
-/// Whether some machine could match both rows at once.
+/// Whether two rows have equal resolution priority and can match one machine.
 ///
-/// This is the exact negation of "resolution is unambiguous", so it is
-/// derived from the same predicates matching uses rather than from a
-/// separate key: an identity key that omits a dimension (vendors) rejects
-/// rows that are genuinely distinguishable, and one that compares a
-/// wildcard field verbatim (an absent `image_identity` matches any) misses
-/// pairs that really do collide.
-fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) -> bool {
+/// Exact and family rows deliberately overlap: exact wins. Two exact rows or
+/// two family rows at the same priority must remain disjoint, or resolution
+/// would depend on row-id order.
+fn rows_are_ambiguous(left: &PlatformSupportRow, right: &PlatformSupportRow) -> bool {
     if left.cpu().architecture != right.cpu().architecture {
         return false;
     }
@@ -237,7 +246,14 @@ fn rows_can_both_match(left: &PlatformSupportRow, right: &PlatformSupportRow) ->
         return false;
     }
     match (left.accelerator(), right.accelerator()) {
-        (Some(a), Some(b)) => a.sku == b.sku,
+        (Some(a), Some(b)) => match (a.match_policy, b.match_policy) {
+            (AcceleratorMatchPolicy::Exact, AcceleratorMatchPolicy::Exact) => a.sku == b.sku,
+            (AcceleratorMatchPolicy::Family, AcceleratorMatchPolicy::Family) => {
+                a.family == b.family
+            }
+            (AcceleratorMatchPolicy::Exact, AcceleratorMatchPolicy::Family)
+            | (AcceleratorMatchPolicy::Family, AcceleratorMatchPolicy::Exact) => false,
+        },
         (None, None) => true,
         _ => false,
     }
@@ -312,7 +328,13 @@ impl PlatformRegistry {
     /// when the registry is not installed, or is installed but not
     /// readable by this process.
     pub fn load_installed() -> Result<Self, PlatformRegistryError> {
-        Self::load(Path::new(install_paths::PLATFORM_REGISTRY_DIR))
+        let directory = install_paths::platform_registry_dir().map_err(|detail| {
+            PlatformRegistryError::Unreadable {
+                path: install_paths::PLATFORM_REGISTRY_DIR_ENV.to_string(),
+                detail,
+            }
+        })?;
+        Self::load(&directory)
     }
 
     /// Load the registry from a directory containing `rows/` and
@@ -353,11 +375,11 @@ impl PlatformRegistry {
                 .map_err(|source| PlatformRegistryError::in_document(path, source))?;
             if let Some(overlapping) = loaded_rows
                 .values()
-                .find(|existing| rows_can_both_match(existing, &row))
+                .find(|existing| rows_are_ambiguous(existing, &row))
             {
                 return Err(PlatformRegistryError::AmbiguousRegistry {
                     detail: format!(
-                        "rows `{}` and `{}` can both match one machine",
+                        "rows `{}` and `{}` can both match one machine at the same priority",
                         overlapping.row_id(),
                         row.row_id()
                     ),
@@ -559,21 +581,28 @@ impl PlatformRegistry {
 
         let mut nearest_count = u32::MAX;
         let mut nearest = Mismatch::default();
-        let mut outside_environment: Vec<&PlatformSupportRow> = Vec::new();
+        let mut exact_outside_environment: Vec<&PlatformSupportRow> = Vec::new();
+        let mut family_outside_environment: Vec<&PlatformSupportRow> = Vec::new();
+        let mut family_match: Option<&PlatformSupportRow> = None;
         for row in self.rows.values() {
             let mismatch = Mismatch::between(row, detected);
             if mismatch.is_environment_only() {
-                outside_environment.push(row);
+                if row.accelerator().is_some_and(|accelerator| {
+                    accelerator.match_policy == AcceleratorMatchPolicy::Family
+                }) {
+                    family_outside_environment.push(row);
+                } else {
+                    exact_outside_environment.push(row);
+                }
             }
             if mismatch.count() == 0 {
-                return match row.support_level() {
-                    SupportLevel::Planned => RowMatch::PlannedNotValidated(row),
-                    // Defined and detectable, but not a supported
-                    // combination, exactly as `is_supported_combination`
-                    // reports it.
-                    SupportLevel::Experimental => RowMatch::Experimental(row),
-                    SupportLevel::Production | SupportLevel::Preview => RowMatch::Supported(row),
-                };
+                if row.accelerator().is_some_and(|accelerator| {
+                    accelerator.match_policy == AcceleratorMatchPolicy::Family
+                }) {
+                    family_match = Some(row);
+                    continue;
+                }
+                return matched_row(row);
             }
             match mismatch.count().cmp(&nearest_count) {
                 std::cmp::Ordering::Less => {
@@ -587,9 +616,18 @@ impl PlatformRegistry {
             }
         }
 
+        if let Some(row) = family_match {
+            return matched_row(row);
+        }
+
         // Hardware matched a row but the machine shape is outside its
         // evidence: report the row rather than an unrelated reason, so a
         // caller can say precisely which claim does not transfer here.
+        let outside_environment = if exact_outside_environment.is_empty() {
+            family_outside_environment
+        } else {
+            exact_outside_environment
+        };
         if !outside_environment.is_empty() {
             return RowMatch::OutsideValidatedEnvironment {
                 // Exactly one row's hardware matches: name it. Several,
@@ -613,6 +651,31 @@ impl PlatformRegistry {
                 .reason()
                 .unwrap_or(PlatformReason::UnsupportedAcceleratorSku),
         )
+    }
+
+    /// Resolve a platform observation into its row-bounded memory capability.
+    ///
+    /// A capability exists only for a supported row with a matching
+    /// accelerator observation. Planned, experimental, outside-environment,
+    /// and unsupported outcomes never publish an admission limit. A family
+    /// row applies the same conservative detected-and-row-bounded ceiling as
+    /// an exact row.
+    #[must_use]
+    pub fn resolved_capability(&self, report: &PlatformReport) -> Option<PlatformCapability> {
+        let detected = report.detected_platform();
+        let RowMatch::Supported(row) = self.resolve(&detected) else {
+            return None;
+        };
+        let observed = report.accelerator.as_ref()?;
+        let declared = row.accelerator()?;
+        debug_assert!(accelerator_matches(row, &detected));
+        debug_assert_eq!(observed.memory_profile, declared.memory_profile);
+        Some(PlatformCapability::bounded(
+            row.row_id(),
+            declared.memory_profile,
+            observed.memory_bytes,
+            declared.memory_bytes,
+        ))
     }
 }
 
@@ -691,7 +754,7 @@ fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
         && row.os().version == host.os_version
         // A row that names an image identity requires it; a row that does
         // not is indifferent to whatever the host reports, which is why
-        // `rows_can_both_match` treats an absent one as overlapping.
+        // `rows_are_ambiguous` treats an absent one as overlapping.
         && row
             .os()
             .image_identity
@@ -703,10 +766,34 @@ fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
 
 fn accelerator_matches(row: &PlatformSupportRow, detected: &DetectedPlatform) -> bool {
     match (row.accelerator(), detected.accelerator.as_ref()) {
-        (Some(row_accelerator), Some(observed)) => row_accelerator.sku == observed.sku,
+        (Some(row_accelerator), Some(observed)) => match row_accelerator.match_policy {
+            AcceleratorMatchPolicy::Exact => row_accelerator.sku == observed.sku,
+            AcceleratorMatchPolicy::Family => {
+                row_accelerator.family == "Apple M-series"
+                    && detected.host.vendor.known() == Some(CpuVendor::Apple)
+                    && is_apple_m_series_sku(&observed.sku)
+            }
+        },
         (None, None) => true,
         _ => false,
     }
+}
+
+/// Whether the exact brand string is one of Apple's M-series spellings.
+///
+/// Detection deliberately preserves the system-reported SKU verbatim. Family
+/// matching therefore recognizes only the documented base, Pro, Max, and
+/// Ultra forms and rejects near-miss prose rather than normalizing it into
+/// support.
+fn is_apple_m_series_sku(sku: &str) -> bool {
+    let Some(rest) = sku.strip_prefix("Apple M") else {
+        return false;
+    };
+    let generation_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if generation_len == 0 || rest.starts_with('0') {
+        return false;
+    }
+    matches!(&rest[generation_len..], "" | " Pro" | " Max" | " Ultra")
 }
 
 fn read_json_documents(directory: &Path) -> Result<Vec<(PathBuf, String)>, PlatformRegistryError> {

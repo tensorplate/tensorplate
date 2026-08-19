@@ -4,10 +4,16 @@
 [ok] info platform_profile — host matches 4 candidate support row(s): jetson-agx-orin-32gb, jetson-agx-orin-64gb, jetson-orin-nano-8gb-jp62, jetson-orin-nx-16gb
     hint: several rows share this host profile; accelerator identity is needed to name one
 
+## macos26-apple-m-series-preview
+[ok] info host_facts — host arch=arm64 vendor=apple
+[ok] info host_os — macOS 26 [exact: version 26.5.2, build 25F84]
+[ok] info platform_profile — host matches 2 candidate support row(s): macos26-apple-m-series-preview, macos26-m1pro-16gb
+    hint: several rows share this host profile; accelerator identity is needed to name one
+
 ## macos26-m1pro-16gb
 [ok] info host_facts — host arch=arm64 vendor=apple
 [ok] info host_os — macOS 26 [exact: version 26.5.2, build 25F84]
-[ok] info platform_profile — host matches 2 candidate support row(s): macos26-m1pro-16gb, macos26-m4pro-24gb
+[ok] info platform_profile — host matches 2 candidate support row(s): macos26-apple-m-series-preview, macos26-m1pro-16gb
     hint: several rows share this host profile; accelerator identity is needed to name one
 
 ## ubuntu2404-x86-a100-40g-a2hg1

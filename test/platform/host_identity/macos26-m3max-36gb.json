@@ -1,0 +1,22 @@
+{
+  "row_id": "macos26-apple-m-series-preview",
+  "matches_row": true,
+  "provenance": "spec_authored",
+  "provenance_note": "Compatibility fixture; Apple M3 Max and 36GB unified memory are transcribed from Apple technical specifications (https://support.apple.com/en-gb/117736); this is not hardware-validation evidence",
+  "sources": {
+    "uname_machine": "arm64",
+    "sw_vers_product_name": "macOS",
+    "sw_vers_product_version": "26.5.2",
+    "sw_vers_build_version": "25F84",
+    "cpu_brand": "Apple M3 Max",
+    "hw_memsize": "38654705664"
+  },
+  "expect": {
+    "architecture": "arm64",
+    "vendor": "apple",
+    "os_name": "macOS",
+    "os_version": "26",
+    "image_identity": null,
+    "machine_type": null
+  }
+}

@@ -5,7 +5,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 ## Supported combinations
 
-7 supported combination(s): 5 Production, 2 Preview.
+8 supported combination(s): 5 Production, 3 Preview.
 
 ### Production
 
@@ -21,6 +21,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 | Row | OS | CPU | Accelerator | Validated on | Model classes |
 | --- | --- | --- | --- | --- | --- |
+| `macos26-apple-m-series-preview` | macOS 26 | arm64 (apple) | Apple M-series | Apple M-series compatibility envelope; MacBook Pro, Apple M1 Pro 16GB is the current in-lab validation target | `chunked_policy` (Preview) |
 | `ubuntu2204-x86-cpu` | Ubuntu 22.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 22.04 host; smoke validated on GitHub-hosted runners | — |
 | `ubuntu2404-x86-cpu` | Ubuntu 24.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 24.04 host; smoke validated on GitHub-hosted runners | — |
 
@@ -41,7 +42,6 @@ and are excluded from supported combinations.
 | `jetson-agx-orin-32gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 32GB | Jetson AGX Orin 32GB (hardware not yet in lab) |
 | `jetson-agx-orin-64gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 64GB | Jetson AGX Orin 64GB (hardware not yet in lab) |
 | `jetson-orin-nx-16gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin NX 16GB | Jetson Orin NX 16GB (hardware not yet in lab) |
-| `macos26-m4pro-24gb` | macOS 26 | arm64 (apple) | Apple M4 Pro | MacBook Pro, Apple M4 Pro 24GB (hardware not yet in lab) |
 | `ubuntu2404-x86-rtxpro6000we-physical` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Workstation Edition | AMD x86_64 workstation (hardware not yet in lab) |
 
 ## Roadmap targets (not supported)

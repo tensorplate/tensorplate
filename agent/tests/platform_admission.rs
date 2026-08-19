@@ -15,13 +15,14 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use tensorplate_agent::error::AgentError;
 use tensorplate_agent::platform_admission::{
-    check_backend_packages, evaluate_platform, ObservedStack, PlatformAdmission, PlatformRejection,
-    PlatformVerdict,
+    check_backend_packages, ObservedStack, PlatformAdmission,
 };
 use tensorplate_platform::{
-    identify_accelerator, AcceleratorSources, DetectedArchitecture, DetectedPlatform,
-    DetectedVendor, HostIdentity, PlatformReason, PlatformRegistry, PlatformSupportRow,
+    identify_accelerator, AcceleratorIdentity, AcceleratorObservation, AcceleratorSources,
+    DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity, HostReport, PlatformReason,
+    PlatformRegistry, PlatformReport, PlatformSupportRow,
 };
 
 fn repo_root() -> PathBuf {
@@ -51,9 +52,33 @@ fn host_of(row: &PlatformSupportRow) -> HostIdentity {
     }
 }
 
+/// Wrap a host identity and an accelerator into the observation shape
+/// admission consumes. The memory figures are the row's own, so a case
+/// only ever varies the dimension it is about.
+fn report_of(
+    row: &PlatformSupportRow,
+    host: HostIdentity,
+    accelerator: Option<AcceleratorIdentity>,
+) -> PlatformReport {
+    PlatformReport {
+        host: HostReport {
+            identity: host,
+            exact: ExactHostFacts::default(),
+        },
+        accelerator: accelerator.map(|identity| {
+            let declared = row.accelerator().expect("a row with an accelerator");
+            AcceleratorObservation {
+                identity,
+                memory_bytes: Some(declared.memory_bytes),
+                memory_profile: declared.memory_profile,
+            }
+        }),
+    }
+}
+
 /// Detect from one of the committed accelerator fixtures, so admission is
 /// driven by the same recorded text detection is.
-fn detected_from_fixture(row: &PlatformSupportRow, fixture: &str) -> DetectedPlatform {
+fn detected_from_fixture(row: &PlatformSupportRow, fixture: &str) -> PlatformReport {
     let text = std::fs::read_to_string(
         repo_root()
             .join("test/platform/accelerator")
@@ -65,7 +90,7 @@ fn detected_from_fixture(row: &PlatformSupportRow, fixture: &str) -> DetectedPla
     })
     .expect("detection succeeds")
     .expect("one device");
-    DetectedPlatform::with_accelerator(host_of(row), report.identity)
+    report_of(row, host_of(row), Some(report.identity))
 }
 
 #[test]
@@ -75,8 +100,12 @@ fn a_partitioned_accelerator_is_refused_with_mig_mode_enabled() {
     // the row's evidence was never collected at.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
-    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Rejected(PlatformRejection::Reason { reason, detail }) => {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+        PlatformAdmission::Rejected {
+            reason: Some(reason),
+            detail,
+            ..
+        } => {
             assert_eq!(reason, PlatformReason::MigModeEnabled);
             assert!(!detail.is_empty(), "a rejection must say why");
         }
@@ -90,22 +119,80 @@ fn the_same_card_unpartitioned_is_admitted() {
     // everything would look correct.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
-    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Admitted { row_id } => {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+        PlatformAdmission::Supported { row_id, .. } => {
             assert_eq!(row_id, "ubuntu2404-x86-a100-40g-a2hg1");
         }
-        other @ PlatformVerdict::Rejected(_) => {
+        other @ PlatformAdmission::Rejected { .. } => {
             panic!("a non-partitioned supported card must be admitted, got {other:?}")
         }
     }
 }
 
 #[test]
+fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacity() {
+    let registry = registry();
+    let row = registry
+        .row("ubuntu2404-x86-l4-g2s8")
+        .expect("the L4 row is committed");
+    let declared = row.accelerator().expect("the L4 row has an accelerator");
+    let report = PlatformReport {
+        host: HostReport {
+            identity: host_of(row),
+            exact: ExactHostFacts::default(),
+        },
+        accelerator: Some(AcceleratorObservation {
+            identity: AcceleratorIdentity {
+                sku: declared.sku.clone(),
+                partitioned: false,
+            },
+            memory_bytes: None,
+            memory_profile: declared.memory_profile,
+        }),
+    };
+
+    let admission = PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default());
+    let PlatformAdmission::Supported {
+        capability: Some(capability),
+        ..
+    } = &admission
+    else {
+        panic!("a supported L4 with an unreadable framebuffer must remain admitted");
+    };
+    assert_eq!(capability.detected_memory_bytes(), None);
+    assert_eq!(
+        capability.max_resident_model_memory(),
+        declared.memory_bytes,
+        "an absent reading adds no tighter bound than the validated row budget"
+    );
+
+    let harness = common::Harness::new();
+    let mut config = harness.config.clone();
+    config.device_memory_bytes = None;
+    admission.apply_memory_limit(&mut config);
+    assert_eq!(config.device_memory_bytes, Some(declared.memory_bytes));
+
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "unknown-framebuffer",
+        common::BundleSpec {
+            memory_estimate_bytes: Some(1024 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    tensorplate_agent::bundle::verify(&bundle, &config)
+        .expect("a positive estimate below the row budget must remain admissible");
+}
+
+#[test]
 fn an_off_matrix_card_is_refused_with_the_sku_reason() {
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "unsupported-a100-80gb");
-    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Rejected(PlatformRejection::Reason { reason, .. }) => {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+        PlatformAdmission::Rejected {
+            reason: Some(reason),
+            ..
+        } => {
             assert_eq!(reason, PlatformReason::UnsupportedAcceleratorSku);
         }
         other => panic!("an off-matrix card must be refused, got {other:?}"),
@@ -128,8 +215,8 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
         "this case assumes the committed row has no recorded stack yet"
     );
     assert!(matches!(
-        evaluate_platform(&registry, &detected, &ObservedStack::default()),
-        PlatformVerdict::Admitted { .. }
+        PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()),
+        PlatformAdmission::Supported { .. }
     ));
 
     // And a row that does record one is enforced against what the machine
@@ -143,8 +230,8 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
         installed_packages: BTreeSet::new(),
     };
     assert!(matches!(
-        evaluate_platform(&staged, &detected, &matching),
-        PlatformVerdict::Admitted { .. }
+        PlatformAdmission::evaluate(&staged, &detected, &matching),
+        PlatformAdmission::Supported { .. }
     ));
 
     for observed in [
@@ -154,8 +241,12 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
             installed_packages: BTreeSet::new(),
         },
     ] {
-        match evaluate_platform(&staged, &detected, &observed) {
-            PlatformVerdict::Rejected(PlatformRejection::Reason { reason, detail }) => {
+        match PlatformAdmission::evaluate(&staged, &detected, &observed) {
+            PlatformAdmission::Rejected {
+                reason: Some(reason),
+                detail,
+                ..
+            } => {
                 assert_eq!(reason, PlatformReason::MissingDriverRuntime);
                 assert!(
                     detail.contains("nvidia_driver") && detail.contains("550.54.15"),
@@ -229,8 +320,8 @@ fn a_backend_path_the_row_declares_requires_its_packages() {
     assert!(check_backend_packages(row, "python_pytorch", &installed).is_ok());
 
     match check_backend_packages(row, "python_pytorch", &BTreeSet::new()) {
-        Err(PlatformRejection::Reason { reason, detail }) => {
-            assert_eq!(reason, PlatformReason::MissingBackendPackage);
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
             assert!(
                 detail.contains("tensorplate-backend-python-pytorch"),
                 "the rejection must name the package the row requires: {detail}"
@@ -249,8 +340,8 @@ fn a_backend_path_the_row_never_claimed_is_refused_rather_than_waved_through() {
     let registry = registry();
     let row = a100(&registry);
     match check_backend_packages(row, "vitis_ai", &BTreeSet::new()) {
-        Err(PlatformRejection::Reason { reason, detail }) => {
-            assert_eq!(reason, PlatformReason::MissingBackendPackage);
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
             assert!(detail.contains("vitis_ai"), "names the path: {detail}");
         }
         other => panic!("an undeclared backend path must be refused, got {other:?}"),
@@ -262,20 +353,24 @@ fn a_rejected_machine_stays_rejected_whatever_backend_a_bundle_names() {
     // The startup verdict is not something a bundle can talk its way past.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
-    let verdict = evaluate_platform(&registry, &detected, &ObservedStack::default());
-    let admission = PlatformAdmission::new(
-        verdict,
-        BTreeSet::from(["tensorplate-backend-python-pytorch".to_string()]),
+    let admission = PlatformAdmission::evaluate(
+        &registry,
+        &detected,
+        &ObservedStack {
+            components: BTreeMap::new(),
+            installed_packages: BTreeSet::from(["tensorplate-backend-python-pytorch".to_string()]),
+        },
     );
 
     for backend in ["python_pytorch", "tensorrt", "anything"] {
-        match admission.admit(&registry, backend) {
-            Err(rejection) => assert_eq!(
-                rejection.reason(),
+        match admission.admit_backend(&registry, backend) {
+            Err(AgentError::PlatformNotAdmissible { reason, .. }) => assert_eq!(
+                reason,
                 Some(PlatformReason::MigModeEnabled),
                 "the machine-level reason must survive, not be replaced by a package one"
             ),
             Ok(()) => panic!("a partitioned machine must not admit `{backend}`"),
+            Err(other) => panic!("expected a platform rejection, got {other:?}"),
         }
     }
 }
@@ -301,19 +396,17 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
     })
     .expect("detection succeeds")
     .expect("one device");
-    let detected = DetectedPlatform::with_accelerator(host, report.identity);
+    let detected = report_of(row, host, Some(report.identity));
 
-    match evaluate_platform(&registry, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Rejected(rejection @ PlatformRejection::NoFrozenReason { .. }) => {
-            assert_eq!(
-                rejection.reason(),
-                None,
-                "a machine-shape miss must not borrow a frozen reason"
-            );
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+        PlatformAdmission::Rejected {
+            reason: None,
+            ref detail,
+            ..
+        } => {
             assert!(
-                rejection.detail().contains("machine shape"),
-                "the detail must say what is actually wrong: {}",
-                rejection.detail()
+                detail.contains("machine shape") || detail.contains("validated environment"),
+                "the detail must say what is actually wrong: {detail}"
             );
         }
         other => {
@@ -335,21 +428,22 @@ fn an_experimental_row_does_not_borrow_the_planned_reason() {
         .expect("staged row");
     let detected = detected_from_fixture(row, "ubuntu2404-x86-a100-40g-a2hg1");
 
-    match evaluate_platform(&staged, &detected, &ObservedStack::default()) {
-        PlatformVerdict::Rejected(rejection) => {
+    match PlatformAdmission::evaluate(&staged, &detected, &ObservedStack::default()) {
+        rejected @ PlatformAdmission::Rejected { .. } => {
             assert_eq!(
-                rejection.reason(),
+                rejected.reason(),
                 None,
-                "an Experimental row must not borrow a frozen reason, got {:?}",
-                rejection.reason()
+                "an Experimental row must not borrow a frozen reason, got {rejected:?}"
             );
+            let PlatformAdmission::Rejected { ref detail, .. } = rejected else {
+                unreachable!("matched on Rejected")
+            };
             assert!(
-                rejection.detail().contains("Experimental"),
-                "the detail must say what is actually true: {}",
-                rejection.detail()
+                detail.contains("experimental"),
+                "the detail must say what is actually true: {detail}"
             );
         }
-        other @ PlatformVerdict::Admitted { .. } => {
+        other @ PlatformAdmission::Supported { .. } => {
             panic!("an Experimental row is not a supported combination, got {other:?}")
         }
     }
@@ -423,8 +517,8 @@ fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
     let harness = common::Harness::new();
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
-    let verdict = evaluate_platform(&registry, &detected, &ObservedStack::default());
-    assert!(matches!(verdict, PlatformVerdict::Rejected(_)));
+    let verdict = PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default());
+    assert!(matches!(verdict, PlatformAdmission::Rejected { .. }));
 
     let coordinator = Arc::new(
         Coordinator::new(
@@ -432,7 +526,7 @@ fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
             harness.store.clone(),
             harness.worker.clone(),
         )
-        .with_platform_admission(PlatformAdmission::new(verdict, BTreeSet::new()))
+        .with_platform_admission(verdict)
         .with_platform_registry(registry),
     );
 
@@ -456,4 +550,63 @@ fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
         }
         other => panic!("a partitioned machine must not deploy, got {other:?}"),
     }
+}
+
+#[test]
+fn the_coordinator_applies_backend_admission_after_bundle_verification() {
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let harness = common::Harness::new();
+    let registry = registry();
+    let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
+    let admission = PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default());
+    assert!(matches!(admission, PlatformAdmission::Supported { .. }));
+
+    let coordinator = Arc::new(
+        Coordinator::new(
+            harness.config.clone(),
+            harness.store.clone(),
+            harness.worker.clone(),
+        )
+        .with_platform_admission(admission)
+        .with_platform_registry(registry),
+    );
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "undeclared-backend",
+        common::BundleSpec {
+            backend_hint: Some("mock"),
+            ..Default::default()
+        },
+    );
+
+    match coordinator.deploy(
+        "undeclared-backend",
+        &bundle,
+        BTreeMap::default(),
+        None,
+        None,
+    ) {
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
+            assert!(
+                detail.contains("mock"),
+                "the rejection names the backend: {detail}"
+            );
+        }
+        other => panic!("an undeclared backend must not deploy, got {other:?}"),
+    }
+    assert!(
+        !harness
+            .config
+            .staging_dir
+            .join("undeclared-backend")
+            .exists(),
+        "backend admission must happen before staging"
+    );
+    assert!(
+        harness.worker.calls().expect("worker calls").is_empty(),
+        "backend admission must happen before worker prepare"
+    );
 }

@@ -1,0 +1,242 @@
+{
+  "redaction": {
+    "environment_values_included": false,
+    "operator_paths_included": false,
+    "policy": "allowlisted structured results only",
+    "raw_command_output_included": false
+  },
+  "result": "pass",
+  "schema_version": "1",
+  "stages": [
+    {
+      "finished_at": "2026-08-02T03:33:13Z",
+      "stage": "host-facts",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "architecture": "arm64",
+        "chip": "Apple M1 Pro",
+        "homebrew_version": "6.0.13-107-g9a1cb43",
+        "macos_build": "25F84",
+        "macos_version": "26.5.2",
+        "memory": "16 GB",
+        "model": "MacBook Pro"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:33:13Z",
+      "stage": "formula-pin",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "declared_version": "0.2.1-rc.3",
+        "formulae": {
+          "tensorplate": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          },
+          "tensorplate-agent": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          },
+          "tensorplate-backend-python-pytorch": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          },
+          "tensorplate-cli": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          },
+          "tensorplate-observability": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          },
+          "tensorplate-serving": {
+            "declared_version": "0.2.1-rc.3",
+            "sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+            "url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+          }
+        },
+        "source_sha256": "1afa3840e8a2297c1abf3d807506c57a9c692ad8ccdf21a5dea3251b889f4267",
+        "source_url": "https://github.com/tensorplate/tensorplate/archive/bd9067edcdb9ea5dba05225534d8fe30426a1835.tar.gz"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:33:13Z",
+      "stage": "deploy-input",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "backend_hint": "python_pytorch",
+        "backend_profile": "mps_fixture",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "device": "mps",
+        "model_artifact": "mps-smoke.json",
+        "model_artifact_digest": "sha256:d189c7eabc4cd5a77c91222eab51ed7030c98f36a897c47265ce63d787e42492"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:33:13Z",
+      "stage": "baseline",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "linked_version": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:33:13Z",
+      "stage": "tap-trust",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "candidate_formula_graph_trusted": true
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:29Z",
+      "stage": "clean-install",
+      "started_at": "2026-08-02T03:33:13Z",
+      "status": "pass",
+      "summary": {
+        "candidate_version": "0.2.1-rc.3"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:31Z",
+      "stage": "packaged-closure",
+      "started_at": "2026-08-02T03:34:29Z",
+      "status": "pass",
+      "summary": {
+        "all_six_formulae_installed": true
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:37Z",
+      "stage": "launchd-start",
+      "started_at": "2026-08-02T03:34:31Z",
+      "status": "pass",
+      "summary": {
+        "agent": "started",
+        "observability": "started",
+        "serving_has_independent_job": false
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:38Z",
+      "stage": "mps-capability",
+      "started_at": "2026-08-02T03:34:37Z",
+      "status": "pass",
+      "summary": {
+        "accelerator_runtime_available": true,
+        "accelerator_runtime_built": true,
+        "accelerator_runtime_version": "26.5.2",
+        "backend_name": "python_pytorch",
+        "framework_version": "2.13.0",
+        "python_version": "3.14.6"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:42Z",
+      "stage": "deploy-smoke",
+      "started_at": "2026-08-02T03:34:38Z",
+      "status": "pass",
+      "summary": {
+        "agent_state": "ready",
+        "backend": "python_pytorch",
+        "backend_profile": "mps_fixture",
+        "deployment_id": "wave-2b-macos-deploy-smoke-20260802T033312Z",
+        "deployment_phase": "active",
+        "device": "mps",
+        "mps_tensor_operation_required_for_load": true,
+        "serving_endpoint": "ready",
+        "status_severity": "ready",
+        "supervision_state": "not_configured"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:34:44Z",
+      "stage": "launchd-restart",
+      "started_at": "2026-08-02T03:34:42Z",
+      "status": "pass",
+      "summary": {
+        "agent": "restarted",
+        "observability": "restarted"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:35:00Z",
+      "stage": "launchd-crash-loop",
+      "started_at": "2026-08-02T03:34:44Z",
+      "status": "pass",
+      "summary": {
+        "agent_recovered": true
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:35:02Z",
+      "stage": "offline-runtime",
+      "started_at": "2026-08-02T03:35:00Z",
+      "status": "pass",
+      "summary": {
+        "network_denied_doctor": "pass",
+        "network_denied_mps": "pass"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:35:12Z",
+      "stage": "uninstall",
+      "started_at": "2026-08-02T03:35:02Z",
+      "status": "pass",
+      "summary": {
+        "all_six_formulae_absent": true,
+        "launchd_jobs_absent": true
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:35:30Z",
+      "stage": "baseline-restore",
+      "started_at": "2026-08-02T03:35:12Z",
+      "status": "pass",
+      "summary": {
+        "linked_version": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:36:42Z",
+      "stage": "upgrade",
+      "started_at": "2026-08-02T03:35:30Z",
+      "status": "pass",
+      "summary": {
+        "from": "0.1.2",
+        "to": "0.2.1-rc.3"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:36:51Z",
+      "stage": "rollback",
+      "started_at": "2026-08-02T03:36:42Z",
+      "status": "pass",
+      "summary": {
+        "from": "0.2.1-rc.3",
+        "state_preserved": true,
+        "to": "0.1.2"
+      }
+    },
+    {
+      "finished_at": "2026-08-02T03:36:51Z",
+      "stage": "tap-restored",
+      "started_at": "2026-08-02T03:36:51Z",
+      "status": "pass",
+      "summary": {
+        "worktree_clean": true
+      }
+    }
+  ]
+}

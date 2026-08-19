@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
-    ControlRequest, ControlResponse, DeployRequest, DeployStatus, ResponseStatus,
+    is_valid_deployment_id, ControlRequest, ControlResponse, DeployRequest, DeployStatus,
+    ResponseStatus,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
 
@@ -56,6 +57,11 @@ pub fn run<W: Write, E: Write>(
         .deployment_id
         .clone()
         .unwrap_or_else(|| format!("deploy-{}", uuid::Uuid::new_v4()));
+    if !is_valid_deployment_id(&deployment_id) {
+        return Err(CliError::Usage(
+            "deployment id must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved".into(),
+        ));
+    }
     let labels = args
         .labels
         .iter()
@@ -516,6 +522,23 @@ mod tests {
         let mut err = Vec::new();
         let result = run(&r, &profile(), &client, &args, &mut out, &mut err);
         assert!(matches!(result, Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn deploy_rejects_unsafe_deployment_id_before_calling_agent() {
+        let td = tempfile::tempdir().unwrap();
+        let bundle = write_bundle(&td);
+        let mut args = deploy_args(bundle, false);
+        args.deployment_id = Some("../state".into());
+        let client = MockAgentClient::new();
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let result = run(&r, &profile(), &client, &args, &mut out, &mut err);
+
+        assert!(matches!(result, Err(CliError::Usage(_))));
+        assert!(client.history().is_empty());
     }
 
     #[test]

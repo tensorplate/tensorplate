@@ -77,12 +77,19 @@ through normal `apt update` / `apt upgrade`; the bootstrap never repeats.
 See [tensorplate-ready.md](docs/install/tensorplate-ready.md) for
 provisioning, validation, and upgrade flows.
 
-CLI-only workstations:
+Workstation and appliance installs:
 
 ```bash
 sudo apt install tensorplate-cli            # Ubuntu AMD64, after the same one-time bootstrap
-brew install tensorplate/tap/tensorplate    # macOS Apple Silicon (CLI-only by design)
+brew install tensorplate/tap/tensorplate    # Complete appliance on the validated macOS row
 ```
+
+Recognized Apple M-series Macs running macOS 26 are supported through a
+Preview compatibility envelope. Apple M1 Pro with 16 GB unified memory is the
+exact Production row and current hardware-validation target; other M-series
+chips have fixture compatibility coverage, not per-SKU hardware evidence.
+See [the macOS install guide](docs/install/macos-cli.md) for the formula graph,
+services, and uninstall procedure.
 
 The signed GitHub Release assets and `install.sh` remain the supported
 no-APT fallback ([external-install.md](docs/install/external-install.md)).

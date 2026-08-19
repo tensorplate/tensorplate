@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Rust mirror of `config/schemas/platform_support_row.json`: one exact
-// platform support row.
+// Rust mirror of `config/schemas/platform_support_row.json`: one platform
+// support row.
 //
-// Every field is exact-version, which is the point: evidence recorded on
-// one row never transfers to another, so a row that names "Ubuntu 24.04"
-// does not cover 22.04 and a row that names one accelerator SKU does not
-// cover its neighbour. Memory accounting references the platform memory
-// profile records by property name rather than re-specifying them.
+// Every host and OS field is exact-version. Accelerator rows are exact by
+// default; an explicitly family-matched row is a lower-priority compatibility
+// envelope and never turns its representative validation target into evidence
+// for each member SKU. Memory accounting references the platform memory profile
+// records by property name rather than re-specifying them.
 //
 // Like the other config schemas, this versions on its own track and
 // validation failures map to `ErrorCode::ConfigInvalid`. Validation is
@@ -102,6 +102,31 @@ string_only_enum! {
         Unsupported => "unsupported",
         /// The accelerator has no partitioning concept.
         NotApplicable => "not_applicable",
+    }
+}
+
+string_only_enum! {
+    /// How an accelerator row compares its declared identity.
+    pub enum AcceleratorMatchPolicy {
+        /// The observed SKU must equal the row SKU verbatim.
+        Exact => "exact",
+        /// The observed SKU must belong to the row's explicitly supported
+        /// family. Exact rows take precedence over family rows.
+        Family => "family",
+    }
+}
+
+impl Default for AcceleratorMatchPolicy {
+    fn default() -> Self {
+        Self::Exact
+    }
+}
+
+impl AcceleratorMatchPolicy {
+    // serde's `skip_serializing_if` callback receives `&T`.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_exact(value: &Self) -> bool {
+        *value == Self::Exact
     }
 }
 
@@ -233,7 +258,7 @@ pub struct KernelDriverStack {
 /// claiming all of them; membership is what drives
 /// [`crate::PlatformReason::UnsupportedCpuVendor`], with no out-of-band
 /// allowlist. A row with an accelerator names exactly one vendor, because
-/// the exact accelerator SKU pins the host.
+/// an accelerator identity pins the host vendor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpuIdentity {
@@ -249,12 +274,15 @@ impl CpuIdentity {
     }
 }
 
-/// Accelerator identity. Names the exact SKU: a near-miss never matches.
+/// Accelerator identity. Exact matching is the default; family matching must
+/// be requested explicitly and is resolved only after exact rows.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Accelerator {
     pub family: String,
     pub sku: String,
+    #[serde(default, skip_serializing_if = "AcceleratorMatchPolicy::is_exact")]
+    pub match_policy: AcceleratorMatchPolicy,
     /// Accelerator memory size in bytes; always declared and positive, so
     /// a row can never present an accelerator with no usable budget.
     #[serde(deserialize_with = "json_numbers::deserialize_safe_bytes")]
@@ -359,7 +387,7 @@ pub struct Evidence {
     pub location: String,
 }
 
-/// One exact platform support row.
+/// One platform support row.
 ///
 /// Fields are private and read-only: a decoded row cannot exist or be
 /// mutated into a state that violates the schema.
@@ -581,6 +609,29 @@ impl PlatformSupportRow {
             }
             if accelerator.memory_bytes == 0 {
                 return Err(invalid("accelerator memory_bytes must be positive"));
+            }
+            if accelerator.match_policy == AcceleratorMatchPolicy::Family {
+                if accelerator.sku != accelerator.family {
+                    return Err(invalid(
+                        "a family-matched accelerator row uses its family as the display SKU",
+                    ));
+                }
+                if self.cpu.vendors.as_slice() != [CpuVendor::Apple]
+                    || accelerator.family != "Apple M-series"
+                {
+                    return Err(invalid(
+                        "family accelerator matching is defined only for Apple M-series rows",
+                    ));
+                }
+                if self.support_level != SupportLevel::Preview
+                    || self.provenance != Provenance::SpecAuthored
+                    || self.evidence.is_some()
+                {
+                    return Err(invalid(
+                        "a family-matched accelerator row must remain Preview, spec_authored, \
+                         and evidence-free",
+                    ));
+                }
             }
         } else {
             // An accelerator-less row cannot report GPU utilization, and

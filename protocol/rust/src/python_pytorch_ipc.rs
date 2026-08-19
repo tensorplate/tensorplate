@@ -82,6 +82,18 @@ pub struct IpcHealth {
     pub last_error: Option<String>,
 }
 
+/// Vendor-neutral accelerator-runtime facts collected by the backend package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IpcRuntimeCapability {
+    pub backend_name: String,
+    pub framework_version: String,
+    pub accelerator_runtime_version: String,
+    pub accelerator_runtime_built: bool,
+    pub accelerator_runtime_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
 /// Mirror of `protocol/schemas/python_pytorch_ipc.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IpcMessage {
@@ -110,6 +122,9 @@ pub struct IpcMessage {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ProtocolError>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_capability: Option<IpcRuntimeCapability>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metric: Option<IpcMetric>,
@@ -166,6 +181,8 @@ pub enum IpcMessageError {
     HealthResponseMissingHealth,
     #[error("health.backend_factory, if present, must be non-empty")]
     EmptyHealthBackendFactory,
+    #[error("runtime_capability is invalid: {0}")]
+    InvalidRuntimeCapability(String),
 }
 
 impl IpcMessage {
@@ -193,6 +210,7 @@ impl IpcMessage {
             model_spec: Some(model_spec),
             status: None,
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         })
@@ -216,6 +234,7 @@ impl IpcMessage {
         let error = validate_error(self.error)?;
         validate_metric(&self.metric)?;
         validate_health(&self.health)?;
+        validate_runtime_capability(&self.runtime_capability)?;
         let normalized = Self {
             schema_version: SCHEMA_VERSION.to_string(),
             message_id: self.message_id,
@@ -227,6 +246,7 @@ impl IpcMessage {
             model_spec,
             status: self.status,
             error,
+            runtime_capability: self.runtime_capability,
             metric: self.metric,
             health: self.health,
         };
@@ -310,6 +330,39 @@ fn validate_health(health: &Option<IpcHealth>) -> Result<(), IpcMessageError> {
     Ok(())
 }
 
+fn validate_runtime_capability(
+    capability: &Option<IpcRuntimeCapability>,
+) -> Result<(), IpcMessageError> {
+    let Some(capability) = capability else {
+        return Ok(());
+    };
+    if capability.backend_name.is_empty()
+        || capability.framework_version.is_empty()
+        || capability.accelerator_runtime_version.is_empty()
+    {
+        return Err(IpcMessageError::InvalidRuntimeCapability(
+            "name and version fields must be non-empty".into(),
+        ));
+    }
+    if capability.accelerator_runtime_available && !capability.accelerator_runtime_built {
+        return Err(IpcMessageError::InvalidRuntimeCapability(
+            "available runtimes require accelerator_runtime_built".into(),
+        ));
+    }
+    match (
+        capability.accelerator_runtime_available,
+        capability.unavailable_reason.as_deref(),
+    ) {
+        (true, None) | (false, Some("accelerator_runtime_unavailable")) => Ok(()),
+        (true, Some(_)) => Err(IpcMessageError::InvalidRuntimeCapability(
+            "available runtimes must not carry unavailable_reason".into(),
+        )),
+        (false, _) => Err(IpcMessageError::InvalidRuntimeCapability(
+            "unavailable runtimes require accelerator_runtime_unavailable".into(),
+        )),
+    }
+}
+
 fn validate_kind_invariants(message: &IpcMessage) -> Result<(), IpcMessageError> {
     if message.async_id == Some(0) {
         return Err(IpcMessageError::ZeroAsyncId);
@@ -389,8 +442,8 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::{
-        IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcStatus, IpcTensor,
-        SCHEMA_VERSION,
+        IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcRuntimeCapability,
+        IpcStatus, IpcTensor, SCHEMA_VERSION,
     };
     use crate::decode_with_version_check;
     use crate::error::{ErrorCode, ProtocolError};
@@ -449,6 +502,7 @@ mod tests {
             model_spec: None,
             status: None,
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         };
@@ -472,6 +526,7 @@ mod tests {
             model_spec: None,
             status: Some(IpcStatus::Ok),
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         }
@@ -495,6 +550,7 @@ mod tests {
             model_spec: None,
             status: Some(IpcStatus::Ok),
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         }
@@ -518,6 +574,14 @@ mod tests {
             model_spec: None,
             status: Some(IpcStatus::Ok),
             error: None,
+            runtime_capability: Some(IpcRuntimeCapability {
+                backend_name: "python_pytorch".into(),
+                framework_version: "2.9.1".into(),
+                accelerator_runtime_version: "26.0".into(),
+                accelerator_runtime_built: true,
+                accelerator_runtime_available: true,
+                unavailable_reason: None,
+            }),
             metric: None,
             health: Some(IpcHealth {
                 ready: true,
@@ -534,6 +598,34 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_runtime_requires_typed_reason() {
+        let raw = r#"{
+            "schema_version":"0.1",
+            "message_id":"health-2",
+            "kind":"health_check_response",
+            "status":"ok",
+            "runtime_capability":{
+                "backend_name":"python_pytorch",
+                "framework_version":"2.9.1",
+                "accelerator_runtime_version":"26.0",
+                "accelerator_runtime_built":true,
+                "accelerator_runtime_available":false
+            },
+            "health":{
+                "ready":false,
+                "backend_factory":null,
+                "uptime_ns":42,
+                "last_error":"runtime unavailable"
+            }
+        }"#;
+        let message: IpcMessage = serde_json::from_str(raw).expect("shape decodes");
+        assert!(matches!(
+            message.validate(),
+            Err(IpcMessageError::InvalidRuntimeCapability(_))
+        ));
+    }
+
+    #[test]
     fn error_event_round_trips() {
         let m = IpcMessage {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -546,6 +638,7 @@ mod tests {
             model_spec: None,
             status: Some(IpcStatus::Error),
             error: Some(ProtocolError::new(ErrorCode::LoadFailed, "weights missing")),
+            runtime_capability: None,
             metric: None,
             health: None,
         }
@@ -571,6 +664,7 @@ mod tests {
             model_spec: None,
             status: None,
             error: None,
+            runtime_capability: None,
             metric: Some(IpcMetric {
                 name: "infer_latency_ms".into(),
                 value_f64: Some(8.5),
@@ -598,6 +692,7 @@ mod tests {
             model_spec: None,
             status: None,
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         }
@@ -618,6 +713,7 @@ mod tests {
             model_spec: None,
             status: None,
             error: None,
+            runtime_capability: None,
             metric: None,
             health: None,
         }

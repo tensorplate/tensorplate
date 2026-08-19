@@ -6,8 +6,127 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- A supported discrete NVIDIA GPU whose framebuffer size cannot be read now
+  retains the validated platform row's memory budget as its deploy ceiling.
+  Missing framebuffer evidence no longer becomes a zero-byte limit that
+  rejects every bundle with a positive memory estimate, while the row budget
+  continues to prevent admission from becoming unbounded. (V021-E02-F02-T01)
+
+- Homebrew now confines the agent control surface to the installing user: the
+  runtime directory is `0700` and the Unix-domain socket is `0600`. Native
+  Linux packages retain their dedicated `tensorplate`-group authorization
+  boundary and `0660` socket. The architecture and lifecycle checks now pin
+  both package-specific trust models. (V021-E03-F01-T03)
+
+- A detection failure no longer leaves a machine ungated. Both platform
+  lanes wired deploy admission independently, and they disagreed on this
+  point: one recorded a failure to read the hardware as a rejection, the
+  other treated it as "no verdict" and let deployment proceed with no
+  platform gate at all — on exactly the hardware nobody has characterised.
+
+  The rejection is the right answer, and it does not require the false
+  claim the other design was avoiding. A rejection whose reason is absent
+  says "detection failed", not "your platform is unsupported"; only the
+  gate closes. Settling the verdict now returns a verdict rather than an
+  option, so there is no path on which the agent runs ungated.
+
+- Per-deployment platform admission now checks the matched row's backend
+  package requirements after bundle verification and before staging. Package
+  inventory comes from Homebrew formulas on macOS and the Debian package
+  database on Linux, preserving the same fail-closed gate on both lanes.
+
+- Deployment identifiers are now constrained to one bounded,
+  filesystem-safe path segment at protocol, agent, and CLI boundaries before
+  the agent creates transaction state or derives a staging path. Local and
+  device-routed deploys share the same policy. Import pruning continues to
+  recognize longer filesystem-safe names created by older clients, so stale
+  legacy imports remain reclaimable.
+
 ### Added
 
+- The macOS lifecycle deploy gate now uses a verified bundle artifact to
+  select an MPS-backed sidecar fixture whose load performs and synchronizes a
+  real PyTorch tensor operation on the MPS device. The gate rejects any other
+  backend profile, requires an active deployment with ready CLI state and a
+  serving endpoint whose health names the expected deployment, uses a unique
+  deployment identifier per rehearsal, checks supervisor health when
+  configured, and emits an allowlisted per-stage transcript without
+  operator paths or environment values. macOS install guidance now states
+  the exact supported row and removes the entire six-formula graph before
+  untapping. (V021-E03-F01-T04, V021-E03-F02-T03)
+
+- A guarded Apple M1 Pro Homebrew lifecycle harness now records redacted,
+  stage-by-stage evidence for clean install, packaged-only deploy smoke,
+  launchd restart and crash-loop behavior, network-denied runtime checks,
+  CLI-only formula upgrade continuity, rollback, and uninstall. The
+  accompanying runbook defines immutable RC/commit source pins and recovery
+  steps while preserving the operator's prior CLI-only installation. The
+  packaged CLI also supplies the formula-managed backend module path so
+  doctor probes the same Python/PyTorch runtime as the agent. The current-head
+  gate also captures the packaged agent's admission decision and requires the
+  M1 Pro exact Production row to win over the M-series Preview fallback while
+  preserving both rows' 16 GiB ceiling.
+  (V021-E03-F01-T04)
+
+- Homebrew now links the installed platform registry and Python/PyTorch
+  backend descriptor into its shared prefix, points the descriptor at the
+  formula-managed PyTorch interpreter, and passes the corresponding discovery
+  and Python paths through the agent's launchd service. The agent, CLI, and
+  observability process resolve absolute descriptor and registry directory
+  overrides while retaining the native-package defaults. Python 3.14 joins
+  backend CI and descriptor support to match the current Homebrew PyTorch
+  runtime. (V021-E03-F01-T01, V021-E03-F02-T03)
+
+- The Python/PyTorch sidecar now probes the configured Apple accelerator
+  runtime before SmolVLA model dependencies or weights are loaded. Load and
+  health responses publish a vendor-neutral runtime capability record with
+  framework and operating-system runtime versions, build state, and current
+  availability. An unavailable runtime rejects the load with the typed
+  `accelerator_runtime_unavailable` platform reason, while the shared
+  `tp::Error::Code` remains `unsupported`. The backend descriptor now
+  declares the supported Apple device target. (V021-E03-F02-T03)
+
+- Apple silicon detection now reads the exact chip identity and unified-memory
+  size from `sysctl`, resolves exact rows before a narrowly recognized Apple
+  M-series Preview compatibility row, and publishes a vendor-neutral
+  `PlatformCapability`. Its
+  `max_resident_model_memory` is the lesser of detected memory and the row
+  budget. Agent admission applies that ceiling before bundle capacity checks
+  and rejects Planned rows, unsupported chips, unsupported macOS versions, or
+  failed detection before staging and model load. The M1 Pro 16 GB exact row
+  remains the current evidence-backed hardware-validation target; M2 Pro, M3
+  Max, and M4 Pro fixtures exercise family compatibility without asserting
+  per-SKU hardware validation, and a non-M-series Apple fixture proves the
+  boundary fails closed. Family rows are constrained to Preview,
+  `spec_authored`, and evidence-free so validation evidence can attach only to
+  exact hardware rows.
+  (V021-E03-F02-T01, V021-E03-F02-T02)
+
+- Homebrew now installs prefix-rendered agent, CLI, and observability configs,
+  secures their config/state/runtime/log paths during post-install, connects
+  the packaged CLI to the local agent UDS, and routes launchd output plus
+  structured diagnostics to documented log files. The post-install checks
+  reject symlinked managed paths and fail with the affected path when a
+  required mode cannot be enforced. (V021-E03-F01-T03)
+
+- Homebrew installs launchd service definitions for the agent and
+  observability processes. Both start when loaded, restart after unsuccessful
+  exits with launchd throttling, and remain independent; the serving worker
+  deliberately has no launchd job because the agent remains its sole process
+  owner. (V021-E03-F01-T02)
+
+- Homebrew packaging templates now cover the complete macOS appliance:
+  agent, serving worker, CLI, observability, and the Python/PyTorch backend,
+  with `tensorplate` retained as the meta-formula so existing installs have a
+  continuous upgrade name. Release automation renders the entire graph from
+  one tagged source archive and checksum and submits it as one tap change,
+  preventing component versions from drifting. The CLI component explicitly
+  accepts the command path owned by the former CLI-only formula; the tap
+  migration will exercise that handoff before release. Service definitions,
+  macOS paths, and hardware smoke remain owned by the following macOS
+  lifecycle changes. (V021-E03-F01-T01)
 - A release-prep check that a Production support claim rests on a recorded
   run. The existing guard asserts only that a Production row *declares* an
   evidence location containing its row id — not that the directory exists,
@@ -392,12 +511,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (V021-E01-F01-T03)
 
 - Platform registry loading and the query API that resolves a detected
-  machine to exactly one support row. `PlatformRegistry` loads the
+  machine to exactly one support row. Exact accelerator rows take precedence
+  over explicitly declared lower-priority family compatibility rows.
+  `PlatformRegistry` loads the
   committed rows and roadmap targets and **fails closed**: one invalid
   document means no registry, because a half-loaded registry would report
   supported platforms as unsupported. Colliding entries — a duplicated row
-  id, two rows matching the same platform identity, or a roadmap target
-  shadowing a row id — are rejected at load rather than resolved by
+  id, two rows matching the same platform identity at the same priority, or
+  a roadmap target shadowing a row id — are rejected at load rather than resolved by
   picking a winner at query time. Roadmap targets load into a separate
   catalog that matching never consults, so a target can never be read as
   support. `resolve()` returns a typed `RowMatch`: supported, matched a
@@ -427,13 +548,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Platform support row registry: the schema-first artifact every later
   platform feature keys off. `config/schemas/platform_support_row.json`
-  defines one exact platform row (OS with exact version and image
+  defines one platform row (OS with exact version and image
   identity, kernel/driver stack, CPU architecture and vendor, accelerator
-  SKU with its required memory size, memory profile reference and
-  partition posture, backend
-  package sets per channel, model-class row pointers, per-signal gate
-  semantics, support level, provenance, validation environment, and
-  evidence location), and the deliberately smaller
+  identity with exact matching by default and an explicit,
+  lower-priority family policy, required memory size, memory profile reference,
+  and partition posture, backend package sets per channel, model-class row
+  pointers, per-signal gate semantics, support level, provenance, validation
+  environment, and evidence location), and the deliberately smaller
   `config/schemas/roadmap_target.json` describes future targets that are
   not exact enough to be rows — a target has no row id, support level,
   model-class rows, gate semantics, or evidence, is never matched against
@@ -450,7 +571,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   explicitly — vendor support is decided by registry membership, never an
   out-of-band allowlist.
 - The committed registry under `config/platform/`: all twelve v0.2.1 rows
-  (five Production, two Preview, five Planned) and all four roadmap
+  (five Production, three Preview, four Planned) and all four roadmap
   targets, including the deploy-smoke rows' Preview model-class pointers
   so diagnosis renders posture from the registry rather than a hardcoded
   list. Every row is currently marked `spec_authored` — no v0.2.1

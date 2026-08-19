@@ -414,11 +414,14 @@ accepted. Channels are independent — approve in any order, or hold any one:
 - **`publish-apt`** (env `apt`) — builds, signs, and syncs the stable APT
   repository from this run's signed assets, then validate per
   [`apt-repository.md`](./apt-repository.md). Re-runnable on failure.
-- **`publish-homebrew`** (env `homebrew`) — opens an auto-merge formula-bump PR
-  in [`tensorplate/homebrew-tap`](https://github.com/tensorplate/homebrew-tap).
-  The job finishing means "PR opened with auto-merge armed", not "merged": the
-  tap CI (audit + build-from-source + `brew test` on Apple Silicon) gates the
-  merge, so the tap goes live eventually-consistently. Re-runnable.
+- **`publish-homebrew`** (env `homebrew`) — renders the five component
+  formulas and the `tensorplate` meta-formula from
+  `packaging/homebrew/Formula/`, then opens one auto-merge PR in
+  [`tensorplate/homebrew-tap`](https://github.com/tensorplate/homebrew-tap).
+  Every formula points at the same tagged source archive and checksum. The job
+  finishing means "PR opened with auto-merge armed", not "merged": the tap CI
+  (audit + build-from-source + `brew test` on Apple Silicon) gates the merge,
+  so the tap goes live eventually-consistently. Re-runnable.
 - **`publish-github`** (env `github-release`) — un-drafts the GitHub Release
   (`gh release edit --draft=false --latest`), making the assets public.
 

@@ -104,8 +104,9 @@ pub struct HostIdentity {
 /// accelerator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorIdentity {
-    /// Exact SKU as the platform reports it. Compared verbatim against a
-    /// row's SKU: a near-miss is unsupported, never a nearest match.
+    /// Exact SKU as the platform reports it. Compared verbatim against exact
+    /// rows and without normalization against any explicit family policy: a
+    /// near miss is unsupported, never a nearest match.
     pub sku: String,
     /// Whether the device is partitioned. Partitioned devices are rejected
     /// before any SKU comparison, so a partitioned instance of a supported
