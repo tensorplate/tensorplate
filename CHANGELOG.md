@@ -6,6 +6,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- CI jobs no longer hang for their entire budget when a package mirror
+  stalls. A stalled mirror is not a failing one: apt holds an
+  open-but-idle connection and waits, so a job burns its whole timeout
+  without ever producing an error — and retries do nothing, because there
+  is no failure to retry. A response timeout turns the stall into an error
+  that retries can then recover.
+
+  apt's own `Acquire` timeouts are set too, but they are not sufficient on
+  their own: they fire when a connection goes **idle**, and a mirror
+  trickling bytes never trips them. That was observed directly — a job
+  stalled for ten minutes with the drop-in accepted and active. So every
+  apt invocation is additionally bounded in wall clock, which does not
+  depend on why apt is slow.
+
+  The bound converts a stall into a failed step, which is re-runnable;
+  it does not retry automatically. That is a deliberate stopping point
+  rather than the ideal: three attempts at an automatic-retry wrapper
+  introduced bugs of their own, and a change to every workflow is not the
+  place to be clever.
+
+  The C++ workflow also gains per-job timeouts. It was the only workflow
+  with none, so its jobs inherited the six-hour default: one stalled apt
+  step ran 68 minutes before anyone looked, where the same stall in a
+  workflow with budgets failed in 15.
+
 ### Added
 
 - The PCI bus is now read, so an accelerator that is physically present can

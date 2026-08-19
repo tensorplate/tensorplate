@@ -34,6 +34,9 @@ on:
       # dispatched by hand four times during #150 for exactly this reason.
       - 'platform/**'
       - 'config/platform/**'
+      # Every apt call in this workflow goes through the wrapper, so a change
+      # to it must be able to trigger the jobs that exercise it.
+      - 'tools/ci/**'
   workflow_dispatch:
 
 permissions:
@@ -54,6 +57,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A stalled mirror is what costs time here, not a failing one: apt
+      # holds an open-but-idle connection and waits, so a job burns its
+      # whole budget without ever failing. A response timeout turns the
+      # stall into an error, and only then can a retry recover it —
+      # retries alone do nothing for a hang. Written as a drop-in so it
+      # also covers apt calls inside the test scripts, which per-command
+      # flags would miss.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
       # apt-utils and gnupg are not needed to run the suites, but several
       # checks are guarded on the tools being present and silently skip
       # without them. Install them so the checks actually execute.
@@ -61,8 +83,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             apt-utils \
             build-essential \
             debhelper \
@@ -98,6 +120,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      # A stalled mirror is what costs time here, not a failing one: apt
+      # holds an open-but-idle connection and waits, so a job burns its
+      # whole budget without ever failing. A response timeout turns the
+      # stall into an error, and only then can a retry recover it —
+      # retries alone do nothing for a hang. Written as a drop-in so it
+      # also covers apt calls inside the test scripts, which per-command
+      # flags would miss.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
       # Drives the shipped units against the runner's own systemd. The units
       # are architecture-independent, so one runner covers the contract both
       # architectures inherit; verify_systemd_units.sh only reads them as text.
@@ -119,14 +160,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      # A stalled mirror is what costs time here, not a failing one: apt
+      # holds an open-but-idle connection and waits, so a job burns its
+      # whole budget without ever failing. A response timeout turns the
+      # stall into an error, and only then can a retry recover it —
+      # retries alone do nothing for a hang. Written as a drop-in so it
+      # also covers apt calls inside the test scripts, which per-command
+      # flags would miss.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
       - name: Install build and packaging dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
+          tools/ci/apt-get.sh update
           # cmake comes from the runner image, not apt: jammy ships 3.22 and the
           # tree requires 3.25 (same reason as the release workflow's amd64 job).
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             build-essential \
             clang-15 \
             debhelper \
@@ -184,12 +244,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A stalled mirror is what costs time here, not a failing one: apt
+      # holds an open-but-idle connection and waits, so a job burns its
+      # whole budget without ever failing. A response timeout turns the
+      # stall into an error, and only then can a retry recover it —
+      # retries alone do nothing for a hang. Written as a drop-in so it
+      # also covers apt calls inside the test scripts, which per-command
+      # flags would miss.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
       - name: Install packaging toolchain
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             apt-utils \
             build-essential \
             debhelper \

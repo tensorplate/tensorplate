@@ -111,12 +111,31 @@ jobs:
           # branch), which is the source the build-only run built.
           ref: ${{ inputs.source_run_id != '' && github.ref || env.TAG }}
 
+      # A stalled mirror is what costs time here, not a failing one: apt
+      # holds an open-but-idle connection and waits, so a job burns its
+      # whole budget without ever failing. A response timeout turns the
+      # stall into an error, and only then can a retry recover it —
+      # retries alone do nothing for a hang. Written as a drop-in so it
+      # also covers apt calls inside the test scripts, which per-command
+      # flags would miss.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
       - name: Install repository tooling
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
             apt-utils \
             dpkg-dev \
             gnupg \
