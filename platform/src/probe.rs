@@ -174,6 +174,7 @@ impl SystemHostProbe {
                 None
             },
             proc_meminfo: self.read("/proc/meminfo")?,
+            pci_devices: self.pci_devices()?,
         })
     }
 
@@ -193,6 +194,75 @@ impl SystemHostProbe {
     /// As [`crate::detect::identify_platform`].
     pub fn detect_platform(&self) -> Result<PlatformReport, PlatformProbeError> {
         identify_platform(&self.sources()?)
+    }
+
+    /// The PCI bus as one line per function: `<address> <vendor> <device>
+    /// <class>`.
+    ///
+    /// The first directory enumeration in this module, so it repeats the
+    /// discipline every single-file read here already follows: a bus that
+    /// is not there is `None` (a Mac and a Jetson have no
+    /// `/sys/bus/pci/devices`, and that is a signal), while a bus that is
+    /// there and cannot be read is an error. Collapsing those would report
+    /// a machine whose sysfs is unreadable as a machine with no devices.
+    ///
+    /// A single function that disappears mid-enumeration is skipped rather
+    /// than failing: hot-unplug is real, and this fact is evidence rather
+    /// than something matching depends on.
+    fn pci_devices(&self) -> Result<Option<String>, PlatformProbeError> {
+        let root = self.path("/sys/bus/pci/devices");
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(PlatformProbeError::Unreadable {
+                    source_name: root.display().to_string(),
+                    detail: err.to_string(),
+                })
+            }
+        };
+        let mut lines = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|err| PlatformProbeError::Unreadable {
+                source_name: root.display().to_string(),
+                detail: err.to_string(),
+            })?;
+            let address = entry.file_name().to_string_lossy().into_owned();
+            // Only a vanished entry is skipped. Anything else — a denied
+            // read, an I/O error, a value that is not UTF-8 — is a source
+            // that exists and cannot be read, which this module raises
+            // rather than reports as absent. Swallowing them here would
+            // hand back an inventory that is quietly incomplete, and an
+            // incomplete inventory is exactly the "no accelerator present"
+            // answer this reading exists to stop being wrong about.
+            let field = |name: &str| -> Result<Option<String>, PlatformProbeError> {
+                let path = entry.path().join(name);
+                match std::fs::read(&path) {
+                    Ok(bytes) => match String::from_utf8(bytes) {
+                        Ok(value) => Ok(Some(value.trim().to_string())),
+                        Err(err) => Err(PlatformProbeError::Unreadable {
+                            source_name: path.display().to_string(),
+                            detail: err.to_string(),
+                        }),
+                    },
+                    Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+                    Err(err) => Err(PlatformProbeError::Unreadable {
+                        source_name: path.display().to_string(),
+                        detail: err.to_string(),
+                    }),
+                }
+            };
+            let (Some(vendor), Some(device), Some(class)) =
+                (field("vendor")?, field("device")?, field("class")?)
+            else {
+                // A function that vanished between listing and reading:
+                // hot-unplug is real, and it is genuinely absent now.
+                continue;
+            };
+            lines.push(format!("{address} {vendor} {device} {class}"));
+        }
+        lines.sort();
+        Ok(Some(lines.join("\n")))
     }
 
     /// The machine type, on machines that have one.
@@ -486,6 +556,75 @@ mod tests {
         let probe = SystemHostProbe::with_root(&staging);
         assert!(!probe.looks_like_gce().expect("dmi readable"));
         assert_eq!(probe.gce_machine_type().expect("no query attempted"), None);
+
+        std::fs::remove_dir_all(&staging).ok();
+    }
+
+    #[test]
+    fn an_unreadable_pci_attribute_is_an_error_not_a_missing_device() {
+        // The discipline this module opens with, applied to the files
+        // inside the directory rather than only to the directory. A denied
+        // read must not become "that device is not there": an inventory
+        // that is quietly incomplete is the same wrong answer -- "no
+        // accelerator present" -- that reading the bus exists to prevent.
+        let staging = std::env::temp_dir().join(format!("tp-pci-perm-{}", std::process::id()));
+        let device = staging.join("sys/bus/pci/devices/0000:00:04.0");
+        std::fs::create_dir_all(&device).expect("stage");
+        std::fs::write(device.join("vendor"), "0x10de\n").expect("vendor");
+        std::fs::write(device.join("device"), "0x27b8\n").expect("device");
+        let class = device.join("class");
+        std::fs::write(&class, "0x030000\n").expect("class");
+
+        // Readable first: the device is inventoried.
+        let listed = SystemHostProbe::with_root(&staging)
+            .pci_devices()
+            .expect("readable bus")
+            .expect("bus present");
+        assert!(listed.contains("0000:00:04.0"), "baseline: {listed}");
+
+        // Now make one attribute unreadable. `.ok()` would have skipped the
+        // device and reported an empty bus.
+        let mut perms = std::fs::metadata(&class).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+        std::fs::set_permissions(&class, perms).expect("chmod");
+
+        let result = SystemHostProbe::with_root(&staging).pci_devices();
+        // Running as root defeats the permission bit; skip rather than
+        // assert something the environment cannot produce.
+        if std::fs::read(&class).is_err() {
+            let err = result.expect_err("an unreadable attribute is an error");
+            assert!(
+                format!("{err}").contains("class"),
+                "the error names the attribute path: {err}"
+            );
+        }
+
+        let mut perms = std::fs::metadata(&class).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o644);
+        std::fs::set_permissions(&class, perms).ok();
+        std::fs::remove_dir_all(&staging).ok();
+    }
+
+    #[test]
+    fn a_vanished_pci_function_is_skipped_rather_than_fatal() {
+        // Hot-unplug between listing and reading is real, and a function
+        // that is genuinely gone is absent rather than unreadable.
+        let staging = std::env::temp_dir().join(format!("tp-pci-gone-{}", std::process::id()));
+        let present = staging.join("sys/bus/pci/devices/0000:00:04.0");
+        let partial = staging.join("sys/bus/pci/devices/0000:00:05.0");
+        std::fs::create_dir_all(&present).expect("stage");
+        std::fs::create_dir_all(partial).expect("stage");
+        std::fs::write(present.join("vendor"), "0x10de\n").expect("vendor");
+        std::fs::write(present.join("device"), "0x27b8\n").expect("device");
+        std::fs::write(present.join("class"), "0x030000\n").expect("class");
+        // `partial` has no attribute files at all, as a removed device does.
+
+        let listed = SystemHostProbe::with_root(&staging)
+            .pci_devices()
+            .expect("a vanished function is not an error")
+            .expect("bus present");
+        assert!(listed.contains("0000:00:04.0"));
+        assert!(!listed.contains("0000:00:05.0"));
 
         std::fs::remove_dir_all(&staging).ok();
     }
