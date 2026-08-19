@@ -6,6 +6,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- CI jobs no longer hang for their entire budget when a package mirror
+  stalls. A stalled mirror is not a failing one: apt holds an
+  open-but-idle connection and waits, so a job burns its whole timeout
+  without ever producing an error — and retries do nothing, because there
+  is no failure to retry. A response timeout turns the stall into an error
+  that retries can then recover.
+
+  Applied as an apt drop-in rather than per-command flags, so it also
+  covers the apt calls inside the packaging and lifecycle scripts, which
+  do considerably more of them than the install steps do. The step
+  verifies apt accepted the settings, so a job fails loudly rather than
+  quietly running unprotected.
+
+  The C++ workflow also gains per-job timeouts. It was the only workflow
+  with none, so its jobs inherited the six-hour default: one stalled apt
+  step ran 68 minutes before anyone looked, where the same stall in a
+  workflow with budgets failed in 15.
+
 ### Added
 
 - The PCI bus is now read, so an accelerator that is physically present can
