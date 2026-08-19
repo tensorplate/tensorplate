@@ -35,6 +35,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Admission posture: how strictly a machine is judged before a deploy is
+  admitted is now an explicit, reported value rather than one policy applied
+  everywhere.
+
+  The strictness floor is **derived from each row's own gate semantics**,
+  not stored. A row that acts on thermal, power or throttle as
+  `load_bearing` is one whose cooling belongs to the operator — a Jetson in
+  a product, a workstation under a desk — and its evidence does not transfer
+  to a chassis nobody characterised. A row that merely reports those signals
+  is a managed machine. Row authors already made that judgement, per row;
+  this reads their decision rather than adding one, which is why the same
+  accelerator lands differently in two chassis: the RTX PRO 6000 Workstation
+  row gates on temperature and its Server Edition sibling does not.
+
+  An operator may set a posture, and it can only make admission stricter:
+  the value in force is the maximum of theirs and the row's floor, so an
+  edge row's requirement is a property of the hardware rather than a default
+  that can be switched off. An unrecognised posture is a startup error, not
+  a silent fallback — a value a future release adds must not be quietly
+  ignored by an older agent running at a strictness nobody chose.
+
+  **Nothing consults the posture yet and behaviour is unchanged.** It is
+  reported, with its provenance, so an operator can see which strictness
+  they are running at and whether it came from the row or from their own
+  configuration. That is what lets them pin it, and what keeps a future
+  change to the default from being a silent behaviour change on upgrade.
+
+### Added
+
 - The PCI bus is now read, so an accelerator that is physically present can
   be told from one that is absent. `nvidia-smi` needs a working driver to
   answer, which makes a card with a missing or broken driver

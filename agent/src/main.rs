@@ -38,8 +38,8 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    AcceleratorObservation, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry, PlatformReport,
-    SystemHostProbe,
+    AcceleratorObservation, AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry,
+    PlatformReport, SystemHostProbe,
 };
 use tensorplate_protocol::install_paths;
 use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
@@ -201,13 +201,30 @@ fn evaluate_platform_admission(
     let Some(registry) = registry else {
         return PlatformAdmission::detection_failed("installed platform registry is unavailable");
     };
+    // Already validated at config load, so an unparsable value cannot
+    // reach here; `ok()` selects the row floor rather than guessing.
+    let operator_posture = config
+        .admission_posture
+        .as_deref()
+        .and_then(|value| value.parse::<AdmissionPosture>().ok());
     let admission = match observe_platform() {
-        Ok((report, observed)) => PlatformAdmission::evaluate(registry, &report, &observed),
+        Ok((report, observed)) => {
+            PlatformAdmission::evaluate(registry, &report, &observed, operator_posture)
+        }
         Err(err) => PlatformAdmission::detection_failed(err.to_string()),
     };
     admission.apply_memory_limit(config);
+    // The posture is reported with its provenance, not just its value. An
+    // operator who can see which strictness they are running at, and
+    // whether it came from the row or from their own config, can pin it --
+    // which is what keeps a future change to the default from being a
+    // silent behaviour change on upgrade.
+    let (posture, posture_from) = admission
+        .posture()
+        .map_or(("none", "none"), |(p, from)| (p.as_str(), from));
     eprintln!(
-        "platform admission: row={} reason={} max_resident_model_memory={}",
+        "platform admission: row={} reason={} posture={posture} ({posture_from}) \
+         max_resident_model_memory={}",
         admission.row_id().unwrap_or("none"),
         admission
             .reason()

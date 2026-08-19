@@ -59,9 +59,9 @@ pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, ProfileSelection, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};
 pub use row::{
-    Accelerator, AcceleratorMatchPolicy, BackendPackageSet, CpuArchitecture, CpuIdentity,
-    CpuVendor, Evidence, Gate, GateSemantics, GateValue, KernelDriverStack, ModelClassRowRef,
-    OsIdentity, PackageChannel, Partitioning, PlatformSupportRow, Provenance, StackComponent,
-    SupportLevel, ValidationEnvironment, ValidationEnvironmentKind,
+    Accelerator, AcceleratorMatchPolicy, AdmissionPosture, BackendPackageSet, CpuArchitecture,
+    CpuIdentity, CpuVendor, Evidence, Gate, GateSemantics, GateValue, KernelDriverStack,
+    ModelClassRowRef, OsIdentity, PackageChannel, Partitioning, PlatformSupportRow, Provenance,
+    StackComponent, SupportLevel, ValidationEnvironment, ValidationEnvironmentKind,
     PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
 };

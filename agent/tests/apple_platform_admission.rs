@@ -53,7 +53,7 @@ fn sources(name: &str) -> HostSources {
 
 fn admission(name: &str) -> PlatformAdmission {
     let report = identify_platform(&sources(name)).expect("platform detects");
-    PlatformAdmission::evaluate(&registry(), &report, &ObservedStack::default())
+    PlatformAdmission::evaluate(&registry(), &report, &ObservedStack::default(), None)
 }
 
 #[test]

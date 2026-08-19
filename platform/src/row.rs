@@ -768,3 +768,115 @@ impl PlatformSupportRow {
         )
     }
 }
+
+/// How strictly a machine matching this row must be judged before a deploy
+/// is admitted.
+///
+/// Not a stored field. It is **derived** from the row's own
+/// [`GateSemantics`], deliberately: storing it would make a future policy
+/// change a schema bump plus a golden regeneration plus a migration of
+/// every committed row, where deriving it keeps the rule in one function.
+/// Nothing about it enters the row schema, the match key, or the frozen
+/// reason vocabulary, so the policy stays replaceable without touching the
+/// mechanism.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum AdmissionPosture {
+    /// Deploy wherever the hardware can actually serve. The row still
+    /// governs what is CLAIMED; it does not govern whether the machine
+    /// runs.
+    TechnicalPrerequisites,
+    /// Deploy only on a machine matching a row that carries validation
+    /// evidence.
+    ///
+    /// Ordered above [`Self::TechnicalPrerequisites`] so that resolving two
+    /// postures is a `max`: a floor can raise an operator's choice, never
+    /// lower it.
+    ValidatedRowRequired,
+}
+
+impl AdmissionPosture {
+    /// The strictest posture a machine matching `row` may be judged at.
+    ///
+    /// A row that gates on thermal, power or throttle as
+    /// [`GateValue::LoadBearing`] is a row whose chassis belongs to the
+    /// operator — a Jetson in a product, a workstation under a desk — and
+    /// its evidence does not transfer to a chassis nobody characterized.
+    /// A row recording those as context reports them and does not act on
+    /// them, which is what a managed datacenter machine looks like.
+    ///
+    /// That distinction is not invented here. Row authors already made it,
+    /// per row, when they wrote the gate semantics; this reads their
+    /// decision rather than adding one. It is also why the same accelerator
+    /// in two chassis lands differently: the RTX PRO 6000 Workstation row
+    /// gates on temperature and its Server Edition sibling does not.
+    #[must_use]
+    pub fn floor_for(row: &PlatformSupportRow) -> Self {
+        let gates = row.gate_semantics();
+        let chassis_gated = [&gates.thermal, &gates.power, &gates.throttle]
+            .into_iter()
+            .any(|gate| gate.gate == GateValue::LoadBearing);
+        if chassis_gated {
+            Self::ValidatedRowRequired
+        } else {
+            Self::TechnicalPrerequisites
+        }
+    }
+
+    /// The posture actually in force: the stricter of the row's floor and
+    /// whatever the operator asked for.
+    ///
+    /// An operator may opt UP to a stricter posture anywhere. They may not
+    /// opt below a row's floor, which is what makes an edge row's
+    /// requirement a property of the hardware rather than a default someone
+    /// can turn off.
+    ///
+    /// With no operator preference the floor stands. That is the decision
+    /// recorded for v0.2.1: a datacenter row runs on prerequisites without
+    /// anyone configuring it, because a global default would override a
+    /// deliberate per-row judgement with a general one.
+    #[must_use]
+    pub fn resolve(floor: Self, operator: Option<Self>) -> Self {
+        match operator {
+            Some(requested) => floor.max(requested),
+            None => floor,
+        }
+    }
+
+    /// Where a resolved posture came from, for reporting.
+    #[must_use]
+    pub fn provenance(floor: Self, operator: Option<Self>) -> &'static str {
+        match operator {
+            Some(requested) if requested > floor => "operator",
+            // Either no preference, or one the floor already met or
+            // exceeded — in both cases the row decided the outcome.
+            _ => "row floor",
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TechnicalPrerequisites => "technical_prerequisites",
+            Self::ValidatedRowRequired => "validated_row_required",
+        }
+    }
+}
+
+impl std::str::FromStr for AdmissionPosture {
+    type Err = String;
+
+    /// Parsed strictly. An unrecognized posture is an error rather than a
+    /// silent fallback, so a value a future release adds cannot be quietly
+    /// ignored by an older agent that would then run at the wrong
+    /// strictness without saying so.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "technical_prerequisites" => Ok(Self::TechnicalPrerequisites),
+            "validated_row_required" => Ok(Self::ValidatedRowRequired),
+            other => Err(format!(
+                "unknown admission posture `{other}`; expected \
+                 `technical_prerequisites` or `validated_row_required`"
+            )),
+        }
+    }
+}
