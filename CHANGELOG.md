@@ -27,8 +27,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
   A machine with no PCI bus at all — a Mac, a Jetson — reports absence,
   which is a signal rather than a failure, exactly as every other source
-  here. A bus that exists and cannot be read is an error: collapsing those
-  would report an unreadable sysfs as a machine with no devices.
+  here. A bus that exists and cannot be read is an error, and so is a
+  device attribute that exists and cannot be read: collapsing either would
+  report unreadable sysfs as a machine with no devices, which is the same
+  wrong answer this reading exists to prevent. Only an attribute that has
+  genuinely vanished — hot-unplug between listing and reading — is skipped.
 
 ### Fixed
 

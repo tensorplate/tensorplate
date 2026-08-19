@@ -820,4 +820,14 @@ fn a_machine_with_no_pci_bus_is_not_a_machine_with_no_devices() {
     // line must not discard the devices either side of it.
     let ragged = "garbage\n0000:00:04.0 0x10de 0x27b8 0x030000\nalso garbage";
     assert_eq!(nvidia_pci_functions(ragged), vec!["0000:00:04.0"]);
+
+    // Including a class token that is not ASCII. Slicing bytes off this
+    // panicked -- `é` is two bytes, so a byte-length check passes and the
+    // split lands mid-character -- which is the opposite of "skipped".
+    let non_ascii = "0000:00:04.0 0x10de 0x27b8 0xaé\n0000:00:06.0 0x10de 0x27b8 0x030000";
+    assert_eq!(
+        nvidia_pci_functions(non_ascii),
+        vec!["0000:00:06.0"],
+        "a class this cannot parse is skipped, and does not take the bus with it"
+    );
 }

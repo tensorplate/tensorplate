@@ -826,13 +826,17 @@ pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
             if !vendor.eq_ignore_ascii_case(NVIDIA_PCI_VENDOR) {
                 return None;
             }
+            // Parsed as a number rather than sliced as text. The token is
+            // ASCII hex on any real bus, but slicing bytes off a string
+            // that might not be would panic on a multi-byte character —
+            // and this function documents that it SKIPS what it cannot
+            // parse. `from_str_radix` rejects a malformed token instead.
+            let value = u32::from_str_radix(class.trim_start_matches("0x"), 16).ok()?;
             // PCI base class 0x03 is "display controller"; the subclass
             // separates VGA (0x00) from 3D (0x02). Both are the device an
             // accelerator presents, and neither is the audio function
             // (base class 0x04) on the same board.
-            let digits = class.trim_start_matches("0x");
-            digits.len().ge(&2).then_some(())?;
-            (&digits[..2] == "03").then(|| address.to_string())
+            ((value >> 16) & 0xff == 0x03).then(|| address.to_string())
         })
         .collect()
 }
