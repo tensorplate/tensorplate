@@ -28,6 +28,12 @@ set -Eeuo pipefail
 BASELINE_TAG="${TP_APT_LIFECYCLE_BASELINE_TAG:-v0.1.1}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# `apt-get update` here refreshes EVERY configured source, not just the
+# local channel this rehearsal publishes -- the Ubuntu archives are still
+# in the list -- so these calls reach real mirrors and can stall on one
+# that trickles bytes without ever failing. Bounded and retried, which is
+# what turns a stall into something recoverable.
+apt_retrying() { "${repo_root}/tools/ci/apt-get.sh" "$@"; }
 note() { printf '==> %s\n' "$*"; }
 pass() { printf 'PASS: %s\n' "$*"; }
 
@@ -75,7 +81,11 @@ mkdir -p /var/lib/tensorplate/state && echo "desired-state" > /var/lib/tensorpla
 pass "baseline ${baseline_ver} installed"
 
 note "C. stock-state negatives"
-if apt-get install -y tensorplate >"${work}/stock.log" 2>&1; then
+# Bounded, but deliberately NOT through the retrying wrapper: this call is
+# EXPECTED to fail, so retrying would repeat a failure the test asserts,
+# and the wrapper's `dpkg --configure -a` between attempts would mutate the
+# stock host whose stock-ness is the thing under test.
+if timeout -k 30 240 apt-get install -y tensorplate >"${work}/stock.log" 2>&1; then
   die "stock host must not resolve tensorplate"
 fi
 grep -q "Unable to locate package tensorplate" "${work}/stock.log" ||
@@ -117,8 +127,8 @@ TP_READY_EXPECTED_URI=file:/srv/tensorplate-apt \
   tools/validation/tensorplate-ready-check.sh --online >"${work}/rc-ready.log" 2>&1 ||
   { cat "${work}/rc-ready.log" >&2; die "tensorplate-ready-check --online failed after bootstrap"; }
 pass "tensorplate-ready-check --online green after bootstrap"
-apt-get update -qq
-apt-get install -y -qq tensorplate >"${work}/upgrade.log" 2>&1 ||
+apt_retrying update -qq
+apt_retrying install -y -qq tensorplate >"${work}/upgrade.log" 2>&1 ||
   { tail -15 "${work}/upgrade.log" >&2; die "two-command install failed"; }
 stale="$(dpkg-query -W -f '${binary:Package} ${Version}\n' 'tensorplate-*' | grep -F "$baseline_ver" || true)"
 [[ -z "$stale" ]] || die "packages left on the baseline version: $stale"
@@ -151,7 +161,7 @@ tools/release/publish-apt-repo.sh \
   --allow-unverified-assets >/dev/null
 cp -a "${work}/apt-next/pool/." /srv/tensorplate-apt/pool/
 cp -a "${work}/apt-next/dists/." /srv/tensorplate-apt/dists/
-apt-get update -qq
+apt_retrying update -qq
 candidate="$(apt-cache policy tensorplate | awk '/Candidate:/{print $2}')"
 [[ "$candidate" == "$staging_ver" ]] ||
   die "future tensorplate runtime version not discovered; candidate=$candidate expected=$staging_ver"

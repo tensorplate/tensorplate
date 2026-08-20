@@ -111,8 +111,19 @@ if ((ONLINE)); then
     fail "--online requires root (apt-get update)"
   else
     update_log="$(mktemp)"
-    if apt-get update >"$update_log" 2>&1; then
+    # Bounded, because a source that stalls rather than fails would hang
+    # this check indefinitely -- and a readiness check that never answers
+    # is worse than one that says no. Deliberately NOT retried: whether
+    # `apt-get update` succeeds against the configured sources is the
+    # thing being reported, and retrying until it works would hide the
+    # flakiness this exists to surface.
+    update_status=0
+    timeout -k 30 240 apt-get update >"$update_log" 2>&1 || update_status=$?
+    if ((update_status == 0)); then
       pass "apt-get update succeeded"
+    elif ((update_status == 124 || update_status == 137)); then
+      fail "apt-get update did not finish within 240s; a configured source is accepting the connection but not answering"
+      cat "$update_log" >&2
     else
       fail "apt-get update failed; see output below"
       cat "$update_log" >&2
