@@ -107,8 +107,12 @@ fn an_edge_row_still_requires_the_evidence_to_cover_this_machine() {
     // A Jetson's thermal, power and throttle gates are load-bearing: the
     // chassis is the operator's, and a validation run in someone else's
     // enclosure says nothing about this one.
+    // Production, so the support-level check passes it through and the
+    // POSTURE gate is what refuses it. `jetson-orin-nx-16gb` is Planned,
+    // and using it here tested the support level while appearing to test
+    // the chassis gate.
     let registry = registry();
-    let jetson = row(&registry, "jetson-orin-nx-16gb");
+    let jetson = row(&registry, "jetson-orin-nano-8gb-jp62");
     let report = in_an_uncharacterised_chassis(jetson, "a2-highgpu-1g");
 
     let admission =
@@ -301,6 +305,150 @@ fn registry_with_a_required_component() -> PlatformRegistry {
     document["kernel_driver_stack"]["components"] = serde_json::json!([
         {"component": "nvidia_driver", "version": "550.54.15"}
     ]);
+    let rendered = serde_json::to_string(&document).expect("row renders");
+    PlatformRegistry::from_documents(
+        [(std::path::Path::new("l4.json"), rendered.as_str())],
+        std::iter::empty(),
+    )
+    .expect("registry loads")
+}
+
+#[test]
+fn a_planned_row_is_not_deployable_just_because_the_machine_is_further_from_it() {
+    // An exact match on a Planned row is refused as
+    // `row_planned_not_validated`. Reaching the outside-environment path
+    // means the machine is FURTHER from the row than an exact match --
+    // so admitting here what an exact match refuses inverts the gate:
+    // the row would become deployable only by running it somewhere its
+    // own evidence covers even less.
+    //
+    // Latent rather than live: every committed Planned row has a
+    // load-bearing chassis gate, so the posture check refuses it first.
+    // The next Planned server row would not be so lucky.
+    let registry = registry_with_l4_at("Planned");
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = in_an_uncharacterised_chassis(l4, "g2-standard-16");
+
+    let admission =
+        PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
+
+    assert_eq!(
+        admission.validated(),
+        None,
+        "a Planned row must not deploy: {admission:?}"
+    );
+    assert_eq!(
+        admission.reason(),
+        Some(PlatformReason::RowPlannedNotValidated),
+        "and it must say WHY, with the same reason an exact match gives"
+    );
+}
+
+#[test]
+fn an_experimental_row_is_refused_on_the_prerequisite_path_too() {
+    let registry = registry_with_l4_at("Experimental");
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = in_an_uncharacterised_chassis(l4, "g2-standard-16");
+
+    let admission =
+        PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
+
+    assert_eq!(
+        admission.validated(),
+        None,
+        "experimental is not deployable: {admission:?}"
+    );
+    // The frozen vocabulary has no value for experimental, exactly as the
+    // exact-match arm records.
+    assert_eq!(admission.reason(), None);
+    assert!(
+        admission
+            .ensure_supported()
+            .expect_err("refused")
+            .to_string()
+            .contains("experimental"),
+        "the detail must name it"
+    );
+}
+
+#[test]
+fn a_broken_driver_is_named_as_one_even_when_the_probe_itself_fails() {
+    // The common broken-driver case is an INSTALLED nvidia-smi exiting
+    // non-zero, which is a probe error rather than an absent accelerator.
+    // That returns before any matching happens, so the PCI evidence was
+    // never consulted and the operator got an untyped detection failure
+    // instead of being told their driver is broken.
+    let host = HostReport {
+        identity: host_of(row(&registry(), "ubuntu2404-x86-cpu")),
+        exact: ExactHostFacts {
+            nvidia_pci_functions: vec!["0000:00:04.0".to_string()],
+            ..ExactHostFacts::default()
+        },
+    };
+
+    let admission =
+        PlatformAdmission::accelerator_probe_failed(&host, "nvidia-smi exited with status 1");
+
+    assert_eq!(
+        admission.reason(),
+        Some(PlatformReason::MissingDriverRuntime),
+        "a card on the bus and a probe that cannot answer for it is a driver problem: {admission:?}"
+    );
+    let rendered = admission
+        .ensure_supported()
+        .expect_err("refused")
+        .to_string();
+    assert!(
+        rendered.contains("0000:00:04.0"),
+        "name the device: {rendered}"
+    );
+    assert!(
+        rendered.contains("nvidia-smi exited"),
+        "keep the underlying error: {rendered}"
+    );
+}
+
+#[test]
+fn a_probe_failure_with_no_card_on_the_bus_stays_an_untyped_detection_failure() {
+    // Fail closed, but do not claim a driver problem that nothing
+    // evidences. Naming `missing_driver_runtime` here would send an
+    // operator looking for a driver on a machine that has no card.
+    let host = HostReport {
+        identity: host_of(row(&registry(), "ubuntu2404-x86-cpu")),
+        exact: ExactHostFacts::default(),
+    };
+
+    let admission = PlatformAdmission::accelerator_probe_failed(&host, "permission denied");
+
+    assert_eq!(
+        admission.reason(),
+        None,
+        "nothing evidences a driver problem: {admission:?}"
+    );
+    admission
+        .ensure_supported()
+        .expect_err("still fails closed");
+}
+
+/// The committed L4 row at a chosen support level. No committed row is
+/// both permissively gated and Planned, so the case has to be built.
+fn registry_with_l4_at(support_level: &str) -> PlatformRegistry {
+    let body = std::fs::read_to_string(
+        repo_root().join("config/platform/rows/ubuntu2404-x86-l4-g2s8.json"),
+    )
+    .expect("read the L4 row");
+    let mut document: serde_json::Value = serde_json::from_str(&body).expect("row parses");
+    document["support_level"] = serde_json::json!(support_level);
+    // The loader refuses a Planned or Experimental row that still claims
+    // evidence, and the key is ABSENT on such a row rather than null --
+    // both rules cost this fixture a round trip.
+    let fields = document.as_object_mut().expect("a row is an object");
+    fields.remove("evidence");
+    if support_level == "Planned" {
+        // And no model-class claims either, until it is validated --
+        // required as a field, so emptied rather than removed.
+        fields.insert("model_class_rows".to_string(), serde_json::json!([]));
+    }
     let rendered = serde_json::to_string(&document).expect("row renders");
     PlatformRegistry::from_documents(
         [(std::path::Path::new("l4.json"), rendered.as_str())],

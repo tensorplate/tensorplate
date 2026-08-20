@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    AdmissionPosture, PlatformCapability, PlatformReason, PlatformRegistry, PlatformReport,
-    PlatformSupportRow, RowMatch,
+    AdmissionPosture, HostReport, PlatformCapability, PlatformReason, PlatformRegistry,
+    PlatformReport, PlatformSupportRow, RowMatch, SupportLevel,
 };
 
 use crate::config::AgentConfig;
@@ -140,25 +140,27 @@ impl PlatformAdmission {
                     validated: true,
                 }
             }
-            RowMatch::PlannedNotValidated(row) => Self::Rejected {
-                row_id: Some(row.row_id().to_string()),
-                reason: Some(PlatformReason::RowPlannedNotValidated),
-                detail: format!(
-                    "platform row `{}` is planned but not validated",
-                    row.row_id()
-                ),
-            },
-            RowMatch::Experimental(row) => Self::Rejected {
-                row_id: Some(row.row_id().to_string()),
-                reason: None,
-                detail: format!(
-                    "platform row `{}` is experimental and not deployable",
-                    row.row_id()
-                ),
-            },
+            RowMatch::PlannedNotValidated(row) => Self::planned(row),
+            RowMatch::Experimental(row) => Self::experimental(row),
             RowMatch::OutsideValidatedEnvironment {
                 candidate: Some(row),
             } => {
+                // Support level first. Reaching this path means the
+                // machine is FURTHER from the row than an exact match is,
+                // and an exact match on a Planned or Experimental row is
+                // refused -- so admitting here would invert the gate,
+                // making such a row deployable only where its evidence
+                // covers even less. Every committed Planned row happens to
+                // carry a load-bearing chassis gate, so the posture check
+                // below would catch them today; that is a property of the
+                // current rows, not a guarantee, and it is not what makes
+                // this correct.
+                if !row.is_supported_combination() {
+                    return match row.support_level() {
+                        SupportLevel::Planned => Self::planned(row),
+                        _ => Self::experimental(row),
+                    };
+                }
                 let floor = AdmissionPosture::floor_for(row);
                 let posture = AdmissionPosture::resolve(floor, operator_posture);
                 if posture == AdmissionPosture::ValidatedRowRequired {
@@ -206,6 +208,60 @@ impl PlatformAdmission {
                 reason: Some(reason),
                 detail: format!("platform is unsupported: {reason}"),
             },
+        }
+    }
+
+    fn planned(row: &PlatformSupportRow) -> Self {
+        Self::Rejected {
+            row_id: Some(row.row_id().to_string()),
+            reason: Some(PlatformReason::RowPlannedNotValidated),
+            detail: format!(
+                "platform row `{}` is planned but not validated",
+                row.row_id()
+            ),
+        }
+    }
+
+    fn experimental(row: &PlatformSupportRow) -> Self {
+        Self::Rejected {
+            row_id: Some(row.row_id().to_string()),
+            reason: None,
+            detail: format!(
+                "platform row `{}` is experimental and not deployable",
+                row.row_id()
+            ),
+        }
+    }
+
+    /// Classify a failure to probe the accelerator.
+    ///
+    /// The usual broken driver is an *installed* `nvidia-smi` exiting
+    /// non-zero, which is a probe error rather than an absent accelerator
+    /// -- so it never reaches [`Self::evaluate`], and the PCI evidence that
+    /// would name it goes unread. Without this the operator is told
+    /// detection failed, which is true and useless, when the machine could
+    /// have been told its driver is broken.
+    ///
+    /// Rejects either way. What the PCI bus decides is whether the reason
+    /// is typed: a card on the bus evidences a driver problem, and nothing
+    /// on the bus evidences one, so claiming `missing_driver_runtime` there
+    /// would send an operator looking for a driver on a machine with no
+    /// card.
+    #[must_use]
+    pub fn accelerator_probe_failed(host: &HostReport, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        if host.exact.nvidia_pci_functions.is_empty() {
+            return Self::detection_failed(detail);
+        }
+        Self::Rejected {
+            row_id: None,
+            reason: Some(PlatformReason::MissingDriverRuntime),
+            detail: format!(
+                "the PCI bus reports an NVIDIA display controller at {} but the accelerator \
+                 probe failed: {detail}. The driver is present-but-broken or absent; deploying \
+                 here would serve on the CPU without saying so",
+                host.exact.nvidia_pci_functions.join(", ")
+            ),
         }
     }
 

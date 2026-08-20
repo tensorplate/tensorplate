@@ -208,7 +208,13 @@ fn evaluate_platform_admission(
         .as_deref()
         .and_then(|value| value.parse::<AdmissionPosture>().ok());
     let admission = match observe_platform() {
-        Ok((report, observed)) => {
+        // The accelerator could not be probed. Classified from the host
+        // report rather than reported as a bare detection failure, so a
+        // broken driver on a card that IS on the bus is named as one.
+        Ok((report, _observed, Some(err))) => {
+            PlatformAdmission::accelerator_probe_failed(&report.host, err.to_string())
+        }
+        Ok((report, observed, None)) => {
             PlatformAdmission::evaluate(registry, &report, &observed, operator_posture)
         }
         Err(err) => PlatformAdmission::detection_failed(err.to_string()),
@@ -306,19 +312,35 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
 /// identified from the same sources the host is. A discrete card is not —
 /// it is a separate device the vendor tool enumerates — so it is asked for
 /// only when the report carries none.
-fn observe_platform() -> Result<(PlatformReport, ObservedStack), PlatformProbeError> {
+/// Observe the platform.
+///
+/// A HOST probe failure is still fatal — without the host there is nothing
+/// to reason about. An ACCELERATOR probe failure is returned alongside the
+/// report instead of replacing it: the host report carries the PCI
+/// evidence that says whether the failure is a broken driver on a real
+/// card, and propagating the error here throws that evidence away before
+/// anything can read it. That is what made the usual broken-driver case —
+/// an installed `nvidia-smi` exiting non-zero — surface as an untyped
+/// detection failure.
+fn observe_platform(
+) -> Result<(PlatformReport, ObservedStack, Option<PlatformProbeError>), PlatformProbeError> {
     let mut report = SystemHostProbe::new().detect_platform()?;
+    let mut accelerator_probe_error = None;
     if report.accelerator.is_none() {
-        if let Some(card) = NvidiaSmiProbe::new().detect()? {
-            report.accelerator = Some(AcceleratorObservation {
-                // Recorded, never matched on: a discrete card's usable
-                // framebuffer is not its row's nominal capacity, which is
-                // why the row is matched on SKU alone. It is carried so a
-                // resolved capability can bound the memory ceiling.
-                memory_bytes: card.exact.memory_total_bytes,
-                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-                identity: card.identity,
-            });
+        match NvidiaSmiProbe::new().detect() {
+            Ok(Some(card)) => {
+                report.accelerator = Some(AcceleratorObservation {
+                    // Recorded, never matched on: a discrete card's usable
+                    // framebuffer is not its row's nominal capacity, which is
+                    // why the row is matched on SKU alone. It is carried so a
+                    // resolved capability can bound the memory ceiling.
+                    memory_bytes: card.exact.memory_total_bytes,
+                    memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+                    identity: card.identity,
+                });
+            }
+            Ok(None) => {}
+            Err(err) => accelerator_probe_error = Some(err),
         }
     }
     // Rows record no driver components until their first evidence run, so
@@ -327,7 +349,7 @@ fn observe_platform() -> Result<(PlatformReport, ObservedStack), PlatformProbeEr
         components: BTreeMap::new(),
         installed_packages: installed_packages(),
     };
-    Ok((report, observed))
+    Ok((report, observed, accelerator_probe_error))
 }
 
 fn load_runtime_config(

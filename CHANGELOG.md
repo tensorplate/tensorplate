@@ -32,6 +32,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `admission_posture` to `validated_row_required`, which closes this path
   everywhere; the row's floor can only be raised, never lowered.
 
+  A Planned or Experimental row is never admitted on this path. An exact
+  match on one is refused, and a machine reaching the prerequisite path is
+  further from the row than an exact match — so admitting it there would
+  have made such a row deployable only where its own evidence covers even
+  less.
+
   Prerequisites are checked for PRESENCE, not for the exact versions a row
   records. Those versions are what the evidence run happened to have, not a
   minimum — refusing a machine for carrying a newer driver would refuse
@@ -46,6 +52,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   driver. Refused on every posture: this is not a question of how strictly
   the machine is judged, since serving CPU work on a machine bought for its
   accelerator is a silent downgrade under any of them.
+
+  This covers the probe FAILING as well as returning nothing. The usual
+  broken driver is an installed `nvidia-smi` exiting non-zero, which is an
+  error rather than an absent accelerator, and an error previously replaced
+  the host report before the PCI evidence could be read — so the operator
+  got an untyped detection failure where the machine could have been told
+  its driver is broken. A probe failure with no NVIDIA function on the bus
+  stays an untyped detection failure, because nothing there evidences a
+  driver problem and naming one would send an operator looking for a driver
+  on a machine that has no card.
 
   Note the consequence for a deliberately driverless GPU host — a card
   unbound for passthrough, say, on a box meant to serve CPU work. That host
