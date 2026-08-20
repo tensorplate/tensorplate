@@ -21,8 +21,8 @@ use tensorplate_agent::platform_admission::{
 };
 use tensorplate_platform::{
     identify_accelerator, AcceleratorIdentity, AcceleratorObservation, AcceleratorSources,
-    DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity, HostReport, PlatformReason,
-    PlatformRegistry, PlatformReport, PlatformSupportRow,
+    AdmissionPosture, DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity,
+    HostReport, PlatformReason, PlatformRegistry, PlatformReport, PlatformSupportRow,
 };
 
 fn repo_root() -> PathBuf {
@@ -400,7 +400,16 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
     .expect("one device");
     let detected = report_of(row, host, Some(report.identity));
 
-    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
+    // Pinned strict by the operator. Without this the A100 is a
+    // datacenter row, whose floor now admits an uncharacterised chassis on
+    // prerequisites -- the subject here is the SHAPE of a refusal, so the
+    // case has to be one that still refuses.
+    match PlatformAdmission::evaluate(
+        &registry,
+        &detected,
+        &ObservedStack::default(),
+        Some(AdmissionPosture::ValidatedRowRequired),
+    ) {
         PlatformAdmission::Rejected {
             reason: None,
             ref detail,

@@ -677,6 +677,40 @@ impl PlatformRegistry {
             declared.memory_bytes,
         ))
     }
+
+    /// The memory ceiling for a machine admitted against `row` without
+    /// matching that row's validated environment.
+    ///
+    /// The same conservative bound a validated match gets: the smaller of
+    /// what this machine reports and what the row budgets. The row's
+    /// *environment* evidence does not transfer to an uncharacterised
+    /// chassis, which is why such a machine is never `Supported` — but the
+    /// memory budget is a property of the accelerator, and that does.
+    ///
+    /// Publishing no ceiling here would be the unsafe reading of "not
+    /// validated": it would leave the machine admitted with the configured
+    /// limit alone, so an unvalidated host would be bounded *less* than a
+    /// validated one.
+    ///
+    /// No assertion that the observed and declared memory profiles agree.
+    /// [`Self::resolved_capability`] can make that claim because it has an
+    /// exact match in hand; the candidate here may have matched by family,
+    /// where they legitimately differ.
+    #[must_use]
+    pub fn capability_outside_environment(
+        &self,
+        report: &PlatformReport,
+        row: &PlatformSupportRow,
+    ) -> Option<PlatformCapability> {
+        let observed = report.accelerator.as_ref()?;
+        let declared = row.accelerator()?;
+        Some(PlatformCapability::bounded(
+            row.row_id(),
+            declared.memory_profile,
+            observed.memory_bytes,
+            declared.memory_bytes,
+        ))
+    }
 }
 
 fn host_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
