@@ -151,6 +151,20 @@ pub struct AgentConfig {
     pub device_memory_bytes: Option<u64>,
     #[serde(default)]
     pub device_family: DeviceFamily,
+    /// How strictly this machine must be judged before a deploy is
+    /// admitted, where the operator has an opinion.
+    ///
+    /// Absent means the matched row's own floor decides. A value here can
+    /// only make admission STRICTER: it is resolved as the maximum of this
+    /// and the row's floor, so an edge row's requirement cannot be turned
+    /// off by configuration.
+    ///
+    /// Held as the raw string and parsed in `validate` so an unrecognized
+    /// value is a startup error rather than a silent fallback — a posture a
+    /// future release adds must not be quietly ignored by an older agent
+    /// that would then run at a strictness nobody chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_posture: Option<String>,
     #[serde(default)]
     pub worker: WorkerConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +197,11 @@ impl AgentConfig {
     /// Returns [`AgentError::Config`] for missing or invalid fields. The
     /// caller must not mutate durable state before this returns Ok.
     pub fn validate(mut self) -> AgentResult<Self> {
+        if let Some(posture) = self.admission_posture.as_deref() {
+            posture
+                .parse::<tensorplate_platform::AdmissionPosture>()
+                .map_err(AgentError::Config)?;
+        }
         if self.schema_version != tensorplate_protocol::SCHEMA_VERSION {
             return Err(AgentError::Config(format!(
                 "unsupported schema_version `{}` (expected `{}`)",
@@ -363,6 +382,7 @@ mod tests {
             backend_capabilities: Default::default(),
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
+            admission_posture: None,
             worker: Default::default(),
             supervision: None,
             runtime_version: None,

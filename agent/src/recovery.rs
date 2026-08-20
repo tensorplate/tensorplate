@@ -437,6 +437,7 @@ mod tests {
             backend_capabilities: Default::default(),
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
+            admission_posture: None,
             worker: Default::default(),
             supervision: None,
             runtime_version: Some("0.1.0".into()),
