@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    AdmissionPosture, PlatformCapability, PlatformReason, PlatformRegistry, PlatformReport,
-    PlatformSupportRow, RowMatch,
+    AdmissionPosture, HostReport, PlatformCapability, PlatformProbeError, PlatformReason,
+    PlatformRegistry, PlatformReport, PlatformSupportRow, RowMatch, SupportLevel,
 };
 
 use crate::config::AgentConfig;
@@ -61,6 +61,16 @@ pub enum PlatformAdmission {
         /// opt out of rather than a silent behaviour change on upgrade.
         posture: AdmissionPosture,
         posture_from: &'static str,
+        /// Whether this admission rests on a row whose evidence covers
+        /// this machine.
+        ///
+        /// False where the machine was admitted on technical
+        /// prerequisites instead: the hardware matches a row, the chassis
+        /// is one nobody characterised, and the row's own gate semantics
+        /// say its chassis signals are context rather than gates. The
+        /// machine runs; what it must not do is claim a validation that
+        /// was recorded somewhere else.
+        validated: bool,
     },
     Rejected {
         row_id: Option<String>,
@@ -90,6 +100,26 @@ impl PlatformAdmission {
         observed: &ObservedStack,
         operator_posture: Option<AdmissionPosture>,
     ) -> Self {
+        // A GPU host whose driver is missing or broken reports no
+        // accelerator, and a host with no accelerator resolves to a
+        // CPU-only row and deploys as a CPU box. The PCI bus says which of
+        // the two this is, and it answers without a driver.
+        //
+        // Checked before matching, and on every posture: this is not a
+        // question of how strictly the machine is judged. Serving CPU
+        // work on a machine bought for its accelerator is a silent
+        // downgrade under any posture, and the operator is the one who
+        // should decide to accept it.
+        if report.accelerator.is_none() && !report.host.exact.nvidia_pci_functions.is_empty() {
+            let functions = report.host.exact.nvidia_pci_functions.join(", ");
+            return Self::Rejected {
+                row_id: None,
+                reason: Some(PlatformReason::MissingDriverRuntime),
+                detail: format!(
+                    "the PCI bus reports an NVIDIA display controller at {functions} but no                      accelerator could be identified; the driver is absent or not functional.                      Deploying here would serve on the CPU without saying so"
+                ),
+            };
+        }
         let detected = report.detected_platform();
         match registry.resolve(&detected) {
             RowMatch::Supported(row) => {
@@ -107,42 +137,141 @@ impl PlatformAdmission {
                     installed_packages: observed.installed_packages.clone(),
                     posture: AdmissionPosture::resolve(floor, operator_posture),
                     posture_from: AdmissionPosture::provenance(floor, operator_posture),
+                    validated: true,
                 }
             }
-            RowMatch::PlannedNotValidated(row) => Self::Rejected {
-                row_id: Some(row.row_id().to_string()),
-                reason: Some(PlatformReason::RowPlannedNotValidated),
-                detail: format!(
-                    "platform row `{}` is planned but not validated",
-                    row.row_id()
-                ),
-            },
-            RowMatch::Experimental(row) => Self::Rejected {
-                row_id: Some(row.row_id().to_string()),
-                reason: None,
-                detail: format!(
-                    "platform row `{}` is experimental and not deployable",
-                    row.row_id()
-                ),
-            },
-            RowMatch::OutsideValidatedEnvironment { candidate } => Self::Rejected {
-                row_id: candidate.map(|row| row.row_id().to_string()),
-                reason: None,
-                detail: candidate.map_or_else(
-                    || "platform is outside every validated environment".to_string(),
-                    |row| {
-                        format!(
+            RowMatch::PlannedNotValidated(row) => Self::planned(row),
+            RowMatch::Experimental(row) => Self::experimental(row),
+            RowMatch::OutsideValidatedEnvironment {
+                candidate: Some(row),
+            } => {
+                // Support level first. Reaching this path means the
+                // machine is FURTHER from the row than an exact match is,
+                // and an exact match on a Planned or Experimental row is
+                // refused -- so admitting here would invert the gate,
+                // making such a row deployable only where its evidence
+                // covers even less. Every committed Planned row happens to
+                // carry a load-bearing chassis gate, so the posture check
+                // below would catch them today; that is a property of the
+                // current rows, not a guarantee, and it is not what makes
+                // this correct.
+                if !row.is_supported_combination() {
+                    return match row.support_level() {
+                        SupportLevel::Planned => Self::planned(row),
+                        _ => Self::experimental(row),
+                    };
+                }
+                let floor = AdmissionPosture::floor_for(row);
+                let posture = AdmissionPosture::resolve(floor, operator_posture);
+                if posture == AdmissionPosture::ValidatedRowRequired {
+                    return Self::Rejected {
+                        row_id: Some(row.row_id().to_string()),
+                        reason: None,
+                        detail: format!(
                             "platform is outside the validated environment for row `{}`",
                             row.row_id()
-                        )
-                    },
-                ),
+                        ),
+                    };
+                }
+                // Presence, not equality. The versions a row records are
+                // what was validated, not a minimum and not a ceiling —
+                // refusing a machine for carrying a newer driver than the
+                // evidence run happened to have would refuse most of the
+                // fleet this path exists to admit.
+                if let Some(detail) = first_absent_component(row, observed) {
+                    return Self::Rejected {
+                        row_id: Some(row.row_id().to_string()),
+                        reason: Some(PlatformReason::MissingDriverRuntime),
+                        detail,
+                    };
+                }
+                Self::Supported {
+                    row_id: row.row_id().to_string(),
+                    capability: registry.capability_outside_environment(report, row),
+                    installed_packages: observed.installed_packages.clone(),
+                    posture,
+                    posture_from: AdmissionPosture::provenance(floor, operator_posture),
+                    validated: false,
+                }
+            }
+            // No single row's hardware matches, so there is no row to read
+            // a posture floor or a prerequisite list from. Naming one
+            // would be picking arbitrarily, and guessing at prerequisites
+            // is what this whole path exists to avoid.
+            RowMatch::OutsideValidatedEnvironment { candidate: None } => Self::Rejected {
+                row_id: None,
+                reason: None,
+                detail: "platform is outside every validated environment".to_string(),
             },
             RowMatch::Unsupported(reason) => Self::Rejected {
                 row_id: None,
                 reason: Some(reason),
                 detail: format!("platform is unsupported: {reason}"),
             },
+        }
+    }
+
+    fn planned(row: &PlatformSupportRow) -> Self {
+        Self::Rejected {
+            row_id: Some(row.row_id().to_string()),
+            reason: Some(PlatformReason::RowPlannedNotValidated),
+            detail: format!(
+                "platform row `{}` is planned but not validated",
+                row.row_id()
+            ),
+        }
+    }
+
+    fn experimental(row: &PlatformSupportRow) -> Self {
+        Self::Rejected {
+            row_id: Some(row.row_id().to_string()),
+            reason: None,
+            detail: format!(
+                "platform row `{}` is experimental and not deployable",
+                row.row_id()
+            ),
+        }
+    }
+
+    /// Classify a failure to probe the accelerator.
+    ///
+    /// The usual broken driver is an *installed* `nvidia-smi` exiting
+    /// non-zero, which is a probe error rather than an absent accelerator
+    /// -- so it never reaches [`Self::evaluate`], and the PCI evidence that
+    /// would name it goes unread. Without this the operator is told
+    /// detection failed, which is true and useless, when the machine could
+    /// have been told its driver is broken.
+    ///
+    /// Rejects either way. What varies is whether the reason is typed, and
+    /// TWO things have to hold before it is.
+    ///
+    /// The error must be [`PlatformProbeError::Unreadable`] -- the tool
+    /// could not be run or would not answer. `Unrecognized` means it
+    /// answered and this release cannot interpret the answer: more than one
+    /// GPU, a malformed row, an unknown partitioning state. The driver is
+    /// working in every one of those, so blaming it would send an operator
+    /// to fix something that is not broken.
+    ///
+    /// And the PCI bus must show a card. Nothing on the bus evidences no
+    /// driver problem, so claiming one there would send an operator looking
+    /// for a driver on a machine that has no card.
+    #[must_use]
+    pub fn accelerator_probe_failed(host: &HostReport, error: &PlatformProbeError) -> Self {
+        let PlatformProbeError::Unreadable { .. } = error else {
+            return Self::detection_failed(error.to_string());
+        };
+        if host.exact.nvidia_pci_functions.is_empty() {
+            return Self::detection_failed(error.to_string());
+        }
+        Self::Rejected {
+            row_id: None,
+            reason: Some(PlatformReason::MissingDriverRuntime),
+            detail: format!(
+                "the PCI bus reports an NVIDIA display controller at {} but the accelerator \
+                 probe could not answer for it: {error}. The driver is present-but-broken or \
+                 absent; deploying here would serve on the CPU without saying so",
+                host.exact.nvidia_pci_functions.join(", ")
+            ),
         }
     }
 
@@ -257,6 +386,16 @@ impl PlatformAdmission {
         }
     }
 
+    /// Whether an admitted machine rests on validation evidence that
+    /// covers it, or was admitted on technical prerequisites.
+    #[must_use]
+    pub fn validated(&self) -> Option<bool> {
+        match self {
+            Self::Supported { validated, .. } => Some(*validated),
+            Self::Rejected { .. } => None,
+        }
+    }
+
     #[must_use]
     pub fn capability(&self) -> Option<&PlatformCapability> {
         match self {
@@ -267,6 +406,28 @@ impl PlatformAdmission {
 }
 
 /// The first declared component that is absent or at the wrong version.
+/// The first component a row records that this machine does not report at
+/// all.
+///
+/// The version is deliberately not compared. `first_stack_mismatch` exists
+/// for a machine claiming a row's validation, where the recorded versions
+/// are the ones the evidence was taken on and matching them exactly is the
+/// claim. A machine admitted on prerequisites makes no such claim: it needs
+/// the driver and runtime to be *there*.
+fn first_absent_component(row: &PlatformSupportRow, observed: &ObservedStack) -> Option<String> {
+    row.kernel_driver_stack()
+        .components
+        .iter()
+        .find(|component| !observed.components.contains_key(&component.component))
+        .map(|component| {
+            format!(
+                "row `{}` requires {}, which this machine does not report",
+                row.row_id(),
+                component.component
+            )
+        })
+}
+
 fn first_stack_mismatch(row: &PlatformSupportRow, observed: &ObservedStack) -> Option<String> {
     for component in &row.kernel_driver_stack().components {
         match observed.components.get(&component.component) {

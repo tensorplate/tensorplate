@@ -339,13 +339,23 @@ fn render_platform_profile(registry: &PlatformRegistry, identity: &HostIdentity)
         // matches. Saying "unsupported" without qualification would be
         // read as "this hardware is not supported", which is not the
         // claim: the hardware is, this chassis is not.
+        // Unsupported is still the right status -- no support claim covers
+        // this chassis. It no longer means undeployable, though: where the
+        // matched row records its chassis signals as context rather than
+        // gates, the agent admits such a machine on technical
+        // prerequisites and reports it as unvalidated. Saying only
+        // "unsupported" would now read as "this will not run", which is a
+        // different and wrong claim. Which of the two applies depends on
+        // the row the accelerator resolves to, and this is the host-level
+        // answer, taken before any accelerator is identified -- so it
+        // states both outcomes rather than guessing at one.
         ProfileSelection::OutsideValidatedEnvironment => Finding::unsupported(
             FindingId::PlatformProfile,
             Severity::Warning,
             "host hardware matches this release, but no row's evidence covers the machine shape it is running on"
                 .to_string(),
             Some(
-                "support is recorded per validated machine shape; see the Validated on column in docs/release/support-matrix.md"
+                "no support claim covers this chassis, which does not by itself mean it will not run: a managed-datacenter row admits the machine on technical prerequisites and reports it as unvalidated, while a row whose thermal, power or throttle gates are load-bearing requires evidence that covers the machine. The agent prints the resolved posture at startup. See the Validated on column in docs/release/support-matrix.md"
                     .into(),
             ),
         ),

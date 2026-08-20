@@ -6,6 +6,75 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Changed
+
+- Deploy admission on a server or bare-metal machine no row's evidence
+  covers now gates on technical prerequisites instead of refusing
+  (V021-E02-F03-T03). Bare metal, AWS and Azure hosts carrying silicon a
+  row already describes were told `outside_validated_environment` and
+  refused, which restricted deployment to three exact GCP shapes.
+
+  Which machines this applies to is not a new policy. It is read off the
+  matched row's `gate_semantics`, which every row already declares: a row
+  gating thermal, power or throttle as `load_bearing` is one whose cooling
+  belongs to the operator, and validation recorded in someone else's
+  enclosure says nothing about this one — every Jetson row and the physical
+  workstation row are unchanged and still require evidence that covers the
+  machine. A row recording those as context is a managed machine, and there
+  the missing evidence is about the chassis rather than about whether the
+  hardware can serve.
+
+  Such a machine runs, and is reported as `unvalidated` at startup with the
+  posture that admitted it and where that came from. It is bounded by the
+  same memory ceiling a validated match gets: "not validated" must not read
+  as "not bounded", or the unvalidated host would be bounded less than the
+  validated one. An operator who wants a uniformly validated fleet can pin
+  `admission_posture` to `validated_row_required`, which closes this path
+  everywhere; the row's floor can only be raised, never lowered.
+
+  A Planned or Experimental row is never admitted on this path. An exact
+  match on one is refused, and a machine reaching the prerequisite path is
+  further from the row than an exact match — so admitting it there would
+  have made such a row deployable only where its own evidence covers even
+  less.
+
+  Prerequisites are checked for PRESENCE, not for the exact versions a row
+  records. Those versions are what the evidence run happened to have, not a
+  minimum — refusing a machine for carrying a newer driver would refuse
+  most of the fleet this path exists to admit. A machine matching a row
+  exactly is unaffected and still compared against the recorded versions.
+
+- A GPU host whose driver is missing or broken is now refused instead of
+  deploying as a CPU box (V021-E02-F03-T03). `nvidia-smi` needs a working
+  driver to answer, so a broken driver and no card at all produced the same
+  silence, and the host resolved to a CPU-only row and served on the CPU
+  without saying so. The PCI bus distinguishes them and answers without a
+  driver. Refused on every posture: this is not a question of how strictly
+  the machine is judged, since serving CPU work on a machine bought for its
+  accelerator is a silent downgrade under any of them.
+
+  This covers the probe FAILING as well as returning nothing. The usual
+  broken driver is an installed `nvidia-smi` exiting non-zero, which is an
+  error rather than an absent accelerator, and an error previously replaced
+  the host report before the PCI evidence could be read — so the operator
+  got an untyped detection failure where the machine could have been told
+  its driver is broken.
+
+  Two conditions have to hold before the driver is blamed, and both exist
+  to avoid sending an operator after a driver that is working. The probe
+  must have been unable to READ the tool — a probe that ran and returned an
+  answer this release cannot interpret, such as more than one GPU or an
+  unknown partitioning state, means the driver answered fine and the
+  topology is what is unsupported. And an NVIDIA function must be on the
+  PCI bus, since nothing there evidences no driver problem at all. Anything
+  else stays an untyped detection failure, which still refuses the deploy.
+
+  Note the consequence for a deliberately driverless GPU host — a card
+  unbound for passthrough, say, on a box meant to serve CPU work. That host
+  deployed before and is refused now, and there is no override for it in
+  this release. Fixing the silent downgrade was the requirement; an opt-out
+  is a follow-up, and `admission_posture` is the natural place for it.
+
 ### Fixed
 
 - CI jobs no longer hang for their entire budget when a package mirror
