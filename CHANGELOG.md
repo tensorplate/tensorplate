@@ -6,6 +6,40 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- The APT channel lifecycle rehearsal no longer hangs for its whole budget
+  when a package mirror stalls. Bounding every apt call in the workflows
+  left the calls made *inside* the rehearsal script unbounded, and the
+  sources list there still carries the Ubuntu archives — so `apt-get
+  update` reaches real mirrors and can stall on one that accepts the
+  connection and then trickles bytes, which no `Acquire` timeout catches.
+  Observed as a 30-minute cancellation on the amd64 job while the arm64
+  job ran the same script in under two minutes.
+
+  Not every call is treated the same way, because retrying is not always
+  the right answer:
+
+  - The three network-facing calls are bounded and retried.
+  - The stock-state negative — which asserts that a host with no channel
+    knowledge *cannot* resolve the package — is bounded but never retried.
+    A retry would repeat a failure the test asserts, and the retry path's
+    `dpkg --configure -a` would mutate the very stock host under test.
+  - `tensorplate-ready-check --online` is bounded but never retried:
+    whether `apt-get update` succeeds against the configured sources is
+    what it reports, so retrying until it works would hide the flakiness
+    it exists to surface. A stall is now distinguished from a failure in
+    its output rather than reported as the same thing.
+  - The two `apt-get remove` calls are left alone. They are local dpkg
+    work with no mirror to stall on, and retrying a partially applied
+    removal risks more than the stall it would prevent.
+
+  The shared wrapper also stops assuming it is not root. The rehearsal
+  runs as root, and a container with no `sudo` installed is a normal place
+  to run it, so hard-coding `sudo` would have made the wrapper unusable
+  exactly where the unbounded calls were. It also emits plain text instead
+  of GitHub Actions annotation syntax when not running in CI.
+
 ### Changed
 
 - Deploy admission on a server or bare-metal machine no row's evidence

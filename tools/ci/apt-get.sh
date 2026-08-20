@@ -33,7 +33,32 @@ readonly ATTEMPTS="${APT_ATTEMPTS:-3}"
 
 # Overridable so the behaviour can be exercised without root or a network.
 readonly APT_GET="${APT_GET_BIN:-apt-get}"
-readonly SUDO="${SUDO_BIN:-sudo}"
+
+# Nothing to elevate when already root. The packaging rehearsal runs that
+# way, and a container with no sudo installed is a normal place to run it,
+# so hard-coding sudo would make this unusable exactly where the unbounded
+# apt calls live. An explicit SUDO_BIN still wins, so the behaviour stays
+# exercisable without root.
+if [ -n "${SUDO_BIN:-}" ]; then
+  privileged=("$SUDO_BIN")
+elif [ "$(id -u)" -eq 0 ]; then
+  privileged=()
+else
+  privileged=(sudo)
+fi
+
+# `::warning::` is GitHub Actions syntax and renders as an annotation
+# there. This also runs from the rehearsal on an operator's own container,
+# where the same string is just noise.
+annotate() {
+  local level="$1"
+  shift
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    printf '::%s::%s\n' "$level" "$*" >&2
+  else
+    printf '%s: %s\n' "$level" "$*" >&2
+  fi
+}
 
 if (( $# == 0 )); then
   echo "usage: $(basename "$0") <apt-get arguments>" >&2
@@ -45,27 +70,27 @@ while true; do
   status=0
   # `-k 30`: if apt ignores SIGTERM (mid-dpkg, say), SIGKILL follows. With
   # timeout as apt's direct parent both signals reach apt itself.
-  "$SUDO" timeout -k 30 "$BOUND_SECONDS" "$APT_GET" "$@" || status=$?
+  ${privileged[@]+"${privileged[@]}"} timeout -k 30 "$BOUND_SECONDS" "$APT_GET" "$@" || status=$?
 
   if (( status == 0 )); then
     exit 0
   fi
 
   if (( status == 124 || status == 137 )); then
-    echo "::warning::apt-get $1 exceeded ${BOUND_SECONDS}s and was terminated (attempt ${attempt}/${ATTEMPTS})" >&2
+    annotate warning "apt-get $1 exceeded ${BOUND_SECONDS}s and was terminated (attempt ${attempt}/${ATTEMPTS})"
   else
-    echo "::warning::apt-get $1 failed with status ${status} (attempt ${attempt}/${ATTEMPTS})" >&2
+    annotate warning "apt-get $1 failed with status ${status} (attempt ${attempt}/${ATTEMPTS})"
   fi
 
   if (( attempt >= ATTEMPTS )); then
-    echo "::error::apt-get $1 failed after ${ATTEMPTS} attempts (last status ${status})" >&2
+    annotate error "apt-get $1 failed after ${ATTEMPTS} attempts (last status ${status})"
     exit "$status"
   fi
 
   # A bound that fires mid-unpack leaves dpkg needing a hand before the
   # next attempt can do anything. Advisory: it fails harmlessly when there
   # is nothing interrupted to configure.
-  "$SUDO" dpkg --configure -a || true
+  ${privileged[@]+"${privileged[@]}"} dpkg --configure -a || true
 
   sleep $(( attempt * 10 ))
   attempt=$(( attempt + 1 ))
