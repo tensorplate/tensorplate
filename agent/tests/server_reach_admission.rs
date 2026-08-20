@@ -20,9 +20,10 @@ use std::path::PathBuf;
 
 use tensorplate_agent::platform_admission::{ObservedStack, PlatformAdmission};
 use tensorplate_platform::{
-    AcceleratorIdentity, AcceleratorObservation, AdmissionPosture, DetectedArchitecture,
-    DetectedVendor, ExactHostFacts, HostIdentity, HostReport, PlatformReason, PlatformRegistry,
-    PlatformReport, PlatformSupportRow,
+    identify_accelerator, AcceleratorIdentity, AcceleratorObservation, AcceleratorSources,
+    AdmissionPosture, DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity,
+    HostReport, PlatformProbeError, PlatformReason, PlatformRegistry, PlatformReport,
+    PlatformSupportRow,
 };
 
 fn repo_root() -> PathBuf {
@@ -386,8 +387,13 @@ fn a_broken_driver_is_named_as_one_even_when_the_probe_itself_fails() {
         },
     };
 
-    let admission =
-        PlatformAdmission::accelerator_probe_failed(&host, "nvidia-smi exited with status 1");
+    let admission = PlatformAdmission::accelerator_probe_failed(
+        &host,
+        &PlatformProbeError::Unreadable {
+            source_name: "nvidia-smi".to_string(),
+            detail: "`nvidia-smi` exited with status 1".to_string(),
+        },
+    );
 
     assert_eq!(
         admission.reason(),
@@ -403,7 +409,7 @@ fn a_broken_driver_is_named_as_one_even_when_the_probe_itself_fails() {
         "name the device: {rendered}"
     );
     assert!(
-        rendered.contains("nvidia-smi exited"),
+        rendered.contains("exited with status 1"),
         "keep the underlying error: {rendered}"
     );
 }
@@ -418,7 +424,13 @@ fn a_probe_failure_with_no_card_on_the_bus_stays_an_untyped_detection_failure() 
         exact: ExactHostFacts::default(),
     };
 
-    let admission = PlatformAdmission::accelerator_probe_failed(&host, "permission denied");
+    let admission = PlatformAdmission::accelerator_probe_failed(
+        &host,
+        &PlatformProbeError::Unreadable {
+            source_name: "nvidia-smi".to_string(),
+            detail: "permission denied".to_string(),
+        },
+    );
 
     assert_eq!(
         admission.reason(),
@@ -455,4 +467,45 @@ fn registry_with_l4_at(support_level: &str) -> PlatformRegistry {
         std::iter::empty(),
     )
     .expect("registry loads")
+}
+
+#[test]
+fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault() {
+    // `nvidia-smi` ANSWERED here -- the driver is fine. The answer is more
+    // than one GPU, which no row in this release claims, so detection
+    // refuses to interpret it. Blaming `missing_driver_runtime` for that
+    // sends an operator to reinstall a driver that is working.
+    //
+    // Driven through the real probe rather than a hand-built error, so the
+    // test breaks if multi-GPU stops producing `Unrecognized`.
+    let two_cards = "NVIDIA L4, 23034, 550.54.15, GPU-1111, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-2222, Disabled";
+    let error = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(two_cards.to_string()),
+    })
+    .expect_err("two GPUs cannot be interpreted as one device");
+    assert!(
+        matches!(error, PlatformProbeError::Unrecognized { .. }),
+        "a readable-but-uninterpretable answer is Unrecognized, got {error:?}"
+    );
+
+    let host = HostReport {
+        identity: host_of(row(&registry(), "ubuntu2404-x86-cpu")),
+        exact: ExactHostFacts {
+            // The cards ARE on the bus. Under the untyped-by-PCI-alone
+            // rule this is exactly the case that got misblamed.
+            nvidia_pci_functions: vec!["0000:00:04.0".to_string(), "0000:00:05.0".to_string()],
+            ..ExactHostFacts::default()
+        },
+    };
+
+    let admission = PlatformAdmission::accelerator_probe_failed(&host, &error);
+
+    assert_eq!(
+        admission.reason(),
+        None,
+        "the driver answered; this is an unsupported topology, not a driver fault: {admission:?}"
+    );
+    admission
+        .ensure_supported()
+        .expect_err("still fails closed");
 }

@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    AdmissionPosture, HostReport, PlatformCapability, PlatformReason, PlatformRegistry,
-    PlatformReport, PlatformSupportRow, RowMatch, SupportLevel,
+    AdmissionPosture, HostReport, PlatformCapability, PlatformProbeError, PlatformReason,
+    PlatformRegistry, PlatformReport, PlatformSupportRow, RowMatch, SupportLevel,
 };
 
 use crate::config::AgentConfig;
@@ -242,24 +242,34 @@ impl PlatformAdmission {
     /// detection failed, which is true and useless, when the machine could
     /// have been told its driver is broken.
     ///
-    /// Rejects either way. What the PCI bus decides is whether the reason
-    /// is typed: a card on the bus evidences a driver problem, and nothing
-    /// on the bus evidences one, so claiming `missing_driver_runtime` there
-    /// would send an operator looking for a driver on a machine with no
-    /// card.
+    /// Rejects either way. What varies is whether the reason is typed, and
+    /// TWO things have to hold before it is.
+    ///
+    /// The error must be [`PlatformProbeError::Unreadable`] -- the tool
+    /// could not be run or would not answer. `Unrecognized` means it
+    /// answered and this release cannot interpret the answer: more than one
+    /// GPU, a malformed row, an unknown partitioning state. The driver is
+    /// working in every one of those, so blaming it would send an operator
+    /// to fix something that is not broken.
+    ///
+    /// And the PCI bus must show a card. Nothing on the bus evidences no
+    /// driver problem, so claiming one there would send an operator looking
+    /// for a driver on a machine that has no card.
     #[must_use]
-    pub fn accelerator_probe_failed(host: &HostReport, detail: impl Into<String>) -> Self {
-        let detail = detail.into();
+    pub fn accelerator_probe_failed(host: &HostReport, error: &PlatformProbeError) -> Self {
+        let PlatformProbeError::Unreadable { .. } = error else {
+            return Self::detection_failed(error.to_string());
+        };
         if host.exact.nvidia_pci_functions.is_empty() {
-            return Self::detection_failed(detail);
+            return Self::detection_failed(error.to_string());
         }
         Self::Rejected {
             row_id: None,
             reason: Some(PlatformReason::MissingDriverRuntime),
             detail: format!(
                 "the PCI bus reports an NVIDIA display controller at {} but the accelerator \
-                 probe failed: {detail}. The driver is present-but-broken or absent; deploying \
-                 here would serve on the CPU without saying so",
+                 probe could not answer for it: {error}. The driver is present-but-broken or \
+                 absent; deploying here would serve on the CPU without saying so",
                 host.exact.nvidia_pci_functions.join(", ")
             ),
         }

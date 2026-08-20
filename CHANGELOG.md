@@ -58,10 +58,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   error rather than an absent accelerator, and an error previously replaced
   the host report before the PCI evidence could be read — so the operator
   got an untyped detection failure where the machine could have been told
-  its driver is broken. A probe failure with no NVIDIA function on the bus
-  stays an untyped detection failure, because nothing there evidences a
-  driver problem and naming one would send an operator looking for a driver
-  on a machine that has no card.
+  its driver is broken.
+
+  Two conditions have to hold before the driver is blamed, and both exist
+  to avoid sending an operator after a driver that is working. The probe
+  must have been unable to READ the tool — a probe that ran and returned an
+  answer this release cannot interpret, such as more than one GPU or an
+  unknown partitioning state, means the driver answered fine and the
+  topology is what is unsupported. And an NVIDIA function must be on the
+  PCI bus, since nothing there evidences no driver problem at all. Anything
+  else stays an untyped detection failure, which still refuses the deploy.
 
   Note the consequence for a deliberately driverless GPU host — a card
   unbound for passthrough, say, on a box meant to serve CPU work. That host

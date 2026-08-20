@@ -212,7 +212,7 @@ fn evaluate_platform_admission(
         // report rather than reported as a bare detection failure, so a
         // broken driver on a card that IS on the bus is named as one.
         Ok((report, _observed, Some(err))) => {
-            PlatformAdmission::accelerator_probe_failed(&report.host, err.to_string())
+            PlatformAdmission::accelerator_probe_failed(&report.host, &err)
         }
         Ok((report, observed, None)) => {
             PlatformAdmission::evaluate(registry, &report, &observed, operator_posture)
