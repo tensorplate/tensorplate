@@ -22,8 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    PlatformCapability, PlatformReason, PlatformRegistry, PlatformReport, PlatformSupportRow,
-    RowMatch,
+    AdmissionPosture, PlatformCapability, PlatformReason, PlatformRegistry, PlatformReport,
+    PlatformSupportRow, RowMatch,
 };
 
 use crate::config::AgentConfig;
@@ -52,6 +52,15 @@ pub enum PlatformAdmission {
         /// Carried so a per-deploy package check is a comparison rather
         /// than a re-probe.
         installed_packages: BTreeSet<String>,
+        /// The posture in force for this machine, and where it came from.
+        ///
+        /// Recorded rather than consulted: nothing reads it to decide
+        /// anything yet. It is reported so an operator can SEE the
+        /// strictness they are running at and pin it explicitly — which is
+        /// what makes a future change to the default a decision they can
+        /// opt out of rather than a silent behaviour change on upgrade.
+        posture: AdmissionPosture,
+        posture_from: &'static str,
     },
     Rejected {
         row_id: Option<String>,
@@ -79,6 +88,7 @@ impl PlatformAdmission {
         registry: &PlatformRegistry,
         report: &PlatformReport,
         observed: &ObservedStack,
+        operator_posture: Option<AdmissionPosture>,
     ) -> Self {
         let detected = report.detected_platform();
         match registry.resolve(&detected) {
@@ -90,10 +100,13 @@ impl PlatformAdmission {
                         detail,
                     };
                 }
+                let floor = AdmissionPosture::floor_for(row);
                 Self::Supported {
                     row_id: row.row_id().to_string(),
                     capability: registry.resolved_capability(report),
                     installed_packages: observed.installed_packages.clone(),
+                    posture: AdmissionPosture::resolve(floor, operator_posture),
+                    posture_from: AdmissionPosture::provenance(floor, operator_posture),
                 }
             }
             RowMatch::PlannedNotValidated(row) => Self::Rejected {
@@ -228,6 +241,19 @@ impl PlatformAdmission {
         match self {
             Self::Supported { .. } => None,
             Self::Rejected { reason, .. } => *reason,
+        }
+    }
+
+    /// The posture in force, where this machine is admissible at all.
+    #[must_use]
+    pub fn posture(&self) -> Option<(AdmissionPosture, &'static str)> {
+        match self {
+            Self::Supported {
+                posture,
+                posture_from,
+                ..
+            } => Some((*posture, posture_from)),
+            Self::Rejected { .. } => None,
         }
     }
 

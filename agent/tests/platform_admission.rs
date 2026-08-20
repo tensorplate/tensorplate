@@ -100,7 +100,7 @@ fn a_partitioned_accelerator_is_refused_with_mig_mode_enabled() {
     // the row's evidence was never collected at.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
-    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
         PlatformAdmission::Rejected {
             reason: Some(reason),
             detail,
@@ -119,7 +119,7 @@ fn the_same_card_unpartitioned_is_admitted() {
     // everything would look correct.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
-    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
         PlatformAdmission::Supported { row_id, .. } => {
             assert_eq!(row_id, "ubuntu2404-x86-a100-40g-a2hg1");
         }
@@ -151,7 +151,8 @@ fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacit
         }),
     };
 
-    let admission = PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default());
+    let admission =
+        PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
     let PlatformAdmission::Supported {
         capability: Some(capability),
         ..
@@ -188,7 +189,7 @@ fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacit
 fn an_off_matrix_card_is_refused_with_the_sku_reason() {
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "unsupported-a100-80gb");
-    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
         PlatformAdmission::Rejected {
             reason: Some(reason),
             ..
@@ -215,7 +216,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
         "this case assumes the committed row has no recorded stack yet"
     );
     assert!(matches!(
-        PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()),
+        PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None),
         PlatformAdmission::Supported { .. }
     ));
 
@@ -230,7 +231,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
         installed_packages: BTreeSet::new(),
     };
     assert!(matches!(
-        PlatformAdmission::evaluate(&staged, &detected, &matching),
+        PlatformAdmission::evaluate(&staged, &detected, &matching, None),
         PlatformAdmission::Supported { .. }
     ));
 
@@ -241,7 +242,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
             installed_packages: BTreeSet::new(),
         },
     ] {
-        match PlatformAdmission::evaluate(&staged, &detected, &observed) {
+        match PlatformAdmission::evaluate(&staged, &detected, &observed, None) {
             PlatformAdmission::Rejected {
                 reason: Some(reason),
                 detail,
@@ -360,6 +361,7 @@ fn a_rejected_machine_stays_rejected_whatever_backend_a_bundle_names() {
             components: BTreeMap::new(),
             installed_packages: BTreeSet::from(["tensorplate-backend-python-pytorch".to_string()]),
         },
+        None,
     );
 
     for backend in ["python_pytorch", "tensorrt", "anything"] {
@@ -398,7 +400,7 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
     .expect("one device");
     let detected = report_of(row, host, Some(report.identity));
 
-    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default()) {
+    match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
         PlatformAdmission::Rejected {
             reason: None,
             ref detail,
@@ -428,7 +430,7 @@ fn an_experimental_row_does_not_borrow_the_planned_reason() {
         .expect("staged row");
     let detected = detected_from_fixture(row, "ubuntu2404-x86-a100-40g-a2hg1");
 
-    match PlatformAdmission::evaluate(&staged, &detected, &ObservedStack::default()) {
+    match PlatformAdmission::evaluate(&staged, &detected, &ObservedStack::default(), None) {
         rejected @ PlatformAdmission::Rejected { .. } => {
             assert_eq!(
                 rejected.reason(),
@@ -517,7 +519,8 @@ fn the_coordinator_actually_refuses_a_deploy_on_a_rejected_machine() {
     let harness = common::Harness::new();
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "mig-enabled-a100-40g");
-    let verdict = PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default());
+    let verdict =
+        PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None);
     assert!(matches!(verdict, PlatformAdmission::Rejected { .. }));
 
     let coordinator = Arc::new(
@@ -560,7 +563,8 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
     let harness = common::Harness::new();
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
-    let admission = PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default());
+    let admission =
+        PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None);
     assert!(matches!(admission, PlatformAdmission::Supported { .. }));
 
     let coordinator = Arc::new(
