@@ -222,9 +222,18 @@ fn evaluate_platform_admission(
     let (posture, posture_from) = admission
         .posture()
         .map_or(("none", "none"), |(p, from)| (p.as_str(), from));
+    // Said out loud on every start. A machine admitted without evidence
+    // covering it runs exactly like one that has it, so the log line is
+    // the only place the difference is visible -- and an operator who
+    // cannot see it cannot decide whether they mind.
+    let evidence = match admission.validated() {
+        Some(true) => "validated",
+        Some(false) => "unvalidated (admitted on technical prerequisites)",
+        None => "none",
+    };
     eprintln!(
         "platform admission: row={} reason={} posture={posture} ({posture_from}) \
-         max_resident_model_memory={}",
+         evidence={evidence} max_resident_model_memory={}",
         admission.row_id().unwrap_or("none"),
         admission
             .reason()
