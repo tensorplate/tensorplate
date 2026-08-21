@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-readonly DEFAULT_VERSION="${TP_INSTALL_DEFAULT_VERSION:-0.1.1}"
+readonly DEFAULT_VERSION="${TP_INSTALL_DEFAULT_VERSION:-0.2.1}"
 readonly DEFAULT_REPO="${TP_INSTALL_REPO:-tensorplate/tensorplate}"
 readonly OPTIONAL_PYTHON_PACKAGE="tensorplate-backend-python-pytorch"
 readonly CLI_PACKAGE="tensorplate-cli"
