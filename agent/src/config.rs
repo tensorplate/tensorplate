@@ -47,6 +47,7 @@ pub enum WorkerControlMode {
 /// these against the bundle's `capability_requirements`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
+#[serde(deny_unknown_fields)]
 pub struct BackendCapability {
     #[serde(default, rename = "async")]
     pub async_: bool,
@@ -70,6 +71,7 @@ pub struct BackendCapability {
 
 /// Worker-control bounded-timeout knobs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     #[serde(default)]
     pub mode: WorkerControlMode,
@@ -131,6 +133,7 @@ const fn default_serving_candidate_bind_port() -> u16 {
 
 /// V01-E08 agent configuration. Mirrors `config/schemas/agent.json`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,

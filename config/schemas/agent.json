@@ -5,7 +5,19 @@
   "description": "Runtime configuration for `tensorplate-agent` (V01-E08). The agent loads this file at startup, validates it before opening the local control transport, and refuses to mutate durable state until validation succeeds.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version"],
+  "required": ["schema_version", "state_dir", "staging_dir"],
+  "allOf": [
+    {
+      "$comment": "transport defaults to unix_socket, so an ABSENT transport also requires socket_path. Without the anyOf the default case slips through and a schema-valid config fails at startup.",
+      "if": {
+        "anyOf": [
+          {"properties": {"transport": {"const": "unix_socket"}}, "required": ["transport"]},
+          {"not": {"required": ["transport"]}}
+        ]
+      },
+      "then": {"required": ["socket_path"]}
+    }
+  ],
   "properties": {
     "schema_version": {"type": "string", "const": "0.1"},
     "transport": {
@@ -16,16 +28,19 @@
     },
     "socket_path": {
       "type": "string",
+      "pattern": "^/",
       "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
     },
     "tcp_bind_host": {"type": "string", "default": "127.0.0.1"},
     "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535},
     "state_dir": {
       "type": "string",
+      "pattern": "^/",
       "description": "Absolute directory where the durable state file lives. Created if missing."
     },
     "staging_dir": {
       "type": "string",
+      "pattern": "^/",
       "description": "Absolute directory where deploy transactions stage verified bundles. Each deployment lives under `<staging_dir>/<deployment_id>/`."
     },
     "available_backends": {

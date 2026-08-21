@@ -640,6 +640,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "hex",
+ "jsonschema",
  "serde",
  "serde_json",
  "sha2",

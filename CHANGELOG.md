@@ -25,13 +25,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   would have invalidated every config file already installed. `runtime_version`,
   which the agent fills in at load, is now declared too.
 
+  The runtime now refuses unknown fields, which the schema had claimed all
+  along with `additionalProperties: false`. Before this, `worker: {"mod":
+  "process"}` — one character off `mode` — parsed cleanly and left
+  `mode = Mock`, so an operator asking for the real serving binary got the
+  in-process mock and served nothing real, with no error at any point.
+
+  The schema also now states what the runtime actually requires. It
+  accepted `{"schema_version": "0.1"}`, which the agent then refused for
+  want of `state_dir` and `staging_dir` — so a config written from the
+  published schema could fail at startup. `state_dir` and `staging_dir` are
+  required, `socket_path` is required whenever the transport is (or
+  defaults to) a Unix socket, and the three path fields must be absolute,
+  as the agent has always insisted.
+
   Guarded by a bidirectional contract test rather than a field-by-field
   one. Every field a fully-populated config serializes must be declared by
   the schema, and every property the schema declares must be one the
   runtime accepts — the second direction is what catches an invented field
   like `control`, which a one-way check would have passed. Both shipped
-  configs, Debian and Homebrew, are checked against the schema and the
-  runtime. Restoring the previous schema fails three of these tests.
+  configs, Debian and Homebrew, are validated with the real JSON Schema
+  compiler rather than by comparing top-level key names — a nested
+  property, a wrong type, a bad enum value or an out-of-range number all
+  pass a membership check while failing the schema. Restoring the previous
+  schema fails three of these tests.
 
 - The APT channel lifecycle rehearsal no longer hangs for its whole budget
   when a package mirror stalls. Bounding every apt call in the workflows

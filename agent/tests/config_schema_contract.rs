@@ -196,12 +196,28 @@ fn the_schema_declares_no_field_the_runtime_would_refuse() {
     );
 }
 
+/// The compiled schema, so a test validates documents rather than
+/// inspecting key names.
+fn compiled_schema() -> jsonschema::JSONSchema {
+    let body = std::fs::read_to_string(repo_path("config/schemas/agent.json"))
+        .expect("read the agent config schema");
+    let document: serde_json::Value = serde_json::from_str(&body).expect("schema parses");
+    // Leaked so the compiled schema can borrow it for the test's lifetime.
+    let document: &'static serde_json::Value = Box::leak(Box::new(document));
+    jsonschema::JSONSchema::compile(document).expect("the schema itself is valid")
+}
+
 #[test]
 fn every_shipped_config_is_accepted_by_the_schema_it_names() {
     // The bug that started this: `packaging/conf/agent.json` -- the config
     // installed on every Debian host -- did not validate against the schema
     // `docs/architecture/agent.md` names as its wire format.
-    let declared = schema_properties();
+    //
+    // Validated with the real compiler, not by comparing top-level key
+    // names: a nested property, a wrong type, a bad enum value or an
+    // out-of-range number all pass a membership check while failing the
+    // schema this is named after.
+    let schema = compiled_schema();
     for relative in [
         "packaging/conf/agent.json",
         "packaging/homebrew/conf/agent.json.in",
@@ -209,21 +225,84 @@ fn every_shipped_config_is_accepted_by_the_schema_it_names() {
         let body = std::fs::read_to_string(repo_path(relative))
             .unwrap_or_else(|err| panic!("read {relative}: {err}"));
         // The Homebrew file is a template. Its @HOMEBREW_PREFIX@ tokens sit
-        // inside string values, so it parses as JSON untouched -- but the
-        // runtime also requires absolute paths, and an unsubstituted token
-        // is not one. Substituted with the default prefix, which is what
-        // the formula writes at install time.
+        // inside string values, so it parses as JSON untouched -- but both
+        // the schema and the runtime require absolute paths, and an
+        // unsubstituted token is not one.
         let body = body.replace("@HOMEBREW_PREFIX@", "/opt/homebrew");
         let document: serde_json::Value =
             serde_json::from_str(&body).unwrap_or_else(|err| panic!("{relative} parses: {err}"));
-        for key in document.as_object().expect("a config is an object").keys() {
-            assert!(
-                declared.contains(key),
-                "`{relative}` sets `{key}`, which the schema does not declare -- with \
-                 additionalProperties:false that config fails its own schema"
+
+        if let Err(errors) = schema.validate(&document) {
+            let rendered: Vec<String> = errors
+                .map(|e| format!("{} at {}", e, e.instance_path))
+                .collect();
+            panic!(
+                "`{relative}` does not satisfy its own schema:\n  {}",
+                rendered.join("\n  ")
             );
         }
+
         AgentConfig::parse_json(&body)
             .unwrap_or_else(|err| panic!("{relative} must also satisfy the runtime: {err}"));
     }
+}
+
+#[test]
+fn a_config_the_schema_accepts_is_one_the_runtime_can_start() {
+    // The two must agree on what is REQUIRED, not only on which fields
+    // exist. `{"schema_version":"0.1"}` used to validate cleanly and then
+    // fail at startup for want of `state_dir` -- an operator following the
+    // published schema produced a config the agent refused.
+    let schema = compiled_schema();
+    let cases = [
+        r#"{"schema_version":"0.1"}"#,
+        // Isolates the REQUIRED fields specifically: socket_path is present,
+        // so the transport conditional is satisfied and nothing else can do
+        // the rejecting. Without this case, dropping `required` from the
+        // schema left every other case still rejected for another reason and
+        // this test passed while the guarantee was gone.
+        r#"{"schema_version":"0.1","socket_path":"/run/tensorplate/agent.sock"}"#,
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/staging"}"#,
+        r#"{"schema_version":"0.1","state_dir":"relative","staging_dir":"/b","socket_path":"/s","available_backends":["mock"]}"#,
+    ];
+    for case in cases {
+        let document: serde_json::Value = serde_json::from_str(case).expect("case parses");
+        let schema_ok = schema.validate(&document).is_ok();
+        let runtime_ok = AgentConfig::parse_json(case).is_ok();
+        assert!(
+            !schema_ok || runtime_ok,
+            "the schema accepts a config the runtime refuses, so following the published \
+             schema produces something that will not start: {case}"
+        );
+    }
+}
+
+#[test]
+fn a_mistyped_field_is_refused_rather_than_silently_defaulted() {
+    // `worker.mod` instead of `worker.mode` used to parse, leaving
+    // `mode = Mock` -- so an operator asking for the real serving binary
+    // got the in-process mock and served nothing real, with no error. The
+    // schema said additionalProperties:false all along; only the runtime
+    // disagreed.
+    let mistyped = r#"{
+        "schema_version": "0.1",
+        "transport": "unix_socket",
+        "socket_path": "/run/tensorplate/agent.sock",
+        "state_dir": "/var/lib/tensorplate/state",
+        "staging_dir": "/var/lib/tensorplate/bundles/staging",
+        "available_backends": ["mock"],
+        "worker": {"mod": "process"}
+    }"#;
+    let err = AgentConfig::parse_json(mistyped)
+        .expect_err("an unknown field must not be accepted and defaulted");
+    assert!(
+        err.to_string().contains("mod"),
+        "the error should name the offending field, got `{err}`"
+    );
+    // And the schema agrees, which is the point of the pair.
+    let document: serde_json::Value = serde_json::from_str(mistyped).expect("parses");
+    assert!(
+        compiled_schema().validate(&document).is_err(),
+        "the schema must reject it too"
+    );
 }
