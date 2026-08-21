@@ -44,6 +44,7 @@ readonly APPROVED_PREPARE_FILES=(
   vcpkg.json
   packaging/VERSION
   packaging/debian/changelog
+  packaging/scripts/install.sh
   CHANGELOG.md
 )
 
@@ -658,6 +659,7 @@ run_preflight() {
 prepare_python() {
   python3 - "$VERSION" <<'PY'
 import datetime
+import email.utils
 import json
 import re
 import sys
@@ -665,13 +667,25 @@ from pathlib import Path
 
 version = sys.argv[1]
 today = datetime.date.today().isoformat()
+# Debian changelog trailers use RFC 2822, and dpkg-parsechangelog rejects
+# anything else -- a malformed date breaks the build rather than the date.
+debian_date = email.utils.format_datetime(
+    datetime.datetime.now(datetime.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+)
 
 def replace(path, pattern, repl, flags=0):
     p = Path(path)
     text = p.read_text()
     new, count = re.subn(pattern, repl, text, count=1, flags=flags)
-    if count == 0 and repl not in text:
-        raise SystemExit(f"{path}: expected pattern was not found")
+    if count == 0:
+        # A callable replacement has no literal form to look for, so the
+        # already-applied check only applies to string replacements. `in`
+        # against a function raises, which would have turned a missed
+        # pattern into a confusing TypeError instead of this message.
+        if callable(repl) or repl not in text:
+            raise SystemExit(f"{path}: expected pattern was not found")
     p.write_text(new)
 
 replace(
@@ -699,10 +713,20 @@ if not bumped:
     raise SystemExit("Cargo.toml: no in-workspace path dependency found to bump")
 cargo.write_text(text)
 
+# P2b: every in-workspace package, not only the ones carrying `-dev`.
+# A finalized-to-finalized prepare (0.2.1 -> 0.2.2) matched nothing here,
+# so the lockfile kept the previous versions and `cargo check --locked`
+# failed on a tree that had already been tagged.
 lock = Path("Cargo.lock")
 if lock.exists():
     text = lock.read_text()
-    text = re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+-dev"', f'version = "{version}"', text)
+    text, bumped = re.subn(
+        r'(\[\[package\]\]\nname = "tensorplate-[a-z0-9-]+"\nversion = )"[^"]+"',
+        lambda m: f'{m.group(1)}"{version}"',
+        text,
+    )
+    if not bumped:
+        raise SystemExit("Cargo.lock: no tensorplate-* package entry found to bump")
     lock.write_text(text)
 
 vcpkg = Path("vcpkg.json")
@@ -712,12 +736,40 @@ vcpkg.write_text(json.dumps(data, indent=2) + "\n")
 
 Path("packaging/VERSION").write_text(version + "\n")
 
+# The installer's no-argument default. The release build stamps the
+# PUBLISHED copy too, which is what a user actually downloads; this keeps
+# the in-repo copy from drifting behind it and being wrong for anyone
+# running from a checkout.
+replace(
+    "packaging/scripts/install.sh",
+    r'(TP_INSTALL_DEFAULT_VERSION:-)[^}]*',
+    lambda m: f'{m.group(1)}{version}',
+)
+
 debian = Path("packaging/debian/changelog")
-lines = debian.read_text().splitlines()
+existing = debian.read_text()
+lines = existing.splitlines()
 if not lines:
     raise SystemExit("packaging/debian/changelog is empty")
-lines[0] = f"tensorplate ({version}-1) unstable; urgency=medium"
-debian.write_text("\n".join(lines) + "\n")
+# PREPEND. Rewriting line 1 relabelled whatever stanza was on top -- an
+# already-published one, with its own changes and its own date -- so the
+# new package inherited a body describing work it does not contain and the
+# previous release lost its package history. A changelog is append-only
+# from the top; the previous entries are the record.
+if lines[0].startswith(f"tensorplate ({version}-1)"):
+    raise SystemExit(f"packaging/debian/changelog already has a {version}-1 stanza on top")
+stanza = "\n".join(
+    [
+        f"tensorplate ({version}-1) unstable; urgency=medium",
+        "",
+        f"  * Release {version}. See CHANGELOG.md for the complete change list.",
+        "",
+        f" -- TensorPlate Contributors <oss@tensorplate.com>  {debian_date}",
+        "",
+        "",
+    ]
+)
+debian.write_text(stanza + existing)
 
 changelog = Path("CHANGELOG.md")
 text = changelog.read_text()

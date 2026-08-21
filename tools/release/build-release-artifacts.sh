@@ -341,6 +341,18 @@ fi
 cp "${debs[@]}" "$ARTIFACTS_DIR/"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 
+# The installer is published as a release asset, and its documented flow is
+# to run it with no arguments. Copied verbatim it carries whatever default
+# the branch happened to hold, so a v0.2.1 asset installed some older
+# release -- the one thing a user downloading it from THIS release cannot
+# be expected to check. The env override is preserved.
+sed -i.bak -E \
+  "s|(TP_INSTALL_DEFAULT_VERSION:-)[^}]*|\1${VERSION}|" \
+  "$ARTIFACTS_DIR/install.sh"
+rm -f "$ARTIFACTS_DIR/install.sh.bak"
+grep -Fq "TP_INSTALL_DEFAULT_VERSION:-${VERSION}}" "$ARTIFACTS_DIR/install.sh" ||
+  die "install.sh was not stamped with ${VERSION}; the published installer would default to another release"
+
 # The tensorplate-python SDK wheel + sdist are built by a separate hosted
 # job (pure Python; no Jetson toolchain) and staged here so they are covered
 # by the same signed manifest and SHA256SUMS as the runtime/CLI assets.
