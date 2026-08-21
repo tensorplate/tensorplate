@@ -680,15 +680,23 @@ replace(
     'set(TP_RUNTIME_VERSION_SUFFIX       ""',
 )
 
+replace(
+    "CMakeLists.txt",
+    r'^(\s*)VERSION[ \t]+[0-9]+\.[0-9]+\.[0-9]+[ \t]*$',
+    f'\\g<1>VERSION {version}',
+    flags=re.MULTILINE,
+)
+
 cargo = Path("Cargo.toml")
 text = cargo.read_text()
 text = re.sub(r'^version = "[^"]+"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
-text = re.sub(
-    r'tensorplate-protocol = \{ path = "protocol/rust", version = "[^"]+" \}',
-    f'tensorplate-protocol = {{ path = "protocol/rust", version = "{version}" }}',
+text, bumped = re.subn(
+    r'(tensorplate-[a-z0-9-]+ = \{ path = "[^"]+", version = )"[^"]+"',
+    lambda m: f'{m.group(1)}"{version}"',
     text,
-    count=1,
 )
+if not bumped:
+    raise SystemExit("Cargo.toml: no in-workspace path dependency found to bump")
 cargo.write_text(text)
 
 lock = Path("Cargo.lock")
