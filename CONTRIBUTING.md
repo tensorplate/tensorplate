@@ -1,6 +1,6 @@
 # Contributing to TensorPlate
 
-TensorPlate is an edge AI and robotics inference platform. Contributions should preserve the runtime/control-plane boundaries, hardware-adjacent reliability guarantees, and test discipline described below.
+TensorPlate is an inference platform. Contributions should preserve the runtime/control-plane boundaries, hardware-adjacent reliability guarantees, and test discipline described below.
 
 ## Issue Workflow
 

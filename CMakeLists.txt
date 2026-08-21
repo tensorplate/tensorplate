@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.25)
 project(
   TensorPlate
   VERSION 0.1.1
-  DESCRIPTION "TensorPlate edge AI inference platform"
+  DESCRIPTION "TensorPlate inference platform"
   HOMEPAGE_URL "https://github.com/tensorplate/tensorplate"
   LANGUAGES CXX
 )
