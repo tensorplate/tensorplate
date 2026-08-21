@@ -3,7 +3,7 @@
 </p>
 
 <h3 align="center">
-The Inference Layer for Production AI
+Agentic performance engineering for AI inference.
 </h3>
 
 <p align="center">
