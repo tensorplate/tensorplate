@@ -8,24 +8,18 @@
   "required": ["schema_version"],
   "properties": {
     "schema_version": {"type": "string", "const": "0.1"},
-    "control": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Local control API transport. v0.1.0 default: Unix domain socket. Loopback HTTP is reserved for environments where UDS is unavailable; the agent records the decision rationale in logs at startup.",
-      "properties": {
-        "transport": {
-          "type": "string",
-          "enum": ["unix_socket", "loopback_tcp"],
-          "default": "unix_socket"
-        },
-        "socket_path": {
-          "type": "string",
-          "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
-        },
-        "tcp_bind_host": {"type": "string", "default": "127.0.0.1"},
-        "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535}
-      }
+    "transport": {
+      "type": "string",
+      "enum": ["unix_socket", "loopback_tcp"],
+      "default": "unix_socket",
+      "description": "Local control API transport. v0.1.0 default: Unix domain socket. Loopback HTTP is reserved for environments where UDS is unavailable; the agent records the decision rationale in logs at startup."
     },
+    "socket_path": {
+      "type": "string",
+      "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
+    },
+    "tcp_bind_host": {"type": "string", "default": "127.0.0.1"},
+    "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535},
     "state_dir": {
       "type": "string",
       "description": "Absolute directory where the durable state file lives. Created if missing."
@@ -101,6 +95,10 @@
       "type": "string",
       "enum": ["technical_prerequisites", "validated_row_required"],
       "description": "How strictly this machine must be judged before a deploy is admitted. Omit to let the matched platform row's own floor decide. A value here can only make admission stricter: it is resolved as the maximum of this and the row's floor, so an edge row's requirement cannot be switched off by configuration. An unrecognised value is a startup error, not a silent fallback."
+    },
+    "runtime_version": {
+      "type": "string",
+      "description": "Runtime version this config was written for. Normally absent: the agent fills it in at load with its own version, and it is recorded rather than matched."
     },
     "worker": {
       "type": "object",

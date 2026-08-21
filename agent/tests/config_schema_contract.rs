@@ -16,6 +16,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tensorplate_agent::config::AgentConfig;
@@ -108,4 +109,121 @@ fn omitting_the_posture_stays_valid_and_leaves_the_row_to_decide() {
     let cfg =
         AgentConfig::parse_json(&config_json(None)).expect("a config without a posture loads");
     assert_eq!(cfg.admission_posture, None);
+}
+
+// ---------------------------------------------------------------------------
+// The whole config surface, not one field.
+//
+// `admission_posture` was added to the struct and not to the schema, and
+// nothing in the build noticed. The same was already true of four control
+// fields and `runtime_version`, and of a `control` object the schema
+// declared that no config has ever carried. A per-field test would have
+// caught none of those, because each was written after the field it would
+// have guarded.
+
+/// Every top-level key a fully-populated config serializes to.
+fn runtime_keys() -> BTreeSet<String> {
+    // Every optional field is Some on purpose: two of them are
+    // `skip_serializing_if = "Option::is_none"`, so a None here would hide
+    // exactly the field this is meant to check.
+    let populated = serde_json::json!({
+        "schema_version": "0.1",
+        "transport": "unix_socket",
+        "socket_path": "/run/tensorplate/agent.sock",
+        "tcp_bind_host": "127.0.0.1",
+        "tcp_bind_port": 18080_u16,
+        "state_dir": "/var/lib/tensorplate/state",
+        "staging_dir": "/var/lib/tensorplate/bundles/staging",
+        "available_backends": ["mock"],
+        "device_memory_bytes": 8_589_934_592_u64,
+        "admission_posture": "validated_row_required",
+        "runtime_version": "0.2.1",
+        "supervision": {
+            "binary_path": "/usr/lib/tensorplate/tensorplate-serving",
+            "working_dir": "/var/lib/tensorplate",
+            "serving_config_path": "/var/lib/tensorplate/serving.json",
+            "control_port": 18080
+        },
+    });
+    let config =
+        AgentConfig::parse_json(&populated.to_string()).expect("the populated config is valid");
+    let rendered = serde_json::to_value(config).expect("a config serializes");
+    rendered
+        .as_object()
+        .expect("a config is an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn schema_properties() -> BTreeSet<String> {
+    let body = std::fs::read_to_string(repo_path("config/schemas/agent.json"))
+        .expect("read the agent config schema");
+    let schema: serde_json::Value = serde_json::from_str(&body).expect("schema parses");
+    schema["properties"]
+        .as_object()
+        .expect("the schema declares properties")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_schema_declares_every_field_the_runtime_accepts() {
+    // `additionalProperties: false` means a field the schema omits is
+    // REFUSED by a schema-aware validator while the agent starts on it.
+    let (runtime, declared) = (runtime_keys(), schema_properties());
+    let missing: Vec<&String> = runtime.difference(&declared).collect();
+    assert!(
+        missing.is_empty(),
+        "the runtime accepts fields the schema omits, so a config using them is refused by \
+         every validator while the agent honours it: {missing:?}"
+    );
+}
+
+#[test]
+fn the_schema_declares_no_field_the_runtime_would_refuse() {
+    // The other direction, which is not symmetric: a schema-only field is
+    // an invitation to write a config the agent silently ignores. The
+    // `control` object was exactly that -- an object no config has ever
+    // carried, describing a shape the runtime never had.
+    let (runtime, declared) = (runtime_keys(), schema_properties());
+    let invented: Vec<&String> = declared.difference(&runtime).collect();
+    assert!(
+        invented.is_empty(),
+        "the schema declares fields the runtime does not accept, so a config written to the \
+         schema would be ignored or rejected: {invented:?}"
+    );
+}
+
+#[test]
+fn every_shipped_config_is_accepted_by_the_schema_it_names() {
+    // The bug that started this: `packaging/conf/agent.json` -- the config
+    // installed on every Debian host -- did not validate against the schema
+    // `docs/architecture/agent.md` names as its wire format.
+    let declared = schema_properties();
+    for relative in [
+        "packaging/conf/agent.json",
+        "packaging/homebrew/conf/agent.json.in",
+    ] {
+        let body = std::fs::read_to_string(repo_path(relative))
+            .unwrap_or_else(|err| panic!("read {relative}: {err}"));
+        // The Homebrew file is a template. Its @HOMEBREW_PREFIX@ tokens sit
+        // inside string values, so it parses as JSON untouched -- but the
+        // runtime also requires absolute paths, and an unsubstituted token
+        // is not one. Substituted with the default prefix, which is what
+        // the formula writes at install time.
+        let body = body.replace("@HOMEBREW_PREFIX@", "/opt/homebrew");
+        let document: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|err| panic!("{relative} parses: {err}"));
+        for key in document.as_object().expect("a config is an object").keys() {
+            assert!(
+                declared.contains(key),
+                "`{relative}` sets `{key}`, which the schema does not declare -- with \
+                 additionalProperties:false that config fails its own schema"
+            );
+        }
+        AgentConfig::parse_json(&body)
+            .unwrap_or_else(|err| panic!("{relative} must also satisfy the runtime: {err}"));
+    }
 }

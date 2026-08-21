@@ -8,6 +8,31 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The agent config schema now describes the config the agent actually
+  accepts. `config/schemas/agent.json` declared a nested `control` object
+  holding `transport`, `socket_path`, `tcp_bind_host` and `tcp_bind_port`,
+  while the runtime reads all four at the top level — and with
+  `additionalProperties: false`, that meant **the shipped
+  `packaging/conf/agent.json` did not validate against its own schema**.
+  `docs/architecture/agent.md` names that schema as the wire format for the
+  config, so an operator writing one from it produced a file the agent
+  would not accept, and an operator copying the shipped file failed
+  validation against the documented shape.
+
+  Corrected toward the runtime rather than the other way round: no config
+  has ever carried a `control` object, on any host or in any commit, so the
+  schema described a shape that never existed. Moving the runtime instead
+  would have invalidated every config file already installed. `runtime_version`,
+  which the agent fills in at load, is now declared too.
+
+  Guarded by a bidirectional contract test rather than a field-by-field
+  one. Every field a fully-populated config serializes must be declared by
+  the schema, and every property the schema declares must be one the
+  runtime accepts — the second direction is what catches an invented field
+  like `control`, which a one-way check would have passed. Both shipped
+  configs, Debian and Homebrew, are checked against the schema and the
+  runtime. Restoring the previous schema fails three of these tests.
+
 - The APT channel lifecycle rehearsal no longer hangs for its whole budget
   when a package mirror stalls. Bounding every apt call in the workflows
   left the calls made *inside* the rehearsal script unbounded, and the
