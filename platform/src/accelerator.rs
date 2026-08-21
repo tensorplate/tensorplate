@@ -358,8 +358,18 @@ mod tests {
             std::process::id(),
             NEXT_STUB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        // Written under a staging name and RENAMED into place. Writing
+        // directly to `path` and then executing it races on Linux: these
+        // tests run in parallel, and a `Command::spawn` on another thread
+        // forks while this thread's write descriptor is still open, so the
+        // child inherits a writable fd to the file and the exec fails with
+        // ETXTBSY -- "Text file busy". Rename is atomic and the executed
+        // path never had a writable descriptor, so nothing can inherit one
+        // against it. Cost two CI runs before it was worth fixing.
+        let staging = path.with_extension("staging");
+        std::fs::write(&staging, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::rename(&staging, &path).expect("publish stub");
         path
     }
 
