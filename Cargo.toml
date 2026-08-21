@@ -17,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.78"
 license = "Apache-2.0"
@@ -26,8 +26,8 @@ repository = "https://github.com/tensorplate/tensorplate"
 authors = ["TensorPlate Contributors"]
 
 [workspace.dependencies]
-tensorplate-protocol = { path = "protocol/rust", version = "0.1.1" }
-tensorplate-platform = { path = "platform", version = "0.1.1" }
+tensorplate-protocol = { path = "protocol/rust", version = "0.2.1" }
+tensorplate-platform = { path = "platform", version = "0.2.1" }
 anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
