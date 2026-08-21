@@ -499,7 +499,7 @@ if bad:
     sys.exit(1)
 PY
   then
-    pass "JSON schema ids and schema_version constants align to $short"
+    pass "JSON schema ids and schema_version constants align to $protocol"
   else
     fail "config/protocol schema version metadata must align to $short"
   fi
@@ -780,20 +780,24 @@ if not lines:
 # new package inherited a body describing work it does not contain and the
 # previous release lost its package history. A changelog is append-only
 # from the top; the previous entries are the record.
-if lines[0].startswith(f"tensorplate ({version}-1)"):
-    raise SystemExit(f"packaging/debian/changelog already has a {version}-1 stanza on top")
-stanza = "\n".join(
-    [
-        f"tensorplate ({version}-1) unstable; urgency=medium",
-        "",
-        f"  * Release {version}. See CHANGELOG.md for the complete change list.",
-        "",
-        f" -- TensorPlate Contributors <oss@tensorplate.com>  {debian_date}",
-        "",
-        "",
-    ]
-)
-debian.write_text(stanza + existing)
+# Idempotent, not an error. `cmd_cut` runs prepare against a tree that a
+# prepare commit has usually already touched, so refusing a matching top
+# stanza blocks the cut entirely -- trading history erasure for a release
+# that cannot be made. A stanza for THIS version on top means the work is
+# done; anything else on top gets a new stanza above it.
+if not lines[0].startswith(f"tensorplate ({version}-1)"):
+    stanza = "\n".join(
+        [
+            f"tensorplate ({version}-1) unstable; urgency=medium",
+            "",
+            f"  * Release {version}. See CHANGELOG.md for the complete change list.",
+            "",
+            f" -- TensorPlate Contributors <oss@tensorplate.com>  {debian_date}",
+            "",
+            "",
+        ]
+    )
+    debian.write_text(stanza + existing)
 
 changelog = Path("CHANGELOG.md")
 text = changelog.read_text()
