@@ -22,20 +22,22 @@ The Inference Layer for Physical AI
 
 
 Production-grade model serving for physical AI. TensorPlate runs
-models on Jetson-class edge devices and handles deployment, rollback, and
-health so they keep serving unattended.
+models from Jetson-class edge devices to datacenter GPUs, and handles
+deployment, rollback, and health so they keep serving unattended.
 
 
 ## Features
 
-Ship AI models to edge hardware and keep them serving in the field,
+Ship AI models to the hardware you actually have and keep them serving,
 without writing your own deployment, supervision, and health tooling.
 
 TensorPlate is the runtime and control plane that production physical AI inference needs:
 
 - **Serve models with low, predictable latency.** A C++ inference runtime runs
-  your model on-device. The v0.1.1 packaged release supports TensorRT on
-  Jetson and an optional out-of-process Python/PyTorch backend; future
+  your model on the machine that serves it. The packaged release supports
+  TensorRT on Jetson and an optional out-of-process Python/PyTorch backend;
+  which backends a given platform admits is recorded per row in the
+  [support matrix](https://tensorplate.com/docs/hardware/overview). Future
   backends are reserved by the bundle and adapter interfaces.
 - **Deploy and roll back safely.** Push a new model with one CLI command; if it
   fails to come up, the agent rolls back automatically.
@@ -46,7 +48,7 @@ TensorPlate is the runtime and control plane that production physical AI inferen
   tell callers when it's safe to send traffic, and an independent monitor keeps
   reporting health and metrics even if the main process is degraded.
 - **Operate it from one CLI.** `deploy`, `rollback`, `status`, `infer`, `logs`,
-  and `doctor` cover the local device workflow and are scriptable for CI.
+  and `doctor` cover the local operator workflow and are scriptable for CI.
 
 ## Getting Started
 
@@ -77,10 +79,11 @@ through normal `apt update` / `apt upgrade`; the bootstrap never repeats.
 See [tensorplate-ready.md](docs/install/tensorplate-ready.md) for
 provisioning, validation, and upgrade flows.
 
-Workstation and appliance installs:
+Server, workstation, and appliance installs:
 
 ```bash
-sudo apt install tensorplate-cli            # Ubuntu AMD64, after the same one-time bootstrap
+sudo apt install tensorplate                # Full runtime on Ubuntu x86_64, after the same one-time bootstrap
+sudo apt install tensorplate-cli            # Operator CLI only
 brew install tensorplate/tap/tensorplate    # Complete appliance on the validated macOS row
 ```
 
@@ -139,7 +142,7 @@ Prerequisites, lint/format checks, and the full CI-equivalent sequence: [local-v
 
 | Component | Path | What it is |
 |---|---|---|
-| Inference runtime | [runtime/](runtime/) | Core on-device execution engine (sessions, scheduling, buffers) |
+| Inference runtime | [runtime/](runtime/) | Core execution engine (sessions, scheduling, buffers) |
 | Serving worker | [serving_worker/](serving_worker/) | Data-plane worker process that serves inference requests |
 | Python backend | [backends/python_pytorch/](backends/python_pytorch/) | Out-of-process Python/PyTorch backend |
 | Public headers | [include/tensorplate/](include/tensorplate/) | Public C++ API |
