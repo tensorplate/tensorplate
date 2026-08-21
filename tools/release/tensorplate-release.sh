@@ -135,12 +135,6 @@ require_version() {
   die "--version must be MAJOR.MINOR.PATCH; pass --allow-snapshot-version for X.Y.Z~dev.YYYYMMDD.gitsha"
 }
 
-version_short() {
-  local base major minor
-  base="${VERSION%%~*}"
-  IFS=. read -r major minor _ <<<"$base"
-  printf '%s.%s\n' "$major" "$minor"
-}
 
 default_paths() {
   require_version
@@ -400,8 +394,6 @@ declared_bundle_format_version() {
 }
 
 check_version_files() {
-  local short
-  short="$(version_short)"
 
   grep -Eq "VERSION[[:space:]]+${VERSION}" CMakeLists.txt &&
     pass "CMake project version is $VERSION" ||
@@ -470,13 +462,13 @@ import json
 import pathlib
 import sys
 
-short = sys.argv[1]
+expected = sys.argv[1]
 bad = []
 for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pathlib.Path("protocol/schemas").glob("*.json"))):
     data = json.loads(path.read_text())
     schema_id = data.get("$id", "")
-    if f"/v{short}/" not in schema_id:
-        bad.append(f"{path}: $id does not contain /v{short}/")
+    if f"/v{expected}/" not in schema_id:
+        bad.append(f"{path}: $id does not contain /v{expected}/")
     found = []
 
     def walk(obj):
@@ -491,8 +483,8 @@ for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pa
 
     walk(data)
     for observed in found:
-        if observed != short:
-            bad.append(f"{path}: schema_version const {observed!r} is not {short!r}")
+        if observed != expected:
+            bad.append(f"{path}: schema_version const {observed!r} is not {expected!r}")
 
 if bad:
     print("\n".join(bad))
@@ -501,7 +493,7 @@ PY
   then
     pass "JSON schema ids and schema_version constants align to $protocol"
   else
-    fail "config/protocol schema version metadata must align to $short"
+    fail "config/protocol schema version metadata must align to $protocol"
   fi
 
   [[ -f include/tensorplate/version.hpp.in ]] &&
