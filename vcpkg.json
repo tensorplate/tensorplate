@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "tensorplate",
   "version-string": "0.1.1",
-  "description": "TensorPlate edge AI inference platform.",
+  "description": "TensorPlate inference platform.",
   "homepage": "https://github.com/tensorplate/tensorplate",
   "license": "Apache-2.0",
   "supports": "(linux | osx | windows) & !uwp",
