@@ -3,7 +3,7 @@
 </p>
 
 <h3 align="center">
-The Inference Layer for Physical AI
+The Inference Layer for Production AI
 </h3>
 
 <p align="center">
@@ -21,9 +21,9 @@ The Inference Layer for Physical AI
 # TensorPlate
 
 
-Production-grade model serving for physical AI. TensorPlate runs
-models from Jetson-class edge devices to datacenter GPUs, and handles
-deployment, rollback, and health so they keep serving unattended.
+Production-grade model serving. TensorPlate runs models from
+Jetson-class edge devices to datacenter GPUs, and handles deployment,
+rollback, and health so they keep serving unattended.
 
 
 ## Features
@@ -31,7 +31,7 @@ deployment, rollback, and health so they keep serving unattended.
 Ship AI models to the hardware you actually have and keep them serving,
 without writing your own deployment, supervision, and health tooling.
 
-TensorPlate is the runtime and control plane that production physical AI inference needs:
+TensorPlate is the runtime and control plane that production inference needs:
 
 - **Serve models with low, predictable latency.** A C++ inference runtime runs
   your model on the machine that serves it. The packaged release supports
