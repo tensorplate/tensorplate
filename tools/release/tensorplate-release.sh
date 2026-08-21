@@ -379,6 +379,26 @@ assert_tag_available() {
   fi
 }
 
+# The protocol and bundle-format versions as the Rust crate declares them.
+#
+# `protocol/rust/src/lib.rs` states that PROTOCOL_VERSION / SCHEMA_VERSION
+# are "an independent semver track from the crate's CARGO_PKG_VERSION (the
+# runtime version)". Deriving the expected value from the runtime version
+# contradicts that: it made a 0.2.x runtime demand protocol 0.2, which is a
+# compatibility migration across 41 schemas that nothing had decided to
+# make. These read the declared value instead, so the check keeps doing the
+# job it is for -- catching DRIFT between CMake, Rust and the schemas --
+# without asserting a coupling the design rejects.
+declared_protocol_version() {
+  sed -n 's/^pub const PROTOCOL_VERSION: &str = "\([^"]*\)";.*/\1/p' \
+    protocol/rust/src/lib.rs | head -n 1
+}
+
+declared_bundle_format_version() {
+  sed -n 's/^pub const BUNDLE_FORMAT_VERSION: &str = "\([^"]*\)";.*/\1/p' \
+    protocol/rust/src/lib.rs | head -n 1
+}
+
 check_version_files() {
   local short
   short="$(version_short)"
@@ -429,19 +449,23 @@ check_version_files() {
     pass "Debian changelog is finalized for $VERSION-1" ||
     fail "packaging/debian/changelog must start with tensorplate (${VERSION}-1) and a non-UNRELEASED distribution"
 
-  grep -Eq "set\\(TP_PROTOCOL_VERSION_MAJOR[[:space:]]+${short%%.*}" CMakeLists.txt &&
-    grep -Eq "set\\(TP_PROTOCOL_VERSION_MINOR[[:space:]]+${short##*.}" CMakeLists.txt &&
-    grep -Eq "pub const PROTOCOL_VERSION: &str = \"${short}\";" protocol/rust/src/lib.rs &&
-    pass "protocol version surface is $short" ||
-    fail "protocol version must remain $short across CMake and Rust"
+  local protocol bundle
+  protocol="$(declared_protocol_version)"
+  bundle="$(declared_bundle_format_version)"
+  [[ -n "$protocol" ]] || fail "could not read PROTOCOL_VERSION from protocol/rust/src/lib.rs"
+  [[ -n "$bundle" ]] || fail "could not read BUNDLE_FORMAT_VERSION from protocol/rust/src/lib.rs"
 
-  grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MAJOR[[:space:]]+${short%%.*}" CMakeLists.txt &&
-    grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MINOR[[:space:]]+${short##*.}" CMakeLists.txt &&
-    grep -Eq "pub const BUNDLE_FORMAT_VERSION: &str = \"${short}\";" protocol/rust/src/lib.rs &&
-    pass "bundle format version surface is $short" ||
-    fail "bundle format version must remain $short across CMake and Rust"
+  grep -Eq "set\\(TP_PROTOCOL_VERSION_MAJOR[[:space:]]+${protocol%%.*}" CMakeLists.txt &&
+    grep -Eq "set\\(TP_PROTOCOL_VERSION_MINOR[[:space:]]+${protocol##*.}" CMakeLists.txt &&
+    pass "protocol version surface agrees at $protocol" ||
+    fail "CMake protocol version disagrees with Rust's declared $protocol"
 
-  if python3 - "$short" <<'PY'
+  grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MAJOR[[:space:]]+${bundle%%.*}" CMakeLists.txt &&
+    grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MINOR[[:space:]]+${bundle##*.}" CMakeLists.txt &&
+    pass "bundle format version surface agrees at $bundle" ||
+    fail "CMake bundle format version disagrees with Rust's declared $bundle"
+
+  if python3 - "$protocol" <<'PY'
 import json
 import pathlib
 import sys
@@ -811,7 +835,8 @@ cmd_prepare() {
     printf '  %s\n' "${APPROVED_PREPARE_FILES[@]}"
     printf '\nRequired final values:\n'
     printf '  runtime/package version: %s\n' "$VERSION"
-    printf '  protocol/bundle format version: %s\n' "$(version_short)"
+    printf '  protocol/bundle format version: %s / %s (independent of the runtime version)\n' \
+      "$(declared_protocol_version)" "$(declared_bundle_format_version)"
     printf '  release branch: %s\n' "$RELEASE_BRANCH"
     printf '  changelog heading: ## [%s] - YYYY-MM-DD\n' "$VERSION"
     return 0
