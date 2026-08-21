@@ -44,6 +44,7 @@ readonly APPROVED_PREPARE_FILES=(
   vcpkg.json
   packaging/VERSION
   packaging/debian/changelog
+  packaging/scripts/install.sh
   CHANGELOG.md
 )
 
@@ -134,12 +135,6 @@ require_version() {
   die "--version must be MAJOR.MINOR.PATCH; pass --allow-snapshot-version for X.Y.Z~dev.YYYYMMDD.gitsha"
 }
 
-version_short() {
-  local base major minor
-  base="${VERSION%%~*}"
-  IFS=. read -r major minor _ <<<"$base"
-  printf '%s.%s\n' "$major" "$minor"
-}
 
 default_paths() {
   require_version
@@ -378,9 +373,27 @@ assert_tag_available() {
   fi
 }
 
+# The protocol and bundle-format versions as the Rust crate declares them.
+#
+# `protocol/rust/src/lib.rs` states that PROTOCOL_VERSION / SCHEMA_VERSION
+# are "an independent semver track from the crate's CARGO_PKG_VERSION (the
+# runtime version)". Deriving the expected value from the runtime version
+# contradicts that: it made a 0.2.x runtime demand protocol 0.2, which is a
+# compatibility migration across 41 schemas that nothing had decided to
+# make. These read the declared value instead, so the check keeps doing the
+# job it is for -- catching DRIFT between CMake, Rust and the schemas --
+# without asserting a coupling the design rejects.
+declared_protocol_version() {
+  sed -n 's/^pub const PROTOCOL_VERSION: &str = "\([^"]*\)";.*/\1/p' \
+    protocol/rust/src/lib.rs | head -n 1
+}
+
+declared_bundle_format_version() {
+  sed -n 's/^pub const BUNDLE_FORMAT_VERSION: &str = "\([^"]*\)";.*/\1/p' \
+    protocol/rust/src/lib.rs | head -n 1
+}
+
 check_version_files() {
-  local short
-  short="$(version_short)"
 
   grep -Eq "VERSION[[:space:]]+${VERSION}" CMakeLists.txt &&
     pass "CMake project version is $VERSION" ||
@@ -428,30 +441,34 @@ check_version_files() {
     pass "Debian changelog is finalized for $VERSION-1" ||
     fail "packaging/debian/changelog must start with tensorplate (${VERSION}-1) and a non-UNRELEASED distribution"
 
-  grep -Eq "set\\(TP_PROTOCOL_VERSION_MAJOR[[:space:]]+${short%%.*}" CMakeLists.txt &&
-    grep -Eq "set\\(TP_PROTOCOL_VERSION_MINOR[[:space:]]+${short##*.}" CMakeLists.txt &&
-    grep -Eq "pub const PROTOCOL_VERSION: &str = \"${short}\";" protocol/rust/src/lib.rs &&
-    pass "protocol version surface is $short" ||
-    fail "protocol version must remain $short across CMake and Rust"
+  local protocol bundle
+  protocol="$(declared_protocol_version)"
+  bundle="$(declared_bundle_format_version)"
+  [[ -n "$protocol" ]] || fail "could not read PROTOCOL_VERSION from protocol/rust/src/lib.rs"
+  [[ -n "$bundle" ]] || fail "could not read BUNDLE_FORMAT_VERSION from protocol/rust/src/lib.rs"
 
-  grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MAJOR[[:space:]]+${short%%.*}" CMakeLists.txt &&
-    grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MINOR[[:space:]]+${short##*.}" CMakeLists.txt &&
-    grep -Eq "pub const BUNDLE_FORMAT_VERSION: &str = \"${short}\";" protocol/rust/src/lib.rs &&
-    pass "bundle format version surface is $short" ||
-    fail "bundle format version must remain $short across CMake and Rust"
+  grep -Eq "set\\(TP_PROTOCOL_VERSION_MAJOR[[:space:]]+${protocol%%.*}" CMakeLists.txt &&
+    grep -Eq "set\\(TP_PROTOCOL_VERSION_MINOR[[:space:]]+${protocol##*.}" CMakeLists.txt &&
+    pass "protocol version surface agrees at $protocol" ||
+    fail "CMake protocol version disagrees with Rust's declared $protocol"
 
-  if python3 - "$short" <<'PY'
+  grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MAJOR[[:space:]]+${bundle%%.*}" CMakeLists.txt &&
+    grep -Eq "set\\(TP_BUNDLE_FORMAT_VERSION_MINOR[[:space:]]+${bundle##*.}" CMakeLists.txt &&
+    pass "bundle format version surface agrees at $bundle" ||
+    fail "CMake bundle format version disagrees with Rust's declared $bundle"
+
+  if python3 - "$protocol" <<'PY'
 import json
 import pathlib
 import sys
 
-short = sys.argv[1]
+expected = sys.argv[1]
 bad = []
 for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pathlib.Path("protocol/schemas").glob("*.json"))):
     data = json.loads(path.read_text())
     schema_id = data.get("$id", "")
-    if f"/v{short}/" not in schema_id:
-        bad.append(f"{path}: $id does not contain /v{short}/")
+    if f"/v{expected}/" not in schema_id:
+        bad.append(f"{path}: $id does not contain /v{expected}/")
     found = []
 
     def walk(obj):
@@ -466,17 +483,17 @@ for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pa
 
     walk(data)
     for observed in found:
-        if observed != short:
-            bad.append(f"{path}: schema_version const {observed!r} is not {short!r}")
+        if observed != expected:
+            bad.append(f"{path}: schema_version const {observed!r} is not {expected!r}")
 
 if bad:
     print("\n".join(bad))
     sys.exit(1)
 PY
   then
-    pass "JSON schema ids and schema_version constants align to $short"
+    pass "JSON schema ids and schema_version constants align to $protocol"
   else
-    fail "config/protocol schema version metadata must align to $short"
+    fail "config/protocol schema version metadata must align to $protocol"
   fi
 
   [[ -f include/tensorplate/version.hpp.in ]] &&
@@ -658,6 +675,7 @@ run_preflight() {
 prepare_python() {
   python3 - "$VERSION" <<'PY'
 import datetime
+import email.utils
 import json
 import re
 import sys
@@ -665,13 +683,25 @@ from pathlib import Path
 
 version = sys.argv[1]
 today = datetime.date.today().isoformat()
+# Debian changelog trailers use RFC 2822, and dpkg-parsechangelog rejects
+# anything else -- a malformed date breaks the build rather than the date.
+debian_date = email.utils.format_datetime(
+    datetime.datetime.now(datetime.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+)
 
 def replace(path, pattern, repl, flags=0):
     p = Path(path)
     text = p.read_text()
     new, count = re.subn(pattern, repl, text, count=1, flags=flags)
-    if count == 0 and repl not in text:
-        raise SystemExit(f"{path}: expected pattern was not found")
+    if count == 0:
+        # A callable replacement has no literal form to look for, so the
+        # already-applied check only applies to string replacements. `in`
+        # against a function raises, which would have turned a missed
+        # pattern into a confusing TypeError instead of this message.
+        if callable(repl) or repl not in text:
+            raise SystemExit(f"{path}: expected pattern was not found")
     p.write_text(new)
 
 replace(
@@ -680,21 +710,39 @@ replace(
     'set(TP_RUNTIME_VERSION_SUFFIX       ""',
 )
 
+replace(
+    "CMakeLists.txt",
+    r'^(\s*)VERSION[ \t]+[0-9]+\.[0-9]+\.[0-9]+[ \t]*$',
+    f'\\g<1>VERSION {version}',
+    flags=re.MULTILINE,
+)
+
 cargo = Path("Cargo.toml")
 text = cargo.read_text()
 text = re.sub(r'^version = "[^"]+"$', f'version = "{version}"', text, count=1, flags=re.MULTILINE)
-text = re.sub(
-    r'tensorplate-protocol = \{ path = "protocol/rust", version = "[^"]+" \}',
-    f'tensorplate-protocol = {{ path = "protocol/rust", version = "{version}" }}',
+text, bumped = re.subn(
+    r'(tensorplate-[a-z0-9-]+ = \{ path = "[^"]+", version = )"[^"]+"',
+    lambda m: f'{m.group(1)}"{version}"',
     text,
-    count=1,
 )
+if not bumped:
+    raise SystemExit("Cargo.toml: no in-workspace path dependency found to bump")
 cargo.write_text(text)
 
+# P2b: every in-workspace package, not only the ones carrying `-dev`.
+# A finalized-to-finalized prepare (0.2.1 -> 0.2.2) matched nothing here,
+# so the lockfile kept the previous versions and `cargo check --locked`
+# failed on a tree that had already been tagged.
 lock = Path("Cargo.lock")
 if lock.exists():
     text = lock.read_text()
-    text = re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+-dev"', f'version = "{version}"', text)
+    text, bumped = re.subn(
+        r'(\[\[package\]\]\nname = "tensorplate-[a-z0-9-]+"\nversion = )"[^"]+"',
+        lambda m: f'{m.group(1)}"{version}"',
+        text,
+    )
+    if not bumped:
+        raise SystemExit("Cargo.lock: no tensorplate-* package entry found to bump")
     lock.write_text(text)
 
 vcpkg = Path("vcpkg.json")
@@ -704,12 +752,44 @@ vcpkg.write_text(json.dumps(data, indent=2) + "\n")
 
 Path("packaging/VERSION").write_text(version + "\n")
 
+# The installer's no-argument default. The release build stamps the
+# PUBLISHED copy too, which is what a user actually downloads; this keeps
+# the in-repo copy from drifting behind it and being wrong for anyone
+# running from a checkout.
+replace(
+    "packaging/scripts/install.sh",
+    r'(TP_INSTALL_DEFAULT_VERSION:-)[^}]*',
+    lambda m: f'{m.group(1)}{version}',
+)
+
 debian = Path("packaging/debian/changelog")
-lines = debian.read_text().splitlines()
+existing = debian.read_text()
+lines = existing.splitlines()
 if not lines:
     raise SystemExit("packaging/debian/changelog is empty")
-lines[0] = f"tensorplate ({version}-1) unstable; urgency=medium"
-debian.write_text("\n".join(lines) + "\n")
+# PREPEND. Rewriting line 1 relabelled whatever stanza was on top -- an
+# already-published one, with its own changes and its own date -- so the
+# new package inherited a body describing work it does not contain and the
+# previous release lost its package history. A changelog is append-only
+# from the top; the previous entries are the record.
+# Idempotent, not an error. `cmd_cut` runs prepare against a tree that a
+# prepare commit has usually already touched, so refusing a matching top
+# stanza blocks the cut entirely -- trading history erasure for a release
+# that cannot be made. A stanza for THIS version on top means the work is
+# done; anything else on top gets a new stanza above it.
+if not lines[0].startswith(f"tensorplate ({version}-1)"):
+    stanza = "\n".join(
+        [
+            f"tensorplate ({version}-1) unstable; urgency=medium",
+            "",
+            f"  * Release {version}. See CHANGELOG.md for the complete change list.",
+            "",
+            f" -- TensorPlate Contributors <oss@tensorplate.com>  {debian_date}",
+            "",
+            "",
+        ]
+    )
+    debian.write_text(stanza + existing)
 
 changelog = Path("CHANGELOG.md")
 text = changelog.read_text()
@@ -751,7 +831,8 @@ cmd_prepare() {
     printf '  %s\n' "${APPROVED_PREPARE_FILES[@]}"
     printf '\nRequired final values:\n'
     printf '  runtime/package version: %s\n' "$VERSION"
-    printf '  protocol/bundle format version: %s\n' "$(version_short)"
+    printf '  protocol/bundle format version: %s / %s (independent of the runtime version)\n' \
+      "$(declared_protocol_version)" "$(declared_bundle_format_version)"
     printf '  release branch: %s\n' "$RELEASE_BRANCH"
     printf '  changelog heading: ## [%s] - YYYY-MM-DD\n' "$VERSION"
     return 0

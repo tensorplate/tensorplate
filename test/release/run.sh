@@ -383,4 +383,65 @@ if command -v dpkg >/dev/null 2>&1; then
   dpkg --compare-versions "${snapshot_version}-1" lt "0.1.0-1"
 fi
 
+# --- prepare is idempotent for the same version -------------------------
+#
+# Two regressions, one after the other. `prepare` used to REWRITE the top
+# changelog stanza, so preparing 0.2.1 relabelled the published 0.1.2 entry
+# and kept its body. Making it prepend then made a matching stanza an
+# error -- and `cmd_cut` always runs prepare, so an already-prepared head
+# could not be cut at all. It has to prepend once and then do nothing.
+#
+# Run against a minimal repo holding only the files prepare touches, so
+# this exercises the real script rather than a copy of its logic.
+prep="$tmp/prep"
+mkdir -p "$prep/packaging/debian" "$prep/packaging/scripts"
+for f in CMakeLists.txt Cargo.toml vcpkg.json CHANGELOG.md \
+         packaging/VERSION packaging/debian/changelog packaging/scripts/install.sh; do
+  mkdir -p "$prep/$(dirname "$f")"
+  cp "$repo_root/$f" "$prep/$f"
+done
+(
+  cd "$prep"
+  git init -q -b prep-line .
+  git add -A
+  git -c user.email=t@example.com -c user.name=t commit -qm base
+  # The stanza currently on top is the one a rewriting prepare would
+  # relabel. Asserting on a FIXED older version instead would pass while
+  # the top entry was silently overwritten -- which is how the erasing
+  # behaviour survived the first version of this test.
+  was_on_top="$(head -n 1 packaging/debian/changelog)"
+  stanzas_before="$(grep -c '^tensorplate (' packaging/debian/changelog)"
+  for attempt in 1 2; do
+    "$repo_root/$script" prepare --version 9.9.9 --prep-branch prep-line \
+      --execute --confirm PREPARE-v9.9.9 >/dev/null 2>&1 || {
+        echo "FAIL: prepare attempt $attempt errored; an already-prepared head must still be preparable" >&2
+        exit 1
+      }
+    git add -A
+    git -c user.email=t@example.com -c user.name=t commit -qm "prepare $attempt" --allow-empty
+  done
+  stanzas="$(grep -c '^tensorplate (9.9.9-1)' packaging/debian/changelog)"
+  [[ "$stanzas" == "1" ]] || {
+    echo "FAIL: expected exactly one 9.9.9 stanza after two prepares, got $stanzas" >&2
+    exit 1
+  }
+  grep -qF "$was_on_top" packaging/debian/changelog || {
+    echo "FAIL: preparing a new version overwrote the stanza that was on top: $was_on_top" >&2
+    exit 1
+  }
+  grep -q '^tensorplate (0.1.2-1)' packaging/debian/changelog || {
+    echo "FAIL: preparing a new version erased the published 0.1.2 stanza" >&2
+    exit 1
+  }
+  stanzas_after="$(grep -c '^tensorplate (' packaging/debian/changelog)"
+  [[ "$stanzas_after" == "$((stanzas_before + 1))" ]] || {
+    echo "FAIL: expected exactly one new stanza, went from $stanzas_before to $stanzas_after" >&2
+    exit 1
+  }
+  grep -q 'TP_INSTALL_DEFAULT_VERSION:-9.9.9}' packaging/scripts/install.sh || {
+    echo "FAIL: prepare left the installer default behind the release version" >&2
+    exit 1
+  }
+)
+
 printf 'release script checks green\n'
