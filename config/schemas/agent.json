@@ -262,6 +262,23 @@
         "restart_policy": {
           "type": "object",
           "additionalProperties": false,
+          "$comment": "kind defaults to bounded_backoff, so an ABSENT kind takes the bounds too. Disabled skips the block in the runtime, and constraining it here would reject a config that starts.",
+          "allOf": [
+            {
+              "if": {"anyOf": [
+                {"properties": {"kind": {"const": "bounded_backoff"}}, "required": ["kind"]},
+                {"not": {"required": ["kind"]}}
+              ]},
+              "then": {"properties": {"backoff": {"properties": {
+                "initial_delay_ms": {"minimum": 1},
+                "multiplier_hundredths": {"minimum": 100},
+                "max_delay_ms": {"minimum": 1},
+                "window_ms": {"minimum": 1},
+                "threshold": {"minimum": 1},
+                "stable_reset_ms": {"minimum": 1}
+              }}}}
+            }
+          ],
           "properties": {
             "kind": {
               "type": "string",
@@ -271,14 +288,14 @@
             "backoff": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Bounded exponential-backoff parameters with a rolling-window crash-loop detector. All timing uses monotonic time.",
+              "description": "Bounded exponential-backoff parameters with a rolling-window crash-loop detector. All timing uses monotonic time. Bounds are enforced only where the policy uses them: `RestartPolicyKind::Disabled` skips this block entirely, so a leftover value there must not fail validation.",
               "properties": {
-                "initial_delay_ms": {"type": "integer", "minimum": 1, "default": 500},
-                "multiplier_hundredths": {"type": "integer", "minimum": 100, "default": 200, "description": "Geometric multiplier x100. 200 means 2.0x."},
-                "max_delay_ms": {"type": "integer", "minimum": 1, "default": 30000},
-                "window_ms": {"type": "integer", "minimum": 1, "default": 300000},
-                "threshold": {"type": "integer", "minimum": 1, "default": 5},
-                "stable_reset_ms": {"type": "integer", "minimum": 1, "default": 120000}
+                "initial_delay_ms": {"type": "integer", "minimum": 0, "default": 500},
+                "multiplier_hundredths": {"type": "integer", "minimum": 0, "default": 200, "description": "Geometric multiplier x100. 200 means 2.0x."},
+                "max_delay_ms": {"type": "integer", "minimum": 0, "default": 30000},
+                "window_ms": {"type": "integer", "minimum": 0, "default": 300000},
+                "threshold": {"type": "integer", "minimum": 0, "default": 5},
+                "stable_reset_ms": {"type": "integer", "minimum": 0, "default": 120000}
               }
             }
           }

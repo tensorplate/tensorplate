@@ -346,6 +346,26 @@ const AGREEMENT_CASES: &[(&str, &str)] = &[
         "mock worker, unused zero port",
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_bind_port":0}}"#,
     ),
+    // A disabled restart policy never reads its backoff block -- the
+    // runtime matches `Disabled => {}` and skips it entirely -- so bounds
+    // that apply unconditionally reject a config that starts. Missed the
+    // first time because the case chosen used values satisfying every
+    // per-field bound and breaking only the cross-field rule, which is
+    // skipped for that same reason.
+    (
+        "disabled policy, unused zero backoff",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"kind":"disabled","backoff":{"initial_delay_ms":0}}}}"#,
+    ),
+    // The other side of that conditional: where the policy DOES read the
+    // block the bounds must still bite -- named explicitly, and by default.
+    (
+        "bounded policy, zero backoff",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"kind":"bounded_backoff","backoff":{"initial_delay_ms":0}}}}"#,
+    ),
+    (
+        "default policy, zero backoff",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"backoff":{"initial_delay_ms":0}}}}"#,
+    ),
 ];
 
 /// Rules the runtime enforces that JSON Schema draft-07 cannot express.
