@@ -37,6 +37,13 @@ on:
       # Every apt call in this workflow goes through the wrapper, so a change
       # to it must be able to trigger the jobs that exercise it.
       - 'tools/ci/**'
+      # The release driver iterates config/schemas and protocol/schemas to
+      # check version metadata, so a schema edit must be able to trigger the
+      # job that runs it. Added after a schema-only PR ran 15 checks instead
+      # of 20 -- the same gap `platform/**` was added to close, found the
+      # same way.
+      - 'config/schemas/**'
+      - 'protocol/schemas/**'
   workflow_dispatch:
 
 permissions:

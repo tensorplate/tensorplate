@@ -53,6 +53,11 @@ pub enum FindingId {
     /// row in it is valid. Reported separately from the path layout
     /// because a present-but-unloadable registry is a different operator
     /// problem from a missing directory.
+    /// packaging: whether the installed agent config still satisfies the
+    /// schema the agent validates it against. Reported by the CLI because
+    /// the CLI is what an operator can run BEFORE an upgrade, while the
+    /// agent that would refuse the config is the one not yet installed.
+    AgentConfigValid,
     PlatformRegistry,
     /// Which support rows the detected host profile could be, or the
     /// typed reason it could be none of them.
@@ -96,6 +101,7 @@ impl FindingId {
             Self::ServingBinaryInstalled => "serving_binary_installed",
             Self::BackendDescriptor => "backend_descriptor",
             Self::PlatformRegistry => "platform_registry",
+            Self::AgentConfigValid => "agent_config_valid",
             Self::PlatformProfile => "platform_profile",
         }
     }

@@ -53,6 +53,7 @@ pub fn run<W: Write, E: Write>(
     let mut findings = Vec::<Finding>::new();
     findings.push(probe_cli_version());
     findings.extend(probe_profile_compatibility(profile));
+    findings.extend(probe_agent_config());
     findings.extend(probe_host_profile());
     findings.extend(probe_ros2_health_stub());
     // packaging install probes: filesystem layout, configs,
@@ -368,6 +369,118 @@ fn render_platform_profile(registry: &PlatformRegistry, identity: &HostIdentity)
                     .into(),
             ),
         ),
+    }
+}
+
+/// The agent config schema, compiled into the CLI.
+///
+/// Embedded rather than read from disk on purpose: this check exists to be
+/// run BEFORE an upgrade, when the schema on the host is still the old
+/// package's. The copy that matters is the one belonging to the version
+/// about to be installed, which is the one this binary was built with.
+const AGENT_CONFIG_SCHEMA: &str = include_str!("../../../../config/schemas/agent.json");
+
+/// Whether the installed agent config still satisfies its schema.
+///
+/// `cli/` may not depend on `agent/`, so this validates against the schema
+/// rather than by calling the agent's own loader. That is sound only
+/// because the two are held in agreement by a contract test; if they drift
+/// this check drifts with them, which is the reason that test exists.
+fn probe_agent_config() -> Vec<Finding> {
+    let path = std::path::Path::new(tensorplate_protocol::install_paths::AGENT_CONFIG_PATH);
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        // Absent is not a fault here: a CLI-only install has no agent
+        // config, and `agent_reachable` already reports a missing agent.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return vec![Finding::skipped(
+                FindingId::AgentConfigValid,
+                Severity::Info,
+                format!("no agent config at {}", path.display()),
+                None,
+            )]
+        }
+        Err(err) => {
+            return vec![Finding::unsupported(
+                FindingId::AgentConfigValid,
+                Severity::Warning,
+                format!("cannot read {}: {err}", path.display()),
+                Some("the config is root:tensorplate 0640; run as root or a member of the tensorplate group".into()),
+            )]
+        }
+    };
+
+    let document: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(document) => document,
+        Err(err) => {
+            return vec![Finding::unsupported(
+                FindingId::AgentConfigValid,
+                Severity::Critical,
+                format!("{} is not valid JSON: {err}", path.display()),
+                Some("the agent will refuse to start until this parses".into()),
+            )]
+        }
+    };
+
+    // The schema is compiled in, so a failure here is a build-time defect
+    // rather than anything about this host -- reported, not panicked, so
+    // one broken embed cannot take out every other check doctor runs.
+    let Ok(schema) = serde_json::from_str::<serde_json::Value>(AGENT_CONFIG_SCHEMA) else {
+        return vec![Finding::skipped(
+            FindingId::AgentConfigValid,
+            Severity::Warning,
+            "the embedded agent config schema is not valid JSON".to_string(),
+            None,
+        )];
+    };
+    let Ok(compiled) = jsonschema::JSONSchema::compile(&schema) else {
+        return vec![Finding::skipped(
+            FindingId::AgentConfigValid,
+            Severity::Warning,
+            "the embedded agent config schema did not compile".to_string(),
+            None,
+        )];
+    };
+
+    // Collected into owned strings before returning: the error iterator
+    // borrows both the compiled schema and the document, and neither
+    // outlives this function.
+    let problems: Option<Vec<String>> = match compiled.validate(&document) {
+        Ok(()) => None,
+        // Every problem, not the first. An operator fixing one key at a
+        // time across repeated upgrade attempts is the failure this exists
+        // to replace.
+        Err(errors) => Some(
+            errors
+                .map(|e| {
+                    let at = e.instance_path.to_string();
+                    if at.is_empty() {
+                        e.to_string()
+                    } else {
+                        format!("{at}: {e}")
+                    }
+                })
+                .collect(),
+        ),
+    };
+
+    match problems {
+        None => vec![Finding::ok(
+            FindingId::AgentConfigValid,
+            Severity::Info,
+            format!("{} satisfies the agent config schema", path.display()),
+            None,
+        )],
+        Some(detail) => vec![Finding::unsupported(
+            FindingId::AgentConfigValid,
+            Severity::Critical,
+            format!(
+                "{} does not satisfy the agent config schema: {}",
+                path.display(),
+                detail.join("; ")
+            ),
+            Some("the agent refuses a config it cannot validate, so fix this BEFORE upgrading; unknown keys are rejected rather than ignored".into()),
+        )],
     }
 }
 
@@ -773,6 +886,66 @@ mod tests {
         match result {
             Err(CliError::DoctorFindings { .. }) => {}
             other => panic!("expected DoctorFindings, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_config_check_tests {
+    // No test asserts the embedded schema matches the committed file.
+    // `include_str!` registers that file as a rebuild dependency, so any
+    // edit forces a recompile and the constant cannot go stale -- such a
+    // test can never fail, and one that cannot fail reads as cover it is
+    // not providing. Verified by editing the schema and watching the
+    // comparison still pass.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_config_with_an_unknown_key_is_reported_not_passed() {
+        // The case the upgrade guidance is about: a stray key used to be
+        // ignored and now refuses to start the agent, so doctor has to say
+        // so BEFORE the package swap rather than after.
+        let schema: serde_json::Value = serde_json::from_str(AGENT_CONFIG_SCHEMA).unwrap();
+        let compiled = jsonschema::JSONSchema::compile(&schema).unwrap();
+        let document: serde_json::Value = serde_json::from_str(
+            r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mod":"process"}}"#,
+        )
+        .unwrap();
+        assert!(
+            compiled.validate(&document).is_err(),
+            "a misspelled key must be reported; the agent will refuse it"
+        );
+    }
+
+    #[test]
+    fn the_shipped_config_passes_the_check() {
+        // Whatever else this reports, it must not condemn the config the
+        // package installs.
+        let schema: serde_json::Value = serde_json::from_str(AGENT_CONFIG_SCHEMA).unwrap();
+        let compiled = jsonschema::JSONSchema::compile(&schema).unwrap();
+        let shipped: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../packaging/conf/agent.json"),
+            )
+            .expect("read the shipped config"),
+        )
+        .unwrap();
+        assert!(compiled.validate(&shipped).is_ok());
+    }
+
+    #[test]
+    fn a_missing_config_is_skipped_not_failed() {
+        // A CLI-only install has no agent config, and `agent_reachable`
+        // already reports a missing agent. Failing here would make every
+        // workstation install look broken.
+        let findings = probe_agent_config();
+        let finding = findings.first().expect("one finding");
+        assert_eq!(finding.id, FindingId::AgentConfigValid);
+        if !std::path::Path::new(tensorplate_protocol::install_paths::AGENT_CONFIG_PATH).exists() {
+            assert_eq!(finding.status, FindingStatus::Skipped);
         }
     }
 }

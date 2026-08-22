@@ -38,6 +38,7 @@ pub enum RestartPolicyKind {
 
 /// Bounded exponential-backoff parameters used by [`RestartPolicyKind::BoundedBackoff`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackoffConfig {
     #[serde(default = "default_initial_delay_ms")]
     pub initial_delay_ms: u64,
@@ -90,6 +91,7 @@ const fn default_stable_reset_ms() -> u64 {
 
 /// Combined restart policy as observed by the supervisor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RestartPolicy {
     #[serde(default)]
     pub kind: RestartPolicyKind,
@@ -121,6 +123,7 @@ pub enum WorkerStdioMode {
 
 /// Bounded supervision-event sink config (V01-E09-F05).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSinkConfig {
     /// Maximum number of pending events queued before the supervisor
     /// drops the oldest. The supervisor records the bounded drop count
@@ -150,6 +153,7 @@ const fn default_event_queue_capacity() -> u32 {
 
 /// V01-E09-F01 worker supervisor configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SupervisorConfig {
     /// Absolute path to the V01-E07 `tensorplate-serving` binary the
     /// supervisor will launch. Validated before any process start.

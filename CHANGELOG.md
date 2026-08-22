@@ -8,6 +8,78 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The agent config schema now describes the config the agent actually
+  accepts. `config/schemas/agent.json` declared a nested `control` object
+  holding `transport`, `socket_path`, `tcp_bind_host` and `tcp_bind_port`,
+  while the runtime reads all four at the top level — and with
+  `additionalProperties: false`, that meant **the shipped
+  `packaging/conf/agent.json` did not validate against its own schema**.
+  `docs/architecture/agent.md` names that schema as the wire format for the
+  config, so an operator writing one from it produced a file the agent
+  would not accept, and an operator copying the shipped file failed
+  validation against the documented shape.
+
+  Corrected toward the runtime rather than the other way round: no config
+  has ever carried a `control` object, on any host or in any commit, so the
+  schema described a shape that never existed. Moving the runtime instead
+  would have invalidated every config file already installed. `runtime_version`,
+  which the agent fills in at load, is now declared too.
+
+  **Operators upgrading should check their config first.** The runtime now
+  refuses unknown fields, which the schema had claimed all along with
+  `additionalProperties: false`. A hand-edited `/etc/tensorplate/agent.json`
+  carrying a stray or misspelled key started before this change and will not
+  start after it. The upgrade preflight checks `schema_version` only, so it
+  does not catch this before the package swap, so `tensorplate doctor` gained
+  an `agent_config_valid` check that validates the installed config against
+  the schema and lists every problem at once. Run it before upgrading.
+  Refusing is the point: the alternative is what this replaces. Before this, `worker: {"mod":
+  "process"}` — one character off `mode` — parsed cleanly and left
+  `mode = Mock`, so an operator asking for the real serving binary got the
+  in-process mock and served nothing real, with no error at any point.
+
+  The two also agree on values, not only on which fields exist. The runtime
+  took any string for `supported_precision` and `supported_artifact_kinds`
+  and any name in `available_backends`, while the schema constrained all
+  three — so a config no validator would pass could run in production. These
+  are refused at load now too, with the same upgrade caveat. Those
+  are now checked against the protocol's own `PrecisionHint` and
+  `ArtifactKind`, rather than a second copy of the allowed values.
+
+  The schema also now states what the runtime actually requires. It
+  accepted `{"schema_version": "0.1"}`, which the agent then refused for
+  want of `state_dir` and `staging_dir` — so a config written from the
+  published schema could fail at startup. `state_dir` and `staging_dir` are
+  required, `socket_path` is required whenever the transport is (or
+  defaults to) a Unix socket, and the three path fields must be absolute,
+  as the agent has always insisted. An audit of every runtime-validation
+  branch closed the rest: whitespace-only backend names, non-loopback hosts
+  and relative paths in the process worker and the supervisor, and a
+  relative event-sink socket.
+
+  Constraints that apply to one branch are now written as conditionals,
+  because the runtime reads them that way. A relative `socket_path` under
+  TCP, or a wide `tcp_bind_host` under a Unix socket, is a value nothing
+  consults — the schema rejected such configs while the agent started them
+  happily, which is the same disagreement pointing the other way.
+
+  Two rules stay runtime-only and are documented as such: a process
+  worker's two ports must differ, and the backoff maximum must not fall
+  below the initial delay. Both compare one value against another, which
+  JSON Schema draft-07 cannot express, so a test asserts the runtime
+  refuses them and flags them for promotion if that ever changes.
+
+  Guarded by a bidirectional contract test rather than a field-by-field
+  one. Every field a fully-populated config serializes must be declared by
+  the schema, and every property the schema declares must be one the
+  runtime accepts — the second direction is what catches an invented field
+  like `control`, which a one-way check would have passed. Both shipped
+  configs, Debian and Homebrew, are validated with the real JSON Schema
+  compiler rather than by comparing top-level key names — a nested
+  property, a wrong type, a bad enum value or an out-of-range number all
+  pass a membership check while failing the schema. Restoring the previous
+  schema fails three of these tests.
+
 - The APT channel lifecycle rehearsal no longer hangs for its whole budget
   when a package mirror stalls. Bounding every apt call in the workflows
   left the calls made *inside* the rehearsal script unbounded, and the

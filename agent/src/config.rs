@@ -47,6 +47,7 @@ pub enum WorkerControlMode {
 /// these against the bundle's `capability_requirements`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
+#[serde(deny_unknown_fields)]
 pub struct BackendCapability {
     #[serde(default, rename = "async")]
     pub async_: bool,
@@ -70,6 +71,7 @@ pub struct BackendCapability {
 
 /// Worker-control bounded-timeout knobs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     #[serde(default)]
     pub mode: WorkerControlMode,
@@ -131,6 +133,7 @@ const fn default_serving_candidate_bind_port() -> u16 {
 
 /// V01-E08 agent configuration. Mirrors `config/schemas/agent.json`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
@@ -189,6 +192,51 @@ fn default_backends() -> Vec<String> {
 }
 
 impl AgentConfig {
+    /// Values the schema constrains with an enum or a minLength.
+    ///
+    /// Split out of `validate` only because it outgrew the length lint;
+    /// it is part of the same contract.
+    fn check_enumerated_values(&self) -> AgentResult<()> {
+        // Values, not just field names. The schema constrains these with an
+        // enum and a minLength; the runtime took any string, so a config the
+        // published schema rejects would start anyway and the two disagreed
+        // about what a valid config IS. Checked against the protocol enums
+        // rather than a second copy of the allowed values -- a list written
+        // down twice is a list that drifts.
+        for backend in &self.available_backends {
+            if backend.trim().is_empty() {
+                return Err(AgentError::Config(
+                    "available_backends must not contain an empty backend name".into(),
+                ));
+            }
+        }
+        for (backend, capability) in &self.backend_capabilities {
+            for precision in &capability.supported_precision {
+                serde_json::from_value::<tensorplate_protocol::PrecisionHint>(
+                    serde_json::Value::String(precision.clone()),
+                )
+                .map_err(|_| {
+                    AgentError::Config(format!(
+                        "backend_capabilities.{backend}.supported_precision contains unknown \
+                     precision `{precision}`"
+                    ))
+                })?;
+            }
+            for kind in &capability.supported_artifact_kinds {
+                serde_json::from_value::<tensorplate_protocol::ArtifactKind>(
+                    serde_json::Value::String(kind.clone()),
+                )
+                .map_err(|_| {
+                    AgentError::Config(format!(
+                        "backend_capabilities.{backend}.supported_artifact_kinds contains \
+                     unknown kind `{kind}`"
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Validate the configuration. Returns a fully-resolved config or a
     /// typed [`AgentError::Config`].
     ///
@@ -197,6 +245,7 @@ impl AgentConfig {
     /// Returns [`AgentError::Config`] for missing or invalid fields. The
     /// caller must not mutate durable state before this returns Ok.
     pub fn validate(mut self) -> AgentResult<Self> {
+        self.check_enumerated_values()?;
         if let Some(posture) = self.admission_posture.as_deref() {
             posture
                 .parse::<tensorplate_platform::AdmissionPosture>()
