@@ -217,13 +217,17 @@ fn a_host_identity_resolves_through_the_registry_to_its_own_row() {
 }
 
 #[test]
-fn the_lab_jetson_does_not_currently_match_the_row_it_should_validate() {
-    // Documents a known gap rather than hiding it. The Jetson row is
-    // spec_authored at JetPack 6.2 / L4T r36.4.x, while every recorded
-    // observation of the in-lab Orin Nano reports L4T R36 REV 5.0. Until
-    // the device is reflashed or the row is corrected against a real run,
-    // the machine that is supposed to validate that row matches no row at
-    // all. If this test starts failing, that gap was closed — update it.
+fn the_lab_jetson_matches_the_row_it_validates() {
+    // This replaces a test asserting the opposite. The row was
+    // spec_authored at JetPack 6.2 / L4T r36.4.x while the in-lab Orin Nano
+    // reported R36 REV 5.0, so the machine meant to validate the row
+    // matched no row at all. That gap is closed: the row now describes the
+    // device, and `jetpack_for_l4t` knows r36.5 because NVIDIA's r36.5
+    // channel offers nvidia-jetpack 6.2.3+b81.
+    //
+    // Kept rather than deleted, and inverted rather than weakened -- the
+    // relationship between the lab device and its row is the thing worth
+    // watching, in whichever direction it happens to point.
     let registry = PlatformRegistry::load(
         &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -236,7 +240,7 @@ fn the_lab_jetson_does_not_currently_match_the_row_it_should_validate() {
         .find(|(name, _)| name == "lab-jetson-orin-nano-l4t-r36.5")
         .map(|(_, f)| f)
         .expect("the recorded lab Jetson fixture exists");
-    assert_eq!(fixture["matches_row"], Value::Bool(false));
+    assert_eq!(fixture["matches_row"], Value::Bool(true));
 
     let report = identify(&sources_of(&fixture)).expect("detection succeeds");
     assert_eq!(
@@ -245,15 +249,16 @@ fn the_lab_jetson_does_not_currently_match_the_row_it_should_validate() {
         "the recorded lab device reports the r36.5 line"
     );
     assert_eq!(
-        registry.candidates(&report.identity).len(),
-        0,
-        "no committed row claims the L4T line the lab Jetson actually runs"
+        report.identity.os_version, "6.2.3",
+        "the JetPack release comes from the L4T line: this board carries no \
+         nvidia-jetpack package to read it from"
     );
-
-    let detected = DetectedPlatform::host_only(report.identity);
     assert!(
-        !matches!(registry.resolve(&detected), RowMatch::Supported(_)),
-        "an unvalidated L4T line must never resolve as supported"
+        registry
+            .candidates(&report.identity)
+            .into_iter()
+            .any(|row| row.row_id() == "jetson-orin-nano-8gb-jp62"),
+        "the device must select the row it exists to validate"
     );
 }
 
@@ -389,12 +394,12 @@ fn a_jetson_without_the_jetpack_package_still_matches_its_row() {
 
     let report = identify(&without_package).expect("detection succeeds");
     assert_eq!(
-        report.identity.os_version, "6.2",
+        report.identity.os_version, "6.2.3",
         "the L4T line names its JetPack release"
     );
     assert_eq!(
         report.identity.image_identity.as_deref(),
-        Some("L4T r36.4.x (Ubuntu 22.04 base)")
+        Some("L4T r36.5.x (Ubuntu 22.04 base)")
     );
     assert!(
         registry
@@ -411,7 +416,7 @@ fn a_jetson_without_the_jetpack_package_still_matches_its_row() {
     unknown_line.nv_tegra_release = Some("# R38 (release), REVISION: 1.0\n".to_string());
     let report = identify(&unknown_line).expect("detection succeeds");
     assert_ne!(
-        report.identity.os_version, "6.2",
+        report.identity.os_version, "6.2.3",
         "an unmapped L4T line must not borrow a JetPack version"
     );
     assert_eq!(registry.candidates(&report.identity).len(), 0);
@@ -445,12 +450,12 @@ fn exact_facts_keep_the_precision_matching_discards() {
     let report = identify(&sources_of(&jetson)).expect("detection succeeds");
     assert_eq!(
         report.identity.image_identity.as_deref(),
-        Some("L4T r36.4.x (Ubuntu 22.04 base)"),
+        Some("L4T r36.5.x (Ubuntu 22.04 base)"),
         "matching sees the minor line"
     );
     assert_eq!(
         report.exact.l4t_release.as_deref(),
-        Some("r36.4.3"),
+        Some("r36.5.0"),
         "evidence sees the exact patch"
     );
     assert_eq!(

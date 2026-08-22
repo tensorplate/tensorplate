@@ -287,7 +287,11 @@ pub fn parse_nv_tegra_release(content: &str) -> Option<L4tRelease> {
 #[must_use]
 pub fn jetpack_version(package_version: &str) -> Option<String> {
     let trimmed = package_version.trim();
-    let version = trimmed.split('-').next()?.trim();
+    // The build suffix is separated by `-` on some releases and `+` on
+    // others: JetPack 6.2 packages as `6.2-b77`, and NVIDIA's r36.5 channel
+    // publishes `6.2.3+b81`. Splitting on only one of them leaves the other
+    // carrying its suffix into the row comparison, where it matches nothing.
+    let version = trimmed.split(['-', '+']).next()?.trim();
     (!version.is_empty()).then(|| version.to_string())
 }
 
@@ -310,6 +314,12 @@ pub fn jetpack_for_l4t(release: L4tRelease) -> Option<&'static str> {
     match (release.major, release.revision_major) {
         // JetPack 6.2 ships L4T 36.4.x.
         (36, 4) => Some("6.2"),
+        // JetPack 6.2.3 ships L4T 36.5.x. Taken from NVIDIA's own r36.5
+        // channel -- `apt-cache policy nvidia-jetpack` on a BSP-flashed
+        // r36.5 device offers `6.2.3+b81` from
+        // repo.download.nvidia.com/jetson/common r36.5/main -- not inferred
+        // from the version numbers, which is what the arm below forbids.
+        (36, 5) => Some("6.2.3"),
         _ => None,
     }
 }

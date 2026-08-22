@@ -8,6 +8,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The in-lab Jetson Orin Nano now matches the row it exists to validate
+  (V021-E02-F02-T04). The row was spec-authored at JetPack 6.2 / L4T
+  r36.4.x while every recorded observation of the device reported L4T R36
+  REV 5.0, so the machine that is supposed to validate that row matched no
+  row at all — and with deploy admission live, it could only ever observe a
+  no-match verdict.
+
+  L4T r36.5 maps to JetPack 6.2.3. That is NVIDIA's own answer, not an
+  inference from version numbers: the device is BSP-flashed and carries no
+  `nvidia-jetpack` package, but the r36.5 channel it is configured against
+  publishes `nvidia-jetpack 6.2.3+b81`. Detection still refuses to guess a
+  JetPack release for an L4T line it has not been told about.
+
+  The JetPack package version is also parsed correctly for this release
+  line. The build suffix is separated by `-` on JetPack 6.2 (`6.2-b77`) and
+  by `+` on 6.2.3 (`6.2.3+b81`); only the first was handled, so a device
+  with the metapackage installed would have carried `6.2.3+b81` into a row
+  comparison that expects `6.2.3` and matched nothing.
+
+  `doctor` on that device now names one row instead of four. The row's OS
+  identity no longer collides with the three Planned Jetson rows still
+  spec-authored at r36.4, so host identity alone resolves it.
+
+  The recorded MemTotal (7789964 kB) replaces the spec-authored figure the
+  fixture carried and flagged for exactly this.
+
 - The agent config schema now describes the config the agent actually
   accepts. `config/schemas/agent.json` declared a nested `control` object
   holding `transport`, `socket_path`, `tcp_bind_host` and `tcp_bind_port`,

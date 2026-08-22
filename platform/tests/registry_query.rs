@@ -579,6 +579,12 @@ fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
     // is consistent with all of them and differs only by accelerator —
     // exactly the ambiguity that makes accelerator identity necessary
     // before a single row can be named.
+    //
+    // The Orin Nano row is deliberately absent: it moved to L4T r36.5 /
+    // JetPack 6.2.3 to match the device that validates it, so an r36.4 host
+    // is no longer consistent with it. The three still listed are the
+    // Planned rows that remain spec_authored at r36.4, and three is enough
+    // to show the ambiguity this test is about.
     let registry = registry();
     let jetson = host(
         CpuArchitecture::Arm64,
@@ -597,7 +603,6 @@ fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
         [
             "jetson-agx-orin-32gb",
             "jetson-agx-orin-64gb",
-            "jetson-orin-nano-8gb-jp62",
             "jetson-orin-nx-16gb"
         ],
         "host identity narrows but cannot decide between accelerators"

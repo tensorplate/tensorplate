@@ -11,7 +11,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 | Row | OS | CPU | Accelerator | Validated on | Model classes |
 | --- | --- | --- | --- | --- | --- |
-| `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
+| `jetson-orin-nano-8gb-jp62` | JetPack 6.2.3 (L4T r36.5.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
 | `macos26-m1pro-16gb` | macOS 26 | arm64 (apple) | Apple M1 Pro | MacBook Pro, Apple M1 Pro 16GB (in lab) | `chunked_policy` (Preview) |
 | `ubuntu2404-x86-a100-40g-a2hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA A100-SXM4-40GB | `a2-highgpu-1g` only | `chunked_policy` (Preview) |
 | `ubuntu2404-x86-l4-g2s8` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA L4 | `g2-standard-8` only | `chunked_policy` (Preview) |
