@@ -5,7 +5,7 @@
   "description": "Runtime configuration for `tensorplate-agent` (V01-E08). The agent loads this file at startup, validates it before opening the local control transport, and refuses to mutate durable state until validation succeeds.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "state_dir", "staging_dir"],
+  "required": ["state_dir", "staging_dir"],
   "allOf": [
     {
       "$comment": "transport defaults to unix_socket, so an ABSENT transport also requires socket_path. Without the anyOf the default case slips through and a schema-valid config fails at startup.",
@@ -15,7 +15,15 @@
           {"not": {"required": ["transport"]}}
         ]
       },
-      "then": {"required": ["socket_path"]}
+      "then": {
+        "required": ["socket_path"],
+        "properties": {"socket_path": {"pattern": "^/"}}
+      }
+    },
+    {
+      "$comment": "The loopback restriction applies to the host actually bound. Under a unix socket the value is unused and the runtime never reads it, so rejecting a leftover here would refuse a config that starts.",
+      "if": {"properties": {"transport": {"const": "loopback_tcp"}}, "required": ["transport"]},
+      "then": {"properties": {"tcp_bind_host": {"enum": ["127.0.0.1", "::1", "localhost"]}}}
     }
   ],
   "properties": {
@@ -28,14 +36,12 @@
     },
     "socket_path": {
       "type": "string",
-      "pattern": "^/",
       "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
     },
     "tcp_bind_host": {
       "type": "string",
-      "enum": ["127.0.0.1", "::1", "localhost"],
       "default": "127.0.0.1",
-      "description": "Loopback literal only. The agent refuses any other host: the control API is local-only, and binding it wider is not a configuration this release serves."
+      "description": "Loopback literal only, enforced under `loopback_tcp` where it is actually bound. The agent refuses any other host: the control API is local-only, and binding it wider is not a configuration this release serves."
     },
     "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535},
     "state_dir": {
@@ -54,7 +60,8 @@
       "description": "Backends the agent will accept in a bundle's `backend_hint`. The agent does not infer availability heuristically; this list is sourced from `tensorplate doctor` output in production.",
       "items": {
         "type": "string",
-        "minLength": 1
+        "minLength": 1,
+        "pattern": "\\S"
       },
       "default": ["mock"]
     },
@@ -127,7 +134,16 @@
       "allOf": [
         {
           "if": {"properties": {"mode": {"const": "process"}}, "required": ["mode"]},
-          "then": {"required": ["serving_binary_path"]}
+          "then": {
+            "required": ["serving_binary_path"],
+            "properties": {
+              "serving_binary_path": {"pattern": "^/"},
+              "serving_config_dir": {"pattern": "^/"},
+              "serving_bind_host": {"enum": ["127.0.0.1", "::1", "localhost"]},
+              "serving_bind_port": {"minimum": 1},
+              "serving_candidate_bind_port": {"minimum": 1}
+            }
+          }
         }
       ],
       "properties": {
@@ -139,7 +155,6 @@
         },
         "serving_binary_path": {
           "type": "string",
-          "pattern": "^/",
           "description": "Absolute path to tensorplate-serving. Required when worker.mode=process."
         },
         "serving_bind_host": {
@@ -149,14 +164,14 @@
         },
         "serving_bind_port": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 65535,
           "default": 18080,
           "description": "Primary loopback port used by the process-backed worker."
         },
         "serving_candidate_bind_port": {
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 65535,
           "default": 18081,
           "description": "Alternate loopback port used while warming a replacement candidate."
@@ -183,6 +198,7 @@
       "properties": {
         "binary_path": {
           "type": "string",
+          "pattern": "^/",
           "description": "Absolute path to the tensorplate-serving binary the supervisor launches. Validated before any process start."
         },
         "args": {
@@ -198,14 +214,17 @@
         },
         "working_dir": {
           "type": "string",
+          "pattern": "^/",
           "description": "Absolute working directory the launched process inherits."
         },
         "serving_config_path": {
           "type": "string",
+          "pattern": "^/",
           "description": "Absolute serving config the supervisor passes via `--config`."
         },
         "control_host": {
           "type": "string",
+          "enum": ["127.0.0.1", "::1", "localhost"],
           "default": "127.0.0.1",
           "description": "Loopback host the worker binds its data plane to."
         },
@@ -272,6 +291,7 @@
             "queue_capacity": {"type": "integer", "minimum": 1, "default": 256},
             "uds_path": {
               "type": "string",
+              "pattern": "^/",
               "description": "Optional Unix domain socket the observability service listens on. v0.1.0 default is in-process only; V01-E10 lights up the UDS path."
             }
           }

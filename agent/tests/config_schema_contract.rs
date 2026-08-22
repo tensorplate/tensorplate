@@ -249,9 +249,13 @@ fn every_shipped_config_is_accepted_by_the_schema_it_names() {
 
 /// Configs that exercise a rule one side had and the other did not.
 ///
-/// Each is a real divergence that was reproduced before it was fixed, so
-/// this doubles as the regression list.
-const DIVERGENCE_CASES: &[(&str, &str)] = &[
+/// Every entry is a divergence that was reproduced before it was fixed, so
+/// this doubles as the regression list. Both directions matter and they
+/// fail differently: a config the schema accepts and the runtime refuses
+/// cannot be started by someone following the published schema, and a
+/// config the runtime accepts and the schema refuses is one no validator
+/// will pass, running in production anyway.
+const AGREEMENT_CASES: &[(&str, &str)] = &[
     ("no state_dir or staging_dir", r#"{"schema_version":"0.1"}"#),
     // Isolates REQUIRED specifically: socket_path is present, so the
     // transport conditional is satisfied and nothing else can do the
@@ -259,64 +263,144 @@ const DIVERGENCE_CASES: &[(&str, &str)] = &[
     // rejected for another reason and the test passed regardless.
     (
         "required fields alone",
-        r#"{"schema_version":"0.1","socket_path":"/run/tensorplate/agent.sock"}"#,
+        r#"{"schema_version":"0.1","socket_path":"/k"}"#,
     ),
     (
         "unix transport without a socket",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s"}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s"}"#,
     ),
     (
         "relative state_dir",
-        r#"{"schema_version":"0.1","state_dir":"relative","staging_dir":"/b","socket_path":"/s"}"#,
+        r#"{"schema_version":"0.1","state_dir":"rel","staging_dir":"/s","socket_path":"/k"}"#,
     ),
     (
         "loopback_tcp bound to the world",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","transport":"loopback_tcp","tcp_bind_host":"0.0.0.0","tcp_bind_port":18080}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","transport":"loopback_tcp","tcp_bind_host":"0.0.0.0","tcp_bind_port":18080}"#,
     ),
     (
         "process worker with no binary",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","worker":{"mode":"process"}}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process"}}"#,
     ),
     (
         "empty supervision block",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","supervision":{}}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{}}"#,
     ),
     (
         "unknown precision value",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","backend_capabilities":{"mock":{"supported_precision":["future"]}}}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","backend_capabilities":{"mock":{"supported_precision":["future"]}}}"#,
     ),
     (
         "unknown artifact kind",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","backend_capabilities":{"mock":{"supported_artifact_kinds":["bogus"]}}}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","backend_capabilities":{"mock":{"supported_artifact_kinds":["bogus"]}}}"#,
     ),
     (
         "empty backend name",
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","available_backends":[""]}"#,
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","available_backends":[""]}"#,
+    ),
+    // --- found by auditing every runtime-validation branch ---------------
+    (
+        "whitespace-only backend name",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","available_backends":["  "]}"#,
+    ),
+    (
+        "process worker on a public host",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_bind_host":"0.0.0.0"}}"#,
+    ),
+    (
+        "process worker, relative config dir",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_config_dir":"rel"}}"#,
+    ),
+    (
+        "supervision with a relative binary",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"rel","working_dir":"/w","serving_config_path":"/c","control_port":18080}}"#,
+    ),
+    (
+        "supervision on a public host",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"control_host":"0.0.0.0"}}"#,
+    ),
+    (
+        "event sink on a relative socket",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"event_sink":{"uds_path":"rel"}}}"#,
+    ),
+    // --- values the runtime never reads, which must NOT be rejected ------
+    // The schema used to constrain these unconditionally, so a leftover
+    // value in a branch nothing consults failed validation for a config
+    // that starts and runs correctly.
+    (
+        "omitted schema_version",
+        r#"{"state_dir":"/v","staging_dir":"/s","socket_path":"/k"}"#,
+    ),
+    (
+        "unused relative socket under TCP",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","transport":"loopback_tcp","tcp_bind_port":18080,"socket_path":"rel"}"#,
+    ),
+    (
+        "unused public tcp host under UDS",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","tcp_bind_host":"0.0.0.0"}"#,
+    ),
+    (
+        "mock worker, unused relative binary",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_binary_path":"rel"}}"#,
+    ),
+    (
+        "mock worker, unused zero port",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_bind_port":0}}"#,
+    ),
+];
+
+/// Rules the runtime enforces that JSON Schema draft-07 cannot express.
+///
+/// Both compare one instance value against another, and draft-07 has no
+/// way to do that -- `$data` is a later extension this schema does not
+/// use. So these are checked one-sided ON PURPOSE: the runtime must refuse
+/// them, and the schema is expected not to. Naming them is the honest
+/// alternative to claiming a parity the format cannot support.
+const RUNTIME_ONLY_RULES: &[(&str, &str)] = &[
+    (
+        "process worker with duplicate ports",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_bind_port":18080,"serving_candidate_bind_port":18080}}"#,
+    ),
+    (
+        "backoff max below initial",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"kind":"bounded_backoff","backoff":{"initial_delay_ms":500,"max_delay_ms":100}}}}"#,
     ),
 ];
 
 #[test]
 fn the_schema_and_the_runtime_agree_on_every_divergence_found_so_far() {
-    // Checked in BOTH directions from one table, because the two failures
-    // are different and a one-way check misses half of them. A config the
-    // schema accepts and the runtime refuses cannot be started by someone
-    // following the published schema. A config the runtime accepts and the
-    // schema refuses is one no validator will pass, running in production
-    // anyway -- that is how `supported_precision: ["future"]` and an empty
-    // backend name got through.
     let schema = compiled_schema();
-    for (name, case) in DIVERGENCE_CASES {
+    for (name, case) in AGREEMENT_CASES {
         let document: serde_json::Value =
             serde_json::from_str(case).unwrap_or_else(|e| panic!("{name} parses: {e}"));
         let schema_ok = schema.validate(&document).is_ok();
         let runtime_ok = AgentConfig::parse_json(case).is_ok();
         assert_eq!(
-            schema_ok,
-            runtime_ok,
-            "`{name}`: schema says {}, runtime says {} -- one of them is wrong about what a \
-             valid config is",
+            schema_ok, runtime_ok,
+            "`{name}`: schema says {}, runtime says {} -- one of them is wrong about what a valid config is",
             if schema_ok { "valid" } else { "invalid" },
             if runtime_ok { "valid" } else { "invalid" },
+        );
+    }
+}
+
+#[test]
+fn cross_field_rules_are_enforced_by_the_runtime_alone() {
+    // The schema is not expected to catch these -- draft-07 cannot compare
+    // two instance values -- but the runtime must, and this is what stops
+    // "the schema cannot express it" from quietly becoming "nobody checks
+    // it". If draft-07 is ever left behind, these move into the agreement
+    // table rather than being deleted.
+    let schema = compiled_schema();
+    for (name, case) in RUNTIME_ONLY_RULES {
+        let document: serde_json::Value =
+            serde_json::from_str(case).unwrap_or_else(|e| panic!("{name} parses: {e}"));
+        assert!(
+            AgentConfig::parse_json(case).is_err(),
+            "`{name}` must be refused at load: no schema check will catch it"
+        );
+        assert!(
+            schema.validate(&document).is_ok(),
+            "`{name}` is now expressible in the schema -- move it to the agreement table"
         );
     }
 }

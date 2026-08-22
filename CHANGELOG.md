@@ -44,10 +44,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   published schema could fail at startup. `state_dir` and `staging_dir` are
   required, `socket_path` is required whenever the transport is (or
   defaults to) a Unix socket, and the three path fields must be absolute,
-  as the agent has always insisted. Three further branches the runtime
-  validated and the schema did not: loopback TCP binds a loopback literal,
-  a `process` worker needs the binary it spawns, and a `supervision` block
-  needs the fields it has no defaults for.
+  as the agent has always insisted. An audit of every runtime-validation
+  branch closed the rest: whitespace-only backend names, non-loopback hosts
+  and relative paths in the process worker and the supervisor, and a
+  relative event-sink socket.
+
+  Constraints that apply to one branch are now written as conditionals,
+  because the runtime reads them that way. A relative `socket_path` under
+  TCP, or a wide `tcp_bind_host` under a Unix socket, is a value nothing
+  consults — the schema rejected such configs while the agent started them
+  happily, which is the same disagreement pointing the other way.
+
+  Two rules stay runtime-only and are documented as such: a process
+  worker's two ports must differ, and the backoff maximum must not fall
+  below the initial delay. Both compare one value against another, which
+  JSON Schema draft-07 cannot express, so a test asserts the runtime
+  refuses them and flags them for promotion if that ever changes.
 
   Guarded by a bidirectional contract test rather than a field-by-field
   one. Every field a fully-populated config serializes must be declared by
