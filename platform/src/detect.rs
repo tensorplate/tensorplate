@@ -330,21 +330,35 @@ pub fn jetpack_version(package_version: &str) -> Option<String> {
 /// describes, so the L4T line it does report is mapped here rather than
 /// leaving it to resolve as an unsupported OS version.
 ///
-/// Keyed on the L4T minor line and answering at feature-release
-/// granularity, which is what a row records: the patch a given revision
-/// shipped as is not derivable from the L4T numbers. An L4T line this
+/// Answers at feature-release granularity, which is what a row records,
+/// but is keyed on the full L4T revision: an L4T *line* does not belong to
+/// one JetPack feature release. r36.4 spans both, and NVIDIA's own archive
+/// is the only thing that says which revision is which. A revision this
 /// release has not been told about yields `None` — an honest "unknown",
 /// never a guess, because a wrong JetPack version would make a machine
 /// match a row it was never validated against.
+///
+/// Only the fallback is enumerated. A device carrying the metapackage
+/// reads its version directly and needs no arm here, so a future 6.2.x on
+/// a new revision still resolves for every normally-flashed device.
 #[must_use]
 pub fn jetpack_for_l4t(release: L4tRelease) -> Option<&'static str> {
-    match (release.major, release.revision_major) {
-        // The JetPack 6.2 feature release spans both L4T revisions: 36.4.x
-        // and 36.5.x are 6.2.x. Which patch a given revision shipped as is
-        // deliberately not claimed here -- NVIDIA's archive pairs 36.5.0
-        // with 6.2.2 and 36.5.2 with 6.2.3, so naming one of them would be
-        // wrong on the other, and a row records the feature release anyway.
-        (36, 4 | 5) => Some("6.2"),
+    match (
+        release.major,
+        release.revision_major,
+        release.revision_minor,
+    ) {
+        // Every L4T revision NVIDIA's archive names as a JetPack 6.2.x
+        // release: 6.2 is 36.4.3, 6.2.1 is 36.4.4, 6.2.2 is 36.5.0, and
+        // 6.2.3 is 36.5.2. All four are the 6.2 feature release, so all
+        // four resolve to the same row -- which is the point.
+        //
+        // Enumerated rather than keyed on the r36.4/r36.5 lines, because
+        // those lines are not wholly 6.2: base 36.4 is JetPack 6.1. Reading
+        // 6.2 off the line would admit a 6.1 board to a 6.2 Production row
+        // on evidence that never covered it, and the board is otherwise
+        // identical, so nothing downstream would notice.
+        (36, 4, 3 | 4) | (36, 5, 0 | 2) => Some("6.2"),
         _ => None,
     }
 }
@@ -911,6 +925,42 @@ mod tests {
                     "`{jetpack}` must already be what a row records"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_revision_outside_jetpack_6_2_is_unknown_rather_than_assumed() {
+        // Base L4T 36.4 is JetPack 6.1 in NVIDIA's archive. The r36.4 line
+        // is therefore not wholly 6.2, and answering for the line would
+        // hand a 6.1 board the version that admits it to a 6.2 Production
+        // row. `None` is the honest answer, and it fails closed.
+        for (revision_major, revision_minor) in [(4, 0), (4, 1), (4, 2), (5, 1), (3, 0)] {
+            assert_eq!(
+                jetpack_for_l4t(L4tRelease {
+                    major: 36,
+                    revision_major,
+                    revision_minor,
+                }),
+                None,
+                "r36.{revision_major}.{revision_minor} is not a JetPack 6.2 release"
+            );
+        }
+    }
+
+    #[test]
+    fn every_jetpack_6_2_revision_lands_on_one_row() {
+        // The generalisation this exists for: the four revisions NVIDIA
+        // ships 6.2.x on must not split across rows.
+        for (revision_major, revision_minor) in [(4, 3), (4, 4), (5, 0), (5, 2)] {
+            assert_eq!(
+                jetpack_for_l4t(L4tRelease {
+                    major: 36,
+                    revision_major,
+                    revision_minor,
+                }),
+                Some("6.2"),
+                "r36.{revision_major}.{revision_minor} is a JetPack 6.2.x release"
+            );
         }
     }
 

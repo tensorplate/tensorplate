@@ -680,3 +680,33 @@ fn the_lab_jetson_is_admitted_on_the_stack_the_agent_observes() {
         }
     }
 }
+
+#[test]
+fn a_jetpack_6_1_jetson_is_not_admitted_to_the_6_2_row() {
+    // L4T 36.4 with no `nvidia-jetpack` package to read a version from is
+    // JetPack 6.1, not 6.2 -- NVIDIA's archive pairs base 36.4 with 6.1 and
+    // only 36.4.3 onward with 6.2.x. The board is identical, so nothing but
+    // the L4T revision distinguishes it from the row's own device, and
+    // admitting it would serve a Production claim on a platform whose
+    // evidence was never collected.
+    let mut sources = lab_jetson_sources();
+    sources.nv_tegra_release = Some(
+        "# R36 (release), REVISION: 4.0, GCID: 41000000, BOARD: generic, EABI: aarch64, DATE: Thu Jan 15 19:24:38 UTC 2026\n"
+            .to_string(),
+    );
+    let registry = registry();
+    let row = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .expect("the Orin Nano row is committed");
+    let identity = identify(&sources).expect("detection succeeds").identity;
+    let accelerator =
+        identify_jetson_accelerator(&sources).expect("a Jetson yields an accelerator identity");
+    let report = report_of(row, identity, Some(accelerator));
+
+    match PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None) {
+        PlatformAdmission::Supported { row_id, .. } => panic!(
+            "a JetPack 6.1 device must not be admitted to the 6.2 row, got Supported({row_id})"
+        ),
+        PlatformAdmission::Rejected { .. } => {}
+    }
+}

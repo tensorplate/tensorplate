@@ -26,13 +26,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   about — r38, say — produces no JetPack version and matches nothing,
   rather than borrowing a release it was never validated against.
 
-  L4T r36.5 maps to the JetPack 6.2 feature release, which the in-lab
-  BSP-flashed device needs because it carries no `nvidia-jetpack` package
-  to read a version from. The mapping deliberately stops at the feature
-  release: NVIDIA's archive pairs L4T 36.5.0 with JetPack 6.2.2 and 36.5.2
-  with 6.2.3, so deriving a patch from the L4T line would be wrong on every
-  revision but the one it was read from — and a row records the feature
-  release regardless.
+  The L4T-to-JetPack fallback, which the in-lab BSP-flashed device needs
+  because it carries no `nvidia-jetpack` package to read a version from,
+  now enumerates exactly the revisions NVIDIA's archive names as JetPack
+  6.2.x: 6.2 is L4T 36.4.3, 6.2.1 is 36.4.4, 6.2.2 is 36.5.0, and 6.2.3 is
+  36.5.2. All four resolve to the `6.2` feature release and therefore to
+  one row, which is the point of the generalisation.
+
+  It is keyed on the full revision rather than the r36.4/r36.5 line
+  because those lines are not wholly 6.2 — base L4T 36.4 is JetPack 6.1.
+  Answering for the line would have handed a 6.1 board the version that
+  admits it to a 6.2 **Production** row, on evidence that never covered it
+  and with nothing downstream able to tell the difference, since the board
+  is otherwise identical. A revision the archive does not name yields no
+  JetPack version and matches nothing. Only the fallback is enumerated: a
+  device carrying the metapackage reads its own version, so a future 6.2.x
+  on a new revision still resolves for every normally-flashed device.
 
   The package version is also parsed correctly for that release. The build
   suffix is `-` on 6.2 (`6.2-b77`) and `+` on 6.2.3 (`6.2.3+b81`); only the
