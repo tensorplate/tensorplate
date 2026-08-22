@@ -3,8 +3,8 @@
   "row_id": "jetson-orin-nano-8gb-jp62",
   "os": {
     "name": "JetPack",
-    "version": "6.2.3",
-    "image_identity": "L4T r36.5.x (Ubuntu 22.04 base)"
+    "version": "6.2",
+    "image_identity": "L4T r36.x (Ubuntu 22.04 base)"
   },
   "kernel_driver_stack": {
     "components": [

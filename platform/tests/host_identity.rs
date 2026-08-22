@@ -245,13 +245,14 @@ fn the_lab_jetson_matches_the_row_it_validates() {
     let report = identify(&sources_of(&fixture)).expect("detection succeeds");
     assert_eq!(
         report.identity.image_identity.as_deref(),
-        Some("L4T r36.5.x (Ubuntu 22.04 base)"),
-        "the recorded lab device reports the r36.5 line"
+        Some("L4T r36.x (Ubuntu 22.04 base)"),
+        "a row names the BSP generation, so the lab device's r36.5 revision \
+         resolves to the same identity a common r36.4 install does"
     );
     assert_eq!(
-        report.identity.os_version, "6.2.3",
-        "the JetPack release comes from the L4T line: this board carries no \
-         nvidia-jetpack package to read it from"
+        report.identity.os_version, "6.2",
+        "the JetPack release comes from the L4T line -- this board carries no \
+         nvidia-jetpack package -- and lands at the feature release a row names"
     );
     assert!(
         registry
@@ -394,12 +395,12 @@ fn a_jetson_without_the_jetpack_package_still_matches_its_row() {
 
     let report = identify(&without_package).expect("detection succeeds");
     assert_eq!(
-        report.identity.os_version, "6.2.3",
+        report.identity.os_version, "6.2",
         "the L4T line names its JetPack release"
     );
     assert_eq!(
         report.identity.image_identity.as_deref(),
-        Some("L4T r36.5.x (Ubuntu 22.04 base)")
+        Some("L4T r36.x (Ubuntu 22.04 base)")
     );
     assert!(
         registry
@@ -416,7 +417,7 @@ fn a_jetson_without_the_jetpack_package_still_matches_its_row() {
     unknown_line.nv_tegra_release = Some("# R38 (release), REVISION: 1.0\n".to_string());
     let report = identify(&unknown_line).expect("detection succeeds");
     assert_ne!(
-        report.identity.os_version, "6.2.3",
+        report.identity.os_version, "6.2",
         "an unmapped L4T line must not borrow a JetPack version"
     );
     assert_eq!(registry.candidates(&report.identity).len(), 0);
@@ -450,12 +451,12 @@ fn exact_facts_keep_the_precision_matching_discards() {
     let report = identify(&sources_of(&jetson)).expect("detection succeeds");
     assert_eq!(
         report.identity.image_identity.as_deref(),
-        Some("L4T r36.5.x (Ubuntu 22.04 base)"),
+        Some("L4T r36.x (Ubuntu 22.04 base)"),
         "matching sees the minor line"
     );
     assert_eq!(
         report.exact.l4t_release.as_deref(),
-        Some("r36.5.0"),
+        Some("r36.4.3"),
         "evidence sees the exact patch"
     );
     assert_eq!(

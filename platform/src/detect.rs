@@ -256,8 +256,18 @@ impl L4tRelease {
     /// taking a patch update must not silently stop matching the row that
     /// describes it.
     #[must_use]
+    /// The L4T line at the granularity a row records.
+    ///
+    /// The BSP generation, not the revision: r36.4 and r36.5 are both
+    /// JetPack 6 on L4T r36, and an operator who installs an Orin Nano gets
+    /// whichever NVIDIA is shipping that week. Pinning the revision meant a
+    /// row matched one of them and refused the other on identical hardware
+    /// -- and since matching is exact string equality, "refused" is what a
+    /// near miss means. The revision is not discarded: `exact()` keeps it,
+    /// and `ExactHostFacts` carries it for evidence, which needs the
+    /// precision matching deliberately drops.
     pub fn row_granularity(&self) -> String {
-        format!("r{}.{}.x", self.major, self.revision_major)
+        format!("r{}.x", self.major)
     }
 }
 
@@ -277,6 +287,28 @@ pub fn parse_nv_tegra_release(content: &str) -> Option<L4tRelease> {
         revision_major: rev_major.trim().parse().ok()?,
         revision_minor: rev_minor.trim().parse().ok()?,
     })
+}
+
+/// The JetPack release at the granularity a row records.
+///
+/// `6.2.3` and `6.2` are the same feature release, and a row that names
+/// `6.2` should match a machine running either -- the same reduction
+/// [`macos_row_version`] makes for `26.5.2` -> `26`. Without it, a patch
+/// release is a different platform as far as matching is concerned, which
+/// is not what a support claim means.
+#[must_use]
+pub fn jetpack_row_version(version: &str) -> Option<String> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.trim();
+    if major.is_empty() {
+        return None;
+    }
+    Some(
+        match parts.next().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(minor) => format!("{major}.{minor}"),
+            None => major.to_string(),
+        },
+    )
 }
 
 /// The JetPack version a row records, from the `nvidia-jetpack` package
@@ -569,6 +601,7 @@ fn jetson_os(
         .as_deref()
         .and_then(jetpack_version)
         .or_else(|| jetpack_for_l4t(release).map(str::to_string))
+        .and_then(|version| jetpack_row_version(&version))
         .unwrap_or_else(|| release.exact());
 
     Ok((
