@@ -664,6 +664,7 @@ name = "tensorplate-cli"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "jsonschema",
  "serde",
  "serde_json",
  "tempfile",

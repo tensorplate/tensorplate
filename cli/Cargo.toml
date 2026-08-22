@@ -21,6 +21,9 @@ path = "src/main.rs"
 [dependencies]
 tensorplate-protocol = { workspace = true }
 tensorplate-platform = { workspace = true }
+# Validates the installed agent config against the schema the agent uses.
+# `cli/` may not depend on `agent/`, so the schema is the shared contract.
+jsonschema = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }

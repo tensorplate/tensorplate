@@ -30,8 +30,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `additionalProperties: false`. A hand-edited `/etc/tensorplate/agent.json`
   carrying a stray or misspelled key started before this change and will not
   start after it. The upgrade preflight checks `schema_version` only, so it
-  does not catch this before the package swap — run `tensorplate doctor`, or
-  validate the file against `config/schemas/agent.json`, before upgrading.
+  does not catch this before the package swap, so `tensorplate doctor` gained
+  an `agent_config_valid` check that validates the installed config against
+  the schema and lists every problem at once. Run it before upgrading.
   Refusing is the point: the alternative is what this replaces. Before this, `worker: {"mod":
   "process"}` — one character off `mode` — parsed cleanly and left
   `mode = Mock`, so an operator asking for the real serving binary got the
