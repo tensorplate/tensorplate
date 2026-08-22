@@ -389,6 +389,16 @@ const RUNTIME_ONLY_RULES: &[(&str, &str)] = &[
 #[test]
 fn the_schema_and_the_runtime_agree_on_every_divergence_found_so_far() {
     let schema = compiled_schema();
+    // An empty or gutted table passes this test while proving nothing, and
+    // every entry is a divergence that was reproduced once -- deleting one
+    // removes the only cover it has. Both outcomes must stay represented,
+    // so dropping every rejecting case is caught too.
+    assert!(
+        AGREEMENT_CASES.len() >= 24,
+        "cases were removed from the table; each is a reproduced divergence"
+    );
+    let mut agreed_valid = 0_usize;
+    let mut agreed_invalid = 0_usize;
     for (name, case) in AGREEMENT_CASES {
         let document: serde_json::Value =
             serde_json::from_str(case).unwrap_or_else(|e| panic!("{name} parses: {e}"));
@@ -400,7 +410,17 @@ fn the_schema_and_the_runtime_agree_on_every_divergence_found_so_far() {
             if schema_ok { "valid" } else { "invalid" },
             if runtime_ok { "valid" } else { "invalid" },
         );
+        if schema_ok {
+            agreed_valid += 1;
+        } else {
+            agreed_invalid += 1;
+        }
     }
+    assert!(
+        agreed_valid > 0 && agreed_invalid > 0,
+        "the table must keep cases both sides accept AND cases both reject; \
+         {agreed_valid} accepted, {agreed_invalid} rejected"
+    );
 }
 
 #[test]

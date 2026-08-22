@@ -25,8 +25,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   would have invalidated every config file already installed. `runtime_version`,
   which the agent fills in at load, is now declared too.
 
-  The runtime now refuses unknown fields, which the schema had claimed all
-  along with `additionalProperties: false`. Before this, `worker: {"mod":
+  **Operators upgrading should check their config first.** The runtime now
+  refuses unknown fields, which the schema had claimed all along with
+  `additionalProperties: false`. A hand-edited `/etc/tensorplate/agent.json`
+  carrying a stray or misspelled key started before this change and will not
+  start after it. The upgrade preflight checks `schema_version` only, so it
+  does not catch this before the package swap — run `tensorplate doctor`, or
+  validate the file against `config/schemas/agent.json`, before upgrading.
+  Refusing is the point: the alternative is what this replaces. Before this, `worker: {"mod":
   "process"}` — one character off `mode` — parsed cleanly and left
   `mode = Mock`, so an operator asking for the real serving binary got the
   in-process mock and served nothing real, with no error at any point.
@@ -34,7 +40,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   The two also agree on values, not only on which fields exist. The runtime
   took any string for `supported_precision` and `supported_artifact_kinds`
   and any name in `available_backends`, while the schema constrained all
-  three — so a config no validator would pass could run in production. Those
+  three — so a config no validator would pass could run in production. These
+  are refused at load now too, with the same upgrade caveat. Those
   are now checked against the protocol's own `PrecisionHint` and
   `ArtifactKind`, rather than a second copy of the allowed values.
 
