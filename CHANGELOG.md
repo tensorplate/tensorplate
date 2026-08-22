@@ -31,13 +31,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `mode = Mock`, so an operator asking for the real serving binary got the
   in-process mock and served nothing real, with no error at any point.
 
+  The two also agree on values, not only on which fields exist. The runtime
+  took any string for `supported_precision` and `supported_artifact_kinds`
+  and any name in `available_backends`, while the schema constrained all
+  three — so a config no validator would pass could run in production. Those
+  are now checked against the protocol's own `PrecisionHint` and
+  `ArtifactKind`, rather than a second copy of the allowed values.
+
   The schema also now states what the runtime actually requires. It
   accepted `{"schema_version": "0.1"}`, which the agent then refused for
   want of `state_dir` and `staging_dir` — so a config written from the
   published schema could fail at startup. `state_dir` and `staging_dir` are
   required, `socket_path` is required whenever the transport is (or
   defaults to) a Unix socket, and the three path fields must be absolute,
-  as the agent has always insisted.
+  as the agent has always insisted. Three further branches the runtime
+  validated and the schema did not: loopback TCP binds a loopback literal,
+  a `process` worker needs the binary it spawns, and a `supervision` block
+  needs the fields it has no defaults for.
 
   Guarded by a bidirectional contract test rather than a field-by-field
   one. Every field a fully-populated config serializes must be declared by

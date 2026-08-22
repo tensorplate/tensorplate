@@ -31,7 +31,12 @@
       "pattern": "^/",
       "description": "Filesystem path for the Unix domain socket. Required when transport is `unix_socket`."
     },
-    "tcp_bind_host": {"type": "string", "default": "127.0.0.1"},
+    "tcp_bind_host": {
+      "type": "string",
+      "enum": ["127.0.0.1", "::1", "localhost"],
+      "default": "127.0.0.1",
+      "description": "Loopback literal only. The agent refuses any other host: the control API is local-only, and binding it wider is not a configuration this release serves."
+    },
     "tcp_bind_port": {"type": "integer", "minimum": 0, "maximum": 65535},
     "state_dir": {
       "type": "string",
@@ -118,6 +123,13 @@
     "worker": {
       "type": "object",
       "additionalProperties": false,
+      "$comment": "mode=process spawns a binary, so the path is required there and only there. The default is mock, which needs none.",
+      "allOf": [
+        {
+          "if": {"properties": {"mode": {"const": "process"}}, "required": ["mode"]},
+          "then": {"required": ["serving_binary_path"]}
+        }
+      ],
       "properties": {
         "mode": {
           "type": "string",
@@ -127,6 +139,7 @@
         },
         "serving_binary_path": {
           "type": "string",
+          "pattern": "^/",
           "description": "Absolute path to tensorplate-serving. Required when worker.mode=process."
         },
         "serving_bind_host": {
@@ -165,6 +178,7 @@
     "supervision": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["binary_path", "working_dir", "serving_config_path", "control_port"],
       "description": "V01-E09 worker supervisor config. Independent of `worker.*`: `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the agent-owned worker process lifecycle (launch, stop, restart backoff, crash-loop policy).",
       "properties": {
         "binary_path": {

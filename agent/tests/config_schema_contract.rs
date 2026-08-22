@@ -247,32 +247,76 @@ fn every_shipped_config_is_accepted_by_the_schema_it_names() {
     }
 }
 
-#[test]
-fn a_config_the_schema_accepts_is_one_the_runtime_can_start() {
-    // The two must agree on what is REQUIRED, not only on which fields
-    // exist. `{"schema_version":"0.1"}` used to validate cleanly and then
-    // fail at startup for want of `state_dir` -- an operator following the
-    // published schema produced a config the agent refused.
-    let schema = compiled_schema();
-    let cases = [
-        r#"{"schema_version":"0.1"}"#,
-        // Isolates the REQUIRED fields specifically: socket_path is present,
-        // so the transport conditional is satisfied and nothing else can do
-        // the rejecting. Without this case, dropping `required` from the
-        // schema left every other case still rejected for another reason and
-        // this test passed while the guarantee was gone.
+/// Configs that exercise a rule one side had and the other did not.
+///
+/// Each is a real divergence that was reproduced before it was fixed, so
+/// this doubles as the regression list.
+const DIVERGENCE_CASES: &[(&str, &str)] = &[
+    ("no state_dir or staging_dir", r#"{"schema_version":"0.1"}"#),
+    // Isolates REQUIRED specifically: socket_path is present, so the
+    // transport conditional is satisfied and nothing else can do the
+    // rejecting. Without it, dropping `required` left every other case
+    // rejected for another reason and the test passed regardless.
+    (
+        "required fields alone",
         r#"{"schema_version":"0.1","socket_path":"/run/tensorplate/agent.sock"}"#,
-        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/staging"}"#,
-        r#"{"schema_version":"0.1","state_dir":"relative","staging_dir":"/b","socket_path":"/s","available_backends":["mock"]}"#,
-    ];
-    for case in cases {
-        let document: serde_json::Value = serde_json::from_str(case).expect("case parses");
+    ),
+    (
+        "unix transport without a socket",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s"}"#,
+    ),
+    (
+        "relative state_dir",
+        r#"{"schema_version":"0.1","state_dir":"relative","staging_dir":"/b","socket_path":"/s"}"#,
+    ),
+    (
+        "loopback_tcp bound to the world",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","transport":"loopback_tcp","tcp_bind_host":"0.0.0.0","tcp_bind_port":18080}"#,
+    ),
+    (
+        "process worker with no binary",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","worker":{"mode":"process"}}"#,
+    ),
+    (
+        "empty supervision block",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","supervision":{}}"#,
+    ),
+    (
+        "unknown precision value",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","backend_capabilities":{"mock":{"supported_precision":["future"]}}}"#,
+    ),
+    (
+        "unknown artifact kind",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","backend_capabilities":{"mock":{"supported_artifact_kinds":["bogus"]}}}"#,
+    ),
+    (
+        "empty backend name",
+        r#"{"schema_version":"0.1","state_dir":"/var/lib/tp","staging_dir":"/var/lib/tp/s","socket_path":"/s","available_backends":[""]}"#,
+    ),
+];
+
+#[test]
+fn the_schema_and_the_runtime_agree_on_every_divergence_found_so_far() {
+    // Checked in BOTH directions from one table, because the two failures
+    // are different and a one-way check misses half of them. A config the
+    // schema accepts and the runtime refuses cannot be started by someone
+    // following the published schema. A config the runtime accepts and the
+    // schema refuses is one no validator will pass, running in production
+    // anyway -- that is how `supported_precision: ["future"]` and an empty
+    // backend name got through.
+    let schema = compiled_schema();
+    for (name, case) in DIVERGENCE_CASES {
+        let document: serde_json::Value =
+            serde_json::from_str(case).unwrap_or_else(|e| panic!("{name} parses: {e}"));
         let schema_ok = schema.validate(&document).is_ok();
         let runtime_ok = AgentConfig::parse_json(case).is_ok();
-        assert!(
-            !schema_ok || runtime_ok,
-            "the schema accepts a config the runtime refuses, so following the published \
-             schema produces something that will not start: {case}"
+        assert_eq!(
+            schema_ok,
+            runtime_ok,
+            "`{name}`: schema says {}, runtime says {} -- one of them is wrong about what a \
+             valid config is",
+            if schema_ok { "valid" } else { "invalid" },
+            if runtime_ok { "valid" } else { "invalid" },
         );
     }
 }
