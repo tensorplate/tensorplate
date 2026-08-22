@@ -675,8 +675,8 @@ fn the_lab_jetson_is_admitted_on_the_stack_the_agent_observes() {
             assert_eq!(row_id, "jetson-orin-nano-8gb-jp62");
             assert!(validated, "the lab device is this row's own evidence");
         }
-        PlatformAdmission::Rejected { reason, detail, .. } => panic!(
-            "the lab Jetson must be admitted at startup, got Rejected({reason:?}): {detail}"
-        ),
+        PlatformAdmission::Rejected { reason, detail, .. } => {
+            panic!("the lab Jetson must be admitted at startup, got Rejected({reason:?}): {detail}")
+        }
     }
 }
