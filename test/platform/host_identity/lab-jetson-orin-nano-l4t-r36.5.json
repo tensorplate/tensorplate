@@ -2,7 +2,7 @@
   "row_id": "jetson-orin-nano-8gb-jp62",
   "matches_row": true,
   "provenance": "recorded",
-  "provenance_note": "recorded from the in-lab Orin Nano on 2026-08-22 over ssh. BSP-flashed, so nvidia-jetpack is NOT installed and this fixture claims no package version; the JetPack release is derived from the L4T line, and r36.5 maps to 6.2.3 because NVIDIA's r36.5 channel offers nvidia-jetpack 6.2.3+b81. Corroborated by nvidia-l4t-core 36.5.0-20260115194252. It matches the same row as the r36.4 fixture because a row names the BSP generation: this device is evidence for the row, not a separate platform.",
+  "provenance_note": "recorded from the in-lab Orin Nano on 2026-08-22 over ssh. BSP-flashed, so nvidia-jetpack is NOT installed and this fixture claims no package version; the JetPack release is derived from the L4T line, which gives the 6.2 feature release -- NVIDIA's r36.5 channel offers nvidia-jetpack 6.2.3+b81, and the archive pairs this device's 36.5.0 with 6.2.2, so the line names 6.2.x and not which patch. Corroborated by nvidia-l4t-core 36.5.0-20260115194252. It matches the same row as the r36.4 fixture because a row names the BSP generation: this device is evidence for the row, not a separate platform.",
   "sources": {
     "uname_machine": "aarch64",
     "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nID=ubuntu\nID_LIKE=debian\n",

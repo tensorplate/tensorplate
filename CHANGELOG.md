@@ -26,15 +26,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   about — r38, say — produces no JetPack version and matches nothing,
   rather than borrowing a release it was never validated against.
 
-  L4T r36.5 maps to JetPack 6.2.3, which the in-lab BSP-flashed device
-  needs because it carries no `nvidia-jetpack` package to read a version
-  from. That mapping is NVIDIA's: their r36.5 channel publishes
-  `nvidia-jetpack 6.2.3+b81`.
+  L4T r36.5 maps to the JetPack 6.2 feature release, which the in-lab
+  BSP-flashed device needs because it carries no `nvidia-jetpack` package
+  to read a version from. The mapping deliberately stops at the feature
+  release: NVIDIA's archive pairs L4T 36.5.0 with JetPack 6.2.2 and 36.5.2
+  with 6.2.3, so deriving a patch from the L4T line would be wrong on every
+  revision but the one it was read from — and a row records the feature
+  release regardless.
 
   The package version is also parsed correctly for that release. The build
   suffix is `-` on 6.2 (`6.2-b77`) and `+` on 6.2.3 (`6.2.3+b81`); only the
   first was handled, so a device with the metapackage installed carried its
   suffix into the comparison and matched nothing.
+
+  Startup admission agrees with that match. The row also recorded an `l4t`
+  entry in `kernel_driver_stack`, which `PlatformAdmission` compares
+  against the stack the agent observes — and `observe_platform` reports no
+  stack components, so the row was resolved and then rejected with
+  `MissingDriverRuntime` on the very device it describes. The entry
+  duplicated `image_identity`, which already carries the L4T line and is
+  what matching keys on, at a granularity the generalisation had moved; it
+  is dropped rather than restated, and a regression drives the recorded lab
+  fixture through detection into admission with the empty stack a real
+  startup supplies.
 
 - The agent config schema now describes the config the agent actually
   accepts. `config/schemas/agent.json` declared a nested `control` object

@@ -222,8 +222,8 @@ fn the_lab_jetson_matches_the_row_it_validates() {
     // spec_authored at JetPack 6.2 / L4T r36.4.x while the in-lab Orin Nano
     // reported R36 REV 5.0, so the machine meant to validate the row
     // matched no row at all. That gap is closed: the row now describes the
-    // device, and `jetpack_for_l4t` knows r36.5 because NVIDIA's r36.5
-    // channel offers nvidia-jetpack 6.2.3+b81.
+    // device, and `jetpack_for_l4t` answers for r36.5 -- at the 6.2 feature
+    // release, which is what a row records and all the L4T line can say.
     //
     // Kept rather than deleted, and inverted rather than weakened -- the
     // relationship between the lab device and its row is the thing worth
