@@ -26,7 +26,7 @@ discrete NVIDIA card. So none of these files came off a machine we own.
 | `unsupported-a100-80gb.txt` | `NVIDIA A100-SXM4-80GB` | Same family as the supported A100, one capacity away. |
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
-| `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The supported A100 with `mig.mode.current` set to `Enabled`. |
+| `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's card with `mig.mode.current` set to `Enabled`. The row is Planned; the partitioning refusal is checked before support level, so this fixture still exercises it. |
 
 UUIDs are synthetic. Driver versions are plausible for the generation and are
 not asserted on. Framebuffer sizes are approximately what each card reports,

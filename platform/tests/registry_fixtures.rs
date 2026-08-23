@@ -105,9 +105,9 @@ fn the_registry_holds_twelve_rows_at_the_declared_levels() {
             .filter(|(_, r)| r.support_level() == level)
             .count()
     };
-    assert_eq!(count(SupportLevel::Production), 5, "five Production rows");
+    assert_eq!(count(SupportLevel::Production), 4, "four Production rows");
     assert_eq!(count(SupportLevel::Preview), 3, "three Preview rows");
-    assert_eq!(count(SupportLevel::Planned), 4, "four Planned rows");
+    assert_eq!(count(SupportLevel::Planned), 5, "five Planned rows");
     assert_eq!(
         count(SupportLevel::Experimental),
         0,
@@ -954,10 +954,7 @@ fn deploy_smoke_rows_declare_preview_model_pointers() {
     for (name, row) in committed_rows() {
         let expected_preview = matches!(
             row.row_id(),
-            "ubuntu2404-x86-l4-g2s8"
-                | "ubuntu2404-x86-a100-40g-a2hg1"
-                | "macos26-m1pro-16gb"
-                | "macos26-apple-m-series-preview"
+            "ubuntu2404-x86-l4-g2s8" | "macos26-m1pro-16gb" | "macos26-apple-m-series-preview"
         );
         if !expected_preview {
             continue;

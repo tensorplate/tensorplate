@@ -6,6 +6,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Changed
+
+- The A100 40GB row (`ubuntu2404-x86-a100-40g-a2hg1`) is now **Planned**,
+  not Production (V021-E02-F02-T04). GCP refused the project's A100 quota on
+  2026-08-23, so the row cannot earn evidence this release, and a Production
+  claim on a match key nobody has observed is exactly what the pre-tag gate
+  exists to refuse. The row keeps its identity, fixtures and partitioning
+  checks, and drops the `chunked_policy` Preview pointer, since a Planned
+  row claims no model-class posture. Quota has been re-requested; promotion
+  back is one field plus evidence.
+
+  The MIG fail-closed tests stay on the A100 fixture: partitioning is
+  checked before support level, so a MIG-enabled A100 is still refused with
+  `mig_mode_enabled` and an unpartitioned one is refused as Planned — which
+  is the control the check needs. The Production datacenter exemplar in the
+  admission and server-reach tests moves to the L4 row. Live MIG observation
+  moves to the RTX PRO 6000 Blackwell Server Edition, which supports up to
+  four MIG instances and whose row already records `partitioning:
+  unsupported`.
+
 ### Fixed
 
 - A Jetson row now matches the module it names across the JetPack 6.2 line

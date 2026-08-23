@@ -87,8 +87,8 @@ fn the_committed_registry_loads_completely() {
     );
     assert_eq!(
         registry.supported_rows().count(),
-        8,
-        "five Production plus three Preview rows are supported combinations"
+        7,
+        "four Production plus three Preview rows are supported combinations"
     );
 }
 
