@@ -579,13 +579,14 @@ fn host_identity_alone_yields_a_candidate_set_not_a_single_row() {
     // is consistent with all of them and differs only by accelerator —
     // exactly the ambiguity that makes accelerator identity necessary
     // before a single row can be named.
+
     let registry = registry();
     let jetson = host(
         CpuArchitecture::Arm64,
         CpuVendor::NvidiaSoc,
         "JetPack",
         "6.2",
-        Some("L4T r36.4.x (Ubuntu 22.04 base)"),
+        Some("L4T r36.x (Ubuntu 22.04 base)"),
     );
     let ids: Vec<&str> = registry
         .candidates(&jetson)

@@ -1,6 +1,6 @@
 ## jetson-orin-nano-8gb-jp62
 [ok] info host_facts — host arch=arm64 vendor=nvidia_soc
-[ok] info host_os — JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) [exact: version 6.2-b77, L4T r36.4.3]
+[ok] info host_os — JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) [exact: version 6.2-b77, L4T r36.4.3]
 [ok] info platform_profile — host matches 4 candidate support row(s): jetson-agx-orin-32gb, jetson-agx-orin-64gb, jetson-orin-nano-8gb-jp62, jetson-orin-nx-16gb
     hint: several rows share this host profile; accelerator identity is needed to name one
 

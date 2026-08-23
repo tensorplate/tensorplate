@@ -8,6 +8,57 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A Jetson row now matches the module it names across the JetPack 6.2 line
+  rather than one L4T revision (V021-E02-F02-T04). A row recorded
+  `L4T r36.4.x` and matching is exact string equality, so an Orin Nano on
+  r36.5 matched no row at all and deploy admission refused it — while the
+  same board on r36.4 was supported. Which revision NVIDIA happens to be
+  shipping is not a property of the hardware anyone bought.
+
+  Rows now name the BSP generation (`L4T r36.x`) and the JetPack feature
+  release (`6.2`), the same reduction macOS already made in recording `26`
+  for a machine reporting `26.5.2`. An Orin Nano on JetPack 6.2, 6.2.1 or
+  6.2.3 resolves to the same row. The exact values are not discarded:
+  `ExactHostFacts` carries `r36.4.3` or `r36.5.0` for evidence, which needs
+  the precision matching deliberately drops.
+
+  Detection still refuses to guess. An L4T generation it has not been told
+  about — r38, say — produces no JetPack version and matches nothing,
+  rather than borrowing a release it was never validated against.
+
+  The L4T-to-JetPack fallback, which the in-lab BSP-flashed device needs
+  because it carries no `nvidia-jetpack` package to read a version from,
+  now enumerates exactly the revisions NVIDIA's archive names as JetPack
+  6.2.x: 6.2 is L4T 36.4.3, 6.2.1 is 36.4.4, 6.2.2 is 36.5.0, and 6.2.3 is
+  36.5.2. All four resolve to the `6.2` feature release and therefore to
+  one row, which is the point of the generalisation.
+
+  It is keyed on the full revision rather than the r36.4/r36.5 line
+  because those lines are not wholly 6.2 — base L4T 36.4 is JetPack 6.1.
+  Answering for the line would have handed a 6.1 board the version that
+  admits it to a 6.2 **Production** row, on evidence that never covered it
+  and with nothing downstream able to tell the difference, since the board
+  is otherwise identical. A revision the archive does not name yields no
+  JetPack version and matches nothing. Only the fallback is enumerated: a
+  device carrying the metapackage reads its own version, so a future 6.2.x
+  on a new revision still resolves for every normally-flashed device.
+
+  The package version is also parsed correctly for that release. The build
+  suffix is `-` on 6.2 (`6.2-b77`) and `+` on 6.2.3 (`6.2.3+b81`); only the
+  first was handled, so a device with the metapackage installed carried its
+  suffix into the comparison and matched nothing.
+
+  Startup admission agrees with that match. The row also recorded an `l4t`
+  entry in `kernel_driver_stack`, which `PlatformAdmission` compares
+  against the stack the agent observes — and `observe_platform` reports no
+  stack components, so the row was resolved and then rejected with
+  `MissingDriverRuntime` on the very device it describes. The entry
+  duplicated `image_identity`, which already carries the L4T line and is
+  what matching keys on, at a granularity the generalisation had moved; it
+  is dropped rather than restated, and a regression drives the recorded lab
+  fixture through detection into admission with the empty stack a real
+  startup supplies.
+
 - The agent config schema now describes the config the agent actually
   accepts. `config/schemas/agent.json` declared a nested `control` object
   holding `transport`, `socket_path`, `tcp_bind_host` and `tcp_bind_port`,

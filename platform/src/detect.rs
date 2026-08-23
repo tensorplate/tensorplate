@@ -19,7 +19,7 @@
 // |---|---|---|
 // | `architecture` | `aarch64` | `arm64` |
 // | `os_version` (macOS) | `26.5.2` | `26` |
-// | `image_identity` (Jetson) | L4T `r36.4.3` | `L4T r36.4.x (…)` |
+// | `image_identity` (Jetson) | L4T `r36.4.3` | `L4T r36.x (…)` |
 //
 // Host-field matching is exact string equality, so detection must produce the
 // row's spelling or the row can never match — including on the very hardware
@@ -249,15 +249,19 @@ impl L4tRelease {
         )
     }
 
-    /// The release at row granularity, e.g. `r36.4.x`.
+    /// The L4T line at the granularity a row records, e.g. `r36.x`.
     ///
-    /// The patch is collapsed to a literal `x` because a row's evidence is
-    /// recorded against an L4T minor line, not a single patch: a device
-    /// taking a patch update must not silently stop matching the row that
-    /// describes it.
+    /// The BSP generation, not the revision: r36.4 and r36.5 are both
+    /// JetPack 6 on L4T r36, and an operator who installs an Orin Nano gets
+    /// whichever NVIDIA is shipping that week. Pinning the revision meant a
+    /// row matched one of them and refused the other on identical hardware
+    /// -- and since matching is exact string equality, "refused" is what a
+    /// near miss means. The revision is not discarded: `exact()` keeps it,
+    /// and `ExactHostFacts` carries it for evidence, which needs the
+    /// precision matching deliberately drops.
     #[must_use]
     pub fn row_granularity(&self) -> String {
-        format!("r{}.{}.x", self.major, self.revision_major)
+        format!("r{}.x", self.major)
     }
 }
 
@@ -279,6 +283,28 @@ pub fn parse_nv_tegra_release(content: &str) -> Option<L4tRelease> {
     })
 }
 
+/// The JetPack release at the granularity a row records.
+///
+/// `6.2.3` and `6.2` are the same feature release, and a row that names
+/// `6.2` should match a machine running either -- the same reduction
+/// [`macos_row_version`] makes for `26.5.2` -> `26`. Without it, a patch
+/// release is a different platform as far as matching is concerned, which
+/// is not what a support claim means.
+#[must_use]
+pub fn jetpack_row_version(version: &str) -> Option<String> {
+    let mut parts = version.trim().split('.');
+    let major = parts.next()?.trim();
+    if major.is_empty() {
+        return None;
+    }
+    Some(
+        match parts.next().map(str::trim).filter(|m| !m.is_empty()) {
+            Some(minor) => format!("{major}.{minor}"),
+            None => major.to_string(),
+        },
+    )
+}
+
 /// The JetPack version a row records, from the `nvidia-jetpack` package
 /// version.
 ///
@@ -287,11 +313,15 @@ pub fn parse_nv_tegra_release(content: &str) -> Option<L4tRelease> {
 #[must_use]
 pub fn jetpack_version(package_version: &str) -> Option<String> {
     let trimmed = package_version.trim();
-    let version = trimmed.split('-').next()?.trim();
+    // The build suffix is separated by `-` on some releases and `+` on
+    // others: JetPack 6.2 packages as `6.2-b77`, and NVIDIA's r36.5 channel
+    // publishes `6.2.3+b81`. Splitting on only one of them leaves the other
+    // carrying its suffix into the row comparison, where it matches nothing.
+    let version = trimmed.split(['-', '+']).next()?.trim();
     (!version.is_empty()).then(|| version.to_string())
 }
 
-/// The JetPack release an L4T line belongs to.
+/// The JetPack feature release an L4T line belongs to.
 ///
 /// The `nvidia-jetpack` metapackage states the version directly, but it is
 /// not present on every JetPack device: a rootfs flashed from the base BSP,
@@ -300,16 +330,35 @@ pub fn jetpack_version(package_version: &str) -> Option<String> {
 /// describes, so the L4T line it does report is mapped here rather than
 /// leaving it to resolve as an unsupported OS version.
 ///
-/// Keyed on the L4T minor line, which is the granularity NVIDIA ships a
-/// JetPack release at. An L4T line this release has not been told about
-/// yields `None` — an honest "unknown", never a guess, because a wrong
-/// JetPack version would make a machine match a row it was never
-/// validated against.
+/// Answers at feature-release granularity, which is what a row records,
+/// but is keyed on the full L4T revision: an L4T *line* does not belong to
+/// one JetPack feature release. r36.4 spans both, and NVIDIA's own archive
+/// is the only thing that says which revision is which. A revision this
+/// release has not been told about yields `None` — an honest "unknown",
+/// never a guess, because a wrong JetPack version would make a machine
+/// match a row it was never validated against.
+///
+/// Only the fallback is enumerated. A device carrying the metapackage
+/// reads its version directly and needs no arm here, so a future 6.2.x on
+/// a new revision still resolves for every normally-flashed device.
 #[must_use]
 pub fn jetpack_for_l4t(release: L4tRelease) -> Option<&'static str> {
-    match (release.major, release.revision_major) {
-        // JetPack 6.2 ships L4T 36.4.x.
-        (36, 4) => Some("6.2"),
+    match (
+        release.major,
+        release.revision_major,
+        release.revision_minor,
+    ) {
+        // Every L4T revision NVIDIA's archive names as a JetPack 6.2.x
+        // release: 6.2 is 36.4.3, 6.2.1 is 36.4.4, 6.2.2 is 36.5.0, and
+        // 6.2.3 is 36.5.2. All four are the 6.2 feature release, so all
+        // four resolve to the same row -- which is the point.
+        //
+        // Enumerated rather than keyed on the r36.4/r36.5 lines, because
+        // those lines are not wholly 6.2: base 36.4 is JetPack 6.1. Reading
+        // 6.2 off the line would admit a 6.1 board to a 6.2 Production row
+        // on evidence that never covered it, and the board is otherwise
+        // identical, so nothing downstream would notice.
+        (36, 4, 3 | 4) | (36, 5, 0 | 2) => Some("6.2"),
         _ => None,
     }
 }
@@ -559,6 +608,7 @@ fn jetson_os(
         .as_deref()
         .and_then(jetpack_version)
         .or_else(|| jetpack_for_l4t(release).map(str::to_string))
+        .and_then(|version| jetpack_row_version(&version))
         .unwrap_or_else(|| release.exact());
 
     Ok((
@@ -839,4 +889,97 @@ pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
             ((value >> 16) & 0xff == 0x03).then(|| address.to_string())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{jetpack_for_l4t, jetpack_row_version, L4tRelease};
+
+    #[test]
+    fn the_jetpack_mapping_claims_only_the_feature_release() {
+        // An L4T revision does not determine a JetPack patch: NVIDIA's
+        // archive pairs 36.5.0 with 6.2.2 and 36.5.2 with 6.2.3. Reading a
+        // patch off the line is therefore wrong on every revision but the
+        // one it was read from. Asserted as a property over every line the
+        // mapping answers for, because the place this gets got wrong is
+        // the next arm somebody adds, not the two that exist.
+        for revision_major in 0..=16 {
+            for revision_minor in 0..=4 {
+                let release = L4tRelease {
+                    major: 36,
+                    revision_major,
+                    revision_minor,
+                };
+                let Some(jetpack) = jetpack_for_l4t(release) else {
+                    continue;
+                };
+                assert_eq!(
+                    jetpack.matches('.').count(),
+                    1,
+                    "r36.{revision_major}.{revision_minor} maps to `{jetpack}`, which names a \
+                     patch release the L4T line cannot determine"
+                );
+                assert_eq!(
+                    jetpack_row_version(jetpack).as_deref(),
+                    Some(jetpack),
+                    "`{jetpack}` must already be what a row records"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_revision_outside_jetpack_6_2_is_unknown_rather_than_assumed() {
+        // Base L4T 36.4 is JetPack 6.1 in NVIDIA's archive. The r36.4 line
+        // is therefore not wholly 6.2, and answering for the line would
+        // hand a 6.1 board the version that admits it to a 6.2 Production
+        // row. `None` is the honest answer, and it fails closed.
+        for (revision_major, revision_minor) in [(4, 0), (4, 1), (4, 2), (5, 1), (3, 0)] {
+            assert_eq!(
+                jetpack_for_l4t(L4tRelease {
+                    major: 36,
+                    revision_major,
+                    revision_minor,
+                }),
+                None,
+                "r36.{revision_major}.{revision_minor} is not a JetPack 6.2 release"
+            );
+        }
+    }
+
+    #[test]
+    fn every_jetpack_6_2_revision_lands_on_one_row() {
+        // The generalisation this exists for: the four revisions NVIDIA
+        // ships 6.2.x on must not split across rows.
+        for (revision_major, revision_minor) in [(4, 3), (4, 4), (5, 0), (5, 2)] {
+            assert_eq!(
+                jetpack_for_l4t(L4tRelease {
+                    major: 36,
+                    revision_major,
+                    revision_minor,
+                }),
+                Some("6.2"),
+                "r36.{revision_major}.{revision_minor} is a JetPack 6.2.x release"
+            );
+        }
+    }
+
+    #[test]
+    fn both_l4t_revisions_of_jetpack_6_2_answer_alike() {
+        // The whole point of the row generalisation: r36.4 and r36.5 are
+        // the same support claim, so they must not resolve to different
+        // JetPack strings and land on different rows.
+        let r36_4 = jetpack_for_l4t(L4tRelease {
+            major: 36,
+            revision_major: 4,
+            revision_minor: 3,
+        });
+        let r36_5 = jetpack_for_l4t(L4tRelease {
+            major: 36,
+            revision_major: 5,
+            revision_minor: 0,
+        });
+        assert_eq!(r36_4, Some("6.2"));
+        assert_eq!(r36_4, r36_5);
+    }
 }

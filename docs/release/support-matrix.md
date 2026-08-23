@@ -11,7 +11,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 | Row | OS | CPU | Accelerator | Validated on | Model classes |
 | --- | --- | --- | --- | --- | --- |
-| `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
+| `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
 | `macos26-m1pro-16gb` | macOS 26 | arm64 (apple) | Apple M1 Pro | MacBook Pro, Apple M1 Pro 16GB (in lab) | `chunked_policy` (Preview) |
 | `ubuntu2404-x86-a100-40g-a2hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA A100-SXM4-40GB | `a2-highgpu-1g` only | `chunked_policy` (Preview) |
 | `ubuntu2404-x86-l4-g2s8` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA L4 | `g2-standard-8` only | `chunked_policy` (Preview) |
@@ -39,9 +39,9 @@ and are excluded from supported combinations.
 
 | Row | OS | CPU | Accelerator | Validated on |
 | --- | --- | --- | --- | --- |
-| `jetson-agx-orin-32gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 32GB | Jetson AGX Orin 32GB (hardware not yet in lab) |
-| `jetson-agx-orin-64gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 64GB | Jetson AGX Orin 64GB (hardware not yet in lab) |
-| `jetson-orin-nx-16gb` | JetPack 6.2 (L4T r36.4.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin NX 16GB | Jetson Orin NX 16GB (hardware not yet in lab) |
+| `jetson-agx-orin-32gb` | JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 32GB | Jetson AGX Orin 32GB (hardware not yet in lab) |
+| `jetson-agx-orin-64gb` | JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson AGX Orin 64GB | Jetson AGX Orin 64GB (hardware not yet in lab) |
+| `jetson-orin-nx-16gb` | JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin NX 16GB | Jetson Orin NX 16GB (hardware not yet in lab) |
 | `ubuntu2404-x86-rtxpro6000we-physical` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Workstation Edition | AMD x86_64 workstation (hardware not yet in lab) |
 
 ## Roadmap targets (not supported)

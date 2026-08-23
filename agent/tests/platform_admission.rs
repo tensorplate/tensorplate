@@ -20,9 +20,10 @@ use tensorplate_agent::platform_admission::{
     check_backend_packages, ObservedStack, PlatformAdmission,
 };
 use tensorplate_platform::{
-    identify_accelerator, AcceleratorIdentity, AcceleratorObservation, AcceleratorSources,
-    AdmissionPosture, DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity,
-    HostReport, PlatformReason, PlatformRegistry, PlatformReport, PlatformSupportRow,
+    identify, identify_accelerator, identify_jetson_accelerator, AcceleratorIdentity,
+    AcceleratorObservation, AcceleratorSources, AdmissionPosture, DetectedArchitecture,
+    DetectedVendor, ExactHostFacts, HostIdentity, HostReport, HostSources, PlatformReason,
+    PlatformRegistry, PlatformReport, PlatformSupportRow,
 };
 
 fn repo_root() -> PathBuf {
@@ -622,4 +623,90 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
         harness.worker.calls().expect("worker calls").is_empty(),
         "backend admission must happen before worker prepare"
     );
+}
+
+/// The recorded sources from the in-lab Orin Nano, read from the fixture
+/// rather than restated here so this test and detection's own fixture
+/// tests cannot drift apart.
+fn lab_jetson_sources() -> HostSources {
+    let body = std::fs::read_to_string(
+        repo_root().join("test/platform/host_identity/lab-jetson-orin-nano-l4t-r36.5.json"),
+    )
+    .expect("read the lab fixture");
+    let fixture: serde_json::Value = serde_json::from_str(&body).expect("fixture parses");
+    let text = |key: &str| {
+        fixture["sources"]
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    HostSources {
+        uname_machine: text("uname_machine"),
+        os_release: text("os_release"),
+        nv_tegra_release: text("nv_tegra_release"),
+        device_tree_model: text("device_tree_model"),
+        proc_meminfo: text("proc_meminfo"),
+        ..HostSources::default()
+    }
+}
+
+#[test]
+fn the_lab_jetson_is_admitted_on_the_stack_the_agent_observes() {
+    // Detection resolving the row is not the same as the agent admitting
+    // it. `observe_platform` reports no stack components, so a row that
+    // records one is measured against a stack that never contains it --
+    // which rejects the row on the very machine it was validated on.
+    // Driven from the recorded sources so the whole path is under test,
+    // and with the empty stack production actually supplies.
+    let registry = registry();
+    let row = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .expect("the Orin Nano row is committed");
+    let sources = lab_jetson_sources();
+    let identity = identify(&sources).expect("detection succeeds").identity;
+    let accelerator =
+        identify_jetson_accelerator(&sources).expect("a Jetson yields an accelerator identity");
+    let report = report_of(row, identity, Some(accelerator));
+
+    match PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None) {
+        PlatformAdmission::Supported {
+            row_id, validated, ..
+        } => {
+            assert_eq!(row_id, "jetson-orin-nano-8gb-jp62");
+            assert!(validated, "the lab device is this row's own evidence");
+        }
+        PlatformAdmission::Rejected { reason, detail, .. } => {
+            panic!("the lab Jetson must be admitted at startup, got Rejected({reason:?}): {detail}")
+        }
+    }
+}
+
+#[test]
+fn a_jetpack_6_1_jetson_is_not_admitted_to_the_6_2_row() {
+    // L4T 36.4 with no `nvidia-jetpack` package to read a version from is
+    // JetPack 6.1, not 6.2 -- NVIDIA's archive pairs base 36.4 with 6.1 and
+    // only 36.4.3 onward with 6.2.x. The board is identical, so nothing but
+    // the L4T revision distinguishes it from the row's own device, and
+    // admitting it would serve a Production claim on a platform whose
+    // evidence was never collected.
+    let mut sources = lab_jetson_sources();
+    sources.nv_tegra_release = Some(
+        "# R36 (release), REVISION: 4.0, GCID: 41000000, BOARD: generic, EABI: aarch64, DATE: Thu Jan 15 19:24:38 UTC 2026\n"
+            .to_string(),
+    );
+    let registry = registry();
+    let row = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .expect("the Orin Nano row is committed");
+    let identity = identify(&sources).expect("detection succeeds").identity;
+    let accelerator =
+        identify_jetson_accelerator(&sources).expect("a Jetson yields an accelerator identity");
+    let report = report_of(row, identity, Some(accelerator));
+
+    match PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None) {
+        PlatformAdmission::Supported { row_id, .. } => panic!(
+            "a JetPack 6.1 device must not be admitted to the 6.2 row, got Supported({row_id})"
+        ),
+        PlatformAdmission::Rejected { .. } => {}
+    }
 }

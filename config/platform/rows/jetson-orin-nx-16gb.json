@@ -4,7 +4,7 @@
   "os": {
     "name": "JetPack",
     "version": "6.2",
-    "image_identity": "L4T r36.4.x (Ubuntu 22.04 base)"
+    "image_identity": "L4T r36.x (Ubuntu 22.04 base)"
   },
   "kernel_driver_stack": {
     "components": []
