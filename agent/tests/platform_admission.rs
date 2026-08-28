@@ -35,10 +35,20 @@ fn registry() -> PlatformRegistry {
 }
 
 /// The A100 row, which is the one the MIG fixtures are written against.
+/// Planned since the A100 quota was refused, so it anchors only the
+/// partitioning checks, which run before support level is considered.
 fn a100(registry: &PlatformRegistry) -> &PlatformSupportRow {
     registry
         .row("ubuntu2404-x86-a100-40g-a2hg1")
         .expect("the A100 row is committed")
+}
+
+/// The L4 row: the Production datacenter exemplar for everything that
+/// needs a supported row with an accelerator fixture behind it.
+fn l4(registry: &PlatformRegistry) -> &PlatformSupportRow {
+    registry
+        .row("ubuntu2404-x86-l4-g2s8")
+        .expect("the L4 row is committed")
 }
 
 fn host_of(row: &PlatformSupportRow) -> HostIdentity {
@@ -115,18 +125,23 @@ fn a_partitioned_accelerator_is_refused_with_mig_mode_enabled() {
 }
 
 #[test]
-fn the_same_card_unpartitioned_is_admitted() {
+fn the_same_card_unpartitioned_is_not_refused_for_partitioning() {
     // The control for the case above. Without it, a check that refused
-    // everything would look correct.
+    // everything would look correct. The A100 row is Planned, so the
+    // unpartitioned card is refused too -- but for that reason and not
+    // this one, which is what the control has to show.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
     match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
-        PlatformAdmission::Supported { row_id, .. } => {
-            assert_eq!(row_id, "ubuntu2404-x86-a100-40g-a2hg1");
+        PlatformAdmission::Rejected {
+            row_id,
+            reason: Some(reason),
+            ..
+        } => {
+            assert_eq!(row_id.as_deref(), Some("ubuntu2404-x86-a100-40g-a2hg1"));
+            assert_eq!(reason, PlatformReason::RowPlannedNotValidated);
         }
-        other @ PlatformAdmission::Rejected { .. } => {
-            panic!("a non-partitioned supported card must be admitted, got {other:?}")
-        }
+        other => panic!("expected the Planned refusal, got {other:?}"),
     }
 }
 
@@ -208,8 +223,8 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
     // a row that does declare one. That is the point: the check has no
     // version of its own to compare against.
     let registry = registry();
-    let row = a100(&registry);
-    let detected = detected_from_fixture(row, "ubuntu2404-x86-a100-40g-a2hg1");
+    let row = l4(&registry);
+    let detected = detected_from_fixture(row, "ubuntu2404-x86-l4-g2s8");
 
     // A row with no recorded stack must not invent a requirement.
     assert!(
@@ -225,7 +240,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
     // reports. Exercised through a registry loaded from a row carrying
     // components, so the requirement is genuinely row-sourced.
     let staged = staged_registry_with_components(&[("nvidia_driver", "550.54.15")]);
-    let detected = detected_from_fixture(a100(&staged), "ubuntu2404-x86-a100-40g-a2hg1");
+    let detected = detected_from_fixture(l4(&staged), "ubuntu2404-x86-l4-g2s8");
 
     let matching = ObservedStack {
         components: BTreeMap::from([("nvidia_driver".to_string(), "550.54.15".to_string())]),
@@ -265,7 +280,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
 /// before any evidence run has recorded one.
 fn staged_registry_with_components(components: &[(&str, &str)]) -> PlatformRegistry {
     let staging = stage_registry();
-    let row_path = staging.join("rows/ubuntu2404-x86-a100-40g-a2hg1.json");
+    let row_path = staging.join("rows/ubuntu2404-x86-l4-g2s8.json");
     let mut row: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&row_path).expect("read row"))
             .expect("row parses");
@@ -386,13 +401,13 @@ fn a_machine_shape_miss_carries_no_borrowed_reason() {
     // correct and their chassis is not, goes and reinstalls the wrong
     // thing.
     let registry = registry();
-    let row = a100(&registry);
+    let row = l4(&registry);
     let mut host = host_of(row);
-    host.machine_type = Some("a2-ultragpu-1g".to_string());
+    host.machine_type = Some("g2-standard-12".to_string());
     let report = identify_accelerator(&AcceleratorSources {
         nvidia_smi_query: Some(
             std::fs::read_to_string(
-                repo_root().join("test/platform/accelerator/ubuntu2404-x86-a100-40g-a2hg1.txt"),
+                repo_root().join("test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt"),
             )
             .expect("read fixture"),
         ),
@@ -572,7 +587,7 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
 
     let harness = common::Harness::new();
     let registry = registry();
-    let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
+    let detected = detected_from_fixture(l4(&registry), "ubuntu2404-x86-l4-g2s8");
     let admission =
         PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None);
     assert!(matches!(admission, PlatformAdmission::Supported { .. }));

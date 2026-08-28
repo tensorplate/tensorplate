@@ -83,8 +83,8 @@ fn a_datacenter_row_admits_an_uncharacterised_chassis_on_prerequisites() {
     // The change this feature exists for: bare metal and every non-GCP VM
     // with identical silicon were told `outside_validated_environment`.
     let registry = registry();
-    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
-    let report = in_an_uncharacterised_chassis(a100, "a2-ultragpu-1g");
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = in_an_uncharacterised_chassis(l4, "g2-standard-12");
 
     let admission =
         PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
@@ -94,7 +94,7 @@ fn a_datacenter_row_admits_an_uncharacterised_chassis_on_prerequisites() {
         Some(false),
         "it runs, but it must not claim evidence recorded on another chassis: {admission:?}"
     );
-    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-a100-40g-a2hg1"));
+    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-l4-g2s8"));
     assert_eq!(
         admission.posture(),
         Some((AdmissionPosture::TechnicalPrerequisites, "row floor")),
@@ -138,8 +138,8 @@ fn an_operator_can_pin_strict_and_close_the_prerequisite_path() {
     // The permissive floor is the row's judgement, not a mandate. An
     // operator running a fleet they want uniformly validated can say so.
     let registry = registry();
-    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
-    let report = in_an_uncharacterised_chassis(a100, "a2-ultragpu-1g");
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = in_an_uncharacterised_chassis(l4, "g2-standard-12");
 
     let admission = PlatformAdmission::evaluate(
         &registry,
@@ -163,14 +163,14 @@ fn a_machine_matching_its_row_is_still_admitted_as_validated() {
     // The permissive path must not quietly relabel machines that DO carry
     // evidence -- otherwise nothing is ever reported as validated again.
     let registry = registry();
-    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
-    let report = report_of(a100, host_of(a100));
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = report_of(l4, host_of(l4));
 
     let admission =
         PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
 
     assert_eq!(admission.validated(), Some(true));
-    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-a100-40g-a2hg1"));
+    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-l4-g2s8"));
 }
 
 #[test]
@@ -178,15 +178,15 @@ fn an_unvalidated_admission_is_bounded_by_the_same_memory_ceiling() {
     // "Not validated" must not read as "not bounded". A machine admitted
     // here without a ceiling would be bounded LESS than one that matched.
     let registry = registry();
-    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
-    let report = in_an_uncharacterised_chassis(a100, "a2-ultragpu-1g");
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let report = in_an_uncharacterised_chassis(l4, "g2-standard-12");
 
     let admission =
         PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
     let capability = admission
         .capability()
         .expect("an unvalidated admission still publishes a ceiling");
-    let declared = a100.accelerator().expect("the A100 row has an accelerator");
+    let declared = l4.accelerator().expect("the A100 row has an accelerator");
     assert_eq!(
         capability.max_resident_model_memory(),
         declared.memory_bytes
@@ -252,8 +252,8 @@ fn a_working_driver_on_a_gpu_host_is_unaffected() {
     // The same host with the card answering: the PCI functions are still
     // listed, and the guard must not fire on them.
     let registry = registry();
-    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
-    let mut report = report_of(a100, host_of(a100));
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let mut report = report_of(l4, host_of(l4));
     report.host.exact.nvidia_pci_functions = vec!["0000:00:04.0".to_string()];
 
     let admission =
