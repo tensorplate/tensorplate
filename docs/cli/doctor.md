@@ -5,7 +5,7 @@ never mutates desired state, restarts workers, downloads packages, or modifies
 config. It is safe to run from any operator session.
 
 ```
-tensorplate doctor [--skip-agent] [--output <human|json>]
+tensorplate doctor [--skip-agent] [--record <dir>] [--output <human|json>]
 ```
 
 ## What it checks
@@ -58,6 +58,19 @@ scripts can grep on `id` strings.
   backend descriptor (e.g. `/usr/bin/python3 -c 'import torch; ...'`). It
   never executes user model code; refused module names that fail an
   identifier-safety check fail as `python_pytorch_runtime = fail`.
+- `--record <dir>` runs no checks at all: it captures this machine's raw
+  platform sources — the same files and command output detection reads — as
+  committable fixtures under `<dir>`. The JSON is the exact shape
+  `test/platform/host_identity/` commits and the accelerator text file is
+  the exact shape `test/platform/accelerator/` commits, so a reviewed
+  recording is a `git mv` away from being a fixture, with
+  `provenance: recorded`. Record-first: the raw text is written even when
+  detection cannot interpret it, because the machines worth recording are
+  exactly the ones it cannot interpret yet — a multi-GPU host, an unknown
+  SKU, a new OS image; the failure becomes a note in the output. When the
+  machine resolves to a support row, the files are named for the row and the
+  observed SKU is compared byte-for-byte against the row's declared one —
+  a mismatch means the row gets corrected, never the recording.
 - `--skip-agent` skips every agent-backed probe but still runs the install
   probes (packages, paths, configs, systemd units, service state, backend
   descriptor). Use it on a

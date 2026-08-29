@@ -1442,7 +1442,10 @@ mod tests {
             vec!["rollback", "--reason", "bad weights"]
         );
 
-        let doctor = Subcommand::Doctor(DoctorArgs { skip_agent: true });
+        let doctor = Subcommand::Doctor(DoctorArgs {
+            skip_agent: true,
+            record: None,
+        });
         assert_eq!(
             build_remote_args(&doctor).unwrap(),
             vec!["doctor", "--skip-agent"]

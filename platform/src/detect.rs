@@ -44,35 +44,48 @@ use crate::row::{CpuArchitecture, CpuVendor};
 /// `/etc/os-release` on macOS, no `/etc/nv_tegra_release` off Jetson).
 /// Absence is a signal, not a failure: it is how the platform is told
 /// apart.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct HostSources {
     /// `uname -m`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub uname_machine: Option<String>,
     /// `/etc/os-release`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub os_release: Option<String>,
     /// `/proc/cpuinfo`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpuinfo: Option<String>,
     /// `/etc/nv_tegra_release`. Present only on Jetson.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nv_tegra_release: Option<String>,
     /// `dpkg-query -W -f='${Version}' nvidia-jetpack`, e.g. `6.2-b77`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nvidia_jetpack_version: Option<String>,
     /// `/proc/device-tree/model`, NUL-terminated on Linux.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_tree_model: Option<String>,
     /// `sw_vers -productName`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sw_vers_product_name: Option<String>,
     /// `sw_vers -productVersion`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sw_vers_product_version: Option<String>,
     /// `sw_vers -buildVersion`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sw_vers_build_version: Option<String>,
     /// `sysctl -n machdep.cpu.brand_string`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_brand: Option<String>,
     /// `sysctl -n hw.memsize`, in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hw_memsize: Option<String>,
     /// Body of the GCE metadata machine-type response, e.g.
     /// `projects/1234/machineTypes/g2-standard-8`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gce_machine_type: Option<String>,
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
     /// Jetson's module capacity is told from its sibling's.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proc_meminfo: Option<String>,
     /// The PCI bus, one line per function: `<address> <vendor> <device>
     /// <class>`, assembled from `/sys/bus/pci/devices/*/{vendor,device,
@@ -88,6 +101,7 @@ pub struct HostSources {
     /// indistinguishable from no card at all — and a GPU host in that state
     /// currently resolves to the CPU-only row and deploys as though it had
     /// no accelerator.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pci_devices: Option<String>,
 }
 

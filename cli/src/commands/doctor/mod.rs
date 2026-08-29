@@ -28,6 +28,8 @@ use crate::client::AgentClient;
 use crate::config::ProfileMode;
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
+
+mod record;
 use crate::profile::ResolvedProfile;
 
 pub mod finding;
@@ -50,6 +52,9 @@ pub fn run<W: Write, E: Write>(
     out: &mut W,
     _stderr: &mut E,
 ) -> CliResult<()> {
+    if let Some(dir) = &args.record {
+        return record::run(*renderer, out, dir);
+    }
     let mut findings = Vec::<Finding>::new();
     findings.push(probe_cli_version());
     findings.extend(probe_profile_compatibility(profile));
@@ -814,7 +819,10 @@ mod tests {
     fn doctor_reports_skipped_agent_probe() {
         let _ = CliConfig::default().validate().unwrap();
         let client = MockAgentClient::new();
-        let args = DoctorArgs { skip_agent: true };
+        let args = DoctorArgs {
+            skip_agent: true,
+            record: None,
+        };
         let r = Renderer::new(OutputMode::Json);
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -878,7 +886,10 @@ mod tests {
         let mut p = profile();
         p.mode = ProfileMode::Relay;
         let client = MockAgentClient::new();
-        let args = DoctorArgs { skip_agent: true };
+        let args = DoctorArgs {
+            skip_agent: true,
+            record: None,
+        };
         let r = Renderer::new(OutputMode::Json);
         let mut out = Vec::new();
         let mut err = Vec::new();

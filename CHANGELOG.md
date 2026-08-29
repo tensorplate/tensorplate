@@ -6,6 +6,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- `tensorplate doctor --record <dir>` captures this machine's raw platform
+  sources as committable fixtures (V021-E02-F02-T04). The emitted JSON is
+  the exact shape `test/platform/host_identity/` commits and the emitted
+  accelerator text is the exact shape `test/platform/accelerator/` commits,
+  with `provenance: recorded` — so the first-run recording sessions on real
+  hardware become one command per box instead of a hand-assembled capture,
+  and the fixture cannot drift from what the machine actually said.
+
+  Record-first, deliberately: raw text is written even when detection
+  cannot interpret it, because the machines worth recording are exactly the
+  ones detection cannot interpret yet — a multi-GPU host, an unknown SKU, a
+  new OS image. Interpretation failures become notes in the output, never
+  aborts. When the machine resolves to a row, the files are named for it
+  and the observed SKU is compared byte-for-byte against the row's declared
+  one, replacing the manual `od -c` discipline the hardware runbook
+  prescribes; a mismatch is called out as a row correction, never an
+  evidence exception. The accelerator identity is derived the way
+  production derives it — the device tree names a Jetson's GPU when
+  `nvidia-smi` has nothing to say.
+
 ### Changed
 
 - The A100 40GB row (`ubuntu2404-x86-a100-40g-a2hg1`) is now **Planned**,
