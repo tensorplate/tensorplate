@@ -360,6 +360,10 @@ fn build_remote_args(subcommand: &Subcommand) -> CliResult<Vec<String>> {
             if a.skip_agent {
                 v.push("--skip-agent".to_string());
             }
+            if let Some(dir) = &a.record {
+                v.push("--record".to_string());
+                v.push(dir.to_string_lossy().into_owned());
+            }
             Ok(v)
         }
         Subcommand::Version => Ok(vec!["version".to_string()]),
@@ -1449,6 +1453,17 @@ mod tests {
         assert_eq!(
             build_remote_args(&doctor).unwrap(),
             vec!["doctor", "--skip-agent"]
+        );
+
+        // --record forwards with a device-local path: recording is about
+        // the target machine, so routing must not silently drop it.
+        let recording = Subcommand::Doctor(DoctorArgs {
+            skip_agent: false,
+            record: Some(std::path::PathBuf::from("/var/lib/tensorplate/hw-evidence")),
+        });
+        assert_eq!(
+            build_remote_args(&recording).unwrap(),
+            vec!["doctor", "--record", "/var/lib/tensorplate/hw-evidence"]
         );
 
         assert_eq!(

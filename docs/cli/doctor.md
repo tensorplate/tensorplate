@@ -70,7 +70,10 @@ scripts can grep on `id` strings.
   SKU, a new OS image; the failure becomes a note in the output. When the
   machine resolves to a support row, the files are named for the row and the
   observed SKU is compared byte-for-byte against the row's declared one —
-  a mismatch means the row gets corrected, never the recording.
+  a mismatch means the row gets corrected, never the recording. With a
+  device configured, the command routes to the device and `<dir>` is a
+  device-local path — the recording is written on the machine being
+  recorded; fetch it from there.
 - `--skip-agent` skips every agent-backed probe but still runs the install
   probes (packages, paths, configs, systemd units, service state, backend
   descriptor). Use it on a

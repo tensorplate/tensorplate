@@ -19,11 +19,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::json;
+use tensorplate_platform::identify_platform;
 use tensorplate_platform::{
-    identify, identify_accelerator, identify_jetson_accelerator, AcceleratorReport,
-    AcceleratorSources, DetectedPlatform, HostReport, HostSources, NvidiaSmiProbe,
-    PlatformRegistry, RowMatch, SystemHostProbe,
+    identify, identify_accelerator, AcceleratorObservation, AcceleratorReport, AcceleratorSources,
+    HostSources, NvidiaSmiProbe, PlatformRegistry, PlatformReport, RowMatch, SystemHostProbe,
 };
+use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
@@ -107,18 +108,33 @@ pub fn record(
     let mut notes = Vec::new();
 
     // Interpret what can be interpreted; failures become notes, never
-    // aborts. The raw text is the deliverable.
-    let host_report: Option<HostReport> = match identify(host_sources) {
+    // aborts. The raw text is the deliverable. Derivation is production's,
+    // through the same entry points the agent's startup uses:
+    // `identify_platform` names the Apple and Jetson accelerators from the
+    // host sources, and `nvidia-smi` fills in a discrete card when that
+    // named none.
+    let mut report: Option<PlatformReport> = match identify_platform(host_sources) {
         Ok(report) => Some(report),
-        Err(e) => {
-            notes.push(format!(
-                "host sources did not interpret: {e}; recording them anyway — \
-                 the expect block must be filled in at review"
-            ));
-            None
-        }
+        Err(platform_err) => match identify(host_sources) {
+            Ok(host) => {
+                notes.push(format!(
+                    "host interpreted but its accelerator did not: {platform_err}; recording anyway"
+                ));
+                Some(PlatformReport {
+                    host,
+                    accelerator: None,
+                })
+            }
+            Err(e) => {
+                notes.push(format!(
+                    "host sources did not interpret: {e}; recording them anyway — \
+                     the expect block must be filled in at review"
+                ));
+                None
+            }
+        },
     };
-    let accelerator: Option<AcceleratorReport> = match identify_accelerator(accelerator_sources) {
+    let discrete: Option<AcceleratorReport> = match identify_accelerator(accelerator_sources) {
         Ok(found) => found,
         Err(e) => {
             notes.push(format!(
@@ -127,47 +143,51 @@ pub fn record(
             None
         }
     };
+    if let (Some(report), Some(card)) = (report.as_mut(), discrete.as_ref()) {
+        if report.accelerator.is_none() {
+            report.accelerator = Some(AcceleratorObservation {
+                identity: card.identity.clone(),
+                memory_bytes: card.exact.memory_total_bytes,
+                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+            });
+        }
+    }
 
     // Resolution names the row this recording is evidence for, when the
-    // machine and the registry agree on one. The accelerator identity
-    // comes from wherever production gets it: the discrete report when
-    // `nvidia-smi` answered, else the host sources — a Jetson's GPU is
-    // named by the device tree, and without it the host profile matches
-    // several candidate rows and names none.
-    let accelerator_identity = accelerator
-        .as_ref()
-        .map(|accel| accel.identity.clone())
-        .or_else(|| identify_jetson_accelerator(host_sources));
-    let named_row = host_report.as_ref().and_then(|report| {
-        let registry = registry?;
-        let identity = report.identity.clone();
-        let detected = match accelerator_identity.clone() {
-            Some(accel) => DetectedPlatform::with_accelerator(identity, accel),
-            None => DetectedPlatform::host_only(identity),
-        };
-        match registry.resolve(&detected) {
-            RowMatch::Supported(row)
-            | RowMatch::PlannedNotValidated(row)
-            | RowMatch::Experimental(row) => Some((row.row_id().to_string(), true)),
-            RowMatch::OutsideValidatedEnvironment {
-                candidate: Some(row),
-            } => Some((row.row_id().to_string(), false)),
-            _ => None,
-        }
-    });
+    // machine and the registry agree on one.
+    let named_row =
+        report.as_ref().and_then(
+            |report| match registry?.resolve(&report.detected_platform()) {
+                RowMatch::Supported(row)
+                | RowMatch::PlannedNotValidated(row)
+                | RowMatch::Experimental(row) => Some((row.row_id().to_string(), true)),
+                RowMatch::OutsideValidatedEnvironment {
+                    candidate: Some(row),
+                } => Some((row.row_id().to_string(), false)),
+                _ => None,
+            },
+        );
     if registry.is_none() {
         notes.push("no installed platform registry; recorded without row resolution".to_string());
     }
 
-    // The byte-exact SKU verdict, replacing the manual `od -c` step. The
-    // comparison is against the named row's declared SKU; a mismatch
+    // The byte-exact SKU verdict, replacing the manual `od -c` step. Row
+    // matching is exact string equality, so a mismatched SKU means
+    // resolution names NO row — which is precisely when the verdict
+    // matters most. The intended rows are therefore found from the host
+    // profile alone, independent of accelerator equality, and a mismatch
     // corrects the row, never the recording.
-    if let (Some(accel), Some((row_id, _))) = (accelerator.as_ref(), named_row.as_ref()) {
-        if let Some(declared) = registry
-            .and_then(|r| r.row(row_id))
-            .and_then(tensorplate_platform::PlatformSupportRow::accelerator)
-        {
-            let observed = &accel.identity.sku;
+    if let (Some(card), Some(report), Some(registry)) =
+        (discrete.as_ref(), report.as_ref(), registry)
+    {
+        let observed = &card.identity.sku;
+        let mut compared = false;
+        for row in registry.select_profile(&report.host.identity).candidates() {
+            let Some(declared) = row.accelerator() else {
+                continue;
+            };
+            compared = true;
+            let row_id = row.row_id();
             if *observed == declared.sku {
                 notes.push(format!(
                     "SKU byte-identical to row `{row_id}`: {observed:?} ({} bytes)",
@@ -183,13 +203,18 @@ pub fn record(
                 ));
             }
         }
+        if !compared {
+            notes.push(format!(
+                "no host-candidate row declares an accelerator to compare {observed:?} against"
+            ));
+        }
     }
 
     let stem = named_row
         .as_ref()
         .map_or("recorded-host", |(row_id, _)| row_id.as_str());
     let mut provenance_note = format!("recorded by `tensorplate doctor --record` on {date}");
-    if let Some(accel) = accelerator.as_ref() {
+    if let Some(accel) = discrete.as_ref() {
         if let Some(driver) = &accel.exact.driver_version {
             provenance_note.push_str(&format!("; driver {driver}"));
         }
@@ -204,8 +229,8 @@ pub fn record(
         provenance: "recorded",
         provenance_note,
         sources: host_sources,
-        expect: host_report.as_ref().map(|report| {
-            let identity = &report.identity;
+        expect: report.as_ref().map(|report| {
+            let identity = &report.host.identity;
             ExpectDoc {
                 architecture: identity.architecture.as_reported().to_string(),
                 vendor: identity.vendor.as_reported().to_string(),
@@ -409,9 +434,47 @@ mod tests {
 
         let txt = out.accelerator_path.expect("still recorded");
         assert_eq!(std::fs::read_to_string(&txt).expect("read"), tampered);
-        // An unknown SKU matches no row, so there is no named row to
-        // carry a verdict — the recording lands under the fallback name.
+        // A mismatched SKU matches no row, so the file lands under the
+        // fallback name — but the verdict must still fire, against the
+        // row the host profile says this machine was meant to be. That is
+        // the whole point of the feature: the mismatch case is the one the
+        // recording session exists to catch.
         assert!(txt.ends_with("recorded-accelerator.txt"), "got {txt:?}");
+        assert!(
+            out.notes.iter().any(|n| n.contains("SKU MISMATCH")
+                && n.contains("ubuntu2404-x86-l4-g2s8")
+                && n.contains("correct the row, not the recording")),
+            "the mismatch verdict must name the intended row: {:?}",
+            out.notes
+        );
+    }
+
+    #[test]
+    fn an_apple_silicon_recording_resolves_its_row() {
+        // The Apple accelerator identity is derived from the host sources
+        // (cpu_brand + hw.memsize), the same way production derives it. A
+        // recording that skipped that path would emit every supported Mac
+        // as an unresolved fixture.
+        let (sources, committed) = sources_from_fixture("macos26-m1pro-16gb");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = record(
+            &sources,
+            &AcceleratorSources::default(),
+            Some(&registry()),
+            dir.path(),
+            "2026-08-29",
+        )
+        .expect("recording succeeds");
+
+        assert_eq!(
+            out.fixture_path.file_name().and_then(|n| n.to_str()),
+            Some("macos26-m1pro-16gb.json"),
+            "a Mac recording is named for its row"
+        );
+        let body = std::fs::read_to_string(&out.fixture_path).expect("read recording");
+        let recorded: Value = serde_json::from_str(&body).expect("recording parses");
+        assert_eq!(recorded["matches_row"], true);
+        assert_eq!(recorded["expect"], committed["expect"]);
     }
 
     #[test]
