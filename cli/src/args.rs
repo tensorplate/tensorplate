@@ -68,6 +68,9 @@ pub enum Subcommand {
 #[derive(Clone, Debug, Default)]
 pub struct DoctorArgs {
     pub skip_agent: bool,
+    /// Record this machine's raw platform sources as committable fixtures
+    /// under the given directory instead of running the probes.
+    pub record: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -356,13 +359,21 @@ fn parse_doctor(rest: &[String], global: &mut GlobalArgs) -> CliResult<DoctorArg
             continue;
         }
         match rest[i].as_str() {
+            "--record" => {
+                i += 1;
+                let Some(dir) = rest.get(i) else {
+                    return Err(CliError::Usage("--record requires a directory".into()));
+                };
+                args.record = Some(PathBuf::from(dir));
+                i += 1;
+            }
             "--skip-agent" => {
                 args.skip_agent = true;
                 i += 1;
             }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "doctor: --skip-agent | --output <human|json>".into(),
+                    "doctor: --skip-agent | --record <dir> | --output <human|json>".into(),
                 ));
             }
             other => {
@@ -1045,6 +1056,25 @@ mod tests {
         assert_eq!(l.level.as_deref(), Some("warn"));
         assert_eq!(l.tail, Some(50));
         assert!(l.follow);
+    }
+
+    #[test]
+    fn doctor_record_takes_a_directory() {
+        let out = parse(&argv(&["doctor", "--record", "/tmp/capture"])).unwrap();
+        let ParseOutcome::Run(parsed) = out else {
+            panic!("expected run outcome")
+        };
+        let Subcommand::Doctor(d) = parsed.subcommand else {
+            panic!("expected doctor")
+        };
+        assert_eq!(
+            d.record.as_deref(),
+            Some(std::path::Path::new("/tmp/capture"))
+        );
+        assert!(
+            parse(&argv(&["doctor", "--record"])).is_err(),
+            "a bare --record must be a usage error"
+        );
     }
 
     #[test]
