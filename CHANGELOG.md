@@ -9,12 +9,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Added
 
 - `tensorplate doctor --record <dir>` captures this machine's raw platform
-  sources as committable fixtures (V021-E02-F02-T04). The emitted JSON is
-  the exact shape `test/platform/host_identity/` commits and the emitted
-  accelerator text is the exact shape `test/platform/accelerator/` commits,
-  with `provenance: recorded` — so the first-run recording sessions on real
-  hardware become one command per box instead of a hand-assembled capture,
-  and the fixture cannot drift from what the machine actually said.
+  sources as private evidence in fixture-compatible shapes
+  (V021-E02-F02-T04). The command warns that raw output can contain live
+  cloud identifiers, device UUIDs, or serials and must not be committed
+  directly. A reviewed, sanitized publication copy uses the exact shapes
+  consumed by `test/platform/host_identity/` and
+  `test/platform/accelerator/`, with `provenance: recorded` — so first-run
+  recording sessions on real hardware become one command per box instead
+  of a hand-assembled capture without putting raw identifiers in git.
 
   Record-first, deliberately: raw text is written even when detection
   cannot interpret it, because the machines worth recording are exactly the

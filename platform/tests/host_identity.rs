@@ -64,6 +64,54 @@ fn sources_of(fixture: &Value) -> HostSources {
     }
 }
 
+const REDACTED_GCE_PROJECT: &str = "REDACTED";
+const LEGACY_SYNTHETIC_GCE_PROJECT: &str = "928311501586";
+const SYNTHETIC_UUID_PREFIX: &str = "GPU-00000000-0000-0000-0000-";
+
+#[test]
+fn published_host_fixtures_do_not_carry_live_identifiers() {
+    // The parser reads only the terminal machine type, so the project slot
+    // is never evidence and every new public GCP fixture must redact it.
+    // The canonical L4 fixture keeps its exact pre-rule synthetic value on
+    // this branch to avoid colliding with the recording PR that replaces it;
+    // no other fixture may use the legacy exception.
+    for (name, fixture) in fixtures() {
+        if let Some(machine_type) = fixture["sources"]["gce_machine_type"].as_str() {
+            let project = machine_type
+                .strip_prefix("projects/")
+                .and_then(|rest| rest.split_once("/machineTypes/"))
+                .map_or_else(
+                    || panic!("{name}: malformed GCE machine type"),
+                    |(project, _)| project,
+                );
+            let legacy_l4 =
+                name == "ubuntu2404-x86-l4-g2s8" && project == LEGACY_SYNTHETIC_GCE_PROJECT;
+            assert!(
+                project == REDACTED_GCE_PROJECT || legacy_l4,
+                "{name}: public fixture contains an unapproved GCP project identifier; \
+                 use projects/REDACTED and retain the raw value privately"
+            );
+        }
+
+        if let Some(note) = fixture["provenance_note"].as_str() {
+            for token in note.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-')) {
+                let Some(suffix) = token.strip_prefix(SYNTHETIC_UUID_PREFIX) else {
+                    assert!(
+                        !token.starts_with("GPU-"),
+                        "{name}: provenance note contains a live-looking device UUID; \
+                         use the reserved synthetic namespace"
+                    );
+                    continue;
+                };
+                assert!(
+                    suffix.len() == 12 && suffix.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "{name}: malformed synthetic device UUID"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn every_fixture_detects_the_identity_it_declares() {
     for (name, fixture) in fixtures() {

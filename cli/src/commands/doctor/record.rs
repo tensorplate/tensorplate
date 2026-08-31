@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// `doctor --record <dir>`: capture this machine's raw platform sources as
-// committable fixtures.
+// `doctor --record <dir>`: capture this machine's raw platform sources for
+// private review and later publication as sanitized fixtures.
 //
 // Record-first: the raw text is written even when interpretation fails,
 // because the machines this exists for are exactly the ones detection
@@ -10,9 +10,9 @@
 // useless for growing the support matrix.
 //
 // The emitted JSON is the exact shape `test/platform/host_identity/`
-// commits, and the emitted text file is the exact shape
-// `test/platform/accelerator/` commits, so a reviewed recording is a
-// `git mv` away from being a fixture.
+// consumes, and the emitted text file is the exact shape
+// `test/platform/accelerator/` consumes. They deliberately preserve raw
+// identifiers and therefore must be sanitized before their first commit.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
+
+const PUBLICATION_WARNING: &str = "WARNING: raw recording may contain live cloud/project identifiers, device UUIDs, or serials; do not commit it directly. Sanitize a publication copy according to docs/validation/fixture-and-evidence-rules.md and retain the unsanitized capture privately.";
 
 /// The committed host-identity fixture shape, field order included.
 #[derive(Serialize)]
@@ -89,6 +91,7 @@ pub fn run<W: Write>(renderer: Renderer, out: &mut W, dir: &Path) -> CliResult<(
     let payload = json!({
         "fixture": outcome.fixture_path,
         "accelerator": outcome.accelerator_path,
+        "publication_warning": PUBLICATION_WARNING,
         "notes": outcome.notes,
     });
     renderer.ok(out, "doctor", human.trim_end(), payload, None, None)?;
@@ -105,7 +108,11 @@ pub fn record(
     date: &str,
 ) -> CliResult<RecordOutcome> {
     std::fs::create_dir_all(dir)?;
-    let mut notes = Vec::new();
+    // This is intentionally first so both human and JSON renderers put the
+    // publication boundary ahead of interpretation details. The files are
+    // raw evidence, not public fixtures, until a sanitized copy passes the
+    // committed fixture guards.
+    let mut notes = vec![PUBLICATION_WARNING.to_string()];
 
     // Interpret what can be interpreted; failures become notes, never
     // aborts. The raw text is the deliverable. Derivation is production's,
@@ -358,6 +365,12 @@ mod tests {
             "2026-08-24",
         )
         .expect("recording succeeds");
+
+        assert_eq!(
+            out.notes.first().map(String::as_str),
+            Some(PUBLICATION_WARNING),
+            "every recording must warn before it can be mistaken for a public fixture"
+        );
 
         assert_eq!(
             out.fixture_path.file_name().and_then(|n| n.to_str()),

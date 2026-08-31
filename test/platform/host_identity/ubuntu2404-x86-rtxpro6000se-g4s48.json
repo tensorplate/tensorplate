@@ -7,7 +7,7 @@
     "uname_machine": "x86_64",
     "os_release": "PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.1 LTS (Noble Numbat)\"\nID=ubuntu\nID_LIKE=debian\n",
     "cpuinfo": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\nmodel name\t: AMD EPYC 9B14\n",
-    "gce_machine_type": "projects/928311501586/machineTypes/g4-standard-48"
+    "gce_machine_type": "projects/REDACTED/machineTypes/g4-standard-48"
   },
   "expect": {
     "architecture": "x86_64",

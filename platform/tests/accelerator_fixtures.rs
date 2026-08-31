@@ -60,6 +60,48 @@ fn sources(text: &str) -> AcceleratorSources {
     }
 }
 
+const SYNTHETIC_UUID_PREFIX: &str = "GPU-00000000-0000-0000-0000-";
+
+/// Existing transcribed fixtures predate the reserved all-zero namespace,
+/// but their UUIDs were documented as synthetic when introduced. Keeping
+/// the exact pairs here makes that legacy set closed: a new fixture or a
+/// changed UUID must use the visibly synthetic namespace instead of adding
+/// another live-looking identifier.
+fn publication_safe_uuid(name: &str, uuid: &str) -> bool {
+    if uuid
+        .strip_prefix(SYNTHETIC_UUID_PREFIX)
+        .is_some_and(|suffix| suffix.len() == 12 && suffix.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return true;
+    }
+
+    matches!(
+        (name, uuid),
+        (
+            "mig-enabled-a100-40g" | "ubuntu2404-x86-a100-40g-a2hg1",
+            "GPU-6b8e2a41-93cd-4a0f-b2e7-5f1c9d3a7e02"
+        ) | (
+            "ubuntu2404-x86-l4-g2s8",
+            "GPU-1d3f0c1e-6a2b-4f77-9d51-8c0b2a6e4f10"
+        ) | (
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            "GPU-9f4a7c25-1e88-46b3-a0d9-2c7b5e8f31a4"
+        ) | (
+            "ubuntu2404-x86-rtxpro6000we-physical",
+            "GPU-4b1d8e70-2f95-4c31-86a7-0d5e9b2c8f14"
+        ) | (
+            "unsupported-a100-80gb",
+            "GPU-2a7c4e19-8b03-4d6f-91ae-7c5d0f2b8e63"
+        ) | (
+            "unsupported-rtx-6000-ada",
+            "GPU-8c2f5a63-4d19-4e7b-b085-9a3c1e6d4f27"
+        ) | (
+            "unsupported-rtx-a6000",
+            "GPU-3e9b1d47-5c62-4a08-8fd3-1b6e9a4c7052"
+        )
+    )
+}
+
 /// The host identity a row describes, so a case exercises only the
 /// accelerator dimension. Taking it from the row rather than hand-writing
 /// it keeps the two from drifting.
@@ -277,9 +319,15 @@ fn detection_records_the_facts_an_evidence_run_needs() {
             report.exact.driver_version.is_some(),
             "{name}: no driver version recorded"
         );
+        let uuid = report
+            .exact
+            .uuid
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: no device UUID recorded"));
         assert!(
-            report.exact.uuid.is_some(),
-            "{name}: no device UUID recorded"
+            publication_safe_uuid(&name, uuid),
+            "{name}: public fixture UUID must use the reserved synthetic namespace; \
+             retain raw device identifiers only in private evidence"
         );
     }
 }

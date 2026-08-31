@@ -26,6 +26,11 @@ cycle; none is speculative. Violations are correctness bugs, not style.
    that sanitization touches. **Sanitize before the first commit**: a
    later sanitization commit leaves the identifiers in the branch
    history, and the branch must then be rewritten before merge.
+   `tensorplate doctor --record` labels its output as private raw evidence,
+   and the fixture harness rejects live-looking GCP project numbers and
+   device UUIDs outside the repository's explicit synthetic namespaces or
+   legacy synthetic allowlist. Adding an exception is therefore a visible,
+   reviewable code change rather than an accidental paste.
 
 ## Asserting
 

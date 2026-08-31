@@ -60,11 +60,14 @@ scripts can grep on `id` strings.
   identifier-safety check fail as `python_pytorch_runtime = fail`.
 - `--record <dir>` runs no checks at all: it captures this machine's raw
   platform sources — the same files and command output detection reads — as
-  committable fixtures under `<dir>`. The JSON is the exact shape
-  `test/platform/host_identity/` commits and the accelerator text file is
-  the exact shape `test/platform/accelerator/` commits, so a reviewed
-  recording is a `git mv` away from being a fixture, with
-  `provenance: recorded`. Record-first: the raw text is written even when
+  private evidence under `<dir>`. The JSON and accelerator text use the
+  shapes consumed by `test/platform/host_identity/` and
+  `test/platform/accelerator/`, but they are **not committable as-is**: the
+  command warns that the raw files can contain live cloud identifiers,
+  device UUIDs, or serials. Create and review a sanitized publication copy
+  under the [fixture and evidence rules](../validation/fixture-and-evidence-rules.md)
+  before its first commit; retain the unsanitized capture privately.
+  Record-first: the raw text is written even when
   detection cannot interpret it, because the machines worth recording are
   exactly the ones it cannot interpret yet — a multi-GPU host, an unknown
   SKU, a new OS image; the failure becomes a note in the output. When the
