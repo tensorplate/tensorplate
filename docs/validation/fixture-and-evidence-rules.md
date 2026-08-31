@@ -23,7 +23,9 @@ cycle; none is speculative. Violations are correctness bugs, not style.
    auth status. Replace identifiers with clearly synthetic values, say so
    where the fixture is described, and retain the unsanitized capture
    privately with the release evidence. Matching must never read a field
-   that sanitization touches.
+   that sanitization touches. **Sanitize before the first commit**: a
+   later sanitization commit leaves the identifiers in the branch
+   history, and the branch must then be rewritten before merge.
 
 ## Asserting
 
