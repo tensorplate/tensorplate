@@ -702,11 +702,30 @@ fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
 }
 
 fn probe_service_states(opts: &InstallProbeOptions) -> Vec<Finding> {
-    if opts.skip_systemd {
-        return skipped_service_states("systemd not present on this host");
-    }
     if opts.prefix.is_some() {
         return skipped_service_states("service-state query skipped for a prefixed test install");
+    }
+    // The supervisor differs by platform and so does the question. On
+    // Linux the agent is a systemd unit; on macOS it is a launchd job
+    // Homebrew loads. Reporting "systemd not present" on a Mac said
+    // nothing about whether the agent was running there, which is the
+    // thing an operator is asking.
+    if cfg!(target_os = "macos") {
+        return vec![
+            probe_launchd_service_state(
+                FindingId::AgentServiceState,
+                "tensorplate-agent",
+                "start with `brew services start tensorplate-agent` after install checks pass",
+            ),
+            probe_launchd_service_state(
+                FindingId::ObservabilityServiceState,
+                "tensorplate-observability",
+                "start with `brew services start tensorplate-observability`",
+            ),
+        ];
+    }
+    if opts.skip_systemd {
+        return skipped_service_states("no supported service supervisor on this host");
     }
     vec![
         probe_service_state(
@@ -720,6 +739,69 @@ fn probe_service_states(opts: &InstallProbeOptions) -> Vec<Finding> {
             "start with `systemctl enable --now tensorplate-observability`",
         ),
     ]
+}
+
+/// The state column for one service in `brew services list` output.
+///
+/// Matched on the exact service name rather than a substring:
+/// `tensorplate-agent` is a prefix of nothing today, and relying on that
+/// staying true is how a future `tensorplate-agent-proxy` would silently
+/// answer for the agent.
+fn launchd_state_from_listing<'a>(listing: &'a str, service: &str) -> Option<&'a str> {
+    listing.lines().find_map(|line| {
+        let mut columns = line.split_whitespace();
+        (columns.next()? == service)
+            .then(|| columns.next())
+            .flatten()
+    })
+}
+
+/// Report a launchd job's state the way the systemd path reports a unit's.
+///
+/// `brew services list` is the supervisor of record on macOS: the jobs are
+/// Homebrew-managed, and asking launchd directly would need the label
+/// Homebrew chose rather than the service name an operator types. A host
+/// without Homebrew is skipped rather than failed -- the CLI runs on
+/// machines that never installed the services.
+fn probe_launchd_service_state(id: FindingId, service: &str, start_hint: &str) -> Finding {
+    let output = match Command::new("brew").args(["services", "list"]).output() {
+        Ok(output) => output,
+        Err(err) => {
+            return Finding::skipped(
+                id,
+                Severity::Info,
+                format!("launchd service-state query unavailable for {service}: {err}"),
+                None,
+            );
+        }
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let Some(state) = launchd_state_from_listing(&listing, service) else {
+        return Finding::missing(
+            id,
+            Severity::Info,
+            format!("{service} is not a known Homebrew service on this host"),
+            Some(start_hint.into()),
+        );
+    };
+    match state {
+        "started" => Finding::ok(id, Severity::Info, format!("{service} is started"), None),
+        "error" => Finding::fail(
+            id,
+            Severity::Critical,
+            format!("{service} is in error"),
+            Some(format!(
+                "inspect `$(brew --prefix)/var/log/tensorplate/{}.error.log` before retrying",
+                service.trim_start_matches("tensorplate-")
+            )),
+        ),
+        other => Finding::warn(
+            id,
+            Severity::Warning,
+            format!("{service} is {other}"),
+            Some(start_hint.into()),
+        ),
+    }
 }
 
 fn probe_service_state(id: FindingId, unit: &str, start_hint: &str) -> Finding {
@@ -1174,6 +1256,51 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    /// Real `brew services list` output shape: a header row, then one row
+    /// per service, columns separated by runs of spaces.
+    const BREW_LISTING: &str = "\
+Name                      Status  User       File
+tensorplate-agent         started operator ~/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist
+tensorplate-observability none
+other-service             error   root       ~/Library/LaunchAgents/other.plist
+";
+
+    #[test]
+    fn a_launchd_listing_is_read_by_exact_service_name() {
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-agent"),
+            Some("started")
+        );
+        // A service Homebrew knows but has never started reads `none`,
+        // which is a state and not an absence -- the probe warns with the
+        // start hint rather than reporting the service unknown.
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-observability"),
+            Some("none")
+        );
+        // Another service's state must never answer for ours.
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-serving"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_launchd_name_is_matched_whole_not_as_a_prefix() {
+        // `tensorplate-agent` is a prefix of nothing today. Relying on
+        // that staying true is how a future sibling service would
+        // silently answer for the agent.
+        let listing = "\
+Name                       Status  User       File
+tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
+";
+        assert_eq!(
+            launchd_state_from_listing(listing, "tensorplate-agent"),
+            None,
+            "a longer name that starts the same must not answer"
+        );
+    }
 
     fn stage_install_layout(td: &Path) {
         for dir in install_paths::required_directories() {

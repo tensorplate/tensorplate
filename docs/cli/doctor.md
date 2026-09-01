@@ -32,9 +32,9 @@ tensorplate doctor [--skip-agent] [--record <dir>] [--output <human|json>]
 | `config_files` | packaging. Each `/etc/tensorplate/*.json` exists, has the documented file mode/ownership, and declares a recognized `schema_version`. |
 | `config_endpoints` | packaging. Installed agent, serving-worker, and observability configs keep first-run endpoints on a Unix socket, loopback, or in-process transport. |
 | `agent_systemd_unit` | packaging. `tensorplate-agent.service` is installed under a known systemd unit directory. |
-| `agent_service_state` | packaging. Reports whether the agent unit is active, stopped, failed, or not queryable. |
+| `agent_service_state` | packaging. Reports whether the agent is running, asked of the supervisor that owns it: `systemctl is-active` on Linux, `brew services list` on macOS, where the agent is a Homebrew-managed launchd job. A host without the supervisor is `skipped` rather than failed — the CLI runs on machines that never installed the services. |
 | `observability_systemd_unit` | packaging. `tensorplate-observability.service` is installed. |
-| `observability_service_state` | packaging. Reports whether the independent observability unit is active, stopped, failed, or not queryable. |
+| `observability_service_state` | packaging. As `agent_service_state`, for the independent observability service. |
 | `serving_systemd_absent` | packaging. **Fails** if `tensorplate-serving.service` is installed — the agent supervises the serving worker (V01-E09). |
 | `serving_binary_installed` | packaging. `/usr/lib/tensorplate/tensorplate-serving` exists. |
 | `python_pytorch_backend` | Packaging probe. The backend descriptor at `/usr/share/tensorplate/backends/python_pytorch/backend.json` is present and parses. |
