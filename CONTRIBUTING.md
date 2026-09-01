@@ -95,6 +95,9 @@ Static checks expected by area:
 - New config schema fields must be documented.
 - New feature flags must be documented.
 - Public behavior changes, interface changes, and new error codes require `CHANGELOG.md` entries.
+- Fixture, recording, and validation-evidence changes must follow the
+  [fixture and evidence rules](docs/validation/fixture-and-evidence-rules.md),
+  including sanitization before the first commit.
 
 ## Local Build and Test
 
