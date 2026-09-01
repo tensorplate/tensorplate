@@ -6,6 +6,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- `doctor` now names the support row a machine **is**, not only the rows it
+  could be (V021-E04-F01-T01). The new `platform_row` finding resolves the
+  detected host *and* accelerator against the registry — the answer
+  `platform_profile`'s hint has always deferred to with "accelerator
+  identity is needed to name one". `doctor` observes the accelerator the
+  way the agent's startup does (host sources for Apple and Jetson, the
+  `nvidia-smi` probe for a discrete card), so it cannot resolve a different
+  row than deploy admission will.
+
+  The two findings stay separate on purpose: an operator whose accelerator
+  probe fails still gets the host-level answer, and the pair says which
+  half of the identity was the problem. A Planned row resolves as
+  `unsupported` naming the row and `row_planned_not_validated` — the
+  A100 40GB row reads that way today.
+
+  This is also where an exact-equality miss becomes visible. A near-miss OS
+  version or an off-matrix accelerator SKU resolves to no row with the
+  typed reason naming the dimension that missed, where the host-level
+  profile alone would have reported a clean match on a host whose card is
+  wrong.
+
 ### Changed
 
 - The L4 row's fixtures are now recorded, not transcribed
