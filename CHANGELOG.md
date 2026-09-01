@@ -6,6 +6,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` now reports service health on macOS (V021-E04-F02-T03).
+  Service-state checks were gated on systemd, so on a Mac they reported
+  "systemd not present" — which says nothing about whether the agent is
+  running there, and that is the question an operator is asking. The
+  check now asks whichever supervisor owns the service: `systemctl` on
+  Linux, `brew services` on macOS, where the agent is a Homebrew-managed
+  launchd job. A host without the supervisor is skipped rather than
+  failed, since the CLI runs on machines that never installed the
+  services.
+
+  The listing is matched on the exact service name. `tensorplate-agent`
+  is a prefix of nothing today, and relying on that staying true is how a
+  future sibling service would silently answer for the agent.
+
+### Deferred
+
+- Per-row live telemetry samples for the evidence bundle are captured
+  during the hardware validation runs rather than here: the code and its
+  fixture samples land now, and the live samples need machines that the
+  lifecycle harness provisions. Recorded in the tracker as part of the
+  hardware gate rather than left implicit.
+
 ### Added
 
 - Gate-semantic handling for the platform signals a row declares
