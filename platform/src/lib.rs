@@ -33,6 +33,7 @@ pub mod detect;
 pub mod error;
 pub mod identity;
 pub mod matrix;
+pub mod memory_telemetry;
 pub mod probe;
 pub mod reason;
 pub mod registry;
@@ -54,6 +55,7 @@ pub use identity::{
     HostIdentity, HostProbe,
 };
 pub use matrix::render_support_matrix;
+pub use memory_telemetry::PlatformMemoryTelemetry;
 pub use probe::SystemHostProbe;
 pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, ProfileSelection, RowMatch};

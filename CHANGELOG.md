@@ -8,6 +8,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Per-row memory telemetry reads what a machine has against what its row
+  budgets, in the row's own memory model (V021-E04-F02-T01). Host memory
+  is now captured as an exact fact (`/proc/meminfo` on Linux,
+  `hw.memsize` on macOS), and the telemetry pairs it with the accelerator
+  figure the row-appropriate source reports.
+
+  The distinction it exists to carry is unified versus discrete. A
+  discrete GPU has two pools and the framebuffer is the one a model loads
+  into; a unified-memory platform has ONE pool the host and accelerator
+  both draw from. Reporting a Jetson's 8 GiB as if it were a discrete
+  framebuffer would tell an operator they have all of it for a model
+  while the OS is living in it. The telemetry says which model applies,
+  so a caller cannot sum two halves of one pool.
+
+  `load_bearing` memory gates consume these fields: a machine below its
+  row budget is actionable where the row gates on memory and context
+  where it does not. An unreadable figure is deliberately not a
+  shortfall — a gate that treated a failed probe as a machine being too
+  small would refuse it for a different fault with a different fix.
+
+### Added
+
 - `doctor` now explains which model classes the matched platform row
   serves, and at what level (V021-E04-F01-T03). The Jetson row shows
   `chunked_policy` at Production, the G4 row shows all three VLA shape
