@@ -62,6 +62,11 @@ pub enum FindingId {
     /// Which support rows the detected host profile could be, or the
     /// typed reason it could be none of them.
     PlatformProfile,
+    /// The one support row the detected host AND accelerator resolve to,
+    /// or the typed reason they resolve to none. `platform_profile`
+    /// answers "which rows could this be" from host identity alone; this
+    /// answers "which row is it", which needs the accelerator.
+    PlatformRow,
 }
 
 impl FindingId {
@@ -103,6 +108,7 @@ impl FindingId {
             Self::PlatformRegistry => "platform_registry",
             Self::AgentConfigValid => "agent_config_valid",
             Self::PlatformProfile => "platform_profile",
+            Self::PlatformRow => "platform_row",
         }
     }
 }

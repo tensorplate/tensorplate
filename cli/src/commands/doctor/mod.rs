@@ -19,9 +19,11 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
-    HostIdentity, HostReport, PlatformProbeError, PlatformRegistry, PlatformRegistryError,
-    ProfileSelection, SystemHostProbe,
+    identify_accelerator, AcceleratorObservation, HostIdentity, NvidiaSmiProbe, PlatformProbeError,
+    PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport, ProfileSelection,
+    RowMatch, SystemHostProbe,
 };
+use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::args::DoctorArgs;
 use crate::client::AgentClient;
@@ -204,7 +206,7 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
 /// goldens without the machine running the test leaking into the answer.
 #[must_use]
 pub fn render_host_section(
-    detected: Result<&HostReport, &PlatformProbeError>,
+    detected: Result<&PlatformReport, &PlatformProbeError>,
     registry: Result<&PlatformRegistry, &PlatformRegistryError>,
 ) -> Vec<Finding> {
     let report = match detected {
@@ -245,11 +247,17 @@ pub fn render_host_section(
                     "skipped: host identity undetected",
                     None,
                 ),
+                Finding::skipped(
+                    FindingId::PlatformRow,
+                    Severity::Info,
+                    "skipped: host identity undetected",
+                    None,
+                ),
             ];
         }
     };
 
-    let identity = &report.identity;
+    let identity = &report.host.identity;
     let mut findings = vec![Finding::ok(
         FindingId::HostFacts,
         Severity::Info,
@@ -272,16 +280,19 @@ pub fn render_host_section(
     }
     let exact = [
         report
+            .host
             .exact
             .os_version
             .as_deref()
             .map(|v| format!("version {v}")),
         report
+            .host
             .exact
             .os_build
             .as_deref()
             .map(|b| format!("build {b}")),
         report
+            .host
             .exact
             .l4t_release
             .as_deref()
@@ -308,7 +319,109 @@ pub fn render_host_section(
             Some("see the platform_registry finding for what to do about it".into()),
         ),
     });
+    findings.push(match registry {
+        Ok(registry) => render_platform_row(registry, report),
+        Err(err) => Finding::skipped(
+            FindingId::PlatformRow,
+            Severity::Info,
+            format!("skipped: the platform registry could not be loaded ({err})"),
+            Some("see the platform_registry finding for what to do about it".into()),
+        ),
+    });
     findings
+}
+
+/// Which support row this machine IS, host and accelerator together.
+///
+/// `platform_profile` above answers from host identity alone and must
+/// report a set, because rows sharing an OS and CPU profile differ only by
+/// accelerator. This is the answer that set defers to. The two are
+/// deliberately separate findings: an operator whose accelerator probe
+/// fails still gets the host-level answer, and the pair says which half
+/// of the identity was the problem.
+fn render_platform_row(registry: &PlatformRegistry, report: &PlatformReport) -> Finding {
+    // A GPU host whose driver is missing or broken reports no accelerator,
+    // and resolving host-only would land it on a CPU row -- telling an
+    // operator whose driver is broken that their machine is a supported
+    // CPU box. The PCI bus says which of the two this is, and it answers
+    // without a driver. Checked before resolution, and in the same order
+    // deploy admission checks it, so the two cannot disagree about this
+    // machine.
+    if report.accelerator.is_none() && !report.host.exact.nvidia_pci_functions.is_empty() {
+        return Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!(
+                "the PCI bus reports an NVIDIA display controller at {} but no accelerator could be identified ({})",
+                report.host.exact.nvidia_pci_functions.join(", "),
+                PlatformReason::MissingDriverRuntime.as_str()
+            ),
+            Some(
+                "the driver is absent or not functional; deploy admission refuses this machine rather than serving on the CPU without saying so"
+                    .into(),
+            ),
+        );
+    }
+    let detected = report.detected_platform();
+    match registry.resolve(&detected) {
+        RowMatch::Supported(row) => Finding::ok(
+            FindingId::PlatformRow,
+            Severity::Info,
+            format!("resolves to support row `{}`", row.row_id()),
+            None,
+        ),
+        // Defined and detectable, carrying no validation evidence. Not a
+        // fault: the row exists precisely so this machine is recognised
+        // rather than told it is unknown hardware.
+        RowMatch::PlannedNotValidated(row) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!(
+                "resolves to row `{}`, which is Planned ({})",
+                row.row_id(),
+                PlatformReason::RowPlannedNotValidated.as_str()
+            ),
+            Some(
+                "the row names this hardware but carries no validation evidence yet; deploy admission refuses it"
+                    .into(),
+            ),
+        ),
+        RowMatch::Experimental(row) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!("resolves to row `{}`, which is Experimental", row.row_id()),
+            Some("an Experimental row is not a supported combination".into()),
+        ),
+        // The hardware matches; the chassis its evidence was collected on
+        // does not. Whether that refuses the machine depends on the row's
+        // gate semantics, which is the agent's call at admission -- so
+        // this states the condition and points at who decides.
+        RowMatch::OutsideValidatedEnvironment { candidate } => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            match candidate {
+                Some(row) => format!(
+                    "hardware matches row `{}`, but no evidence covers this machine shape",
+                    row.row_id()
+                ),
+                None => "hardware matches this release, but no evidence covers this machine shape"
+                    .to_string(),
+            },
+            Some(
+                "a datacenter row admits this on technical prerequisites and reports it unvalidated; a row with load-bearing thermal, power or throttle gates requires covering evidence. The agent prints the resolved posture at startup"
+                    .into(),
+            ),
+        ),
+        RowMatch::Unsupported(reason) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!("resolves to no support row ({})", reason.as_str()),
+            Some(
+                "see docs/release/support-matrix.md for the platforms this release validates"
+                    .into(),
+            ),
+        ),
+    }
 }
 
 /// Which support rows this host could be.
@@ -491,7 +604,26 @@ fn probe_agent_config() -> Vec<Finding> {
 
 /// The host section for the machine this is running on.
 fn probe_host_profile() -> Vec<Finding> {
-    let detected = SystemHostProbe::new().detect();
+    let mut detected = SystemHostProbe::new().detect_platform();
+    // The host sources name an integrated accelerator (Apple, Jetson);
+    // a discrete card needs the tool. Same order the agent's startup
+    // uses, so doctor cannot resolve a different row than admission will.
+    // A probe failure is not fatal here: the host half still renders, and
+    // the row finding reports what the missing accelerator costs.
+    if let Ok(report) = detected.as_mut() {
+        if report.accelerator.is_none() {
+            if let Ok(Some(card)) = NvidiaSmiProbe::new()
+                .sources()
+                .and_then(|sources| identify_accelerator(&sources))
+            {
+                report.accelerator = Some(AcceleratorObservation {
+                    identity: card.identity,
+                    memory_bytes: card.exact.memory_total_bytes,
+                    memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+                });
+            }
+        }
+    }
     let registry = PlatformRegistry::load_installed();
     render_host_section(detected.as_ref(), registry.as_ref())
 }
