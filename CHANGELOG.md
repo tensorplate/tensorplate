@@ -8,6 +8,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- An unsupported-combination matrix asserts, in one table, that each way a
+  machine can miss the support matrix reports the dimension it is actually
+  off-matrix in (V021-E04-F01-T04). Twelve cases, each naming a specific
+  typed reason rather than merely failing, plus a control that a canonical
+  M-series chip still resolves — a matrix that refused everything would
+  otherwise look complete.
+
+  Writing it corrected an expectation rather than the code. An L4 on
+  Ubuntu 22.04 reports `unsupported_accelerator_sku`, not
+  `unsupported_os_version`, and that is right: 22.04 is a supported OS
+  with a Preview CPU row, so telling that operator their OS is unsupported
+  would send them to reinstall a platform that is fine. What no row covers
+  is a GPU on it.
+
+  The coverage half is the point. Two of the ten reasons reached this
+  release with no producer at all, and a table is what makes that visible:
+  the matrix now derives its covered set from its own cases and fails if
+  any reason has none.
+
+### Added
+
 - The typed platform-reason vocabulary is frozen for v0.2.1 and documented
   in `docs/platform/support-reasons.md` (V021-E04-F01-T02): ten values,
   their wire spellings, and the condition that triggers each.
