@@ -328,7 +328,73 @@ pub fn render_host_section(
             Some("see the platform_registry finding for what to do about it".into()),
         ),
     });
+    findings.push(match registry {
+        Ok(registry) => render_model_class_rows(registry, report),
+        Err(err) => Finding::skipped(
+            FindingId::ModelClassRows,
+            Severity::Info,
+            format!("skipped: the platform registry could not be loaded ({err})"),
+            Some("see the platform_registry finding for what to do about it".into()),
+        ),
+    });
     findings
+}
+
+/// Which model classes the matched row carries, and at what level.
+///
+/// Read from the row's `model_class_rows` pointers rather than a list
+/// kept here: a row that gains a model class says so in the registry, and
+/// a second list in the renderer would be a second thing to forget. Only
+/// meaningful once a row is named, so it follows the row match and
+/// reports the same absence rather than guessing.
+fn render_model_class_rows(registry: &PlatformRegistry, report: &PlatformReport) -> Finding {
+    let matched = match registry.resolve(&report.detected_platform()) {
+        RowMatch::Supported(row)
+        | RowMatch::PlannedNotValidated(row)
+        | RowMatch::Experimental(row) => Some(row),
+        RowMatch::OutsideValidatedEnvironment { candidate } => candidate,
+        RowMatch::Unsupported(_) => None,
+    };
+    let Some(row) = matched else {
+        return Finding::skipped(
+            FindingId::ModelClassRows,
+            Severity::Info,
+            "skipped: no support row matched, so no model classes apply",
+            Some("see the platform_row finding for why".into()),
+        );
+    };
+    let pointers = row.model_class_rows();
+    if pointers.is_empty() {
+        // A row carrying no model class is not a broken row: a Planned
+        // row claims nothing until it is validated, and the registry
+        // refuses to let it claim.
+        return Finding::ok(
+            FindingId::ModelClassRows,
+            Severity::Info,
+            format!(
+                "row `{}` claims no model classes at its current support level",
+                row.row_id()
+            ),
+            None,
+        );
+    }
+    let rendered = pointers
+        .iter()
+        .map(|pointer| {
+            format!(
+                "{} ({})",
+                pointer.model_class_row,
+                pointer.support_level.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Finding::ok(
+        FindingId::ModelClassRows,
+        Severity::Info,
+        format!("row `{}` serves {rendered}", row.row_id()),
+        None,
+    )
 }
 
 /// Which support row this machine IS, host and accelerator together.

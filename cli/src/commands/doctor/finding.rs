@@ -67,6 +67,10 @@ pub enum FindingId {
     /// answers "which rows could this be" from host identity alone; this
     /// answers "which row is it", which needs the accelerator.
     PlatformRow,
+    /// Which model-class rows the matched platform row carries, and at
+    /// what support level. Read from the row's registry pointers, so a
+    /// row that gains or loses a model class changes this without code.
+    ModelClassRows,
 }
 
 impl FindingId {
@@ -109,6 +113,7 @@ impl FindingId {
             Self::AgentConfigValid => "agent_config_valid",
             Self::PlatformProfile => "platform_profile",
             Self::PlatformRow => "platform_row",
+            Self::ModelClassRows => "model_class_rows",
         }
     }
 }
