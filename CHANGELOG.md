@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `doctor` now explains which model classes the matched platform row
+  serves, and at what level (V021-E04-F01-T03). The Jetson row shows
+  `chunked_policy` at Production, the G4 row shows all three VLA shape
+  rows, and the deploy-smoke rows show Preview — read from each row's
+  `model_class_rows` registry pointers rather than a list kept in the CLI,
+  so a row that gains or loses a model class changes the output without
+  code.
+
+  A row that claims none says so plainly rather than rendering an empty
+  list: a Planned row carries no model-class claims and the registry
+  refuses to let it, which is an honest row rather than a broken one. The
+  finding is skipped when no row matched, since `platform_row` already
+  carries the reason and two lines for one fact is worse than one.
+
+### Added
+
 - An unsupported-combination matrix asserts, in one table, that each way a
   machine can miss the support matrix reports the dimension it is actually
   off-matrix in (V021-E04-F01-T04). Twelve cases, each naming a specific

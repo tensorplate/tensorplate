@@ -262,6 +262,96 @@ fn a_driverless_gpu_host_is_not_reported_as_a_cpu_row() {
 }
 
 #[test]
+fn the_model_classes_come_from_the_registry_not_a_list_here() {
+    // The posture each row actually claims, read from its pointers. The
+    // shapes differ per row and that is the point: the Jetson carries the
+    // one Production policy class, the G4 carries all three VLA shapes,
+    // and the deploy-smoke rows carry Preview. A hardcoded list would
+    // drift the first time a row changed.
+    for (row_id, fixture_name, accelerator, expected) in [
+        (
+            "jetson-orin-nano-8gb-jp62",
+            "jetson-orin-nano-8gb-jp62",
+            None,
+            vec!["chunked_policy (Production)"],
+        ),
+        (
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            Some("ubuntu2404-x86-rtxpro6000se-g4s48"),
+            vec![
+                "chunked_policy (Production)",
+                "autoregressive_action_tokens (Production)",
+                "flow_action_chunk (Production)",
+            ],
+        ),
+        (
+            "ubuntu2404-x86-l4-g2s8",
+            "ubuntu2404-x86-l4-g2s8",
+            Some("ubuntu2404-x86-l4-g2s8"),
+            vec!["chunked_policy (Preview)"],
+        ),
+        (
+            "macos26-m1pro-16gb",
+            "macos26-m1pro-16gb",
+            None,
+            vec!["chunked_policy (Preview)"],
+        ),
+    ] {
+        let section = section_for(fixture_name, accelerator);
+        let finding = section
+            .iter()
+            .find(|f| f.id == FindingId::ModelClassRows)
+            .expect("a model-class finding");
+        assert_eq!(finding.status, FindingStatus::Pass, "{row_id}");
+        for class in expected {
+            assert!(
+                finding.message.contains(class),
+                "{row_id}: must name `{class}` from the registry: {}",
+                finding.message
+            );
+        }
+    }
+}
+
+#[test]
+fn a_row_claiming_no_model_classes_says_so_rather_than_rendering_empty() {
+    // The A100 row is Planned, and the registry refuses to let a Planned
+    // row carry model-class claims. An empty render would read as a
+    // broken row rather than an honest one.
+    let section = section_for(
+        "ubuntu2404-x86-a100-40g-a2hg1",
+        Some("ubuntu2404-x86-a100-40g-a2hg1"),
+    );
+    let finding = section
+        .iter()
+        .find(|f| f.id == FindingId::ModelClassRows)
+        .expect("a model-class finding");
+    assert!(
+        finding.message.contains("claims no model classes"),
+        "got {}",
+        finding.message
+    );
+}
+
+#[test]
+fn model_classes_are_skipped_when_no_row_matched() {
+    // Nothing to explain when nothing resolved, and the row finding
+    // already carries the reason -- repeating it here would give an
+    // operator two things to read for one fact.
+    let mut riscv = sources_of(&fixture("ubuntu2404-x86-cpu"));
+    riscv.uname_machine = Some("riscv64".to_string());
+    let report = identify_platform(&riscv).expect("detects");
+    let registry = registry();
+    let section = render_host_section(Ok(&report), Ok(&registry));
+    let finding = section
+        .iter()
+        .find(|f| f.id == FindingId::ModelClassRows)
+        .expect("a model-class finding");
+    assert_eq!(finding.status, FindingStatus::Skipped);
+}
+
+#[test]
 fn a_near_miss_os_version_resolves_to_no_row() {
     // One dimension wrong, everything else exact. Matching is exact
     // string equality, so an OS the matrix does not name must not be
