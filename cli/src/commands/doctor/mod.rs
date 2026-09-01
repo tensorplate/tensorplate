@@ -340,6 +340,28 @@ pub fn render_host_section(
 /// fails still gets the host-level answer, and the pair says which half
 /// of the identity was the problem.
 fn render_platform_row(registry: &PlatformRegistry, report: &PlatformReport) -> Finding {
+    // A GPU host whose driver is missing or broken reports no accelerator,
+    // and resolving host-only would land it on a CPU row -- telling an
+    // operator whose driver is broken that their machine is a supported
+    // CPU box. The PCI bus says which of the two this is, and it answers
+    // without a driver. Checked before resolution, and in the same order
+    // deploy admission checks it, so the two cannot disagree about this
+    // machine.
+    if report.accelerator.is_none() && !report.host.exact.nvidia_pci_functions.is_empty() {
+        return Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!(
+                "the PCI bus reports an NVIDIA display controller at {} but no accelerator could be identified ({})",
+                report.host.exact.nvidia_pci_functions.join(", "),
+                PlatformReason::MissingDriverRuntime.as_str()
+            ),
+            Some(
+                "the driver is absent or not functional; deploy admission refuses this machine rather than serving on the CPU without saying so"
+                    .into(),
+            ),
+        );
+    }
     let detected = report.detected_platform();
     match registry.resolve(&detected) {
         RowMatch::Supported(row) => Finding::ok(

@@ -226,6 +226,42 @@ fn every_production_row_resolves_to_its_exact_row_id() {
 }
 
 #[test]
+fn a_driverless_gpu_host_is_not_reported_as_a_cpu_row() {
+    // The silent-downgrade case. The host has an NVIDIA card on the PCI
+    // bus and no working driver, so no accelerator is identified --
+    // resolving on host identity alone lands it on the CPU-only row and
+    // tells the operator their broken machine is supported. Deploy
+    // admission refuses this machine; doctor must not disagree.
+    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
+    assert!(
+        !report.host.exact.nvidia_pci_functions.is_empty(),
+        "the fixture must carry PCI evidence of a GPU"
+    );
+    assert!(
+        report.accelerator.is_none(),
+        "and no identified accelerator"
+    );
+
+    let registry = registry();
+    let section = render_host_section(Ok(&report), Ok(&registry));
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("a row finding");
+    assert_eq!(row.status, FindingStatus::Unsupported);
+    assert!(
+        row.message.contains("missing_driver_runtime"),
+        "the typed reason must say the driver is the problem: {}",
+        row.message
+    );
+    assert!(
+        !row.message.contains("ubuntu2404-x86-cpu"),
+        "a broken GPU host must never read as a supported CPU box: {}",
+        row.message
+    );
+}
+
+#[test]
 fn a_near_miss_os_version_resolves_to_no_row() {
     // One dimension wrong, everything else exact. Matching is exact
     // string equality, so an OS the matrix does not name must not be

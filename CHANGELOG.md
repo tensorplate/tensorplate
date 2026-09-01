@@ -23,6 +23,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `unsupported` naming the row and `row_planned_not_validated` — the
   A100 40GB row reads that way today.
 
+  A GPU host whose driver is missing or broken is refused here rather
+  than resolved: it reports no accelerator, so resolving on host identity
+  alone would land it on a CPU-only row and tell an operator their broken
+  machine is supported. The PCI bus distinguishes the two without a
+  driver, checked in the same order deploy admission checks it, so the two
+  cannot disagree about that machine.
+
   This is also where an exact-equality miss becomes visible. A near-miss OS
   version or an off-matrix accelerator SKU resolves to no row with the
   typed reason naming the dimension that missed, where the host-level
