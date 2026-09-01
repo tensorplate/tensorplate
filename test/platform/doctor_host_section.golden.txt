@@ -24,7 +24,7 @@
 
 ## ubuntu2404-x86-l4-g2s8
 [ok] info host_facts — host arch=x86_64 vendor=intel
-[ok] info host_os — Ubuntu 24.04 on g2-standard-8 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info host_os — Ubuntu 24.04 on g2-standard-8 [exact: version 24.04.4 LTS (Noble Numbat)]
 [ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s8
     hint: several rows share this host profile; accelerator identity is needed to name one
 

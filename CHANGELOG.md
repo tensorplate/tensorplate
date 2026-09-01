@@ -6,6 +6,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Changed
+
+- The L4 row's fixtures are now recorded, not transcribed
+  (V021-E02-F02-T04). Captured by `tensorplate doctor --record` on a
+  disposable GCP `g2-standard-8` booted from stock `ubuntu-2404-lts-amd64`
+  with the driver installed the documented way (`ubuntu-drivers install
+  --gpgpu`, branch 595). The recorded SKU, memory figure, and `[N/A]` MIG
+  spelling agreed with the transcription byte-for-byte, so the row needed
+  no correction — the fixture now proves it rather than assumes it. The
+  invented driver version is corrected from observation; the observed GPU
+  UUID is replaced with a clearly synthetic value in the public fixture. A
+  second recording from the Ubuntu 24.04 Deep Learning VM image (driver
+  580.173.02) agreed on every silicon fact and is committed as the row's
+  second covered boot path (`dlvm-ubuntu2404-l4-g2s8` host and accelerator
+  fixtures), harness-asserted like the lab Jetson's extra recording.
+
 ### Added
 
 - `tensorplate doctor --record <dir>` captures this machine's raw platform
