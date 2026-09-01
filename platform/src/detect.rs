@@ -123,6 +123,12 @@ pub struct ExactHostFacts {
     pub reported_machine: Option<String>,
     /// Device model string where the platform has one.
     pub device_model: Option<String>,
+    /// Total host memory in bytes, from `/proc/meminfo` on Linux and
+    /// `hw.memsize` on macOS.
+    ///
+    /// On a unified-memory platform this is the same pool the accelerator
+    /// draws from, which is the fact per-row memory telemetry turns on.
+    pub host_total_memory_bytes: Option<u64>,
     /// PCI addresses of NVIDIA display or 3D controllers physically
     /// present, whether or not a driver can talk to them.
     ///
@@ -432,6 +438,17 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
 
     let mut exact = ExactHostFacts {
         reported_machine,
+        host_total_memory_bytes: sources
+            .proc_meminfo
+            .as_deref()
+            .and_then(mem_total_from_meminfo)
+            .or_else(|| {
+                sources
+                    .hw_memsize
+                    .as_deref()
+                    .map(str::trim)
+                    .and_then(|raw| raw.parse::<u64>().ok())
+            }),
         ..ExactHostFacts::default()
     };
 
