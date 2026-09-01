@@ -39,6 +39,7 @@ pub mod reason;
 pub mod registry;
 pub mod roadmap;
 pub mod row;
+pub mod signal_telemetry;
 
 pub use accelerator::{
     identify_accelerator, AcceleratorReport, AcceleratorSources, ExactAcceleratorFacts,
@@ -67,3 +68,4 @@ pub use row::{
     StackComponent, SupportLevel, ValidationEnvironment, ValidationEnvironmentKind,
     PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
 };
+pub use signal_telemetry::{SignalName, SignalOutcome, SignalStatus, SignalTelemetry};

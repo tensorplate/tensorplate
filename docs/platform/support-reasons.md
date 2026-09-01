@@ -22,7 +22,7 @@ an engineer who greps another are looking at the same fact.
 | `missing_backend_package` | A package the matched row requires is not installed — including a backend whose descriptor is absent. |
 | `missing_driver_runtime` | A required driver or compute runtime is absent or version-mismatched, **or** the PCI bus reports an accelerator that no driver could identify. |
 | `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
-| `telemetry_degraded` | A telemetry collector expected on the matched row fails at run time. |
+| `telemetry_degraded` | A telemetry collector expected on the matched row fails at run time. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source is recorded and does not. A signal the row declares `not_applicable` was never asked for and cannot produce this. |
 | `row_planned_not_validated` | The machine matches a Planned row exactly: named, carrying no validation evidence. |
 
 ## Boundaries that are easy to blur
@@ -38,6 +38,13 @@ is broken reports no accelerator and would otherwise resolve to a CPU-only
 row — a supported answer, for a machine that will not serve. The PCI bus
 distinguishes the two without a driver, which is why it is consulted
 before resolution.
+
+**An absent sensor is not a failed one, and its explanation is a row
+fact.** A row that declares a signal `not_applicable` carries free text
+saying why — macOS exposes neither per-device power nor GPU utilization
+without privileged access. That text deliberately does not draw from this
+vocabulary: these values say why a *platform* is unsupported, and a sensor
+an OS does not expose is not a support claim about the machine.
 
 **A machine-shape miss has no reason at all.** The vocabulary has no value
 for "this hardware is validated, this chassis is not", and every nearby

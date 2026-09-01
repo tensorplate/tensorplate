@@ -8,6 +8,39 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Gate-semantic handling for the platform signals a row declares
+  (V021-E04-F02-T02), and with it the only producer of
+  `telemetry_degraded`. A row states, per signal, whether it gates
+  behaviour, is reported for context, or is absent here; this resolves
+  that declaration against what the collectors actually read.
+
+  The three postures are genuinely different and every pair is plausible
+  to collapse. A thermal sensor that fails on a Jetson is a machine that
+  cannot be trusted to throttle itself, and it degrades deployment. The
+  same failure on a datacenter row is a missing number on a chassis whose
+  cooling is somebody else's problem: it is recorded, and it does not
+  block — refusing there would make a context signal load-bearing by the
+  back door, which is the row's decision and not this code's. A power
+  reading macOS does not expose without privileges was never going to be
+  there, so it is not asked for and cannot fail.
+
+  An absent signal carries the row's own free-text explanation rather
+  than a typed platform reason. Those say why a *platform* is
+  unsupported; a sensor an OS does not expose is not a support claim
+  about the machine.
+
+### Changed
+
+- Platform signal telemetry is carried in the status and evidence
+  projections rather than on the metric stream. The frozen metric event
+  cannot express these signals — `MetricUnit` has no celsius or watts and
+  the allowed label keys carry no row identity — and bumping a frozen
+  wire contract to add them is a larger change than this work needs. The
+  decision is recorded rather than assumed, and is reversible: nothing
+  here depends on staying off the metric stream.
+
+### Added
+
 - Per-row memory telemetry reads what a machine has against what its row
   budgets, in the row's own memory model (V021-E04-F02-T01). Host memory
   is now captured as an exact fact (`/proc/meminfo` on Linux,
