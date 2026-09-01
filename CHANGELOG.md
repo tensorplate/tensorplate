@@ -8,6 +8,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The typed platform-reason vocabulary is frozen for v0.2.1 and documented
+  in `docs/platform/support-reasons.md` (V021-E04-F01-T02): ten values,
+  their wire spellings, and the condition that triggers each.
+
+- Backend probe failures now carry a typed reason instead of prose alone.
+  `accelerator_runtime_unavailable` gets its first producer on the Rust
+  side, and the boundary it exists to keep is now enforced by a single
+  classification: an absent descriptor is `missing_backend_package`
+  (install something), and every other probe failure is a runtime that is
+  installed and unusable. Collapsing them tells an operator whose PyTorch
+  cannot reach its accelerator to reinstall a package they already have.
+  The reason reaches the wire through the same error-record context the
+  admission rejections already use.
+
+- The reason vocabulary is now checked as a cross-language contract. The
+  Python sidecar emits its own reason strings — an unavailable MPS runtime
+  is the one that exists today — and a test reads the sidecar source and
+  asserts every constant is a spelling this enum owns. A rename on either
+  side that the other does not follow would otherwise surface as an
+  unrecognized string on a machine rather than as a failing test.
+
+### Added
+
 - `doctor` now names the support row a machine **is**, not only the rows it
   could be (V021-E04-F01-T01). The new `platform_row` finding resolves the
   detected host *and* accelerator against the registry — the answer

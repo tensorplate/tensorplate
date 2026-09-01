@@ -41,6 +41,8 @@ use tensorplate_protocol::bundle::{
 };
 use tensorplate_protocol::bundle_manifest::BundleManifest;
 
+use tensorplate_platform::PlatformReason;
+
 use crate::backend_detection::{BackendProbeReport, BackendProbeState};
 use crate::config::{AgentConfig, BackendCapability};
 use crate::error::{AgentError, AgentResult};
@@ -163,6 +165,7 @@ pub fn verify_with_probes(
             return Err(AgentError::BackendUnrunnable {
                 backend: backend_hint.to_string(),
                 reason: format_probe_reason(&report.state),
+                platform_reason: PlatformReason::for_backend_probe(&report.state),
             });
         }
     }
@@ -391,6 +394,10 @@ mod tests {
         clippy::default_trait_access,
         clippy::needless_borrows_for_generic_args
     )]
+
+    use tensorplate_platform::PlatformReason;
+
+    use crate::backend_detection::{BackendProbeReport, BackendProbeState};
 
     use super::{verify, AgentConfig, AgentError, BackendCapability};
     use std::collections::BTreeMap;
@@ -659,12 +666,63 @@ mod tests {
         );
         let err = verify_with_probes(bundle.path(), &cfg, &probes).expect_err("must reject");
         match err {
-            AgentError::BackendUnrunnable { backend, reason } => {
+            AgentError::BackendUnrunnable {
+                backend,
+                reason,
+                platform_reason,
+            } => {
                 assert_eq!(backend, "python_pytorch");
                 assert!(reason.contains("descriptor not installed"));
+                // An absent descriptor is a package that is not
+                // installed, and must not read as a runtime that is.
+                assert_eq!(platform_reason, Some(PlatformReason::MissingBackendPackage));
             }
             other => panic!("expected BackendUnrunnable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_runtime_that_will_not_import_is_not_a_missing_package() {
+        // The distinction the reason vocabulary exists to keep. Both
+        // states refuse the deploy; they send an operator to different
+        // places, and collapsing them tells someone whose PyTorch cannot
+        // reach its accelerator to reinstall a package they already have.
+        use super::verify_with_probes;
+        use std::collections::BTreeMap;
+
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"smolvla","version":"1","format_version":"0.1","model_class":"vla","backend_hint":"python_pytorch","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.available_backends.push("python_pytorch".into());
+
+        let mut probes = BTreeMap::new();
+        probes.insert(
+            "python_pytorch".into(),
+            BackendProbeReport {
+                backend_name: "python_pytorch".into(),
+                descriptor_path: PathBuf::from("/usr/share/tensorplate/backends/python_pytorch"),
+                state: BackendProbeState::PytorchMissing {
+                    detail: "No module named 'torch'".into(),
+                },
+                install_hint: None,
+            },
+        );
+
+        let record = verify_with_probes(bundle.path(), &cfg, &probes)
+            .expect_err("an unusable runtime must refuse the deploy")
+            .to_record();
+        // The typed reason must reach the wire, not stop at the crate
+        // boundary: `context` is what a CLI and the durable store read.
+        assert_eq!(
+            record.context.as_deref(),
+            Some("accelerator_runtime_unavailable"),
+            "an installed-but-unusable runtime is not a missing package"
+        );
     }
 
     #[test]
