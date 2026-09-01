@@ -15,8 +15,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tensorplate_platform::{
-    identify, identify_jetson_accelerator, nvidia_pci_functions, CpuArchitecture, DetectedPlatform,
-    HostSources, PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
+    identify, identify_accelerator, identify_jetson_accelerator, nvidia_pci_functions,
+    AcceleratorSources, CpuArchitecture, DetectedPlatform, HostSources, PlatformProbeError,
+    PlatformReason, PlatformRegistry, RowMatch,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -261,6 +262,63 @@ fn a_host_identity_resolves_through_the_registry_to_its_own_row() {
             candidates.contains(&row_id),
             "{name}: `{row_id}` must be among its own host candidates, got {candidates:?}"
         );
+    }
+}
+
+#[test]
+fn the_dlvm_recording_resolves_to_the_l4_row_it_covers() {
+    // The DLVM recording is the L4 row's second covered boot path, and its
+    // accelerator fixture is not named for a row, so the filename-mapped
+    // accelerator tests skip it. This is the explicit pairing: the
+    // recording's own host sources and raw `nvidia-smi` answer, driven
+    // through full detection, must resolve to the row the coverage claim
+    // names -- and the recorded SKU must be the row's, byte for byte. A
+    // wrong SKU, or a MIG column reading `Enabled`, fails here.
+    let registry = PlatformRegistry::load(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("config/platform"),
+    )
+    .expect("registry loads");
+
+    let fixture = fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "dlvm-ubuntu2404-l4-g2s8")
+        .map(|(_, f)| f)
+        .expect("the recorded DLVM fixture exists");
+    assert_eq!(fixture["matches_row"], Value::Bool(true));
+    let host = identify(&sources_of(&fixture))
+        .expect("detection succeeds")
+        .identity;
+
+    let recorded_answer = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test/platform/accelerator/dlvm-ubuntu2404-l4-g2s8.txt"),
+    )
+    .expect("the recorded DLVM accelerator answer exists");
+    let accelerator = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(recorded_answer),
+    })
+    .expect("the recorded answer interprets")
+    .expect("the recording carries one accelerator");
+
+    let row = registry
+        .row("ubuntu2404-x86-l4-g2s8")
+        .expect("the L4 row is committed");
+    assert_eq!(
+        accelerator.identity.sku,
+        row.accelerator().expect("a GPU row").sku,
+        "the recorded SKU must be the row's, byte for byte"
+    );
+    match registry.resolve(&DetectedPlatform::with_accelerator(
+        host,
+        accelerator.identity,
+    )) {
+        RowMatch::Supported(resolved) => {
+            assert_eq!(resolved.row_id(), "ubuntu2404-x86-l4-g2s8");
+        }
+        other => panic!("the second boot path must resolve to its row, got {other:?}"),
     }
 }
 
