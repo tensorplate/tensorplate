@@ -87,10 +87,15 @@ pub struct SignalTelemetry {
 impl SignalTelemetry {
     /// Resolve a row's declared postures against collector outcomes.
     ///
-    /// `collected` names the signals whose source answered. A signal the
+    /// `outcomes` names the signals whose source answered. A signal the
     /// row declares `not_applicable` is never asked for, so its presence
-    /// or absence in `collected` is ignored rather than treated as a
+    /// or absence in `outcomes` is ignored rather than treated as a
     /// result.
+    ///
+    /// An omitted applicable signal is resolved to `Unavailable`. A
+    /// partial collector map is itself a failed collection result; leaving
+    /// the outcome as `None` would make the same omission indistinguishable
+    /// from `not_applicable` and fail open on load-bearing signals.
     #[must_use]
     pub fn resolve(
         row: &PlatformSupportRow,
@@ -112,9 +117,14 @@ impl SignalTelemetry {
                 SignalStatus {
                     gate: gate.gate,
                     not_applicable_reason: declared_absent.then(|| gate.reason.clone()).flatten(),
-                    outcome: (!declared_absent)
-                        .then(|| outcomes.get(&name).cloned())
-                        .flatten(),
+                    outcome: (!declared_absent).then(|| {
+                        outcomes
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_else(|| SignalOutcome::Unavailable {
+                                detail: "collector produced no outcome".to_string(),
+                            })
+                    }),
                 },
             );
         }
@@ -132,6 +142,13 @@ impl SignalTelemetry {
     #[must_use]
     pub fn signal(&self, name: SignalName) -> Option<&SignalStatus> {
         self.signals.get(&name)
+    }
+
+    /// Every signal in stable name order, for status and evidence
+    /// projections. All five entries are present; only a row-declared
+    /// `not_applicable` entry has no outcome.
+    pub fn signals(&self) -> impl Iterator<Item = (SignalName, &SignalStatus)> {
+        self.signals.iter().map(|(name, status)| (*name, status))
     }
 
     /// Signals whose source was expected here and failed, whatever their
@@ -162,10 +179,22 @@ impl SignalTelemetry {
     /// would make a context signal load-bearing by the back door.
     #[must_use]
     pub fn degrades_deployment(&self) -> bool {
-        self.signals.values().any(|status| {
-            status.gate == GateValue::LoadBearing
-                && matches!(status.outcome, Some(SignalOutcome::Unavailable { .. }))
-        })
+        !self.deployment_degrading_signals().is_empty()
+    }
+
+    /// Failed signals whose row posture makes them deployment gates.
+    /// Context-only failures remain in [`Self::failed_signals`] and status,
+    /// but must not be presented as reasons a deployment was refused.
+    #[must_use]
+    pub fn deployment_degrading_signals(&self) -> Vec<SignalName> {
+        self.signals
+            .iter()
+            .filter(|(_, status)| {
+                status.gate == GateValue::LoadBearing
+                    && matches!(status.outcome, Some(SignalOutcome::Unavailable { .. }))
+            })
+            .map(|(name, _)| *name)
+            .collect()
     }
 
     /// Signals the row declares absent, with the row's own explanation.

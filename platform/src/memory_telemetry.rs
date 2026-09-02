@@ -23,7 +23,7 @@ pub struct PlatformMemoryTelemetry {
     memory_profile: PlatformMemoryProfileName,
     host_total_bytes: Option<u64>,
     accelerator_total_bytes: Option<u64>,
-    row_budget_bytes: u64,
+    row_nominal_capacity_bytes: u64,
     memory_gate: GateValue,
 }
 
@@ -53,7 +53,7 @@ impl PlatformMemoryTelemetry {
             memory_profile: declared.memory_profile,
             host_total_bytes,
             accelerator_total_bytes,
-            row_budget_bytes: declared.memory_bytes,
+            row_nominal_capacity_bytes: declared.memory_bytes,
             memory_gate: row.gate_semantics().memory.gate,
         })
     }
@@ -90,8 +90,8 @@ impl PlatformMemoryTelemetry {
     }
 
     #[must_use]
-    pub fn row_budget_bytes(&self) -> u64 {
-        self.row_budget_bytes
+    pub fn row_nominal_capacity_bytes(&self) -> u64 {
+        self.row_nominal_capacity_bytes
     }
 
     #[must_use]
@@ -99,23 +99,22 @@ impl PlatformMemoryTelemetry {
         self.memory_gate
     }
 
-    /// Whether this machine carries at least the memory its row budgets.
+    /// The usable capacity this row may budget on this observation.
     ///
-    /// `None` when the figure could not be read: absence is not a
-    /// shortfall, and a gate that treated it as one would refuse a
-    /// machine for a probe failure.
-    #[must_use]
-    pub fn meets_row_budget(&self) -> Option<bool> {
-        Some(self.accelerator_total_bytes? >= self.row_budget_bytes)
-    }
-
-    /// Whether a shortfall here is load-bearing on this row.
+    /// A row records the device's nominal capacity while runtime probes
+    /// report usable memory after firmware and driver reservations. Those
+    /// are deliberately different quantities: an L4 row says 24 GiB and
+    /// `nvidia-smi` reports less. Treating nominal capacity as a minimum
+    /// would therefore reject the exact device the row was validated on.
     ///
-    /// The gate is a row fact, not a global policy: the same shortfall
-    /// blocks on a row whose memory gate is load-bearing and is context
-    /// on one where it is not.
+    /// The observed value is instead a ceiling, bounded by the row's
+    /// nominal claim. This is the same rule used by [`crate::PlatformCapability`]
+    /// for model admission. `None` means no usable-capacity observation was
+    /// available; callers report that as collector availability rather than
+    /// inventing a memory shortfall.
     #[must_use]
-    pub fn shortfall_is_load_bearing(&self) -> bool {
-        self.memory_gate == GateValue::LoadBearing && self.meets_row_budget() == Some(false)
+    pub fn effective_budget_bytes(&self) -> Option<u64> {
+        self.accelerator_total_bytes
+            .map(|observed| observed.min(self.row_nominal_capacity_bytes))
     }
 }

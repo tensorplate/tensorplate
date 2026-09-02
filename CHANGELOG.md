@@ -20,23 +20,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
   The listing is matched on the exact service name. `tensorplate-agent`
   is a prefix of nothing today, and relying on that staying true is how a
-  future sibling service would silently answer for the agent.
+  future sibling service would silently answer for the agent. Both
+  services are read from one `brew services list` snapshot. A failed
+  supervisor query is reported as unavailable, with bounded diagnostics,
+  rather than being mistaken for two services that are not installed.
+  Homebrew's CLI config and platform registry also count as install
+  footprints, so these checks run for a component install even when the
+  optional Python backend is absent.
 
 ### Deferred
 
-- Per-row live telemetry samples for the evidence bundle are captured
-  during the hardware validation runs rather than here: the code and its
-  fixture samples land now, and the live samples need machines that the
-  lifecycle harness provisions. Recorded in the tracker as part of the
-  hardware gate rather than left implicit.
+- Live thermal, power, throttle, and GPU-utilization collectors, together
+  with their hardware evidence samples, remain part of the tracked
+  hardware-validation work. This change lands the row-owned policy,
+  fail-closed snapshot resolver, admission gate, and status projection;
+  it does not manufacture live outcomes on machines where no collector is
+  wired. Startup memory facts are the exception because they already come
+  from the platform report used for row resolution.
 
 ### Added
 
 - Gate-semantic handling for the platform signals a row declares
   (V021-E04-F02-T02), and with it the only producer of
   `telemetry_degraded`. A row states, per signal, whether it gates
-  behaviour, is reported for context, or is absent here; this resolves
-  that declaration against what the collectors actually read.
+  behaviour, is reported for context, or is absent here. When a caller
+  supplies a collector snapshot, the resolver applies that declaration
+  to every stable signal name; an omitted applicable result becomes an
+  explicit unavailable outcome rather than silently passing.
 
   The three postures are genuinely different and every pair is plausible
   to collapse. A thermal sensor that fails on a Jetson is a machine that
@@ -55,18 +65,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
-- Platform signal telemetry is carried in the status and evidence
-  projections rather than on the metric stream. The frozen metric event
-  cannot express these signals — `MetricUnit` has no celsius or watts and
-  the allowed label keys carry no row identity — and bumping a frozen
-  wire contract to add them is a larger change than this work needs. The
-  decision is recorded rather than assumed, and is reversible: nothing
-  here depends on staying off the metric stream.
+- Platform telemetry has an additive agent-status projection, also
+  surfaced by `tensorplate status` so hardware validation can record the
+  same JSON as evidence. It is not placed on the metric stream: the frozen
+  metric event cannot express these signals — `MetricUnit` has no celsius
+  or watts and the allowed label keys carry no row identity. The decision
+  is recorded rather than assumed, and is reversible.
+
+  The optional, output-only status field remains on the local control
+  protocol's pre-1.0 `0.1` contract, matching the existing supervision and
+  serving-URL additions: old serde readers ignore it and new readers
+  default its absence. The constrained exception is now explicit in the
+  protocol/versioning documentation; request fields and semantic changes
+  still require a version bump.
 
 ### Added
 
-- Per-row memory telemetry reads what a machine has against what its row
-  budgets, in the row's own memory model (V021-E04-F02-T01). Host memory
+- Per-row memory telemetry reports what a machine has alongside its row's
+  nominal capacity, in the row's own memory model (V021-E04-F02-T01). Host memory
   is now captured as an exact fact (`/proc/meminfo` on Linux,
   `hw.memsize` on macOS), and the telemetry pairs it with the accelerator
   figure the row-appropriate source reports.
@@ -79,11 +95,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   while the OS is living in it. The telemetry says which model applies,
   so a caller cannot sum two halves of one pool.
 
-  `load_bearing` memory gates consume these fields: a machine below its
-  row budget is actionable where the row gates on memory and context
-  where it does not. An unreadable figure is deliberately not a
-  shortfall — a gate that treated a failed probe as a machine being too
-  small would refuse it for a different fault with a different fix.
+  Nominal row capacity is not a minimum usable-memory threshold. Driver
+  and firmware reservations make canonical L4 and Jetson observations
+  smaller than their marketed capacities, so the observed value is a
+  usable ceiling bounded by the row's nominal claim. An unreadable figure
+  remains absent rather than becoming a fabricated shortfall. A future
+  load-bearing minimum must be a separately validated row value, not a
+  comparison between these unlike quantities.
 
 ### Added
 

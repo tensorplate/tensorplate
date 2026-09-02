@@ -596,6 +596,13 @@ impl Coordinator {
         } else {
             AgentRunState::Ready
         };
+        if self
+            .platform_admission
+            .as_ref()
+            .is_some_and(PlatformAdmission::telemetry_degraded)
+        {
+            agent_state = AgentRunState::Degraded;
+        }
         let to_summary = |d: &DeploymentRecord| DeploymentSummary {
             deployment_id: d.deployment_id.clone(),
             bundle_digest: d.bundle_digest.clone(),
@@ -673,6 +680,10 @@ impl Coordinator {
             quarantined,
             recovery: None,
             supervision,
+            platform_telemetry: self
+                .platform_admission
+                .as_ref()
+                .and_then(PlatformAdmission::telemetry_status),
         })
     }
 

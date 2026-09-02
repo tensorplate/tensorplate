@@ -485,6 +485,7 @@ mod tests {
             quarantined: vec![],
             recovery: None,
             supervision: None,
+            platform_telemetry: None,
         };
         ControlResponse {
             agent_status: Some(agent_status),
@@ -590,6 +591,7 @@ mod tests {
                 quarantined: vec![],
                 recovery: None,
                 supervision: None,
+                platform_telemetry: None,
             }),
             ..ControlResponse::ok(Some("corr".into()))
         };

@@ -101,6 +101,48 @@ fn a_failed_load_bearing_sensor_degrades_deployment() {
 }
 
 #[test]
+fn an_empty_outcome_map_fails_applicable_load_bearing_signals_closed() {
+    let jetson = telemetry("jetson-orin-nano-8gb-jp62", &BTreeMap::new());
+    assert!(jetson.degrades_deployment());
+    assert_eq!(
+        jetson.degraded_reason(),
+        Some(PlatformReason::TelemetryDegraded)
+    );
+    for name in [
+        SignalName::Thermal,
+        SignalName::Power,
+        SignalName::Throttle,
+        SignalName::Memory,
+        SignalName::GpuUtilization,
+    ] {
+        assert!(
+            matches!(
+                jetson.signal(name).expect("declared").outcome,
+                Some(SignalOutcome::Unavailable { .. })
+            ),
+            "{}: omission must be an unavailable result",
+            name.as_str()
+        );
+    }
+}
+
+#[test]
+fn a_partial_outcome_map_cannot_turn_an_applicable_signal_into_not_applicable() {
+    let mut outcomes = everything_answered();
+    outcomes.remove(&SignalName::Thermal);
+    let jetson = telemetry("jetson-orin-nano-8gb-jp62", &outcomes);
+    let thermal = jetson.signal(SignalName::Thermal).expect("declared");
+    assert_eq!(thermal.gate, GateValue::LoadBearing);
+    assert_eq!(
+        thermal.outcome,
+        Some(SignalOutcome::Unavailable {
+            detail: "collector produced no outcome".into()
+        })
+    );
+    assert!(jetson.degrades_deployment());
+}
+
+#[test]
 fn a_failed_context_only_sensor_is_reported_without_blocking() {
     // The same failure on a datacenter row. It is recorded -- the reason
     // is still telemetry_degraded -- and it does not block, because the

@@ -158,6 +158,7 @@ mod tests {
             quarantined: vec![],
             recovery: None,
             supervision: None,
+            platform_telemetry: None,
         };
         ControlResponse {
             transaction_id: Some("tx-rollback".into()),

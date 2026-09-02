@@ -496,6 +496,7 @@ mod tests {
                 quarantined: vec![],
                 recovery: None,
                 supervision: None,
+                platform_telemetry: None,
             }),
             ..ControlResponse::ok(Some("c".into()))
         });
@@ -575,6 +576,7 @@ mod tests {
                 quarantined: vec![],
                 recovery: None,
                 supervision: None,
+                platform_telemetry: None,
             }),
             ..ControlResponse::ok(Some("c".into()))
         });
@@ -610,6 +612,7 @@ mod tests {
                 quarantined: vec![],
                 recovery: None,
                 supervision: None,
+                platform_telemetry: None,
             }),
             ..ControlResponse::ok(Some("c".into()))
         });

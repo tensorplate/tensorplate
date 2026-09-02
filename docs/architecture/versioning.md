@@ -72,6 +72,17 @@ runtime and agent both declare the protocol versions they accept; mismatched
 versions are rejected with a typed error during the deploy transaction's
 `verified` phase (lands in V01-E02 / V01-E08).
 
+Until per-schema minor-version negotiation lands, the local Rust agent
+control response has a constrained pre-1.0 exception: optional output-only
+`AgentStatus` fields may remain on `0.1` when old serde readers ignore them
+and new readers default their absence. The global decoder currently requires
+exact equality and shares its version with every protocol family, so a global
+minor bump would make such an additive local field operationally breaking.
+This exception does not cover request fields, removals, type changes, or
+meaning changes, and it must be removed when compatible version ranges are
+implemented. See [`protocol.md`](protocol.md#versioning) for the full
+conditions and existing fields covered by the rule.
+
 ### Schema version
 
 Each schema's `schemaVersion` field follows the same minor/major rules as

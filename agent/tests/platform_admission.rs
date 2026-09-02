@@ -12,7 +12,7 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use tensorplate_agent::error::AgentError;
@@ -20,10 +20,14 @@ use tensorplate_agent::platform_admission::{
     check_backend_packages, ObservedStack, PlatformAdmission,
 };
 use tensorplate_platform::{
-    identify, identify_accelerator, identify_jetson_accelerator, AcceleratorIdentity,
-    AcceleratorObservation, AcceleratorSources, AdmissionPosture, DetectedArchitecture,
-    DetectedVendor, ExactHostFacts, HostIdentity, HostReport, HostSources, PlatformReason,
-    PlatformRegistry, PlatformReport, PlatformSupportRow,
+    identify, identify_accelerator, identify_jetson_accelerator, identify_platform,
+    AcceleratorIdentity, AcceleratorObservation, AcceleratorSources, AdmissionPosture,
+    DetectedArchitecture, DetectedVendor, ExactHostFacts, HostIdentity, HostReport, HostSources,
+    PlatformReason, PlatformRegistry, PlatformReport, PlatformSupportRow, SignalName,
+    SignalOutcome,
+};
+use tensorplate_protocol::{
+    AgentRunState, PlatformSignalOutcomeStatus, PlatformTelemetryGate, PlatformTelemetrySignalName,
 };
 
 fn repo_root() -> PathBuf {
@@ -102,6 +106,42 @@ fn detected_from_fixture(row: &PlatformSupportRow, fixture: &str) -> PlatformRep
     .expect("detection succeeds")
     .expect("one device");
     report_of(row, host_of(row), Some(report.identity))
+}
+
+/// The canonical L4 observation with the fixture's usable framebuffer,
+/// rather than substituting the row's nominal capacity.
+fn observed_l4_report(registry: &PlatformRegistry) -> PlatformReport {
+    let row = l4(registry);
+    let text = std::fs::read_to_string(
+        repo_root().join("test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt"),
+    )
+    .expect("read L4 fixture");
+    let card = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(text),
+    })
+    .expect("fixture parses")
+    .expect("fixture reports one card");
+    PlatformReport {
+        host: HostReport {
+            identity: host_of(row),
+            exact: ExactHostFacts {
+                host_total_memory_bytes: Some(32 * 1024 * 1024 * 1024),
+                ..ExactHostFacts::default()
+            },
+        },
+        accelerator: Some(AcceleratorObservation {
+            identity: card.identity,
+            memory_bytes: card.exact.memory_total_bytes,
+            memory_profile: row.accelerator().expect("accelerator row").memory_profile,
+        }),
+    }
+}
+
+fn all_signal_outcomes() -> BTreeMap<SignalName, SignalOutcome> {
+    SignalName::all()
+        .into_iter()
+        .map(|name| (name, SignalOutcome::Collected))
+        .collect()
 }
 
 #[test]
@@ -643,11 +683,11 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
 /// The recorded sources from the in-lab Orin Nano, read from the fixture
 /// rather than restated here so this test and detection's own fixture
 /// tests cannot drift apart.
-fn lab_jetson_sources() -> HostSources {
+fn host_fixture_sources(name: &str) -> HostSources {
     let body = std::fs::read_to_string(
-        repo_root().join("test/platform/host_identity/lab-jetson-orin-nano-l4t-r36.5.json"),
+        repo_root().join(format!("test/platform/host_identity/{name}.json")),
     )
-    .expect("read the lab fixture");
+    .expect("read host fixture");
     let fixture: serde_json::Value = serde_json::from_str(&body).expect("fixture parses");
     let text = |key: &str| {
         fixture["sources"]
@@ -658,11 +698,23 @@ fn lab_jetson_sources() -> HostSources {
     HostSources {
         uname_machine: text("uname_machine"),
         os_release: text("os_release"),
+        cpuinfo: text("cpuinfo"),
         nv_tegra_release: text("nv_tegra_release"),
+        nvidia_jetpack_version: text("nvidia_jetpack_version"),
         device_tree_model: text("device_tree_model"),
+        sw_vers_product_name: text("sw_vers_product_name"),
+        sw_vers_product_version: text("sw_vers_product_version"),
+        sw_vers_build_version: text("sw_vers_build_version"),
+        cpu_brand: text("cpu_brand"),
+        hw_memsize: text("hw_memsize"),
+        gce_machine_type: text("gce_machine_type"),
         proc_meminfo: text("proc_meminfo"),
-        ..HostSources::default()
+        pci_devices: text("pci_devices"),
     }
+}
+
+fn lab_jetson_sources() -> HostSources {
+    host_fixture_sources("lab-jetson-orin-nano-l4t-r36.5")
 }
 
 #[test]
@@ -724,4 +776,309 @@ fn a_jetpack_6_1_jetson_is_not_admitted_to_the_6_2_row() {
         ),
         PlatformAdmission::Rejected { .. } => {}
     }
+}
+
+#[test]
+fn startup_memory_reaches_status_as_a_usable_bounded_ceiling() {
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let registry = registry();
+    let l4_report = observed_l4_report(&registry);
+    let l4_observed = l4_report
+        .accelerator
+        .as_ref()
+        .and_then(|accelerator| accelerator.memory_bytes)
+        .expect("recorded L4 fixture carries usable framebuffer");
+    let l4_admission =
+        PlatformAdmission::evaluate(&registry, &l4_report, &ObservedStack::default(), None);
+    let harness = common::Harness::new();
+    let coordinator = Arc::new(
+        Coordinator::new(
+            harness.config.clone(),
+            harness.store.clone(),
+            harness.worker.clone(),
+        )
+        .with_platform_admission(l4_admission),
+    );
+    let status = coordinator.status().expect("status");
+    assert_eq!(status.agent_state, AgentRunState::Ready);
+    let projected = status
+        .platform_telemetry
+        .expect("startup admission projects telemetry");
+    assert!(
+        projected.signals.is_empty(),
+        "no live signal snapshot was supplied"
+    );
+    let wire = serde_json::to_value(&projected).expect("serialize memory-only telemetry");
+    assert!(
+        wire.get("signals").is_none(),
+        "no collector snapshot is omitted on the wire rather than encoded as an empty snapshot"
+    );
+    let memory = projected.memory.expect("accelerator row projects memory");
+    assert!(l4_observed < memory.row_nominal_capacity_bytes);
+    assert_eq!(memory.effective_budget_bytes, Some(l4_observed));
+
+    let jetson_report = identify_platform(&lab_jetson_sources()).expect("Jetson fixture detects");
+    let jetson_observed = jetson_report
+        .accelerator
+        .as_ref()
+        .and_then(|accelerator| accelerator.memory_bytes)
+        .expect("Jetson fixture carries usable shared memory");
+    let jetson =
+        PlatformAdmission::evaluate(&registry, &jetson_report, &ObservedStack::default(), None)
+            .telemetry_status()
+            .expect("Jetson is supported");
+    let memory = jetson.memory.expect("Jetson projects shared memory");
+    assert!(memory.shares_one_pool);
+    assert!(jetson_observed < memory.row_nominal_capacity_bytes);
+    assert_eq!(memory.effective_budget_bytes, Some(jetson_observed));
+}
+
+#[test]
+fn a_context_only_failure_degrades_status_without_rejecting_deployment() {
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let registry = registry();
+    let report = observed_l4_report(&registry);
+    let mut outcomes = all_signal_outcomes();
+    outcomes.insert(
+        SignalName::Thermal,
+        SignalOutcome::Unavailable {
+            detail: "temperature source timed out".into(),
+        },
+    );
+    let admission = PlatformAdmission::evaluate_with_signal_outcomes(
+        &registry,
+        &report,
+        &ObservedStack::default(),
+        None,
+        &outcomes,
+    );
+    admission
+        .ensure_supported()
+        .expect("the L4 thermal gate is context-only");
+
+    let harness = common::Harness::new();
+    let status = Coordinator::new(
+        harness.config.clone(),
+        harness.store.clone(),
+        harness.worker.clone(),
+    )
+    .with_platform_admission(admission)
+    .status()
+    .expect("status");
+    assert_eq!(status.agent_state, AgentRunState::Degraded);
+    let telemetry = status.platform_telemetry.expect("telemetry projected");
+    assert_eq!(
+        telemetry.degraded_reason.as_deref(),
+        Some("telemetry_degraded")
+    );
+    assert!(!telemetry.deployment_degraded);
+    assert_eq!(telemetry.signals.len(), 5);
+    let names: HashSet<_> = telemetry.signals.iter().map(|signal| signal.name).collect();
+    assert_eq!(
+        names.len(),
+        5,
+        "each stable signal name appears exactly once"
+    );
+    assert!(names.contains(&PlatformTelemetrySignalName::Thermal));
+    assert!(telemetry.signals.iter().all(|signal| {
+        signal.outcome.is_none() == (signal.gate == PlatformTelemetryGate::NotApplicable)
+    }));
+}
+
+#[test]
+fn observed_memory_completes_a_four_non_memory_signal_snapshot() {
+    let registry = registry();
+    let jetson = identify_platform(&lab_jetson_sources()).expect("Jetson fixture detects");
+    let l4 = observed_l4_report(&registry);
+    let mut non_memory = all_signal_outcomes();
+    non_memory.remove(&SignalName::Memory);
+
+    for (name, report) in [("L4", l4), ("Jetson", jetson)] {
+        let admission = PlatformAdmission::evaluate_with_signal_outcomes(
+            &registry,
+            &report,
+            &ObservedStack::default(),
+            None,
+            &non_memory,
+        );
+        admission.ensure_supported().unwrap_or_else(|err| {
+            panic!("{name}: observed memory must complete the snapshot: {err}")
+        });
+        let telemetry = admission
+            .telemetry_status()
+            .expect("supported row projects");
+        assert_eq!(telemetry.degraded_reason, None, "{name}");
+        let memory = telemetry
+            .signals
+            .iter()
+            .find(|signal| signal.name == PlatformTelemetrySignalName::Memory)
+            .unwrap_or_else(|| panic!("{name}: memory signal projected"));
+        assert_eq!(
+            memory.outcome,
+            Some(PlatformSignalOutcomeStatus::Collected),
+            "{name}: startup memory observation supplies the memory collector outcome"
+        );
+    }
+
+    let mut explicit_failure = non_memory;
+    explicit_failure.insert(
+        SignalName::Memory,
+        SignalOutcome::Unavailable {
+            detail: "memory collector explicitly failed".into(),
+        },
+    );
+    let report = observed_l4_report(&registry);
+    let admission = PlatformAdmission::evaluate_with_signal_outcomes(
+        &registry,
+        &report,
+        &ObservedStack::default(),
+        None,
+        &explicit_failure,
+    );
+    assert!(
+        matches!(
+            admission.ensure_supported(),
+            Err(AgentError::PlatformNotAdmissible {
+                reason: Some(PlatformReason::TelemetryDegraded),
+                ..
+            })
+        ),
+        "an explicit memory collector outcome must override the startup observation"
+    );
+}
+
+#[test]
+fn omitted_load_bearing_outcome_blocks_deploy_and_is_explicit_in_status() {
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let registry = registry();
+    let report = identify_platform(&lab_jetson_sources()).expect("Jetson fixture detects");
+    let mut outcomes = all_signal_outcomes();
+    outcomes.remove(&SignalName::Thermal);
+    outcomes.insert(
+        SignalName::GpuUtilization,
+        SignalOutcome::Unavailable {
+            detail: "utilization source timed out".into(),
+        },
+    );
+    let admission = PlatformAdmission::evaluate_with_signal_outcomes(
+        &registry,
+        &report,
+        &ObservedStack::default(),
+        None,
+        &outcomes,
+    );
+    match admission.ensure_supported() {
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, Some(PlatformReason::TelemetryDegraded));
+            assert!(detail.contains("thermal"));
+            assert!(
+                !detail.contains("gpu_utilization"),
+                "context-only failures stay in status but are not named as deployment blockers: \
+                 {detail}"
+            );
+        }
+        other => panic!("omitted Jetson thermal outcome must reject, got {other:?}"),
+    }
+
+    let harness = common::Harness::new();
+    let coordinator = Arc::new(
+        Coordinator::new(
+            harness.config.clone(),
+            harness.store.clone(),
+            harness.worker.clone(),
+        )
+        .with_platform_admission(admission)
+        .with_platform_registry(registry),
+    );
+    let status = coordinator.status().expect("status");
+    assert_eq!(status.agent_state, AgentRunState::Degraded);
+    let telemetry = status.platform_telemetry.expect("telemetry projected");
+    assert_eq!(telemetry.signals.len(), 5);
+    assert!(telemetry.deployment_degraded);
+    let names: HashSet<_> = telemetry.signals.iter().map(|signal| signal.name).collect();
+    assert_eq!(names.len(), 5, "no signal may be duplicated or omitted");
+    let thermal = telemetry
+        .signals
+        .iter()
+        .find(|signal| signal.name == PlatformTelemetrySignalName::Thermal)
+        .expect("thermal projected");
+    assert!(matches!(
+        thermal.outcome,
+        Some(PlatformSignalOutcomeStatus::Unavailable { .. })
+    ));
+
+    let bundle = common::write_bundle(
+        harness.td.path(),
+        "telemetry-degraded",
+        common::BundleSpec::default(),
+    );
+    match coordinator.deploy("telemetry-degraded", &bundle, BTreeMap::new(), None, None) {
+        Err(AgentError::PlatformNotAdmissible { reason, .. }) => {
+            assert_eq!(reason, Some(PlatformReason::TelemetryDegraded));
+        }
+        other => panic!("load-bearing telemetry must block deploy, got {other:?}"),
+    }
+}
+
+#[test]
+fn generated_projection_uses_no_outcome_only_for_not_applicable_signals() {
+    let registry = registry();
+    let report = identify_platform(&host_fixture_sources("macos26-m1pro-16gb"))
+        .expect("Mac fixture detects");
+    let telemetry = PlatformAdmission::evaluate_with_signal_outcomes(
+        &registry,
+        &report,
+        &ObservedStack::default(),
+        None,
+        &all_signal_outcomes(),
+    )
+    .telemetry_status()
+    .expect("Mac row supported");
+    assert_eq!(telemetry.signals.len(), 5);
+    assert!(telemetry.signals.iter().all(|signal| {
+        signal.outcome.is_none() == (signal.gate == PlatformTelemetryGate::NotApplicable)
+    }));
+    let absent: HashSet<_> = telemetry
+        .signals
+        .iter()
+        .filter(|signal| signal.outcome.is_none())
+        .map(|signal| signal.name)
+        .collect();
+    assert_eq!(
+        absent,
+        HashSet::from([
+            PlatformTelemetrySignalName::Power,
+            PlatformTelemetrySignalName::GpuUtilization,
+        ])
+    );
+
+    let projected = serde_json::to_value(&telemetry).expect("serialize projection");
+    for signal in projected["signals"].as_array().expect("signal array") {
+        assert_eq!(
+            signal.get("outcome").is_none(),
+            signal["gate"] == "not_applicable",
+            "only not-applicable signals omit an outcome: {signal}"
+        );
+    }
+    let envelope = serde_json::json!({
+        "schema_version": tensorplate_protocol::SCHEMA_VERSION,
+        "status": "ok",
+        "agent_status": {
+            "agent_state": "ready",
+            "platform_telemetry": projected,
+        }
+    });
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../protocol/schemas/agent_control.json"))
+            .expect("control schema parses");
+    let validator = jsonschema::JSONSchema::compile(&schema).expect("control schema compiles");
+    assert!(
+        validator.is_valid(&envelope),
+        "generated projection must satisfy the public schema: {envelope}"
+    );
 }

@@ -59,7 +59,9 @@ pub mod worker_status;
 
 pub use agent_control::{
     is_valid_deployment_id, AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse,
-    DeployFailureSummary, DeployRequest, DeployStatus, DeploymentSummary, QuarantineSummary,
+    DeployFailureSummary, DeployRequest, DeployStatus, DeploymentSummary,
+    PlatformMemoryTelemetryStatus, PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus,
+    PlatformTelemetryGate, PlatformTelemetrySignalName, PlatformTelemetryStatus, QuarantineSummary,
     RecoveryAction, RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
     SupervisionStatusSummary, MAX_DEPLOYMENT_ID_BYTES,
 };

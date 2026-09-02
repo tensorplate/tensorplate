@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use tensorplate_cli::commands::doctor::finding::{Finding, FindingId, FindingStatus};
-use tensorplate_cli::commands::doctor::render_host_section;
+use tensorplate_cli::commands::doctor::{render_host_section, HostSectionDetection};
 use tensorplate_platform::{
     identify_accelerator, identify_platform, AcceleratorObservation, AcceleratorSources,
     HostSources, PlatformProbeError, PlatformRegistry, PlatformRegistryError, PlatformReport,
@@ -94,7 +94,8 @@ fn report_for(name: &str, accelerator: Option<&str>) -> PlatformReport {
 /// Render the host section for one committed row's identity.
 fn section_for(name: &str, accelerator: Option<&str>) -> Vec<Finding> {
     let registry = registry();
-    render_host_section(Ok(&report_for(name, accelerator)), Ok(&registry))
+    let report = report_for(name, accelerator);
+    render_host_section(HostSectionDetection::Complete(&report), Ok(&registry))
 }
 
 /// A stand-in load failure for tests that do not care which one it was.
@@ -243,7 +244,7 @@ fn a_driverless_gpu_host_is_not_reported_as_a_cpu_row() {
     );
 
     let registry = registry();
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
     let row = section
         .iter()
         .find(|f| f.id == FindingId::PlatformRow)
@@ -258,6 +259,147 @@ fn a_driverless_gpu_host_is_not_reported_as_a_cpu_row() {
         !row.message.contains("ubuntu2404-x86-cpu"),
         "a broken GPU host must never read as a supported CPU box: {}",
         row.message
+    );
+    let model_classes = section
+        .iter()
+        .find(|f| f.id == FindingId::ModelClassRows)
+        .expect("a model-class finding");
+    assert_eq!(model_classes.status, FindingStatus::Skipped);
+    assert!(
+        !model_classes.message.contains("ubuntu2404-x86-cpu"),
+        "dependent findings must consume the same resolution: {}",
+        model_classes.message
+    );
+}
+
+#[test]
+fn an_unreadable_accelerator_with_pci_evidence_names_the_driver_failure() {
+    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
+    let error = PlatformProbeError::Unreadable {
+        source_name: "nvidia-smi".to_string(),
+        detail: "driver communication failed".to_string(),
+    };
+    let registry = registry();
+
+    let section = render_host_section(
+        HostSectionDetection::AcceleratorProbeFailed {
+            host: &report.host,
+            error: &error,
+        },
+        Ok(&registry),
+    );
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("a row finding");
+    assert_eq!(row.status, FindingStatus::Unsupported);
+    assert!(row.message.contains("missing_driver_runtime"));
+    assert!(row.message.contains("driver communication failed"));
+    assert_eq!(
+        section
+            .iter()
+            .find(|f| f.id == FindingId::ModelClassRows)
+            .expect("a model-class finding")
+            .status,
+        FindingStatus::Skipped,
+    );
+}
+
+#[test]
+fn a_multi_gpu_answer_is_detection_failure_not_a_broken_driver() {
+    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
+    let one = std::fs::read_to_string(repo_path(
+        "test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt",
+    ))
+    .expect("read accelerator fixture");
+    let error = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(format!("{one}{one}")),
+    })
+    .expect_err("two GPUs are outside the supported topology");
+    let registry = registry();
+
+    let section = render_host_section(
+        HostSectionDetection::AcceleratorProbeFailed {
+            host: &report.host,
+            error: &error,
+        },
+        Ok(&registry),
+    );
+    let facts = section
+        .iter()
+        .find(|f| f.id == FindingId::HostFacts)
+        .expect("host facts");
+    assert_eq!(facts.status, FindingStatus::Pass);
+    let profile = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformProfile)
+        .expect("platform profile");
+    assert_eq!(profile.status, FindingStatus::Pass);
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("a row finding");
+    assert_eq!(row.status, FindingStatus::Warning);
+    assert!(row.message.contains("accelerator detection failed"));
+    assert!(
+        !row.message.contains("missing_driver_runtime"),
+        "a driver that answered must not be blamed: {}",
+        row.message
+    );
+    assert_eq!(
+        section
+            .iter()
+            .find(|f| f.id == FindingId::ModelClassRows)
+            .expect("a model-class finding")
+            .status,
+        FindingStatus::Skipped,
+    );
+}
+
+#[test]
+fn malformed_integrated_accelerator_facts_do_not_erase_the_host() {
+    let mut sources = sources_of(&fixture("macos26-m1pro-16gb"));
+    sources.hw_memsize = Some("sixteen gibibytes".to_string());
+    let host = tensorplate_platform::identify(&sources).expect("host still interprets");
+    let error = identify_platform(&sources).expect_err("accelerator memory must be numeric");
+    let registry = registry();
+
+    let section = render_host_section(
+        HostSectionDetection::AcceleratorProbeFailed {
+            host: &host,
+            error: &error,
+        },
+        Ok(&registry),
+    );
+    for id in [
+        FindingId::HostFacts,
+        FindingId::HostOs,
+        FindingId::PlatformProfile,
+    ] {
+        let finding = section
+            .iter()
+            .find(|finding| finding.id == id)
+            .expect("host-derived finding");
+        assert_eq!(
+            finding.status,
+            FindingStatus::Pass,
+            "{id:?} must survive an accelerator-only error"
+        );
+    }
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("a row finding");
+    assert_eq!(row.status, FindingStatus::Warning);
+    assert!(row.message.contains("hw.memsize"));
+    assert!(!row.message.contains("missing_driver_runtime"));
+    assert_eq!(
+        section
+            .iter()
+            .find(|f| f.id == FindingId::ModelClassRows)
+            .expect("a model-class finding")
+            .status,
+        FindingStatus::Skipped,
     );
 }
 
@@ -343,7 +485,7 @@ fn model_classes_are_skipped_when_no_row_matched() {
     riscv.uname_machine = Some("riscv64".to_string());
     let report = identify_platform(&riscv).expect("detects");
     let registry = registry();
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
     let finding = section
         .iter()
         .find(|f| f.id == FindingId::ModelClassRows)
@@ -365,7 +507,7 @@ fn a_near_miss_os_version_resolves_to_no_row() {
     );
     let report = identify_platform(&sources).expect("detects");
     let registry = registry();
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
 
     let row = section
         .iter()
@@ -401,7 +543,7 @@ fn a_near_miss_accelerator_sku_resolves_to_no_row() {
     });
 
     let registry = registry();
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
 
     let profile = section
         .iter()
@@ -431,7 +573,7 @@ fn an_off_matrix_host_renders_a_typed_no_match_not_a_failure() {
     riscv.uname_machine = Some("riscv64".to_string());
     let report = identify_platform(&riscv).expect("detects");
     let registry = registry();
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
 
     let profile = section
         .iter()
@@ -459,7 +601,10 @@ fn undetectable_host_identity_never_fails_doctor() {
         source_name: "sysctl".to_string(),
         detail: "Operation not permitted".to_string(),
     };
-    let section = render_host_section(Err(&err), Err(&NO_REGISTRY));
+    let section = render_host_section(
+        HostSectionDetection::HostProbeFailed(&err),
+        Err(&NO_REGISTRY),
+    );
     assert!(
         section.iter().all(|f| f.status != FindingStatus::Fail),
         "undetected identity must not produce a failing finding: {}",
@@ -471,12 +616,26 @@ fn undetectable_host_identity_never_fails_doctor() {
         .expect("host_facts");
     assert_eq!(facts.status, FindingStatus::Warning);
     assert!(facts.message.contains("Operation not permitted"));
+    assert_eq!(section.len(), 5, "every host-section finding ID is stable");
+    for id in [
+        FindingId::HostFacts,
+        FindingId::HostOs,
+        FindingId::PlatformProfile,
+        FindingId::PlatformRow,
+        FindingId::ModelClassRows,
+    ] {
+        assert_eq!(
+            section.iter().filter(|finding| finding.id == id).count(),
+            1,
+            "{id:?} must be emitted exactly once"
+        );
+    }
 }
 
 #[test]
 fn a_missing_registry_skips_the_profile_without_touching_the_host_lines() {
     let report = identify_platform(&sources_of(&fixture("macos26-m1pro-16gb"))).expect("detects");
-    let section = render_host_section(Ok(&report), Err(&NO_REGISTRY));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Err(&NO_REGISTRY));
 
     let profile = section
         .iter()
@@ -526,7 +685,7 @@ fn an_environment_only_miss_does_not_blame_the_os() {
     )
     .expect("loads");
 
-    let section = render_host_section(Ok(&report), Ok(&registry));
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
     let profile = section
         .iter()
         .find(|f| f.id == FindingId::PlatformProfile)

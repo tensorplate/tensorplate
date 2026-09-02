@@ -22,7 +22,7 @@ an engineer who greps another are looking at the same fact.
 | `missing_backend_package` | A package the matched row requires is not installed — including a backend whose descriptor is absent. |
 | `missing_driver_runtime` | A required driver or compute runtime is absent or version-mismatched, **or** the PCI bus reports an accelerator that no driver could identify. |
 | `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
-| `telemetry_degraded` | A telemetry collector expected on the matched row fails at run time. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source is recorded and does not. A signal the row declares `not_applicable` was never asked for and cannot produce this. |
+| `telemetry_degraded` | In a supplied collector snapshot, a telemetry source expected on the matched row fails or omits its result. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source degrades status and is recorded without blocking. A signal the row declares `not_applicable` was never asked for and cannot produce this. Live non-memory collectors remain part of hardware validation; their absence from the ordinary startup path is not synthesized as either success or failure. |
 | `row_planned_not_validated` | The machine matches a Planned row exactly: named, carrying no validation evidence. |
 
 ## Boundaries that are easy to blur

@@ -174,11 +174,7 @@ fn a_missing_accelerator_figure_is_not_a_shortfall() {
     // failure, which is a different fault with a different fix.
     let l4 = telemetry("ubuntu2404-x86-l4-g2s8", "ubuntu2404-x86-l4-g2s8", None);
     assert_eq!(l4.accelerator_total_bytes(), None);
-    assert_eq!(l4.meets_row_budget(), None);
-    assert!(
-        !l4.shortfall_is_load_bearing(),
-        "an unreadable figure must not read as a failed gate"
-    );
+    assert_eq!(l4.effective_budget_bytes(), None);
 }
 
 #[test]
@@ -201,12 +197,14 @@ fn the_memory_gate_is_a_row_fact_and_the_rows_agree_with_it() {
 }
 
 #[test]
-fn a_shortfall_on_a_context_only_gate_is_not_load_bearing() {
+fn the_memory_gate_is_projected_without_reinterpreting_nominal_capacity() {
     // Every committed row gates memory as load-bearing, so the gate is
     // unfalsifiable against the shipped registry -- a check that ignored
     // it entirely would pass every test. This stages a row whose memory
-    // gate is context-only and asserts the same shortfall stops being
-    // actionable, which is the only way to show the gate is read.
+    // gate is context-only and asserts that exact row fact reaches the
+    // telemetry projection. Capacity remains a usable ceiling either way;
+    // the gate applies to collector availability and model admission, not
+    // to an invalid observed-versus-nominal equality test.
     let staged = stage_registry_with_context_only_memory("ubuntu2404-x86-l4-g2s8");
     let registry = PlatformRegistry::load(&staged).expect("staged registry loads");
     let row = registry.row("ubuntu2404-x86-l4-g2s8").expect("committed");
@@ -217,14 +215,10 @@ fn a_shortfall_on_a_context_only_gate_is_not_load_bearing() {
     }
     let telemetry =
         PlatformMemoryTelemetry::collect(row, &small).expect("the row declares an accelerator");
+    assert_eq!(telemetry.memory_gate(), GateValue::ContextOnly);
     assert_eq!(
-        telemetry.meets_row_budget(),
-        Some(false),
-        "the machine is still short"
-    );
-    assert!(
-        !telemetry.shortfall_is_load_bearing(),
-        "a shortfall is only actionable where the row says memory gates"
+        telemetry.effective_budget_bytes(),
+        Some(4 * 1024 * 1024 * 1024)
     );
     let _ = std::fs::remove_dir_all(&staged);
 }
@@ -266,22 +260,60 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
 }
 
 #[test]
-fn a_machine_below_its_row_budget_trips_a_load_bearing_gate() {
-    // The consumption the gate exists for, driven from a recorded
-    // fixture with the framebuffer replaced by a smaller card's.
-    let registry = registry();
-    let row = registry
-        .row("ubuntu2404-x86-l4-g2s8")
-        .expect("the L4 row is committed");
-    let mut small = report("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
-    if let Some(accelerator) = small.accelerator.as_mut() {
-        accelerator.memory_bytes = Some(4 * 1024 * 1024 * 1024);
+fn canonical_supported_hardware_uses_observed_memory_as_a_bounded_ceiling() {
+    let cases = [
+        (
+            "jetson-orin-nano-8gb-jp62",
+            "jetson-orin-nano-8gb-jp62",
+            None,
+        ),
+        ("macos26-m1pro-16gb", "macos26-m1pro-16gb", None),
+        (
+            "ubuntu2404-x86-l4-g2s8",
+            "ubuntu2404-x86-l4-g2s8",
+            Some("ubuntu2404-x86-l4-g2s8"),
+        ),
+        (
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            Some("ubuntu2404-x86-rtxpro6000se-g4s48"),
+        ),
+    ];
+
+    for (row_id, host, accelerator) in cases {
+        let telemetry = telemetry(row_id, host, accelerator);
+        let observed = telemetry
+            .accelerator_total_bytes()
+            .unwrap_or_else(|| panic!("{row_id}: canonical fixture reports usable capacity"));
+        assert_eq!(
+            telemetry.effective_budget_bytes(),
+            Some(observed.min(telemetry.row_nominal_capacity_bytes())),
+            "{row_id}: usable capacity is bounded, not compared for nominal equality"
+        );
     }
-    let telemetry =
-        PlatformMemoryTelemetry::collect(row, &small).expect("the row declares an accelerator");
-    assert_eq!(telemetry.meets_row_budget(), Some(false));
-    assert!(
-        telemetry.shortfall_is_load_bearing(),
-        "a shortfall on a load-bearing memory gate must be actionable"
-    );
+
+    for (row_id, host, accelerator) in [
+        (
+            "jetson-orin-nano-8gb-jp62",
+            "jetson-orin-nano-8gb-jp62",
+            None,
+        ),
+        (
+            "ubuntu2404-x86-l4-g2s8",
+            "ubuntu2404-x86-l4-g2s8",
+            Some("ubuntu2404-x86-l4-g2s8"),
+        ),
+    ] {
+        let telemetry = telemetry(row_id, host, accelerator);
+        assert!(
+            telemetry.accelerator_total_bytes().expect("observed")
+                < telemetry.row_nominal_capacity_bytes(),
+            "{row_id}: fixture must preserve the real nominal/usable distinction"
+        );
+        assert_eq!(
+            telemetry.effective_budget_bytes(),
+            telemetry.accelerator_total_bytes(),
+            "{row_id}: a reservation is not a hardware shortfall"
+        );
+    }
 }

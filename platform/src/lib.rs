@@ -35,6 +35,7 @@ pub mod identity;
 pub mod matrix;
 pub mod memory_telemetry;
 pub mod probe;
+pub mod probe_failure;
 pub mod reason;
 pub mod registry;
 pub mod roadmap;
@@ -58,6 +59,7 @@ pub use identity::{
 pub use matrix::render_support_matrix;
 pub use memory_telemetry::PlatformMemoryTelemetry;
 pub use probe::SystemHostProbe;
+pub use probe_failure::{classify_accelerator_probe_failure, AcceleratorProbeFailureClass};
 pub use reason::PlatformReason;
 pub use registry::{PlatformRegistry, ProfileSelection, RowMatch};
 pub use roadmap::{RoadmapTarget, ROADMAP_TARGET_SCHEMA_VERSION};

@@ -16,7 +16,7 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -24,7 +24,8 @@ use tensorplate_agent::platform_admission::{check_backend_packages, ObservedStac
 use tensorplate_agent::PlatformAdmission;
 use tensorplate_platform::{
     identify_accelerator, identify_platform, AcceleratorObservation, AcceleratorSources,
-    HostSources, PlatformReason, PlatformRegistry, PlatformReport,
+    HostSources, PlatformReason, PlatformRegistry, PlatformReport, SignalName, SignalOutcome,
+    SignalTelemetry,
 };
 use tensorplate_protocol::backend_probe::BackendProbeState;
 use tensorplate_protocol::PlatformMemoryProfileName;
@@ -195,10 +196,19 @@ fn backend_cases() -> Vec<Case> {
         .context
         .and_then(|c| PlatformReason::try_from(c).ok());
 
-    // A telemetry collector expected on the matched row fails. The
-    // runtime producer belongs to the telemetry task; this asserts the
-    // vocabulary carries the case, against a stubbed failure.
-    let stubbed_collector_failed = true;
+    // Drive the real producer: a resolved row plus the complete collector
+    // snapshot with one unavailable applicable signal.
+    let mut outcomes: BTreeMap<_, _> = SignalName::all()
+        .into_iter()
+        .map(|name| (name, SignalOutcome::Collected))
+        .collect();
+    outcomes.insert(
+        SignalName::Thermal,
+        SignalOutcome::Unavailable {
+            detail: "sensor read failed".into(),
+        },
+    );
+    let telemetry_reason = SignalTelemetry::resolve(l4, &outcomes).degraded_reason();
 
     vec![
         Case {
@@ -217,7 +227,7 @@ fn backend_cases() -> Vec<Case> {
         },
         Case {
             what: "telemetry collector failure",
-            got: stubbed_collector_failed.then_some(PlatformReason::TelemetryDegraded),
+            got: telemetry_reason,
             want: PlatformReason::TelemetryDegraded,
         },
     ]
@@ -245,8 +255,8 @@ fn every_off_matrix_combination_reports_its_own_dimension() {
 fn the_matrix_covers_every_reason_the_vocabulary_owns() {
     // The property a table exists for. Two of the ten reasons reached
     // this release with no producer at all; a coverage assertion is what
-    // would have said so. `telemetry_degraded` is covered by a stub until
-    // the telemetry work brings its runtime producer.
+    // would have said so. `telemetry_degraded` is driven through the real
+    // row-aware resolver above rather than manufactured by this matrix.
     let covered: HashSet<PlatformReason> = all_cases().into_iter().map(|c| c.want).collect();
     for reason in PlatformReason::ALL {
         assert!(
