@@ -69,9 +69,6 @@ impl PlatformReason {
         Self::RowPlannedNotValidated,
     ];
 
-    /// Stable serialized name (snake_case). The exhaustive match makes a
-    /// newly added reason a compile error here rather than a silently
-    /// unspelled one.
     /// The reason a backend probe state carries, or `None` when the
     /// backend is runnable.
     ///
@@ -100,6 +97,9 @@ impl PlatformReason {
         }
     }
 
+    /// Stable serialized name (snake_case). The exhaustive match makes a
+    /// newly added reason a compile error here rather than a silently
+    /// unspelled one.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

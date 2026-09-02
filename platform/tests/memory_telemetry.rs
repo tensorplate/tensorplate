@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+use tempfile::TempDir;
+
 use serde_json::Value;
 use tensorplate_platform::row::GateValue;
 use tensorplate_platform::{
@@ -206,7 +208,7 @@ fn the_memory_gate_is_projected_without_reinterpreting_nominal_capacity() {
     // the gate applies to collector availability and model admission, not
     // to an invalid observed-versus-nominal equality test.
     let staged = stage_registry_with_context_only_memory("ubuntu2404-x86-l4-g2s8");
-    let registry = PlatformRegistry::load(&staged).expect("staged registry loads");
+    let registry = PlatformRegistry::load(staged.path()).expect("staged registry loads");
     let row = registry.row("ubuntu2404-x86-l4-g2s8").expect("committed");
 
     let mut small = report("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
@@ -220,19 +222,20 @@ fn the_memory_gate_is_projected_without_reinterpreting_nominal_capacity() {
         telemetry.effective_budget_bytes(),
         Some(4 * 1024 * 1024 * 1024)
     );
-    let _ = std::fs::remove_dir_all(&staged);
+    // `staged` removes itself when it drops.
 }
 
 /// Copy the committed registry, weakening one row's memory gate.
-fn stage_registry_with_context_only_memory(row_id: &str) -> PathBuf {
-    let staging = std::env::temp_dir().join(format!(
-        "tp-memory-telemetry-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    copy_dir(&repo_path("config/platform"), &staging);
-    let path = staging.join(format!("rows/{row_id}.json"));
+///
+/// Staged in a `TempDir` rather than under a name built from the pid: a
+/// predictable path in the shared temp directory is one another local
+/// user can pre-create as a symlink, and this writes a directory tree
+/// through it. These tests run on shared lab hosts and self-hosted
+/// runners, where that user exists.
+fn stage_registry_with_context_only_memory(row_id: &str) -> TempDir {
+    let staging = TempDir::new().expect("staging dir");
+    copy_dir(&repo_path("config/platform"), staging.path());
+    let path = staging.path().join(format!("rows/{row_id}.json"));
     let body = std::fs::read_to_string(&path).expect("read staged row");
     let mut row: Value = serde_json::from_str(&body).expect("row parses");
     row["gate_semantics"]["memory"] = serde_json::json!({
