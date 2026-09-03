@@ -444,4 +444,66 @@ done
   }
 )
 
+# The evidence gate must be reachable from the release workflow, and
+# every build must sit behind it. A gate that exists but nothing depends
+# on is an optional step wearing a gate's name -- and the failure is
+# silent, because the workflow still runs green while shipping
+# unevidenced Production claims.
+(
+  workflow=".github/workflows/release.yml"
+  # Declared, not assumed. CI provided PyYAML transitively while the
+  # documented standalone run of this suite failed on a developer machine
+  # with a bare ModuleNotFoundError -- and that run is the one the release
+  # runbook tells you to make before tagging.
+  python3 -c 'import yaml' 2>/dev/null || {
+    echo "FAIL: this suite needs PyYAML to read the release workflow." >&2
+    echo "      Install the release tooling dependencies with:" >&2
+    echo "        python3 -m pip install -r tools/release/requirements.txt" >&2
+    exit 1
+  }
+  python3 - "$workflow" <<'PYCHECK'
+import sys, yaml
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    workflow = yaml.safe_load(handle)
+jobs = workflow.get("jobs", {})
+
+gate = jobs.get("evidence_gate")
+if gate is None:
+    sys.exit("FAIL: release.yml has no evidence_gate job")
+
+runs = "\n".join(
+    str(step.get("run", "")) for step in gate.get("steps", [])
+)
+if "check-evidence-bundles.sh" not in runs:
+    sys.exit("FAIL: the evidence gate does not run the completeness check")
+
+def needs_of(name):
+    declared = jobs.get(name, {}).get("needs", [])
+    return [declared] if isinstance(declared, str) else list(declared)
+
+def gated(name, seen=None):
+    """Whether a job sits behind the gate, directly or through its deps."""
+    seen = seen or set()
+    if name in seen:
+        return False
+    seen.add(name)
+    for dependency in needs_of(name):
+        if dependency == "evidence_gate" or gated(dependency, seen):
+            return True
+    return False
+
+# Every job that builds or publishes an artifact. `meta` resolves
+# metadata and the gate itself obviously cannot depend on itself.
+exempt = {"meta", "evidence_gate"}
+ungated = sorted(name for name in jobs if name not in exempt and not gated(name))
+if ungated:
+    sys.exit(
+        "FAIL: these release jobs do not sit behind the evidence gate: "
+        + ", ".join(ungated)
+    )
+print("evidence gate blocks every build and publish job")
+PYCHECK
+)
+
 printf 'release script checks green\n'

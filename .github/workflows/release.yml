@@ -114,9 +114,52 @@ jobs:
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
+  evidence_gate:
+    name: evidence gate
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Install release tooling dependencies
+        shell: bash
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      # Incomplete evidence is reported on every run and enforced only when
+      # publishing: `develop` may carry rows nobody has validated yet, a tag
+      # may not, and a build-only dispatch is how the pipeline itself gets
+      # exercised. A checker that could not run is never waived -- exit 2
+      # means the gate did not reach a verdict, and a gate with no verdict
+      # must not be mistaken for one that passed.
+      - name: Production rows carry the evidence they claim
+        shell: bash
+        env:
+          PUBLISH: ${{ needs.meta.outputs.publish }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -uo pipefail
+          tools/release/check-evidence-bundles.sh --version "$VERSION"
+          status=$?
+          if [[ "$status" -eq 2 ]]; then
+            printf '::error::the evidence checker did not run; this is never waived\n'
+            exit 2
+          fi
+          if [[ "$status" -ne 0 && "$PUBLISH" != "true" ]]; then
+            printf '::warning::evidence incomplete; not blocking a build-only run\n'
+            exit 0
+          fi
+          exit "$status"
+
   build_packages_amd64:
     name: build amd64 runtime packages
-    needs: meta
+    needs: [meta, evidence_gate]
     # Deliberately jammy, not noble: the runtime packages must install on
     # both supported Ubuntu x86_64 releases, and glibc's floor is set by the
     # oldest host a binary must run on. Building on noble would raise the
@@ -319,7 +362,7 @@ jobs:
 
   build_sdk_python:
     name: build tensorplate-python wheel + sdist
-    needs: meta
+    needs: [meta, evidence_gate]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:

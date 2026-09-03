@@ -6,6 +6,104 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- The release workflow now blocks on evidence (V021-E05-F02-T02). A gate
+  job runs the completeness check before anything is built, and every
+  build and publish job sits behind it — a release cannot ship a
+  Production claim whose evidence does not exist.
+
+  It gates before the builds rather than after, because the arm64
+  packages are built on the fleet's single Jetson and that build takes
+  roughly ninety minutes. Failing afterwards would waste the one runner
+  and tell nobody anything sooner.
+
+  Reported on every run, enforced only when publishing. `develop` may
+  carry rows nobody has validated yet; a tag may not — and a build-only
+  dispatch is how the pipeline itself gets exercised, so blocking that
+  would leave the gate untestable except by attempting a real release.
+
+  A gate nothing depends on is an optional step wearing a gate's name,
+  and that failure is silent: the workflow still runs green while
+  shipping unevidenced claims. The release checks now walk the job graph
+  and fail if any build or publish job can reach the artifacts without
+  passing the gate first.
+
+### Added
+
+- A machine-checkable evidence-completeness check for Production rows
+  (V021-E05-F02-T01). For each row claiming Production it verifies three
+  things: the row's provenance is `recorded` rather than spec-authored,
+  its declared evidence directory holds a lifecycle report for that row,
+  and every one of the eight stages passed.
+
+  The guard this replaces asserted that a row *declared* an evidence
+  location whose string contained the row id. It passed happily for a
+  directory nobody had created — which is how four Production rows
+  reached a release branch with `provenance: spec_authored` and empty
+  evidence directories. A check that cannot fail is not a check.
+
+  Completeness is defined in terms of artifacts that already exist rather
+  than a new manifest format, and the report is per row and names what is
+  missing: "evidence incomplete" without a subject is not actionable. It
+  reports every Production row as incomplete today, which is the true
+  answer until the hardware runs happen.
+
+  A report filed under a different row than the one it is evidence for is
+  a failure rather than a pass, and a registry with no Production rows at
+  all is an error rather than a vacuous success — both are ways a
+  completeness check can look like it worked while checking nothing.
+
+### Added
+
+- Physical-row validation runbooks for the in-lab Jetson Orin Nano and the
+  M1 Pro, and a converter that gives their harnesses the same lifecycle
+  report the cloud rows will produce (V021-E05-F01-T03).
+
+  Both harnesses predate the report and record their own stage names, and
+  both run only on hardware CI cannot reach. Rewriting their stage calls
+  would mean editing, untested, the code whose entire purpose is to be
+  trustworthy on a machine nobody can reach — so the stage log they
+  already write is converted instead. The mapping from harness stage to
+  canonical stage is an assertion, and a wrong one lies in the gate's
+  favour, so it is stated per run rather than guessed.
+
+  A canonical stage with no mapped source is emitted as `skipped` with
+  that stated, and a mapped stage absent from the log says it did not
+  run: two different problems with two different fixes, where a shorter
+  report would have shown neither. Timestamps are omitted for a stage
+  that did not run rather than filled in, since inventing one makes an
+  omission look like a very fast pass.
+
+  The Jetson identity check confirms the BSP generation the row names
+  (`L4T r36.x`) rather than a single revision — a device on r36.4.3 and
+  one on r36.5.0 both satisfy the row, and a runbook insisting on one
+  would refuse the other on identical hardware.
+
+### Added
+
+- A shared lifecycle-stage runner and a schema for what it writes
+  (V021-E05-F01-T01). The eight stages — install, upgrade, deploy-smoke,
+  status-logs, rollback, restart, crash-loop, offline — now produce one
+  machine-readable report per row, with each stage's log attached whether
+  it passed or failed.
+
+  The macOS harness already had this shape and the Jetson one did not, so
+  the two produced different evidence for the same stages and only one of
+  them could be read by a machine. The release gate has to decide
+  completeness by reading the report rather than reading prose, so both
+  now emit the same one.
+
+  The failure discipline is the part worth keeping from the original: a
+  stage that fails must APPEAR in the report as a failure. Under `set -e`
+  the runner never reaches its own bookkeeping, so the record is written
+  from an EXIT trap — a harness that merely stopped writing would produce
+  a short report indistinguishable from a short run. A skipped stage
+  requires a reason for the same reason.
+
+  The schema and the shell script name the same eight stages, and a test
+  reads both and fails if they drift.
+
 ### Fixed
 
 - `doctor` now reports service health on macOS (V021-E04-F02-T03).

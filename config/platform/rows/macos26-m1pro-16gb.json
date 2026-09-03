@@ -62,6 +62,6 @@
     "identity": "MacBook Pro, Apple M1 Pro 16GB (in lab)"
   },
   "evidence": {
-    "location": "dist/release/v0.2.1/macos26-m1pro-16gb/"
+    "location": "docs/validation/evidence/v0.2.1/macos26-m1pro-16gb/"
   }
 }
