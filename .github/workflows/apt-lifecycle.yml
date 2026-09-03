@@ -108,6 +108,14 @@ jobs:
         shell: bash
         run: test/release/run.sh
 
+      # The lifecycle stage runner records a failing stage from an EXIT
+      # trap, because `set -e` unwinds before its own bookkeeping. That is
+      # exactly the kind of shell behaviour that rots unnoticed, so it is
+      # exercised here rather than only on the hardware runs it is for.
+      - name: Lifecycle stage runner
+        shell: bash
+        run: test/validation/lifecycle_stages_test.sh
+
       # Which packages a binary-arch-only build emits is decided by debhelper
       # from debian/control, and the release workflow's amd64 job depends on
       # that answer. This runner IS x86_64, so it checks the real thing rather
