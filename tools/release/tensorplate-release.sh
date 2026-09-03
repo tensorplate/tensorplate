@@ -569,7 +569,19 @@ check_evidence() {
 # discovered once the tag is already pushed. An exit of 2 is the checker
 # failing to run, which is a release-blocking fault in its own right and
 # not the same as evidence being incomplete.
+#
+# Final cuts only. A release candidate is how the artifacts get built that
+# validation is then run AGAINST -- the Homebrew rehearsal needs formulae
+# pinned to a published source archive, which does not exist until a tag
+# does. Gating the candidate on the evidence that candidate exists to
+# produce is a deadlock: no tag, so no archive, so no rehearsal, so no
+# evidence, so no tag. Publication is still gated -- the release
+# workflow enforces the same check whenever PUBLISH is true.
 check_evidence_bundles() {
+  if [[ "${FINAL:-0}" -ne 1 ]]; then
+    pass "evidence gate deferred to the final cut (this is a release candidate)"
+    return 0
+  fi
   local status=0
   tools/release/check-evidence-bundles.sh --version "$VERSION" >/dev/null 2>&1 || status=$?
   case "$status" in
