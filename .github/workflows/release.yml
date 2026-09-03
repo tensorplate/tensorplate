@@ -114,9 +114,42 @@ jobs:
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
+  evidence_gate:
+    name: evidence gate
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      # Reported on every run, enforced only when publishing. `develop`
+      # may carry rows nobody has validated yet; a tag may not. A
+      # build-only dispatch is how the pipeline itself gets exercised,
+      # and blocking that would mean the gate could never be tested
+      # except by attempting a real release.
+      - name: Production rows carry the evidence they claim
+        shell: bash
+        env:
+          PUBLISH: ${{ needs.meta.outputs.publish }}
+        run: |
+          set -uo pipefail
+          tools/release/check-evidence-bundles.sh
+          status=$?
+          if [[ "$status" -ne 0 && "$PUBLISH" != "true" ]]; then
+            printf '::warning::evidence incomplete; not blocking a build-only run\n'
+            exit 0
+          fi
+          exit "$status"
+
   build_packages_amd64:
     name: build amd64 runtime packages
-    needs: meta
+    needs: [meta, evidence_gate]
     # Deliberately jammy, not noble: the runtime packages must install on
     # both supported Ubuntu x86_64 releases, and glibc's floor is set by the
     # oldest host a binary must run on. Building on noble would raise the
@@ -319,7 +352,7 @@ jobs:
 
   build_sdk_python:
     name: build tensorplate-python wheel + sdist
-    needs: meta
+    needs: [meta, evidence_gate]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:

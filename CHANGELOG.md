@@ -8,6 +8,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The release workflow now blocks on evidence (V021-E05-F02-T02). A gate
+  job runs the completeness check before anything is built, and every
+  build and publish job sits behind it — a release cannot ship a
+  Production claim whose evidence does not exist.
+
+  It gates before the builds rather than after, because the arm64
+  packages are built on the fleet's single Jetson and that build takes
+  roughly ninety minutes. Failing afterwards would waste the one runner
+  and tell nobody anything sooner.
+
+  Reported on every run, enforced only when publishing. `develop` may
+  carry rows nobody has validated yet; a tag may not — and a build-only
+  dispatch is how the pipeline itself gets exercised, so blocking that
+  would leave the gate untestable except by attempting a real release.
+
+  A gate nothing depends on is an optional step wearing a gate's name,
+  and that failure is silent: the workflow still runs green while
+  shipping unevidenced claims. The release checks now walk the job graph
+  and fail if any build or publish job can reach the artifacts without
+  passing the gate first.
+
+### Added
+
 - A machine-checkable evidence-completeness check for Production rows
   (V021-E05-F02-T01). For each row claiming Production it verifies three
   things: the row's provenance is `recorded` rather than spec-authored,
