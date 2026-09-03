@@ -22,8 +22,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_platform::{
-    AdmissionPosture, HostReport, PlatformCapability, PlatformProbeError, PlatformReason,
-    PlatformRegistry, PlatformReport, PlatformSupportRow, RowMatch, SupportLevel,
+    classify_accelerator_probe_failure, AcceleratorProbeFailureClass, AdmissionPosture, GateValue,
+    HostReport, PlatformCapability, PlatformMemoryTelemetry, PlatformProbeError, PlatformReason,
+    PlatformRegistry, PlatformReport, PlatformSupportRow, RowMatch, SignalName, SignalOutcome,
+    SignalStatus, SignalTelemetry, SupportLevel,
+};
+use tensorplate_protocol::{
+    PlatformMemoryTelemetryStatus, PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus,
+    PlatformTelemetryGate, PlatformTelemetrySignalName, PlatformTelemetryStatus,
 };
 
 use crate::config::AgentConfig;
@@ -71,6 +77,14 @@ pub enum PlatformAdmission {
         /// machine runs; what it must not do is claim a validation that
         /// was recorded somewhere else.
         validated: bool,
+        /// Memory is collected from the same startup report used for row
+        /// resolution. It is always a usable ceiling, never a comparison
+        /// between observed and nominal capacity.
+        memory_telemetry: Option<PlatformMemoryTelemetry>,
+        /// Live non-memory collectors are attached only when a complete
+        /// snapshot is supplied. Absence means "not collected by this
+        /// runtime", not a synthetic success or failure.
+        signal_telemetry: Option<SignalTelemetry>,
     },
     Rejected {
         row_id: Option<String>,
@@ -100,6 +114,34 @@ impl PlatformAdmission {
         observed: &ObservedStack,
         operator_posture: Option<AdmissionPosture>,
     ) -> Self {
+        Self::evaluate_inner(registry, report, observed, operator_posture, None)
+    }
+
+    /// Evaluate admission and attach one actual live signal snapshot.
+    ///
+    /// The ordinary startup path still captures memory from `report`, but
+    /// does not fabricate outcomes for collectors that are not wired on a
+    /// platform. A caller with collector results uses this entry point;
+    /// once supplied, omitted applicable signals fail closed in
+    /// [`SignalTelemetry::resolve`].
+    #[must_use]
+    pub fn evaluate_with_signal_outcomes(
+        registry: &PlatformRegistry,
+        report: &PlatformReport,
+        observed: &ObservedStack,
+        operator_posture: Option<AdmissionPosture>,
+        outcomes: &BTreeMap<SignalName, SignalOutcome>,
+    ) -> Self {
+        Self::evaluate_inner(registry, report, observed, operator_posture, Some(outcomes))
+    }
+
+    fn evaluate_inner(
+        registry: &PlatformRegistry,
+        report: &PlatformReport,
+        observed: &ObservedStack,
+        operator_posture: Option<AdmissionPosture>,
+        signal_outcomes: Option<&BTreeMap<SignalName, SignalOutcome>>,
+    ) -> Self {
         // A GPU host whose driver is missing or broken reports no
         // accelerator, and a host with no accelerator resolves to a
         // CPU-only row and deploys as a CPU box. The PCI bus says which of
@@ -116,7 +158,9 @@ impl PlatformAdmission {
                 row_id: None,
                 reason: Some(PlatformReason::MissingDriverRuntime),
                 detail: format!(
-                    "the PCI bus reports an NVIDIA display controller at {functions} but no                      accelerator could be identified; the driver is absent or not functional.                      Deploying here would serve on the CPU without saying so"
+                    "the PCI bus reports an NVIDIA display controller at {functions} but no \
+                     accelerator could be identified; the driver is absent or not functional. \
+                     Deploying here would serve on the CPU without saying so"
                 ),
             };
         }
@@ -131,6 +175,8 @@ impl PlatformAdmission {
                     };
                 }
                 let floor = AdmissionPosture::floor_for(row);
+                let (memory_telemetry, signal_telemetry) =
+                    collect_telemetry(row, report, signal_outcomes);
                 Self::Supported {
                     row_id: row.row_id().to_string(),
                     capability: registry.resolved_capability(report),
@@ -138,6 +184,8 @@ impl PlatformAdmission {
                     posture: AdmissionPosture::resolve(floor, operator_posture),
                     posture_from: AdmissionPosture::provenance(floor, operator_posture),
                     validated: true,
+                    memory_telemetry,
+                    signal_telemetry,
                 }
             }
             RowMatch::PlannedNotValidated(row) => Self::planned(row),
@@ -185,6 +233,8 @@ impl PlatformAdmission {
                         detail,
                     };
                 }
+                let (memory_telemetry, signal_telemetry) =
+                    collect_telemetry(row, report, signal_outcomes);
                 Self::Supported {
                     row_id: row.row_id().to_string(),
                     capability: registry.capability_outside_environment(report, row),
@@ -192,6 +242,8 @@ impl PlatformAdmission {
                     posture,
                     posture_from: AdmissionPosture::provenance(floor, operator_posture),
                     validated: false,
+                    memory_telemetry,
+                    signal_telemetry,
                 }
             }
             // No single row's hardware matches, so there is no row to read
@@ -257,10 +309,9 @@ impl PlatformAdmission {
     /// for a driver on a machine that has no card.
     #[must_use]
     pub fn accelerator_probe_failed(host: &HostReport, error: &PlatformProbeError) -> Self {
-        let PlatformProbeError::Unreadable { .. } = error else {
-            return Self::detection_failed(error.to_string());
-        };
-        if host.exact.nvidia_pci_functions.is_empty() {
+        if classify_accelerator_probe_failure(host, error)
+            == AcceleratorProbeFailureClass::DetectionFailed
+        {
             return Self::detection_failed(error.to_string());
         }
         Self::Rejected {
@@ -317,6 +368,25 @@ impl PlatformAdmission {
     /// instead of parsing prose.
     pub fn ensure_supported(&self) -> AgentResult<()> {
         match self {
+            Self::Supported {
+                row_id,
+                signal_telemetry: Some(telemetry),
+                ..
+            } if telemetry.degrades_deployment() => {
+                let failed = telemetry
+                    .deployment_degrading_signals()
+                    .into_iter()
+                    .map(SignalName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(AgentError::PlatformNotAdmissible {
+                    reason: Some(PlatformReason::TelemetryDegraded),
+                    detail: format!(
+                        "load-bearing platform telemetry is unavailable for row `{row_id}`: \
+                         {failed}"
+                    ),
+                })
+            }
             Self::Supported { .. } => Ok(()),
             Self::Rejected { reason, detail, .. } => Err(AgentError::PlatformNotAdmissible {
                 reason: *reason,
@@ -344,6 +414,7 @@ impl PlatformAdmission {
         else {
             return self.ensure_supported();
         };
+        self.ensure_supported()?;
         // Looked up rather than held, so this value does not borrow the
         // registry and the coordinator can own both.
         let Some(row) = registry.row(row_id) else {
@@ -368,6 +439,10 @@ impl PlatformAdmission {
     #[must_use]
     pub fn reason(&self) -> Option<PlatformReason> {
         match self {
+            Self::Supported {
+                signal_telemetry: Some(telemetry),
+                ..
+            } => telemetry.degraded_reason(),
             Self::Supported { .. } => None,
             Self::Rejected { reason, .. } => *reason,
         }
@@ -402,6 +477,130 @@ impl PlatformAdmission {
             Self::Supported { capability, .. } => capability.as_ref(),
             Self::Rejected { .. } => None,
         }
+    }
+
+    /// Whether a supplied collector snapshot contains any unavailable
+    /// applicable signal. Context-only failures degrade status but do not
+    /// block deployment.
+    #[must_use]
+    pub fn telemetry_degraded(&self) -> bool {
+        matches!(
+            self,
+            Self::Supported {
+                signal_telemetry: Some(telemetry),
+                ..
+            } if telemetry.degraded_reason().is_some()
+        )
+    }
+
+    /// Additive control-API projection used by status and release evidence
+    /// capture. The projection owns the wire invariants: a resolved signal
+    /// snapshot contains each stable name exactly once, and an outcome is
+    /// absent only for `not_applicable`.
+    #[must_use]
+    pub fn telemetry_status(&self) -> Option<PlatformTelemetryStatus> {
+        let Self::Supported {
+            row_id,
+            validated,
+            memory_telemetry,
+            signal_telemetry,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let signals = signal_telemetry
+            .as_ref()
+            .map(|telemetry| {
+                telemetry
+                    .signals()
+                    .map(|(name, status)| project_signal(name, status))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(PlatformTelemetryStatus {
+            row_id: row_id.clone(),
+            validated: *validated,
+            memory: memory_telemetry.as_ref().map(project_memory),
+            signals,
+            degraded_reason: signal_telemetry
+                .as_ref()
+                .and_then(SignalTelemetry::degraded_reason)
+                .map(|reason| reason.as_str().to_string()),
+            deployment_degraded: signal_telemetry
+                .as_ref()
+                .is_some_and(SignalTelemetry::degrades_deployment),
+        })
+    }
+}
+
+fn collect_telemetry(
+    row: &PlatformSupportRow,
+    report: &PlatformReport,
+    signal_outcomes: Option<&BTreeMap<SignalName, SignalOutcome>>,
+) -> (Option<PlatformMemoryTelemetry>, Option<SignalTelemetry>) {
+    let memory = PlatformMemoryTelemetry::collect(row, report);
+    let signals = signal_outcomes.map(|provided| {
+        let mut completed = provided.clone();
+        completed.entry(SignalName::Memory).or_insert_with(|| {
+            let observed = memory
+                .as_ref()
+                .and_then(PlatformMemoryTelemetry::effective_budget_bytes)
+                .is_some()
+                || (row.accelerator().is_none()
+                    && report.host.exact.host_total_memory_bytes.is_some());
+            if observed {
+                SignalOutcome::Collected
+            } else {
+                SignalOutcome::Unavailable {
+                    detail: "memory capacity observation was unavailable".to_string(),
+                }
+            }
+        });
+        SignalTelemetry::resolve(row, &completed)
+    });
+    (memory, signals)
+}
+
+fn project_gate(gate: GateValue) -> PlatformTelemetryGate {
+    match gate {
+        GateValue::LoadBearing => PlatformTelemetryGate::LoadBearing,
+        GateValue::ContextOnly => PlatformTelemetryGate::ContextOnly,
+        GateValue::NotApplicable => PlatformTelemetryGate::NotApplicable,
+    }
+}
+
+fn project_signal(name: SignalName, status: &SignalStatus) -> PlatformSignalTelemetryStatus {
+    let name = match name {
+        SignalName::Thermal => PlatformTelemetrySignalName::Thermal,
+        SignalName::Power => PlatformTelemetrySignalName::Power,
+        SignalName::Throttle => PlatformTelemetrySignalName::Throttle,
+        SignalName::Memory => PlatformTelemetrySignalName::Memory,
+        SignalName::GpuUtilization => PlatformTelemetrySignalName::GpuUtilization,
+    };
+    let outcome = status.outcome.as_ref().map(|outcome| match outcome {
+        SignalOutcome::Collected => PlatformSignalOutcomeStatus::Collected,
+        SignalOutcome::Unavailable { detail } => PlatformSignalOutcomeStatus::Unavailable {
+            detail: detail.clone(),
+        },
+    });
+    PlatformSignalTelemetryStatus {
+        name,
+        gate: project_gate(status.gate),
+        not_applicable_reason: status.not_applicable_reason.clone(),
+        outcome,
+    }
+}
+
+fn project_memory(telemetry: &PlatformMemoryTelemetry) -> PlatformMemoryTelemetryStatus {
+    PlatformMemoryTelemetryStatus {
+        memory_profile: telemetry.memory_profile(),
+        host_total_bytes: telemetry.host_total_bytes(),
+        accelerator_total_bytes: telemetry.accelerator_total_bytes(),
+        row_nominal_capacity_bytes: telemetry.row_nominal_capacity_bytes(),
+        effective_budget_bytes: telemetry.effective_budget_bytes(),
+        shares_one_pool: telemetry.shares_one_pool(),
+        gate: project_gate(telemetry.memory_gate()),
     }
 }
 

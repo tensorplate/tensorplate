@@ -60,6 +60,7 @@ fn ready_status_response() -> ControlResponse {
             next_restart_delay_ms: None,
             stable_uptime_ms: 30_000,
         }),
+        platform_telemetry: None,
     };
     ControlResponse {
         agent_status: Some(status),

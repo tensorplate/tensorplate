@@ -9,6 +9,7 @@
 
 use std::path::PathBuf;
 
+use tensorplate_platform::PlatformReason;
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::ErrorCode;
 
@@ -47,7 +48,15 @@ pub enum AgentError {
     /// device. Carries the backend name plus a short reason for log
     /// output; the CLI doctor surfaces the full structured detail.
     #[error("backend `{backend}` is unrunnable on this device: {reason}")]
-    BackendUnrunnable { backend: String, reason: String },
+    BackendUnrunnable {
+        backend: String,
+        reason: String,
+        /// The frozen platform reason this probe state maps to. A missing
+        /// descriptor is a missing package; every other failure is a
+        /// runtime that is installed and unusable, and the two send an
+        /// operator to different places.
+        platform_reason: Option<PlatformReason>,
+    },
 
     /// The machine itself cannot honour a deploy: it matches no support
     /// row, matches one that carries no claim, is partitioned, or is
@@ -138,6 +147,10 @@ impl AgentError {
         match self {
             AgentError::PlatformNotAdmissible {
                 reason: Some(reason),
+                ..
+            }
+            | AgentError::BackendUnrunnable {
+                platform_reason: Some(reason),
                 ..
             } => record.with_context(reason.as_str()),
             _ => record,

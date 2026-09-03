@@ -42,6 +42,7 @@ fn active_deployment_response() -> ControlResponse {
         quarantined: vec![],
         recovery: None,
         supervision: None,
+        platform_telemetry: None,
     };
     ControlResponse {
         agent_status: Some(status),
@@ -120,6 +121,7 @@ fn infer_returns_unavailable_when_no_active_deployment() {
         quarantined: vec![],
         recovery: None,
         supervision: None,
+        platform_telemetry: None,
     });
     stub.enqueue(response);
     let td = tempfile::tempdir().unwrap();

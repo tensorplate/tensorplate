@@ -172,6 +172,122 @@
         }
       }
     },
+    "PlatformSignalOutcomeStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {"state": {"const": "collected"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "detail"],
+          "properties": {
+            "state": {"const": "unavailable"},
+            "detail": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "PlatformSignalTelemetryStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "gate"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": ["thermal", "power", "throttle", "memory", "gpu_utilization"]
+        },
+        "gate": {
+          "type": "string",
+          "enum": ["load_bearing", "context_only", "not_applicable"]
+        },
+        "not_applicable_reason": {"type": "string"},
+        "outcome": {"$ref": "#/definitions/PlatformSignalOutcomeStatus"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["gate"],
+            "properties": {"gate": {"const": "not_applicable"}}
+          },
+          "then": {
+            "required": ["not_applicable_reason"],
+            "not": {"required": ["outcome"]}
+          },
+          "else": {"required": ["outcome"]}
+        }
+      ]
+    },
+    "PlatformMemoryTelemetryStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memory_profile",
+        "row_nominal_capacity_bytes",
+        "shares_one_pool",
+        "gate"
+      ],
+      "properties": {
+        "memory_profile": {
+          "type": "string",
+          "enum": ["unified_memory", "discrete_gpu"]
+        },
+        "host_total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accelerator_total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "row_nominal_capacity_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "effective_budget_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "shares_one_pool": {"type": "boolean"},
+        "gate": {
+          "type": "string",
+          "enum": ["load_bearing", "context_only", "not_applicable"]
+        }
+      }
+    },
+    "PlatformTelemetryStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row_id", "validated"],
+      "properties": {
+        "row_id": {"type": "string", "minLength": 1},
+        "validated": {"type": "boolean"},
+        "memory": {"$ref": "#/definitions/PlatformMemoryTelemetryStatus"},
+        "signals": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/PlatformSignalTelemetryStatus"},
+          "allOf": [
+            {"contains": {"properties": {"name": {"const": "thermal"}}}},
+            {"contains": {"properties": {"name": {"const": "power"}}}},
+            {"contains": {"properties": {"name": {"const": "throttle"}}}},
+            {"contains": {"properties": {"name": {"const": "memory"}}}},
+            {"contains": {"properties": {"name": {"const": "gpu_utilization"}}}}
+          ]
+        },
+        "degraded_reason": {"type": "string", "const": "telemetry_degraded"},
+        "deployment_degraded": {"type": "boolean"}
+      }
+    },
     "AgentStatus": {
       "type": "object",
       "additionalProperties": false,
@@ -211,7 +327,8 @@
             "reason": {"type": "string"}
           }
         },
-        "supervision": {"$ref": "#/definitions/SupervisionStatus"}
+        "supervision": {"$ref": "#/definitions/SupervisionStatus"},
+        "platform_telemetry": {"$ref": "#/definitions/PlatformTelemetryStatus"}
       }
     },
     "SupervisionStatus": {

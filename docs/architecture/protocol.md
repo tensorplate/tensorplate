@@ -52,9 +52,24 @@ Bumping the protocol version requires touching:
 - `docs/architecture/versioning.md`
 - `CHANGELOG.md`
 
-Within a major version, additive (backwards-compatible) field
-additions are minor bumps. Renames, removals, and meaning changes
-are major bumps and require migration tooling.
+Within a major version, additive public or cross-language field additions
+are minor bumps. Renames, removals, and meaning changes are major bumps and
+require migration tooling.
+
+There is one narrow pre-1.0 exception for the local Rust agent control
+response. An optional, output-only `AgentStatus` field may be added under
+`0.1` when old Rust readers ignore it and new readers default its absence.
+The agent and CLI currently share one exact-match version decoder with every
+other protocol payload; bumping that global constant for a local status field
+would reject mixed-version agent/CLI installs and every unrelated `0.1`
+payload rather than provide minor-version compatibility. `supervision`,
+`serving_url`, and `platform_telemetry` follow this rule. The schema, Rust
+binding, and round-trip tests still change together, and the exception does
+not apply to request fields or changed meanings. Schema validators pinned to
+the previous file remain strict because `additionalProperties` is false;
+compatibility here is the deployed serde-reader contract. Retire this
+exception when per-schema minor-version negotiation replaces the global
+exact-equality check.
 
 ## Bindings
 

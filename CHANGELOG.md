@@ -6,6 +6,193 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- `doctor` now reports service health on macOS (V021-E04-F02-T03).
+  Service-state checks were gated on systemd, so on a Mac they reported
+  "systemd not present" — which says nothing about whether the agent is
+  running there, and that is the question an operator is asking. The
+  check now asks whichever supervisor owns the service: `systemctl` on
+  Linux, `brew services` on macOS, where the agent is a Homebrew-managed
+  launchd job. A host without the supervisor is skipped rather than
+  failed, since the CLI runs on machines that never installed the
+  services.
+
+  The listing is matched on the exact service name. `tensorplate-agent`
+  is a prefix of nothing today, and relying on that staying true is how a
+  future sibling service would silently answer for the agent. Both
+  services are read from one `brew services list` snapshot. A failed
+  supervisor query is reported as unavailable, with bounded diagnostics,
+  rather than being mistaken for two services that are not installed.
+  Homebrew's CLI config and platform registry also count as install
+  footprints, so these checks run for a component install even when the
+  optional Python backend is absent.
+
+### Deferred
+
+- Live thermal, power, throttle, and GPU-utilization collectors, together
+  with their hardware evidence samples, remain part of the tracked
+  hardware-validation work. This change lands the row-owned policy,
+  fail-closed snapshot resolver, admission gate, and status projection;
+  it does not manufacture live outcomes on machines where no collector is
+  wired. Startup memory facts are the exception because they already come
+  from the platform report used for row resolution.
+
+### Added
+
+- Gate-semantic handling for the platform signals a row declares
+  (V021-E04-F02-T02), and with it the only producer of
+  `telemetry_degraded`. A row states, per signal, whether it gates
+  behaviour, is reported for context, or is absent here. When a caller
+  supplies a collector snapshot, the resolver applies that declaration
+  to every stable signal name; an omitted applicable result becomes an
+  explicit unavailable outcome rather than silently passing.
+
+  The three postures are genuinely different and every pair is plausible
+  to collapse. A thermal sensor that fails on a Jetson is a machine that
+  cannot be trusted to throttle itself, and it degrades deployment. The
+  same failure on a datacenter row is a missing number on a chassis whose
+  cooling is somebody else's problem: it is recorded, and it does not
+  block — refusing there would make a context signal load-bearing by the
+  back door, which is the row's decision and not this code's. A power
+  reading macOS does not expose without privileges was never going to be
+  there, so it is not asked for and cannot fail.
+
+  An absent signal carries the row's own free-text explanation rather
+  than a typed platform reason. Those say why a *platform* is
+  unsupported; a sensor an OS does not expose is not a support claim
+  about the machine.
+
+### Changed
+
+- Platform telemetry has an additive agent-status projection, also
+  surfaced by `tensorplate status` so hardware validation can record the
+  same JSON as evidence. It is not placed on the metric stream: the frozen
+  metric event cannot express these signals — `MetricUnit` has no celsius
+  or watts and the allowed label keys carry no row identity. The decision
+  is recorded rather than assumed, and is reversible.
+
+  The optional, output-only status field remains on the local control
+  protocol's pre-1.0 `0.1` contract, matching the existing supervision and
+  serving-URL additions: old serde readers ignore it and new readers
+  default its absence. The constrained exception is now explicit in the
+  protocol/versioning documentation; request fields and semantic changes
+  still require a version bump.
+
+### Added
+
+- Per-row memory telemetry reports what a machine has alongside its row's
+  nominal capacity, in the row's own memory model (V021-E04-F02-T01). Host memory
+  is now captured as an exact fact (`/proc/meminfo` on Linux,
+  `hw.memsize` on macOS), and the telemetry pairs it with the accelerator
+  figure the row-appropriate source reports.
+
+  The distinction it exists to carry is unified versus discrete. A
+  discrete GPU has two pools and the framebuffer is the one a model loads
+  into; a unified-memory platform has ONE pool the host and accelerator
+  both draw from. Reporting a Jetson's 8 GiB as if it were a discrete
+  framebuffer would tell an operator they have all of it for a model
+  while the OS is living in it. The telemetry says which model applies,
+  so a caller cannot sum two halves of one pool.
+
+  Nominal row capacity is not a minimum usable-memory threshold. Driver
+  and firmware reservations make canonical L4 and Jetson observations
+  smaller than their marketed capacities, so the observed value is a
+  usable ceiling bounded by the row's nominal claim. An unreadable figure
+  remains absent rather than becoming a fabricated shortfall. A future
+  load-bearing minimum must be a separately validated row value, not a
+  comparison between these unlike quantities.
+
+### Added
+
+- `doctor` now explains which model classes the matched platform row
+  serves, and at what level (V021-E04-F01-T03). The Jetson row shows
+  `chunked_policy` at Production, the G4 row shows all three VLA shape
+  rows, and the deploy-smoke rows show Preview — read from each row's
+  `model_class_rows` registry pointers rather than a list kept in the CLI,
+  so a row that gains or loses a model class changes the output without
+  code.
+
+  A row that claims none says so plainly rather than rendering an empty
+  list: a Planned row carries no model-class claims and the registry
+  refuses to let it, which is an honest row rather than a broken one. The
+  finding is skipped when no row matched, since `platform_row` already
+  carries the reason and two lines for one fact is worse than one.
+
+### Added
+
+- An unsupported-combination matrix asserts, in one table, that each way a
+  machine can miss the support matrix reports the dimension it is actually
+  off-matrix in (V021-E04-F01-T04). Twelve cases, each naming a specific
+  typed reason rather than merely failing, plus a control that a canonical
+  M-series chip still resolves — a matrix that refused everything would
+  otherwise look complete.
+
+  Writing it corrected an expectation rather than the code. An L4 on
+  Ubuntu 22.04 reports `unsupported_accelerator_sku`, not
+  `unsupported_os_version`, and that is right: 22.04 is a supported OS
+  with a Preview CPU row, so telling that operator their OS is unsupported
+  would send them to reinstall a platform that is fine. What no row covers
+  is a GPU on it.
+
+  The coverage half is the point. Two of the ten reasons reached this
+  release with no producer at all, and a table is what makes that visible:
+  the matrix now derives its covered set from its own cases and fails if
+  any reason has none.
+
+### Added
+
+- The typed platform-reason vocabulary is frozen for v0.2.1 and documented
+  in `docs/platform/support-reasons.md` (V021-E04-F01-T02): ten values,
+  their wire spellings, and the condition that triggers each.
+
+- Backend probe failures now carry a typed reason instead of prose alone.
+  `accelerator_runtime_unavailable` gets its first producer on the Rust
+  side, and the boundary it exists to keep is now enforced by a single
+  classification: an absent descriptor is `missing_backend_package`
+  (install something), and every other probe failure is a runtime that is
+  installed and unusable. Collapsing them tells an operator whose PyTorch
+  cannot reach its accelerator to reinstall a package they already have.
+  The reason reaches the wire through the same error-record context the
+  admission rejections already use.
+
+- The reason vocabulary is now checked as a cross-language contract. The
+  Python sidecar emits its own reason strings — an unavailable MPS runtime
+  is the one that exists today — and a test reads the sidecar source and
+  asserts every constant is a spelling this enum owns. A rename on either
+  side that the other does not follow would otherwise surface as an
+  unrecognized string on a machine rather than as a failing test.
+
+### Added
+
+- `doctor` now names the support row a machine **is**, not only the rows it
+  could be (V021-E04-F01-T01). The new `platform_row` finding resolves the
+  detected host *and* accelerator against the registry — the answer
+  `platform_profile`'s hint has always deferred to with "accelerator
+  identity is needed to name one". `doctor` observes the accelerator the
+  way the agent's startup does (host sources for Apple and Jetson, the
+  `nvidia-smi` probe for a discrete card), so it cannot resolve a different
+  row than deploy admission will.
+
+  The two findings stay separate on purpose: an operator whose accelerator
+  probe fails still gets the host-level answer, and the pair says which
+  half of the identity was the problem. A Planned row resolves as
+  `unsupported` naming the row and `row_planned_not_validated` — the
+  A100 40GB row reads that way today.
+
+  A GPU host whose driver is missing or broken is refused here rather
+  than resolved: it reports no accelerator, so resolving on host identity
+  alone would land it on a CPU-only row and tell an operator their broken
+  machine is supported. The PCI bus distinguishes the two without a
+  driver, checked in the same order deploy admission checks it, so the two
+  cannot disagree about that machine.
+
+  This is also where an exact-equality miss becomes visible. A near-miss OS
+  version or an off-matrix accelerator SKU resolves to no row with the
+  typed reason naming the dimension that missed, where the host-level
+  profile alone would have reported a clean match on a host whose card is
+  wrong.
+
 ### Changed
 
 - The L4 row's fixtures are now recorded, not transcribed

@@ -17,7 +17,7 @@
 // `skipped` finding, not a `fail`, so workspace CI still passes.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::install_paths::{
@@ -265,11 +265,29 @@ fn query_dpkg_package(package: &str) -> DpkgPackageState {
 }
 
 fn any_install_present(opts: &InstallProbeOptions) -> bool {
+    let homebrew_context = cfg!(target_os = "macos");
+    let cli_config = if opts.prefix.is_none() && homebrew_context {
+        std::env::var_os("TENSORPLATE_CLI_CONFIG")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+    any_install_present_with_homebrew_paths(opts, homebrew_context, cli_config.as_deref())
+}
+
+fn any_install_present_with_homebrew_paths(
+    opts: &InstallProbeOptions,
+    homebrew_context: bool,
+    cli_config: Option<&Path>,
+) -> bool {
     // Treat the install layout as present if any of the durable-state
     // directories or installed binaries exists. We avoid a single
     // probe (e.g. /etc/tensorplate) because dpkg conffiles, broken
     // remove/purge cycles, or operator scripts can leave one of those
-    // behind on an otherwise-clean host.
+    // behind on an otherwise-clean host. Homebrew's component formulae
+    // install outside these Debian paths, so include the CLI config that
+    // its wrapper selects and the package-channel platform-registry path.
     let candidates = [
         tensorplate_protocol::install_paths::ETC_DIR,
         tensorplate_protocol::install_paths::STATE_DIR,
@@ -278,6 +296,9 @@ fn any_install_present(opts: &InstallProbeOptions) -> bool {
         PYTHON_PYTORCH_BACKEND_DESCRIPTOR,
     ];
     candidates.iter().any(|p| prefixed(opts, p).exists())
+        || (homebrew_context
+            && (cli_config.is_some_and(Path::exists)
+                || platform_registry_path(opts).is_ok_and(|path| path.exists())))
         || python_backend_descriptor_path(opts).is_ok_and(|path| path.exists())
 }
 
@@ -702,11 +723,19 @@ fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
 }
 
 fn probe_service_states(opts: &InstallProbeOptions) -> Vec<Finding> {
-    if opts.skip_systemd {
-        return skipped_service_states("systemd not present on this host");
-    }
     if opts.prefix.is_some() {
         return skipped_service_states("service-state query skipped for a prefixed test install");
+    }
+    // The supervisor differs by platform and so does the question. On
+    // Linux the agent is a systemd unit; on macOS it is a launchd job
+    // Homebrew loads. Reporting "systemd not present" on a Mac said
+    // nothing about whether the agent was running there, which is the
+    // thing an operator is asking.
+    if cfg!(target_os = "macos") {
+        return probe_launchd_service_states();
+    }
+    if opts.skip_systemd {
+        return skipped_service_states("no supported service supervisor on this host");
     }
     vec![
         probe_service_state(
@@ -720,6 +749,130 @@ fn probe_service_states(opts: &InstallProbeOptions) -> Vec<Finding> {
             "start with `systemctl enable --now tensorplate-observability`",
         ),
     ]
+}
+
+/// The state column for one service in `brew services list` output.
+///
+/// Matched on the exact service name rather than a substring:
+/// `tensorplate-agent` is a prefix of nothing today, and relying on that
+/// staying true is how a future `tensorplate-agent-proxy` would silently
+/// answer for the agent.
+fn launchd_state_from_listing<'a>(listing: &'a str, service: &str) -> Option<&'a str> {
+    listing.lines().find_map(|line| {
+        let mut columns = line.split_whitespace();
+        (columns.next()? == service)
+            .then(|| columns.next())
+            .flatten()
+    })
+}
+
+/// Report both launchd jobs' states from one supervisor snapshot.
+///
+/// `brew services list` is the supervisor of record on macOS: the jobs are
+/// Homebrew-managed, and asking launchd directly would need the label
+/// Homebrew chose rather than the service name an operator types. A host
+/// without Homebrew is skipped rather than failed -- the CLI runs on
+/// machines that never installed the services.
+fn probe_launchd_service_states() -> Vec<Finding> {
+    probe_launchd_service_states_with(|| {
+        Command::new("brew")
+            .args(["services", "list"])
+            .output()
+            .map_err(|err| err.to_string())
+    })
+}
+
+fn probe_launchd_service_states_with(
+    query: impl FnOnce() -> Result<Output, String>,
+) -> Vec<Finding> {
+    launchd_service_states_from_output(query())
+}
+
+fn launchd_service_states_from_output(output: Result<Output, String>) -> Vec<Finding> {
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            return skipped_service_states(&format!(
+                "launchd service-state query unavailable: {err}"
+            ));
+        }
+    };
+    if !output.status.success() {
+        let stderr = bounded_stderr(&output.stderr);
+        let detail = if stderr.is_empty() {
+            format!("`brew services list` exited with {}", output.status)
+        } else {
+            format!(
+                "`brew services list` exited with {}: {stderr}",
+                output.status
+            )
+        };
+        return skipped_service_states(&format!(
+            "launchd service-state query unavailable: {detail}"
+        ));
+    }
+    let listing = String::from_utf8_lossy(&output.stdout);
+    vec![
+        launchd_service_state_from_listing(
+            &listing,
+            FindingId::AgentServiceState,
+            "tensorplate-agent",
+            "start with `brew services start tensorplate-agent` after install checks pass",
+        ),
+        launchd_service_state_from_listing(
+            &listing,
+            FindingId::ObservabilityServiceState,
+            "tensorplate-observability",
+            "start with `brew services start tensorplate-observability`",
+        ),
+    ]
+}
+
+fn bounded_stderr(stderr: &[u8]) -> String {
+    const MAX_CHARS: usize = 512;
+
+    let detail = String::from_utf8_lossy(stderr);
+    let detail = detail.trim();
+    let mut chars = detail.chars();
+    let mut bounded: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn launchd_service_state_from_listing(
+    listing: &str,
+    id: FindingId,
+    service: &str,
+    start_hint: &str,
+) -> Finding {
+    let Some(state) = launchd_state_from_listing(listing, service) else {
+        return Finding::missing(
+            id,
+            Severity::Info,
+            format!("{service} is not a known Homebrew service on this host"),
+            Some(start_hint.into()),
+        );
+    };
+    match state {
+        "started" => Finding::ok(id, Severity::Info, format!("{service} is started"), None),
+        "error" => Finding::fail(
+            id,
+            Severity::Critical,
+            format!("{service} is in error"),
+            Some(format!(
+                "inspect `$(brew --prefix)/var/log/tensorplate/{}.error.log` before retrying",
+                service.trim_start_matches("tensorplate-")
+            )),
+        ),
+        other => Finding::warn(
+            id,
+            Severity::Warning,
+            format!("{service} is {other}"),
+            Some(start_hint.into()),
+        ),
+    }
 }
 
 fn probe_service_state(id: FindingId, unit: &str, start_hint: &str) -> Finding {
@@ -1171,9 +1324,136 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use std::cell::Cell;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     use tempfile::TempDir;
+
+    /// Real `brew services list` output shape: a header row, then one row
+    /// per service, columns separated by runs of spaces.
+    const BREW_LISTING: &str = "\
+Name                      Status  User       File
+tensorplate-agent         started operator ~/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist
+tensorplate-observability none
+other-service             error   root       ~/Library/LaunchAgents/other.plist
+";
+
+    #[test]
+    fn a_launchd_listing_is_read_by_exact_service_name() {
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-agent"),
+            Some("started")
+        );
+        // A service Homebrew knows but has never started reads `none`,
+        // which is a state and not an absence -- the probe warns with the
+        // start hint rather than reporting the service unknown.
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-observability"),
+            Some("none")
+        );
+        // Another service's state must never answer for ours.
+        assert_eq!(
+            launchd_state_from_listing(BREW_LISTING, "tensorplate-serving"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_launchd_name_is_matched_whole_not_as_a_prefix() {
+        // `tensorplate-agent` is a prefix of nothing today. Relying on
+        // that staying true is how a future sibling service would
+        // silently answer for the agent.
+        let listing = "\
+Name                       Status  User       File
+tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
+";
+        assert_eq!(
+            launchd_state_from_listing(listing, "tensorplate-agent"),
+            None,
+            "a longer name that starts the same must not answer"
+        );
+    }
+
+    #[test]
+    fn a_homebrew_cli_config_is_an_install_footprint_without_the_optional_backend() {
+        let td = TempDir::new().unwrap();
+        let cli_config = td.path().join("opt/homebrew/etc/tensorplate/cli.json");
+        fs::create_dir_all(cli_config.parent().unwrap()).unwrap();
+        fs::write(&cli_config, b"{}\n").unwrap();
+        let opts = InstallProbeOptions {
+            prefix: Some(td.path().to_path_buf()),
+            probe_backends: false,
+            skip_systemd: true,
+        };
+
+        assert!(
+            !python_backend_descriptor_path(&opts).unwrap().exists(),
+            "the optional Python backend must not make this test pass"
+        );
+        assert!(any_install_present_with_homebrew_paths(
+            &opts,
+            true,
+            Some(&cli_config)
+        ));
+    }
+
+    #[test]
+    fn non_homebrew_context_ignores_homebrew_only_install_footprints() {
+        let td = TempDir::new().unwrap();
+        let opts = InstallProbeOptions {
+            prefix: Some(td.path().to_path_buf()),
+            probe_backends: false,
+            skip_systemd: false,
+        };
+        let cli_config = td.path().join("opt/homebrew/etc/tensorplate/cli.json");
+        fs::create_dir_all(cli_config.parent().unwrap()).unwrap();
+        fs::write(&cli_config, b"{}\n").unwrap();
+        fs::create_dir_all(platform_registry_path(&opts).unwrap()).unwrap();
+
+        assert!(
+            !any_install_present_with_homebrew_paths(&opts, false, Some(&cli_config)),
+            "a CLI config or registry override must not imply a partial Debian install"
+        );
+    }
+
+    #[test]
+    fn launchd_service_states_share_one_successful_brew_query() {
+        let calls = Cell::new(0);
+        let findings = probe_launchd_service_states_with(|| {
+            calls.set(calls.get() + 1);
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: BREW_LISTING.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        });
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].id, FindingId::AgentServiceState);
+        assert_eq!(findings[0].status_label(), "ok");
+        assert_eq!(findings[1].id, FindingId::ObservabilityServiceState);
+        assert_eq!(findings[1].status_label(), "warning");
+    }
+
+    #[test]
+    fn an_unsuccessful_brew_query_skips_both_services_with_bounded_stderr() {
+        let stderr = format!("brew supervisor failure {}", "x".repeat(1_024));
+        let findings = launchd_service_states_from_output(Ok(Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }));
+
+        assert_eq!(findings.len(), 2);
+        assert!(findings.iter().all(|finding| {
+            finding.status_label() == "skipped"
+                && finding.message.contains("brew supervisor failure")
+                && finding.message.contains('…')
+        }));
+        assert_eq!(bounded_stderr(stderr.as_bytes()).chars().count(), 513);
+    }
 
     fn stage_install_layout(td: &Path) {
         for dir in install_paths::required_directories() {

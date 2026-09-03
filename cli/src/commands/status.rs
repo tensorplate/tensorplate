@@ -151,7 +151,7 @@ fn agent_block(status: Option<&AgentStatus>) -> Value {
             })),
         })
     });
-    json!({
+    let mut block = json!({
         "available": true,
         "agent_state": agent_state_label(status.agent_state),
         "active": active,
@@ -165,7 +165,15 @@ fn agent_block(status: Option<&AgentStatus>) -> Value {
             "message": e.message,
             "context": e.context,
         })),
-    })
+    });
+    if let (Value::Object(fields), Some(telemetry)) =
+        (&mut block, status.platform_telemetry.as_ref())
+    {
+        // Keep this as the protocol-owned serialization rather than
+        // maintaining a second CLI representation of the wire enums.
+        fields.insert("platform_telemetry".into(), json!(telemetry));
+    }
+    block
 }
 
 fn summary_block(d: &DeploymentSummary) -> Value {
@@ -395,6 +403,78 @@ fn render_human(
                 err.message,
             ));
         }
+        if let Some(telemetry) = status.platform_telemetry.as_ref() {
+            out.push_str(&format!(
+                "platform_telemetry: row={} validated={} deployment_degraded={}\n",
+                telemetry.row_id, telemetry.validated, telemetry.deployment_degraded,
+            ));
+            if let Some(memory) = telemetry.memory.as_ref() {
+                out.push_str(&format!(
+                    "  memory: profile={} effective_budget_bytes={} row_nominal_capacity_bytes={}\n",
+                    wire_label(&memory.memory_profile),
+                    memory
+                        .effective_budget_bytes
+                        .map_or_else(|| "unavailable".into(), |value| value.to_string()),
+                    memory.row_nominal_capacity_bytes,
+                ));
+            }
+
+            let collected = telemetry
+                .signals
+                .iter()
+                .filter(|signal| {
+                    matches!(
+                        signal.outcome.as_ref(),
+                        Some(
+                            tensorplate_protocol::agent_control::PlatformSignalOutcomeStatus::Collected
+                        )
+                    )
+                })
+                .count();
+            let unavailable = telemetry
+                .signals
+                .iter()
+                .filter(|signal| {
+                    matches!(
+                        signal.outcome.as_ref(),
+                        Some(
+                            tensorplate_protocol::agent_control::PlatformSignalOutcomeStatus::Unavailable {
+                                ..
+                            }
+                        )
+                    )
+                })
+                .count();
+            let not_applicable = telemetry
+                .signals
+                .len()
+                .saturating_sub(collected + unavailable);
+            if telemetry.signals.is_empty() {
+                out.push_str("  signals: <no live snapshot supplied>\n");
+            } else {
+                out.push_str(&format!(
+                    "  signals: collected={collected} unavailable={unavailable} not_applicable={not_applicable}\n"
+                ));
+            }
+            for signal in &telemetry.signals {
+                if let Some(
+                    tensorplate_protocol::agent_control::PlatformSignalOutcomeStatus::Unavailable {
+                        detail,
+                    },
+                ) = signal.outcome.as_ref()
+                {
+                    out.push_str(&format!(
+                        "  unavailable_signal: name={} gate={} detail={}\n",
+                        wire_label(&signal.name),
+                        wire_label(&signal.gate),
+                        detail,
+                    ));
+                }
+            }
+            if let Some(reason) = telemetry.degraded_reason.as_deref() {
+                out.push_str(&format!("  degraded_reason={reason}\n"));
+            }
+        }
     } else {
         out.push_str("agent: <unavailable>\n");
     }
@@ -422,6 +502,13 @@ fn render_human(
         }
     }
     out
+}
+
+fn wire_label<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(Value::String(label)) => label,
+        _ => "unknown".into(),
+    }
 }
 
 fn agent_state_label(state: AgentRunState) -> &'static str {
@@ -502,8 +589,13 @@ mod tests {
     use crate::profile::{ResolvedProfile, Transport};
     use std::path::PathBuf;
     use std::time::Duration;
-    use tensorplate_protocol::agent_control::{ControlResponse, DeploymentSummary};
+    use tensorplate_protocol::agent_control::{
+        ControlResponse, DeploymentSummary, PlatformMemoryTelemetryStatus,
+        PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus, PlatformTelemetryGate,
+        PlatformTelemetrySignalName, PlatformTelemetryStatus,
+    };
     use tensorplate_protocol::supervision_event::{SupervisionAgentState, SupervisionServingState};
+    use tensorplate_protocol::PlatformMemoryProfileName;
 
     fn profile() -> ResolvedProfile {
         ResolvedProfile {
@@ -553,6 +645,7 @@ mod tests {
                 next_restart_delay_ms: None,
                 stable_uptime_ms: 30_000,
             }),
+            platform_telemetry: None,
         }
     }
 
@@ -566,6 +659,58 @@ mod tests {
             sup.restart_count = 5;
         }
         s
+    }
+
+    fn platform_telemetry() -> PlatformTelemetryStatus {
+        PlatformTelemetryStatus {
+            row_id: "ubuntu2404-x86-l4-g2s8".into(),
+            validated: true,
+            memory: Some(PlatformMemoryTelemetryStatus {
+                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+                host_total_bytes: Some(32 * 1024 * 1024 * 1024),
+                accelerator_total_bytes: Some(23_034 * 1024 * 1024),
+                row_nominal_capacity_bytes: 24 * 1024 * 1024 * 1024,
+                effective_budget_bytes: Some(23_034 * 1024 * 1024),
+                shares_one_pool: false,
+                gate: PlatformTelemetryGate::LoadBearing,
+            }),
+            signals: vec![
+                PlatformSignalTelemetryStatus {
+                    name: PlatformTelemetrySignalName::Thermal,
+                    gate: PlatformTelemetryGate::ContextOnly,
+                    not_applicable_reason: None,
+                    outcome: Some(PlatformSignalOutcomeStatus::Collected),
+                },
+                PlatformSignalTelemetryStatus {
+                    name: PlatformTelemetrySignalName::Power,
+                    gate: PlatformTelemetryGate::LoadBearing,
+                    not_applicable_reason: None,
+                    outcome: Some(PlatformSignalOutcomeStatus::Unavailable {
+                        detail: "power collector timed out".into(),
+                    }),
+                },
+                PlatformSignalTelemetryStatus {
+                    name: PlatformTelemetrySignalName::Throttle,
+                    gate: PlatformTelemetryGate::NotApplicable,
+                    not_applicable_reason: Some("not exposed by this row".into()),
+                    outcome: None,
+                },
+                PlatformSignalTelemetryStatus {
+                    name: PlatformTelemetrySignalName::Memory,
+                    gate: PlatformTelemetryGate::LoadBearing,
+                    not_applicable_reason: None,
+                    outcome: Some(PlatformSignalOutcomeStatus::Collected),
+                },
+                PlatformSignalTelemetryStatus {
+                    name: PlatformTelemetrySignalName::GpuUtilization,
+                    gate: PlatformTelemetryGate::ContextOnly,
+                    not_applicable_reason: None,
+                    outcome: Some(PlatformSignalOutcomeStatus::Collected),
+                },
+            ],
+            degraded_reason: Some("telemetry_degraded".into()),
+            deployment_degraded: true,
+        }
     }
 
     #[test]
@@ -583,6 +728,64 @@ mod tests {
         let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
         assert_eq!(parsed["payload"]["severity"], "ready");
         assert_eq!(parsed["payload"]["agent"]["available"], true);
+        assert!(parsed["payload"]["agent"]
+            .get("platform_telemetry")
+            .is_none());
+    }
+
+    #[test]
+    fn json_status_uses_protocol_platform_telemetry_projection() {
+        let telemetry = platform_telemetry();
+        let mut status = agent_status_with_active();
+        status.platform_telemetry = Some(telemetry.clone());
+
+        let block = agent_block(Some(&status));
+
+        assert_eq!(
+            block["platform_telemetry"],
+            serde_json::to_value(telemetry).unwrap()
+        );
+    }
+
+    #[test]
+    fn human_status_summarizes_platform_telemetry() {
+        let mut status = agent_status_with_active();
+        status.platform_telemetry = Some(platform_telemetry());
+
+        let rendered = render_human(&profile(), Some(&status), None);
+
+        assert!(rendered.contains(
+            "platform_telemetry: row=ubuntu2404-x86-l4-g2s8 validated=true deployment_degraded=true"
+        ));
+        assert!(rendered.contains(
+            "memory: profile=discrete_gpu effective_budget_bytes=24152899584 row_nominal_capacity_bytes=25769803776"
+        ));
+        assert!(rendered.contains("signals: collected=3 unavailable=1 not_applicable=1"));
+        assert!(rendered.contains(
+            "unavailable_signal: name=power gate=load_bearing detail=power collector timed out"
+        ));
+        assert!(rendered.contains("degraded_reason=telemetry_degraded"));
+    }
+
+    #[test]
+    fn absent_platform_telemetry_does_not_change_human_status() {
+        let rendered = render_human(&profile(), Some(&agent_status_with_active()), None);
+
+        assert!(!rendered.contains("platform_telemetry:"));
+    }
+
+    #[test]
+    fn memory_only_platform_telemetry_names_the_absent_live_snapshot() {
+        let mut status = agent_status_with_active();
+        let mut telemetry = platform_telemetry();
+        telemetry.signals.clear();
+        telemetry.degraded_reason = None;
+        telemetry.deployment_degraded = false;
+        status.platform_telemetry = Some(telemetry);
+
+        let rendered = render_human(&profile(), Some(&status), None);
+
+        assert!(rendered.contains("signals: <no live snapshot supplied>"));
     }
 
     #[test]

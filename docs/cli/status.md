@@ -10,7 +10,10 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
 
 - **Agent**: `ControlOp::Status` gives the agent's view of the deploy
   transaction, active/previous/candidate deployments, supervision summary,
-  quarantine entries, and last error.
+  quarantine entries, last error, and the optional matched-row platform
+  telemetry projection. Startup memory facts are present for accelerator
+  rows; signal outcomes appear only when a live collector snapshot was
+  supplied.
 - **Observability snapshot** (optional): when `--observability-snapshot
   <path>` is supplied, the CLI reads the V01-E10 status snapshot at that
   path (schema: [`protocol/schemas/observability_status.json`](../../protocol/schemas/observability_status.json))
@@ -52,6 +55,11 @@ supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
     "candidate": null,
     "in_flight_transaction": null,
     "supervision": { "serving_state": "ready", "crash_loop": false, … },
+    "platform_telemetry": {
+      "row_id": "ubuntu2404-x86-l4-g2s8",
+      "validated": true,
+      "memory": { "memory_profile": "discrete_gpu", … }
+    },
     "quarantined": [],
     "last_error": null
   },

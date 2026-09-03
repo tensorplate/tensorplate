@@ -10,6 +10,7 @@
 // work; the values themselves are frozen here.
 
 use serde::{Deserialize, Serialize};
+use tensorplate_protocol::backend_probe::BackendProbeState;
 
 /// Why a detected platform is not a supported combination.
 ///
@@ -68,6 +69,34 @@ impl PlatformReason {
         Self::RowPlannedNotValidated,
     ];
 
+    /// The reason a backend probe state carries, or `None` when the
+    /// backend is runnable.
+    ///
+    /// The distinction this exists to keep: a descriptor that is absent
+    /// means the package is not installed, and every other failure means
+    /// the package IS installed and its runtime is not usable. Collapsing
+    /// them sends an operator whose PyTorch cannot see its accelerator to
+    /// reinstall a package they already have.
+    #[must_use]
+    pub fn for_backend_probe(state: &BackendProbeState) -> Option<Self> {
+        match state {
+            BackendProbeState::Runnable => None,
+            BackendProbeState::DescriptorMissing => Some(Self::MissingBackendPackage),
+            // Present but unusable: a malformed descriptor, an absent or
+            // wrong-version interpreter, a module or framework that will
+            // not import, or a runtime the backend refuses to run under.
+            BackendProbeState::DescriptorMalformed { .. }
+            | BackendProbeState::RuntimeVersionMismatch { .. }
+            | BackendProbeState::PythonInterpreterMissing { .. }
+            | BackendProbeState::PythonVersionMismatch { .. }
+            | BackendProbeState::PythonModuleImportFailed { .. }
+            | BackendProbeState::PytorchMissing { .. }
+            | BackendProbeState::PytorchVersionMismatch { .. } => {
+                Some(Self::AcceleratorRuntimeUnavailable)
+            }
+        }
+    }
+
     /// Stable serialized name (snake_case). The exhaustive match makes a
     /// newly added reason a compile error here rather than a silently
     /// unspelled one.
@@ -118,6 +147,84 @@ mod tests {
         spellings.sort_unstable();
         spellings.dedup();
         assert_eq!(spellings.len(), 10, "reason spellings must be distinct");
+    }
+
+    #[test]
+    fn a_backend_probe_never_conflates_a_missing_package_with_a_dead_runtime() {
+        use tensorplate_protocol::backend_probe::BackendProbeState as S;
+        // Absent descriptor: the package is not installed.
+        assert_eq!(
+            PlatformReason::for_backend_probe(&S::DescriptorMissing),
+            Some(PlatformReason::MissingBackendPackage)
+        );
+        // Everything else: the package IS installed and its runtime is
+        // not usable. Enumerated rather than wildcarded so a new probe
+        // state has to be classified deliberately.
+        for state in [
+            S::DescriptorMalformed {
+                reason: String::new(),
+            },
+            S::RuntimeVersionMismatch {
+                runtime_version: String::new(),
+                descriptor_min: String::new(),
+            },
+            S::PythonInterpreterMissing {
+                interpreter: String::new(),
+            },
+            S::PythonVersionMismatch {
+                interpreter: String::new(),
+                observed: String::new(),
+                required: String::new(),
+            },
+            S::PythonModuleImportFailed {
+                module: String::new(),
+                detail: String::new(),
+            },
+            S::PytorchMissing {
+                detail: String::new(),
+            },
+            S::PytorchVersionMismatch {
+                observed: String::new(),
+                required: String::new(),
+            },
+        ] {
+            assert_eq!(
+                PlatformReason::for_backend_probe(&state),
+                Some(PlatformReason::AcceleratorRuntimeUnavailable),
+                "{state:?} is an installed runtime that will not run"
+            );
+        }
+        assert_eq!(PlatformReason::for_backend_probe(&S::Runnable), None);
+    }
+
+    #[test]
+    fn the_cpu_dimensions_and_the_sku_stay_distinct() {
+        // Three reasons that a renderer could plausibly collapse. The
+        // vocabulary is only useful if each names one dimension: an
+        // operator on the wrong architecture and one on an unbuilt vendor
+        // need different answers, and the SKU reason is vendor-neutral so
+        // it can carry an Apple chip and an NVIDIA card alike.
+        let spellings = [
+            PlatformReason::UnsupportedCpuArch.as_str(),
+            PlatformReason::UnsupportedCpuVendor.as_str(),
+            PlatformReason::UnsupportedAcceleratorSku.as_str(),
+        ];
+        assert_eq!(
+            spellings
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3,
+            "these three must never share a spelling"
+        );
+        for vendor in ["nvidia", "apple", "amd", "intel"] {
+            assert!(
+                !PlatformReason::UnsupportedAcceleratorSku
+                    .as_str()
+                    .contains(vendor),
+                "the SKU reason must stay vendor-neutral"
+            );
+        }
     }
 
     #[test]

@@ -19,9 +19,12 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
-    HostIdentity, HostReport, PlatformProbeError, PlatformRegistry, PlatformRegistryError,
-    ProfileSelection, SystemHostProbe,
+    classify_accelerator_probe_failure, identify, identify_accelerator, AcceleratorObservation,
+    AcceleratorProbeFailureClass, HostIdentity, HostReport, NvidiaSmiProbe, PlatformProbeError,
+    PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport, ProfileSelection,
+    RowMatch, SystemHostProbe,
 };
+use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::args::DoctorArgs;
 use crate::client::AgentClient;
@@ -188,12 +191,44 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
             FindingId::AgentSocket,
             Severity::Warning,
             format!("agent socket `{}` does not exist", path.display()),
-            Some(
-                "is `tensorplate-agent` running? `systemctl status tensorplate-agent` should report active"
-                    .into(),
-            ),
+            Some(agent_socket_hint().into()),
         )
     }
+}
+
+#[cfg(target_os = "linux")]
+fn agent_socket_hint() -> &'static str {
+    "is `tensorplate-agent` running? `systemctl status tensorplate-agent` should report active"
+}
+
+#[cfg(target_os = "macos")]
+fn agent_socket_hint() -> &'static str {
+    "is `tensorplate-agent` running? `brew services list` should report `tensorplate-agent` as started"
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn agent_socket_hint() -> &'static str {
+    "is `tensorplate-agent` running? check its state in this platform's service supervisor"
+}
+
+/// Detection state consumed by the pure host-section renderer.
+///
+/// Host detection and accelerator detection are deliberately represented
+/// separately.  A readable host whose accelerator probe failed still has an
+/// OS, CPU profile and PCI evidence worth reporting; replacing that host with
+/// the accelerator error is what previously made doctor lose those facts.
+#[derive(Clone, Copy, Debug)]
+pub enum HostSectionDetection<'a> {
+    /// Host and accelerator detection completed.
+    Complete(&'a PlatformReport),
+    /// Host detection completed, but integrated or discrete accelerator
+    /// detection failed.
+    AcceleratorProbeFailed {
+        host: &'a HostReport,
+        error: &'a PlatformProbeError,
+    },
+    /// The host itself could not be detected.
+    HostProbeFailed(&'a PlatformProbeError),
 }
 
 /// Render the host section from an already-detected host.
@@ -204,12 +239,13 @@ fn probe_unix_socket(path: &PathBuf) -> Finding {
 /// goldens without the machine running the test leaking into the answer.
 #[must_use]
 pub fn render_host_section(
-    detected: Result<&HostReport, &PlatformProbeError>,
+    detected: HostSectionDetection<'_>,
     registry: Result<&PlatformRegistry, &PlatformRegistryError>,
 ) -> Vec<Finding> {
-    let report = match detected {
-        Ok(report) => report,
-        Err(err) => {
+    let host = match detected {
+        HostSectionDetection::Complete(report) => &report.host,
+        HostSectionDetection::AcceleratorProbeFailed { host, .. } => host,
+        HostSectionDetection::HostProbeFailed(err) => {
             // A source that could not be read is not a platform that is
             // unsupported. This is a warning, not a failure: `doctor` is
             // what an operator runs to find out why their access is wrong,
@@ -245,11 +281,23 @@ pub fn render_host_section(
                     "skipped: host identity undetected",
                     None,
                 ),
+                Finding::skipped(
+                    FindingId::PlatformRow,
+                    Severity::Info,
+                    "skipped: host identity undetected",
+                    None,
+                ),
+                Finding::skipped(
+                    FindingId::ModelClassRows,
+                    Severity::Info,
+                    "skipped: host identity undetected",
+                    None,
+                ),
             ];
         }
     };
 
-    let identity = &report.identity;
+    let identity = &host.identity;
     let mut findings = vec![Finding::ok(
         FindingId::HostFacts,
         Severity::Info,
@@ -271,18 +319,12 @@ pub fn render_host_section(
         os.push_str(&format!(" on {machine_type}"));
     }
     let exact = [
-        report
-            .exact
+        host.exact
             .os_version
             .as_deref()
             .map(|v| format!("version {v}")),
-        report
-            .exact
-            .os_build
-            .as_deref()
-            .map(|b| format!("build {b}")),
-        report
-            .exact
+        host.exact.os_build.as_deref().map(|b| format!("build {b}")),
+        host.exact
             .l4t_release
             .as_deref()
             .map(|l| format!("L4T {l}")),
@@ -308,7 +350,268 @@ pub fn render_host_section(
             Some("see the platform_registry finding for what to do about it".into()),
         ),
     });
+    let resolution = classify_platform(detected, registry);
+    findings.push(render_platform_row(resolution));
+    findings.push(render_model_class_rows(resolution));
     findings
+}
+
+/// One shared answer for the two findings derived from exact platform
+/// resolution.  Keeping the answer as a value prevents `platform_row` from
+/// rejecting a driverless host while `model_class_rows` independently resolves
+/// that same host to a CPU row.
+#[derive(Clone, Copy, Debug)]
+enum PlatformResolution<'a> {
+    Matched(RowMatch<'a>),
+    MissingDriverRuntime {
+        host: &'a HostReport,
+        error: Option<&'a PlatformProbeError>,
+    },
+    AcceleratorDetectionFailed(&'a PlatformProbeError),
+    HostDetectionFailed,
+    RegistryUnavailable(&'a PlatformRegistryError),
+}
+
+fn classify_platform<'a>(
+    detected: HostSectionDetection<'a>,
+    registry: Result<&'a PlatformRegistry, &'a PlatformRegistryError>,
+) -> PlatformResolution<'a> {
+    match detected {
+        HostSectionDetection::Complete(report)
+            if report.accelerator.is_none()
+                && !report.host.exact.nvidia_pci_functions.is_empty() =>
+        {
+            PlatformResolution::MissingDriverRuntime {
+                host: &report.host,
+                error: None,
+            }
+        }
+        HostSectionDetection::Complete(report) => match registry {
+            Ok(registry) => {
+                PlatformResolution::Matched(registry.resolve(&report.detected_platform()))
+            }
+            Err(err) => PlatformResolution::RegistryUnavailable(err),
+        },
+        HostSectionDetection::AcceleratorProbeFailed { host, error } => {
+            match classify_accelerator_probe_failure(host, error) {
+                AcceleratorProbeFailureClass::MissingDriverRuntime => {
+                    PlatformResolution::MissingDriverRuntime {
+                        host,
+                        error: Some(error),
+                    }
+                }
+                AcceleratorProbeFailureClass::DetectionFailed => {
+                    PlatformResolution::AcceleratorDetectionFailed(error)
+                }
+            }
+        }
+        HostSectionDetection::HostProbeFailed(_) => PlatformResolution::HostDetectionFailed,
+    }
+}
+
+/// Which model classes the matched row carries, and at what level.
+///
+/// Read from the row's `model_class_rows` pointers rather than a list
+/// kept here: a row that gains a model class says so in the registry, and
+/// a second list in the renderer would be a second thing to forget. Only
+/// meaningful once a row is named, so it follows the row match and
+/// reports the same absence rather than guessing.
+fn render_model_class_rows(resolution: PlatformResolution<'_>) -> Finding {
+    let matched = match resolution {
+        PlatformResolution::Matched(row_match) => match row_match {
+            RowMatch::Supported(row)
+            | RowMatch::PlannedNotValidated(row)
+            | RowMatch::Experimental(row) => Some(row),
+            RowMatch::OutsideValidatedEnvironment { candidate } => candidate,
+            RowMatch::Unsupported(_) => None,
+        },
+        PlatformResolution::MissingDriverRuntime { .. } => {
+            return Finding::skipped(
+                FindingId::ModelClassRows,
+                Severity::Info,
+                "skipped: accelerator driver/runtime unavailable, so no support row was resolved",
+                Some("see the platform_row finding for why".into()),
+            );
+        }
+        PlatformResolution::AcceleratorDetectionFailed(_) => {
+            return Finding::skipped(
+                FindingId::ModelClassRows,
+                Severity::Info,
+                "skipped: accelerator detection failed, so no support row was resolved",
+                Some("see the platform_row finding for why".into()),
+            );
+        }
+        PlatformResolution::HostDetectionFailed => {
+            return Finding::skipped(
+                FindingId::ModelClassRows,
+                Severity::Info,
+                "skipped: host identity undetected",
+                None,
+            );
+        }
+        PlatformResolution::RegistryUnavailable(err) => {
+            return Finding::skipped(
+                FindingId::ModelClassRows,
+                Severity::Info,
+                format!("skipped: the platform registry could not be loaded ({err})"),
+                Some("see the platform_registry finding for what to do about it".into()),
+            );
+        }
+    };
+    let Some(row) = matched else {
+        return Finding::skipped(
+            FindingId::ModelClassRows,
+            Severity::Info,
+            "skipped: no support row matched, so no model classes apply",
+            Some("see the platform_row finding for why".into()),
+        );
+    };
+    let pointers = row.model_class_rows();
+    if pointers.is_empty() {
+        // A row carrying no model class is not a broken row: a Planned
+        // row claims nothing until it is validated, and the registry
+        // refuses to let it claim.
+        return Finding::ok(
+            FindingId::ModelClassRows,
+            Severity::Info,
+            format!(
+                "row `{}` claims no model classes at its current support level",
+                row.row_id()
+            ),
+            None,
+        );
+    }
+    let rendered = pointers
+        .iter()
+        .map(|pointer| {
+            format!(
+                "{} ({})",
+                pointer.model_class_row,
+                pointer.support_level.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Finding::ok(
+        FindingId::ModelClassRows,
+        Severity::Info,
+        format!("row `{}` serves {rendered}", row.row_id()),
+        None,
+    )
+}
+
+/// Which support row this machine IS, host and accelerator together.
+///
+/// `platform_profile` above answers from host identity alone and must
+/// report a set, because rows sharing an OS and CPU profile differ only by
+/// accelerator. This is the answer that set defers to. The two are
+/// deliberately separate findings: an operator whose accelerator probe
+/// fails still gets the host-level answer, and the pair says which half
+/// of the identity was the problem.
+fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
+    match resolution {
+        PlatformResolution::MissingDriverRuntime { host, error } => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!(
+                "the PCI bus reports an NVIDIA display controller at {} but {} ({})",
+                host.exact.nvidia_pci_functions.join(", "),
+                error.map_or_else(
+                    || "no accelerator could be identified".to_string(),
+                    |err| format!("the accelerator probe could not answer for it: {err}"),
+                ),
+                PlatformReason::MissingDriverRuntime.as_str()
+            ),
+            Some(
+                "the driver is absent or not functional; deploy admission refuses this machine rather than serving on the CPU without saying so"
+                    .into(),
+            ),
+        ),
+        PlatformResolution::AcceleratorDetectionFailed(err) => Finding::warn(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!("platform row could not be resolved because accelerator detection failed: {err}"),
+            Some(match err {
+                PlatformProbeError::Unreadable { .. } =>
+                    "the accelerator source could not be read, and there is no independent PCI evidence that proves a missing driver; inspect the named source and retry"
+                        .into(),
+                PlatformProbeError::Unrecognized { .. } =>
+                    "the accelerator source answered but this release could not interpret it; attach `tensorplate doctor --output json` rather than reinstalling the driver"
+                        .into(),
+            }),
+        ),
+        PlatformResolution::HostDetectionFailed => Finding::skipped(
+            FindingId::PlatformRow,
+            Severity::Info,
+            "skipped: host identity undetected",
+            None,
+        ),
+        PlatformResolution::RegistryUnavailable(err) => Finding::skipped(
+            FindingId::PlatformRow,
+            Severity::Info,
+            format!("skipped: the platform registry could not be loaded ({err})"),
+            Some("see the platform_registry finding for what to do about it".into()),
+        ),
+        PlatformResolution::Matched(row_match) => match row_match {
+        RowMatch::Supported(row) => Finding::ok(
+            FindingId::PlatformRow,
+            Severity::Info,
+            format!("resolves to support row `{}`", row.row_id()),
+            None,
+        ),
+        // Defined and detectable, carrying no validation evidence. Not a
+        // fault: the row exists precisely so this machine is recognised
+        // rather than told it is unknown hardware.
+        RowMatch::PlannedNotValidated(row) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!(
+                "resolves to row `{}`, which is Planned ({})",
+                row.row_id(),
+                PlatformReason::RowPlannedNotValidated.as_str()
+            ),
+            Some(
+                "the row names this hardware but carries no validation evidence yet; deploy admission refuses it"
+                    .into(),
+            ),
+        ),
+        RowMatch::Experimental(row) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!("resolves to row `{}`, which is Experimental", row.row_id()),
+            Some("an Experimental row is not a supported combination".into()),
+        ),
+        // The hardware matches; the chassis its evidence was collected on
+        // does not. Whether that refuses the machine depends on the row's
+        // gate semantics, which is the agent's call at admission -- so
+        // this states the condition and points at who decides.
+        RowMatch::OutsideValidatedEnvironment { candidate } => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            match candidate {
+                Some(row) => format!(
+                    "hardware matches row `{}`, but no evidence covers this machine shape",
+                    row.row_id()
+                ),
+                None => "hardware matches this release, but no evidence covers this machine shape"
+                    .to_string(),
+            },
+            Some(
+                "a datacenter row admits this on technical prerequisites and reports it unvalidated; a row with load-bearing thermal, power or throttle gates requires covering evidence. The agent prints the resolved posture at startup"
+                    .into(),
+            ),
+        ),
+        RowMatch::Unsupported(reason) => Finding::unsupported(
+            FindingId::PlatformRow,
+            Severity::Warning,
+            format!("resolves to no support row ({})", reason.as_str()),
+            Some(
+                "see docs/release/support-matrix.md for the platforms this release validates"
+                    .into(),
+            ),
+        ),
+        },
+    }
 }
 
 /// Which support rows this host could be.
@@ -491,9 +794,69 @@ fn probe_agent_config() -> Vec<Finding> {
 
 /// The host section for the machine this is running on.
 fn probe_host_profile() -> Vec<Finding> {
-    let detected = SystemHostProbe::new().detect();
     let registry = PlatformRegistry::load_installed();
-    render_host_section(detected.as_ref(), registry.as_ref())
+    let sources = match SystemHostProbe::new().sources() {
+        Ok(sources) => sources,
+        Err(err) => {
+            return render_host_section(
+                HostSectionDetection::HostProbeFailed(&err),
+                registry.as_ref(),
+            )
+        }
+    };
+    // Interpret the complete platform first. If only its accelerator half is
+    // malformed, recover the independently interpretable host instead of
+    // replacing every host finding with that accelerator error.
+    let mut report = match tensorplate_platform::identify_platform(&sources) {
+        Ok(report) => report,
+        Err(accelerator_error) => match identify(&sources) {
+            Ok(host) => {
+                return render_host_section(
+                    HostSectionDetection::AcceleratorProbeFailed {
+                        host: &host,
+                        error: &accelerator_error,
+                    },
+                    registry.as_ref(),
+                )
+            }
+            Err(host_error) => {
+                return render_host_section(
+                    HostSectionDetection::HostProbeFailed(&host_error),
+                    registry.as_ref(),
+                )
+            }
+        },
+    };
+    // The host sources name an integrated accelerator (Apple, Jetson);
+    // a discrete card needs the tool. Same order the agent's startup
+    // uses, so doctor cannot resolve a different row than admission will.
+    // A probe failure is carried alongside the host: its class depends on
+    // both the error kind and independent PCI evidence.
+    if report.accelerator.is_none() {
+        match NvidiaSmiProbe::new()
+            .sources()
+            .and_then(|sources| identify_accelerator(&sources))
+        {
+            Ok(Some(card)) => {
+                report.accelerator = Some(AcceleratorObservation {
+                    identity: card.identity,
+                    memory_bytes: card.exact.memory_total_bytes,
+                    memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return render_host_section(
+                    HostSectionDetection::AcceleratorProbeFailed {
+                        host: &report.host,
+                        error: &error,
+                    },
+                    registry.as_ref(),
+                )
+            }
+        }
+    }
+    render_host_section(HostSectionDetection::Complete(&report), registry.as_ref())
 }
 
 fn probe_ros2_health_stub() -> Vec<Finding> {
@@ -795,6 +1158,7 @@ mod tests {
             quarantined: vec![],
             recovery: None,
             supervision: None,
+            platform_telemetry: None,
         };
         if active {
             status.active = Some(DeploymentSummary {
@@ -812,6 +1176,30 @@ mod tests {
         ControlResponse {
             agent_status: Some(status),
             ..ControlResponse::ok(Some("corr".into()))
+        }
+    }
+
+    #[test]
+    fn a_missing_agent_socket_names_the_native_service_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let finding = probe_unix_socket(&dir.path().join("missing-agent.sock"));
+        let hint = finding.hint.expect("a missing socket has a recovery hint");
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(hint.contains("systemctl status tensorplate-agent"));
+            assert!(!hint.contains("brew services"));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(hint.contains("brew services list"));
+            assert!(!hint.contains("systemctl"));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            assert!(hint.contains("service supervisor"));
+            assert!(!hint.contains("systemctl"));
+            assert!(!hint.contains("brew services"));
         }
     }
 

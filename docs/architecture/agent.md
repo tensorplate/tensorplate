@@ -131,6 +131,14 @@ Errors carry a typed `code` matching `tensorplate_protocol::ErrorCode`,
 so the CLI (V01-E11) and the observability service (V01-E10) see the
 same stable code surface as the C++ runtime.
 
+For an admitted accelerator row, `agent_status.platform_telemetry` is an
+optional additive block containing the row identity, validation state, and
+startup memory facts. A resolved live signal snapshot contains all five
+stable signal names; applicable omissions are explicit `unavailable`
+outcomes, while an absent snapshot omits the `signals` field.
+Context-only failures degrade agent status without blocking deployment;
+load-bearing failures do both.
+
 ## Durable state store (V01-E08-F02)
 
 The store persists exactly two files in the agent's state directory:
