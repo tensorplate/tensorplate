@@ -444,4 +444,80 @@ done
   }
 )
 
+# A release candidate must be distinguishable from the release it is a
+# candidate for. Built as plain X.Y.Z it was not: same dpkg version, so
+# `apt` saw nothing to upgrade and anyone who installed a candidate was
+# stranded on it, with `tensorplate --version` reporting the final
+# release's string.
+(
+  workflow=".github/workflows/release.yml"
+
+  # Exercise the workflow's own derivation rather than a copy of it.
+  derive() {
+    bash -c '
+      tag="$1"
+      version="${tag#v}"; version="${version%%-*}"
+      deb_version="$version"; python_version="$version"
+      if [[ "$tag" =~ -rc\.([1-9][0-9]*)$ ]]; then
+        deb_version="${version}~rc.${BASH_REMATCH[1]}"
+        python_version="${version}rc${BASH_REMATCH[1]}"
+      fi
+      printf "%s %s %s" "$version" "$deb_version" "$python_version"' _ "$1"
+  }
+
+  # The derivation must still be the one the workflow ships.
+  for fragment in 'deb_version="${version}~rc.${BASH_REMATCH[1]}"' \
+                  'python_version="${version}rc${BASH_REMATCH[1]}"'; do
+    grep -qF "$fragment" "$workflow" || {
+      echo "FAIL: release.yml no longer derives versions as this test assumes: $fragment" >&2
+      exit 1
+    }
+  done
+
+  read -r final_v final_deb final_py <<<"$(derive v0.2.1)"
+  read -r rc_v rc_deb rc_py <<<"$(derive v0.2.1-rc.1)"
+
+  [[ "$final_deb" == "0.2.1" && "$final_py" == "0.2.1" ]] || {
+    echo "FAIL: a final tag must not gain a prerelease suffix (got $final_deb / $final_py)" >&2
+    exit 1
+  }
+  [[ "$rc_deb" == "0.2.1~rc.1" ]] || {
+    echo "FAIL: rc deb version must be 0.2.1~rc.1, got $rc_deb" >&2; exit 1; }
+  [[ "$rc_py" == "0.2.1rc1" ]] || {
+    echo "FAIL: rc python version must be PEP 440 0.2.1rc1, got $rc_py" >&2; exit 1; }
+  [[ "$rc_v" == "$final_v" ]] || {
+    echo "FAIL: the source version must be the same for a candidate and its release" >&2; exit 1; }
+  [[ "$rc_deb" != "$final_deb" ]] || {
+    echo "FAIL: candidate and final produce the same package version" >&2; exit 1; }
+
+  # The build script must accept the Debian form and refuse the semver one:
+  # `-rc.1` in an upstream version would be read as a Debian revision.
+  grep -qF 'die "--version must be X.Y.Z or X.Y.Z~rc.N for release builds"' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: build-release-artifacts.sh does not accept the candidate version form" >&2
+    exit 1
+  }
+
+  # dpkg takes the version from the changelog, not from --version, so the
+  # staging path must run for candidates and not only for snapshots.
+  grep -qE 'elif \[\[ "\$VERSION" == \*"~"\* \]\]; then' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: candidate builds do not stage their version into debian/changelog" >&2
+    exit 1
+  }
+
+  # The ordering the whole fix rests on. dpkg is present on the CI runners
+  # that run this suite; locally it may not be, and an unchecked claim is
+  # reported rather than passed over in silence.
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg --compare-versions "${rc_deb}-1" lt "${final_deb}-1" || {
+      echo "FAIL: ${rc_deb}-1 must sort below ${final_deb}-1 or there is no upgrade path" >&2
+      exit 1
+    }
+    echo "candidate versions sort below their release (dpkg-verified)"
+  else
+    echo "candidate version derivation checked; dpkg absent, ordering NOT verified here"
+  fi
+)
+
 printf 'release script checks green\n'

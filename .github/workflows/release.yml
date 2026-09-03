@@ -40,6 +40,8 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+      deb_version: ${{ steps.meta.outputs.deb_version }}
+      python_version: ${{ steps.meta.outputs.python_version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       draft: ${{ steps.meta.outputs.draft }}
       release_dir: ${{ steps.meta.outputs.release_dir }}
@@ -76,11 +78,25 @@ jobs:
             echo "::error::release tags must be vX.Y.Z or vX.Y.Z-rc.N"
             exit 1
           fi
+          # One release identity, three encodings, derived here so no
+          # consumer has to know the mapping:
+          #   version        0.2.1       source/semver base; what the tree says
+          #   deb_version    0.2.1~rc.1  Debian; `~` sorts below the bare
+          #                              version so the final release is an
+          #                              upgrade from a candidate
+          #   python_version 0.2.1rc1    PEP 440
+          # A candidate built as plain 0.2.1 was indistinguishable from the
+          # release: same dpkg version, so no upgrade path off it, and
+          # `tensorplate --version` reported the same string for both.
           version="${tag#v}"
           version="${version%%-*}"
           prerelease="false"
-          if [[ "$tag" == *-* ]]; then
+          deb_version="$version"
+          python_version="$version"
+          if [[ "$tag" =~ -rc\.([1-9][0-9]*)$ ]]; then
             prerelease="true"
+            deb_version="${version}~rc.${BASH_REMATCH[1]}"
+            python_version="${version}rc${BASH_REMATCH[1]}"
           fi
           draft="false"
           if [[ "$prerelease" == "false" ]]; then
@@ -102,6 +118,8 @@ jobs:
           {
             echo "tag=${tag}"
             echo "version=${version}"
+            echo "deb_version=${deb_version}"
+            echo "python_version=${python_version}"
             echo "prerelease=${prerelease}"
             echo "draft=${draft}"
             echo "release_dir=${release_dir}"
@@ -334,7 +352,7 @@ jobs:
       - name: Build, check, and smoke-install the SDK distribution
         shell: bash
         env:
-          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION: ${{ needs.meta.outputs.python_version }}
         run: |
           set -Eeuo pipefail
           # The source tree carries a .dev0 development version between
@@ -479,7 +497,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
-          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION: ${{ needs.meta.outputs.deb_version }}
           TAG: ${{ needs.meta.outputs.tag }}
           RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
           MANIFEST: ${{ needs.meta.outputs.manifest }}

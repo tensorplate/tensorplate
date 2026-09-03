@@ -119,27 +119,34 @@ derive_snapshot_version() {
   printf '%s~dev.%s.%s\n' "$(base_version)" "$date" "$short_sha"
 }
 
-restore_snapshot_changelog() {
+restore_staged_changelog() {
   if [[ -n "$CHANGELOG_BACKUP" && -f "$CHANGELOG_BACKUP" ]]; then
     cp -- "$CHANGELOG_BACKUP" packaging/debian/changelog
     rm -f -- "$CHANGELOG_BACKUP"
   fi
 }
 
-write_snapshot_changelog() {
+# Stage the version being built into the Debian changelog.
+#
+# dpkg takes the package version from this file, not from `--version`, so
+# a build whose version differs from the tree's must rewrite it or ship a
+# package labelled with the wrong version. The tree always carries the
+# final release version; snapshots and release candidates do not.
+write_staged_changelog() {
+  local distribution="$1"
   CHANGELOG_BACKUP="$(mktemp)"
   cp -- packaging/debian/changelog "$CHANGELOG_BACKUP"
-  trap restore_snapshot_changelog EXIT
-  python3 - "$VERSION" <<'PY'
+  trap restore_staged_changelog EXIT
+  python3 - "$VERSION" "$distribution" <<'PY'
 import sys
 from pathlib import Path
 
-version = sys.argv[1]
+version, distribution = sys.argv[1], sys.argv[2]
 path = Path("packaging/debian/changelog")
 lines = path.read_text().splitlines()
 if not lines:
     raise SystemExit("packaging/debian/changelog is empty")
-lines[0] = f"tensorplate ({version}-1) UNRELEASED; urgency=medium"
+lines[0] = f"tensorplate ({version}-1) {distribution}; urgency=medium"
 path.write_text("\n".join(lines) + "\n")
 PY
 }
@@ -154,8 +161,13 @@ if ((SNAPSHOT)); then
 else
   [[ -n "$VERSION" ]] || die "--version is required"
   [[ -n "$TAG" ]] || die "--tag is required"
-  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-    die "--version must be MAJOR.MINOR.PATCH for release builds"
+  # `~rc.N` is the Debian prerelease form, and the tilde is load-bearing:
+  # it sorts BELOW the bare version, so 0.2.1~rc.1-1 < 0.2.1-1 and apt
+  # offers the final release as an upgrade. Building a candidate as plain
+  # 0.2.1 produced a package indistinguishable from the real release --
+  # same version to dpkg, so no upgrade path off it at all.
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(~rc\.[1-9][0-9]*)?$ ]] ||
+    die "--version must be X.Y.Z or X.Y.Z~rc.N for release builds"
 fi
 
 host_arch="$(dpkg --print-architecture)"
@@ -169,7 +181,13 @@ if [[ "$TARGET_ARCH" != "$host_arch" ]]; then
 fi
 
 if ((SNAPSHOT)); then
-  write_snapshot_changelog
+  write_staged_changelog UNRELEASED
+elif [[ "$VERSION" == *"~"* ]]; then
+  # A release candidate is published and installable, so it takes a real
+  # distribution rather than UNRELEASED. Without this the candidate would
+  # be built from the tree's changelog and labelled with the final
+  # release's version -- the same version, so no upgrade path off it.
+  write_staged_changelog unstable
 fi
 
 note "validating release installer"
@@ -224,8 +242,12 @@ if [[ -z "$BUILD_DIR" ]]; then
     BUILD_DIR="build/release"
   fi
 fi
+# Everything after the tilde is the prerelease identity: `dev.DATE.SHA`
+# for a snapshot, `rc.N` for a candidate, absent for a final release. The
+# runtime reports it, so `tensorplate --version` distinguishes a candidate
+# from the release it is a candidate for.
 runtime_version_suffix=""
-if ((SNAPSHOT)); then
+if [[ "$VERSION" == *"~"* ]]; then
   runtime_version_suffix="${VERSION#*~}"
 fi
 cmake_args=(
