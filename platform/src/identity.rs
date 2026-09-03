@@ -112,6 +112,16 @@ pub struct AcceleratorIdentity {
     /// before any SKU comparison, so a partitioned instance of a supported
     /// SKU never resolves to its row.
     pub partitioned: bool,
+    /// How many accelerators the host reports.
+    ///
+    /// Carried in the identity rather than left to the probe so a
+    /// multi-device host produces a verdict instead of an error: the
+    /// count is a fact about the machine, and a machine no row claims is
+    /// unsupported, not undetectable. Rejected before any SKU comparison
+    /// for the same reason `partitioned` is -- two of a supported card is
+    /// a topology nothing was validated on, not a degraded version of the
+    /// row that claims one.
+    pub device_count: u32,
 }
 
 /// A complete observation of the machine: host plus accelerator, if any.

@@ -135,6 +135,14 @@ fn identity_cases() -> Vec<Case> {
             got: admission_reason(&report("macos26-apple-a17pro-unsupported", None)),
             want: PlatformReason::UnsupportedAcceleratorSku,
         },
+        // The silicon is exactly the row's; there is simply more of it.
+        // Named separately from the SKU cases because the fix an operator
+        // needs is different: nothing is wrong with the card.
+        Case {
+            what: "more accelerators than any row claims",
+            got: admission_reason(&report("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"))),
+            want: PlatformReason::UnsupportedAcceleratorTopology,
+        },
         Case {
             what: "exact Planned row",
             got: admission_reason(&report("jetson-orin-nx-16gb", None)),

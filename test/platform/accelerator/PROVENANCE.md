@@ -50,6 +50,7 @@ listed so a future recording knows exactly what claim it replaces.
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
 | `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's card with `mig.mode.current` set to `Enabled`. The row is Planned; the partitioning refusal is checked before support level, so this fixture still exercises it. |
+| `multi-gpu-two-l4.txt` | `NVIDIA L4` | The L4 row's own **recorded** line, repeated with a second synthetic UUID. Not a recording: no two-GPU host has been observed. What it exercises is the device count, which needs no more fidelity than two identical cards — the SKU is deliberately the supported one, so the refusal cannot be mistaken for an off-matrix SKU. |
 
 UUIDs are synthetic. Driver versions are plausible for the generation and are
 not asserted on. Framebuffer sizes are approximately what each card reports,
