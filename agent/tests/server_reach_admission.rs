@@ -64,6 +64,7 @@ fn report_of(row: &PlatformSupportRow, host: HostIdentity) -> PlatformReport {
             identity: AcceleratorIdentity {
                 sku: declared.sku.clone(),
                 partitioned: false,
+                device_count: 1,
             },
             memory_bytes: Some(declared.memory_bytes),
             memory_profile: declared.memory_profile,
@@ -471,39 +472,58 @@ fn registry_with_l4_at(support_level: &str) -> PlatformRegistry {
 
 #[test]
 fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault() {
-    // `nvidia-smi` ANSWERED here -- the driver is fine. The answer is more
-    // than one GPU, which no row in this release claims, so detection
-    // refuses to interpret it. Blaming `missing_driver_runtime` for that
-    // sends an operator to reinstall a driver that is working.
+    // `nvidia-smi` ANSWERED here -- the driver is fine, and so is the
+    // answer. Two L4s is a machine no row claims, which is a verdict, not
+    // a failure to read. Blaming `missing_driver_runtime` would send an
+    // operator to reinstall a working driver; reporting the answer
+    // uninterpretable would tell them their tool is broken. Both are
+    // wrong for the same reason: nothing here failed.
     //
-    // Driven through the real probe rather than a hand-built error, so the
-    // test breaks if multi-GPU stops producing `Unrecognized`.
+    // Driven through the real probe rather than a hand-built value, so
+    // the test breaks if multi-GPU stops being detected.
     let two_cards = "NVIDIA L4, 23034, 550.54.15, GPU-1111, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-2222, Disabled";
-    let error = identify_accelerator(&AcceleratorSources {
+    let report = identify_accelerator(&AcceleratorSources {
         nvidia_smi_query: Some(two_cards.to_string()),
     })
-    .expect_err("two GPUs cannot be interpreted as one device");
-    assert!(
-        matches!(error, PlatformProbeError::Unrecognized { .. }),
-        "a readable-but-uninterpretable answer is Unrecognized, got {error:?}"
+    .expect("two readable devices are an answer, not a failure")
+    .expect("a host with GPUs reports an accelerator");
+    assert_eq!(
+        report.identity.device_count, 2,
+        "the count is the fact the verdict turns on"
+    );
+    assert_eq!(
+        report.identity.sku, "NVIDIA L4",
+        "device 0 still supplies identity, so evidence has something real to record"
     );
 
-    let host = HostReport {
-        identity: host_of(row(&registry(), "ubuntu2404-x86-cpu")),
-        exact: ExactHostFacts {
-            // The cards ARE on the bus. Under the untyped-by-PCI-alone
-            // rule this is exactly the case that got misblamed.
-            nvidia_pci_functions: vec!["0000:00:04.0".to_string(), "0000:00:05.0".to_string()],
-            ..ExactHostFacts::default()
-        },
-    };
+    let registry = registry();
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let mut platform = report_of(l4, host_of(l4));
+    platform
+        .accelerator
+        .as_mut()
+        .expect("the fixture has an accelerator")
+        .identity
+        .device_count = 2;
 
-    let admission = PlatformAdmission::accelerator_probe_failed(&host, &error);
+    let admission =
+        PlatformAdmission::evaluate(&registry, &platform, &ObservedStack::default(), None);
 
     assert_eq!(
         admission.reason(),
-        None,
-        "the driver answered; this is an unsupported topology, not a driver fault: {admission:?}"
+        Some(PlatformReason::UnsupportedAcceleratorTopology),
+        "the operator gets the fact they can act on -- the count -- not a driver they must \
+         not touch: {admission:?}"
+    );
+    assert_ne!(
+        admission.reason(),
+        Some(PlatformReason::MissingDriverRuntime),
+        "the original hazard: a working driver blamed for a topology"
+    );
+    assert_ne!(
+        admission.reason(),
+        Some(PlatformReason::UnsupportedAcceleratorSku),
+        "the silicon is exactly the row's; there is only more of it"
     );
     admission
         .ensure_supported()

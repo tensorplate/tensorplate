@@ -538,6 +538,14 @@ impl PlatformRegistry {
     /// degraded version of that row, it is a configuration this release
     /// does not serve on.
     ///
+    /// A host reporting more than one accelerator is rejected the same
+    /// way and for the same reason. Every committed row is single-device,
+    /// so two of a supported card is a topology no row's evidence was
+    /// collected on -- not a better version of the row that claims one.
+    /// Partitioning is checked first: on a host that is both partitioned
+    /// and multi-device, MIG is the more specific and more actionable
+    /// answer.
+    ///
     /// A machine whose hardware matches a row but whose machine shape is
     /// outside that row's validated environment resolves to
     /// [`RowMatch::OutsideValidatedEnvironment`], never to `Supported`:
@@ -568,7 +576,11 @@ impl PlatformRegistry {
     /// one", and none for "the OS name is unknown", so both report the
     /// nearest available truth
     /// ([`PlatformReason::UnsupportedAcceleratorSku`] and
-    /// [`PlatformReason::UnsupportedOsVersion`] respectively).
+    /// [`PlatformReason::UnsupportedOsVersion`] respectively). A third
+    /// such gap was closed rather than absorbed:
+    /// [`PlatformReason::UnsupportedAcceleratorTopology`] exists because
+    /// reporting a device count as a wrong SKU would have been the same
+    /// kind of nearest-available-truth, on a fact an operator can act on.
     #[must_use]
     pub fn resolve(&self, detected: &DetectedPlatform) -> RowMatch<'_> {
         if detected
@@ -577,6 +589,14 @@ impl PlatformRegistry {
             .is_some_and(|accelerator| accelerator.partitioned)
         {
             return RowMatch::Unsupported(PlatformReason::MigModeEnabled);
+        }
+
+        if detected
+            .accelerator
+            .as_ref()
+            .is_some_and(|accelerator| accelerator.device_count != 1)
+        {
+            return RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology);
         }
 
         let mut nearest_count = u32::MAX;

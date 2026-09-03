@@ -306,53 +306,69 @@ fn an_unreadable_accelerator_with_pci_evidence_names_the_driver_failure() {
 }
 
 #[test]
-fn a_multi_gpu_answer_is_detection_failure_not_a_broken_driver() {
-    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
-    let one = std::fs::read_to_string(repo_path(
-        "test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt",
-    ))
-    .expect("read accelerator fixture");
-    let error = identify_accelerator(&AcceleratorSources {
-        nvidia_smi_query: Some(format!("{one}{one}")),
-    })
-    .expect_err("two GPUs are outside the supported topology");
+fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
+    // This used to render "accelerator detection failed" as a Warning,
+    // because two cards produced a probe error. Two readable cards are an
+    // answer, so the host now resolves normally and is refused with the
+    // fact an operator can act on. The difference matters at the console:
+    // a Warning saying detection failed invites them to debug their
+    // driver or their nvidia-smi; an Unsupported row naming the topology
+    // tells them this release serves one device.
+    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
+    report
+        .accelerator
+        .as_mut()
+        .expect("the fixture carries an accelerator")
+        .identity
+        .device_count = 2;
     let registry = registry();
 
-    let section = render_host_section(
-        HostSectionDetection::AcceleratorProbeFailed {
-            host: &report.host,
-            error: &error,
-        },
-        Ok(&registry),
-    );
+    let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
+
     let facts = section
         .iter()
         .find(|f| f.id == FindingId::HostFacts)
         .expect("host facts");
     assert_eq!(facts.status, FindingStatus::Pass);
-    let profile = section
-        .iter()
-        .find(|f| f.id == FindingId::PlatformProfile)
-        .expect("platform profile");
-    assert_eq!(profile.status, FindingStatus::Pass);
     let row = section
         .iter()
         .find(|f| f.id == FindingId::PlatformRow)
         .expect("a row finding");
-    assert_eq!(row.status, FindingStatus::Warning);
-    assert!(row.message.contains("accelerator detection failed"));
+    assert_eq!(
+        row.status,
+        FindingStatus::Unsupported,
+        "a machine no row claims is unsupported, not a warning: {row:?}"
+    );
     assert!(
-        !row.message.contains("missing_driver_runtime"),
-        "a driver that answered must not be blamed: {}",
+        row.message.contains("unsupported_accelerator_topology"),
+        "the reason must name the topology: {}",
         row.message
     );
-    assert_eq!(
-        section
-            .iter()
-            .find(|f| f.id == FindingId::ModelClassRows)
-            .expect("a model-class finding")
-            .status,
-        FindingStatus::Skipped,
+    assert!(
+        !row.message.contains("missing_driver_runtime"),
+        "the driver answered and is not at fault: {}",
+        row.message
+    );
+    assert!(
+        !row.message.contains("detection failed"),
+        "nothing failed to detect: {}",
+        row.message
+    );
+
+    // The generic "see the support matrix" pointer is actively unhelpful
+    // here: this card IS on the matrix. The hint has to say that the
+    // count is what was refused.
+    let hint = row
+        .hint
+        .as_deref()
+        .expect("an unsupported row carries a hint");
+    assert!(
+        hint.contains("one accelerator per host"),
+        "the hint must name the actual constraint: {hint}"
+    );
+    assert!(
+        !hint.contains("support-matrix.md"),
+        "pointing at the matrix would tell them their supported card is supported: {hint}"
     );
 }
 
