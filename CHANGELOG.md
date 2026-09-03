@@ -6,6 +6,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- A shared lifecycle-stage runner and a schema for what it writes
+  (V021-E05-F01-T01). The eight stages — install, upgrade, deploy-smoke,
+  status-logs, rollback, restart, crash-loop, offline — now produce one
+  machine-readable report per row, with each stage's log attached whether
+  it passed or failed.
+
+  The macOS harness already had this shape and the Jetson one did not, so
+  the two produced different evidence for the same stages and only one of
+  them could be read by a machine. The release gate has to decide
+  completeness by reading the report rather than reading prose, so both
+  now emit the same one.
+
+  The failure discipline is the part worth keeping from the original: a
+  stage that fails must APPEAR in the report as a failure. Under `set -e`
+  the runner never reaches its own bookkeeping, so the record is written
+  from an EXIT trap — a harness that merely stopped writing would produce
+  a short report indistinguishable from a short run. A skipped stage
+  requires a reason for the same reason.
+
+  The schema and the shell script name the same eight stages, and a test
+  reads both and fails if they drift.
+
 ### Fixed
 
 - `doctor` now reports service health on macOS (V021-E04-F02-T03).
