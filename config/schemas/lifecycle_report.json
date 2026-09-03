@@ -5,9 +5,19 @@
   "description": "One harness run against one support row. Written by tools/validation/lifecycle-stages.sh and consumed by evidence-bundle assembly, which decides completeness from the stage set rather than from prose.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "row_id", "started_at", "finished_at", "outcome", "stages"],
+  "required": [
+    "schema_version",
+    "row_id",
+    "started_at",
+    "finished_at",
+    "outcome",
+    "stages"
+  ],
   "properties": {
-    "schema_version": { "type": "string", "const": "0.1" },
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
     "row_id": {
       "type": "string",
       "description": "The support row this run validates. A report whose row is not in the registry is evidence for nothing.",
@@ -18,10 +28,19 @@
       "description": "Which harness produced this run, for reproducing it.",
       "minLength": 1
     },
-    "started_at": { "type": "string", "format": "date-time" },
-    "finished_at": { "type": "string", "format": "date-time" },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "outcome": {
-      "enum": ["pass", "fail"],
+      "enum": [
+        "pass",
+        "fail"
+      ],
       "description": "pass only when every stage passed. A run that aborted mid-way is a fail with the stages it reached."
     },
     "stages": {
@@ -30,7 +49,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["stage", "status", "started_at", "finished_at", "log"],
+        "required": [
+          "stage",
+          "status",
+          "log"
+        ],
         "properties": {
           "stage": {
             "enum": [
@@ -45,9 +68,23 @@
             ],
             "description": "The eight lifecycle stages. A closed set so a report missing one is detectable rather than merely shorter."
           },
-          "status": { "enum": ["pass", "fail", "skipped"] },
-          "started_at": { "type": "string", "format": "date-time" },
-          "finished_at": { "type": "string", "format": "date-time" },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "skipped"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the stage began. Present only for a stage that ran."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the stage ended. Present only for a stage that ran."
+          },
           "log": {
             "type": "string",
             "description": "Log file for this stage, relative to the report. Attached whether the stage passed or failed: a passing stage's log is what a later regression is diffed against.",
@@ -60,8 +97,45 @@
         },
         "allOf": [
           {
-            "if": { "properties": { "status": { "enum": ["fail", "skipped"] } }, "required": ["status"] },
-            "then": { "required": ["detail"] }
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "fail",
+                    "skipped"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "detail"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pass",
+                    "fail"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "required": [
+                "started_at",
+                "finished_at"
+              ]
+            }
           }
         ]
       }

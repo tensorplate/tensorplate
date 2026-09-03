@@ -99,6 +99,104 @@ fn an_aborted_run_still_validates_and_names_the_failed_stage() {
     assert_eq!(failed, vec!["deploy-smoke"]);
 }
 
+/// Run the converter over a harness-shaped stage log.
+fn convert(rows: &[(&str, &str)], maps: &[&str]) -> (Value, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let tsv = dir.path().join("stages.tsv");
+    let mut body = String::from("stage\tstatus\tstarted_at\tfinished_at\tlog\n");
+    for (stage, status) in rows {
+        body.push_str(&format!(
+            "{stage}\t{status}\t2026-09-03T03:00:00Z\t2026-09-03T03:01:00Z\t{stage}.log\n"
+        ));
+    }
+    std::fs::write(&tsv, body).expect("write stage log");
+    let out = dir.path().join("lifecycle-report.json");
+    let status = Command::new(repo_root().join("tools/validation/lifecycle-report-from-stages.sh"))
+        .arg(&tsv)
+        .arg("macos26-m1pro-16gb")
+        .arg("contract-test")
+        .arg(&out)
+        .args(maps)
+        .status()
+        .expect("run converter");
+    assert!(status.success(), "converter must succeed on a valid log");
+    let doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(out).expect("read report")).expect("parses");
+    (doc, dir)
+}
+
+#[test]
+fn a_converted_harness_log_validates_and_carries_all_eight_stages() {
+    // A harness that ran only some of the canonical stages still produces
+    // a complete report: the release gate has to see the absent ones to
+    // report them missing, and a shorter report would read as a shorter
+    // run rather than an incomplete one.
+    let (doc, _dir) = convert(
+        &[("clean-install", "pass"), ("deploy-smoke", "pass")],
+        &["clean-install=install", "deploy-smoke=deploy-smoke"],
+    );
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "converted report must validate: {errors:?}"
+    );
+    assert_eq!(
+        doc["stages"].as_array().expect("stages").len(),
+        8,
+        "every canonical stage appears, run or not"
+    );
+    assert_eq!(doc["outcome"], "pass");
+}
+
+#[test]
+fn a_converted_report_distinguishes_an_unmapped_stage_from_an_unrun_one() {
+    // Two different problems with two different fixes: nobody taught the
+    // converter which harness stage covers this, versus the harness knows
+    // and did not get there.
+    let (doc, _dir) = convert(
+        &[("clean-install", "pass")],
+        &["clean-install=install", "launchd-restart=restart"],
+    );
+    let detail = |stage: &str| -> String {
+        doc["stages"]
+            .as_array()
+            .expect("stages")
+            .iter()
+            .find(|s| s["stage"] == stage)
+            .and_then(|s| s["detail"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        detail("restart").contains("did not run"),
+        "a mapped stage absent from the log is an unrun stage: {}",
+        detail("restart")
+    );
+    assert!(
+        detail("offline").contains("no harness stage mapped"),
+        "an unmapped canonical stage says so: {}",
+        detail("offline")
+    );
+}
+
+#[test]
+fn a_failed_harness_stage_survives_conversion() {
+    // The property the gate depends on: conversion must not launder a
+    // failure into a pass or an omission.
+    let (doc, _dir) = convert(
+        &[("clean-install", "pass"), ("deploy-smoke", "fail")],
+        &["clean-install=install", "deploy-smoke=deploy-smoke"],
+    );
+    assert_eq!(doc["outcome"], "fail");
+    let smoke = doc["stages"]
+        .as_array()
+        .expect("stages")
+        .iter()
+        .find(|s| s["stage"] == "deploy-smoke")
+        .expect("deploy-smoke present");
+    assert_eq!(smoke["status"], "fail");
+}
+
 #[test]
 fn the_schema_and_the_harness_agree_on_the_eight_stage_names() {
     // Two lists of stage names, in two languages, that must not drift.

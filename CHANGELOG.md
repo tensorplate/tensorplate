@@ -8,6 +8,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Physical-row validation runbooks for the in-lab Jetson Orin Nano and the
+  M1 Pro, and a converter that gives their harnesses the same lifecycle
+  report the cloud rows will produce (V021-E05-F01-T03).
+
+  Both harnesses predate the report and record their own stage names, and
+  both run only on hardware CI cannot reach. Rewriting their stage calls
+  would mean editing, untested, the code whose entire purpose is to be
+  trustworthy on a machine nobody can reach — so the stage log they
+  already write is converted instead. The mapping from harness stage to
+  canonical stage is an assertion, and a wrong one lies in the gate's
+  favour, so it is stated per run rather than guessed.
+
+  A canonical stage with no mapped source is emitted as `skipped` with
+  that stated, and a mapped stage absent from the log says it did not
+  run: two different problems with two different fixes, where a shorter
+  report would have shown neither. Timestamps are omitted for a stage
+  that did not run rather than filled in, since inventing one makes an
+  omission look like a very fast pass.
+
+  The Jetson identity check confirms the BSP generation the row names
+  (`L4T r36.x`) rather than a single revision — a device on r36.4.3 and
+  one on r36.5.0 both satisfy the row, and a runbook insisting on one
+  would refuse the other on identical hardware.
+
+### Added
+
 - A shared lifecycle-stage runner and a schema for what it writes
   (V021-E05-F01-T01). The eight stages — install, upgrade, deploy-smoke,
   status-logs, rollback, restart, crash-loop, offline — now produce one
