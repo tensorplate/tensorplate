@@ -116,6 +116,14 @@ jobs:
         shell: bash
         run: test/validation/lifecycle_stages_test.sh
 
+      # The checker itself, not the repository's current evidence state:
+      # it is expected to report the real rows as incomplete until the
+      # hardware runs happen, and the release workflow is where that
+      # becomes blocking.
+      - name: Evidence completeness check
+        shell: bash
+        run: test/validation/evidence_bundle_test.sh
+
       # Which packages a binary-arch-only build emits is decided by debhelper
       # from debian/control, and the release workflow's amd64 job depends on
       # that answer. This runner IS x86_64, so it checks the real thing rather
