@@ -8,6 +8,31 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A machine-checkable evidence-completeness check for Production rows
+  (V021-E05-F02-T01). For each row claiming Production it verifies three
+  things: the row's provenance is `recorded` rather than spec-authored,
+  its declared evidence directory holds a lifecycle report for that row,
+  and every one of the eight stages passed.
+
+  The guard this replaces asserted that a row *declared* an evidence
+  location whose string contained the row id. It passed happily for a
+  directory nobody had created — which is how four Production rows
+  reached a release branch with `provenance: spec_authored` and empty
+  evidence directories. A check that cannot fail is not a check.
+
+  Completeness is defined in terms of artifacts that already exist rather
+  than a new manifest format, and the report is per row and names what is
+  missing: "evidence incomplete" without a subject is not actionable. It
+  reports every Production row as incomplete today, which is the true
+  answer until the hardware runs happen.
+
+  A report filed under a different row than the one it is evidence for is
+  a failure rather than a pass, and a registry with no Production rows at
+  all is an error rather than a vacuous success — both are ways a
+  completeness check can look like it worked while checking nothing.
+
+### Added
+
 - Physical-row validation runbooks for the in-lab Jetson Orin Nano and the
   M1 Pro, and a converter that gives their harnesses the same lifecycle
   report the cloud rows will produce (V021-E05-F01-T03).
