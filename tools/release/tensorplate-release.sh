@@ -564,6 +564,21 @@ check_evidence() {
     warn "$CLEAN_ROOM_REPORT is a procedure or incomplete report; final public publication still requires clean-room decision evidence"
 }
 
+# The workflow's evidence gate runs after a tag exists. Running the same
+# checker here means an incomplete bundle stops the cut instead of being
+# discovered once the tag is already pushed. An exit of 2 is the checker
+# failing to run, which is a release-blocking fault in its own right and
+# not the same as evidence being incomplete.
+check_evidence_bundles() {
+  local status=0
+  tools/release/check-evidence-bundles.sh --version "$VERSION" >/dev/null 2>&1 || status=$?
+  case "$status" in
+    0) pass "every Production row carries complete evidence for $VERSION" ;;
+    1) fail "Production rows lack complete evidence for $VERSION (run tools/release/check-evidence-bundles.sh --version $VERSION)" ;;
+    *) fail "the evidence checker could not run (exit ${status}); re-run it directly to see why" ;;
+  esac
+}
+
 check_artifacts() {
   if [[ ! -d "$ARTIFACTS_DIR" ]]; then
     fail "artifact directory $ARTIFACTS_DIR is missing"
@@ -855,6 +870,7 @@ run_source_preflight() {
   check_version_files
   check_changelog
   check_release_notes
+  check_evidence_bundles
 
   if ((${#FAILURES[@]})); then
     printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2

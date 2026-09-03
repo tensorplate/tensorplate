@@ -17,24 +17,29 @@
 # an absent stage and an unrun one must not look alike.
 #
 # Usage:
-#   lifecycle-report-from-stages.sh <stages.tsv> <row_id> <harness> <out.json> [map...]
-# where each map is `harness_stage=canonical_stage`.
+#   lifecycle-report-from-stages.sh <stages.tsv> <row_id> <tested_version> \
+#       <harness> <out.json> [map...]
+# where each map is `harness_stage=canonical_stage`. A canonical stage may
+# be named by several harness stages; the weakest of their results is the
+# one reported.
 
 set -Eeuo pipefail
 
 die() { printf 'lifecycle-report: %s\n' "$1" >&2; exit 2; }
 
-[[ $# -ge 4 ]] || die "usage: $0 <stages.tsv> <row_id> <harness> <out.json> [harness_stage=canonical]..."
+[[ $# -ge 5 ]] || die "usage: $0 <stages.tsv> <row_id> <tested_version> <harness> <out.json> [harness_stage=canonical]..."
 
-stages_tsv="$1"; row_id="$2"; harness="$3"; out="$4"; shift 4
+stages_tsv="$1"; row_id="$2"; tested_version="$3"; harness="$4"; out="$5"; shift 5
 [[ -f "$stages_tsv" ]] || die "no stage log at ${stages_tsv}"
+[[ "$tested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+  die "tested version \`${tested_version}\` is not a release version"
 
-python3 - "$stages_tsv" "$row_id" "$harness" "$out" "$@" <<'PY'
-import json, sys
+python3 - "$stages_tsv" "$row_id" "$tested_version" "$harness" "$out" "$@" <<'PY'
+import json, os, sys
 
-stages_tsv, row_id, harness, out = sys.argv[1:5]
+stages_tsv, row_id, tested_version, harness, out = sys.argv[1:6]
 mapping = {}
-for pair in sys.argv[5:]:
+for pair in sys.argv[6:]:
     if "=" not in pair:
         sys.exit(f"lifecycle-report: bad mapping `{pair}`, expected harness_stage=canonical")
     src, dst = pair.split("=", 1)
@@ -58,19 +63,27 @@ with open(stages_tsv, encoding="utf-8") as handle:
 
 # A harness stage may map to a canonical one; the rest are its own
 # business and are not evidence for this contract.
+# Weakest-result ordering. fail dominates skipped dominates pass, so a
+# canonical stage covered by several harness stages reports the worst of
+# them regardless of the order they appear in the log. The previous rule
+# replaced only a `pass`, which meant a `skipped` seen first silently
+# absorbed a later `fail` -- the same two stages produced `pass` or `fail`
+# depending on their order in the TSV.
+SEVERITY = {"pass": 0, "skipped": 1, "fail": 2}
+
 seen, stages = {}, []
 for row in rows:
     canonical = mapping.get(row.get("stage", ""))
     if canonical is None:
         continue
-    # A canonical stage covered by several harness stages fails if ANY
-    # of them failed: the weakest result is the honest one.
     prior = seen.get(canonical)
     status = row.get("status", "fail")
-    if prior is None or (prior["status"] == "pass" and status != "pass"):
+    if status not in SEVERITY:
+        status = "fail"
+    if prior is None or SEVERITY[status] > SEVERITY[prior["status"]]:
         entry = {
             "stage": canonical,
-            "status": status if status in ("pass", "fail", "skipped") else "fail",
+            "status": status,
             "log": row.get("log", f"{canonical}.log"),
         }
         for key in ("started_at", "finished_at"):
@@ -99,13 +112,29 @@ for canonical in CANONICAL:
 
 started = min((s["started_at"] for s in stages if s.get("started_at")), default="")
 finished = max((s["finished_at"] for s in stages if s.get("finished_at")), default="")
+# pass requires all eight present and passing; "nothing failed" is not the
+# same claim, and reporting it as pass let two passes and six skips look
+# like a validated row.
+if any(s["status"] == "fail" for s in stages):
+    outcome = "fail"
+elif all(s["status"] == "pass" for s in stages) and len(stages) == len(CANONICAL):
+    outcome = "pass"
+else:
+    outcome = "incomplete"
+
+subject = {"tested_version": tested_version}
+revision = os.environ.get("TP_LIFECYCLE_SOURCE_REVISION", "")
+if revision:
+    subject["source_revision"] = revision
+
 report = {
     "schema_version": "0.1",
     "row_id": row_id,
+    "subject": subject,
     "harness": harness,
     "started_at": started,
     "finished_at": finished,
-    "outcome": "fail" if any(s["status"] == "fail" for s in stages) else "pass",
+    "outcome": outcome,
     "stages": stages,
 }
 with open(out, "w", encoding="utf-8") as handle:

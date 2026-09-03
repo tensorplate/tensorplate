@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://tensorplate.dev/schemas/lifecycle_report.json",
+  "$id": "https://tensorplate.com/schemas/v0.1/lifecycle_report.json",
   "title": "Lifecycle validation report",
   "description": "One harness run against one support row. Written by tools/validation/lifecycle-stages.sh and consumed by evidence-bundle assembly, which decides completeness from the stage set rather than from prose.",
   "type": "object",
@@ -8,6 +8,7 @@
   "required": [
     "schema_version",
     "row_id",
+    "subject",
     "started_at",
     "finished_at",
     "outcome",
@@ -22,6 +23,31 @@
       "type": "string",
       "description": "The support row this run validates. A report whose row is not in the registry is evidence for nothing.",
       "minLength": 1
+    },
+    "subject": {
+      "type": "object",
+      "description": "What was actually installed and exercised. A report that does not say what it tested cannot authorize a release: without it a run filed under one version silently blesses every later tag.",
+      "additionalProperties": false,
+      "required": [
+        "tested_version"
+      ],
+      "properties": {
+        "tested_version": {
+          "type": "string",
+          "description": "The TensorPlate version installed on the machine under test, as the packages reported it. The release gate requires this to equal the version being released.",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
+        },
+        "source_revision": {
+          "type": "string",
+          "description": "Full git SHA of the source the tested artifacts were built from, when the harness can determine it.",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "artifact_digest": {
+          "type": "string",
+          "description": "sha256 of the installed package, when the harness can determine it. Binds the report to one artifact rather than to a version string anyone can reuse.",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
     },
     "harness": {
       "type": "string",
@@ -39,9 +65,10 @@
     "outcome": {
       "enum": [
         "pass",
-        "fail"
+        "fail",
+        "incomplete"
       ],
-      "description": "pass only when every stage passed. A run that aborted mid-way is a fail with the stages it reached."
+      "description": "pass only when all eight canonical stages are present and passed. fail when any stage failed. incomplete when nothing failed but the eight are not all present and passing -- a deliberate skip is not a breakage, and conflating the two would either hide a gap or invent a failure. Only pass satisfies the release gate."
     },
     "stages": {
       "type": "array",

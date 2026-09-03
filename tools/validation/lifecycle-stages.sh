@@ -10,19 +10,21 @@
 # reading it rather than by reading prose.
 #
 # The failure discipline is the part worth preserving from the original:
-# a stage that fails must APPEAR in the report as a failure. Under
-# `set -e` the runner never reaches its own bookkeeping, so the caller
-# installs an EXIT trap that records the stage left in flight. A harness
-# that merely stopped writing would produce a short report that reads
-# exactly like a short run.
+# a stage that fails must APPEAR in the report as a failure. lifecycle_stage
+# therefore captures its command's status and classifies the stage itself,
+# rather than letting `set -e` unwind past its own bookkeeping. Relying on
+# ambient errexit was unsound: bash disables -e inside a function invoked
+# from a tested context, so `lifecycle_stage install false || :` recorded a
+# pass for a command that failed. The EXIT trap remains as a backstop for
+# signals and for exits raised outside a stage.
 #
 # Usage:
 #   source tools/validation/lifecycle-stages.sh
-#   lifecycle_begin <row_id> <evidence_dir> [harness_name]
+#   lifecycle_begin <row_id> <evidence_dir> <tested_version> [harness_name]
 #   trap 'lifecycle_abort $?' EXIT
 #   lifecycle_stage install install_fn args...
 #   lifecycle_skip upgrade "no prior release on this row"
-#   lifecycle_finish            # writes the report, clears the trap
+#   lifecycle_finish            # writes the report
 
 set -Eeuo pipefail
 
@@ -39,6 +41,9 @@ LIFECYCLE_STAGES=(
 
 _lc_row_id=""
 _lc_harness=""
+_lc_version=""
+_lc_source_revision=""
+_lc_finished=0
 _lc_dir=""
 _lc_report=""
 _lc_started=""
@@ -71,11 +76,18 @@ _lc_known_stage() {
 lifecycle_begin() {
   _lc_row_id="${1:?row id required}"
   _lc_dir="${2:?evidence dir required}"
-  _lc_harness="${3:-$(basename "${BASH_SOURCE[1]:-unknown}")}"
+  # Required: a report that does not say which version it exercised cannot
+  # authorize a release, because nothing stops it being reused for a later one.
+  _lc_version="${3:?tested version required}"
+  _lc_harness="${4:-$(basename "${BASH_SOURCE[1]:-unknown}")}"
+  [[ "$_lc_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
+    _lc_die "tested version \`${_lc_version}\` is not a release version"
+  _lc_source_revision="${TP_LIFECYCLE_SOURCE_REVISION:-}"
   mkdir -p "$_lc_dir"
   _lc_report="${_lc_dir}/lifecycle-report.json"
   _lc_started="$(_lc_now)"
   _lc_records=()
+  _lc_finished=0
 }
 
 _lc_record() {
@@ -89,9 +101,15 @@ _lc_record() {
   _lc_records+=("${entry}}")
 }
 
-# Run one stage, capturing its output. On success the record is written
-# here; on failure `set -e` unwinds to the caller's trap, which calls
-# lifecycle_abort.
+# Run one stage, capturing its output and its status.
+#
+# The status is captured explicitly rather than inferred from control flow.
+# Under `set -e` a failing command would unwind before the pass record was
+# written -- but bash suspends errexit inside a function called from a
+# tested context (`lifecycle_stage install false || :`), and there the
+# unconditional record ran and certified a failure as a pass. Branching on
+# the captured status is correct in both contexts, and returning the
+# original status keeps the caller's errexit behaviour unchanged.
 lifecycle_stage() {
   local stage="$1"
   shift
@@ -100,7 +118,20 @@ lifecycle_stage() {
   _lc_active_started="$(_lc_now)"
   _lc_active_log="${stage}.log"
   printf '== stage %s\n' "$stage" >&2
-  "$@" >"${_lc_dir}/${_lc_active_log}" 2>&1
+
+  local status=0
+  "$@" >"${_lc_dir}/${_lc_active_log}" 2>&1 || status=$?
+
+  if (( status != 0 )); then
+    local detail="stage exited ${status}"
+    if [[ -s "${_lc_dir}/${_lc_active_log}" ]]; then
+      detail="${detail}: $(tail -n 3 "${_lc_dir}/${_lc_active_log}" | tr '\n' ' ')"
+    fi
+    _lc_record "$stage" fail "$_lc_active_started" "$(_lc_now)" "$_lc_active_log" "$detail"
+    _lc_active=""
+    return "$status"
+  fi
+
   _lc_record "$stage" pass "$_lc_active_started" "$(_lc_now)" "$_lc_active_log"
   _lc_active=""
 }
@@ -122,6 +153,11 @@ lifecycle_skip() {
 lifecycle_abort() {
   local status="${1:-1}"
   set +e
+  # lifecycle_finish already wrote the report. Returning here rather than
+  # clearing the EXIT trap leaves the caller's own cleanup handler intact:
+  # this file is sourced, and the harnesses chain real cleanup (restoring
+  # packages, services and Homebrew formulae) off the same trap.
+  (( _lc_finished )) && return 0
   if [[ "$status" -ne 0 && -n "$_lc_active" ]]; then
     local detail="stage exited ${status}"
     if [[ -s "${_lc_dir}/${_lc_active_log}" ]]; then
@@ -134,14 +170,36 @@ lifecycle_abort() {
   return 0
 }
 
+# pass requires all eight canonical stages present and passing. Treating
+# "nothing failed" as a pass let a run of two passes and six skips certify
+# itself, which is the exact claim the release gate exists to refuse.
 _lc_write_report() {
-  local outcome="pass" record
+  local outcome record stage passed=0 failed=0
   for record in "${_lc_records[@]}"; do
-    case "$record" in *'"status":"fail"'*) outcome="fail" ;; esac
+    case "$record" in *'"status":"fail"'*) failed=1 ;; esac
   done
+  for stage in "${LIFECYCLE_STAGES[@]}"; do
+    for record in "${_lc_records[@]}"; do
+      case "$record" in
+        *"\"stage\":\"${stage}\",\"status\":\"pass\""*) (( ++passed )); break ;;
+      esac
+    done
+  done
+  if (( failed )); then
+    outcome="fail"
+  elif (( passed == ${#LIFECYCLE_STAGES[@]} )); then
+    outcome="pass"
+  else
+    outcome="incomplete"
+  fi
   {
     printf '{\n  "schema_version": "0.1",\n'
     printf '  "row_id": %s,\n' "$(_lc_json_escape "$_lc_row_id")"
+    printf '  "subject": {\n    "tested_version": %s' "$(_lc_json_escape "$_lc_version")"
+    if [[ -n "$_lc_source_revision" ]]; then
+      printf ',\n    "source_revision": %s' "$(_lc_json_escape "$_lc_source_revision")"
+    fi
+    printf '\n  },\n'
     printf '  "harness": %s,\n' "$(_lc_json_escape "$_lc_harness")"
     printf '  "started_at": "%s",\n  "finished_at": "%s",\n' "$_lc_started" "$(_lc_now)"
     printf '  "outcome": "%s",\n  "stages": [\n' "$outcome"
@@ -155,10 +213,10 @@ _lc_write_report() {
   } >"$_lc_report"
 }
 
-# Write the report for a run that completed. Clears the trap so the
-# caller's own cleanup does not write it twice.
+# Write the report for a run that completed. Marks the run finished so a
+# later lifecycle_abort is a no-op, without touching the caller's EXIT trap.
 lifecycle_finish() {
   _lc_write_report
-  trap - EXIT
+  _lc_finished=1
   printf '== lifecycle report: %s\n' "$_lc_report" >&2
 }

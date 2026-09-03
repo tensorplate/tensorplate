@@ -16,20 +16,48 @@ directory. It carries all eight lifecycle stages — a stage that did not
 run appears as `skipped` **with a reason**, because an absent stage and
 an unrun one must not look alike to the gate.
 
+The report also names the version it exercised. A run that does not say
+what it tested would otherwise authorize every later tag, so the gate
+requires `subject.tested_version` to equal the version being released.
+
 The harnesses predate that report and record their own stage names, so
 they emit it through the converter rather than by rewriting stage calls
 on code that only runs on hardware:
 
 ```bash
 tools/validation/lifecycle-report-from-stages.sh \
-  <evidence>/stages.tsv <row_id> <harness> <evidence>/lifecycle-report.json \
+  <evidence>/stages.tsv <row_id> <tested_version> <harness> \
+  <evidence>/lifecycle-report.json \
   <harness_stage>=<canonical_stage> ...
 ```
 
 The mapping is an assertion: naming `clean-install=install` claims that
 the harness's clean-install stage *is* the canonical install stage. Get
 it wrong and the report lies in the gate's favour, which is the one
-direction that matters.
+direction that matters. Several harness stages may name the same
+canonical stage; the weakest of their results is the one reported.
+
+### Neither harness covers all eight stages yet
+
+Both runbooks below produce an `incomplete` report today, and the
+release gate refuses both rows. That is the accurate state, not a
+defect in the runbook:
+
+| Canonical stage | Jetson | macOS |
+| --- | --- | --- |
+| install | covered | covered |
+| upgrade | **not implemented** | covered |
+| deploy-smoke | covered | covered |
+| status-logs | covered | **not implemented** |
+| rollback | **not implemented** | covered |
+| restart | covered | covered |
+| crash-loop | **not implemented** | covered |
+| offline | **not implemented** | covered |
+
+Closing these gaps means adding the missing operations to the harnesses
+themselves, which is tracked as hardware work. Until then the converter
+emits each gap as `skipped` with the reason, so the gate reports what is
+missing rather than accepting a partial run.
 
 ## Jetson Orin Nano 8GB Super
 
@@ -64,17 +92,41 @@ the device invalidates the glibc-floor comparison the run exists for.
    uname -r
    ```
 
-3. Run the clean-room harness, then convert its stage log:
+3. Run the clean-room harness. It takes the `run` subcommand and refuses
+   to start without the confirmation token, because it purges TensorPlate
+   packages and state:
 
    ```bash
-   tools/validation/jetson-clean-room.sh --evidence-dir <evidence>
-   tools/validation/lifecycle-report-from-stages.sh \
-     <evidence>/stages.tsv jetson-orin-nano-8gb-jp62 jetson-clean-room \
-     <evidence>/lifecycle-report.json <mappings...>
+   tools/validation/jetson-clean-room.sh run \
+     --evidence-dir <evidence> \
+     --confirm RESET-TENSORPLATE
    ```
 
-4. File the report and the recorded fixtures under
-   `dist/release/<tag>/jetson-orin-nano-8gb-jp62/`.
+4. Derive the stage log, then the report. The harness records each step
+   as `<step>.exit` rather than writing a `stages.tsv`, so the adapter
+   reads what it left behind:
+
+   ```bash
+   tools/validation/jetson-stages-from-evidence.sh <evidence> \
+     > <evidence>/stages.tsv
+
+   tools/validation/lifecycle-report-from-stages.sh \
+     <evidence>/stages.tsv jetson-orin-nano-8gb-jp62 <tested_version> \
+     jetson-clean-room <evidence>/lifecycle-report.json \
+     install=install \
+     deploy-trt-identity=deploy-smoke infer-trt-identity=deploy-smoke \
+     status-after-infer=status-logs logs-agent=status-logs \
+     journal-agent=status-logs \
+     stop-services=restart start-services=restart services-ready=restart
+   ```
+
+   `upgrade`, `rollback`, `crash-loop` and `offline` are deliberately
+   unmapped: the harness has no such steps, and naming one anyway would
+   assert a stage that never ran.
+
+5. File the report and the recorded fixtures under
+   `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
+   **Sanitize first** — see that directory's README.
 
 ## MacBook Pro M1 Pro
 
@@ -87,19 +139,37 @@ stage meaningless.
    `macos26-m1pro-16gb`, and `model_class_rows` reports `chunked_policy
    (Preview)`.
 
-2. Run the lifecycle harness and convert:
+2. Run the lifecycle harness. It mutates Homebrew state, so it refuses to
+   start unless that is acknowledged explicitly, and it needs all three
+   inputs:
 
    ```bash
-   tools/validation/macos-homebrew-lifecycle.sh --evidence-dir <evidence>
+   TP_HOMEBREW_LIFECYCLE_ALLOW=1 \
+     tools/validation/macos-homebrew-lifecycle.sh \
+       --candidate-formula-dir <six rendered formulae, pinned to one build> \
+       --baseline-formula <historical CLI-only tensorplate.rb> \
+       --bundle-dir <MPS deploy-smoke fixture containing manifest.json> \
+       --evidence-dir <evidence>
+   ```
+
+3. Convert its stage log. The harness writes `stages.tsv` itself:
+
+   ```bash
    tools/validation/lifecycle-report-from-stages.sh \
-     <evidence>/stages.tsv macos26-m1pro-16gb macos-homebrew-lifecycle \
-     <evidence>/lifecycle-report.json \
+     <evidence>/stages.tsv macos26-m1pro-16gb <tested_version> \
+     macos-homebrew-lifecycle <evidence>/lifecycle-report.json \
      clean-install=install upgrade=upgrade deploy-smoke=deploy-smoke \
-     host-facts=status-logs rollback=rollback launchd-restart=restart \
+     rollback=rollback launchd-restart=restart \
      launchd-crash-loop=crash-loop offline-runtime=offline
    ```
 
-3. File under `dist/release/<tag>/macos26-m1pro-16gb/`.
+   `status-logs` is deliberately unmapped. The harness's `host-facts`
+   stage collects inventory before anything is installed; it is not an
+   observation of status or log behaviour, and mapping it would claim a
+   stage that never ran.
+
+4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
+   **Sanitize first** — see that directory's README.
 
 ## What a failed run is worth
 

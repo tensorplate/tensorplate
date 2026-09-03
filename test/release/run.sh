@@ -451,6 +451,16 @@ done
 # unevidenced Production claims.
 (
   workflow=".github/workflows/release.yml"
+  # Declared, not assumed. CI provided PyYAML transitively while the
+  # documented standalone run of this suite failed on a developer machine
+  # with a bare ModuleNotFoundError -- and that run is the one the release
+  # runbook tells you to make before tagging.
+  python3 -c 'import yaml' 2>/dev/null || {
+    echo "FAIL: this suite needs PyYAML to read the release workflow." >&2
+    echo "      Install the release tooling dependencies with:" >&2
+    echo "        python3 -m pip install -r tools/release/requirements.txt" >&2
+    exit 1
+  }
   python3 - "$workflow" <<'PYCHECK'
 import sys, yaml
 
