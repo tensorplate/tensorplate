@@ -215,8 +215,15 @@ jobs:
 
       - name: Build amd64 Rust binaries
         shell: bash
+        env:
+          # Cargo metadata cannot distinguish a candidate from the release
+          # it is a candidate for: both are built from a tree that says
+          # 0.2.1. Without this the packaged CLI, agent and observability
+          # binaries all report the final release's version.
+          TP_RELEASE_VERSION: ${{ needs.meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
+          export TP_RELEASE_VERSION="${TP_RELEASE_VERSION#v}"
           cargo build --release \
             --bin tensorplate-agent \
             --bin tensorplate-observability \
@@ -262,8 +269,24 @@ jobs:
 
       - name: Build amd64 runtime packages
         shell: bash
+        env:
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
         run: |
           set -Eeuo pipefail
+          # dpkg takes the package version from debian/changelog, not from
+          # any argument. A candidate build left this at the tree's final
+          # version, so the amd64 packages were named 0.2.1 while the ARM
+          # collector looked for 0.2.1~rc.1 and reported every one missing.
+          python3 - "$DEB_VERSION" <<'PYVER'
+          import sys
+          from pathlib import Path
+          path = Path("packaging/debian/changelog")
+          lines = path.read_text().splitlines()
+          head = lines[0]
+          lines[0] = f"tensorplate ({sys.argv[1]}-1) unstable; urgency=medium"
+          path.write_text("\n".join(lines) + "\n")
+          print(f"staged debian/changelog: {head!r} -> {lines[0]!r}")
+          PYVER
           # Binary-arch only: the architecture-independent packages
           # (tensorplate-common, the Python backend, the apt bootstrap) are
           # shared and are built once by the primary job.
@@ -497,7 +520,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
-          VERSION: ${{ needs.meta.outputs.deb_version }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
           TAG: ${{ needs.meta.outputs.tag }}
           RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
           MANIFEST: ${{ needs.meta.outputs.manifest }}
@@ -508,6 +532,7 @@ jobs:
           args=(
             tools/release/build-release-artifacts.sh
             --version "$VERSION"
+            --deb-version "$DEB_VERSION"
             --tag "$TAG"
             --artifacts-dir "$RELEASE_DIR"
             --manifest "$MANIFEST"

@@ -37,7 +37,13 @@ Usage:
   build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR --manifest FILE --checksums FILE [options]
 
 Options:
-  --version VERSION      Core release version, for example 0.1.0.
+  --version VERSION      Canonical release version, for example 0.1.0. Always
+                         bare MAJOR.MINOR.PATCH for a release build; this is
+                         what the manifest and installer record.
+  --deb-version VERSION  Debian package version, for example 0.1.0~rc.1.
+                         Defaults to --version. A candidate differs here and
+                         only here: `~` sorts below the bare version, so the
+                         final release is an upgrade from the candidate.
   --tag TAG              Git tag being published, for example v0.1.0.
   --artifacts-dir DIR    Output directory for .deb artifacts.
   --manifest FILE        Artifact manifest JSON path.
@@ -62,6 +68,7 @@ note() {
 }
 
 VERSION=""
+DEB_VERSION=""
 TAG=""
 ARTIFACTS_DIR=""
 MANIFEST=""
@@ -78,6 +85,7 @@ SDK_DIST_DIR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="${2:-}"; shift 2 ;;
+    --deb-version) DEB_VERSION="${2:-}"; shift 2 ;;
     --tag) TAG="${2:-}"; shift 2 ;;
     --artifacts-dir) ARTIFACTS_DIR="${2:-}"; shift 2 ;;
     --manifest) MANIFEST="${2:-}"; shift 2 ;;
@@ -137,7 +145,7 @@ write_staged_changelog() {
   CHANGELOG_BACKUP="$(mktemp)"
   cp -- packaging/debian/changelog "$CHANGELOG_BACKUP"
   trap restore_staged_changelog EXIT
-  python3 - "$VERSION" "$distribution" <<'PY'
+  python3 - "$DEB_VERSION" "$distribution" <<'PY'
 import sys
 from pathlib import Path
 
@@ -158,16 +166,26 @@ if ((SNAPSHOT)); then
   SKIP_TAG_VERIFY=1
   [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+~dev\.[0-9]{8}\.[0-9a-f]+$ ]] ||
     die "snapshot --version must look like X.Y.Z~dev.YYYYMMDD.gitsha"
+  DEB_VERSION="$VERSION"
 else
   [[ -n "$VERSION" ]] || die "--version is required"
   [[ -n "$TAG" ]] || die "--tag is required"
+  # The canonical version stays bare. Downstream consumers disagree about
+  # syntax -- the manifest generator and the installer both reject a
+  # Debian-form version -- so the candidate identity travels in
+  # --deb-version and nowhere else.
+  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "--version must be MAJOR.MINOR.PATCH for release builds"
+  DEB_VERSION="${DEB_VERSION:-$VERSION}"
   # `~rc.N` is the Debian prerelease form, and the tilde is load-bearing:
   # it sorts BELOW the bare version, so 0.2.1~rc.1-1 < 0.2.1-1 and apt
   # offers the final release as an upgrade. Building a candidate as plain
   # 0.2.1 produced a package indistinguishable from the real release --
   # same version to dpkg, so no upgrade path off it at all.
-  [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(~rc\.[1-9][0-9]*)?$ ]] ||
-    die "--version must be X.Y.Z or X.Y.Z~rc.N for release builds"
+  [[ "$DEB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(~rc\.[1-9][0-9]*)?$ ]] ||
+    die "--deb-version must be X.Y.Z or X.Y.Z~rc.N"
+  [[ "$DEB_VERSION" == "$VERSION" || "$DEB_VERSION" == "${VERSION}~"* ]] ||
+    die "--deb-version ${DEB_VERSION} is not a form of --version ${VERSION}"
 fi
 
 host_arch="$(dpkg --print-architecture)"
@@ -182,7 +200,7 @@ fi
 
 if ((SNAPSHOT)); then
   write_staged_changelog UNRELEASED
-elif [[ "$VERSION" == *"~"* ]]; then
+elif [[ "$DEB_VERSION" == *"~"* ]]; then
   # A release candidate is published and installable, so it takes a real
   # distribution rather than UNRELEASED. Without this the candidate would
   # be built from the tree's changelog and labelled with the final
@@ -247,8 +265,15 @@ fi
 # runtime reports it, so `tensorplate --version` distinguishes a candidate
 # from the release it is a candidate for.
 runtime_version_suffix=""
-if [[ "$VERSION" == *"~"* ]]; then
-  runtime_version_suffix="${VERSION#*~}"
+if [[ "$DEB_VERSION" == *"~"* ]]; then
+  runtime_version_suffix="${DEB_VERSION#*~}"
+fi
+# The semver spelling of the same identity, for the Rust crates: Cargo
+# metadata cannot express `~`, and the tag already carries `-rc.N`.
+if [[ -n "$TAG" ]]; then
+  export TP_RELEASE_VERSION="${TAG#v}"
+elif [[ -n "$runtime_version_suffix" ]]; then
+  export TP_RELEASE_VERSION="${VERSION}-${runtime_version_suffix}"
 fi
 cmake_args=(
   -S .
@@ -341,13 +366,13 @@ done
 if [[ "$TARGET_ARCH" != "$SECONDARY_ARCH" ]]; then
   for pkg in "${SECONDARY_ARCH_PACKAGES[@]}"; do
     mapfile -t matches < <(find "$repo_parent" -maxdepth 1 -type f \
-      -name "${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb" | sort)
+      -name "${pkg}_${DEB_VERSION}-*_${SECONDARY_ARCH}.deb" | sort)
     if ((${#matches[@]} == 1)); then
       debs+=("${matches[0]}")
       continue
     fi
     if ((${#matches[@]} > 1)); then
-      die "expected at most one ${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; found ${#matches[@]}"
+      die "expected at most one ${pkg}_${DEB_VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; found ${#matches[@]}"
     fi
     # Releases ship the complete x86_64 runtime set from the same asset set
     # (the release workflow's hosted amd64 job stages the packages), and
@@ -356,7 +381,7 @@ if [[ "$TARGET_ARCH" != "$SECONDARY_ARCH" ]]; then
     if ((SNAPSHOT)); then
       note "WARNING: no ${pkg} ${SECONDARY_ARCH} package staged; snapshot artifacts omit it"
     else
-      die "missing ${pkg}_${VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; the release workflow's ${SECONDARY_ARCH} packaging job must stage it before release artifact builds"
+      die "missing ${pkg}_${DEB_VERSION}-*_${SECONDARY_ARCH}.deb in $repo_parent; the release workflow's ${SECONDARY_ARCH} packaging job must stage it before release artifact builds"
     fi
   done
 fi
@@ -368,12 +393,13 @@ install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 # the branch happened to hold, so a v0.2.1 asset installed some older
 # release -- the one thing a user downloading it from THIS release cannot
 # be expected to check. The env override is preserved.
+install_default="${TAG:-$VERSION}"
 sed -i.bak -E \
-  "s|(TP_INSTALL_DEFAULT_VERSION:-)[^}]*|\1${VERSION}|" \
+  "s|(TP_INSTALL_DEFAULT_VERSION:-)[^}]*|\1${install_default}|" \
   "$ARTIFACTS_DIR/install.sh"
 rm -f "$ARTIFACTS_DIR/install.sh.bak"
-grep -Fq "TP_INSTALL_DEFAULT_VERSION:-${VERSION}}" "$ARTIFACTS_DIR/install.sh" ||
-  die "install.sh was not stamped with ${VERSION}; the published installer would default to another release"
+grep -Fq "TP_INSTALL_DEFAULT_VERSION:-${install_default}}" "$ARTIFACTS_DIR/install.sh" ||
+  die "install.sh was not stamped with ${install_default}; the published installer would default to another release"
 
 # The tensorplate-python SDK wheel + sdist are built by a separate hosted
 # job (pure Python; no Jetson toolchain) and staged here so they are covered

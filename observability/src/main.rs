@@ -29,7 +29,15 @@ use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::install_paths;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+// A release build may carry an identity Cargo does not: a candidate is
+// built from the same tree as the release it is a candidate for, so
+// CARGO_PKG_VERSION reports `0.2.1` for both and `--version` cannot tell
+// them apart. The release build supplies TP_RELEASE_VERSION; everything
+// else falls back to the crate version.
+const VERSION: &str = match option_env!("TP_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 fn print_version() {
     println!("{NAME} {VERSION}");
