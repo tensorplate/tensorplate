@@ -444,4 +444,240 @@ done
   }
 )
 
+# A release candidate must be distinguishable from the release it is a
+# candidate for, and must survive every interface between the tag and the
+# installed package. Built as plain X.Y.Z it was not: same dpkg version,
+# so `apt` saw nothing to upgrade and anyone who installed a candidate was
+# stranded on it.
+#
+# These execute the interfaces rather than grepping for them. An earlier
+# version of this block asserted two assignment strings and passed while
+# the candidate flow failed at its first artifact build.
+(
+  workflow=".github/workflows/release.yml"
+
+  derive() {
+    bash -c '
+      tag="$1"
+      version="${tag#v}"; version="${version%%-*}"
+      deb_version="$version"; python_version="$version"
+      if [[ "$tag" =~ -rc\.([1-9][0-9]*)$ ]]; then
+        deb_version="${version}~rc.${BASH_REMATCH[1]}"
+        python_version="${version}rc${BASH_REMATCH[1]}"
+      fi
+      printf "%s %s %s" "$version" "$deb_version" "$python_version"' _ "$1"
+  }
+  for fragment in 'deb_version="${version}~rc.${BASH_REMATCH[1]}"' \
+                  'python_version="${version}rc${BASH_REMATCH[1]}"'; do
+    grep -qF "$fragment" "$workflow" || {
+      echo "FAIL: release.yml no longer derives versions as this test assumes: $fragment" >&2
+      exit 1; }
+  done
+
+  read -r canon deb py <<<"$(derive v0.2.1-rc.1)"
+  read -r f_canon f_deb f_py <<<"$(derive v0.2.1)"
+  [[ "$deb" == "0.2.1~rc.1" && "$py" == "0.2.1rc1" && "$canon" == "0.2.1" ]] || {
+    echo "FAIL: candidate identities wrong: $canon / $deb / $py" >&2; exit 1; }
+  [[ "$f_canon" == "$canon" ]] || {
+    echo "FAIL: a candidate and its release must share the canonical version" >&2; exit 1; }
+  [[ "$f_deb" == "0.2.1" && "$f_py" == "0.2.1" ]] || {
+    echo "FAIL: a final tag must not gain a prerelease suffix" >&2; exit 1; }
+  [[ "$deb" != "$f_deb" ]] || { echo "FAIL: candidate and final share a package version" >&2; exit 1; }
+
+  # 1. A real candidate must survive manifest generation AND verification.
+  #    Checking require_version alone passed while the manifest layer still
+  #    rejected every candidate artifact by name.
+  fx="$(mktemp -d)"; art="$fx/artifacts"; mkdir -p "$art"
+  for pkg in tensorplate-common tensorplate-agent tensorplate-serving \
+             tensorplate-observability tensorplate-cli \
+             tensorplate-backend-python-pytorch tensorplate-apt-source tensorplate; do
+    case "$pkg" in
+      tensorplate-common|tensorplate-backend-python-pytorch|tensorplate-apt-source) a=all ;;
+      *) a=arm64 ;;
+    esac
+    : >"$art/${pkg}_${deb}-1_${a}.deb"
+  done
+  for pkg in tensorplate tensorplate-agent tensorplate-serving \
+             tensorplate-observability tensorplate-cli; do
+    : >"$art/${pkg}_${deb}-1_amd64.deb"
+  done
+  : >"$art/tensorplate_python-${py}-py3-none-any.whl"
+  : >"$art/tensorplate_python-${py}.tar.gz"
+  : >"$art/install.sh"
+
+  tools/release/tensorplate-release.sh manifest \
+    --version "$canon" --deb-version "$deb" --python-version "$py" \
+    --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+    --manifest "$fx/manifest.json" --checksums "$fx/SHA256SUMS" --arch arm64 \
+    >/dev/null 2>&1 || {
+      echo "FAIL: manifest generation rejects a real candidate artifact set" >&2
+      rm -rf "$fx"; exit 1; }
+
+  tools/release/tensorplate-release.sh verify \
+    --version "$canon" --deb-version "$deb" --python-version "$py" \
+    --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+    --manifest "$fx/manifest.json" --checksums "$fx/SHA256SUMS" --skip-tag-verify \
+    >/dev/null 2>&1 || {
+      echo "FAIL: verification rejects the candidate manifest it just generated" >&2
+      rm -rf "$fx"; exit 1; }
+
+  # The manifest records the canonical version; only the artifacts carry
+  # the candidate spelling.
+  python3 -c "
+import json, sys
+m = json.load(open('$fx/manifest.json'))
+if m['release']['version'] != '$canon':
+    sys.exit(f\"FAIL: manifest records {m['release']['version']!r}, not the canonical version\")
+" || { rm -rf "$fx"; exit 1; }
+
+  # Control: without the package identity, the manifest layer must refuse
+  # the same artifacts. A fixture that cannot fail proves nothing.
+  if tools/release/tensorplate-release.sh manifest \
+      --version "$canon" --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+      --manifest "$fx/control.json" --checksums "$fx/control.sums" --arch arm64 \
+      >/dev/null 2>&1; then
+    echo "FAIL: the manifest layer accepted candidate artifacts under the canonical version" >&2
+    rm -rf "$fx"; exit 1
+  fi
+  rm -rf "$fx"
+
+  # 2. The installer must accept what the build stamps as its default.
+  #    install.sh refuses the Debian form, so the tag is what gets stamped.
+  ( VERSION_INPUT="v0.2.1-rc.1"
+    die() { echo "FAIL: install.sh rejects the stamped candidate default: $*" >&2; exit 1; }
+    if [[ "$VERSION_INPUT" == v* ]]; then
+      TAG="$VERSION_INPUT"; RELEASE_VERSION="${VERSION_INPUT#v}"; RELEASE_VERSION="${RELEASE_VERSION%%-*}"
+    else RELEASE_VERSION="$VERSION_INPUT"; TAG="v${VERSION_INPUT}"; fi
+    [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] || die "$TAG"
+    [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "$RELEASE_VERSION" ) || exit 1
+  grep -q 'install_default="${TAG:-$VERSION}"' tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the installer is not stamped with the tag form" >&2; exit 1; }
+
+  # 3. Package filenames and the secondary-arch collector must agree, and
+  #    both must use the Debian version.
+  grep -q 'name "${pkg}_${DEB_VERSION}-\*_${SECONDARY_ARCH}.deb"' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the secondary-arch collector does not look for the Debian version" >&2; exit 1; }
+  # The primary collector too: changelog staging names the built packages
+  # with the Debian version, so a canonical pattern matches nothing.
+  grep -q 'name "${pkg}_${DEB_VERSION}-\*_\*.deb"' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the primary collector does not look for the Debian version" >&2; exit 1; }
+  grep -q '${pkg}_${DEB_VERSION}-\*_${TARGET_ARCH}.deb|${pkg}_${DEB_VERSION}-\*_all.deb' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the primary collector case patterns still use the canonical version" >&2; exit 1; }
+
+  # The tag and the package version are one identity. Validating only a
+  # shared base accepted `TAG=v0.2.1 DEB_VERSION=0.2.1~rc.1` and
+  # `TAG=v0.2.1-rc.2 DEB_VERSION=0.2.1~rc.1`, either of which ships Rust
+  # binaries (identity from the tag) contradicting the packages (identity
+  # from the Debian version).
+  #
+  # This invokes the real builder. An earlier version reimplemented the
+  # check inline and passed with the builder's own validation removed.
+  tuple_out() {
+    local scratch; scratch="$(mktemp -d)"
+    tools/release/build-release-artifacts.sh --version 0.2.1 --tag "$1" --deb-version "$2" \
+      --artifacts-dir "$scratch/a" --manifest "$scratch/m.json" \
+      --checksums "$scratch/s" 2>&1 | head -1
+    rm -rf "$scratch"
+  }
+  for bad in "v0.2.1|0.2.1~rc.1" "v0.2.1-rc.2|0.2.1~rc.1"; do
+    if ! tuple_out "${bad%%|*}" "${bad##*|}" | grep -q 'contradicts --tag'; then
+      echo "FAIL: the builder accepted contradictory identities ${bad%%|*} / ${bad##*|}" >&2
+      exit 1
+    fi
+  done
+  if tuple_out v0.2.1-rc.1 '0.2.1~rc.1' | grep -q 'contradicts --tag'; then
+    echo "FAIL: the builder rejected a consistent candidate pair" >&2
+    exit 1
+  fi
+
+  # Ordering: the Rust crates are compiled by the `cargo` call, so the
+  # override has to be exported before it. Exported afterwards, ARM Rust
+  # binaries reported the final version while ARM C++ reported the candidate.
+  export_line="$(grep -n 'export TP_RELEASE_VERSION' tools/release/build-release-artifacts.sh | head -1 | cut -d: -f1)"
+  cargo_line="$(grep -n '^cargo "' tools/release/build-release-artifacts.sh | head -1 | cut -d: -f1)"
+  [[ -n "$export_line" && -n "$cargo_line" && "$export_line" -lt "$cargo_line" ]] || {
+    echo "FAIL: TP_RELEASE_VERSION (line ${export_line:-none}) must be exported before cargo runs (line ${cargo_line:-none})" >&2
+    exit 1; }
+
+  # Both architectures must give the C++ build its suffix, or a candidate
+  # ships Rust and C++ binaries that disagree.
+  grep -q 'DTP_RUNTIME_VERSION_SUFFIX="$runtime_suffix"' "$workflow" || {
+    echo "FAIL: the amd64 C++ build receives no runtime version suffix" >&2; exit 1; }
+  grep -q 'DEB_VERSION: ${{ needs.meta.outputs.deb_version }}' "$workflow" || {
+    echo "FAIL: the amd64 job does not receive the Debian version" >&2; exit 1; }
+
+  # 4. Both changelog paths must stamp the Debian version, or dpkg names the
+  #    package after the final release regardless of what was passed.
+  stage_dir="$(mktemp -d)"; mkdir -p "$stage_dir/packaging/debian"
+  printf 'tensorplate (0.2.1-1) unstable; urgency=medium\n\n  * Release.\n' \
+    >"$stage_dir/packaging/debian/changelog"
+  # Read the staged line inside the subshell: write_staged_changelog
+  # installs an EXIT trap that restores the tree's changelog, which in a
+  # real build fires only after the packages are built.
+  repo_root="$PWD"
+  staged="$( cd "$stage_dir"
+    CHANGELOG_BACKUP=""; VERSION=0.2.1; DEB_VERSION=0.2.1~rc.1
+    : "$CHANGELOG_BACKUP" "$VERSION" "$DEB_VERSION"  # consumed by the evaluated bodies
+    eval "$(sed -n '/^restore_staged_changelog()/,/^}/p;/^write_staged_changelog()/,/^}$/p' \
+      "$repo_root/tools/release/build-release-artifacts.sh")"
+    write_staged_changelog unstable
+    head -1 packaging/debian/changelog )"
+  printf '%s' "$staged" | grep -q '0\.2\.1~rc\.1-1' || {
+    echo "FAIL: the ARM build does not stamp the candidate version into debian/changelog" >&2
+    rm -rf "$stage_dir"; exit 1; }
+  head -1 "$stage_dir/packaging/debian/changelog" | grep -q '0\.2\.1-1' || {
+    echo "FAIL: the tree's changelog was not restored after the build" >&2
+    rm -rf "$stage_dir"; exit 1; }
+  rm -rf "$stage_dir"
+
+  python3 - "$workflow" <<'PYAMD'
+import subprocess, sys, tempfile, pathlib, yaml
+w = yaml.safe_load(open(sys.argv[1]))
+step = next(s for s in w["jobs"]["build_packages_amd64"]["steps"]
+            if s.get("name") == "Build amd64 runtime packages")
+body = step["run"].split("packaging/scripts/build-deb.sh")[0]
+d = tempfile.mkdtemp(); pathlib.Path(d, "packaging/debian").mkdir(parents=True)
+pathlib.Path(d, "packaging/debian/changelog").write_text(
+    "tensorplate (0.2.1-1) unstable; urgency=medium\n\n  * Release.\n")
+r = subprocess.run(["bash", "-c", body], cwd=d,
+                   env={"DEB_VERSION": "0.2.1~rc.1", "PATH": "/usr/bin:/bin"},
+                   capture_output=True, text=True)
+head = pathlib.Path(d, "packaging/debian/changelog").read_text().splitlines()[0]
+if r.returncode != 0 or "0.2.1~rc.1-1" not in head:
+    sys.exit(f"FAIL: the amd64 job does not stamp the candidate version (got {head!r})")
+PYAMD
+
+  # 5. The binaries must say which build they are. Cargo metadata cannot:
+  #    a candidate is built from the tree that says 0.2.1, so without the
+  #    override `tensorplate --version` printed the final release's string.
+  if command -v cargo >/dev/null 2>&1; then
+    for site in cli/src/lib.rs observability/src/lib.rs protocol/rust/src/lib.rs \
+                agent/src/main.rs observability/src/main.rs; do
+      grep -q 'TP_RELEASE_VERSION' "$site" || {
+        echo "FAIL: $site does not honour the release-version override" >&2; exit 1; }
+    done
+    out="$(TP_RELEASE_VERSION=0.2.1-rc.1 cargo run -q -p tensorplate-cli --bin tensorplate -- --version 2>/dev/null | head -1)"
+    [[ "$out" == *"0.2.1-rc.1"* ]] || {
+      echo "FAIL: a candidate build reports '$out'; it must name the candidate" >&2; exit 1; }
+    plain="$(cargo run -q -p tensorplate-cli --bin tensorplate -- --version 2>/dev/null | head -1)"
+    [[ "$plain" != *"-rc."* ]] || {
+      echo "FAIL: a build with no override leaked a candidate version: '$plain'" >&2; exit 1; }
+    echo "candidate binaries report their own version (built and executed)"
+  else
+    echo "FAIL: cargo is required to check that a candidate build reports its version" >&2
+    exit 1
+  fi
+
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg --compare-versions "${deb}-1" lt "${f_deb}-1" || {
+      echo "FAIL: ${deb}-1 must sort below ${f_deb}-1 or there is no upgrade path" >&2; exit 1; }
+    echo "candidate versions sort below their release (dpkg-verified)"
+  else
+    echo "candidate version derivation checked; dpkg absent, ordering NOT verified here"
+  fi
+)
+
 printf 'release script checks green\n'

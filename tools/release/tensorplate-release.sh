@@ -180,6 +180,12 @@ command_exists() {
 
 parse_common_args() {
   VERSION=""
+  # A release candidate spells its identity three ways: the manifest
+  # records the canonical version, the .deb files carry the Debian form,
+  # and the wheel carries the PEP 440 form. Defaulting both to the
+  # canonical version keeps a final release single-identity.
+  DEB_VERSION=""
+  PYTHON_VERSION=""
   RELEASE_BRANCH=""
   BASE_REF="origin/develop"
   PREP_BRANCH=""
@@ -207,6 +213,8 @@ parse_common_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) VERSION="${2:-}"; shift 2 ;;
+      --deb-version) DEB_VERSION="${2:-}"; shift 2 ;;
+      --python-version) PYTHON_VERSION="${2:-}"; shift 2 ;;
       --release-branch) RELEASE_BRANCH="${2:-}"; shift 2 ;;
       --base) BASE_REF="${2:-}"; shift 2 ;;
       --prep-branch) PREP_BRANCH="${2:-}"; shift 2 ;;
@@ -940,10 +948,13 @@ cmd_cut() {
 manifest_python() {
   local secondary_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
+  export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
   python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" "$SECONDARY_ARCH" "${secondary_packages%,}" "$SECONDARY_TARGET_OS" <<'PY'
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -953,6 +964,11 @@ from pathlib import Path
     target_arch, commit, branch, validation_report, clean_room_report,
     secondary_arch, secondary_packages_raw, secondary_target_os,
 ) = sys.argv[1:]
+# The package and wheel encodings of `version`. Equal to it for a final
+# release; a candidate differs, and the artifacts on disk carry the
+# candidate spelling while the manifest records the canonical one.
+deb_version = os.environ.get("TP_DEB_VERSION") or version
+python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 required = [
@@ -997,8 +1013,11 @@ for package in required:
         # `tensorplate-agent`. Every decision below must use the parsed name,
         # or a stray file rides into the manifest under a sibling's identity.
         parsed_package = match.group("package")
-        if not (package_version == version or package_version.startswith(version + "-")):
-            raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
+        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+            raise SystemExit(
+                f"{path.name}: package version {package_version} does not match "
+                f"the release's package version {deb_version}"
+            )
         if parsed_package != package and parsed_package not in required:
             raise SystemExit(
                 f"{path.name}: file name does not match a published package "
@@ -1060,8 +1079,8 @@ artifacts.append(
 # in the signed manifest and SHA256SUMS when staged into the artifacts dir;
 # absent from runtime-only snapshot builds.
 for sdk_kind, sdk_pattern in (
-    ("python-wheel", f"tensorplate_python-{version}-py3-none-any.whl"),
-    ("python-sdist", f"tensorplate_python-{version}.tar.gz"),
+    ("python-wheel", f"tensorplate_python-{python_version}-py3-none-any.whl"),
+    ("python-sdist", f"tensorplate_python-{python_version}.tar.gz"),
 ):
     sdk_matches = sorted(root.glob(sdk_pattern))
     if not sdk_matches:
@@ -1139,9 +1158,12 @@ PY
 verify_manifest_python() {
   local secondary_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
+  export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
   python3 - "$1" "$2" "$3" "$4" "$5" "$SECONDARY_ARCH" "${secondary_packages%,}" <<'PY'
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1149,6 +1171,8 @@ from pathlib import Path
     version, tag, artifacts_dir, manifest_path, checksums_path,
     secondary_arch, secondary_packages_raw,
 ) = sys.argv[1:]
+deb_version = os.environ.get("TP_DEB_VERSION") or version
+python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 manifest = json.loads(Path(manifest_path).read_text())

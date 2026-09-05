@@ -172,8 +172,16 @@ pub const SKELETON_MARKER: &str = "tensorplate-protocol-skeleton";
 /// This corresponds to the runtime release version, **not** the protocol
 /// version. Use [`PROTOCOL_VERSION`] for the cross-process protocol.
 #[must_use]
+// A release build may carry an identity Cargo does not: a candidate is
+// built from the same tree as the release it is a candidate for, so
+// CARGO_PKG_VERSION reports `0.2.1` for both and `--version` cannot tell
+// them apart. The release build supplies TP_RELEASE_VERSION; everything
+// else falls back to the crate version.
 pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    match option_env!("TP_RELEASE_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    }
 }
 
 /// Errors returned by [`decode_with_version_check`].
