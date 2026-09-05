@@ -484,13 +484,62 @@ done
     echo "FAIL: a final tag must not gain a prerelease suffix" >&2; exit 1; }
   [[ "$deb" != "$f_deb" ]] || { echo "FAIL: candidate and final share a package version" >&2; exit 1; }
 
-  # 1. The manifest generator must accept the canonical version we pass it.
-  #    Passing the Debian form here rejected every candidate build outright.
-  ( VERSION="$canon" ALLOW_SNAPSHOT_VERSION=0
-    : "$VERSION" "$ALLOW_SNAPSHOT_VERSION"  # consumed by the evaluated require_version
-    die() { echo "FAIL: manifest/verify rejects the canonical candidate version: $*" >&2; exit 1; }
-    eval "$(sed -n '/^require_version()/,/^}/p' tools/release/tensorplate-release.sh)"
-    require_version ) || exit 1
+  # 1. A real candidate must survive manifest generation AND verification.
+  #    Checking require_version alone passed while the manifest layer still
+  #    rejected every candidate artifact by name.
+  fx="$(mktemp -d)"; art="$fx/artifacts"; mkdir -p "$art"
+  for pkg in tensorplate-common tensorplate-agent tensorplate-serving \
+             tensorplate-observability tensorplate-cli \
+             tensorplate-backend-python-pytorch tensorplate-apt-source tensorplate; do
+    case "$pkg" in
+      tensorplate-common|tensorplate-backend-python-pytorch|tensorplate-apt-source) a=all ;;
+      *) a=arm64 ;;
+    esac
+    : >"$art/${pkg}_${deb}-1_${a}.deb"
+  done
+  for pkg in tensorplate tensorplate-agent tensorplate-serving \
+             tensorplate-observability tensorplate-cli; do
+    : >"$art/${pkg}_${deb}-1_amd64.deb"
+  done
+  : >"$art/tensorplate_python-${py}-py3-none-any.whl"
+  : >"$art/tensorplate_python-${py}.tar.gz"
+  : >"$art/install.sh"
+
+  tools/release/tensorplate-release.sh manifest \
+    --version "$canon" --deb-version "$deb" --python-version "$py" \
+    --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+    --manifest "$fx/manifest.json" --checksums "$fx/SHA256SUMS" --arch arm64 \
+    >/dev/null 2>&1 || {
+      echo "FAIL: manifest generation rejects a real candidate artifact set" >&2
+      rm -rf "$fx"; exit 1; }
+
+  tools/release/tensorplate-release.sh verify \
+    --version "$canon" --deb-version "$deb" --python-version "$py" \
+    --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+    --manifest "$fx/manifest.json" --checksums "$fx/SHA256SUMS" --skip-tag-verify \
+    >/dev/null 2>&1 || {
+      echo "FAIL: verification rejects the candidate manifest it just generated" >&2
+      rm -rf "$fx"; exit 1; }
+
+  # The manifest records the canonical version; only the artifacts carry
+  # the candidate spelling.
+  python3 -c "
+import json, sys
+m = json.load(open('$fx/manifest.json'))
+if m['release']['version'] != '$canon':
+    sys.exit(f\"FAIL: manifest records {m['release']['version']!r}, not the canonical version\")
+" || { rm -rf "$fx"; exit 1; }
+
+  # Control: without the package identity, the manifest layer must refuse
+  # the same artifacts. A fixture that cannot fail proves nothing.
+  if tools/release/tensorplate-release.sh manifest \
+      --version "$canon" --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+      --manifest "$fx/control.json" --checksums "$fx/control.sums" --arch arm64 \
+      >/dev/null 2>&1; then
+    echo "FAIL: the manifest layer accepted candidate artifacts under the canonical version" >&2
+    rm -rf "$fx"; exit 1
+  fi
+  rm -rf "$fx"
 
   # 2. The installer must accept what the build stamps as its default.
   #    install.sh refuses the Debian form, so the tag is what gets stamped.
@@ -509,6 +558,54 @@ done
   grep -q 'name "${pkg}_${DEB_VERSION}-\*_${SECONDARY_ARCH}.deb"' \
     tools/release/build-release-artifacts.sh || {
     echo "FAIL: the secondary-arch collector does not look for the Debian version" >&2; exit 1; }
+  # The primary collector too: changelog staging names the built packages
+  # with the Debian version, so a canonical pattern matches nothing.
+  grep -q 'name "${pkg}_${DEB_VERSION}-\*_\*.deb"' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the primary collector does not look for the Debian version" >&2; exit 1; }
+  grep -q '${pkg}_${DEB_VERSION}-\*_${TARGET_ARCH}.deb|${pkg}_${DEB_VERSION}-\*_all.deb' \
+    tools/release/build-release-artifacts.sh || {
+    echo "FAIL: the primary collector case patterns still use the canonical version" >&2; exit 1; }
+
+  # The tag and the package version are one identity. Validating only a
+  # shared base accepted `TAG=v0.2.1 DEB_VERSION=0.2.1~rc.1` and
+  # `TAG=v0.2.1-rc.2 DEB_VERSION=0.2.1~rc.1`, either of which ships Rust
+  # binaries (identity from the tag) contradicting the packages (identity
+  # from the Debian version).
+  #
+  # This invokes the real builder. An earlier version reimplemented the
+  # check inline and passed with the builder's own validation removed.
+  tuple_out() {
+    local scratch; scratch="$(mktemp -d)"
+    tools/release/build-release-artifacts.sh --version 0.2.1 --tag "$1" --deb-version "$2" \
+      --artifacts-dir "$scratch/a" --manifest "$scratch/m.json" \
+      --checksums "$scratch/s" 2>&1 | head -1
+    rm -rf "$scratch"
+  }
+  for bad in "v0.2.1|0.2.1~rc.1" "v0.2.1-rc.2|0.2.1~rc.1"; do
+    if ! tuple_out "${bad%%|*}" "${bad##*|}" | grep -q 'contradicts --tag'; then
+      echo "FAIL: the builder accepted contradictory identities ${bad%%|*} / ${bad##*|}" >&2
+      exit 1
+    fi
+  done
+  if tuple_out v0.2.1-rc.1 '0.2.1~rc.1' | grep -q 'contradicts --tag'; then
+    echo "FAIL: the builder rejected a consistent candidate pair" >&2
+    exit 1
+  fi
+
+  # Ordering: the Rust crates are compiled by the `cargo` call, so the
+  # override has to be exported before it. Exported afterwards, ARM Rust
+  # binaries reported the final version while ARM C++ reported the candidate.
+  export_line="$(grep -n 'export TP_RELEASE_VERSION' tools/release/build-release-artifacts.sh | head -1 | cut -d: -f1)"
+  cargo_line="$(grep -n '^cargo "' tools/release/build-release-artifacts.sh | head -1 | cut -d: -f1)"
+  [[ -n "$export_line" && -n "$cargo_line" && "$export_line" -lt "$cargo_line" ]] || {
+    echo "FAIL: TP_RELEASE_VERSION (line ${export_line:-none}) must be exported before cargo runs (line ${cargo_line:-none})" >&2
+    exit 1; }
+
+  # Both architectures must give the C++ build its suffix, or a candidate
+  # ships Rust and C++ binaries that disagree.
+  grep -q 'DTP_RUNTIME_VERSION_SUFFIX="$runtime_suffix"' "$workflow" || {
+    echo "FAIL: the amd64 C++ build receives no runtime version suffix" >&2; exit 1; }
   grep -q 'DEB_VERSION: ${{ needs.meta.outputs.deb_version }}' "$workflow" || {
     echo "FAIL: the amd64 job does not receive the Debian version" >&2; exit 1; }
 

@@ -40,6 +40,8 @@ Options:
   --version VERSION      Canonical release version, for example 0.1.0. Always
                          bare MAJOR.MINOR.PATCH for a release build; this is
                          what the manifest and installer record.
+  --python-version VER   PEP 440 SDK version, for example 0.1.0rc1. Defaults
+                         to --version. The wheel and sdist are named with it.
   --deb-version VERSION  Debian package version, for example 0.1.0~rc.1.
                          Defaults to --version. A candidate differs here and
                          only here: `~` sorts below the bare version, so the
@@ -69,6 +71,7 @@ note() {
 
 VERSION=""
 DEB_VERSION=""
+PYTHON_VERSION=""
 TAG=""
 ARTIFACTS_DIR=""
 MANIFEST=""
@@ -86,6 +89,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="${2:-}"; shift 2 ;;
     --deb-version) DEB_VERSION="${2:-}"; shift 2 ;;
+    --python-version) PYTHON_VERSION="${2:-}"; shift 2 ;;
     --tag) TAG="${2:-}"; shift 2 ;;
     --artifacts-dir) ARTIFACTS_DIR="${2:-}"; shift 2 ;;
     --manifest) MANIFEST="${2:-}"; shift 2 ;;
@@ -167,6 +171,7 @@ if ((SNAPSHOT)); then
   [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+~dev\.[0-9]{8}\.[0-9a-f]+$ ]] ||
     die "snapshot --version must look like X.Y.Z~dev.YYYYMMDD.gitsha"
   DEB_VERSION="$VERSION"
+  PYTHON_VERSION="$VERSION"
 else
   [[ -n "$VERSION" ]] || die "--version is required"
   [[ -n "$TAG" ]] || die "--tag is required"
@@ -176,7 +181,20 @@ else
   # --deb-version and nowhere else.
   [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "--version must be MAJOR.MINOR.PATCH for release builds"
-  DEB_VERSION="${DEB_VERSION:-$VERSION}"
+  expected_deb="$VERSION"
+  if [[ -n "$TAG" ]]; then
+    case "$TAG" in
+      "v${VERSION}") ;;
+      "v${VERSION}-rc."*) expected_deb="${VERSION}~rc.${TAG##*-rc.}" ;;
+      *) die "--tag ${TAG} is not a tag for version ${VERSION}" ;;
+    esac
+  fi
+  DEB_VERSION="${DEB_VERSION:-$expected_deb}"
+  expected_python="$VERSION"
+  [[ "$expected_deb" == *"~rc."* ]] && expected_python="${VERSION}rc${expected_deb##*~rc.}"
+  PYTHON_VERSION="${PYTHON_VERSION:-$expected_python}"
+  [[ "$PYTHON_VERSION" == "$expected_python" ]] ||
+    die "--python-version ${PYTHON_VERSION} contradicts --tag ${TAG:-<none>}; expected ${expected_python}"
   # `~rc.N` is the Debian prerelease form, and the tilde is load-bearing:
   # it sorts BELOW the bare version, so 0.2.1~rc.1-1 < 0.2.1-1 and apt
   # offers the final release as an upgrade. Building a candidate as plain
@@ -184,8 +202,8 @@ else
   # same version to dpkg, so no upgrade path off it at all.
   [[ "$DEB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(~rc\.[1-9][0-9]*)?$ ]] ||
     die "--deb-version must be X.Y.Z or X.Y.Z~rc.N"
-  [[ "$DEB_VERSION" == "$VERSION" || "$DEB_VERSION" == "${VERSION}~"* ]] ||
-    die "--deb-version ${DEB_VERSION} is not a form of --version ${VERSION}"
+  [[ "$DEB_VERSION" == "$expected_deb" ]] ||
+    die "--deb-version ${DEB_VERSION} contradicts --tag ${TAG:-<none>}; expected ${expected_deb}"
 fi
 
 host_arch="$(dpkg --print-architecture)"
@@ -230,6 +248,22 @@ if grep -q 'STAGING PLACEHOLDER' "$keyring_asc"; then
 fi
 
 note "building Rust release binaries"
+# Runtime identity, resolved before anything is compiled. Both toolchains
+# have to agree: the Rust crates read TP_RELEASE_VERSION and the C++ build
+# takes TP_RUNTIME_VERSION_SUFFIX, and a build that set one after the
+# other had run shipped a candidate whose CLI reported the final version.
+runtime_version_suffix=""
+if [[ "$DEB_VERSION" == *"~"* ]]; then
+  runtime_version_suffix="${DEB_VERSION#*~}"
+fi
+# The semver spelling of the same identity, for the Rust crates: Cargo
+# metadata cannot express `~`, and the tag already carries `-rc.N`.
+if [[ -n "$TAG" ]]; then
+  export TP_RELEASE_VERSION="${TAG#v}"
+elif [[ -n "$runtime_version_suffix" ]]; then
+  export TP_RELEASE_VERSION="${VERSION}-${runtime_version_suffix}"
+fi
+
 cargo_args=(
   build
   --release
@@ -264,17 +298,6 @@ fi
 # for a snapshot, `rc.N` for a candidate, absent for a final release. The
 # runtime reports it, so `tensorplate --version` distinguishes a candidate
 # from the release it is a candidate for.
-runtime_version_suffix=""
-if [[ "$DEB_VERSION" == *"~"* ]]; then
-  runtime_version_suffix="${DEB_VERSION#*~}"
-fi
-# The semver spelling of the same identity, for the Rust crates: Cargo
-# metadata cannot express `~`, and the tag already carries `-rc.N`.
-if [[ -n "$TAG" ]]; then
-  export TP_RELEASE_VERSION="${TAG#v}"
-elif [[ -n "$runtime_version_suffix" ]]; then
-  export TP_RELEASE_VERSION="${VERSION}-${runtime_version_suffix}"
-fi
 cmake_args=(
   -S .
   -B "$BUILD_DIR"
@@ -346,17 +369,17 @@ repo_parent="$(dirname "$repo_root")"
 debs=()
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
   matches=()
-  mapfile -t candidates < <(find "$repo_parent" -maxdepth 1 -type f -name "${pkg}_${VERSION}-*_*.deb" | sort)
+  mapfile -t candidates < <(find "$repo_parent" -maxdepth 1 -type f -name "${pkg}_${DEB_VERSION}-*_*.deb" | sort)
   for candidate in "${candidates[@]}"; do
     candidate_name="$(basename -- "$candidate")"
     case "$candidate_name" in
-      ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb|${pkg}_${VERSION}-*_all.deb)
+      ${pkg}_${DEB_VERSION}-*_${TARGET_ARCH}.deb|${pkg}_${DEB_VERSION}-*_all.deb)
         matches+=("$candidate")
         ;;
     esac
   done
   ((${#matches[@]} == 1)) ||
-    die "expected exactly one ${pkg}_${VERSION}-*_${TARGET_ARCH}.deb or ${pkg}_${VERSION}-*_all.deb in $repo_parent; found ${#matches[@]}"
+    die "expected exactly one ${pkg}_${DEB_VERSION}-*_${TARGET_ARCH}.deb or ${pkg}_${DEB_VERSION}-*_all.deb in $repo_parent; found ${#matches[@]}"
   debs+=("${matches[0]}")
 done
 # Collect the secondary-architecture runtime set staged alongside the
@@ -418,6 +441,8 @@ note "generating manifest and checksums"
 manifest_args=(
   manifest
   --version "$VERSION" \
+  --deb-version "$DEB_VERSION" \
+  --python-version "$PYTHON_VERSION" \
   --tag "$TAG" \
   --artifacts-dir "$ARTIFACTS_DIR" \
   --manifest "$MANIFEST" \
@@ -434,6 +459,8 @@ tools/release/tensorplate-release.sh "${manifest_args[@]}"
 verify_args=(
   verify
   --version "$VERSION"
+  --deb-version "$DEB_VERSION"
+  --python-version "$PYTHON_VERSION"
   --tag "$TAG"
   --artifacts-dir "$ARTIFACTS_DIR"
   --manifest "$MANIFEST"

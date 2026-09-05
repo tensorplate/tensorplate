@@ -234,6 +234,7 @@ jobs:
         env:
           CC: clang
           CXX: clang++
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
         run: |
           set -Eeuo pipefail
           # TensorRT stays OFF. A hosted runner has no CUDA/TensorRT SDK, and
@@ -248,7 +249,15 @@ jobs:
           # dpkg-buildpackage failure. Pin the DWARF version rather than
           # relying on a compiler default, and keep it scoped to this build so
           # the Jetson packaging path is untouched.
+          # The C++ runtime takes its identity from CMake; the Rust crates
+          # take theirs from TP_RELEASE_VERSION. Both have to be set on
+          # both architectures or a candidate ships binaries that disagree.
+          runtime_suffix=""
+          if [[ "$DEB_VERSION" == *"~"* ]]; then
+            runtime_suffix="${DEB_VERSION#*~}"
+          fi
           cmake -S . -B build/release \
+            -DTP_RUNTIME_VERSION_SUFFIX="$runtime_suffix" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS=-gdwarf-4 \
@@ -522,6 +531,7 @@ jobs:
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
           VERSION: ${{ needs.meta.outputs.version }}
           DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+          PYTHON_VERSION: ${{ needs.meta.outputs.python_version }}
           TAG: ${{ needs.meta.outputs.tag }}
           RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
           MANIFEST: ${{ needs.meta.outputs.manifest }}
@@ -533,6 +543,7 @@ jobs:
             tools/release/build-release-artifacts.sh
             --version "$VERSION"
             --deb-version "$DEB_VERSION"
+            --python-version "$PYTHON_VERSION"
             --tag "$TAG"
             --artifacts-dir "$RELEASE_DIR"
             --manifest "$MANIFEST"
