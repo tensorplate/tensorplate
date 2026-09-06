@@ -39,13 +39,13 @@ Usage:
 Options:
   --version VERSION      Canonical release version, for example 0.1.0. Always
                          bare MAJOR.MINOR.PATCH for a release build; this is
-                         what the manifest and installer record.
-  --python-version VER   PEP 440 SDK version, for example 0.1.0rc1. Defaults
-                         to --version. The wheel and sdist are named with it.
+                         what the source tree and release manifest record.
+  --python-version VER   PEP 440 SDK version, for example 0.1.0rc1. Derived
+                         from --tag when omitted; names the wheel and sdist.
   --deb-version VERSION  Debian package version, for example 0.1.0~rc.1.
-                         Defaults to --version. A candidate differs here and
-                         only here: `~` sorts below the bare version, so the
-                         final release is an upgrade from the candidate.
+                         Derived from --tag when omitted. The `~` sorts below
+                         the bare version, so the final release is an upgrade
+                         from the candidate.
   --tag TAG              Git tag being published, for example v0.1.0.
   --artifacts-dir DIR    Output directory for .deb artifacts.
   --manifest FILE        Artifact manifest JSON path.
@@ -131,6 +131,73 @@ derive_snapshot_version() {
   printf '%s~dev.%s.%s\n' "$(base_version)" "$date" "$short_sha"
 }
 
+# Refuse to relabel one source release as another. Release-candidate and
+# snapshot identities add a suffix to the source's numeric version, but all
+# three version authorities in the checkout must still agree on that base.
+# Keep this check independent of Cargo and CMake so it runs before either
+# toolchain (and before the Debian changelog is staged).
+verify_source_version_identity() {
+  local expected_source_version packaging_source_version
+  expected_source_version="${VERSION%%~*}"
+  packaging_source_version="$(base_version)"
+
+  [[ "$packaging_source_version" == "$expected_source_version" ]] ||
+    die "source version mismatch: --version base ${expected_source_version} does not match packaging/VERSION base ${packaging_source_version}"
+
+  python3 - "$expected_source_version" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+expected = sys.argv[1]
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"error: source version mismatch: {message}")
+
+
+cmake_text = Path("CMakeLists.txt").read_text()
+project_match = re.search(
+    r"(?ms)^\s*project\s*\((.*?)^\s*\)",
+    cmake_text,
+)
+if project_match is None:
+    fail("cannot read project() from CMakeLists.txt")
+cmake_match = re.search(
+    r"(?m)^\s*VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)\s*$",
+    project_match.group(1),
+)
+if cmake_match is None:
+    fail("cannot read project VERSION from CMakeLists.txt")
+cmake_version = cmake_match.group(1)
+if cmake_version != expected:
+    fail(
+        f"--version base {expected} does not match "
+        f"CMakeLists.txt project VERSION {cmake_version}"
+    )
+
+cargo_text = Path("Cargo.toml").read_text()
+workspace_match = re.search(
+    r"(?ms)^\s*\[workspace\.package\]\s*(.*?)(?=^\s*\[|\Z)",
+    cargo_text,
+)
+if workspace_match is None:
+    fail("cannot read [workspace.package] from Cargo.toml")
+cargo_match = re.search(
+    r'''(?m)^\s*version\s*=\s*["']([0-9]+\.[0-9]+\.[0-9]+)(?:[-+][^"']+)?["']\s*(?:#.*)?$''',
+    workspace_match.group(1),
+)
+if cargo_match is None:
+    fail("cannot read [workspace.package].version from Cargo.toml")
+cargo_version = cargo_match.group(1)
+if cargo_version != expected:
+    fail(
+        f"--version base {expected} does not match "
+        f"Cargo.toml workspace package version {cargo_version}"
+    )
+PY
+}
+
 restore_staged_changelog() {
   if [[ -n "$CHANGELOG_BACKUP" && -f "$CHANGELOG_BACKUP" ]]; then
     cp -- "$CHANGELOG_BACKUP" packaging/debian/changelog
@@ -185,7 +252,13 @@ else
   if [[ -n "$TAG" ]]; then
     case "$TAG" in
       "v${VERSION}") ;;
-      "v${VERSION}-rc."*) expected_deb="${VERSION}~rc.${TAG##*-rc.}" ;;
+      "v${VERSION}-rc."*)
+        candidate_prefix="v${VERSION}-rc."
+        candidate_number="${TAG#"$candidate_prefix"}"
+        [[ "$candidate_number" =~ ^[1-9][0-9]*$ ]] ||
+          die "--tag ${TAG} must end in a positive numeric release-candidate number"
+        expected_deb="${VERSION}~rc.${candidate_number}"
+        ;;
       *) die "--tag ${TAG} is not a tag for version ${VERSION}" ;;
     esac
   fi
@@ -205,6 +278,8 @@ else
   [[ "$DEB_VERSION" == "$expected_deb" ]] ||
     die "--deb-version ${DEB_VERSION} contradicts --tag ${TAG:-<none>}; expected ${expected_deb}"
 fi
+
+verify_source_version_identity
 
 host_arch="$(dpkg --print-architecture)"
 CROSS_BUILD=0

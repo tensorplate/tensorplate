@@ -63,6 +63,10 @@ Usage:
 
 Common options:
   --version VERSION          Release version without leading v, for example 0.1.0.
+  --deb-version VERSION      Expected Debian version, for example 0.1.0~rc.1.
+                            Derived from --tag when omitted.
+  --python-version VERSION   Expected SDK version, for example 0.1.0rc1.
+                            Derived from --tag when omitted.
   --release-branch BRANCH   Expected release branch. Defaults to the
                             maintenance line release/MAJOR.MINOR.
   --base REF                Source ref for cut. Defaults to origin/develop.
@@ -1155,7 +1159,11 @@ print(f"wrote {checksums_out}")
 PY
 }
 
-verify_manifest_python() {
+verify_manifest_python() (
+  # Preflight also calls this helper directly. Validate here so every
+  # caller gets the same identity checks; the subshell lets preflight
+  # report a tuple failure without exiting before it writes its report.
+  require_version_tuple
   local secondary_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
   export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
@@ -1164,6 +1172,7 @@ verify_manifest_python() {
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -1181,6 +1190,11 @@ if manifest.get("release", {}).get("version") != version:
 if manifest.get("release", {}).get("tag") != tag:
     raise SystemExit("manifest tag mismatch")
 
+sdk_files = {
+    "python-wheel": f"tensorplate_python-{python_version}-py3-none-any.whl",
+    "python-sdist": f"tensorplate_python-{python_version}.tar.gz",
+}
+
 checksums = {}
 for line in Path(checksums_path).read_text().splitlines():
     if not line.strip():
@@ -1190,6 +1204,33 @@ for line in Path(checksums_path).read_text().splitlines():
 
 for artifact in manifest.get("artifacts", []):
     name = artifact["file"]
+    # Hashes bind bytes to a manifest, but do not prove those bytes belong
+    # to the requested candidate. Check the artifact's identity even when
+    # its manifest and checksum file have been regenerated together.
+    if "package" in artifact or name.endswith(".deb"):
+        if artifact.get("kind") in sdk_files:
+            raise SystemExit(f"{name}: artifact kind mismatch; a Debian package is not an SDK asset")
+        match = re.fullmatch(
+            r"(?P<package>[^_/]+)_(?P<version>[^_/]+)_(?P<architecture>[^_/]+)\.deb",
+            name,
+        )
+        if not match:
+            raise SystemExit(f"artifact name is not Debian-like: {name}")
+        package_version = match.group("version")
+        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+            raise SystemExit(
+                f"{name}: package version {package_version} does not match "
+                f"the release's package version {deb_version}"
+            )
+        for field in ("package", "version", "architecture"):
+            if artifact.get(field) != match.group(field):
+                raise SystemExit(f"{name}: manifest {field} mismatch with artifact filename")
+    elif artifact.get("kind") in sdk_files or name.startswith("tensorplate_python-"):
+        expected_file = sdk_files.get(artifact.get("kind"))
+        if name != expected_file:
+            raise SystemExit(f"{name}: SDK filename does not match expected artifact {expected_file}")
+        if artifact.get("version") != python_version:
+            raise SystemExit(f"{name}: SDK version mismatch; expected {python_version}")
     path = root / name
     if not path.is_file():
         raise SystemExit(f"missing artifact listed in manifest: {name}")
@@ -1202,6 +1243,17 @@ for artifact in manifest.get("artifacts", []):
         raise SystemExit(f"manifest checksum mismatch for {name}")
     if checksums.get(name) != digest:
         raise SystemExit(f"SHA256SUMS mismatch for {name}")
+
+# Publish uploads these staged files. An unlisted stale package must not
+# bypass identity and checksum validation just because it is not in JSON.
+staged_assets = {
+    path.name
+    for pattern in ("*.deb", "tensorplate_python-*.whl", "tensorplate_python-*.tar.gz")
+    for path in root.glob(pattern)
+}
+unlisted = staged_assets - {artifact["file"] for artifact in manifest.get("artifacts", [])}
+if unlisted:
+    raise SystemExit("staged artifacts are missing from manifest: " + ", ".join(sorted(unlisted)))
 
 manifest_digest = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
 if checksums.get(Path(manifest_path).name) != manifest_digest:
@@ -1246,7 +1298,7 @@ if not snapshot:
             raise SystemExit(f"manifest is missing the required tensorplate-python {sdk_kind}")
 print("manifest verified")
 PY
-}
+)
 
 # The tag, the package version and the wheel version are one identity, and
 # every one of them is derived from the tag. The outer builder validated
@@ -1254,21 +1306,24 @@ PY
 # right -- used directly for recovery -- and were fail-open: a verifier
 # given RC9 package and wheel versions against an RC1 tag exited 0.
 #
-# Snapshots are exempt: their version is `X.Y.Z~dev.DATE.SHA` and their tag
-# names a branch and commit rather than a release.
+# A snapshot tag names a branch and commit rather than a release. Its
+# package version is still required to agree with its snapshot version.
 require_version_tuple() {
-  ((${ALLOW_SNAPSHOT_VERSION:-0})) && return 0
   local expected_deb="$VERSION" expected_python="$VERSION" rc
-  case "${TAG:-v${VERSION}}" in
-    "v${VERSION}") ;;
-    "v${VERSION}-rc."*)
-      rc="${TAG##*-rc.}"
-      [[ "$rc" =~ ^[1-9][0-9]*$ ]] || die "tag ${TAG} has a malformed candidate number"
-      expected_deb="${VERSION}~rc.${rc}"
-      expected_python="${VERSION}rc${rc}"
-      ;;
-    *) die "tag ${TAG} is not a tag for version ${VERSION}" ;;
-  esac
+  if [[ "$VERSION" == *"~dev."* ]] && ((${ALLOW_SNAPSHOT_VERSION:-0})); then
+    : # require_version already checked the snapshot syntax.
+  else
+    case "${TAG:-v${VERSION}}" in
+      "v${VERSION}") ;;
+      "v${VERSION}-rc."*)
+        rc="${TAG#v${VERSION}-rc.}"
+        [[ "$rc" =~ ^[1-9][0-9]*$ ]] || die "tag ${TAG} has a malformed candidate number"
+        expected_deb="${VERSION}~rc.${rc}"
+        expected_python="${VERSION}rc${rc}"
+        ;;
+      *) die "tag ${TAG} is not a tag for version ${VERSION}" ;;
+    esac
+  fi
   DEB_VERSION="${DEB_VERSION:-$expected_deb}"
   PYTHON_VERSION="${PYTHON_VERSION:-$expected_python}"
   [[ "$DEB_VERSION" == "$expected_deb" ]] ||
@@ -1355,6 +1410,7 @@ cmd_tag() {
 cmd_publish() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "publish requires --tag"
+  require_version_tuple
   if [[ "$DRY_RUN" -eq 0 && "$EXECUTE" -eq 0 ]]; then
     DRY_RUN=1
   fi

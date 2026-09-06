@@ -15,6 +15,8 @@ source_install_script="packaging/scripts/build-install-from-source.sh"
 publish_apt_script="tools/release/publish-apt-repo.sh"
 publish_homebrew_script="tools/release/publish-homebrew-formula.sh"
 verify_homebrew_formulas="test/release/verify_homebrew_formulas.sh"
+verify_artifact_identity="test/release/test_artifact_identity.py"
+verify_build_source_identity="test/release/test_build_source_identity.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -32,6 +34,8 @@ bash -n "$publish_apt_script"
 bash -n "$publish_homebrew_script"
 "$publish_homebrew_script" --help >/dev/null
 "$verify_homebrew_formulas"
+python3 "$verify_artifact_identity"
+python3 "$verify_build_source_identity"
 
 # Patch tags live on the per-minor maintenance line, not per-version
 # release branches.
