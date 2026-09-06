@@ -257,12 +257,16 @@ if [[ "$DEB_VERSION" == *"~"* ]]; then
   runtime_version_suffix="${DEB_VERSION#*~}"
 fi
 # The semver spelling of the same identity, for the Rust crates: Cargo
-# metadata cannot express `~`, and the tag already carries `-rc.N`.
-if [[ -n "$TAG" ]]; then
-  export TP_RELEASE_VERSION="${TAG#v}"
-elif [[ -n "$runtime_version_suffix" ]]; then
-  export TP_RELEASE_VERSION="${VERSION}-${runtime_version_suffix}"
-fi
+# metadata cannot express `~`, so the package version's tilde becomes a
+# hyphen and everything else is already shared.
+#
+# Derived from the package version rather than from the tag, because a
+# snapshot's tag is `snapshot-<branch>-<sha>` and using it made the Rust
+# crates report a non-numeric version. That is not cosmetic: the loose
+# parser in protocol takes the segment before the first hyphen, so
+# `snapshot-...` parsed as 0.0.0 and a snapshot agent rejected the shipped
+# backend and otherwise compatible bundles on version-floor checks.
+export TP_RELEASE_VERSION="${DEB_VERSION/\~/-}"
 
 cargo_args=(
   build

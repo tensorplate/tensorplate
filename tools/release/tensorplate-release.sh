@@ -1092,7 +1092,7 @@ for sdk_kind, sdk_pattern in (
         {
             "file": sdk_path.name,
             "kind": sdk_kind,
-            "version": version,
+            "version": python_version,
             "target_os": "Python 3.10+ (any platform)",
             "size_bytes": sdk_path.stat().st_size,
             "sha256": sha256(sdk_path),
@@ -1248,15 +1248,46 @@ print("manifest verified")
 PY
 }
 
+# The tag, the package version and the wheel version are one identity, and
+# every one of them is derived from the tag. The outer builder validated
+# this, but manifest/verify/publish are supported entry points in their own
+# right -- used directly for recovery -- and were fail-open: a verifier
+# given RC9 package and wheel versions against an RC1 tag exited 0.
+#
+# Snapshots are exempt: their version is `X.Y.Z~dev.DATE.SHA` and their tag
+# names a branch and commit rather than a release.
+require_version_tuple() {
+  ((${ALLOW_SNAPSHOT_VERSION:-0})) && return 0
+  local expected_deb="$VERSION" expected_python="$VERSION" rc
+  case "${TAG:-v${VERSION}}" in
+    "v${VERSION}") ;;
+    "v${VERSION}-rc."*)
+      rc="${TAG##*-rc.}"
+      [[ "$rc" =~ ^[1-9][0-9]*$ ]] || die "tag ${TAG} has a malformed candidate number"
+      expected_deb="${VERSION}~rc.${rc}"
+      expected_python="${VERSION}rc${rc}"
+      ;;
+    *) die "tag ${TAG} is not a tag for version ${VERSION}" ;;
+  esac
+  DEB_VERSION="${DEB_VERSION:-$expected_deb}"
+  PYTHON_VERSION="${PYTHON_VERSION:-$expected_python}"
+  [[ "$DEB_VERSION" == "$expected_deb" ]] ||
+    die "--deb-version ${DEB_VERSION} contradicts tag ${TAG:-v$VERSION}; expected ${expected_deb}"
+  [[ "$PYTHON_VERSION" == "$expected_python" ]] ||
+    die "--python-version ${PYTHON_VERSION} contradicts tag ${TAG:-v$VERSION}; expected ${expected_python}"
+}
+
 cmd_manifest() {
   parse_common_args "$@"
   TAG="${TAG:-v${VERSION}}"
+  require_version_tuple
   manifest_python
 }
 
 cmd_verify() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "verify requires --tag"
+  require_version_tuple
   if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
     note "skipping annotated tag check for build-only artifact validation"
   else

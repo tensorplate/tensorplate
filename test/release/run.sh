@@ -530,15 +530,53 @@ if m['release']['version'] != '$canon':
     sys.exit(f\"FAIL: manifest records {m['release']['version']!r}, not the canonical version\")
 " || { rm -rf "$fx"; exit 1; }
 
-  # Control: without the package identity, the manifest layer must refuse
-  # the same artifacts. A fixture that cannot fail proves nothing.
+  # Control: a fixture that cannot fail proves nothing. Under a final tag
+  # the derived package version is the canonical one, so these candidate
+  # artifacts must be refused by name.
   if tools/release/tensorplate-release.sh manifest \
-      --version "$canon" --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+      --version "$canon" --tag "v$canon" --artifacts-dir "$art" \
       --manifest "$fx/control.json" --checksums "$fx/control.sums" --arch arm64 \
       >/dev/null 2>&1; then
-    echo "FAIL: the manifest layer accepted candidate artifacts under the canonical version" >&2
+    echo "FAIL: the manifest layer accepted candidate artifacts under a final tag" >&2
     rm -rf "$fx"; exit 1
   fi
+  # The driver must enforce the tuple itself: manifest, verify and publish
+  # are supported entry points for recovery, and were fail-open. A verifier
+  # given RC9 identities against an RC1 tag exited 0 with "manifest verified".
+  if tools/release/tensorplate-release.sh verify \
+      --version "$canon" --deb-version 0.2.1~rc.9 --python-version 0.2.1rc9 \
+      --tag v0.2.1-rc.1 --artifacts-dir "$art" \
+      --manifest "$fx/manifest.json" --checksums "$fx/SHA256SUMS" --skip-tag-verify \
+      >/dev/null 2>&1; then
+    echo "FAIL: the verifier accepted package/wheel versions contradicting the tag" >&2
+    rm -rf "$fx"; exit 1
+  fi
+  if tools/release/tensorplate-release.sh manifest \
+      --version "$canon" --deb-version "$deb" --python-version "$py" \
+      --tag v0.2.1-rc.2 --artifacts-dir "$art" \
+      --manifest "$fx/mismatch.json" --checksums "$fx/mismatch.sums" --arch arm64 \
+      >/dev/null 2>&1; then
+    echo "FAIL: manifest generation accepted an RC2 tag against RC1 artifacts" >&2
+    rm -rf "$fx"; exit 1
+  fi
+
+  # Each artifact's metadata records its own version, the way the Debian
+  # entries already do; recording the canonical one made the manifest
+  # describe tensorplate_python-0.2.1rc1 as version 0.2.1.
+  python3 - "$fx/manifest.json" "$py" <<'PYSDK' || { rm -rf "$fx"; exit 1; }
+import json, sys
+manifest_path, expected = sys.argv[1], sys.argv[2]
+manifest = json.load(open(manifest_path))
+sdk = [a for a in manifest["artifacts"] if "tensorplate_python-" in a.get("file", "")]
+if not sdk:
+    sys.exit("FAIL: the RC manifest carries no SDK artifacts")
+wrong = [a for a in sdk if a.get("version") != expected]
+if wrong:
+    sys.exit(
+        "FAIL: SDK metadata records %r, not the artifact version %r"
+        % (wrong[0].get("version"), expected)
+    )
+PYSDK
   rm -rf "$fx"
 
   # 2. The installer must accept what the build stamps as its default.
@@ -601,6 +639,29 @@ if m['release']['version'] != '$canon':
   [[ -n "$export_line" && -n "$cargo_line" && "$export_line" -lt "$cargo_line" ]] || {
     echo "FAIL: TP_RELEASE_VERSION (line ${export_line:-none}) must be exported before cargo runs (line ${cargo_line:-none})" >&2
     exit 1; }
+
+  # The Rust identity must stay a numeric-leading semver for every build
+  # kind. Deriving it from the tag gave snapshots `snapshot-<branch>-<sha>`,
+  # and protocol's loose parser takes the segment before the first hyphen,
+  # so that parsed as 0.0.0 and a snapshot agent rejected the shipped
+  # backend and otherwise compatible bundles on version-floor checks.
+  #
+  # Evaluate the expression the script actually ships, not a copy of it.
+  export_expr="$(grep -m1 '^export TP_RELEASE_VERSION=' tools/release/build-release-artifacts.sh)"
+  [[ -n "$export_expr" ]] || {
+    echo "FAIL: build-release-artifacts.sh no longer exports TP_RELEASE_VERSION" >&2; exit 1; }
+  grep -q 'TP_RELEASE_VERSION="${TAG#v}"' tools/release/build-release-artifacts.sh && {
+    echo "FAIL: the Rust identity is derived from the tag again; snapshot tags are not versions" >&2
+    exit 1; }
+  for case in "0.2.1|0.2.1" "0.2.1~rc.1|0.2.1-rc.1" "0.2.1~dev.20260903.abc123|0.2.1-dev.20260903.abc123"; do
+    got="$(DEB_VERSION="${case%%|*}" bash -c "$export_expr"'; printf %s "$TP_RELEASE_VERSION"')"
+    [[ "$got" == "${case##*|}" ]] || {
+      echo "FAIL: package version ${case%%|*} yields runtime identity '$got', expected ${case##*|}" >&2
+      exit 1; }
+    [[ "$got" =~ ^[0-9] ]] || {
+      echo "FAIL: runtime identity '$got' does not begin with a number; it parses as 0.0.0" >&2
+      exit 1; }
+  done
 
   # Both architectures must give the C++ build its suffix, or a candidate
   # ships Rust and C++ binaries that disagree.
