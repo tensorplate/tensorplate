@@ -117,6 +117,14 @@ tools/release/tensorplate-release.sh manifest \
   --checksums "${TP_CHECKSUMS}"
 ```
 
+For a release candidate, keep `--version` canonical: for example,
+`--version 0.2.1 --tag v0.2.1-rc.1`. The driver derives Debian version
+`0.2.1~rc.1` and Python version `0.2.1rc1` from that tag. Explicit
+`--deb-version` and `--python-version` arguments must agree with it.
+The top-level `release.version` remains `0.2.1`; each artifact records
+its own version, such as `0.2.1~rc.1-1` for a Debian package or `0.2.1rc1`
+for an SDK wheel. The same identity rules apply to `verify` and `publish`.
+
 The manifest is JSON with this stable shape:
 
 ```json
@@ -204,7 +212,12 @@ tools/release/tensorplate-release.sh verify \
 
 Verification fails if the tag is not annotated, a required package is
 missing, manifest metadata drifts from the requested version/tag, or any
-checksum mismatches. The required runtime package set must include the
+checksum mismatches. Debian and SDK filenames and per-artifact version
+metadata must agree with the versions derived from the tag, even if the
+manifest and checksums have been regenerated together. Staged Debian or
+SDK files absent from the manifest also fail verification, so the manual
+publish path cannot upload an unchecked stale asset.
+The required runtime package set must include the
 target architecture or `all`. On the publish path every member of the
 secondary runtime set is also required, asserted by `(package,
 architecture)` pair, so a half-published architecture cannot verify clean —

@@ -40,6 +40,8 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
+      deb_version: ${{ steps.meta.outputs.deb_version }}
+      python_version: ${{ steps.meta.outputs.python_version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
       draft: ${{ steps.meta.outputs.draft }}
       release_dir: ${{ steps.meta.outputs.release_dir }}
@@ -76,11 +78,25 @@ jobs:
             echo "::error::release tags must be vX.Y.Z or vX.Y.Z-rc.N"
             exit 1
           fi
+          # One release identity, three encodings, derived here so no
+          # consumer has to know the mapping:
+          #   version        0.2.1       source/semver base; what the tree says
+          #   deb_version    0.2.1~rc.1  Debian; `~` sorts below the bare
+          #                              version so the final release is an
+          #                              upgrade from a candidate
+          #   python_version 0.2.1rc1    PEP 440
+          # A candidate built as plain 0.2.1 was indistinguishable from the
+          # release: same dpkg version, so no upgrade path off it, and
+          # `tensorplate --version` reported the same string for both.
           version="${tag#v}"
           version="${version%%-*}"
           prerelease="false"
-          if [[ "$tag" == *-* ]]; then
+          deb_version="$version"
+          python_version="$version"
+          if [[ "$tag" =~ -rc\.([1-9][0-9]*)$ ]]; then
             prerelease="true"
+            deb_version="${version}~rc.${BASH_REMATCH[1]}"
+            python_version="${version}rc${BASH_REMATCH[1]}"
           fi
           draft="false"
           if [[ "$prerelease" == "false" ]]; then
@@ -102,6 +118,8 @@ jobs:
           {
             echo "tag=${tag}"
             echo "version=${version}"
+            echo "deb_version=${deb_version}"
+            echo "python_version=${python_version}"
             echo "prerelease=${prerelease}"
             echo "draft=${draft}"
             echo "release_dir=${release_dir}"
@@ -114,9 +132,52 @@ jobs:
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
+  evidence_gate:
+    name: evidence gate
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      - name: Install release tooling dependencies
+        shell: bash
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      # Incomplete evidence is reported on every run and enforced only when
+      # publishing: `develop` may carry rows nobody has validated yet, a tag
+      # may not, and a build-only dispatch is how the pipeline itself gets
+      # exercised. A checker that could not run is never waived -- exit 2
+      # means the gate did not reach a verdict, and a gate with no verdict
+      # must not be mistaken for one that passed.
+      - name: Production rows carry the evidence they claim
+        shell: bash
+        env:
+          PUBLISH: ${{ needs.meta.outputs.publish }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -uo pipefail
+          tools/release/check-evidence-bundles.sh --version "$VERSION"
+          status=$?
+          if [[ "$status" -eq 2 ]]; then
+            printf '::error::the evidence checker did not run; this is never waived\n'
+            exit 2
+          fi
+          if [[ "$status" -ne 0 && "$PUBLISH" != "true" ]]; then
+            printf '::warning::evidence incomplete; not blocking a build-only run\n'
+            exit 0
+          fi
+          exit "$status"
+
   build_packages_amd64:
     name: build amd64 runtime packages
-    needs: meta
+    needs: [meta, evidence_gate]
     # Deliberately jammy, not noble: the runtime packages must install on
     # both supported Ubuntu x86_64 releases, and glibc's floor is set by the
     # oldest host a binary must run on. Building on noble would raise the
@@ -197,8 +258,15 @@ jobs:
 
       - name: Build amd64 Rust binaries
         shell: bash
+        env:
+          # Cargo metadata cannot distinguish a candidate from the release
+          # it is a candidate for: both are built from a tree that says
+          # 0.2.1. Without this the packaged CLI, agent and observability
+          # binaries all report the final release's version.
+          TP_RELEASE_VERSION: ${{ needs.meta.outputs.tag }}
         run: |
           set -Eeuo pipefail
+          export TP_RELEASE_VERSION="${TP_RELEASE_VERSION#v}"
           cargo build --release \
             --bin tensorplate-agent \
             --bin tensorplate-observability \
@@ -209,6 +277,7 @@ jobs:
         env:
           CC: clang
           CXX: clang++
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
         run: |
           set -Eeuo pipefail
           # TensorRT stays OFF. A hosted runner has no CUDA/TensorRT SDK, and
@@ -223,7 +292,15 @@ jobs:
           # dpkg-buildpackage failure. Pin the DWARF version rather than
           # relying on a compiler default, and keep it scoped to this build so
           # the Jetson packaging path is untouched.
+          # The C++ runtime takes its identity from CMake; the Rust crates
+          # take theirs from TP_RELEASE_VERSION. Both have to be set on
+          # both architectures or a candidate ships binaries that disagree.
+          runtime_suffix=""
+          if [[ "$DEB_VERSION" == *"~"* ]]; then
+            runtime_suffix="${DEB_VERSION#*~}"
+          fi
           cmake -S . -B build/release \
+            -DTP_RUNTIME_VERSION_SUFFIX="$runtime_suffix" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS=-gdwarf-4 \
@@ -244,8 +321,24 @@ jobs:
 
       - name: Build amd64 runtime packages
         shell: bash
+        env:
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
         run: |
           set -Eeuo pipefail
+          # dpkg takes the package version from debian/changelog, not from
+          # any argument. A candidate build left this at the tree's final
+          # version, so the amd64 packages were named 0.2.1 while the ARM
+          # collector looked for 0.2.1~rc.1 and reported every one missing.
+          python3 - "$DEB_VERSION" <<'PYVER'
+          import sys
+          from pathlib import Path
+          path = Path("packaging/debian/changelog")
+          lines = path.read_text().splitlines()
+          head = lines[0]
+          lines[0] = f"tensorplate ({sys.argv[1]}-1) unstable; urgency=medium"
+          path.write_text("\n".join(lines) + "\n")
+          print(f"staged debian/changelog: {head!r} -> {lines[0]!r}")
+          PYVER
           # Binary-arch only: the architecture-independent packages
           # (tensorplate-common, the Python backend, the apt bootstrap) are
           # shared and are built once by the primary job.
@@ -319,7 +412,7 @@ jobs:
 
   build_sdk_python:
     name: build tensorplate-python wheel + sdist
-    needs: meta
+    needs: [meta, evidence_gate]
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -334,7 +427,7 @@ jobs:
       - name: Build, check, and smoke-install the SDK distribution
         shell: bash
         env:
-          VERSION: ${{ needs.meta.outputs.version }}
+          VERSION: ${{ needs.meta.outputs.python_version }}
         run: |
           set -Eeuo pipefail
           # The source tree carries a .dev0 development version between
@@ -480,6 +573,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
           VERSION: ${{ needs.meta.outputs.version }}
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+          PYTHON_VERSION: ${{ needs.meta.outputs.python_version }}
           TAG: ${{ needs.meta.outputs.tag }}
           RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
           MANIFEST: ${{ needs.meta.outputs.manifest }}
@@ -490,6 +585,8 @@ jobs:
           args=(
             tools/release/build-release-artifacts.sh
             --version "$VERSION"
+            --deb-version "$DEB_VERSION"
+            --python-version "$PYTHON_VERSION"
             --tag "$TAG"
             --artifacts-dir "$RELEASE_DIR"
             --manifest "$MANIFEST"

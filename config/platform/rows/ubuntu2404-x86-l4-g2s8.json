@@ -68,6 +68,6 @@
     "machine_type": "g2-standard-8"
   },
   "evidence": {
-    "location": "dist/release/v0.2.1/ubuntu2404-x86-l4-g2s8/"
+    "location": "docs/validation/evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/"
   }
 }
