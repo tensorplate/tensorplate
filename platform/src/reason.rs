@@ -6,8 +6,9 @@
 // This crate owns the enum. `doctor`, deploy admission, and status are
 // intended to emit these values rather than prose, so the same condition
 // reads the same way everywhere; the consumers are wired up separately.
-// Trigger conditions and user-facing rendering are frozen by the doctor
-// work; the values themselves are frozen here.
+// Trigger conditions are documented in docs/platform/support-reasons.md.
+// Existing wire spellings stay stable; the topology reason adds a distinct
+// verdict for a readable multi-device answer without renaming another cause.
 
 use serde::{Deserialize, Serialize};
 use tensorplate_protocol::backend_probe::BackendProbeState;
@@ -33,8 +34,10 @@ pub enum PlatformReason {
     /// The CPU architecture is supported but the vendor is not, on a row
     /// where vendor is load-bearing.
     UnsupportedCpuVendor,
-    /// The accelerator is partitioned. Partitioned devices are rejected
-    /// before model load rather than served at reduced capacity.
+    /// At least one reported accelerator is partitioned. Once all device
+    /// rows parse, this takes precedence over device count and SKU, so
+    /// partitioned devices are rejected before model load regardless of
+    /// their position in the probe output.
     MigModeEnabled,
     /// A required backend package is absent from the installed package
     /// set.

@@ -3,11 +3,10 @@
 // `doctor --record <dir>`: capture this machine's raw platform sources for
 // private review and later publication as sanitized fixtures.
 //
-// Record-first: the raw text is written even when interpretation fails,
-// because the machines this exists for are exactly the ones detection
-// cannot yet interpret — a multi-GPU host, an unknown SKU, a new OS
-// image. A recording that only worked on supported machines would be
-// useless for growing the support matrix.
+// Record-first: the raw text is written even when interpretation fails.
+// Unknown SKUs, new OS images, and malformed vendor answers are exactly the
+// inputs that need preserving for later diagnosis; a recording that only
+// worked on supported machines would be useless for growing the matrix.
 //
 // The emitted JSON is the exact shape `test/platform/host_identity/`
 // consumes, and the emitted text file is the exact shape
@@ -491,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn an_uninterpretable_accelerator_answer_is_still_recorded() {
+    fn an_uninterpretable_later_accelerator_row_is_still_recorded() {
         // The record-first property: an answer this code cannot read is
         // still the deliverable, because the recording is what a later
         // reader diagnoses from.
@@ -499,10 +498,14 @@ mod tests {
         // The example used to be a multi-GPU host. That stopped being
         // uninterpretable -- a host listing two cards has answered
         // clearly, and detection now reports the count instead of
-        // refusing -- so this uses an answer that genuinely cannot be
-        // parsed: a row with the wrong number of fields.
+        // refusing -- so this uses an answer whose first device is readable
+        // and whose later row has the wrong number of fields. The later row
+        // matters: counting it without parsing it used to erase the failure.
         let (sources, _) = sources_from_fixture("ubuntu2404-x86-l4-g2s8");
-        let malformed = "NVIDIA L4, 23034, 580.173.02\n".to_string();
+        let malformed = format!(
+            "{}NVIDIA L4, 23034, 580.173.02\n",
+            accelerator_text("ubuntu2404-x86-l4-g2s8")
+        );
         let dir = tempfile::tempdir().expect("tempdir");
         let out = record(
             &sources,

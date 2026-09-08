@@ -7,7 +7,7 @@
 // Scattered tests already cover most of these conditions individually.
 // What a table buys is different: the reasons are a fixed vocabulary, and
 // a table makes it visible when one of them has no case at all — which is
-// how two of the ten came to have no producer. Each case names the
+// how two of the original ten came to have no producer. Each case names the
 // dimension it is off-matrix in, so a wrong-but-plausible reason (a bad
 // SKU reported as a bad OS) fails here rather than reaching an operator.
 //
@@ -261,7 +261,7 @@ fn every_off_matrix_combination_reports_its_own_dimension() {
 
 #[test]
 fn the_matrix_covers_every_reason_the_vocabulary_owns() {
-    // The property a table exists for. Two of the ten reasons reached
+    // The property a table exists for. Two of the original ten reasons reached
     // this release with no producer at all; a coverage assertion is what
     // would have said so. `telemetry_degraded` is driven through the real
     // row-aware resolver above rather than manufactured by this matrix.

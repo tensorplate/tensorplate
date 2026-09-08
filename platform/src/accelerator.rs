@@ -49,8 +49,8 @@ pub struct ExactAcceleratorFacts {
     pub mig_mode: Option<String>,
 }
 
-/// A detected accelerator: the row-comparable identity plus the exact
-/// facts it was read from.
+/// Detected accelerators: device 0's SKU and exact facts, with device count
+/// and partitioning aggregated across every reported device.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorReport {
     pub identity: AcceleratorIdentity,
@@ -74,8 +74,8 @@ pub struct AcceleratorSources {
 /// # Errors
 ///
 /// Returns [`PlatformProbeError::Unrecognized`] when the tool answered but
-/// its answer cannot be interpreted -- a malformed row, or a device with
-/// no usable product name.
+/// any device row cannot be interpreted: a malformed row, a device with
+/// no usable product name, or an unknown MIG state.
 ///
 /// More than one device is **not** an error. `Unrecognized` is for a
 /// source whose answer cannot be read at all, and a host listing eight
@@ -103,13 +103,17 @@ pub fn identify_accelerator(
         // successful exit, and a successful query listing nothing is the
         // tool's way of saying there is no GPU.
         0 => Ok(None),
-        // Device 0 supplies the identity and the exact facts; the count
-        // is what decides the verdict. Reading the first device on a
-        // multi-device host is not a claim about the others -- it gives
-        // evidence and telemetry something real to record about a machine
-        // that is about to be refused for its topology.
+        // Device 0 supplies the SKU and exact facts. Topology is host-wide:
+        // validate every device and retain whether any is partitioned so
+        // the registry's MIG-before-count verdict is independent of order.
         n => {
             let mut report = parse_device(lines[0])?;
+            for line in &lines[1..] {
+                // Parse unconditionally, even after detecting MIG. A later
+                // malformed device must remain an interpretation failure.
+                let device = parse_device(line)?;
+                report.identity.partitioned |= device.identity.partitioned;
+            }
             report.identity.device_count = u32::try_from(n).unwrap_or(u32::MAX);
             Ok(Some(report))
         }
@@ -443,6 +447,71 @@ mod tests {
                 .expect("one device")
                 .expect("an accelerator");
         assert_eq!(report.identity.device_count, 1);
+    }
+
+    #[test]
+    fn partitioning_on_any_device_preserves_the_first_devices_exact_facts() {
+        let disabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-aaa, Disabled";
+        let enabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bbb, Enabled";
+        let not_applicable = "NVIDIA L4, 23034, 550.54.15, GPU-ccc, [N/A]";
+        for rows in [
+            vec![disabled, enabled],
+            vec![enabled, disabled],
+            vec![not_applicable, disabled, enabled],
+        ] {
+            let first = parse_device(rows[0]).expect("valid first device");
+            let report = identify_accelerator(&sources(&rows.join("\n")))
+                .expect("every device is readable")
+                .expect("devices are present");
+            assert!(
+                report.identity.partitioned,
+                "MIG on any device must be reported, regardless of order: {rows:?}"
+            );
+            assert_eq!(
+                usize::try_from(report.identity.device_count).ok(),
+                Some(rows.len())
+            );
+            assert_eq!(report.identity.sku, first.identity.sku);
+            assert_eq!(
+                report.exact, first.exact,
+                "aggregate topology must not replace device 0's exact facts"
+            );
+        }
+    }
+
+    #[test]
+    fn every_accelerator_row_must_be_interpretable_even_after_mig_is_detected() {
+        let disabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-aaa, Disabled";
+        let enabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bbb, Enabled";
+        for invalid in [
+            "malformed row",
+            "[Unknown Error], 40536, 550.54.15, GPU-bad, Disabled",
+            "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, [Unknown Error]",
+            "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, Pending",
+        ] {
+            for index in 0..3 {
+                // The final position follows an enabled GPU. Parsing must
+                // not stop once the aggregate partitioned flag is true.
+                let mut rows = [disabled, enabled, disabled];
+                rows[index] = invalid;
+                let error = identify_accelerator(&sources(&rows.join("\n")))
+                    .expect_err("every reported device must be interpretable");
+                assert!(
+                    matches!(error, PlatformProbeError::Unrecognized { .. }),
+                    "invalid row {index} must remain an interpretation failure: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_unpartitioned_devices_are_counted() {
+        let row = "NVIDIA H100 PCIe, 81559, 550.54.15, GPU-aaa, Disabled\n";
+        let report = identify_accelerator(&sources(&row.repeat(8)))
+            .expect("eight readable devices")
+            .expect("devices are present");
+        assert_eq!(report.identity.device_count, 8);
+        assert!(!report.identity.partitioned);
     }
 
     #[test]

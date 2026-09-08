@@ -88,7 +88,7 @@ pub enum PlatformAdmission {
     },
     Rejected {
         row_id: Option<String>,
-        /// `None` where the frozen vocabulary has no value for this
+        /// `None` where the typed vocabulary has no value for this
         /// outcome. Two cases reach that: an Experimental row, and a
         /// machine whose shape no row's evidence covers. Borrowing the
         /// nearest reason would name a dimension that is actually fine —
@@ -299,10 +299,10 @@ impl PlatformAdmission {
     ///
     /// The error must be [`PlatformProbeError::Unreadable`] -- the tool
     /// could not be run or would not answer. `Unrecognized` means it
-    /// answered and this release cannot interpret the answer: more than one
-    /// GPU, a malformed row, an unknown partitioning state. The driver is
-    /// working in every one of those, so blaming it would send an operator
-    /// to fix something that is not broken.
+    /// answered and this release cannot interpret a device row: malformed
+    /// fields, an unusable product name, or an unknown partitioning state.
+    /// That does not establish a driver fault. A fully parsed multi-GPU
+    /// answer reaches row resolution instead, which refuses its topology.
     ///
     /// And the PCI bus must show a card. Nothing on the bus evidences no
     /// driver problem, so claiming one there would send an operator looking
@@ -363,7 +363,7 @@ impl PlatformAdmission {
     /// # Errors
     ///
     /// [`AgentError::PlatformNotAdmissible`] carrying the typed reason
-    /// where the frozen vocabulary has one. The reason is projected rather
+    /// where the typed vocabulary has one. The reason is projected rather
     /// than only rendered, so a caller reads it off the error record
     /// instead of parsing prose.
     pub fn ensure_supported(&self) -> AgentResult<()> {

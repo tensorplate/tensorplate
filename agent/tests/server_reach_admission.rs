@@ -72,6 +72,29 @@ fn report_of(row: &PlatformSupportRow, host: HostIdentity) -> PlatformReport {
     }
 }
 
+/// Drive the discrete-accelerator parser and carry its answer into the same
+/// platform report admission receives at startup.
+fn report_from_accelerator_answer(
+    row: &PlatformSupportRow,
+    answer: &str,
+) -> Result<PlatformReport, PlatformProbeError> {
+    let card = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(answer.to_string()),
+    })?
+    .expect("the test answer lists at least one accelerator");
+    Ok(PlatformReport {
+        host: HostReport {
+            identity: host_of(row),
+            exact: ExactHostFacts::default(),
+        },
+        accelerator: Some(AcceleratorObservation {
+            identity: card.identity,
+            memory_bytes: card.exact.memory_total_bytes,
+            memory_profile: row.accelerator().expect("a GPU row").memory_profile,
+        }),
+    })
+}
+
 /// A host carrying a row's hardware in a chassis that row never validated.
 fn in_an_uncharacterised_chassis(row: &PlatformSupportRow, shape: &str) -> PlatformReport {
     let mut host = host_of(row);
@@ -482,29 +505,23 @@ fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault()
     // Driven through the real probe rather than a hand-built value, so
     // the test breaks if multi-GPU stops being detected.
     let two_cards = "NVIDIA L4, 23034, 550.54.15, GPU-1111, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-2222, Disabled";
-    let report = identify_accelerator(&AcceleratorSources {
-        nvidia_smi_query: Some(two_cards.to_string()),
-    })
-    .expect("two readable devices are an answer, not a failure")
-    .expect("a host with GPUs reports an accelerator");
+    let registry = registry();
+    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
+    let platform = report_from_accelerator_answer(l4, two_cards)
+        .expect("two readable devices are an answer, not a failure");
+    let identity = &platform
+        .accelerator
+        .as_ref()
+        .expect("a host with GPUs reports an accelerator")
+        .identity;
     assert_eq!(
-        report.identity.device_count, 2,
+        identity.device_count, 2,
         "the count is the fact the verdict turns on"
     );
     assert_eq!(
-        report.identity.sku, "NVIDIA L4",
+        identity.sku, "NVIDIA L4",
         "device 0 still supplies identity, so evidence has something real to record"
     );
-
-    let registry = registry();
-    let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
-    let mut platform = report_of(l4, host_of(l4));
-    platform
-        .accelerator
-        .as_mut()
-        .expect("the fixture has an accelerator")
-        .identity
-        .device_count = 2;
 
     let admission =
         PlatformAdmission::evaluate(&registry, &platform, &ObservedStack::default(), None);
@@ -528,4 +545,102 @@ fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault()
     admission
         .ensure_supported()
         .expect_err("still fails closed");
+}
+
+#[test]
+fn mixed_mig_multi_gpu_is_rejected_as_mig_in_either_device_order() {
+    // MIG is a host-wide topology fact. Device 0 still supplies exact
+    // evidence, but it must not decide whether another device's partitioned
+    // state is visible to admission.
+    let disabled = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-disabled, Disabled";
+    let enabled = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-enabled, Enabled";
+    let registry = registry();
+    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
+
+    for (order, answer) in [
+        ("disabled first", format!("{disabled}\n{enabled}\n")),
+        ("enabled first", format!("{enabled}\n{disabled}\n")),
+    ] {
+        let platform = report_from_accelerator_answer(a100, &answer)
+            .unwrap_or_else(|error| panic!("{order}: both rows must interpret: {error}"));
+        let identity = &platform
+            .accelerator
+            .as_ref()
+            .expect("the answer carries accelerators")
+            .identity;
+        assert_eq!(identity.device_count, 2, "{order}");
+        assert!(identity.partitioned, "{order}: MIG on either card must win");
+
+        let admission =
+            PlatformAdmission::evaluate(&registry, &platform, &ObservedStack::default(), None);
+        assert_eq!(
+            admission.reason(),
+            Some(PlatformReason::MigModeEnabled),
+            "{order}: MIG is more specific than device count: {admission:?}"
+        );
+        assert!(
+            admission.capability().is_none(),
+            "{order}: a rejected host must publish no model capability"
+        );
+        assert!(
+            admission.ensure_supported().is_err(),
+            "{order}: mixed-MIG topology must be refused"
+        );
+    }
+}
+
+#[test]
+fn an_invalid_gpu_row_is_a_probe_failure_in_either_device_order() {
+    // Counting a line is not enough to call it a readable device. A broken
+    // later row used to disappear behind device 0 and reach admission as a
+    // normal unsupported topology; reversing the lines exposed the error.
+    let valid = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-valid, Disabled";
+    let invalid = [
+        ("malformed", "NVIDIA A100-SXM4-40GB, 40960"),
+        (
+            "unknown MIG",
+            "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-bad, [Unknown Error]",
+        ),
+        ("missing name", "[N/A], 40960, 550.54.15, GPU-bad, Disabled"),
+    ];
+    let registry = registry();
+    let a100 = row(&registry, "ubuntu2404-x86-a100-40g-a2hg1");
+    let host = report_of(a100, host_of(a100)).host;
+
+    for (case, bad) in invalid {
+        for (order, answer) in [
+            ("invalid first", format!("{bad}\n{valid}\n")),
+            ("invalid second", format!("{valid}\n{bad}\n")),
+        ] {
+            let error = report_from_accelerator_answer(a100, &answer)
+                .expect_err("every reported device row must be interpreted");
+            assert!(
+                matches!(&error, PlatformProbeError::Unrecognized { .. }),
+                "{case}, {order}: {error:?}"
+            );
+
+            let admission = PlatformAdmission::accelerator_probe_failed(&host, &error);
+            assert_eq!(
+                admission.reason(),
+                None,
+                "{case}, {order}: an interpretation failure is not a topology verdict"
+            );
+            assert!(
+                admission.capability().is_none(),
+                "{case}, {order}: failed detection must publish no capability"
+            );
+            let rendered = admission
+                .ensure_supported()
+                .expect_err("failed accelerator detection must fail closed")
+                .to_string();
+            assert!(
+                rendered.contains("detection failed"),
+                "{case}, {order}: retain the real failure: {rendered}"
+            );
+            assert!(
+                !rendered.contains("unsupported_accelerator_topology"),
+                "{case}, {order}: malformed input is not a valid topology: {rendered}"
+            );
+        }
+    }
 }

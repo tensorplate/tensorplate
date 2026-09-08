@@ -91,6 +91,26 @@ fn report_for(name: &str, accelerator: Option<&str>) -> PlatformReport {
     report
 }
 
+/// Detect a discrete answer and carry it into the complete report consumed by
+/// the doctor renderer. Unlike `report_for`, this accepts deliberately mixed
+/// and malformed answers that do not belong in the committed fixture set.
+fn report_from_accelerator_answer(
+    host_fixture: &str,
+    answer: &str,
+) -> Result<PlatformReport, PlatformProbeError> {
+    let mut report = report_for(host_fixture, None);
+    let card = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(answer.to_string()),
+    })?
+    .expect("the test answer lists at least one accelerator");
+    report.accelerator = Some(AcceleratorObservation {
+        identity: card.identity,
+        memory_bytes: card.exact.memory_total_bytes,
+        memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+    });
+    Ok(report)
+}
+
 /// Render the host section for one committed row's identity.
 fn section_for(name: &str, accelerator: Option<&str>) -> Vec<Finding> {
     let registry = registry();
@@ -314,13 +334,7 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
     // a Warning saying detection failed invites them to debug their
     // driver or their nvidia-smi; an Unsupported row naming the topology
     // tells them this release serves one device.
-    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
-    report
-        .accelerator
-        .as_mut()
-        .expect("the fixture carries an accelerator")
-        .identity
-        .device_count = 2;
+    let report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"));
     let registry = registry();
 
     let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
@@ -370,6 +384,111 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
         !hint.contains("support-matrix.md"),
         "pointing at the matrix would tell them their supported card is supported: {hint}"
     );
+}
+
+#[test]
+fn mixed_mig_multi_gpu_names_mig_in_either_device_order() {
+    let disabled = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-disabled, Disabled";
+    let enabled = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-enabled, Enabled";
+    let registry = registry();
+
+    for (order, answer) in [
+        ("disabled first", format!("{disabled}\n{enabled}\n")),
+        ("enabled first", format!("{enabled}\n{disabled}\n")),
+    ] {
+        let report = report_from_accelerator_answer("ubuntu2404-x86-a100-40g-a2hg1", &answer)
+            .unwrap_or_else(|error| panic!("{order}: both rows must interpret: {error}"));
+        let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
+        let row = section
+            .iter()
+            .find(|finding| finding.id == FindingId::PlatformRow)
+            .expect("a row finding");
+        assert_eq!(row.status, FindingStatus::Unsupported, "{order}: {row:?}");
+        assert!(
+            row.message.contains("mig_mode_enabled"),
+            "{order}: MIG is more specific than device count: {}",
+            row.message
+        );
+        assert!(
+            !row.message.contains("unsupported_accelerator_topology"),
+            "{order}: device ordering must not hide MIG: {}",
+            row.message
+        );
+
+        let model_classes = section
+            .iter()
+            .find(|finding| finding.id == FindingId::ModelClassRows)
+            .expect("a model-class finding");
+        assert_eq!(
+            model_classes.status,
+            FindingStatus::Skipped,
+            "{order}: a rejected host must claim no model-class support"
+        );
+    }
+}
+
+#[test]
+fn an_invalid_gpu_row_renders_detection_failure_in_either_device_order() {
+    let valid = "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-valid, Disabled";
+    let invalid = [
+        ("malformed", "NVIDIA A100-SXM4-40GB, 40960"),
+        (
+            "unknown MIG",
+            "NVIDIA A100-SXM4-40GB, 40960, 550.54.15, GPU-bad, [Unknown Error]",
+        ),
+        ("missing name", "[N/A], 40960, 550.54.15, GPU-bad, Disabled"),
+    ];
+    let host = report_for("ubuntu2404-x86-a100-40g-a2hg1", None).host;
+    let registry = registry();
+
+    for (case, bad) in invalid {
+        for (order, answer) in [
+            ("invalid first", format!("{bad}\n{valid}\n")),
+            ("invalid second", format!("{valid}\n{bad}\n")),
+        ] {
+            let error = report_from_accelerator_answer("ubuntu2404-x86-a100-40g-a2hg1", &answer)
+                .expect_err("every reported device row must be interpreted");
+            assert!(
+                matches!(&error, PlatformProbeError::Unrecognized { .. }),
+                "{case}, {order}: {error:?}"
+            );
+
+            let section = render_host_section(
+                HostSectionDetection::AcceleratorProbeFailed {
+                    host: &host,
+                    error: &error,
+                },
+                Ok(&registry),
+            );
+            let row = section
+                .iter()
+                .find(|finding| finding.id == FindingId::PlatformRow)
+                .expect("a row finding");
+            assert_eq!(row.status, FindingStatus::Warning, "{case}, {order}");
+            assert!(
+                row.message.contains("accelerator detection failed"),
+                "{case}, {order}: preserve the interpretation failure: {}",
+                row.message
+            );
+            assert!(
+                !row.message.contains("unsupported_accelerator_topology")
+                    && !row.message.contains("missing_driver_runtime"),
+                "{case}, {order}: malformed input is neither topology nor driver failure: {}",
+                row.message
+            );
+
+            let model_classes = section
+                .iter()
+                .find(|finding| finding.id == FindingId::ModelClassRows)
+                .expect("a model-class finding");
+            assert_eq!(
+                model_classes.status,
+                FindingStatus::Skipped,
+                "{case}, {order}: no row means no model-class support"
+            );
+            assert!(model_classes.message.contains("detection failed"));
+        }
+    }
 }
 
 #[test]

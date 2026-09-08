@@ -100,17 +100,17 @@ pub struct HostIdentity {
     pub machine_type: Option<String>,
 }
 
-/// What the accelerator reports about itself. Absent on hosts with no
-/// accelerator.
+/// The first accelerator's SKU plus the topology of all reported devices.
+/// Absent on hosts with no accelerator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorIdentity {
-    /// Exact SKU as the platform reports it. Compared verbatim against exact
-    /// rows and without normalization against any explicit family policy: a
-    /// near miss is unsupported, never a nearest match.
+    /// Exact SKU of device 0 as the platform reports it. Compared verbatim
+    /// against exact rows and without normalization against any explicit
+    /// family policy: a near miss is unsupported, never a nearest match.
     pub sku: String,
-    /// Whether the device is partitioned. Partitioned devices are rejected
-    /// before any SKU comparison, so a partitioned instance of a supported
-    /// SKU never resolves to its row.
+    /// Whether any reported device is partitioned. Partitioning is rejected
+    /// before device count or SKU comparison, independent of device order.
+    /// Exact facts retain device 0's own MIG state rather than this aggregate.
     pub partitioned: bool,
     /// How many accelerators the host reports.
     ///
