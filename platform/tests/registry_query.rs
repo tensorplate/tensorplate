@@ -49,6 +49,7 @@ fn accelerator(sku: &str) -> AcceleratorIdentity {
     AcceleratorIdentity {
         sku: sku.to_string(),
         partitioned: false,
+        device_count: 1,
     }
 }
 

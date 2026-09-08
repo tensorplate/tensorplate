@@ -6,8 +6,9 @@
 // This crate owns the enum. `doctor`, deploy admission, and status are
 // intended to emit these values rather than prose, so the same condition
 // reads the same way everywhere; the consumers are wired up separately.
-// Trigger conditions and user-facing rendering are frozen by the doctor
-// work; the values themselves are frozen here.
+// Trigger conditions are documented in docs/platform/support-reasons.md.
+// Existing wire spellings stay stable; the topology reason adds a distinct
+// verdict for a readable multi-device answer without renaming another cause.
 
 use serde::{Deserialize, Serialize};
 use tensorplate_protocol::backend_probe::BackendProbeState;
@@ -33,8 +34,10 @@ pub enum PlatformReason {
     /// The CPU architecture is supported but the vendor is not, on a row
     /// where vendor is load-bearing.
     UnsupportedCpuVendor,
-    /// The accelerator is partitioned. Partitioned devices are rejected
-    /// before model load rather than served at reduced capacity.
+    /// At least one reported accelerator is partitioned. Once all device
+    /// rows parse, this takes precedence over device count and SKU, so
+    /// partitioned devices are rejected before model load regardless of
+    /// their position in the probe output.
     MigModeEnabled,
     /// A required backend package is absent from the installed package
     /// set.
@@ -51,12 +54,22 @@ pub enum PlatformReason {
     /// The detected identity exactly matches a Planned row: the platform
     /// is known and defined, but carries no validation evidence yet.
     RowPlannedNotValidated,
+    /// The host reports a number of accelerators no row claims. Every row
+    /// this release commits to is single-device, so a host with two or
+    /// more is refused before any SKU is compared -- a supported SKU
+    /// installed twice is not a supported machine, because no row's
+    /// evidence was collected on that topology.
+    ///
+    /// Distinct from [`Self::UnsupportedAcceleratorSku`], which says the
+    /// silicon is wrong. Here the silicon may be exactly right and there
+    /// is simply more of it than anything has been validated against.
+    UnsupportedAcceleratorTopology,
 }
 
 impl PlatformReason {
     /// Every reason, in declaration order. Downstream conformance tests
     /// iterate this to prove each reason has a trigger and a rendering.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::UnsupportedAcceleratorSku,
         Self::UnsupportedOsVersion,
         Self::UnsupportedCpuArch,
@@ -67,6 +80,7 @@ impl PlatformReason {
         Self::AcceleratorRuntimeUnavailable,
         Self::TelemetryDegraded,
         Self::RowPlannedNotValidated,
+        Self::UnsupportedAcceleratorTopology,
     ];
 
     /// The reason a backend probe state carries, or `None` when the
@@ -113,6 +127,7 @@ impl PlatformReason {
             Self::AcceleratorRuntimeUnavailable => "accelerator_runtime_unavailable",
             Self::TelemetryDegraded => "telemetry_degraded",
             Self::RowPlannedNotValidated => "row_planned_not_validated",
+            Self::UnsupportedAcceleratorTopology => "unsupported_accelerator_topology",
         }
     }
 }
@@ -141,12 +156,12 @@ mod tests {
     use super::PlatformReason;
 
     #[test]
-    fn the_vocabulary_is_ten_distinct_values() {
+    fn the_vocabulary_is_eleven_distinct_values() {
         let mut spellings: Vec<&str> = PlatformReason::ALL.iter().map(|r| r.as_str()).collect();
-        assert_eq!(spellings.len(), 10);
+        assert_eq!(spellings.len(), 11);
         spellings.sort_unstable();
         spellings.dedup();
-        assert_eq!(spellings.len(), 10, "reason spellings must be distinct");
+        assert_eq!(spellings.len(), 11, "reason spellings must be distinct");
     }
 
     #[test]

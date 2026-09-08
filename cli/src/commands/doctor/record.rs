@@ -3,11 +3,10 @@
 // `doctor --record <dir>`: capture this machine's raw platform sources for
 // private review and later publication as sanitized fixtures.
 //
-// Record-first: the raw text is written even when interpretation fails,
-// because the machines this exists for are exactly the ones detection
-// cannot yet interpret — a multi-GPU host, an unknown SKU, a new OS
-// image. A recording that only worked on supported machines would be
-// useless for growing the support matrix.
+// Record-first: the raw text is written even when interpretation fails.
+// Unknown SKUs, new OS images, and malformed vendor answers are exactly the
+// inputs that need preserving for later diagnosis; a recording that only
+// worked on supported machines would be useless for growing the matrix.
 //
 // The emitted JSON is the exact shape `test/platform/host_identity/`
 // consumes, and the emitted text file is the exact shape
@@ -491,9 +490,56 @@ mod tests {
     }
 
     #[test]
-    fn an_uninterpretable_accelerator_answer_is_still_recorded() {
-        // The record-first property, and the machine it exists for: a
-        // multi-GPU host, whose answer detection refuses today.
+    fn an_uninterpretable_later_accelerator_row_is_still_recorded() {
+        // The record-first property: an answer this code cannot read is
+        // still the deliverable, because the recording is what a later
+        // reader diagnoses from.
+        //
+        // The example used to be a multi-GPU host. That stopped being
+        // uninterpretable -- a host listing two cards has answered
+        // clearly, and detection now reports the count instead of
+        // refusing -- so this uses an answer whose first device is readable
+        // and whose later row has the wrong number of fields. The later row
+        // matters: counting it without parsing it used to erase the failure.
+        let (sources, _) = sources_from_fixture("ubuntu2404-x86-l4-g2s8");
+        let malformed = format!(
+            "{}NVIDIA L4, 23034, 580.173.02\n",
+            accelerator_text("ubuntu2404-x86-l4-g2s8")
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = record(
+            &sources,
+            &AcceleratorSources {
+                nvidia_smi_query: Some(malformed.clone()),
+            },
+            Some(&registry()),
+            dir.path(),
+            "2026-08-24",
+        )
+        .expect("recording must not depend on interpretation");
+
+        let txt = out.accelerator_path.expect("raw answer recorded");
+        assert_eq!(
+            std::fs::read_to_string(&txt).expect("read"),
+            malformed,
+            "the uninterpretable answer is the deliverable"
+        );
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("did not interpret") && n.contains("recorded anyway")),
+            "the failure is a note, not an abort: {:?}",
+            out.notes
+        );
+    }
+
+    #[test]
+    fn a_multi_gpu_answer_is_recorded_and_interpreted() {
+        // The machine the case above used to stand for. It is no longer
+        // an interpretation failure: two readable cards is an answer, and
+        // recording it without a "did not interpret" note is the
+        // difference between "we could not read your host" and "we read
+        // it and this release does not serve that shape".
         let (sources, _) = sources_from_fixture("ubuntu2404-x86-l4-g2s8");
         let one = accelerator_text("ubuntu2404-x86-l4-g2s8");
         let two_gpus = format!("{one}{one}");
@@ -507,19 +553,13 @@ mod tests {
             dir.path(),
             "2026-08-24",
         )
-        .expect("recording must not depend on interpretation");
+        .expect("records");
 
         let txt = out.accelerator_path.expect("raw answer recorded");
-        assert_eq!(
-            std::fs::read_to_string(&txt).expect("read"),
-            two_gpus,
-            "the uninterpretable answer is the deliverable"
-        );
+        assert_eq!(std::fs::read_to_string(&txt).expect("read"), two_gpus);
         assert!(
-            out.notes
-                .iter()
-                .any(|n| n.contains("did not interpret") && n.contains("recorded anyway")),
-            "the failure is a note, not an abort: {:?}",
+            !out.notes.iter().any(|n| n.contains("did not interpret")),
+            "a readable two-card answer is not an interpretation failure: {:?}",
             out.notes
         );
     }

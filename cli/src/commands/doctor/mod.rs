@@ -605,10 +605,18 @@ fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
             FindingId::PlatformRow,
             Severity::Warning,
             format!("resolves to no support row ({})", reason.as_str()),
-            Some(
-                "see docs/release/support-matrix.md for the platforms this release validates"
+            Some(match reason {
+                // The one reason where the generic pointer is actively
+                // unhelpful: the operator's hardware is on the matrix, so
+                // reading the support matrix tells them it should work.
+                // What they need to know is that the count is the
+                // problem, and that nothing is wrong with the machine.
+                PlatformReason::UnsupportedAcceleratorTopology =>
+                    "this release serves one accelerator per host; a host with more is refused rather than served on a subset of its devices, so the card itself may be fully supported"
+                        .into(),
+                _ => "see docs/release/support-matrix.md for the platforms this release validates"
                     .into(),
-            ),
+            }),
         ),
         },
     }

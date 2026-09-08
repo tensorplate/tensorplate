@@ -21,7 +21,7 @@ pub enum AcceleratorProbeFailureClass {
 }
 
 impl AcceleratorProbeFailureClass {
-    /// The frozen platform reason carried by this class, when one applies.
+    /// The typed platform reason carried by this class, when one applies.
     #[must_use]
     pub const fn reason(self) -> Option<PlatformReason> {
         match self {
@@ -37,8 +37,9 @@ impl AcceleratorProbeFailureClass {
 /// An [`PlatformProbeError::Unreadable`] result can mean a missing or broken
 /// driver, but only when the PCI bus independently reports an NVIDIA display
 /// controller.  [`PlatformProbeError::Unrecognized`] means the tool answered
-/// and this release could not interpret the answer (for example, a multi-GPU
-/// topology or malformed row); blaming the driver in that case is incorrect.
+/// and this release could not interpret at least one device row (for example,
+/// a malformed row or unknown MIG state); blaming the driver in that case is
+/// incorrect. A readable multi-GPU answer is resolved by the registry instead.
 #[must_use]
 pub fn classify_accelerator_probe_failure(
     host: &HostReport,
@@ -99,7 +100,7 @@ mod tests {
         let host = host_with_pci(Some("0000:00:04.0 0x10de 0x27b8 0x030200\n"));
         let error = PlatformProbeError::Unrecognized {
             source_name: "nvidia-smi".to_string(),
-            detail: "expected exactly one device, found 2".to_string(),
+            detail: "expected 5 comma-separated fields, got 3".to_string(),
         };
 
         let classified = classify_accelerator_probe_failure(&host, &error);

@@ -1,11 +1,13 @@
 # Platform reason vocabulary
 
-Ten typed values say why a machine is not a supported combination. They
-are **frozen for v0.2.1**: the set, the wire spellings, and the trigger
-conditions below do not change within the release line. Rendering may be
-reworded; the spelling a caller matches on may not.
+Eleven typed values say why a machine is not a supported combination.
+The existing wire spellings remain unchanged; the added
+`unsupported_accelerator_topology` value identifies a readable multi-device
+host that previously produced a detection failure. The table below defines
+each trigger. Rendering may be reworded; the spelling a caller matches on
+remains stable.
 
-The point of a fixed vocabulary is that one condition reads the same way
+The point of a shared vocabulary is that one condition reads the same way
 in every surface. `doctor`, deploy admission, and the durable error record
 emit the same value for the same cause, so an operator who reads one and
 an engineer who greps another are looking at the same fact.
@@ -18,12 +20,13 @@ an engineer who greps another are looking at the same fact.
 | `unsupported_os_version` | The OS version is below a row's floor, or is not the exact version a row names. |
 | `unsupported_cpu_arch` | The CPU architecture is not one this release builds for. |
 | `unsupported_cpu_vendor` | The architecture is built for, but no row covers this vendor. Distinct from the arch reason: the two send an operator to different answers. |
-| `mig_mode_enabled` | The accelerator is partitioned. Checked before SKU, so a partitioned supported card refuses for partitioning rather than for identity. |
+| `mig_mode_enabled` | At least one reported accelerator is partitioned. After every device row has been parsed, this is checked before device count and SKU, regardless of which device reports MIG enabled. |
 | `missing_backend_package` | A package the matched row requires is not installed — including a backend whose descriptor is absent. |
 | `missing_driver_runtime` | A required driver or compute runtime is absent or version-mismatched, **or** the PCI bus reports an accelerator that no driver could identify. |
 | `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
 | `telemetry_degraded` | In a supplied collector snapshot, a telemetry source expected on the matched row fails or omits its result. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source degrades status and is recorded without blocking. A signal the row declares `not_applicable` was never asked for and cannot produce this. Live non-memory collectors remain part of hardware validation; their absence from the ordinary startup path is not synthesized as either success or failure. |
 | `row_planned_not_validated` | The machine matches a Planned row exactly: named, carrying no validation evidence. |
+| `unsupported_accelerator_topology` | The detected accelerator count is not one. Every supported accelerator row is single-device, so a readable multi-device host is refused before SKU comparison; a supported card installed twice does not inherit its single-device row's validation. |
 
 ## Boundaries that are easy to blur
 
@@ -38,6 +41,15 @@ is broken reports no accelerator and would otherwise resolve to a CPU-only
 row — a supported answer, for a machine that will not serve. The PCI bus
 distinguishes the two without a driver, which is why it is consulted
 before resolution.
+
+**A readable multi-device answer is not a detection failure.** Every
+nonempty `nvidia-smi` device row must parse before the host can receive a
+topology verdict. A malformed row, unusable product name, or unknown MIG
+state on any device remains an interpretation failure, not evidence of a
+broken driver. For a fully parsed answer, MIG enabled on any device takes
+precedence over the count-based refusal. Otherwise, more than one device
+reports `unsupported_accelerator_topology`; the release does not select a
+supported subset of those devices.
 
 **An absent sensor is not a failed one, and its explanation is a row
 fact.** A row that declares a signal `not_applicable` carries free text

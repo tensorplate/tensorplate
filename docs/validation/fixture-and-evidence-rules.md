@@ -7,10 +7,11 @@ cycle; none is speculative. Violations are correctness bugs, not style.
 ## Recording
 
 1. **Record first, interpret second.** The raw output is the deliverable.
-   A capture must succeed on machines detection cannot interpret — an
-   unknown SKU, a multi-GPU host, a new OS image — because those are the
-   machines a capture exists for. Interpretation failures become notes,
-   never aborts.
+   A capture must succeed on unsupported machines, such as an unknown
+   SKU or a readable multi-GPU host, and when a source answer cannot be
+   interpreted, such as a malformed accelerator row. Preserve every raw
+   device row in either case. Interpretation failures become notes, never
+   aborts; a readable but unsupported topology is not such a failure.
 
 2. **Recordings replace transcriptions, and a mismatch corrects the row —
    never the recording.** A transcribed fixture proves the parser and the

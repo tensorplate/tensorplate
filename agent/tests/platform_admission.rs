@@ -201,6 +201,7 @@ fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacit
             identity: AcceleratorIdentity {
                 sku: declared.sku.clone(),
                 partitioned: false,
+                device_count: 1,
             },
             memory_bytes: None,
             memory_profile: declared.memory_profile,
