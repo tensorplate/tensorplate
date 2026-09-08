@@ -20,6 +20,13 @@ The report also names the version it exercised. A run that does not say
 what it tested would otherwise authorize every later tag, so the gate
 requires `subject.tested_version` to equal the version being released.
 
+`<tested_version>` is the bare release version — `0.2.1`, never
+`0.2.1~rc.1`. That holds even when the packages under test came from a
+release candidate: a candidate's `.deb` reports `0.2.1~rc.1` so that
+`apt` offers the real release as an upgrade, but the evidence is filed
+against the release it stands for, not the build it was collected on.
+The schema rejects the `~` form rather than accepting both spellings.
+
 The harnesses predate that report and record their own stage names, so
 they emit it through the converter rather than by rewriting stage calls
 on code that only runs on hardware:

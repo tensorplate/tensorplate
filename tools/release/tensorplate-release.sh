@@ -63,6 +63,10 @@ Usage:
 
 Common options:
   --version VERSION          Release version without leading v, for example 0.1.0.
+  --deb-version VERSION      Expected Debian version, for example 0.1.0~rc.1.
+                            Derived from --tag when omitted.
+  --python-version VERSION   Expected SDK version, for example 0.1.0rc1.
+                            Derived from --tag when omitted.
   --release-branch BRANCH   Expected release branch. Defaults to the
                             maintenance line release/MAJOR.MINOR.
   --base REF                Source ref for cut. Defaults to origin/develop.
@@ -180,6 +184,12 @@ command_exists() {
 
 parse_common_args() {
   VERSION=""
+  # A release candidate spells its identity three ways: the manifest
+  # records the canonical version, the .deb files carry the Debian form,
+  # and the wheel carries the PEP 440 form. Defaulting both to the
+  # canonical version keeps a final release single-identity.
+  DEB_VERSION=""
+  PYTHON_VERSION=""
   RELEASE_BRANCH=""
   BASE_REF="origin/develop"
   PREP_BRANCH=""
@@ -207,6 +217,8 @@ parse_common_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) VERSION="${2:-}"; shift 2 ;;
+      --deb-version) DEB_VERSION="${2:-}"; shift 2 ;;
+      --python-version) PYTHON_VERSION="${2:-}"; shift 2 ;;
       --release-branch) RELEASE_BRANCH="${2:-}"; shift 2 ;;
       --base) BASE_REF="${2:-}"; shift 2 ;;
       --prep-branch) PREP_BRANCH="${2:-}"; shift 2 ;;
@@ -968,10 +980,13 @@ cmd_cut() {
 manifest_python() {
   local secondary_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
+  export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
   python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" "$SECONDARY_ARCH" "${secondary_packages%,}" "$SECONDARY_TARGET_OS" <<'PY'
 import datetime
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -981,6 +996,11 @@ from pathlib import Path
     target_arch, commit, branch, validation_report, clean_room_report,
     secondary_arch, secondary_packages_raw, secondary_target_os,
 ) = sys.argv[1:]
+# The package and wheel encodings of `version`. Equal to it for a final
+# release; a candidate differs, and the artifacts on disk carry the
+# candidate spelling while the manifest records the canonical one.
+deb_version = os.environ.get("TP_DEB_VERSION") or version
+python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 required = [
@@ -1025,8 +1045,11 @@ for package in required:
         # `tensorplate-agent`. Every decision below must use the parsed name,
         # or a stray file rides into the manifest under a sibling's identity.
         parsed_package = match.group("package")
-        if not (package_version == version or package_version.startswith(version + "-")):
-            raise SystemExit(f"{path.name}: package version {package_version} does not match release {version}")
+        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+            raise SystemExit(
+                f"{path.name}: package version {package_version} does not match "
+                f"the release's package version {deb_version}"
+            )
         if parsed_package != package and parsed_package not in required:
             raise SystemExit(
                 f"{path.name}: file name does not match a published package "
@@ -1088,8 +1111,8 @@ artifacts.append(
 # in the signed manifest and SHA256SUMS when staged into the artifacts dir;
 # absent from runtime-only snapshot builds.
 for sdk_kind, sdk_pattern in (
-    ("python-wheel", f"tensorplate_python-{version}-py3-none-any.whl"),
-    ("python-sdist", f"tensorplate_python-{version}.tar.gz"),
+    ("python-wheel", f"tensorplate_python-{python_version}-py3-none-any.whl"),
+    ("python-sdist", f"tensorplate_python-{python_version}.tar.gz"),
 ):
     sdk_matches = sorted(root.glob(sdk_pattern))
     if not sdk_matches:
@@ -1101,7 +1124,7 @@ for sdk_kind, sdk_pattern in (
         {
             "file": sdk_path.name,
             "kind": sdk_kind,
-            "version": version,
+            "version": python_version,
             "target_os": "Python 3.10+ (any platform)",
             "size_bytes": sdk_path.stat().st_size,
             "sha256": sha256(sdk_path),
@@ -1164,12 +1187,20 @@ print(f"wrote {checksums_out}")
 PY
 }
 
-verify_manifest_python() {
+verify_manifest_python() (
+  # Preflight also calls this helper directly. Validate here so every
+  # caller gets the same identity checks; the subshell lets preflight
+  # report a tuple failure without exiting before it writes its report.
+  require_version_tuple
   local secondary_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
+  export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
   python3 - "$1" "$2" "$3" "$4" "$5" "$SECONDARY_ARCH" "${secondary_packages%,}" <<'PY'
 import hashlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -1177,6 +1208,8 @@ from pathlib import Path
     version, tag, artifacts_dir, manifest_path, checksums_path,
     secondary_arch, secondary_packages_raw,
 ) = sys.argv[1:]
+deb_version = os.environ.get("TP_DEB_VERSION") or version
+python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
 manifest = json.loads(Path(manifest_path).read_text())
@@ -1184,6 +1217,11 @@ if manifest.get("release", {}).get("version") != version:
     raise SystemExit("manifest version mismatch")
 if manifest.get("release", {}).get("tag") != tag:
     raise SystemExit("manifest tag mismatch")
+
+sdk_files = {
+    "python-wheel": f"tensorplate_python-{python_version}-py3-none-any.whl",
+    "python-sdist": f"tensorplate_python-{python_version}.tar.gz",
+}
 
 checksums = {}
 for line in Path(checksums_path).read_text().splitlines():
@@ -1194,6 +1232,33 @@ for line in Path(checksums_path).read_text().splitlines():
 
 for artifact in manifest.get("artifacts", []):
     name = artifact["file"]
+    # Hashes bind bytes to a manifest, but do not prove those bytes belong
+    # to the requested candidate. Check the artifact's identity even when
+    # its manifest and checksum file have been regenerated together.
+    if "package" in artifact or name.endswith(".deb"):
+        if artifact.get("kind") in sdk_files:
+            raise SystemExit(f"{name}: artifact kind mismatch; a Debian package is not an SDK asset")
+        match = re.fullmatch(
+            r"(?P<package>[^_/]+)_(?P<version>[^_/]+)_(?P<architecture>[^_/]+)\.deb",
+            name,
+        )
+        if not match:
+            raise SystemExit(f"artifact name is not Debian-like: {name}")
+        package_version = match.group("version")
+        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+            raise SystemExit(
+                f"{name}: package version {package_version} does not match "
+                f"the release's package version {deb_version}"
+            )
+        for field in ("package", "version", "architecture"):
+            if artifact.get(field) != match.group(field):
+                raise SystemExit(f"{name}: manifest {field} mismatch with artifact filename")
+    elif artifact.get("kind") in sdk_files or name.startswith("tensorplate_python-"):
+        expected_file = sdk_files.get(artifact.get("kind"))
+        if name != expected_file:
+            raise SystemExit(f"{name}: SDK filename does not match expected artifact {expected_file}")
+        if artifact.get("version") != python_version:
+            raise SystemExit(f"{name}: SDK version mismatch; expected {python_version}")
     path = root / name
     if not path.is_file():
         raise SystemExit(f"missing artifact listed in manifest: {name}")
@@ -1206,6 +1271,17 @@ for artifact in manifest.get("artifacts", []):
         raise SystemExit(f"manifest checksum mismatch for {name}")
     if checksums.get(name) != digest:
         raise SystemExit(f"SHA256SUMS mismatch for {name}")
+
+# Publish uploads these staged files. An unlisted stale package must not
+# bypass identity and checksum validation just because it is not in JSON.
+staged_assets = {
+    path.name
+    for pattern in ("*.deb", "tensorplate_python-*.whl", "tensorplate_python-*.tar.gz")
+    for path in root.glob(pattern)
+}
+unlisted = staged_assets - {artifact["file"] for artifact in manifest.get("artifacts", [])}
+if unlisted:
+    raise SystemExit("staged artifacts are missing from manifest: " + ", ".join(sorted(unlisted)))
 
 manifest_digest = hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()
 if checksums.get(Path(manifest_path).name) != manifest_digest:
@@ -1250,17 +1326,51 @@ if not snapshot:
             raise SystemExit(f"manifest is missing the required tensorplate-python {sdk_kind}")
 print("manifest verified")
 PY
+)
+
+# The tag, the package version and the wheel version are one identity, and
+# every one of them is derived from the tag. The outer builder validated
+# this, but manifest/verify/publish are supported entry points in their own
+# right -- used directly for recovery -- and were fail-open: a verifier
+# given RC9 package and wheel versions against an RC1 tag exited 0.
+#
+# A snapshot tag names a branch and commit rather than a release. Its
+# package version is still required to agree with its snapshot version.
+require_version_tuple() {
+  local expected_deb="$VERSION" expected_python="$VERSION" rc
+  if [[ "$VERSION" == *"~dev."* ]] && ((${ALLOW_SNAPSHOT_VERSION:-0})); then
+    : # require_version already checked the snapshot syntax.
+  else
+    case "${TAG:-v${VERSION}}" in
+      "v${VERSION}") ;;
+      "v${VERSION}-rc."*)
+        rc="${TAG#v${VERSION}-rc.}"
+        [[ "$rc" =~ ^[1-9][0-9]*$ ]] || die "tag ${TAG} has a malformed candidate number"
+        expected_deb="${VERSION}~rc.${rc}"
+        expected_python="${VERSION}rc${rc}"
+        ;;
+      *) die "tag ${TAG} is not a tag for version ${VERSION}" ;;
+    esac
+  fi
+  DEB_VERSION="${DEB_VERSION:-$expected_deb}"
+  PYTHON_VERSION="${PYTHON_VERSION:-$expected_python}"
+  [[ "$DEB_VERSION" == "$expected_deb" ]] ||
+    die "--deb-version ${DEB_VERSION} contradicts tag ${TAG:-v$VERSION}; expected ${expected_deb}"
+  [[ "$PYTHON_VERSION" == "$expected_python" ]] ||
+    die "--python-version ${PYTHON_VERSION} contradicts tag ${TAG:-v$VERSION}; expected ${expected_python}"
 }
 
 cmd_manifest() {
   parse_common_args "$@"
   TAG="${TAG:-v${VERSION}}"
+  require_version_tuple
   manifest_python
 }
 
 cmd_verify() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "verify requires --tag"
+  require_version_tuple
   if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
     note "skipping annotated tag check for build-only artifact validation"
   else
@@ -1328,6 +1438,7 @@ cmd_tag() {
 cmd_publish() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "publish requires --tag"
+  require_version_tuple
   if [[ "$DRY_RUN" -eq 0 && "$EXECUTE" -eq 0 ]]; then
     DRY_RUN=1
   fi

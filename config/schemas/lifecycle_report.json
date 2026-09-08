@@ -34,7 +34,7 @@
       "properties": {
         "tested_version": {
           "type": "string",
-          "description": "The TensorPlate version installed on the machine under test, as the packages reported it. The release gate requires this to equal the version being released.",
+          "description": "The release version this run authorizes, as the release workflow resolves it (`meta.outputs.version`) -- always bare X.Y.Z, including when the artifacts under test came from a candidate. NOT the package version string: a candidate's .deb reports 0.2.1~rc.1 and its wheel 0.2.1rc1, and recording either here would be recording which build was installed rather than which release the evidence stands for. That fact belongs in artifact_digest. The `~` form is deliberately outside the pattern so it cannot be filed here by accident.",
           "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$"
         },
         "source_revision": {
