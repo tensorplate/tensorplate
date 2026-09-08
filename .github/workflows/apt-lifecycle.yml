@@ -21,6 +21,9 @@ on:
       - 'tools/validation/**'
       - 'test/packaging/**'
       - 'test/release/**'
+      # This workflow is the only runner of the lifecycle and evidence
+      # suites, so a PR editing only one of them would skip it entirely.
+      - 'test/validation/**'
       # The drift guard in test/release/run.sh reads the amd64 copy list
       # out of release.yml, so a change to release.yml alone must trigger
       # it — otherwise the guard cannot fire on the edit that causes the
@@ -107,6 +110,31 @@ jobs:
       - name: Release driver checks
         shell: bash
         run: test/release/run.sh
+
+      # The evidence checker validates reports against the lifecycle
+      # schema, and the release driver's drift guard reads release.yml.
+      # Both were previously assumed to be present rather than declared.
+      - name: Install release tooling dependencies
+        shell: bash
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      # The lifecycle stage runner classifies each stage from its
+      # command's captured status, because bash suspends errexit inside a
+      # function called from a tested context -- where relying on it
+      # recorded a failing command as a pass. That is exactly the kind of
+      # shell behaviour that rots unnoticed, so it is exercised here
+      # rather than only on the hardware runs it is for.
+      - name: Lifecycle stage runner
+        shell: bash
+        run: test/validation/lifecycle_stages_test.sh
+
+      # The checker itself, not the repository's current evidence state:
+      # it is expected to report the real rows as incomplete until the
+      # hardware runs happen, and the release workflow is where that
+      # becomes blocking.
+      - name: Evidence completeness check
+        shell: bash
+        run: test/validation/evidence_bundle_test.sh
 
       # Which packages a binary-arch-only build emits is decided by debhelper
       # from debian/control, and the release workflow's amd64 job depends on

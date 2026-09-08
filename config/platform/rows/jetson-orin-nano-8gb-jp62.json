@@ -68,6 +68,6 @@
     "identity": "Jetson Orin Nano 8GB Super, Super power mode (in lab)"
   },
   "evidence": {
-    "location": "dist/release/v0.2.1/jetson-orin-nano-8gb-jp62/"
+    "location": "docs/validation/evidence/v0.2.1/jetson-orin-nano-8gb-jp62/"
   }
 }

@@ -1,0 +1,12 @@
+# Python packages the release tooling imports directly.
+#
+# Both were previously assumed rather than declared: the release driver's
+# workflow drift guard imports yaml, and the evidence checker validates
+# lifecycle reports against config/schemas/lifecycle_report.json. CI
+# happened to provide yaml transitively, so the standalone release suite
+# failed only on a developer machine -- which is the run the runbook tells
+# you to make before tagging.
+#
+#   python3 -m pip install -r tools/release/requirements.txt
+PyYAML>=6.0
+jsonschema>=4.0
