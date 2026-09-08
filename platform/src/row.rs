@@ -291,7 +291,24 @@ pub struct Accelerator {
     /// property name; the profile owns budget domains, measurement
     /// sources, and headroom computation.
     pub memory_profile: PlatformMemoryProfileName,
+    /// How many accelerators of this SKU the row claims.
+    ///
+    /// Absent means one, so every row written before topology existed
+    /// keeps its meaning and no committed fixture changes. A row claims a
+    /// topology and not just silicon: evidence collected on one card does
+    /// not carry to eight of them.
+    #[serde(default = "one_device", skip_serializing_if = "is_one_device")]
+    pub device_count: u32,
     pub partitioning: Partitioning,
+}
+
+const fn one_device() -> u32 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_one_device(count: &u32) -> bool {
+    *count == 1
 }
 
 /// Required backend package set and channel for one backend path.
