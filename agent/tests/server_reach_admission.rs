@@ -64,6 +64,7 @@ fn report_of(row: &PlatformSupportRow, host: HostIdentity) -> PlatformReport {
             identity: AcceleratorIdentity {
                 sku: declared.sku.clone(),
                 partitioned: false,
+                heterogeneous: false,
                 device_count: 1,
             },
             memory_bytes: Some(declared.memory_bytes),

@@ -162,6 +162,13 @@
           ],
           "description": "Reference to the platform memory profile record of the same property name; the profile owns budget domains, measurement sources, and headroom computation."
         },
+        "device_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "default": 1,
+          "description": "How many accelerators of this SKU the row claims. Absent means one, so every row written before topology existed keeps its meaning and no fixture changes. A row claims a topology, not just silicon: evidence collected on one card does not carry to eight of them, so a host whose count differs matches no row rather than matching on SKU alone."
+        },
         "partitioning": {
           "type": "string",
           "enum": [

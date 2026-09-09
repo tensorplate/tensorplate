@@ -612,7 +612,7 @@ fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
                 // What they need to know is that the count is the
                 // problem, and that nothing is wrong with the machine.
                 PlatformReason::UnsupportedAcceleratorTopology =>
-                    "this release serves one accelerator per host; a host with more is refused rather than served on a subset of its devices, so the card itself may be fully supported"
+                    "accelerator SKUs must be identical and the device count must match a support row; mixed SKUs or an unsupported count are refused rather than served on a subset of devices"
                         .into(),
                 _ => "see docs/release/support-matrix.md for the platforms this release validates"
                     .into(),

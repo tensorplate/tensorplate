@@ -49,8 +49,8 @@ pub struct ExactAcceleratorFacts {
     pub mig_mode: Option<String>,
 }
 
-/// Detected accelerators: device 0's SKU and exact facts, with device count
-/// and partitioning aggregated across every reported device.
+/// Detected accelerators: device 0's SKU and exact facts, with device count,
+/// partitioning, and heterogeneity aggregated across every reported device.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorReport {
     pub identity: AcceleratorIdentity,
@@ -79,13 +79,11 @@ pub struct AcceleratorSources {
 ///
 /// More than one device is **not** an error. `Unrecognized` is for a
 /// source whose answer cannot be read at all, and a host listing eight
-/// H100s has answered perfectly clearly; it is merely off-matrix, which
-/// this module returns as a detected value so the registry can call it
-/// unsupported rather than undetectable. The count rides in
-/// [`AcceleratorIdentity::device_count`] and is refused there, before any
-/// SKU comparison -- so the original hazard, quietly resolving a two-GPU
-/// host to a single-GPU row, is closed by the refusal rather than by
-/// declining to look.
+/// H100s has answered perfectly clearly. The count rides in
+/// [`AcceleratorIdentity::device_count`] so the registry can compare it
+/// against each row's claim. Mixed SKU sets are also readable observations:
+/// [`AcceleratorIdentity::heterogeneous`] preserves that fact so they cannot
+/// inherit a row claiming several devices of just the first device's SKU.
 pub fn identify_accelerator(
     sources: &AcceleratorSources,
 ) -> Result<Option<AcceleratorReport>, PlatformProbeError> {
@@ -104,15 +102,16 @@ pub fn identify_accelerator(
         // tool's way of saying there is no GPU.
         0 => Ok(None),
         // Device 0 supplies the SKU and exact facts. Topology is host-wide:
-        // validate every device and retain whether any is partitioned so
-        // the registry's MIG-before-count verdict is independent of order.
+        // validate every device and retain partitioning and mixed SKUs so
+        // the registry's topology verdict is independent of device order.
         n => {
             let mut report = parse_device(lines[0])?;
             for line in &lines[1..] {
-                // Parse unconditionally, even after detecting MIG. A later
-                // malformed device must remain an interpretation failure.
+                // Parse unconditionally, even after detecting MIG or mixed
+                // SKUs. A later malformed device remains a probe failure.
                 let device = parse_device(line)?;
                 report.identity.partitioned |= device.identity.partitioned;
+                report.identity.heterogeneous |= device.identity.sku != report.identity.sku;
             }
             report.identity.device_count = u32::try_from(n).unwrap_or(u32::MAX);
             Ok(Some(report))
@@ -161,6 +160,7 @@ fn parse_device(line: &str) -> Result<AcceleratorReport, PlatformProbeError> {
             // same fact and a way for the two to drift apart.
             sku: name.clone(),
             partitioned,
+            heterogeneous: false,
             // Corrected by the caller, which is the only place that knows
             // how many devices the tool listed.
             device_count: 1,
@@ -414,7 +414,7 @@ mod tests {
         // never collected on it. What changed is where that is prevented.
         // Refusing to parse said "your tool is unreadable" about a
         // perfectly readable answer; the count is carried instead, and
-        // the registry refuses it before any SKU is compared.
+        // the registry compares it with the count each row claims.
         //
         // The assertion that matters is the count. If it came back as 1,
         // the original hazard would be live again and every other test
@@ -430,6 +430,7 @@ mod tests {
             "two devices must not silently become one"
         );
         assert_eq!(report.identity.sku, "NVIDIA L4");
+        assert!(!report.identity.heterogeneous);
         assert_eq!(
             report.exact.uuid.as_deref(),
             Some("GPU-aaa"),
@@ -447,6 +448,27 @@ mod tests {
                 .expect("one device")
                 .expect("an accelerator");
         assert_eq!(report.identity.device_count, 1);
+        assert!(!report.identity.heterogeneous);
+    }
+
+    #[test]
+    fn mixed_skus_are_observations_independent_of_device_order() {
+        let l4 = "NVIDIA L4, 24564, 550.54.15, GPU-aaa, [N/A]";
+        let a100 = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bbb, Disabled";
+        for rows in [vec![l4, a100], vec![a100, l4], vec![l4, a100, l4]] {
+            let first = parse_device(rows[0]).expect("valid first device");
+            let report = identify_accelerator(&sources(&rows.join("\n")))
+                .expect("mixed hardware is still readable")
+                .expect("devices are present");
+            assert!(report.identity.heterogeneous, "mixed set: {rows:?}");
+            assert!(!report.identity.partitioned);
+            assert_eq!(report.identity.sku, first.identity.sku);
+            assert_eq!(report.exact, first.exact);
+            assert_eq!(
+                usize::try_from(report.identity.device_count).ok(),
+                Some(rows.len())
+            );
+        }
     }
 
     #[test]
@@ -480,26 +502,29 @@ mod tests {
     }
 
     #[test]
-    fn every_accelerator_row_must_be_interpretable_even_after_mig_is_detected() {
+    fn every_accelerator_row_must_be_interpretable_after_topology_is_detected() {
         let disabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-aaa, Disabled";
         let enabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bbb, Enabled";
+        let l4 = "NVIDIA L4, 24564, 550.54.15, GPU-ccc, [N/A]";
         for invalid in [
             "malformed row",
             "[Unknown Error], 40536, 550.54.15, GPU-bad, Disabled",
             "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, [Unknown Error]",
             "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, Pending",
         ] {
-            for index in 0..3 {
-                // The final position follows an enabled GPU. Parsing must
-                // not stop once the aggregate partitioned flag is true.
-                let mut rows = [disabled, enabled, disabled];
-                rows[index] = invalid;
-                let error = identify_accelerator(&sources(&rows.join("\n")))
-                    .expect_err("every reported device must be interpretable");
-                assert!(
-                    matches!(error, PlatformProbeError::Unrecognized { .. }),
-                    "invalid row {index} must remain an interpretation failure: {error:?}"
-                );
+            for valid_rows in [[disabled, enabled, disabled], [l4, disabled, l4]] {
+                for index in 0..3 {
+                    // The final position follows MIG or a mixed SKU pair.
+                    // Neither aggregate flag may short-circuit parsing.
+                    let mut rows = valid_rows;
+                    rows[index] = invalid;
+                    let error = identify_accelerator(&sources(&rows.join("\n")))
+                        .expect_err("every reported device must be interpretable");
+                    assert!(
+                        matches!(error, PlatformProbeError::Unrecognized { .. }),
+                        "invalid row {index} must remain an interpretation failure: {error:?}"
+                    );
+                }
             }
         }
     }
@@ -512,6 +537,7 @@ mod tests {
             .expect("devices are present");
         assert_eq!(report.identity.device_count, 8);
         assert!(!report.identity.partitioned);
+        assert!(!report.identity.heterogeneous);
     }
 
     #[test]

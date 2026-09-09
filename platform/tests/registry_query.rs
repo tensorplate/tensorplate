@@ -46,11 +46,33 @@ fn host(
 }
 
 fn accelerator(sku: &str) -> AcceleratorIdentity {
+    accelerator_set(sku, 1)
+}
+
+fn accelerator_set(sku: &str, device_count: u32) -> AcceleratorIdentity {
     AcceleratorIdentity {
         sku: sku.to_string(),
         partitioned: false,
-        device_count: 1,
+        device_count,
+        heterogeneous: false,
     }
+}
+
+/// A registry holding one row, built from a committed row with an edit.
+///
+/// Deriving from a real row rather than hand-writing one keeps these
+/// cases honest about every other field the schema requires.
+fn registry_from_l4_row(edit: impl Fn(&mut serde_json::Value)) -> PlatformRegistry {
+    let text = std::fs::read_to_string(registry_dir().join("rows/ubuntu2404-x86-l4-g2s8.json"))
+        .expect("read the L4 row");
+    let mut document: serde_json::Value = serde_json::from_str(&text).expect("row parses");
+    edit(&mut document);
+    let rendered = serde_json::to_string(&document).expect("row renders");
+    PlatformRegistry::from_documents(
+        [(Path::new("rows/l4.json"), rendered.as_str())],
+        std::iter::empty(),
+    )
+    .expect("the edited row loads")
 }
 
 /// The detected identity of a committed row, derived from the row itself
@@ -71,7 +93,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
                 AcceleratorMatchPolicy::Exact => a.sku.as_str(),
                 AcceleratorMatchPolicy::Family => "Apple M2 Pro",
             };
-            DetectedPlatform::with_accelerator(host, accelerator(sku))
+            DetectedPlatform::with_accelerator(host, accelerator_set(sku, a.device_count))
         }
         None => DetectedPlatform::host_only(host),
     }
@@ -921,4 +943,136 @@ fn a_physical_row_and_a_same_sku_cloud_row_are_not_ambiguous() {
         .map(PlatformSupportRow::row_id)
         .collect();
     assert_eq!(candidates, vec!["ubuntu2404-x86-rtxpro6000we-physical"]);
+}
+
+#[test]
+fn a_row_claiming_two_devices_matches_a_two_device_host() {
+    // The accepting direction, and the only thing that proves the count
+    // is matched rather than merely refused. A registry that rejected
+    // every multi-device host would pass every refusal case here while
+    // being incapable of ever supporting one.
+    let registry = registry_from_l4_row(|document| {
+        document["accelerator"]["device_count"] = serde_json::json!(2);
+    });
+    let row = registry.rows().next().expect("one row");
+    let mut detected = identity_of(&registry, row.row_id());
+    detected.accelerator = Some(accelerator_set("NVIDIA L4", 2));
+
+    match registry.resolve(&detected) {
+        RowMatch::Supported(matched) => assert_eq!(matched.row_id(), row.row_id()),
+        other => panic!("a two-device host must match the row that claims two: {other:?}"),
+    }
+}
+
+#[test]
+fn a_row_claiming_two_devices_refuses_a_single_device_host() {
+    // The other side of the same rule: a row claiming a pair is not
+    // satisfied by one card. Without this the count could be checked in
+    // only one direction and still pass the case above.
+    let registry = registry_from_l4_row(|document| {
+        document["accelerator"]["device_count"] = serde_json::json!(2);
+    });
+    let row = registry.rows().next().expect("one row");
+    let mut detected = identity_of(&registry, row.row_id());
+    detected.accelerator = Some(accelerator_set("NVIDIA L4", 1));
+
+    assert_eq!(
+        registry.resolve(&detected),
+        RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology),
+        "one card does not satisfy a row that claims two"
+    );
+}
+
+#[test]
+fn a_row_that_omits_the_count_still_means_one() {
+    // The compatibility rule the schema states. Every committed row was
+    // written before topology existed and none declares a count, so a
+    // default of anything but one would unsupport the entire registry.
+    let registry = registry_from_l4_row(|document| {
+        assert!(
+            document["accelerator"].get("device_count").is_none(),
+            "the committed row must not declare a count, or this proves nothing"
+        );
+    });
+    let row = registry.rows().next().expect("one row");
+    assert_eq!(row.accelerator().expect("an accelerator").device_count, 1);
+
+    let detected = identity_of(&registry, row.row_id());
+    match registry.resolve(&detected) {
+        RowMatch::Supported(_) => {}
+        other => panic!("a single-device host must still match an undeclared row: {other:?}"),
+    }
+}
+
+#[test]
+fn distinct_device_counts_coexist_and_resolve_without_ambiguity() {
+    for filename in [
+        "ubuntu2404-x86-l4-g2s8.json",
+        "macos26-apple-m-series-preview.json",
+    ] {
+        let text = std::fs::read_to_string(registry_dir().join("rows").join(filename))
+            .expect("read a committed row");
+        let mut single: serde_json::Value = serde_json::from_str(&text).expect("row parses");
+        single["row_id"] = serde_json::json!("one-device");
+        single["validation_environment"] = serde_json::json!({
+            "kind": "physical", "identity": "test host"
+        });
+        let mut pair = single.clone();
+        pair["row_id"] = serde_json::json!("two-devices");
+        pair["accelerator"]["device_count"] = serde_json::json!(2);
+        let single = serde_json::to_string(&single).expect("serialize single");
+        let load = |other: &serde_json::Value| {
+            let other = serde_json::to_string(other).expect("serialize other count");
+            PlatformRegistry::from_documents(
+                [
+                    (Path::new("single.json"), single.as_str()),
+                    (Path::new("other.json"), other.as_str()),
+                ],
+                std::iter::empty(),
+            )
+        };
+        let registry = load(&pair).expect("distinct counts cannot match the same host");
+        for row_id in ["one-device", "two-devices"] {
+            let mut detected = identity_of(&registry, row_id);
+            let expected = registry.row(row_id).expect("row loaded");
+            assert_eq!(registry.resolve(&detected), RowMatch::Supported(expected));
+
+            // A row with the right count but different environment still
+            // outranks the other row's count mismatch.
+            detected.host.machine_type = Some("other-shape".to_string());
+            assert_eq!(
+                registry.resolve(&detected),
+                RowMatch::OutsideValidatedEnvironment {
+                    candidate: Some(expected)
+                }
+            );
+        }
+
+        // Explicit one and an omitted count describe the same topology.
+        pair["accelerator"]["device_count"] = serde_json::json!(1);
+        let error = load(&pair).expect_err("the same count remains ambiguous");
+        assert!(error.to_string().contains("can both match"), "{error}");
+    }
+}
+
+#[test]
+fn supported_silicon_with_the_wrong_count_keeps_its_topology_reason() {
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.accelerator = Some(accelerator_set("NVIDIA L4", 2));
+    for machine_type in [Some("g2-standard-8"), None, Some("g2-standard-24")] {
+        detected.host.machine_type = machine_type.map(str::to_string);
+        assert_eq!(
+            registry.resolve(&detected),
+            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology),
+            "supported silicon remains supported silicon on {machine_type:?}"
+        );
+    }
+
+    // A genuinely different SKU must still be diagnosed as such.
+    detected.accelerator = Some(accelerator_set("NVIDIA H100", 2));
+    assert_eq!(
+        registry.resolve(&detected),
+        RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+    );
 }

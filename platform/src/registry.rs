@@ -129,7 +129,24 @@ impl Mismatch {
     const ARCHITECTURE: u8 = 1 << 0;
     const VENDOR: u8 = 1 << 1;
     const OS: u8 = 1 << 2;
-    const ACCELERATOR: u8 = 1 << 3;
+    /// The row claims a different number of accelerators than the host
+    /// reports.
+    ///
+    /// Ranked ABOVE the SKU, which is the one place this module's
+    /// broadest-first rule inverts, and it is worth saying why. The bits
+    /// above narrow from a broader fact to a narrower one. These two do
+    /// not stand in that relation: a topology miss can only be set by a
+    /// row that HAS an accelerator, against a host that HAS one, so it is
+    /// always a statement about this machine's actual GPU. A SKU miss can
+    /// come from any row, including the CPU-only rows, whose "mismatch"
+    /// is only that they have no accelerator at all.
+    ///
+    /// So a host with two of a supported card ties: the card's row misses
+    /// on topology alone, and a CPU row misses on accelerator alone.
+    /// Resolving that tie toward the SKU told an operator holding exactly
+    /// the right hardware that their accelerator was unsupported.
+    const TOPOLOGY: u8 = 1 << 3;
+    const ACCELERATOR: u8 = 1 << 4;
     /// Hardware matches but the machine shape is outside the row's
     /// evidence. This bit is never consulted by [`Self::reason`] — an
     /// environment-only miss has no frozen reason and is reported through
@@ -137,7 +154,7 @@ impl Mismatch {
     /// `resolve` checks *before* the nearest-miss fold because naming the
     /// row whose claim does not reach this machine is more actionable
     /// than naming a dimension of some other row.
-    const ENVIRONMENT: u8 = 1 << 4;
+    const ENVIRONMENT: u8 = 1 << 5;
 
     fn between(row: &PlatformSupportRow, detected: &DetectedPlatform) -> Self {
         let mut bits = 0;
@@ -158,6 +175,9 @@ impl Mismatch {
         if !accelerator_matches(row, detected) {
             bits |= Self::ACCELERATOR;
         }
+        if !topology_matches(row, detected) {
+            bits |= Self::TOPOLOGY;
+        }
         if !environment_matches(row, &detected.host) {
             bits |= Self::ENVIRONMENT;
         }
@@ -167,6 +187,13 @@ impl Mismatch {
     /// Whether the only thing that differs is the machine shape.
     fn is_environment_only(self) -> bool {
         self.0 == Self::ENVIRONMENT
+    }
+
+    /// Host identity and SKU match, but the count differs. A different
+    /// machine shape must not hide that fact behind a CPU-only row's SKU
+    /// mismatch.
+    fn is_topology_miss(self) -> bool {
+        self.0 & !Self::ENVIRONMENT == Self::TOPOLOGY
     }
 
     /// The same mismatch judged on host identity alone.
@@ -201,6 +228,8 @@ impl Mismatch {
             Some(PlatformReason::UnsupportedCpuVendor)
         } else if self.0 & Self::OS != 0 {
             Some(PlatformReason::UnsupportedOsVersion)
+        } else if self.0 & Self::TOPOLOGY != 0 {
+            Some(PlatformReason::UnsupportedAcceleratorTopology)
         } else if self.0 & Self::ACCELERATOR != 0 {
             Some(PlatformReason::UnsupportedAcceleratorSku)
         } else {
@@ -246,6 +275,7 @@ fn rows_are_ambiguous(left: &PlatformSupportRow, right: &PlatformSupportRow) -> 
         return false;
     }
     match (left.accelerator(), right.accelerator()) {
+        (Some(a), Some(b)) if a.device_count != b.device_count => false,
         (Some(a), Some(b)) => match (a.match_policy, b.match_policy) {
             (AcceleratorMatchPolicy::Exact, AcceleratorMatchPolicy::Exact) => a.sku == b.sku,
             (AcceleratorMatchPolicy::Family, AcceleratorMatchPolicy::Family) => {
@@ -538,13 +568,10 @@ impl PlatformRegistry {
     /// degraded version of that row, it is a configuration this release
     /// does not serve on.
     ///
-    /// A host reporting more than one accelerator is rejected the same
-    /// way and for the same reason. Every committed row is single-device,
-    /// so two of a supported card is a topology no row's evidence was
-    /// collected on -- not a better version of the row that claims one.
-    /// Partitioning is checked first: on a host that is both partitioned
-    /// and multi-device, MIG is the more specific and more actionable
-    /// answer.
+    /// A heterogeneous accelerator set is also rejected outright: rows
+    /// claim a count of one SKU, so the first device cannot stand in for
+    /// unlike devices. Partitioning is checked first, independent of
+    /// device order. Homogeneous sets match the row's declared count.
     ///
     /// A machine whose hardware matches a row but whose machine shape is
     /// outside that row's validated environment resolves to
@@ -557,7 +584,7 @@ impl PlatformRegistry {
     /// machine fails in the fewest dimensions — so a machine one CPU
     /// vendor away from a row is told about the vendor rather than about
     /// its accelerator. Ties resolve in this module's own dimension
-    /// priority — architecture, then vendor, then OS, then accelerator:
+    /// priority — architecture, vendor, OS, topology, then accelerator:
     /// broadest first, because the broader fact explains more — so the
     /// answer never depends on registry file order. That order is
     /// deliberately not the one `PlatformReason::ALL` happens to list,
@@ -568,6 +595,10 @@ impl PlatformRegistry {
     /// reported before any nearest-miss reason, because naming the row
     /// whose claim does not reach this machine says more than naming a
     /// dimension of some unrelated row.
+    /// If host identity and SKU match but the count differs, topology is
+    /// reported before the nearest-miss reason as well, even when the
+    /// machine shape differs. An unrelated CPU-only row being closer
+    /// does not make that observed SKU unsupported.
     ///
     /// Trigger *semantics* for the reasons — when `doctor` shows which,
     /// and how — are frozen elsewhere; this is the registry's own
@@ -594,18 +625,20 @@ impl PlatformRegistry {
         if detected
             .accelerator
             .as_ref()
-            .is_some_and(|accelerator| accelerator.device_count != 1)
+            .is_some_and(|accelerator| accelerator.heterogeneous)
         {
             return RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology);
         }
 
         let mut nearest_count = u32::MAX;
         let mut nearest = Mismatch::default();
+        let mut topology_mismatch = false;
         let mut exact_outside_environment: Vec<&PlatformSupportRow> = Vec::new();
         let mut family_outside_environment: Vec<&PlatformSupportRow> = Vec::new();
         let mut family_match: Option<&PlatformSupportRow> = None;
         for row in self.rows.values() {
             let mismatch = Mismatch::between(row, detected);
+            topology_mismatch |= mismatch.is_topology_miss();
             if mismatch.is_environment_only() {
                 if row.accelerator().is_some_and(|accelerator| {
                     accelerator.match_policy == AcceleratorMatchPolicy::Family
@@ -657,6 +690,9 @@ impl PlatformRegistry {
                     _ => None,
                 },
             };
+        }
+        if topology_mismatch {
+            return RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology);
         }
         // `reason()` is `None` only for a mismatch of nothing or of
         // environment alone, and both returned above — so this fallback is
@@ -816,6 +852,32 @@ fn os_matches(row: &PlatformSupportRow, host: &HostIdentity) -> bool {
             .map_or(true, |required| {
                 host.image_identity.as_ref() == Some(required)
             })
+}
+
+/// Whether the host reports as many accelerators as the row claims.
+///
+/// Separate from [`accelerator_matches`] so the two produce different
+/// reasons: a host with eight of a card the row names has the right
+/// silicon and the wrong topology, and telling its operator the SKU is
+/// unsupported would send them to replace hardware that is correct.
+///
+/// Vacuous unless BOTH sides have an accelerator. An accelerator-less row
+/// is already refused on the accelerator dimension, and counting the same
+/// fact twice would let it outrank a nearer row.
+///
+/// That vacuity is also what keeps topology out of the host-level answer.
+/// [`Mismatch::host_only`] masks the accelerator bit because a host
+/// profile says nothing about the card fitted; it does not mask this one,
+/// because `select_profile` resolves against an accelerator-less platform
+/// where this function cannot set the bit at all.
+///
+fn topology_matches(row: &PlatformSupportRow, detected: &DetectedPlatform) -> bool {
+    match (row.accelerator(), detected.accelerator.as_ref()) {
+        (Some(row_accelerator), Some(observed)) => {
+            row_accelerator.device_count == observed.device_count
+        }
+        _ => true,
+    }
 }
 
 fn accelerator_matches(row: &PlatformSupportRow, detected: &DetectedPlatform) -> bool {

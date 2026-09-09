@@ -54,15 +54,13 @@ pub enum PlatformReason {
     /// The detected identity exactly matches a Planned row: the platform
     /// is known and defined, but carries no validation evidence yet.
     RowPlannedNotValidated,
-    /// The host reports a number of accelerators no row claims. Every row
-    /// this release commits to is single-device, so a host with two or
-    /// more is refused before any SKU is compared -- a supported SKU
-    /// installed twice is not a supported machine, because no row's
-    /// evidence was collected on that topology.
+    /// The host reports a device count no matching row claims, or mixes
+    /// accelerator SKUs. Rows claim a homogeneous set of a specified size;
+    /// evidence for one topology does not transfer to another.
     ///
     /// Distinct from [`Self::UnsupportedAcceleratorSku`], which says the
     /// silicon is wrong. Here the silicon may be exactly right and there
-    /// is simply more of it than anything has been validated against.
+    /// is a different number or combination of devices.
     UnsupportedAcceleratorTopology,
 }
 

@@ -544,6 +544,7 @@ pub fn identify_platform(sources: &HostSources) -> Result<PlatformReport, Platfo
             identity: AcceleratorIdentity {
                 sku: sku.to_string(),
                 partitioned: false,
+                heterogeneous: false,
                 // One integrated GPU sharing the host's memory. Not a
                 // count read from anywhere: a unified-memory part has
                 // exactly one, and there is no source that could say
@@ -807,6 +808,7 @@ pub fn identify_jetson_accelerator(sources: &HostSources) -> Option<AcceleratorI
         // Jetson modules do not partition. The row records this as
         // `not_applicable`; reporting `true` here would reject every board.
         partitioned: false,
+        heterogeneous: false,
         // A Jetson module carries one integrated GPU. Same reasoning as
         // the unified-memory path: this is the module's shape, not a
         // reading that could come back different.

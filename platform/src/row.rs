@@ -291,7 +291,24 @@ pub struct Accelerator {
     /// property name; the profile owns budget domains, measurement
     /// sources, and headroom computation.
     pub memory_profile: PlatformMemoryProfileName,
+    /// How many accelerators of this SKU the row claims; always positive.
+    ///
+    /// Absent means one, so every row written before topology existed
+    /// keeps its meaning and no committed fixture changes. A row claims a
+    /// topology and not just silicon: evidence collected on one card does
+    /// not carry to eight of them.
+    #[serde(default = "one_device", skip_serializing_if = "is_one_device")]
+    pub device_count: u32,
     pub partitioning: Partitioning,
+}
+
+const fn one_device() -> u32 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_one_device(count: &u32) -> bool {
+    *count == 1
 }
 
 /// Required backend package set and channel for one backend path.
@@ -466,11 +483,12 @@ impl PlatformSupportRow {
     /// Parse and validate a row document. All failures are fail-closed
     /// typed errors mapping to `ErrorCode::ConfigInvalid`.
     ///
-    /// Byte-valued fields are validated on their exact decimal lexeme
-    /// before parsing, so a declared size can never be silently rounded.
-    /// **Invariant:** every number token in a row document is a byte
-    /// value; adding a non-byte numeric field requires a field-scoped
-    /// check instead of the document-level canonicalization used here.
+    /// Numeric fields are validated on their exact decimal lexeme before
+    /// parsing, so a declared size or count can never be silently rounded.
+    /// **Invariant:** every number token is a nonnegative integer in the
+    /// safe byte-value domain. Device counts share that domain and are
+    /// narrowed to positive `u32` values by decoding and validation. A
+    /// numeric field outside this domain requires a field-scoped check.
     pub fn from_json(json: &str) -> Result<Self, PlatformRegistryError> {
         let canonical =
             json_numbers::canonicalize_byte_lexemes(json).map_err(|(token, reason)| {
@@ -609,6 +627,9 @@ impl PlatformSupportRow {
             }
             if accelerator.memory_bytes == 0 {
                 return Err(invalid("accelerator memory_bytes must be positive"));
+            }
+            if accelerator.device_count == 0 {
+                return Err(invalid("accelerator device_count must be positive"));
             }
             if accelerator.match_policy == AcceleratorMatchPolicy::Family {
                 if accelerator.sku != accelerator.family {

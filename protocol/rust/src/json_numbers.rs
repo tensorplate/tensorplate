@@ -45,8 +45,10 @@ enum LexemeExponent {
 /// wrap that in their own typed error. Malformed tokens pass through
 /// verbatim for serde to report as grammar errors.
 ///
-/// **Caller invariant:** every number token in the document must be a byte
-/// value. Documents that mix byte counts with unrelated numbers need a
+/// **Caller invariant:** every number token must be a nonnegative integer
+/// within [`MAX_SAFE_BYTES`]. A narrower integer field, such as a device
+/// count, may share this pass if its decoder enforces its own bounds.
+/// Documents with fractional, negative, or larger numeric domains need a
 /// field-scoped check instead.
 pub fn canonicalize_byte_lexemes(raw: &str) -> Result<String, (String, &'static str)> {
     let bytes = raw.as_bytes();

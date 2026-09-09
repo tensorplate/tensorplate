@@ -112,15 +112,20 @@ pub struct AcceleratorIdentity {
     /// before device count or SKU comparison, independent of device order.
     /// Exact facts retain device 0's own MIG state rather than this aggregate.
     pub partitioned: bool,
+    /// Whether reported devices have different exact SKU strings.
+    ///
+    /// A row claims a count of one SKU, so a mixed set cannot match it.
+    /// Kept as an observation: readable heterogeneous hardware is
+    /// unsupported, not a probe failure.
+    pub heterogeneous: bool,
     /// How many accelerators the host reports.
     ///
     /// Carried in the identity rather than left to the probe so a
     /// multi-device host produces a verdict instead of an error: the
     /// count is a fact about the machine, and a machine no row claims is
-    /// unsupported, not undetectable. Rejected before any SKU comparison
-    /// for the same reason `partitioned` is -- two of a supported card is
-    /// a topology nothing was validated on, not a degraded version of the
-    /// row that claims one.
+    /// unsupported, not undetectable. Compared against each row's declared
+    /// count: two of a supported card cannot inherit a single-card row's
+    /// validation evidence.
     pub device_count: u32,
 }
 
