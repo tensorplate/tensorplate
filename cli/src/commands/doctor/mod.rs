@@ -19,12 +19,11 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
-    classify_accelerator_probe_failure, identify, identify_accelerator, AcceleratorObservation,
+    classify_accelerator_probe_failure, identify, identify_accelerator,
     AcceleratorProbeFailureClass, HostIdentity, HostReport, NvidiaSmiProbe, PlatformProbeError,
     PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport, ProfileSelection,
     RowMatch, SystemHostProbe,
 };
-use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::args::DoctorArgs;
 use crate::client::AgentClient;
@@ -846,11 +845,7 @@ fn probe_host_profile() -> Vec<Finding> {
             .and_then(|sources| identify_accelerator(&sources))
         {
             Ok(Some(card)) => {
-                report.accelerator = Some(AcceleratorObservation {
-                    identity: card.identity,
-                    memory_bytes: card.exact.memory_total_bytes,
-                    memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-                });
+                report.accelerator = Some(card.observation());
             }
             Ok(None) => {}
             Err(error) => {

@@ -129,11 +129,7 @@ fn observed_l4_report(registry: &PlatformRegistry) -> PlatformReport {
                 ..ExactHostFacts::default()
             },
         },
-        accelerator: Some(AcceleratorObservation {
-            identity: card.identity,
-            memory_bytes: card.exact.memory_total_bytes,
-            memory_profile: row.accelerator().expect("accelerator row").memory_profile,
-        }),
+        accelerator: Some(card.observation()),
     }
 }
 

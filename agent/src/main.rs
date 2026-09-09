@@ -38,11 +38,10 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    AcceleratorObservation, AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry,
-    PlatformReport, SystemHostProbe,
+    AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry, PlatformReport,
+    SystemHostProbe,
 };
 use tensorplate_protocol::install_paths;
-use tensorplate_protocol::platform_memory_profile::PlatformMemoryProfileName;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 // A release build may carry an identity Cargo does not: a candidate is
@@ -337,15 +336,7 @@ fn observe_platform(
     if report.accelerator.is_none() {
         match NvidiaSmiProbe::new().detect() {
             Ok(Some(card)) => {
-                report.accelerator = Some(AcceleratorObservation {
-                    // Recorded, never matched on: a discrete card's usable
-                    // framebuffer is not its row's nominal capacity, which is
-                    // why the row is matched on SKU alone. It is carried so a
-                    // resolved capability can bound the memory ceiling.
-                    memory_bytes: card.exact.memory_total_bytes,
-                    memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-                    identity: card.identity,
-                });
+                report.accelerator = Some(card.observation());
             }
             Ok(None) => {}
             Err(err) => accelerator_probe_error = Some(err),

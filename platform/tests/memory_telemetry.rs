@@ -17,8 +17,8 @@ use tempfile::TempDir;
 use serde_json::Value;
 use tensorplate_platform::row::GateValue;
 use tensorplate_platform::{
-    identify_accelerator, identify_platform, AcceleratorObservation, AcceleratorSources,
-    HostSources, PlatformMemoryTelemetry, PlatformRegistry, PlatformReport,
+    identify_accelerator, identify_platform, AcceleratorSources, HostSources,
+    PlatformMemoryTelemetry, PlatformRegistry, PlatformReport,
 };
 use tensorplate_protocol::PlatformMemoryProfileName;
 
@@ -68,11 +68,7 @@ fn report(host: &str, accelerator: Option<&str>) -> PlatformReport {
         })
         .expect("interprets")
         .expect("one device");
-        report.accelerator = Some(AcceleratorObservation {
-            identity: card.identity,
-            memory_bytes: card.exact.memory_total_bytes,
-            memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-        });
+        report.accelerator = Some(card.observation());
     }
     report
 }
