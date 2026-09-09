@@ -8,6 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Support rows can declare an accelerator `device_count`, defaulting to
+  one. Rows with different counts can coexist and match their respective
+  homogeneous device sets.
+
+### Fixed
+
+- Mixed accelerator SKUs are refused regardless of device order. Hosts
+  with supported silicon but an unsupported count retain topology
+  diagnostics outside the validated machine shape, and zero-count rows
+  fail validation.
+
+### Added
+
 - The release workflow now blocks on evidence (V021-E05-F02-T02). A gate
   job runs the completeness check before anything is built, and every
   build and publish job sits behind it — a release cannot ship a

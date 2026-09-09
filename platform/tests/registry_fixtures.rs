@@ -609,6 +609,64 @@ fn accelerator_invariants_agree_between_schema_and_decoder() {
 }
 
 #[test]
+fn accelerator_device_count_bounds_agree_between_schema_and_decoder() {
+    let mut cases = vec![("absent device_count", a_valid_row_value(), true)];
+    for (label, count, valid) in [
+        ("one device", serde_json::json!(1), true),
+        ("two devices", serde_json::json!(2), true),
+        ("integral float device_count", serde_json::json!(2.0), true),
+        ("maximum device_count", serde_json::json!(u32::MAX), true),
+        ("zero device_count", serde_json::json!(0), false),
+        ("null device_count", serde_json::Value::Null, false),
+        ("negative device_count", serde_json::json!(-1), false),
+        ("fractional device_count", serde_json::json!(1.5), false),
+        (
+            "device_count above u32 range",
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            false,
+        ),
+    ] {
+        let mut row = a_valid_row_value();
+        row["accelerator"]["device_count"] = count;
+        cases.push((label, row, valid));
+    }
+    assert_row_verdicts_agree(cases);
+}
+
+#[test]
+fn accelerator_device_counts_default_and_round_trip_without_changing() {
+    for count in [None, Some(1), Some(2), Some(u32::MAX)] {
+        let mut document = a_valid_row_value();
+        assert!(document["accelerator"].get("device_count").is_none());
+        if let Some(count) = count {
+            document["accelerator"]["device_count"] = serde_json::json!(count);
+        }
+        let row = PlatformSupportRow::from_json(
+            &serde_json::to_string(&document).expect("serialize document"),
+        )
+        .expect("valid count decodes");
+        let expected = count.unwrap_or(1);
+        assert_eq!(
+            row.accelerator().expect("accelerator").device_count,
+            expected
+        );
+        let serialized = serde_json::to_value(&row).expect("serialize row");
+        assert_eq!(
+            serialized["accelerator"].get("device_count"),
+            (expected != 1)
+                .then(|| serde_json::json!(expected))
+                .as_ref(),
+            "only the default count is omitted"
+        );
+        let decoded = PlatformSupportRow::from_json(
+            &serde_json::to_string(&serialized).expect("serialize document"),
+        )
+        .expect("serialized count decodes");
+        assert_eq!(decoded, row);
+    }
+}
+
+#[test]
 fn accelerator_memory_bytes_stay_exact() {
     let mut zero = a_valid_row_value();
     zero["accelerator"]["memory_bytes"] = serde_json::json!(0);

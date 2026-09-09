@@ -333,7 +333,7 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
     // fact an operator can act on. The difference matters at the console:
     // a Warning saying detection failed invites them to debug their
     // driver or their nvidia-smi; an Unsupported row naming the topology
-    // tells them this release serves one device.
+    // names the device-set constraint.
     let report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"));
     let registry = registry();
 
@@ -377,13 +377,32 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
         .as_deref()
         .expect("an unsupported row carries a hint");
     assert!(
-        hint.contains("one accelerator per host"),
+        hint.contains("device count must match a support row"),
         "the hint must name the actual constraint: {hint}"
     );
     assert!(
         !hint.contains("support-matrix.md"),
         "pointing at the matrix would tell them their supported card is supported: {hint}"
     );
+}
+
+#[test]
+fn topology_guidance_survives_a_different_machine_shape() {
+    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"));
+    let registry = registry();
+    for machine_type in [None, Some("g2-standard-24")] {
+        report.host.identity.machine_type = machine_type.map(str::to_string);
+        let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
+        let row = section
+            .iter()
+            .find(|finding| finding.id == FindingId::PlatformRow)
+            .expect("a row finding");
+        assert_eq!(row.status, FindingStatus::Unsupported);
+        assert!(row.message.contains("unsupported_accelerator_topology"));
+        let hint = row.hint.as_deref().expect("topology guidance");
+        assert!(hint.contains("device count must match a support row"));
+        assert!(hint.contains("accelerator SKUs must be identical"));
+    }
 }
 
 #[test]

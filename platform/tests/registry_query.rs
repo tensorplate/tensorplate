@@ -54,6 +54,7 @@ fn accelerator_set(sku: &str, device_count: u32) -> AcceleratorIdentity {
         sku: sku.to_string(),
         partitioned: false,
         device_count,
+        heterogeneous: false,
     }
 }
 
@@ -92,7 +93,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
                 AcceleratorMatchPolicy::Exact => a.sku.as_str(),
                 AcceleratorMatchPolicy::Family => "Apple M2 Pro",
             };
-            DetectedPlatform::with_accelerator(host, accelerator(sku))
+            DetectedPlatform::with_accelerator(host, accelerator_set(sku, a.device_count))
         }
         None => DetectedPlatform::host_only(host),
     }
@@ -1001,4 +1002,77 @@ fn a_row_that_omits_the_count_still_means_one() {
         RowMatch::Supported(_) => {}
         other => panic!("a single-device host must still match an undeclared row: {other:?}"),
     }
+}
+
+#[test]
+fn distinct_device_counts_coexist_and_resolve_without_ambiguity() {
+    for filename in [
+        "ubuntu2404-x86-l4-g2s8.json",
+        "macos26-apple-m-series-preview.json",
+    ] {
+        let text = std::fs::read_to_string(registry_dir().join("rows").join(filename))
+            .expect("read a committed row");
+        let mut single: serde_json::Value = serde_json::from_str(&text).expect("row parses");
+        single["row_id"] = serde_json::json!("one-device");
+        single["validation_environment"] = serde_json::json!({
+            "kind": "physical", "identity": "test host"
+        });
+        let mut pair = single.clone();
+        pair["row_id"] = serde_json::json!("two-devices");
+        pair["accelerator"]["device_count"] = serde_json::json!(2);
+        let single = serde_json::to_string(&single).expect("serialize single");
+        let load = |other: &serde_json::Value| {
+            let other = serde_json::to_string(other).expect("serialize other count");
+            PlatformRegistry::from_documents(
+                [
+                    (Path::new("single.json"), single.as_str()),
+                    (Path::new("other.json"), other.as_str()),
+                ],
+                std::iter::empty(),
+            )
+        };
+        let registry = load(&pair).expect("distinct counts cannot match the same host");
+        for row_id in ["one-device", "two-devices"] {
+            let mut detected = identity_of(&registry, row_id);
+            let expected = registry.row(row_id).expect("row loaded");
+            assert_eq!(registry.resolve(&detected), RowMatch::Supported(expected));
+
+            // A row with the right count but different environment still
+            // outranks the other row's count mismatch.
+            detected.host.machine_type = Some("other-shape".to_string());
+            assert_eq!(
+                registry.resolve(&detected),
+                RowMatch::OutsideValidatedEnvironment {
+                    candidate: Some(expected)
+                }
+            );
+        }
+
+        // Explicit one and an omitted count describe the same topology.
+        pair["accelerator"]["device_count"] = serde_json::json!(1);
+        let error = load(&pair).expect_err("the same count remains ambiguous");
+        assert!(error.to_string().contains("can both match"), "{error}");
+    }
+}
+
+#[test]
+fn supported_silicon_with_the_wrong_count_keeps_its_topology_reason() {
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
+    detected.accelerator = Some(accelerator_set("NVIDIA L4", 2));
+    for machine_type in [Some("g2-standard-8"), None, Some("g2-standard-24")] {
+        detected.host.machine_type = machine_type.map(str::to_string);
+        assert_eq!(
+            registry.resolve(&detected),
+            RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorTopology),
+            "supported silicon remains supported silicon on {machine_type:?}"
+        );
+    }
+
+    // A genuinely different SKU must still be diagnosed as such.
+    detected.accelerator = Some(accelerator_set("NVIDIA H100", 2));
+    assert_eq!(
+        registry.resolve(&detected),
+        RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+    );
 }
