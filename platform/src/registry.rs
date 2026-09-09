@@ -725,12 +725,18 @@ impl PlatformRegistry {
         let observed = report.accelerator.as_ref()?;
         let declared = row.accelerator()?;
         debug_assert!(accelerator_matches(row, &detected));
+        debug_assert!(topology_matches(row, &detected));
         debug_assert_eq!(observed.memory_profile, declared.memory_profile);
+        // The count comes from the row rather than the observation. Both
+        // agree here -- resolve refused the machine otherwise -- and taking
+        // the row's makes the capability a statement about what was
+        // validated rather than about what happens to be plugged in.
         Some(PlatformCapability::bounded(
             row.row_id(),
             declared.memory_profile,
             observed.memory_bytes,
             declared.memory_bytes,
+            declared.device_count,
         ))
     }
 
@@ -765,6 +771,7 @@ impl PlatformRegistry {
             declared.memory_profile,
             observed.memory_bytes,
             declared.memory_bytes,
+            declared.device_count,
         ))
     }
 }

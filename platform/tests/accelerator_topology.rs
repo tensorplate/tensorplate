@@ -35,6 +35,22 @@ fn two_l4_registry() -> PlatformRegistry {
     .expect("two-device row loads")
 }
 
+/// The same synthetic row claiming one device, so a ceiling can be compared
+/// across counts with nothing else differing.
+fn one_l4_registry() -> PlatformRegistry {
+    let source = include_str!("../../config/platform/rows/ubuntu2404-x86-l4-g2s8.json");
+    let mut document: serde_json::Value = serde_json::from_str(source).expect("committed row");
+    document["validation_environment"] = serde_json::json!({
+        "kind": "physical", "identity": "synthetic one-device lab server"
+    });
+    let body = serde_json::to_string(&document).expect("row renders");
+    PlatformRegistry::from_documents(
+        [(Path::new("one-l4.json"), body.as_str())],
+        std::iter::empty(),
+    )
+    .expect("one-device row loads")
+}
+
 fn report(registry: &PlatformRegistry, devices: &[&str]) -> PlatformReport {
     let row = registry.rows().next().expect("one row");
     let detected = identify_accelerator(&AcceleratorSources {
@@ -95,4 +111,52 @@ fn partitioning_precedes_a_mixed_topology() {
         );
         assert!(registry.resolved_capability(&report).is_none());
     }
+}
+
+#[test]
+fn the_capability_reports_the_count_the_row_claims() {
+    // Admission bounds replica count from the resolved capability rather
+    // than from the raw observation, so the count has to survive
+    // resolution. Read from the row, which is what was validated.
+    let two = two_l4_registry();
+    let capability = two
+        .resolved_capability(&report(&two, &[L4, SECOND_L4]))
+        .expect("a matching two-device host resolves a capability");
+    assert_eq!(capability.device_count(), 2);
+
+    let one = one_l4_registry();
+    let capability = one
+        .resolved_capability(&report(&one, &[L4]))
+        .expect("a matching one-device host resolves a capability");
+    assert_eq!(capability.device_count(), 1);
+}
+
+#[test]
+fn the_memory_ceiling_is_per_device_and_does_not_scale_with_the_count() {
+    // The property that stops a worker being handed a budget no single
+    // card can honour. A replica is pinned to one device and cannot reach
+    // the others, so eight cards of 24 GiB is a 24 GiB ceiling, not 192.
+    //
+    // Asserted as an equality between counts rather than against a
+    // literal, so it fails on any scaling -- by the count, or by anything
+    // else that varies with it.
+    let one = one_l4_registry();
+    let two = two_l4_registry();
+    let single = one
+        .resolved_capability(&report(&one, &[L4]))
+        .expect("one-device capability");
+    let paired = two
+        .resolved_capability(&report(&two, &[L4, SECOND_L4]))
+        .expect("two-device capability");
+
+    assert_eq!(
+        paired.max_resident_model_memory(),
+        single.max_resident_model_memory(),
+        "the per-device ceiling must not change when the row claims more devices"
+    );
+    assert_eq!(
+        paired.row_memory_budget_bytes(),
+        single.row_memory_budget_bytes(),
+        "the row budget is per device too"
+    );
 }
