@@ -20,10 +20,9 @@ use serde::Serialize;
 use serde_json::json;
 use tensorplate_platform::identify_platform;
 use tensorplate_platform::{
-    identify, identify_accelerator, AcceleratorObservation, AcceleratorReport, AcceleratorSources,
-    HostSources, NvidiaSmiProbe, PlatformRegistry, PlatformReport, RowMatch, SystemHostProbe,
+    identify, identify_accelerator, AcceleratorReport, AcceleratorSources, HostSources,
+    NvidiaSmiProbe, PlatformRegistry, PlatformReport, RowMatch, SystemHostProbe,
 };
-use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
@@ -151,11 +150,7 @@ pub fn record(
     };
     if let (Some(report), Some(card)) = (report.as_mut(), discrete.as_ref()) {
         if report.accelerator.is_none() {
-            report.accelerator = Some(AcceleratorObservation {
-                identity: card.identity.clone(),
-                memory_bytes: card.exact.memory_total_bytes,
-                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-            });
+            report.accelerator = Some(card.observation());
         }
     }
 

@@ -23,12 +23,10 @@ use serde_json::Value;
 use tensorplate_agent::platform_admission::{check_backend_packages, ObservedStack};
 use tensorplate_agent::PlatformAdmission;
 use tensorplate_platform::{
-    identify_accelerator, identify_platform, AcceleratorObservation, AcceleratorSources,
-    HostSources, PlatformReason, PlatformRegistry, PlatformReport, SignalName, SignalOutcome,
-    SignalTelemetry,
+    identify_accelerator, identify_platform, AcceleratorSources, HostSources, PlatformReason,
+    PlatformRegistry, PlatformReport, SignalName, SignalOutcome, SignalTelemetry,
 };
 use tensorplate_protocol::backend_probe::BackendProbeState;
-use tensorplate_protocol::PlatformMemoryProfileName;
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -78,11 +76,7 @@ fn report(host: &str, accelerator: Option<&str>) -> PlatformReport {
         })
         .expect("accelerator fixture interprets")
         .expect("accelerator fixture carries a device");
-        report.accelerator = Some(AcceleratorObservation {
-            identity: card.identity,
-            memory_bytes: card.exact.memory_total_bytes,
-            memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-        });
+        report.accelerator = Some(card.observation());
     }
     report
 }

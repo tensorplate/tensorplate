@@ -8,11 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Platform capabilities carry the admitted device count alongside a
+  per-device memory ceiling.
+
 - Support rows can declare an accelerator `device_count`, defaulting to
   one. Rows with different counts can coexist and match their respective
   homogeneous device sets.
 
 ### Fixed
+
+- Multi-device memory ceilings use the smallest known device capacity,
+  capped by the row budget, regardless of device order. Missing readings
+  preserve known bounds; when no device reports capacity, the row budget
+  remains the fallback. Device 0's exact evidence stays separate.
 
 - Mixed accelerator SKUs are refused regardless of device order. Hosts
   with supported silicon but an unsupported count retain topology

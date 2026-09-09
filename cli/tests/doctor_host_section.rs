@@ -21,10 +21,9 @@ use serde_json::Value;
 use tensorplate_cli::commands::doctor::finding::{Finding, FindingId, FindingStatus};
 use tensorplate_cli::commands::doctor::{render_host_section, HostSectionDetection};
 use tensorplate_platform::{
-    identify_accelerator, identify_platform, AcceleratorObservation, AcceleratorSources,
-    HostSources, PlatformProbeError, PlatformRegistry, PlatformRegistryError, PlatformReport,
+    identify_accelerator, identify_platform, AcceleratorSources, HostSources, PlatformProbeError,
+    PlatformRegistry, PlatformRegistryError, PlatformReport,
 };
-use tensorplate_protocol::PlatformMemoryProfileName;
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -81,11 +80,7 @@ fn report_for(name: &str, accelerator: Option<&str>) -> PlatformReport {
             })
             .expect("accelerator fixture interprets")
             .expect("accelerator fixture carries a device");
-            report.accelerator = Some(AcceleratorObservation {
-                identity: card.identity,
-                memory_bytes: card.exact.memory_total_bytes,
-                memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-            });
+            report.accelerator = Some(card.observation());
         }
     }
     report
@@ -103,11 +98,7 @@ fn report_from_accelerator_answer(
         nvidia_smi_query: Some(answer.to_string()),
     })?
     .expect("the test answer lists at least one accelerator");
-    report.accelerator = Some(AcceleratorObservation {
-        identity: card.identity,
-        memory_bytes: card.exact.memory_total_bytes,
-        memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-    });
+    report.accelerator = Some(card.observation());
     Ok(report)
 }
 
@@ -690,11 +681,7 @@ fn a_near_miss_accelerator_sku_resolves_to_no_row() {
     })
     .expect("interprets")
     .expect("one device");
-    report.accelerator = Some(AcceleratorObservation {
-        identity: card.identity,
-        memory_bytes: card.exact.memory_total_bytes,
-        memory_profile: PlatformMemoryProfileName::DiscreteGpu,
-    });
+    report.accelerator = Some(card.observation());
 
     let registry = registry();
     let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));

@@ -88,11 +88,7 @@ fn report_from_accelerator_answer(
             identity: host_of(row),
             exact: ExactHostFacts::default(),
         },
-        accelerator: Some(AcceleratorObservation {
-            identity: card.identity,
-            memory_bytes: card.exact.memory_total_bytes,
-            memory_profile: row.accelerator().expect("a GPU row").memory_profile,
-        }),
+        accelerator: Some(card.observation()),
     })
 }
 
@@ -216,6 +212,47 @@ fn an_unvalidated_admission_is_bounded_by_the_same_memory_ceiling() {
         capability.max_resident_model_memory(),
         declared.memory_bytes
     );
+}
+
+#[test]
+fn admission_applies_the_smallest_device_capacity_in_either_environment() {
+    let source = include_str!("../../config/platform/rows/ubuntu2404-x86-l4-g2s8.json");
+    let mut document: serde_json::Value = serde_json::from_str(source).expect("committed row");
+    document["accelerator"]["device_count"] = serde_json::json!(2);
+    document["validation_environment"] = serde_json::json!({
+        "kind": "cloud_instance",
+        "identity": "synthetic two-device server",
+        "machine_type": "synthetic-two-device-shape"
+    });
+    let body = serde_json::to_string(&document).expect("row renders");
+    let registry = PlatformRegistry::from_documents(
+        [(std::path::Path::new("two-l4.json"), body.as_str())],
+        std::iter::empty(),
+    )
+    .expect("synthetic row loads");
+    let l4 = registry.rows().next().expect("one row");
+    let larger = "NVIDIA L4, 24564, 550.54.15, GPU-synthetic-first, [N/A]";
+    let smaller = "NVIDIA L4, 23034, 550.54.15, GPU-synthetic-second, [N/A]";
+    for devices in [[larger, smaller], [smaller, larger]] {
+        for validated in [true, false] {
+            let mut report = report_from_accelerator_answer(l4, &devices.join("\n"))
+                .expect("readable device capacities");
+            if !validated {
+                report.host.identity.machine_type = None;
+            }
+            let admission =
+                PlatformAdmission::evaluate(&registry, &report, &ObservedStack::default(), None);
+            assert_eq!(admission.validated(), Some(validated));
+            assert_eq!(admission.capability().expect("admitted").device_count(), 2);
+            let mut config = tensorplate_agent::config::AgentConfig::parse_json(include_str!(
+                "../../packaging/conf/agent.json"
+            ))
+            .expect("packaged config is valid");
+            config.device_memory_bytes = Some(32 * 1024 * 1024 * 1024);
+            admission.apply_memory_limit(&mut config);
+            assert_eq!(config.device_memory_bytes, Some(23034 * 1024 * 1024));
+        }
+    }
 }
 
 #[test]

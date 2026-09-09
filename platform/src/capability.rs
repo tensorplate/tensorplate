@@ -16,8 +16,10 @@ use crate::identity::AcceleratorIdentity;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorObservation {
     pub identity: AcceleratorIdentity,
-    /// Memory reported by the accelerator probe. Absence means the probe
-    /// retained a usable identity but could not read a trustworthy capacity.
+    /// Per-device memory reported by the accelerator probe. For a discrete
+    /// device set, this is the smallest known capacity across the devices.
+    /// Absence means no trustworthy capacity was read, leaving the row's
+    /// memory budget as the admission bound.
     pub memory_bytes: Option<u64>,
     pub memory_profile: PlatformMemoryProfileName,
 }
@@ -35,9 +37,10 @@ pub struct AcceleratorObservation {
 /// pool the others' memory. Reading `device_count` alongside the ceiling
 /// is how a caller bounds how many such workers a host can hold.
 ///
-/// The observation this is built from carries device 0's memory, which is
-/// the whole set's memory only because heterogeneous sets never reach
-/// here -- the registry refuses them before a row resolves.
+/// The discrete observation uses the smallest known capacity across the
+/// reported devices. Matching SKUs can still have different usable memory,
+/// so device 0's capacity alone cannot bound the set. Missing readings add
+/// no tighter bound; the row's per-device budget always remains in force.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformCapability {
     row_id: String,

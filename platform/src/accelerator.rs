@@ -20,6 +20,9 @@
 use std::io::ErrorKind;
 use std::process::Command;
 
+use tensorplate_protocol::PlatformMemoryProfileName;
+
+use crate::capability::AcceleratorObservation;
 use crate::error::PlatformProbeError;
 use crate::identity::{AcceleratorIdentity, AcceleratorProbe};
 
@@ -50,11 +53,31 @@ pub struct ExactAcceleratorFacts {
 }
 
 /// Detected accelerators: device 0's SKU and exact facts, with device count,
-/// partitioning, and heterogeneity aggregated across every reported device.
+/// partitioning, heterogeneity, and a conservative memory reading aggregated
+/// across every reported device.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceleratorReport {
     pub identity: AcceleratorIdentity,
     pub exact: ExactAcceleratorFacts,
+    /// Smallest known device capacity; missing readings add no bound.
+    min_device_memory_bytes: Option<u64>,
+}
+
+impl AcceleratorReport {
+    /// Project the report into the observation used for memory admission.
+    ///
+    /// A homogeneous SKU set can still report different usable capacities.
+    /// Use the smallest known reading across devices, preserving device 0's
+    /// separate exact facts for evidence. If no capacity is readable, the
+    /// observation leaves the row's memory budget as the admission bound.
+    #[must_use]
+    pub fn observation(&self) -> AcceleratorObservation {
+        AcceleratorObservation {
+            identity: self.identity.clone(),
+            memory_bytes: self.min_device_memory_bytes,
+            memory_profile: PlatformMemoryProfileName::DiscreteGpu,
+        }
+    }
 }
 
 /// Raw accelerator sources gathered from the machine.
@@ -112,6 +135,13 @@ pub fn identify_accelerator(
                 let device = parse_device(line)?;
                 report.identity.partitioned |= device.identity.partitioned;
                 report.identity.heterogeneous |= device.identity.sku != report.identity.sku;
+                if let Some(memory) = device.min_device_memory_bytes {
+                    report.min_device_memory_bytes = Some(
+                        report
+                            .min_device_memory_bytes
+                            .map_or(memory, |smallest| smallest.min(memory)),
+                    );
+                }
             }
             report.identity.device_count = u32::try_from(n).unwrap_or(u32::MAX);
             Ok(Some(report))
@@ -152,6 +182,7 @@ fn parse_device(line: &str) -> Result<AcceleratorReport, PlatformProbeError> {
     };
 
     let (partitioned, mig_mode) = parse_mig_mode(fields[4], line)?;
+    let memory_total_bytes = optional(fields[1]).and_then(|mib| mebibytes_to_bytes(&mib));
 
     Ok(AcceleratorReport {
         identity: AcceleratorIdentity {
@@ -167,11 +198,12 @@ fn parse_device(line: &str) -> Result<AcceleratorReport, PlatformProbeError> {
         },
         exact: ExactAcceleratorFacts {
             reported_name: name,
-            memory_total_bytes: optional(fields[1]).and_then(|mib| mebibytes_to_bytes(&mib)),
+            memory_total_bytes,
             driver_version: optional(fields[2]),
             uuid: optional(fields[3]),
             mig_mode,
         },
+        min_device_memory_bytes: memory_total_bytes,
     })
 }
 
@@ -506,16 +538,21 @@ mod tests {
         let disabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-aaa, Disabled";
         let enabled = "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bbb, Enabled";
         let l4 = "NVIDIA L4, 24564, 550.54.15, GPU-ccc, [N/A]";
+        let zero_memory = "NVIDIA L4, 0, 550.54.15, GPU-ddd, [N/A]";
         for invalid in [
             "malformed row",
             "[Unknown Error], 40536, 550.54.15, GPU-bad, Disabled",
             "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, [Unknown Error]",
             "NVIDIA A100-SXM4-40GB, 40536, 550.54.15, GPU-bad, Pending",
         ] {
-            for valid_rows in [[disabled, enabled, disabled], [l4, disabled, l4]] {
+            for valid_rows in [
+                [disabled, enabled, disabled],
+                [l4, disabled, l4],
+                [zero_memory, l4, l4],
+            ] {
                 for index in 0..3 {
-                    // The final position follows MIG or a mixed SKU pair.
-                    // Neither aggregate flag may short-circuit parsing.
+                    // Neither a topology flag nor the smallest possible
+                    // memory reading may short-circuit later parsing.
                     let mut rows = valid_rows;
                     rows[index] = invalid;
                     let error = identify_accelerator(&sources(&rows.join("\n")))
@@ -697,6 +734,44 @@ mod tests {
             Some(24_564 * 1024 * 1024),
             "the observed framebuffer is recorded as reported"
         );
+        assert_eq!(
+            report.observation().memory_bytes,
+            report.exact.memory_total_bytes
+        );
+    }
+
+    #[test]
+    fn memory_observation_uses_the_smallest_known_capacity_in_either_order() {
+        for (left, right, expected) in [
+            ("24564", "23034", Some(23_034 * 1024 * 1024)),
+            ("24564", "[Not Supported]", Some(24_564 * 1024 * 1024)),
+            ("unreadable", "23034", Some(23_034 * 1024 * 1024)),
+            ("[N/A]", "unreadable", None),
+            ("0", "24564", Some(0)),
+        ] {
+            for (first_memory, second_memory) in [(left, right), (right, left)] {
+                let first = format!("NVIDIA L4, {first_memory}, 550.54.15, GPU-aaa, [N/A]");
+                let second = format!("NVIDIA L4, {second_memory}, 550.54.15, GPU-bbb, [N/A]");
+                let first_report = parse_device(&first).expect("first device is readable");
+                let report = identify_accelerator(&sources(&format!("{first}\n{second}\n")))
+                    .expect("capacity can be unknown without losing device identity")
+                    .expect("two devices are present");
+                let observation = report.observation();
+                assert_eq!(
+                    observation.memory_bytes, expected,
+                    "memory readings {first_memory}, {second_memory}"
+                );
+                assert_eq!(observation.identity, report.identity);
+                assert_eq!(
+                    observation.memory_profile,
+                    PlatformMemoryProfileName::DiscreteGpu
+                );
+                assert_eq!(
+                    report.exact, first_report.exact,
+                    "the aggregate bound must not replace device 0's exact facts"
+                );
+            }
+        }
     }
 
     #[test]
