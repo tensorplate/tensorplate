@@ -378,6 +378,10 @@ fn seed_supervisor_from_state(
     let desired = snapshot.active.as_ref().map(|active| DesiredWorker {
         deployment_id: active.deployment_id.clone(),
         backend: active.backend_hint.clone(),
+        // Reconciled from durable state, which records what is deployed and
+        // not where it runs. Unpinned for the same reason the coordinator is:
+        // nothing allocates devices yet.
+        device_index: None,
     });
     supervisor
         .set_desired_active(desired)

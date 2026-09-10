@@ -8,6 +8,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Worker supervision accepts an optional device pin at launch through
+  `DesiredWorker`. A pin sets `CUDA_VISIBLE_DEVICES` after the environment
+  allowlist; unpinned workers retain the allowlist behavior. Deployment
+  allocation remains single-device and does not assign pins yet.
+
 - Bundle manifests can declare an optional `accelerator_requirements`
   block with `device_count` and a `replicas` or `device_set` mode. Omission
   retains single-device behavior without a format-version change. Zero
@@ -22,6 +27,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   homogeneous device sets.
 
 ### Fixed
+
+- Changing, adding, or removing a device pin for a running deployment
+  stops the old worker before launching its replacement with the latest
+  requested pin. Repeating an unchanged pin preserves the running worker.
 
 - Multi-device memory ceilings use the smallest known device capacity,
   capped by the row budget, regardless of device order. Missing readings

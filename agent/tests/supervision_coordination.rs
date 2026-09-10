@@ -134,6 +134,7 @@ fn deploy_resets_supervisor_crash_loop_state() {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: "stuck".into(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("desired");
     for _ in 0..8 {

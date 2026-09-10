@@ -31,6 +31,9 @@ use super::config::{SupervisorConfig, WorkerStdioMode};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerHandle {
     pub deployment_id: String,
+    /// Device pin used at launch. Kept with the running worker so desired
+    /// placement changes can be reconciled before a replacement starts.
+    pub device_index: Option<u32>,
     pub launch_sequence: u64,
     pub launched_at: Instant,
     pub pid: Option<u32>,
@@ -81,16 +84,23 @@ pub enum PollOutcome {
 /// Implementations must be `Send + Sync` so they can sit behind the
 /// supervisor's mutex.
 pub trait WorkerProcess: Send + Sync {
-    /// Spawn a worker for `deployment_id`. The implementation records
-    /// platform-specific identity and a `launch_sequence` derived from
+    /// Spawn a worker for `deployment_id`, optionally confined to one
+    /// accelerator. The implementation records platform-specific identity
+    /// and a `launch_sequence` derived from
     /// [`WorkerProcess::next_launch_sequence`].
+    ///
+    /// The pin is a parameter rather than configuration because two
+    /// workers of the same deployment differ only by it: they share a
+    /// binary, a config path, and a working directory, and giving each its
+    /// own config purely to carry one integer would put the same fact in
+    /// two places.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError::WorkerControl`] on spawn failures and
     /// [`AgentError::Config`] when a required path is missing at launch
     /// time. The supervisor maps these to typed supervision errors.
-    fn launch(&self, deployment_id: &str) -> AgentResult<WorkerHandle>;
+    fn launch(&self, deployment_id: &str, device_index: Option<u32>) -> AgentResult<WorkerHandle>;
 
     /// Sample whether the worker is still running. The implementation
     /// must be non-blocking; the supervisor calls this from its `tick`
@@ -141,7 +151,7 @@ impl SystemWorkerProcess {
         }
     }
 
-    fn command(&self) -> Command {
+    fn command(&self, device_index: Option<u32>) -> Command {
         let mut cmd = Command::new(&self.cfg.binary_path);
         cmd.arg("--config").arg(&self.cfg.serving_config_path);
         for extra in &self.cfg.args {
@@ -153,6 +163,16 @@ impl SystemWorkerProcess {
             if let Ok(value) = std::env::var(key) {
                 cmd.env(key, value);
             }
+        }
+        // Set after the allowlist, deliberately. The environment is
+        // cleared and rebuilt from the allowlist, so an operator who has
+        // CUDA_VISIBLE_DEVICES set in the agent's own environment could
+        // otherwise widen a worker's view of the hardware by adding that
+        // name to the allowlist. The pin is the platform's decision about
+        // which device this worker gets, so it wins over anything
+        // inherited.
+        if let Some(index) = device_index {
+            cmd.env("CUDA_VISIBLE_DEVICES", index.to_string());
         }
         match self.cfg.stdio_mode {
             WorkerStdioMode::Inherit => {
@@ -187,7 +207,7 @@ impl SystemWorkerProcess {
 }
 
 impl WorkerProcess for SystemWorkerProcess {
-    fn launch(&self, deployment_id: &str) -> AgentResult<WorkerHandle> {
+    fn launch(&self, deployment_id: &str, device_index: Option<u32>) -> AgentResult<WorkerHandle> {
         if !self.cfg.binary_path.is_file() {
             return Err(AgentError::Config(format!(
                 "supervision.binary_path `{}` is not a regular file",
@@ -207,7 +227,7 @@ impl WorkerProcess for SystemWorkerProcess {
         if state.child.is_some() {
             return Err(AgentError::Busy("worker process already running".into()));
         }
-        let mut cmd = self.command();
+        let mut cmd = self.command(device_index);
         let child = cmd.spawn().map_err(|err| {
             AgentError::WorkerControl(format!("spawn {}: {err}", self.cfg.binary_path.display()))
         })?;
@@ -215,6 +235,7 @@ impl WorkerProcess for SystemWorkerProcess {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let handle = WorkerHandle {
             deployment_id: deployment_id.to_string(),
+            device_index,
             launch_sequence: state.next_sequence,
             launched_at: Instant::now(),
             pid,
@@ -360,6 +381,11 @@ struct MockState {
 pub struct MockCall {
     pub op: &'static str,
     pub deployment_id: Option<String>,
+    /// The pin `launch` was called with. Recorded so a test can assert the
+    /// supervisor forwarded what the desired worker asked for, which is
+    /// otherwise invisible: the pin only becomes observable inside a
+    /// process this double never spawns.
+    pub device_index: Option<u32>,
 }
 
 impl MockWorkerProcess {
@@ -410,7 +436,7 @@ impl MockWorkerProcess {
 }
 
 impl WorkerProcess for MockWorkerProcess {
-    fn launch(&self, deployment_id: &str) -> AgentResult<WorkerHandle> {
+    fn launch(&self, deployment_id: &str, device_index: Option<u32>) -> AgentResult<WorkerHandle> {
         let mut state = self
             .inner
             .lock()
@@ -418,6 +444,7 @@ impl WorkerProcess for MockWorkerProcess {
         state.history.push(MockCall {
             op: "launch",
             deployment_id: Some(deployment_id.to_string()),
+            device_index,
         });
         if let Some(reason) = state.behavior.fail_launch.clone() {
             return Err(AgentError::WorkerControl(reason));
@@ -428,6 +455,7 @@ impl WorkerProcess for MockWorkerProcess {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let handle = WorkerHandle {
             deployment_id: deployment_id.to_string(),
+            device_index,
             launch_sequence: state.next_sequence,
             launched_at: Instant::now(),
             pid: Some(1_000 + u32::try_from(state.next_sequence).unwrap_or(0)),
@@ -476,6 +504,8 @@ impl WorkerProcess for MockWorkerProcess {
         state.history.push(MockCall {
             op: "graceful_stop",
             deployment_id: Some(handle.deployment_id.clone()),
+            // Not a launch: stopping a worker does not name a device.
+            device_index: None,
         });
         if state.behavior.graceful_stop_ignored {
             return Ok(());
@@ -500,6 +530,8 @@ impl WorkerProcess for MockWorkerProcess {
         state.history.push(MockCall {
             op: "force_terminate",
             deployment_id: Some(handle.deployment_id.clone()),
+            // Not a launch: stopping a worker does not name a device.
+            device_index: None,
         });
         state.force_killed = true;
         if state.current.as_ref().map(|c| c.launch_sequence) == Some(handle.launch_sequence) {
@@ -586,9 +618,32 @@ mod tests {
 
     use super::{
         command_digest, ExitStatus, MockProcessBehavior, MockWorkerProcess, PollOutcome,
-        WorkerProcess,
+        SupervisorConfig, SystemWorkerProcess, WorkerProcess,
     };
+    use crate::supervision::config::{EventSinkConfig, RestartPolicy, WorkerStdioMode};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    /// A config that only has to be well-formed: these cases inspect the
+    /// prepared command and never spawn, so no path needs to exist.
+    fn cfg() -> SupervisorConfig {
+        SupervisorConfig {
+            binary_path: PathBuf::from("/usr/local/bin/tensorplate-serving"),
+            args: vec![],
+            env_allowlist: BTreeSet::new(),
+            working_dir: PathBuf::from("/var/lib/tensorplate"),
+            serving_config_path: PathBuf::from("/var/lib/tensorplate/serving.json"),
+            control_host: "127.0.0.1".into(),
+            control_port: 18080,
+            stdio_mode: WorkerStdioMode::Inherit,
+            startup_timeout_ms: 30_000,
+            graceful_stop_timeout_ms: 5_000,
+            kill_timeout_ms: 2_000,
+            status_poll_interval_ms: 1_000,
+            restart_policy: RestartPolicy::default(),
+            event_sink: EventSinkConfig::default(),
+        }
+    }
 
     #[test]
     fn mock_launch_then_exit_records_history() {
@@ -597,7 +652,7 @@ mod tests {
             exit_code: Some(0),
             ..Default::default()
         });
-        let handle = mock.launch("d-1").expect("launch");
+        let handle = mock.launch("d-1", None).expect("launch");
         assert!(matches!(mock.poll(&handle), Ok(PollOutcome::Running)));
         match mock.poll(&handle).expect("poll") {
             PollOutcome::Exited(status) => assert_eq!(status.code, Some(0)),
@@ -610,15 +665,15 @@ mod tests {
     #[test]
     fn mock_double_launch_returns_busy() {
         let mock = MockWorkerProcess::new();
-        let _h1 = mock.launch("d-1").expect("launch");
-        let err = mock.launch("d-1").expect_err("double launch");
+        let _h1 = mock.launch("d-1", None).expect("launch");
+        let err = mock.launch("d-1", None).expect_err("double launch");
         assert!(matches!(err, crate::error::AgentError::Busy(_)));
     }
 
     #[test]
     fn mock_graceful_stop_exits_on_next_poll() {
         let mock = MockWorkerProcess::new();
-        let handle = mock.launch("d-1").expect("launch");
+        let handle = mock.launch("d-1", None).expect("launch");
         mock.graceful_stop(&handle).expect("stop");
         match mock.poll(&handle).expect("poll") {
             PollOutcome::Exited(status) => {
@@ -635,7 +690,7 @@ mod tests {
             graceful_stop_ignored: true,
             ..Default::default()
         });
-        let handle = mock.launch("d-1").expect("launch");
+        let handle = mock.launch("d-1", None).expect("launch");
         // Graceful stop is ignored; supervisor escalates.
         mock.graceful_stop(&handle).expect("stop");
         assert!(!mock.force_killed());
@@ -653,14 +708,14 @@ mod tests {
             fail_launch: Some("missing artifact".into()),
             ..Default::default()
         });
-        let err = mock.launch("d-1").expect_err("fail");
+        let err = mock.launch("d-1", None).expect_err("fail");
         assert!(matches!(err, crate::error::AgentError::WorkerControl(_)));
     }
 
     #[test]
     fn mock_exit_now_overrides_default_threshold() {
         let mock = MockWorkerProcess::new();
-        let handle = mock.launch("d-1").expect("launch");
+        let handle = mock.launch("d-1", None).expect("launch");
         mock.exit_now(ExitStatus {
             code: Some(2),
             signal: None,
@@ -684,5 +739,84 @@ mod tests {
             command_digest(&bin, &args, &cfg),
             command_digest(&bin, &args, &cfg)
         );
+    }
+
+    /// Read one variable off a prepared command without spawning it.
+    fn env_of(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs().find_map(|(k, v)| {
+            (k == key).then(|| v.map(|value| value.to_string_lossy().into_owned()))
+        })?
+    }
+
+    #[test]
+    fn a_pinned_worker_is_confined_to_its_device_and_an_unpinned_one_is_not() {
+        let process = SystemWorkerProcess::new(cfg());
+
+        let pinned = process.command(Some(3));
+        assert_eq!(
+            env_of(&pinned, "CUDA_VISIBLE_DEVICES").as_deref(),
+            Some("3"),
+            "a pinned worker must see exactly the device it was given"
+        );
+
+        // The other direction matters as much. Setting the variable
+        // unconditionally would confine every existing single-device
+        // deployment to device 0 -- which is usually the same device, and
+        // therefore a change that would look like it worked.
+        let unpinned = process.command(None);
+        assert_eq!(
+            env_of(&unpinned, "CUDA_VISIBLE_DEVICES"),
+            None,
+            "an unpinned worker must be left alone, not pinned to device 0"
+        );
+    }
+
+    #[test]
+    fn the_pin_wins_over_an_inherited_value() {
+        // The environment is cleared and rebuilt from the allowlist, so an
+        // operator with CUDA_VISIBLE_DEVICES set in the agent's own
+        // environment could widen a worker's view of the hardware just by
+        // adding that name to the allowlist. Both assertions live in one
+        // test because they share a process-wide variable.
+        let mut config = cfg();
+        config
+            .env_allowlist
+            .insert("CUDA_VISIBLE_DEVICES".to_string());
+        let process = SystemWorkerProcess::new(config);
+
+        std::env::set_var("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7");
+
+        let pinned = process.command(Some(2));
+        assert_eq!(
+            env_of(&pinned, "CUDA_VISIBLE_DEVICES").as_deref(),
+            Some("2"),
+            "the platform's decision about which device a worker gets must \
+             outrank anything inherited"
+        );
+
+        // Without a pin the allowlist still governs: this is an operator
+        // choice about an unpinned worker, not a confinement decision.
+        let unpinned = process.command(None);
+        assert_eq!(
+            env_of(&unpinned, "CUDA_VISIBLE_DEVICES").as_deref(),
+            Some("0,1,2,3,4,5,6,7"),
+        );
+
+        std::env::remove_var("CUDA_VISIBLE_DEVICES");
+    }
+
+    #[test]
+    fn launch_records_the_pin_it_was_given() {
+        // The supervisor reads the pin off the desired worker and hands it
+        // to launch. That hand-off is otherwise invisible: the variable
+        // only exists inside a process the double never spawns.
+        let mock = MockWorkerProcess::new();
+        mock.launch("d-1", Some(5)).expect("launch");
+        let call = mock
+            .history()
+            .into_iter()
+            .find(|c| c.op == "launch")
+            .expect("a launch was recorded");
+        assert_eq!(call.device_index, Some(5));
     }
 }

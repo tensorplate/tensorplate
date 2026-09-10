@@ -119,13 +119,195 @@ fn build_fixture(process: Arc<MockWorkerProcess>, probe: Arc<MockReadinessProbe>
 }
 
 fn set_desired(fixture: &Fixture, id: &str) {
+    set_desired_pin(fixture, id, None);
+}
+
+fn set_desired_pin(fixture: &Fixture, id: &str, device_index: Option<u32>) {
     fixture
         .supervisor
         .set_desired_active(Some(DesiredWorker {
             deployment_id: id.to_string(),
             backend: "mock".into(),
+            device_index,
         }))
         .expect("set desired");
+}
+
+fn launch_pinned_fixture(process: Arc<MockWorkerProcess>, device_index: Option<u32>) -> Fixture {
+    let probe = Arc::new(MockReadinessProbe::new());
+    probe.script(vec![ready_sample("d-1")]);
+    let fixture = build_fixture(process, probe);
+    set_desired_pin(&fixture, "d-1", device_index);
+    let _ = fixture.supervisor.tick().expect("launch");
+    let _ = fixture.supervisor.tick().expect("ready");
+    assert_eq!(fixture.process.history()[0].device_index, device_index);
+    fixture
+}
+
+fn assert_pin_change_replaces_worker(previous: Option<u32>, next: Option<u32>) {
+    let fixture = launch_pinned_fixture(Arc::new(MockWorkerProcess::new()), previous);
+    let _ = fixture.sink.drain();
+    set_desired_pin(&fixture, "d-1", next);
+    let _ = fixture.supervisor.tick().expect("begin stop");
+    let history = fixture.process.history();
+    assert_eq!(
+        history.iter().map(|call| call.op).collect::<Vec<_>>(),
+        ["launch", "graceful_stop"]
+    );
+    let _ = fixture.supervisor.tick().expect("old worker exits");
+    assert_eq!(fixture.process.history().len(), 2);
+    let _ = fixture.supervisor.tick().expect("replacement launches");
+    let history = fixture.process.history();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[2].op, "launch");
+    assert_eq!(history[2].deployment_id.as_deref(), Some("d-1"));
+    assert_eq!(history[2].device_index, next);
+    assert_eq!(fixture.supervisor.status().launch_sequence, 2);
+    assert_eq!(fixture.supervisor.status().restart_count, 0);
+    assert!(fixture
+        .supervisor
+        .drain_faults()
+        .expect("faults")
+        .is_empty());
+    let kinds: Vec<_> = fixture.sink.drain().into_iter().map(|p| p.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            SupervisionEventKind::WorkerStopping,
+            SupervisionEventKind::WorkerStopped,
+            SupervisionEventKind::WorkerStarted,
+        ]
+    );
+}
+
+#[test]
+fn adding_device_pin_replaces_same_deployment_worker() {
+    assert_pin_change_replaces_worker(None, Some(1));
+}
+
+#[test]
+fn changing_device_pin_replaces_same_deployment_worker() {
+    assert_pin_change_replaces_worker(Some(0), Some(1));
+}
+
+#[test]
+fn removing_device_pin_replaces_same_deployment_worker() {
+    assert_pin_change_replaces_worker(Some(1), None);
+}
+
+#[test]
+fn unchanged_device_pin_preserves_running_worker() {
+    for pin in [None, Some(1)] {
+        let fixture = launch_pinned_fixture(Arc::new(MockWorkerProcess::new()), pin);
+        for _ in 0..3 {
+            set_desired_pin(&fixture, "d-1", pin);
+            let _ = fixture.supervisor.tick().expect("same desired worker");
+        }
+        assert_eq!(fixture.process.history().len(), 1);
+        assert_eq!(fixture.supervisor.status().launch_sequence, 1);
+        assert_eq!(
+            fixture.supervisor.status().serving_state,
+            SupervisionServingState::Ready
+        );
+    }
+}
+
+#[test]
+fn crash_restart_preserves_nonzero_device_pin() {
+    let fixture = launch_pinned_fixture(Arc::new(MockWorkerProcess::new()), Some(3));
+    fixture.process.exit_now(ExitStatus {
+        code: Some(1),
+        signal: None,
+        after_ready: true,
+    });
+    let outcome = fixture.supervisor.tick().expect("crash");
+    assert!(matches!(outcome, TickOutcome::Fault(_)));
+    fixture.clock.advance(Duration::from_millis(5));
+    let _ = fixture.supervisor.tick().expect("restart");
+    let history = fixture.process.history();
+    assert_eq!(history.len(), 2);
+    assert!(history
+        .iter()
+        .all(|call| call.op == "launch" && call.device_index == Some(3)));
+    assert_eq!(fixture.supervisor.status().launch_sequence, 2);
+}
+
+#[test]
+fn pin_updates_during_stop_launch_latest_request_after_old_worker_exits() {
+    // Include reverting to the running worker's original pin after its stop
+    // has begun: the replacement still must reflect the latest request.
+    for latest_pin in [Some(2), None] {
+        let process = Arc::new(MockWorkerProcess::with_behavior(MockProcessBehavior {
+            graceful_stop_ignored: true,
+            ..Default::default()
+        }));
+        let fixture = launch_pinned_fixture(process, None);
+        set_desired_pin(&fixture, "d-1", Some(1));
+        let _ = fixture.supervisor.tick().expect("begin stop");
+        set_desired_pin(&fixture, "d-1", Some(1));
+        let _ = fixture
+            .supervisor
+            .tick()
+            .expect("repeat desired while stopping");
+        set_desired_pin(&fixture, "d-1", latest_pin);
+        let _ = fixture
+            .supervisor
+            .tick()
+            .expect("latest desired while stopping");
+        assert_eq!(fixture.process.history().len(), 2);
+
+        fixture.clock.advance(Duration::from_millis(11));
+        let _ = fixture.supervisor.tick().expect("force old worker to stop");
+        assert!(fixture.process.force_killed());
+        assert_eq!(fixture.process.history().len(), 3);
+        let _ = fixture.supervisor.tick().expect("observe old worker exit");
+        assert_eq!(fixture.process.history().len(), 3);
+        let _ = fixture
+            .supervisor
+            .tick()
+            .expect("launch latest desired pin");
+        let history = fixture.process.history();
+        assert_eq!(
+            history.iter().map(|call| call.op).collect::<Vec<_>>(),
+            ["launch", "graceful_stop", "force_terminate", "launch"]
+        );
+        assert_eq!(history[3].device_index, latest_pin);
+        assert_eq!(fixture.supervisor.status().launch_sequence, 2);
+        assert!(fixture
+            .supervisor
+            .drain_faults()
+            .expect("faults")
+            .is_empty());
+    }
+}
+
+#[test]
+fn clearing_desired_during_pin_change_stops_without_replacement() {
+    let fixture = launch_pinned_fixture(Arc::new(MockWorkerProcess::new()), None);
+    set_desired_pin(&fixture, "d-1", Some(1));
+    let _ = fixture.supervisor.tick().expect("begin stop");
+    fixture
+        .supervisor
+        .set_desired_active(None)
+        .expect("clear desired");
+    for _ in 0..3 {
+        let _ = fixture.supervisor.tick().expect("drain and remain stopped");
+    }
+    assert_eq!(
+        fixture
+            .process
+            .history()
+            .iter()
+            .map(|call| call.op)
+            .collect::<Vec<_>>(),
+        ["launch", "graceful_stop"]
+    );
+    assert!(fixture.supervisor.status().actual_active.is_none());
+    assert!(fixture
+        .supervisor
+        .drain_faults()
+        .expect("faults")
+        .is_empty());
 }
 
 #[test]
@@ -330,6 +512,7 @@ fn missing_observability_consumer_does_not_stall_supervision() {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: "d-1".into(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("set desired");
     for _ in 0..10 {
@@ -370,6 +553,7 @@ fn bounded_event_sink_drops_oldest_when_full() {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: "d-1".into(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("set desired");
     for _ in 0..6 {

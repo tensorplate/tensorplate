@@ -82,6 +82,16 @@ pub enum TickOutcome {
 pub struct DesiredWorker {
     pub deployment_id: String,
     pub backend: String,
+    /// Which accelerator this worker is confined to, if any.
+    ///
+    /// `None` means the worker sees whatever the host exposes, which is
+    /// every deployment today: rows claim one device and the manifest
+    /// refuses to ask for more. It becomes load-bearing when one
+    /// deployment runs a replica per device, where two workers sharing a
+    /// host must not both take device 0 -- and where a worker allowed to
+    /// see all of them would allocate against memory another replica is
+    /// counting on.
+    pub device_index: Option<u32>,
 }
 
 /// Public V01-E09 worker supervisor.
@@ -170,7 +180,8 @@ impl WorkerSupervisor {
         inner.state.status(now)
     }
 
-    /// Install / clear the desired active deployment.
+    /// Install / clear the desired active deployment. Changing the device
+    /// pin replaces the running worker even when the deployment ID is unchanged.
     ///
     /// # Errors
     ///
@@ -182,9 +193,16 @@ impl WorkerSupervisor {
             .inner
             .lock()
             .map_err(|e| AgentError::Internal(format!("supervisor mutex poisoned: {e}")))?;
-        let next_id = desired.as_ref().map(|d| d.deployment_id.as_str());
-        let current_id = inner.handle.as_ref().map(|h| h.deployment_id.as_str());
-        if inner.handle.is_some() && current_id != next_id {
+        let next_placement = desired
+            .as_ref()
+            .map(|d| (d.deployment_id.as_str(), d.device_index));
+        // Compare with the launched worker, since desired may be updated
+        // again while that worker is still stopping.
+        let current_placement = inner
+            .handle
+            .as_ref()
+            .map(|h| (h.deployment_id.as_str(), h.device_index));
+        if inner.handle.is_some() && current_placement != next_placement {
             inner.stop_requested = true;
             inner.stop_hold = false;
         }
@@ -346,7 +364,10 @@ impl WorkerSupervisor {
             .desired
             .clone()
             .ok_or_else(|| AgentError::Internal("launch_worker without desired".into()))?;
-        match self.process.launch(&desired.deployment_id) {
+        match self
+            .process
+            .launch(&desired.deployment_id, desired.device_index)
+        {
             Ok(handle) => {
                 inner.handle = Some(handle.clone());
                 inner.launched_at = Some(now);
@@ -849,6 +870,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Tick 1: launch.
@@ -887,6 +909,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Tick 1: launch
@@ -923,6 +946,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         for _ in 0..6 {
@@ -957,6 +981,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         for _ in 0..6 {
@@ -982,6 +1007,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Reach ready.
@@ -1015,6 +1041,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch");
@@ -1050,6 +1077,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set d-1");
         let _ = supervisor.tick().expect("launch d-1");
@@ -1058,6 +1086,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-2".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set d-2");
         let _ = supervisor.tick().expect("stop d-1");
@@ -1087,6 +1116,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch"); // launch
@@ -1134,6 +1164,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch");
