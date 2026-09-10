@@ -365,6 +365,16 @@
         },
         "desired_active": {"type": "string"},
         "actual_active": {"type": "string"},
+        "desired_device_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Accelerator the deployment asks this worker to be confined to. Absent means unpinned: the worker sees whatever the host exposes."
+        },
+        "actual_device_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Accelerator the running worker was launched with. Differs from `desired_device_index` only in the window between a pin change and the relaunch it causes, because changing a pin replaces the worker rather than moving it."
+        },
         "backend": {"type": "string"},
         "restart_count": {"type": "integer", "minimum": 0},
         "crash_loop_threshold": {"type": "integer", "minimum": 0},

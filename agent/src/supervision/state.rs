@@ -95,6 +95,15 @@ pub struct SupervisionState {
     pub phase: SupervisionPhase,
     pub desired_active: Option<String>,
     pub actual_active: Option<String>,
+    /// The pin the desired worker asks for, and the pin the worker that is
+    /// actually running was launched with.
+    ///
+    /// A pair for the same reason the deployment ids are: changing a pin
+    /// replaces the worker, so between the request and the relaunch these
+    /// legitimately differ -- and reporting only one would be wrong exactly
+    /// when an operator is watching a placement move.
+    pub desired_device_index: Option<u32>,
+    pub actual_device_index: Option<u32>,
     pub backend: Option<String>,
     pub launch_sequence: u64,
     pub last_ready_at: Option<Instant>,
@@ -113,6 +122,8 @@ impl SupervisionState {
             phase: SupervisionPhase::NoActiveDeployment,
             desired_active: None,
             actual_active: None,
+            desired_device_index: None,
+            actual_device_index: None,
             backend: None,
             launch_sequence: 0,
             last_ready_at: None,
@@ -125,9 +136,15 @@ impl SupervisionState {
     /// Install a new desired active deployment. The supervisor transitions
     /// the phase to `Starting` if the worker is not already serving it.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn set_desired_active(&mut self, deployment_id: Option<String>, backend: Option<String>) {
+    pub fn set_desired_active(
+        &mut self,
+        deployment_id: Option<String>,
+        backend: Option<String>,
+        device_index: Option<u32>,
+    ) {
         self.desired_active.clone_from(&deployment_id);
         self.backend = backend;
+        self.desired_device_index = device_index;
         if deployment_id.is_none() {
             self.phase = SupervisionPhase::NoActiveDeployment;
         } else if matches!(self.phase, SupervisionPhase::NoActiveDeployment) {
@@ -148,6 +165,8 @@ impl SupervisionState {
             agent_state: self.phase.to_agent_state(),
             desired_active: self.desired_active.clone(),
             actual_active: self.actual_active.clone(),
+            desired_device_index: self.desired_device_index,
+            actual_device_index: self.actual_device_index,
             backend: self.backend.clone(),
             restart_count: self.counters.rolling_count,
             crash_loop_threshold: self.counters.threshold,
@@ -171,6 +190,11 @@ pub struct SupervisionStatus {
     pub agent_state: SupervisionAgentState,
     pub desired_active: Option<String>,
     pub actual_active: Option<String>,
+    /// Which accelerator the deployment asks for, and which one the running
+    /// worker got. Absent means unpinned -- the worker sees whatever the
+    /// host exposes, which is every deployment today.
+    pub desired_device_index: Option<u32>,
+    pub actual_device_index: Option<u32>,
     pub backend: Option<String>,
     pub restart_count: u32,
     pub crash_loop_threshold: u32,
@@ -191,6 +215,8 @@ impl SupervisionStatus {
             agent_state: SupervisionAgentState::Ready,
             desired_active: None,
             actual_active: None,
+            desired_device_index: None,
+            actual_device_index: None,
             backend: None,
             restart_count: 0,
             crash_loop_threshold: 0,
@@ -275,7 +301,7 @@ mod tests {
     #[test]
     fn set_desired_active_transitions_to_starting() {
         let mut s = SupervisionState::fresh();
-        s.set_desired_active(Some("d-1".into()), Some("mock".into()));
+        s.set_desired_active(Some("d-1".into()), Some("mock".into()), None);
         assert_eq!(s.phase, SupervisionPhase::Starting);
         assert_eq!(s.desired_active.as_deref(), Some("d-1"));
     }
@@ -283,8 +309,8 @@ mod tests {
     #[test]
     fn clear_desired_active_goes_idle() {
         let mut s = SupervisionState::fresh();
-        s.set_desired_active(Some("d-1".into()), Some("mock".into()));
-        s.set_desired_active(None, None);
+        s.set_desired_active(Some("d-1".into()), Some("mock".into()), None);
+        s.set_desired_active(None, None, None);
         assert_eq!(s.phase, SupervisionPhase::NoActiveDeployment);
     }
 

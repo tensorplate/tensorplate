@@ -50,6 +50,8 @@ fn ready_status_response() -> ControlResponse {
             agent_state: SupervisionAgentState::Ready,
             desired_active: Some("d-1".into()),
             actual_active: Some("d-1".into()),
+            desired_device_index: None,
+            actual_device_index: None,
             backend: Some("tensorrt".into()),
             restart_count: 0,
             crash_loop_threshold: 5,

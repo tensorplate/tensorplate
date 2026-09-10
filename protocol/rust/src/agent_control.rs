@@ -367,6 +367,14 @@ pub struct SupervisionStatusSummary {
     pub desired_active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_active: Option<String>,
+    /// Accelerator the deployment asks for, and the one the running worker
+    /// got. Absent means unpinned. They differ only between a pin change
+    /// and the relaunch it causes, because changing a pin replaces the
+    /// worker rather than moving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_device_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_device_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub restart_count: u64,
@@ -1089,6 +1097,8 @@ mod tests {
                 agent_state: SupervisionAgentState::Failed,
                 desired_active: Some("d-1".into()),
                 actual_active: None,
+                desired_device_index: None,
+                actual_device_index: None,
                 backend: Some("mock".into()),
                 restart_count: 5,
                 crash_loop_threshold: 5,

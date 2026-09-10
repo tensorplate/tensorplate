@@ -659,6 +659,8 @@ impl Coordinator {
                 agent_state: status.agent_state,
                 desired_active: status.desired_active,
                 actual_active: status.actual_active,
+                desired_device_index: status.desired_device_index,
+                actual_device_index: status.actual_device_index,
                 backend: status.backend,
                 restart_count: u64::from(status.restart_count),
                 crash_loop_threshold: u64::from(status.crash_loop_threshold),

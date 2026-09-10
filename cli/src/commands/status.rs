@@ -194,6 +194,8 @@ fn supervision_block(s: &SupervisionStatusSummary) -> Value {
         "serving_state": serving_state_label(s.serving_state),
         "desired_active": s.desired_active,
         "actual_active": s.actual_active,
+        "desired_device_index": s.desired_device_index,
+        "actual_device_index": s.actual_device_index,
         "backend": s.backend,
         "restart_count": s.restart_count,
         "crash_loop_threshold": s.crash_loop_threshold,
@@ -368,6 +370,28 @@ fn render_human(
                 if s.crash_loop { " (CRASH-LOOP)" } else { "" },
                 s.backend.as_deref().unwrap_or("<unknown>"),
             ));
+            match (s.actual_device_index, s.desired_device_index) {
+                // Divergence is transient and worth showing: a pin change
+                // replaces the worker, and this is the window where the
+                // running one is still on the old device.
+                (Some(actual), Some(desired)) if actual != desired => {
+                    out.push_str(&format!(
+                        "  accelerator: device={actual} (moving to {desired})\n"
+                    ));
+                }
+                (Some(actual), _) => {
+                    out.push_str(&format!("  accelerator: device={actual}\n"));
+                }
+                (None, Some(desired)) => {
+                    out.push_str(&format!(
+                        "  accelerator: device={desired} requested, no worker running\n"
+                    ));
+                }
+                // Unpinned, which is every deployment today. Saying so on
+                // every status line would be noise an operator learns to
+                // skip, and the line that matters would go with it.
+                (None, None) => {}
+            }
             if let Some(err) = s.last_failure_message.as_deref() {
                 out.push_str(&format!(
                     "  last_failure: code={} message={}\n",
@@ -635,6 +659,8 @@ mod tests {
                 agent_state: SupervisionAgentState::Ready,
                 desired_active: Some("d-1".into()),
                 actual_active: Some("d-1".into()),
+                desired_device_index: None,
+                actual_device_index: None,
                 backend: Some("tensorrt".into()),
                 restart_count: 0,
                 crash_loop_threshold: 5,
@@ -872,6 +898,67 @@ mod tests {
         assert_eq!(
             parsed["payload"]["observability"]["observability_state"],
             "no_heartbeat"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_worker_prints_no_accelerator_line() {
+        // Every deployment today is unpinned. A line reading "device=<none>"
+        // on every status would be noise an operator learns to skip past --
+        // and the one that matters would go with it.
+        let rendered = render_human(&profile(), Some(&agent_status_with_active()), None);
+        assert!(
+            !rendered.contains("accelerator: device"),
+            "unpinned status must stay quiet: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_worker_names_its_device() {
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.desired_device_index = Some(2);
+            sup.actual_device_index = Some(2);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("accelerator: device=2"),
+            "a pinned worker must say which device: {rendered}"
+        );
+        assert!(
+            !rendered.contains("moving to"),
+            "nothing is moving: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_worker_being_moved_names_both_devices() {
+        // The window the pair exists for. Printing only the request would
+        // tell an operator the model had moved while it was still serving
+        // from the old device.
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.actual_device_index = Some(0);
+            sup.desired_device_index = Some(3);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("device=0 (moving to 3)"),
+            "both the serving device and the target must appear: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_requested_device_with_no_worker_says_nothing_is_running() {
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.actual_device_index = None;
+            sup.desired_device_index = Some(1);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("device=1 requested, no worker running"),
+            "a request with nothing serving must not read as serving: {rendered}"
         );
     }
 }
