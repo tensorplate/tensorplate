@@ -495,6 +495,40 @@ pub struct SbomReference {
     pub digest: String,
 }
 
+/// How many accelerators one deployment occupies, and what it does with them.
+///
+/// Absent from a manifest means one device, so nothing written before
+/// topology existed changes meaning and the format version does not move.
+/// Device identity never appears here: the bundle declares the shape it
+/// needs and the platform decides which devices satisfy it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceleratorRequirements {
+    /// Accelerators one deployment occupies.
+    pub device_count: u32,
+    pub mode: AcceleratorMode,
+}
+
+/// What a deployment does with the devices it is given.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceleratorMode {
+    /// N independent copies, one per device, behind one endpoint. Each
+    /// engine sees a single device and needs no awareness of the others.
+    Replicas,
+    /// One model given the whole set, with the engine dividing the work.
+    DeviceSet,
+}
+
+impl AcceleratorMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replicas => "replicas",
+            Self::DeviceSet => "device_set",
+        }
+    }
+}
+
 /// bundle format manifest envelope. Mirrors
 /// `protocol/schemas/bundle_manifest.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -518,6 +552,12 @@ pub struct BundleManifest {
     pub runtime_compatibility: RuntimeCompatibility,
     #[serde(default, skip_serializing_if = "is_default_capability_requirements")]
     pub capability_requirements: CapabilityRequirements,
+    /// Absent means one device. Modelled as an option rather than a
+    /// defaulted struct because "this bundle says nothing about topology"
+    /// and "this bundle asks for one replica" are different statements,
+    /// and defaulting would put a mode nobody chose into every manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerator_requirements: Option<AcceleratorRequirements>,
     #[serde(default, skip_serializing_if = "is_default_precision_metadata")]
     pub precision: PrecisionMetadata,
     #[serde(default, skip_serializing_if = "is_default_model_blocks")]
@@ -583,6 +623,12 @@ pub enum BundleManifestError {
         "BundleManifest.backend_hint `{0}` is not recognized; v0.1.0 accepts `tensorrt`, `libtorch`, `python_pytorch`; `vitis_ai` and `onnxruntime` are reserved extension slots"
     )]
     UnknownBackendHint(String),
+    #[error("BundleManifest.accelerator_requirements.device_count must be at least 1")]
+    ZeroDeviceCount,
+    #[error(
+        "BundleManifest.accelerator_requirements asks for {device_count} accelerators in `{mode}` mode; this release serves one device per deployment and refuses rather than running on fewer than the bundle asks for"
+    )]
+    UnsupportedAcceleratorTopology { device_count: u32, mode: String },
     #[error("BundleManifest.artifacts must contain at least one entry")]
     NoArtifacts,
     #[error("BundleManifest.artifacts must contain exactly one entry with role=model")]
@@ -748,6 +794,24 @@ impl BundleManifest {
                 self.backend_hint.clone(),
             ));
         }
+        // The shape is frozen here so a later release adds behaviour without
+        // revising this contract. The behaviour is not: neither mode is
+        // executable yet -- replicas needs the supervisor to pin a worker to
+        // a device, and device sets need the engine work behind that. A
+        // manifest asking for more than one device is refused rather than
+        // quietly served on one, which is the outcome that would let a
+        // bundle believe it got what it asked for.
+        if let Some(requirements) = self.accelerator_requirements {
+            if requirements.device_count == 0 {
+                return Err(BundleManifestError::ZeroDeviceCount);
+            }
+            if requirements.device_count > 1 {
+                return Err(BundleManifestError::UnsupportedAcceleratorTopology {
+                    device_count: requirements.device_count,
+                    mode: requirements.mode.as_str().to_string(),
+                });
+            }
+        }
         if self.artifacts.is_empty() {
             return Err(BundleManifestError::NoArtifacts);
         }
@@ -895,6 +959,7 @@ impl Default for BundleManifest {
             target_hardware: TargetHardware::default(),
             runtime_compatibility: RuntimeCompatibility::default(),
             capability_requirements: CapabilityRequirements::default(),
+            accelerator_requirements: None,
             precision: PrecisionMetadata::default(),
             model_blocks: ModelBlocks::default(),
             signature: None,
@@ -912,9 +977,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        ArtifactRole, BundleArtifact, BundleManifest, BundleManifestError, CapabilityRequirements,
-        DeviceFamily, ModelClass, PrecisionHint, RuntimeCompatibility, TargetHardware,
-        SCHEMA_VERSION,
+        AcceleratorMode, AcceleratorRequirements, ArtifactRole, BundleArtifact, BundleManifest,
+        BundleManifestError, CapabilityRequirements, DeviceFamily, ModelClass, PrecisionHint,
+        RuntimeCompatibility, TargetHardware, SCHEMA_VERSION,
     };
     use crate::decode_with_version_check;
 
@@ -947,6 +1012,7 @@ mod tests {
                 max_runtime_version: Some("0.2.0".into()),
             },
             capability_requirements: CapabilityRequirements::default(),
+            accelerator_requirements: None,
             precision: super::PrecisionMetadata::default(),
             model_blocks: super::ModelBlocks::default(),
             signature: None,
@@ -1137,5 +1203,122 @@ mod tests {
             err,
             BundleManifestError::InvalidVitisCalibrationDigest
         ));
+    }
+
+    fn with_accelerators(device_count: u32, mode: AcceleratorMode) -> BundleManifest {
+        let mut manifest = vision_manifest();
+        manifest.accelerator_requirements = Some(AcceleratorRequirements { device_count, mode });
+        manifest
+    }
+
+    #[test]
+    fn a_manifest_that_says_nothing_about_topology_still_validates() {
+        // The compatibility rule the whole block rests on. Every bundle
+        // written before topology existed omits it, so if absence were not
+        // accepted the field would break every manifest in the world.
+        let manifest = vision_manifest();
+        assert!(manifest.accelerator_requirements.is_none());
+        manifest.validate().expect("absence means one device");
+    }
+
+    #[test]
+    fn an_absent_block_is_omitted_from_the_encoding_entirely() {
+        // Not merely defaulted: a manifest round-tripping through this type
+        // must not gain a key it never had, or every re-signed bundle would
+        // differ from its original by a field nobody wrote.
+        let encoded = serde_json::to_value(vision_manifest()).expect("encodes");
+        assert!(
+            encoded.get("accelerator_requirements").is_none(),
+            "an unset block must not appear in the encoding: {encoded}"
+        );
+    }
+
+    #[test]
+    fn one_device_is_accepted_in_either_mode() {
+        for mode in [AcceleratorMode::Replicas, AcceleratorMode::DeviceSet] {
+            with_accelerators(1, mode)
+                .validate()
+                .expect("one device is what this release serves");
+        }
+    }
+
+    #[test]
+    fn more_than_one_device_is_refused_rather_than_served_on_fewer() {
+        // The shape is frozen so a later release adds behaviour without
+        // revising this contract. The behaviour is not: neither mode is
+        // executable yet. Accepting the manifest and running it on one
+        // device would let a bundle believe it got what it asked for.
+        for mode in [AcceleratorMode::Replicas, AcceleratorMode::DeviceSet] {
+            let err = with_accelerators(4, mode)
+                .validate()
+                .expect_err("four devices cannot be honoured");
+            assert!(
+                matches!(
+                    err,
+                    BundleManifestError::UnsupportedAcceleratorTopology {
+                        device_count: 4,
+                        ..
+                    }
+                ),
+                "expected a topology refusal naming four devices, got {err:?}"
+            );
+            // Asserted on the rendered message as well as the variant: the
+            // operator reads this string, and a refusal that does not say
+            // what was asked for leaves them guessing which field to change.
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains('4'),
+                "names the count asked for: {rendered}"
+            );
+            assert!(
+                rendered.contains(mode.as_str()),
+                "names the mode it was asked in: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_devices_is_a_different_failure_from_too_many() {
+        // Distinct because the fixes differ: zero is a malformed manifest,
+        // and four is a well-formed request this release cannot serve.
+        let err = with_accelerators(0, AcceleratorMode::Replicas)
+            .validate()
+            .expect_err("zero is not a device count");
+        assert!(
+            matches!(err, BundleManifestError::ZeroDeviceCount),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn the_mode_spellings_match_the_schema_that_documents_them() {
+        // This type is a hand-maintained mirror of the JSON schema -- the
+        // module header says so, and nothing checks it. A rename on either
+        // side would otherwise surface as a bundle that parses everywhere
+        // except where it matters.
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/bundle_manifest.json"))
+                .expect("the schema parses");
+        let documented: Vec<&str> = schema["properties"]["accelerator_requirements"]["properties"]
+            ["mode"]["enum"]
+            .as_array()
+            .expect("the schema documents the mode enum")
+            .iter()
+            .map(|v| v.as_str().expect("mode spellings are strings"))
+            .collect();
+        let owned = [
+            AcceleratorMode::Replicas.as_str(),
+            AcceleratorMode::DeviceSet.as_str(),
+        ];
+        assert_eq!(documented, owned, "the schema and this enum must agree");
+
+        // And the round trip, so a spelling that matches the schema but
+        // decodes to the wrong variant is caught too.
+        for mode in [AcceleratorMode::Replicas, AcceleratorMode::DeviceSet] {
+            let encoded = serde_json::to_value(mode).expect("encodes");
+            assert_eq!(encoded.as_str(), Some(mode.as_str()));
+            let decoded: AcceleratorMode = serde_json::from_value(encoded).expect("decodes back");
+            assert_eq!(decoded, mode);
+        }
     }
 }

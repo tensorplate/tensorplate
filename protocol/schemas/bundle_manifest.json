@@ -253,6 +253,30 @@
         }
       }
     },
+    "accelerator_requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_count",
+        "mode"
+      ],
+      "description": "How many accelerators one deployment of this bundle occupies, and what it does with them. Absent means one device, so no manifest written before topology existed changes meaning and the format version does not move. Deliberately not inside `capability_requirements`, which is a closed bag of booleans: a device count is a requirement with a value, not a flag. Device identity never appears here -- the bundle declares the shape it needs and the platform decides which devices satisfy it.",
+      "properties": {
+        "device_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Accelerators one deployment occupies. One is the only value this release can honour."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "replicas",
+            "device_set"
+          ],
+          "description": "`replicas` runs N independent copies, one per device, behind one endpoint; the engine sees a single device and needs no awareness of the others. `device_set` gives one model the whole set and the engine divides the work. Both spellings are frozen here so a later release adds behaviour without revising this contract; neither is executable in this release, and a manifest requesting more than one device is refused rather than served on fewer."
+        }
+      }
+    },
     "capability_requirements": {
       "type": "object",
       "additionalProperties": false,

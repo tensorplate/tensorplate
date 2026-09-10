@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Bundle manifests can declare an optional `accelerator_requirements`
+  block with `device_count` and a `replicas` or `device_set` mode. Omission
+  retains single-device behavior without a format-version change. Zero
+  devices are invalid; requests above one device are refused with the
+  requested count and mode until multi-device execution is supported.
+
 - Platform capabilities carry the admitted device count alongside a
   per-device memory ceiling.
 
