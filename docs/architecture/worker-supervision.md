@@ -18,6 +18,24 @@ V01-E09 makes `tensorplate-agent` the owner of the
 This document is the single source of truth for the supervisor's
 contract with `Coordinator`, the observability service, and the CLI.
 
+## Device pinning
+
+`DesiredWorker.device_index` optionally selects one accelerator for a
+worker. `WorkerProcess::launch` receives the pin as a launch parameter.
+The process launcher sets `CUDA_VISIBLE_DEVICES` after rebuilding the
+environment from the allowlist, so an explicit pin overrides an inherited
+value. With `None`, the allowlist continues to govern the environment.
+
+The running worker's handle retains its launch-time pin. Adding, changing,
+or removing that pin through `set_desired_active` stops the old worker
+before launching a replacement, even for the same deployment ID. An
+unchanged request preserves the running worker. If desired placement
+changes again while the worker is stopping, the replacement uses the
+latest request. Crash restarts also use the current desired pin.
+
+The coordinator and restart recovery currently request `None`: device
+allocation and multi-device execution remain deferred.
+
 ## Layering
 
 ```

@@ -180,7 +180,8 @@ impl WorkerSupervisor {
         inner.state.status(now)
     }
 
-    /// Install / clear the desired active deployment.
+    /// Install / clear the desired active deployment. Changing the device
+    /// pin replaces the running worker even when the deployment ID is unchanged.
     ///
     /// # Errors
     ///
@@ -192,9 +193,16 @@ impl WorkerSupervisor {
             .inner
             .lock()
             .map_err(|e| AgentError::Internal(format!("supervisor mutex poisoned: {e}")))?;
-        let next_id = desired.as_ref().map(|d| d.deployment_id.as_str());
-        let current_id = inner.handle.as_ref().map(|h| h.deployment_id.as_str());
-        if inner.handle.is_some() && current_id != next_id {
+        let next_placement = desired
+            .as_ref()
+            .map(|d| (d.deployment_id.as_str(), d.device_index));
+        // Compare with the launched worker, since desired may be updated
+        // again while that worker is still stopping.
+        let current_placement = inner
+            .handle
+            .as_ref()
+            .map(|h| (h.deployment_id.as_str(), h.device_index));
+        if inner.handle.is_some() && current_placement != next_placement {
             inner.stop_requested = true;
             inner.stop_hold = false;
         }

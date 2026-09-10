@@ -31,6 +31,9 @@ use super::config::{SupervisorConfig, WorkerStdioMode};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkerHandle {
     pub deployment_id: String,
+    /// Device pin used at launch. Kept with the running worker so desired
+    /// placement changes can be reconciled before a replacement starts.
+    pub device_index: Option<u32>,
     pub launch_sequence: u64,
     pub launched_at: Instant,
     pub pid: Option<u32>,
@@ -232,6 +235,7 @@ impl WorkerProcess for SystemWorkerProcess {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let handle = WorkerHandle {
             deployment_id: deployment_id.to_string(),
+            device_index,
             launch_sequence: state.next_sequence,
             launched_at: Instant::now(),
             pid,
@@ -451,6 +455,7 @@ impl WorkerProcess for MockWorkerProcess {
         state.next_sequence = state.next_sequence.saturating_add(1);
         let handle = WorkerHandle {
             deployment_id: deployment_id.to_string(),
+            device_index,
             launch_sequence: state.next_sequence,
             launched_at: Instant::now(),
             pid: Some(1_000 + u32::try_from(state.next_sequence).unwrap_or(0)),
