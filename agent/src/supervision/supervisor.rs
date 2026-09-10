@@ -82,6 +82,16 @@ pub enum TickOutcome {
 pub struct DesiredWorker {
     pub deployment_id: String,
     pub backend: String,
+    /// Which accelerator this worker is confined to, if any.
+    ///
+    /// `None` means the worker sees whatever the host exposes, which is
+    /// every deployment today: rows claim one device and the manifest
+    /// refuses to ask for more. It becomes load-bearing when one
+    /// deployment runs a replica per device, where two workers sharing a
+    /// host must not both take device 0 -- and where a worker allowed to
+    /// see all of them would allocate against memory another replica is
+    /// counting on.
+    pub device_index: Option<u32>,
 }
 
 /// Public V01-E09 worker supervisor.
@@ -346,7 +356,10 @@ impl WorkerSupervisor {
             .desired
             .clone()
             .ok_or_else(|| AgentError::Internal("launch_worker without desired".into()))?;
-        match self.process.launch(&desired.deployment_id) {
+        match self
+            .process
+            .launch(&desired.deployment_id, desired.device_index)
+        {
             Ok(handle) => {
                 inner.handle = Some(handle.clone());
                 inner.launched_at = Some(now);
@@ -849,6 +862,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Tick 1: launch.
@@ -887,6 +901,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Tick 1: launch
@@ -923,6 +938,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         for _ in 0..6 {
@@ -957,6 +973,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         for _ in 0..6 {
@@ -982,6 +999,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         // Reach ready.
@@ -1015,6 +1033,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch");
@@ -1050,6 +1069,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set d-1");
         let _ = supervisor.tick().expect("launch d-1");
@@ -1058,6 +1078,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-2".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set d-2");
         let _ = supervisor.tick().expect("stop d-1");
@@ -1087,6 +1108,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch"); // launch
@@ -1134,6 +1156,7 @@ mod tests {
             .set_desired_active(Some(DesiredWorker {
                 deployment_id: "d-1".into(),
                 backend: "mock".into(),
+                device_index: None,
             }))
             .expect("set desired");
         let _ = supervisor.tick().expect("launch");

@@ -788,6 +788,11 @@ impl Coordinator {
         let desired = DesiredWorker {
             deployment_id: deployment_id.to_string(),
             backend: backend_hint.to_string(),
+            // Unpinned: one deployment, one worker, whatever the host
+            // exposes. A pin here needs an allocator deciding which device
+            // each replica gets, and nothing allocates yet -- rows claim
+            // one device and the manifest refuses to ask for more.
+            device_index: None,
         };
         let _ = sup.set_desired_active(Some(desired));
         let _ = sup.recover_after_operator_action();

@@ -124,6 +124,7 @@ fn set_desired(fixture: &Fixture, id: &str) {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: id.to_string(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("set desired");
 }
@@ -330,6 +331,7 @@ fn missing_observability_consumer_does_not_stall_supervision() {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: "d-1".into(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("set desired");
     for _ in 0..10 {
@@ -370,6 +372,7 @@ fn bounded_event_sink_drops_oldest_when_full() {
         .set_desired_active(Some(DesiredWorker {
             deployment_id: "d-1".into(),
             backend: "mock".into(),
+            device_index: None,
         }))
         .expect("set desired");
     for _ in 0..6 {
