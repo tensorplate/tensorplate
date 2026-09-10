@@ -200,6 +200,12 @@ observability service. Fields:
 - `serving_state` — stable supervision phase name (above).
 - `agent_state` — coarse `ready` / `degraded` / `failed` rollup.
 - `desired_active` / `actual_active` — deployment ids.
+- `desired_device_index` / `actual_device_index` — requested and
+  launch-time accelerator pins. With the corresponding deployment ID
+  present, an absent pin means unpinned. Without that ID, no worker is
+  requested or running. The actual pin remains tied to the launched
+  worker through a placement change and clears when the worker leaves
+  actual state; the desired pin remains visible during launch or restart.
 - `backend` — backend hint published by the active bundle.
 - `restart_count` / `crash_loop_threshold` / `crash_loop` — rolling
   policy state.

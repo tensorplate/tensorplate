@@ -190,9 +190,9 @@ pub struct SupervisionStatus {
     pub agent_state: SupervisionAgentState,
     pub desired_active: Option<String>,
     pub actual_active: Option<String>,
-    /// Which accelerator the deployment asks for, and which one the running
-    /// worker got. Absent means unpinned -- the worker sees whatever the
-    /// host exposes, which is every deployment today.
+    /// Requested and launch-time accelerator pins. Interpret each with its
+    /// corresponding active deployment ID: an absent pin on a present
+    /// deployment means unpinned, while an absent ID means no worker.
     pub desired_device_index: Option<u32>,
     pub actual_device_index: Option<u32>,
     pub backend: Option<String>,

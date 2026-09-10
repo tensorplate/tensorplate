@@ -368,12 +368,12 @@
         "desired_device_index": {
           "type": "integer",
           "minimum": 0,
-          "description": "Accelerator the deployment asks this worker to be confined to. Absent means unpinned: the worker sees whatever the host exposes."
+          "description": "Requested accelerator pin. When desired_active is present, an absent pin means an unpinned worker is requested. When desired_active is absent, no worker is requested."
         },
         "actual_device_index": {
           "type": "integer",
           "minimum": 0,
-          "description": "Accelerator the running worker was launched with. Differs from `desired_device_index` only in the window between a pin change and the relaunch it causes, because changing a pin replaces the worker rather than moving it."
+          "description": "Accelerator pin used to launch the running worker. When actual_active is present, an absent pin means the worker is unpinned; when actual_active is absent, no worker is running. The actual and desired pins can differ during initial launch, restart, or a placement change."
         },
         "backend": {"type": "string"},
         "restart_count": {"type": "integer", "minimum": 0},

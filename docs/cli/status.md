@@ -36,6 +36,30 @@ The CLI picks the highest severity across agent state, supervision state,
 and observability state. Crash-loop is surfaced explicitly because the
 supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
 
+## Accelerator placement
+
+Supervision includes `desired_device_index` and `actual_device_index`.
+Read them alongside `desired_active` and `actual_active`: a present
+deployment ID with a null pin means an unpinned worker; an absent ID means
+no worker is requested or running on that side. The agent wire protocol
+omits absent optional pins, while CLI JSON renders them as `null`.
+
+Human output distinguishes the running worker from the requested placement:
+
+| State | Accelerator line |
+| --- | --- |
+| Running on the requested device | `accelerator: device=2` |
+| Running unpinned while a pin is requested | `accelerator: unpinned (moving to 1)` |
+| Running on one device while another is requested | `accelerator: device=0 (moving to 3)` |
+| Running pinned while an unpinned replacement is requested | `accelerator: device=0 (removing pin)` |
+| Desired deployment cleared, pinned worker still stopping | `accelerator: device=0 (stopping)` |
+| Pin requested, worker has not launched or is awaiting restart | `accelerator: device=1 requested, no worker running` |
+
+Ordinary unpinned deployments omit the accelerator line. The requested
+and actual pins can differ during initial launch, restart, and placement
+changes. The running pin is cleared only when the supervisor removes the
+worker from its actual state.
+
 ## JSON payload skeleton
 
 ```jsonc
@@ -54,7 +78,15 @@ supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
     "previous_active": null,
     "candidate": null,
     "in_flight_transaction": null,
-    "supervision": { "serving_state": "ready", "crash_loop": false, … },
+    "supervision": {
+      "serving_state": "ready",
+      "desired_active": "d-1",
+      "actual_active": "d-1",
+      "desired_device_index": null,
+      "actual_device_index": null,
+      "crash_loop": false,
+      …
+    },
     "platform_telemetry": {
       "row_id": "ubuntu2404-x86-l4-g2s8",
       "validated": true,
