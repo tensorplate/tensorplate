@@ -141,7 +141,7 @@ fn render(findings: &[Finding]) -> String {
 /// real host of that row would report. `None` is a row whose accelerator
 /// comes from the host sources themselves (Apple, Jetson) or which has
 /// none at all (CPU-only) -- both are cases the row match must handle.
-const GOLDEN_ROWS: [(&str, &str, Option<&str>); 8] = [
+const GOLDEN_ROWS: [(&str, &str, Option<&str>); 12] = [
     (
         "jetson-orin-nano-8gb-jp62",
         "jetson-orin-nano-8gb-jp62",
@@ -153,6 +153,26 @@ const GOLDEN_ROWS: [(&str, &str, Option<&str>); 8] = [
         "ubuntu2404-x86-a100-40g-a2hg1",
         "ubuntu2404-x86-a100-40g-a2hg1",
         Some("ubuntu2404-x86-a100-40g-a2hg1"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug1",
+        "ubuntu2404-x86-a100-80g-a2ug1",
+        Some("ubuntu2404-x86-a100-80g-a2ug1"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug8",
+        "ubuntu2404-x86-a100-80g-a2ug8",
+        Some("ubuntu2404-x86-a100-80g-a2ug8"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        Some("ubuntu2404-x86-h100-80g-a3hg1"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg8",
+        "ubuntu2404-x86-h100-80g-a3hg8",
+        Some("ubuntu2404-x86-h100-80g-a3hg8"),
     ),
     (
         "ubuntu2404-x86-l4-g2s8",

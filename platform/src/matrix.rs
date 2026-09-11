@@ -136,9 +136,21 @@ fn write_row_table(out: &mut String, rows: &[&PlatformSupportRow], with_model_cl
             .collect::<Vec<_>>()
             .join(", ");
         let cpu = format!("{} ({vendors})", row.cpu().architecture.as_str());
-        let accelerator = row
-            .accelerator()
-            .map_or_else(|| "none".to_string(), |a| cell(&a.sku));
+        // The count is part of the claim. An eight-GPU row and a one-GPU
+        // row of the same card are different support claims -- evidence on
+        // one does not carry to the other -- and without the count they
+        // would read identically here except for the shape name. Omitted
+        // at one so every single-device row renders exactly as before.
+        let accelerator = row.accelerator().map_or_else(
+            || "none".to_string(),
+            |a| {
+                if a.device_count > 1 {
+                    format!("{}\u{00d7} {}", a.device_count, cell(&a.sku))
+                } else {
+                    cell(&a.sku)
+                }
+            },
+        );
         let environment = validated_on(row);
         if with_model_classes {
             let _ = writeln!(

@@ -46,7 +46,24 @@ listed so a future recording knows exactly what claim it replaces.
 | `ubuntu2404-x86-a100-40g-a2hg1.txt` | `NVIDIA A100-SXM4-40GB` | NVIDIA A100 documentation; SXM4 boards encode form factor and capacity in the name. |
 | `ubuntu2404-x86-rtxpro6000se-g4s48.txt` | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | NVIDIA RTX PRO 6000 Blackwell product naming. |
 | `ubuntu2404-x86-rtxpro6000we-physical.txt` | `NVIDIA RTX PRO 6000 Blackwell Workstation Edition` | NVIDIA RTX PRO 6000 Blackwell product naming. This row is **Planned** and has no recorded fixture, so this string has the weakest provenance of any here. |
-| `unsupported-a100-80gb.txt` | `NVIDIA A100-SXM4-80GB` | Same family as the supported A100, one capacity away. |
+| `unsupported-a100-pcie-40gb.txt` | `NVIDIA A100-PCIE-40GB` | The canonical near miss: same family **and** same capacity as the A100 40GB row, differing only in form factor. It replaced `unsupported-a100-80gb.txt` when the A100 80GB became a Preview row, and it is the stronger near miss of the two. GCP's A100s are all SXM4, so this stays off-matrix. The spelling follows NVIDIA's form-factor naming and is not recorded; that is immaterial here, because the property under test is that a card no row names is refused rather than matched to its nearest row. |
+| `ubuntu2404-x86-a100-80g-a2ug1.txt`, `...-a2ug8.txt` | `NVIDIA A100-SXM4-80GB` | Follows the SXM4 naming of the committed A100 40GB row. **Not recorded.** The 81920 MiB framebuffer is carried over from the earlier transcription and is also unverified. The 8-device file repeats the line with distinct synthetic UUIDs. |
+| `ubuntu2404-x86-h100-80g-a3hg1.txt`, `...-a3hg8.txt` | `NVIDIA H100 80GB HBM3` | Name and 81559 MiB framebuffer taken from observed `nvidia-smi` output on another provider's H100 host ([thundergolfer, "Why does an NVIDIA H100 80GB card offer 85.52 GB?"](https://thundergolfer.com/blog/nvidia-gpu-memory-capacity)). **Not recorded on GCP.** Consistent with GCP documenting `a3-highgpu-*` as H100 SXM; `a3-megagpu-8g` uses a different accelerator type (`nvidia-h100-mega-80gb`) and may report a different string, so it has no row. |
+
+### The `NVIDIA ` prefix is driver-dependent
+
+NVIDIA's HGX A100 software guide shows `nvidia-smi` printing
+`A100-SXM4-40GB` -- **without** the `NVIDIA ` prefix -- from an older
+driver. Current drivers print it: the recorded L4 captures (driver 580 and
+595) read `NVIDIA L4`, and the H100 output above reads `NVIDIA H100 80GB
+HBM3`. Every committed NVIDIA row uses the prefixed form.
+
+Detection matches the product name verbatim with no normalisation, so a
+host on an older driver would report a SKU no row names. That is true of
+every NVIDIA row, not something these rows introduce -- but it means the
+first `tensorplate doctor --record` on each of these machines is what
+confirms the string, and its `accelerator_facts` finding will show exactly
+what was reported if it does not match.
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
 | `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's card with `mig.mode.current` set to `Enabled`. The row is Planned; the partitioning refusal is checked before support level, so this fixture still exercises it. |

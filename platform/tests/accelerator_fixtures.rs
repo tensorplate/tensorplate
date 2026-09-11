@@ -90,9 +90,6 @@ fn publication_safe_uuid(name: &str, uuid: &str) -> bool {
             "ubuntu2404-x86-rtxpro6000we-physical",
             "GPU-4b1d8e70-2f95-4c31-86a7-0d5e9b2c8f14"
         ) | (
-            "unsupported-a100-80gb",
-            "GPU-2a7c4e19-8b03-4d6f-91ae-7c5d0f2b8e63"
-        ) | (
             "unsupported-rtx-6000-ada",
             "GPU-8c2f5a63-4d19-4e7b-b085-9a3c1e6d4f27"
         ) | (
@@ -253,7 +250,7 @@ fn a_partitioned_device_is_rejected_before_its_sku_is_considered() {
     // too. If partitioning were checked after the SKU, this would come
     // back unsupported_accelerator_sku and the operator would be sent to
     // replace hardware that is fine.
-    let off_matrix = std::fs::read_to_string(fixture_dir().join("unsupported-a100-80gb.txt"))
+    let off_matrix = std::fs::read_to_string(fixture_dir().join("unsupported-a100-pcie-40gb.txt"))
         .expect("read off-matrix fixture")
         .replace("Disabled", "Enabled");
     let report = identify_accelerator(&sources(&off_matrix))

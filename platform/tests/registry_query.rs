@@ -102,7 +102,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
 #[test]
 fn the_committed_registry_loads_completely() {
     let registry = registry();
-    assert_eq!(registry.rows().count(), 12, "twelve rows load");
+    assert_eq!(registry.rows().count(), 16, "sixteen rows load");
     assert_eq!(
         registry.roadmap_targets().count(),
         4,
@@ -110,8 +110,8 @@ fn the_committed_registry_loads_completely() {
     );
     assert_eq!(
         registry.supported_rows().count(),
-        7,
-        "four Production plus three Preview rows are supported combinations"
+        12,
+        "four Production plus eight Preview rows are supported combinations"
     );
 }
 
@@ -548,7 +548,7 @@ fn unmatched_identities_get_the_most_specific_reason() {
                         None,
                     )
                 },
-                accelerator("NVIDIA A100-SXM4-80GB"),
+                accelerator("NVIDIA A100-PCIE-40GB"),
             ),
             PlatformReason::UnsupportedAcceleratorSku,
         ),
@@ -732,6 +732,10 @@ fn only_shape_scoped_rows_declare_a_machine_type() {
         scoped,
         [
             "ubuntu2404-x86-a100-40g-a2hg1",
+            "ubuntu2404-x86-a100-80g-a2ug1",
+            "ubuntu2404-x86-a100-80g-a2ug8",
+            "ubuntu2404-x86-h100-80g-a3hg1",
+            "ubuntu2404-x86-h100-80g-a3hg8",
             "ubuntu2404-x86-l4-g2s8",
             "ubuntu2404-x86-rtxpro6000se-g4s48"
         ],
