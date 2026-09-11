@@ -124,15 +124,25 @@ the device invalidates the glibc-floor comparison the run exists for.
 
    ```bash
    tools/validation/jetson-clean-room.sh run \
-     --version <tested_version> \
+     --version <asset_tag> \
      --evidence-dir <evidence> \
      --confirm RESET-TENSORPLATE
    ```
 
-   `--version` is not optional in practice. Without it the harness falls
-   back to its own default and downloads that release's assets, so the
-   run would install one release while the report claimed another — and
-   the digest it records would correctly identify the wrong build.
+   `<asset_tag>` is the release **tag** whose published assets this run
+   installs — `v0.2.1-rc.1` — and it is deliberately not the
+   `<tested_version>` the report is filed under. A candidate's assets are
+   what can be downloaded while the evidence is being collected: the
+   release workflow's evidence gate runs before the jobs that build and
+   publish, and a final release is created as a draft, so its assets are
+   not yet reachable at the public tag URL. Passing the bare version here
+   would send the harness after a tag that does not exist yet, and the
+   run would stop at the download.
+
+   The flag is not optional in practice. Without it the harness falls
+   back to its own default tag and downloads that release's assets, so
+   the run would install one release while the report claimed another —
+   and the digest it records would correctly identify the wrong build.
 
    The digest this run files is the sha256 of the release's `SHA256SUMS`,
    taken once the asset set has verified and before anything is purged.
