@@ -379,6 +379,26 @@ print(json.dumps({
 PY
 }
 
+# The artifact this run installed, taken from the pin the formula graph
+# was verified against.
+#
+# This channel publishes no binary: all six formulae build from one
+# source archive, so that archive is the only immutable artifact a
+# digest can name here. It identifies the build input, not the bytes
+# that landed -- two Macs build different binaries from it. Homebrew,
+# not this harness, is what checks the downloaded archive against the
+# pinned sha256.
+record_artifact_digest() {
+  python3 - "${evidence_dir}/formula-pin.json" >"${evidence_dir}/artifact-digest.txt" <<'PY'
+import json
+import pathlib
+import sys
+
+pin = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(f"{pin['source_sha256']}  {pin['source_url']}")
+PY
+}
+
 capture_deploy_input() {
   python3 - "$bundle_dir" >"${evidence_dir}/deploy-input.json" <<'PY'
 import hashlib
@@ -950,6 +970,12 @@ if [[ "$preflight_only" == "1" ]]; then
   exit 0
 fi
 run_stage clean-install install_candidate_clean
+# Recorded here rather than beside the formula-pin stage it reads: a
+# preflight run returns above without installing anything, and a digest
+# filed for an archive nobody fetched would attest an install that never
+# happened. Not a run_stage -- it is not one of the lifecycle stages, and
+# a row in the stage log would claim it was.
+record_artifact_digest || die "failed to record the installed artifact digest"
 run_stage packaged-closure verify_packaged_closure
 run_stage launchd-start start_services
 run_stage m1-exact-row verify_m1_exact_row

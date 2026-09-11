@@ -78,6 +78,13 @@ TP_HOMEBREW_LIFECYCLE_ALLOW=1 \
     --evidence-dir /private/tmp/tensorplate-macos-evidence
 ```
 
+After the candidate install the harness writes `artifact-digest.txt`,
+holding the pinned source archive's checksum and its URL — the same
+`source_sha256` the formula pin and the sanitized transcript already
+carry, so the three cannot disagree. It is what the lifecycle report
+records as the artifact this run installed. A `--preflight-only` run
+writes none, because it downloads no archive.
+
 The run is successful only when every stage in `summary.json` and
 `sanitized-transcript.json` is `pass`. `host-facts.json` deliberately
 excludes serial numbers, hardware UUIDs, and provisioning identifiers.

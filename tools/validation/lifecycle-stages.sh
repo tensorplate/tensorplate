@@ -23,8 +23,15 @@
 #   lifecycle_begin <row_id> <evidence_dir> <tested_version> [harness_name]
 #   trap 'lifecycle_abort $?' EXIT
 #   lifecycle_stage install install_fn args...
+#   lifecycle_artifact_digest <sha256> <what was hashed>
 #   lifecycle_skip upgrade "no prior release on this row"
 #   lifecycle_finish            # writes the report
+#
+# TP_LIFECYCLE_SOURCE_REVISION, if set, is the full 40-hex git SHA the
+# tested artifacts were built from. Anything else is refused rather than
+# written through: a report carrying a tag or a short SHA violates the
+# schema, and the release gate is a worse place to learn that than the
+# machine the run is happening on.
 
 set -Eeuo pipefail
 
@@ -43,6 +50,7 @@ _lc_row_id=""
 _lc_harness=""
 _lc_version=""
 _lc_source_revision=""
+_lc_artifact_digest=""
 _lc_finished=0
 _lc_dir=""
 _lc_report=""
@@ -83,11 +91,41 @@ lifecycle_begin() {
   [[ "$_lc_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] ||
     _lc_die "tested version \`${_lc_version}\` is not a release version"
   _lc_source_revision="${TP_LIFECYCLE_SOURCE_REVISION:-}"
+  [[ -z "$_lc_source_revision" || "$_lc_source_revision" =~ ^[0-9a-f]{40}$ ]] ||
+    _lc_die "source revision \`${_lc_source_revision}\` is not a full git SHA"
+  _lc_artifact_digest=""
   mkdir -p "$_lc_dir"
   _lc_report="${_lc_dir}/lifecycle-report.json"
   _lc_started="$(_lc_now)"
   _lc_records=()
   _lc_finished=0
+}
+
+# Record the artifact this run installed, as the sha256 of the one
+# immutable file the install verified, plus what that file was.
+#
+# Called by the harness after its install stage, not read from the
+# environment: the value cannot be recovered once the run is over, and
+# the harness is the only party that knows which bytes it trusted. The
+# hex goes into the report; the pair is also written to
+# `artifact-digest.txt` beside the stage logs, because `subject` is a
+# closed object with nowhere to say what was hashed, and a digest nobody
+# can attribute later is not evidence.
+#
+# The value is refused rather than normalized. The repository's other
+# digests are `sha256:`-prefixed, and quietly accepting that spelling
+# here would file a report the schema rejects at the release gate.
+lifecycle_artifact_digest() {
+  local digest="${1:?artifact digest required}" what="${2:?what was hashed is required}"
+  [[ -n "$_lc_report" ]] || _lc_die "lifecycle_artifact_digest before lifecycle_begin"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] ||
+    _lc_die "artifact digest \`${digest}\` is not bare lowercase sha256 hex"
+  # One run installs one artifact set. A second value means the harness
+  # does not know which one the report is about.
+  [[ -z "$_lc_artifact_digest" ]] ||
+    _lc_die "artifact digest already recorded as ${_lc_artifact_digest}"
+  _lc_artifact_digest="$digest"
+  printf '%s  %s\n' "$digest" "$what" >"${_lc_dir}/artifact-digest.txt"
 }
 
 _lc_record() {
@@ -198,6 +236,9 @@ _lc_write_report() {
     printf '  "subject": {\n    "tested_version": %s' "$(_lc_json_escape "$_lc_version")"
     if [[ -n "$_lc_source_revision" ]]; then
       printf ',\n    "source_revision": %s' "$(_lc_json_escape "$_lc_source_revision")"
+    fi
+    if [[ -n "$_lc_artifact_digest" ]]; then
+      printf ',\n    "artifact_digest": %s' "$(_lc_json_escape "$_lc_artifact_digest")"
     fi
     printf '\n  },\n'
     printf '  "harness": %s,\n' "$(_lc_json_escape "$_lc_harness")"

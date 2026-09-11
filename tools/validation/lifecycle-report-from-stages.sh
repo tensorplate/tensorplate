@@ -22,6 +22,18 @@
 # where each map is `harness_stage=canonical_stage`. A canonical stage may
 # be named by several harness stages; the weakest of their results is the
 # one reported.
+#
+# The artifact digest is read from `artifact-digest.txt` beside the stage
+# log, in sha256sum's own format -- `<64 lowercase hex>  <what was
+# hashed>`. The harness writes it during the run, because nothing on an
+# installed system reports which artifact it came from, so a digest not
+# taken while the hardware is in hand cannot be recovered afterwards. No
+# file means the report omits the field; a file that is there but
+# malformed stops the conversion rather than being written through.
+#
+# TP_LIFECYCLE_SOURCE_REVISION, if set, is the full 40-hex git SHA the
+# tested artifacts were built from, and is refused if it is anything
+# else.
 
 set -Eeuo pipefail
 
@@ -35,7 +47,7 @@ stages_tsv="$1"; row_id="$2"; tested_version="$3"; harness="$4"; out="$5"; shift
   die "tested version \`${tested_version}\` is not a release version"
 
 python3 - "$stages_tsv" "$row_id" "$tested_version" "$harness" "$out" "$@" <<'PY'
-import json, os, sys
+import json, os, re, sys
 
 stages_tsv, row_id, tested_version, harness, out = sys.argv[1:6]
 mapping = {}
@@ -122,10 +134,69 @@ elif all(s["status"] == "pass" for s in stages) and len(stages) == len(CANONICAL
 else:
     outcome = "incomplete"
 
+def artifact_digest(beside):
+    """The digest the harness recorded next to its stage log, or None.
+
+    Read from the evidence rather than taken from the operator: this is
+    the one fact about a run that cannot be recovered after the hardware
+    is gone, and the harness is the only party that knows which bytes it
+    verified. Absent is allowed -- the schema calls the field optional
+    and a converter run in CI installs nothing. Present but defective is
+    fatal, because the alternatives are filing a report the release gate
+    rejects, or filing one that omits the field as if no harness had
+    ever recorded it.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(beside)), "artifact-digest.txt")
+    if not os.path.exists(path):
+        print(
+            f"lifecycle-report: no artifact digest at {path}; the report will "
+            "not say which artifact was installed",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as err:
+        sys.exit(f"lifecycle-report: cannot read {path}: {err}")
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) != 1:
+        sys.exit(
+            f"lifecycle-report: {path} must hold one digest line, found {len(lines)}"
+        )
+    # sha256sum's own format. Requiring the second column is what tells
+    # real tool output from a digest somebody pasted in by hand, and it
+    # is the only record of WHAT was hashed: `subject` is a closed object
+    # with nowhere to carry it.
+    fields = lines[0].split()
+    if len(fields) < 2:
+        sys.exit(
+            f"lifecycle-report: {path} must say what was hashed, as "
+            "`<sha256>  <file>`"
+        )
+    # Not normalized. A `sha256:` prefix or uppercase hex violates the
+    # schema, and accepting either spelling here would let the wrong
+    # convention into evidence that can only be recollected on hardware.
+    if not re.fullmatch(r"[0-9a-f]{64}", fields[0]):
+        sys.exit(
+            f"lifecycle-report: {path} must begin with bare lowercase sha256 "
+            f"hex, not `{fields[0]}`"
+        )
+    return fields[0]
+
+
 subject = {"tested_version": tested_version}
 revision = os.environ.get("TP_LIFECYCLE_SOURCE_REVISION", "")
+if revision and not re.fullmatch(r"[0-9a-f]{40}", revision):
+    sys.exit(
+        f"lifecycle-report: TP_LIFECYCLE_SOURCE_REVISION `{revision}` is not a "
+        "full git SHA"
+    )
 if revision:
     subject["source_revision"] = revision
+digest = artifact_digest(stages_tsv)
+if digest:
+    subject["artifact_digest"] = digest
 
 report = {
     "schema_version": "0.1",

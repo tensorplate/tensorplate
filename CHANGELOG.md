@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Lifecycle validation reports record which artifact a run installed, as
+  `subject.artifact_digest`. Each harness writes an `artifact-digest.txt`
+  beside its stage logs while the run is happening: the Jetson clean room
+  hashes the release's verified `SHA256SUMS`, and the macOS lifecycle
+  records the source archive its formulae are pinned to. Both report
+  producers take the value from that evidence rather than from the
+  operator, accept only bare lowercase sha256 hex, and omit the field
+  when no harness recorded one.
+
 - Preview rows cover A100 40GB, A100 80GB, and H100 hosts with one, two,
   four, or eight GPUs, A100 40GB with sixteen, plus L4 and RTX PRO 6000
   hosts with two, four, or eight GPUs -- every GPU shape GCP offers for
@@ -43,6 +52,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   homogeneous device sets.
 
 ### Fixed
+
+- Both lifecycle report producers refuse a `TP_LIFECYCLE_SOURCE_REVISION`
+  that is not a full 40-character git SHA, rather than writing it into a
+  report that fails schema validation at the release gate.
 
 - Doctor distinguishes an unavailable accelerator identity from absent
   hardware when NVIDIA PCI evidence is present, directing operators to

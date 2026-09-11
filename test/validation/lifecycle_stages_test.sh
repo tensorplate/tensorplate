@@ -16,6 +16,26 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 harness="${repo_root}/tools/validation/lifecycle-stages.sh"
 failures=0
 
+# Both producers read this, and both now refuse a malformed value. A
+# developer with one exported would otherwise fail these checks for a
+# reason that has nothing to do with what they test.
+unset TP_LIFECYCLE_SOURCE_REVISION
+
+# Real tool output, so the digest fixtures are recorded rather than
+# transcribed. sha256sum on the CI runners, shasum on a developer's Mac.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
+
+subject_field() {
+  python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["subject"].get(sys.argv[2], "absent"))' "$1" "$2"
+}
+
 check() {
   local what="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -165,6 +185,107 @@ set +e
 check "an unknown stage name is rejected" "2" "$?"
 set -e
 
+# --- The artifact digest.
+#
+# The one fact about a run that cannot be recovered once the hardware is
+# gone: nothing on an installed system reports which artifact it came
+# from. So the value is refused rather than repaired, and a run that
+# records none says so by omission rather than by a placeholder.
+digest_line="$(sha256_of "$harness")"
+digest_hex="${digest_line%% *}"
+
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_begin ubuntu2404-x86-l4-g2s8 "${work}/digest" 0.2.1 test-harness
+  trap 'lifecycle_abort $?' EXIT
+  lifecycle_stage install true
+  lifecycle_artifact_digest "$digest_hex" SHA256SUMS
+  lifecycle_finish
+) >/dev/null 2>&1
+check "the artifact digest is carried" "$digest_hex" \
+  "$(subject_field "${work}/digest/lifecycle-report.json" artifact_digest)"
+check "  and the evidence records what was hashed" "${digest_hex}  SHA256SUMS" \
+  "$(cat "${work}/digest/artifact-digest.txt")"
+# The control the refusals below need: absence is a real outcome, not a
+# side effect of the field never being emitted.
+check "a run that records no digest omits the field" "absent" \
+  "$(subject_field "${work}/pass/lifecycle-report.json" artifact_digest)"
+
+# A prefixed or uppercase digest violates the schema. Accepting either
+# spelling would file evidence the release gate rejects, on a run that
+# cannot be repeated cheaply.
+set +e
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_begin ubuntu2404-x86-l4-g2s8 "${work}/prefixed" 0.2.1 test-harness
+  trap 'lifecycle_abort $?' EXIT
+  lifecycle_stage install true
+  lifecycle_artifact_digest "sha256:${digest_hex}" SHA256SUMS
+  lifecycle_finish ) >/dev/null 2>&1
+check "a sha256:-prefixed digest is a harness bug" "2" "$?"
+set -e
+# The guard is in the setter, not in the report writer: the run's own
+# evidence survives the bug, and the bad value never reaches the report.
+check "  and the run's evidence survives it" "yes" \
+  "$([[ -f "${work}/prefixed/lifecycle-report.json" ]] && echo yes || echo no)"
+check "  and the rejected value is not in the report" "absent" \
+  "$(subject_field "${work}/prefixed/lifecycle-report.json" artifact_digest)"
+
+set +e
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_begin r "${work}/upper" 0.2.1 t
+  lifecycle_artifact_digest "$(printf '%s' "$digest_hex" | tr 'a-f' 'A-F')" SHA256SUMS ) 2>/dev/null
+check "  and an uppercase digest is refused too" "2" "$?"
+
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_artifact_digest "$digest_hex" SHA256SUMS ) 2>/dev/null
+check "a digest recorded before the run begins is a harness bug" "2" "$?"
+
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_begin r "${work}/twice" 0.2.1 t
+  lifecycle_artifact_digest "$digest_hex" SHA256SUMS
+  lifecycle_artifact_digest "$digest_hex" SHA256SUMS ) 2>/dev/null
+check "a digest recorded twice is a harness bug" "2" "$?"
+
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  lifecycle_begin r "${work}/unlabelled" 0.2.1 t
+  lifecycle_artifact_digest "$digest_hex" ) 2>/dev/null
+unlabelled_status=$?
+check "a digest that does not say what was hashed is refused" "yes" \
+  "$([[ "$unlabelled_status" -ne 0 ]] && echo yes || echo no)"
+
+# The sibling subject field had the same silent-invalid defect: a tag or
+# a short SHA was written through and only failed at the release gate.
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  export TP_LIFECYCLE_SOURCE_REVISION=v0.2.1
+  lifecycle_begin r "${work}/badrev" 0.2.1 t ) 2>/dev/null
+check "a malformed source revision is refused by the runner" "2" "$?"
+set -e
+
+revision="$(printf '%040d' 0 | tr 0 a)"
+( set -Eeuo pipefail
+  # shellcheck source=tools/validation/lifecycle-stages.sh
+  source "$harness"
+  export TP_LIFECYCLE_SOURCE_REVISION="$revision"
+  lifecycle_begin r "${work}/goodrev" 0.2.1 t
+  trap 'lifecycle_abort $?' EXIT
+  lifecycle_stage install true
+  lifecycle_finish ) >/dev/null 2>&1
+check "  and a full SHA is still carried" "$revision" \
+  "$(subject_field "${work}/goodrev/lifecycle-report.json" source_revision)"
+
 # --- The Jetson evidence adapter.
 #
 # The clean-room harness writes <step>.exit per step and no stages.tsv, so
@@ -217,6 +338,87 @@ check "  and stages the harness cannot run are named as gaps" "yes" \
 d=json.load(open(sys.argv[1]))
 gaps=[s for s in d["stages"] if s["stage"] in ("upgrade","rollback","crash-loop","offline")]
 print("yes" if all(g["status"]=="skipped" and g.get("detail") for g in gaps) else "no")' "${ev}/lifecycle-report.json")"
+
+# --- The converter reads the digest from the evidence, not the operator.
+#
+# This is the producer both physical runbooks invoke, and the digest is
+# the one value an operator could not re-derive after the run. It comes
+# from a file the harness wrote beside its stage log, in sha256sum's own
+# format.
+stage_log() {
+  local dir="$1"
+  mkdir -p "$dir"
+  printf 'stage\tstatus\tstarted_at\tfinished_at\tlog\n' >"${dir}/stages.tsv"
+  printf 'clean-install\tpass\t2026-09-03T03:00:00Z\t2026-09-03T03:01:00Z\tclean-install.log\n' \
+    >>"${dir}/stages.tsv"
+}
+
+convert_with_sidecar() {
+  local dir="$1"
+  set +e
+  "$converter" "${dir}/stages.tsv" macos26-m1pro-16gb 0.2.1 macos-homebrew-lifecycle \
+    "${dir}/lifecycle-report.json" clean-install=install >/dev/null 2>&1
+  local status=$?
+  set -e
+  printf '%s' "$status"
+}
+
+cv="${work}/cv-good"; stage_log "$cv"
+sha256_of "${cv}/stages.tsv" >"${cv}/artifact-digest.txt"
+expected_digest="$(awk '{print $1}' "${cv}/artifact-digest.txt")"
+check "the converter takes the digest from beside the stage log" "0" "$(convert_with_sidecar "$cv")"
+check "  and carries the hex alone, with no trailing newline" "$expected_digest" \
+  "$(subject_field "${cv}/lifecycle-report.json" artifact_digest)"
+
+# The sidecar belongs to the run's evidence, which is where stages.tsv
+# is. A converter reading beside its own output would work in the macOS
+# flow and silently omit the field whenever the report is written
+# elsewhere.
+cv="${work}/cv-wrong-dir"; stage_log "$cv"; mkdir -p "${cv}/out"
+sha256_of "${cv}/stages.tsv" >"${cv}/out/artifact-digest.txt"
+set +e
+"$converter" "${cv}/stages.tsv" macos26-m1pro-16gb 0.2.1 macos-homebrew-lifecycle \
+  "${cv}/out/lifecycle-report.json" clean-install=install >/dev/null 2>&1
+set -e
+check "a digest beside the report rather than the evidence is not picked up" "absent" \
+  "$(subject_field "${cv}/out/lifecycle-report.json" artifact_digest)"
+
+cv="${work}/cv-none"; stage_log "$cv"
+check "no digest at all is not an error" "0" "$(convert_with_sidecar "$cv")"
+check "  and the field is simply absent" "absent" \
+  "$(subject_field "${cv}/lifecycle-report.json" artifact_digest)"
+
+# A sidecar that is there but wrong stops the conversion. Writing it
+# through would file a report the gate rejects; dropping it silently
+# would look exactly like a harness that never recorded one.
+for case in prefixed upper empty unlabelled two-lines; do
+  cv="${work}/cv-${case}"; stage_log "$cv"
+  case "$case" in
+    prefixed) printf 'sha256:%s  SHA256SUMS\n' "$expected_digest" >"${cv}/artifact-digest.txt" ;;
+    upper) printf '%s  SHA256SUMS\n' "$(printf '%s' "$expected_digest" | tr 'a-f' 'A-F')" \
+      >"${cv}/artifact-digest.txt" ;;
+    empty) : >"${cv}/artifact-digest.txt" ;;
+    unlabelled) printf '%s\n' "$expected_digest" >"${cv}/artifact-digest.txt" ;;
+    two-lines) printf '%s  a\n%s  b\n' "$expected_digest" "$expected_digest" \
+      >"${cv}/artifact-digest.txt" ;;
+  esac
+  check "a ${case} digest sidecar stops the conversion" "1" "$(convert_with_sidecar "$cv")"
+  check "  and no report is written" "no" \
+    "$([[ -f "${cv}/lifecycle-report.json" ]] && echo yes || echo no)"
+done
+
+cv="${work}/cv-rev"; stage_log "$cv"
+set +e
+( export TP_LIFECYCLE_SOURCE_REVISION=v0.2.1
+  "$converter" "${cv}/stages.tsv" macos26-m1pro-16gb 0.2.1 macos-homebrew-lifecycle \
+    "${cv}/lifecycle-report.json" clean-install=install ) >/dev/null 2>&1
+check "the converter refuses a malformed source revision" "1" "$?"
+set -e
+( export TP_LIFECYCLE_SOURCE_REVISION="$revision"
+  "$converter" "${cv}/stages.tsv" macos26-m1pro-16gb 0.2.1 macos-homebrew-lifecycle \
+    "${cv}/lifecycle-report.json" clean-install=install ) >/dev/null 2>&1
+check "  and carries a full SHA" "$revision" \
+  "$(subject_field "${cv}/lifecycle-report.json" source_revision)"
 
 printf '\n%s\n' "$([[ "$failures" -eq 0 ]] && echo "all checks passed" || echo "${failures} check(s) failed")"
 exit "$failures"

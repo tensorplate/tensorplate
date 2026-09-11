@@ -265,6 +265,16 @@ PY
 verify_assets() {
   required artifacts-list bash -c 'cd "$1" && find . -maxdepth 1 -type f -print | sort' _ "$ASSETS_DIR"
   required checksums bash -c 'cd "$1" && sha256sum -c SHA256SUMS' _ "$ASSETS_DIR"
+  # Identify the artifacts this run is about, now that the set has
+  # verified and before anything is purged. SHA256SUMS is the file
+  # hashed because no run installs a single package -- install.sh
+  # selects five, six with --with-python-backend -- and because it is
+  # the file the install itself trusts: it is signature-verified, and
+  # the selected packages are checked against its lines. Hashed from
+  # inside the assets directory so the recorded name is `SHA256SUMS`
+  # rather than a path off this machine.
+  required artifact-digest bash -c 'cd "$1" && sha256sum SHA256SUMS >"$2/artifact-digest.txt"' \
+    _ "$ASSETS_DIR" "$EVIDENCE_DIR"
 }
 
 reset_tensorplate() {

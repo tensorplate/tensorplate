@@ -33,6 +33,18 @@ grep -Fq '"serving_health_state": serving_health.get("state") == "ready"' "$harn
 grep -Fq 'serving_health.get("active_model_id") == expected_deployment' "$harness"
 grep -Fq '"supervision_healthy_when_configured": supervision_healthy' "$harness"
 grep -Fq 'sanitized-transcript.json' "$harness"
+grep -Fq 'artifact-digest.txt' "$harness"
+grep -Fq 'record_artifact_digest || die' "$harness"
+
+# The digest must be recorded after the install, not beside the formula
+# pin it reads. A preflight run returns before installing anything, so a
+# digest recorded at pin time would attest an archive nobody fetched.
+digest_line="$(grep -n 'record_artifact_digest || die' "$harness" | cut -d: -f1)"
+install_line="$(grep -n 'run_stage clean-install install_candidate_clean' "$harness" | cut -d: -f1)"
+if [[ "$digest_line" -le "$install_line" ]]; then
+  printf 'FAIL: the artifact digest must be recorded after the candidate install\n' >&2
+  exit 1
+fi
 grep -Fq 'run_stage m1-exact-row verify_m1_exact_row' "$harness"
 grep -Fq '"family_row_not_selected": selected_row != family_row' "$harness"
 grep -Fq '"family_row_16_gib_ceiling"' "$harness"

@@ -27,6 +27,25 @@ release candidate: a candidate's `.deb` reports `0.2.1~rc.1` so that
 against the release it stands for, not the build it was collected on.
 The schema rejects the `~` form rather than accepting both spellings.
 
+Which *build* was installed is the other half of that fact, and it is
+recorded as `subject.artifact_digest`. You never type it: each harness
+writes `<evidence>/artifact-digest.txt` during the run, holding the
+sha256 and the name of what was hashed, and the converter reads it from
+beside `stages.tsv`. Nothing on an installed system reports which
+artifact it came from, so a digest not captured while the machine is in
+hand cannot be recovered afterwards — the run has to be repeated.
+
+A missing file is not fatal: the report omits the field and the
+conversion says so on stderr. A file that is there but malformed stops
+the conversion, because the two ways of continuing are filing a report
+the release gate rejects, or filing one that looks like a run nobody
+recorded a digest for.
+
+`TP_LIFECYCLE_SOURCE_REVISION` is optional and, if set, must be the full
+40-character git SHA the artifacts were built from. A tag or a short SHA
+is now refused by both producers rather than written into a report that
+fails at the gate.
+
 The harnesses predate that report and record their own stage names, so
 they emit it through the converter rather than by rewriting stage calls
 on code that only runs on hardware:
@@ -105,9 +124,26 @@ the device invalidates the glibc-floor comparison the run exists for.
 
    ```bash
    tools/validation/jetson-clean-room.sh run \
+     --version <tested_version> \
      --evidence-dir <evidence> \
      --confirm RESET-TENSORPLATE
    ```
+
+   `--version` is not optional in practice. Without it the harness falls
+   back to its own default and downloads that release's assets, so the
+   run would install one release while the report claimed another — and
+   the digest it records would correctly identify the wrong build.
+
+   The digest this run files is the sha256 of the release's `SHA256SUMS`,
+   taken once the asset set has verified and before anything is purged.
+   That file is what the install itself trusts: it is signature-verified,
+   and the packages are checked against its lines. It identifies the
+   release build under test rather than the local package selection — it
+   covers the whole published asset set, including files this row never
+   installs, and it does not change when the Python backend is included.
+   A run against locally supplied assets, or one that skips signature
+   verification, records a digest nobody outside this machine can
+   resolve; say so in the pull request if you take either path.
 
 4. Derive the stage log, then the report. The harness records each step
    as `<step>.exit` rather than writing a `stages.tsv`, so the adapter
@@ -169,6 +205,17 @@ stage meaningless.
      rollback=rollback launchd-restart=restart \
      launchd-crash-loop=crash-loop offline-runtime=offline
    ```
+
+   The digest this run files is the source archive every candidate
+   formula is pinned to. That channel publishes no binary — all six
+   formulae build from one archive — so the archive is the only
+   immutable artifact a digest can name here, and it identifies the
+   build input rather than the bytes that landed: two Macs build
+   different binaries from it. Homebrew, not this harness, is what
+   verifies the downloaded archive against that checksum. It is recorded
+   after the candidate install, so a `--preflight-only` run files none:
+   a preflight downloads nothing, and a digest filed for it would attest
+   an install that never happened.
 
    `status-logs` is deliberately unmapped. The harness's `host-facts`
    stage collects inventory before anything is installed; it is not an
