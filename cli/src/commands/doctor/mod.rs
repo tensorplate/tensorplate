@@ -292,6 +292,12 @@ pub fn render_host_section(
                     "skipped: host identity undetected",
                     None,
                 ),
+                // Routed through the same renderer as every other outcome,
+                // so the finding is present whether or not detection got
+                // far enough to read a card. A consumer that looks for
+                // `accelerator_facts` should never have to handle it being
+                // absent on one path and present on the rest.
+                render_accelerator_facts(detected),
             ];
         }
     };
@@ -335,6 +341,7 @@ pub fn render_host_section(
         os.push_str(&format!(" [exact: {}]", exact.join(", ")));
     }
     findings.push(Finding::ok(FindingId::HostOs, Severity::Info, os, None));
+    findings.push(render_accelerator_facts(detected));
 
     findings.push(match registry {
         Ok(registry) => render_platform_profile(registry, identity),
@@ -497,6 +504,74 @@ fn render_model_class_rows(resolution: PlatformResolution<'_>) -> Finding {
         format!("row `{}` serves {rendered}", row.row_id()),
         None,
     )
+}
+
+/// What accelerator the host carries, and how many: the fact the
+/// `platform_row` verdict is about.
+///
+/// Stated separately because a verdict alone cannot tell an operator which
+/// of several things is wrong. `unsupported_accelerator_topology` on its own
+/// says the count was refused; it does not say the count was eight, or that
+/// the card was otherwise exactly the supported one. Without this line an
+/// operator on an eight-GPU host has to run `nvidia-smi` to learn what
+/// doctor already read.
+///
+/// Info severity in every case: this reports what was found, and whether
+/// that is acceptable is `platform_row`'s job. A fact that raised its own
+/// warnings would give one condition two findings.
+fn render_accelerator_facts(detected: HostSectionDetection<'_>) -> Finding {
+    match detected {
+        HostSectionDetection::Complete(report) => match report.accelerator.as_ref() {
+            Some(accelerator) => {
+                let identity = &accelerator.identity;
+                let mut message = if identity.heterogeneous {
+                    // The first device's SKU is the only one carried, so say
+                    // it is the first rather than implying it is all of them.
+                    format!(
+                        "{} accelerators of mixed SKUs; the first reports `{}`",
+                        identity.device_count, identity.sku
+                    )
+                } else if identity.device_count == 1 {
+                    format!("1 accelerator: `{}`", identity.sku)
+                } else {
+                    format!("{} accelerators: `{}`", identity.device_count, identity.sku)
+                };
+                if identity.partitioned {
+                    message.push_str(" (partitioned)");
+                }
+                Finding::ok(FindingId::AcceleratorFacts, Severity::Info, message, None)
+            }
+            // PCI evidence proves hardware is present even when the tool
+            // cannot identify it. It does not establish a SKU or GPU count.
+            None if !report.host.exact.nvidia_pci_functions.is_empty() => Finding::skipped(
+                FindingId::AcceleratorFacts,
+                Severity::Info,
+                "skipped: NVIDIA hardware detected on PCI, but accelerator identity is unavailable",
+                Some("see the platform_row finding for why".into()),
+            ),
+            None => Finding::ok(
+                FindingId::AcceleratorFacts,
+                Severity::Info,
+                "no accelerator detected",
+                None,
+            ),
+        },
+        // Detection of the card itself failed. Saying nothing about it here
+        // is correct: `platform_row` owns that diagnosis and its remedy, and
+        // repeating it would give one failure two findings.
+        HostSectionDetection::AcceleratorProbeFailed { .. } => Finding::skipped(
+            FindingId::AcceleratorFacts,
+            Severity::Info,
+            "skipped: the accelerator could not be read",
+            Some("see the platform_row finding for why".into()),
+        ),
+        HostSectionDetection::HostProbeFailed(_) => Finding::skipped(
+            FindingId::AcceleratorFacts,
+            Severity::Info,
+            "skipped: host identity undetected",
+            None,
+        ),
+    }
 }
 
 /// Which support row this machine IS, host and accelerator together.

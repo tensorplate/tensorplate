@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use serde_json::Value;
-use tensorplate_cli::commands::doctor::finding::{Finding, FindingId, FindingStatus};
+use tensorplate_cli::commands::doctor::finding::{Finding, FindingId, FindingStatus, Severity};
 use tensorplate_cli::commands::doctor::{render_host_section, HostSectionDetection};
 use tensorplate_platform::{
     identify_accelerator, identify_platform, AcceleratorSources, HostSources, PlatformProbeError,
@@ -757,13 +757,14 @@ fn undetectable_host_identity_never_fails_doctor() {
         .expect("host_facts");
     assert_eq!(facts.status, FindingStatus::Warning);
     assert!(facts.message.contains("Operation not permitted"));
-    assert_eq!(section.len(), 5, "every host-section finding ID is stable");
+    assert_eq!(section.len(), 6, "every host-section finding ID is stable");
     for id in [
         FindingId::HostFacts,
         FindingId::HostOs,
         FindingId::PlatformProfile,
         FindingId::PlatformRow,
         FindingId::ModelClassRows,
+        FindingId::AcceleratorFacts,
     ] {
         assert_eq!(
             section.iter().filter(|finding| finding.id == id).count(),
@@ -842,4 +843,126 @@ fn an_environment_only_miss_does_not_blame_the_os() {
         "the message names what is actually wrong: {}",
         profile.message
     );
+}
+
+/// The accelerator facts finding for a committed row's host, with the
+/// observed accelerator edited to the shape under test.
+fn accelerator_facts_for(edit: impl Fn(&mut tensorplate_platform::AcceleratorIdentity)) -> Finding {
+    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
+    edit(
+        &mut report
+            .accelerator
+            .as_mut()
+            .expect("the L4 fixture carries an accelerator")
+            .identity,
+    );
+    let registry = registry();
+    render_host_section(HostSectionDetection::Complete(&report), Ok(&registry))
+        .into_iter()
+        .find(|f| f.id == FindingId::AcceleratorFacts)
+        .expect("accelerator_facts is always emitted")
+}
+
+#[test]
+fn pci_only_accelerator_facts_do_not_claim_absence_or_invent_identity() {
+    // A missing nvidia-smi answer does not erase the host probe's PCI
+    // evidence. That evidence proves presence, but not a SKU or GPU count.
+    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
+    assert!(report.accelerator.is_none());
+    assert_eq!(report.host.exact.nvidia_pci_functions, ["0000:00:03.0"]);
+    let registry = registry();
+    for registry_result in [Ok(&registry), Err(&NO_REGISTRY)] {
+        let section = render_host_section(HostSectionDetection::Complete(&report), registry_result);
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::AcceleratorFacts)
+            .expect("accelerator_facts");
+        assert_eq!(facts.status, FindingStatus::Skipped, "{facts:?}");
+        assert_eq!(facts.severity, Severity::Info, "{facts:?}");
+        assert_eq!(
+            facts.message,
+            "skipped: NVIDIA hardware detected on PCI, but accelerator identity is unavailable"
+        );
+        assert_eq!(
+            facts.hint.as_deref(),
+            Some("see the platform_row finding for why")
+        );
+        let row = section
+            .iter()
+            .find(|f| f.id == FindingId::PlatformRow)
+            .expect("platform_row");
+        assert_eq!(row.status, FindingStatus::Unsupported);
+        assert!(row.message.contains("missing_driver_runtime"), "{row:?}");
+        assert!(row.message.contains("0000:00:03.0"), "{row:?}");
+    }
+}
+
+#[test]
+fn cpu_only_accelerator_facts_report_true_absence() {
+    let report = report_for("ubuntu2404-x86-cpu", None);
+    assert!(report.accelerator.is_none());
+    assert!(report.host.exact.nvidia_pci_functions.is_empty());
+    let registry = registry();
+    for registry_result in [Ok(&registry), Err(&NO_REGISTRY)] {
+        let section = render_host_section(HostSectionDetection::Complete(&report), registry_result);
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::AcceleratorFacts)
+            .expect("accelerator_facts");
+        assert_eq!(facts.status, FindingStatus::Pass, "{facts:?}");
+        assert_eq!(facts.severity, Severity::Info, "{facts:?}");
+        assert_eq!(facts.message, "no accelerator detected");
+        assert!(facts.hint.is_none());
+    }
+}
+
+#[test]
+fn a_multi_gpu_host_names_the_count_its_verdict_is_about() {
+    // The gap #192 left: platform_row said `unsupported_accelerator_topology`
+    // and nothing said the count was eight. An operator had to run
+    // nvidia-smi to learn what doctor had already read.
+    let facts = accelerator_facts_for(|identity| identity.device_count = 8);
+    assert_eq!(facts.status, FindingStatus::Pass);
+    assert!(
+        facts.message.contains("8 accelerators") && facts.message.contains("NVIDIA L4"),
+        "must state both the count and the card: {}",
+        facts.message
+    );
+}
+
+#[test]
+fn a_mixed_set_does_not_present_the_first_card_as_all_of_them() {
+    // Only device 0's SKU is carried. Saying "2 accelerators: NVIDIA L4"
+    // for an L4 beside a T4 would state something untrue about the second
+    // card, so a mixed set says it is mixed and names the first as first.
+    let facts = accelerator_facts_for(|identity| {
+        identity.device_count = 2;
+        identity.heterogeneous = true;
+    });
+    assert!(
+        facts.message.contains("mixed"),
+        "a heterogeneous set must say so: {}",
+        facts.message
+    );
+    assert!(
+        facts.message.contains("first"),
+        "and must not imply the named SKU covers every device: {}",
+        facts.message
+    );
+}
+
+#[test]
+fn a_partitioned_card_says_so() {
+    let facts = accelerator_facts_for(|identity| identity.partitioned = true);
+    assert!(facts.message.contains("partitioned"), "{}", facts.message);
+}
+
+#[test]
+fn the_facts_are_information_even_when_the_verdict_refuses() {
+    // A fact that raised its own warning would give one condition two
+    // findings. Whether eight cards are acceptable is platform_row's call;
+    // this line only reports that there are eight.
+    let facts = accelerator_facts_for(|identity| identity.device_count = 8);
+    assert_eq!(facts.severity, Severity::Info, "{facts:?}");
+    assert_eq!(facts.status, FindingStatus::Pass, "{facts:?}");
 }

@@ -71,6 +71,12 @@ pub enum FindingId {
     /// what support level. Read from the row's registry pointers, so a
     /// row that gains or loses a model class changes this without code.
     ModelClassRows,
+    /// What accelerator the host carries and how many of them: the fact
+    /// `platform_row`'s verdict is about. Separate from that verdict for the
+    /// same reason `host_facts` is separate from it -- a refusal code with
+    /// no statement of what was found leaves an operator unable to tell
+    /// "wrong card" from "right card, too many".
+    AcceleratorFacts,
 }
 
 impl FindingId {
@@ -114,6 +120,7 @@ impl FindingId {
             Self::PlatformProfile => "platform_profile",
             Self::PlatformRow => "platform_row",
             Self::ModelClassRows => "model_class_rows",
+            Self::AcceleratorFacts => "accelerator_facts",
         }
     }
 }
