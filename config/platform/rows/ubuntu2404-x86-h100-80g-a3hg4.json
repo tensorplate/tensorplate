@@ -1,0 +1,66 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-h100-80g-a3hg4",
+  "os": {
+    "name": "Ubuntu",
+    "version": "24.04"
+  },
+  "kernel_driver_stack": {
+    "components": []
+  },
+  "cpu": {
+    "architecture": "x86_64",
+    "vendors": [
+      "intel"
+    ]
+  },
+  "accelerator": {
+    "family": "NVIDIA H100",
+    "sku": "NVIDIA H100 80GB HBM3",
+    "memory_bytes": 85899345920,
+    "memory_profile": "discrete_gpu",
+    "partitioning": "unsupported",
+    "device_count": 4
+  },
+  "backend_packages": [
+    {
+      "backend_path": "tensorrt",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-serving"
+      ]
+    },
+    {
+      "backend_path": "python_pytorch",
+      "channel": "apt",
+      "packages": [
+        "tensorplate-backend-python-pytorch"
+      ]
+    }
+  ],
+  "model_class_rows": [],
+  "gate_semantics": {
+    "thermal": {
+      "gate": "context_only"
+    },
+    "power": {
+      "gate": "context_only"
+    },
+    "throttle": {
+      "gate": "context_only"
+    },
+    "memory": {
+      "gate": "load_bearing"
+    },
+    "gpu_utilization": {
+      "gate": "context_only"
+    }
+  },
+  "support_level": "Preview",
+  "provenance": "spec_authored",
+  "validation_environment": {
+    "kind": "cloud_instance",
+    "identity": "GCP a3-highgpu-4g (disposable), 4 GPUs, non-partitioned",
+    "machine_type": "a3-highgpu-4g"
+  }
+}

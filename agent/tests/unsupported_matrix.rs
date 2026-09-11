@@ -134,7 +134,10 @@ fn identity_cases() -> Vec<Case> {
         // needs is different: nothing is wrong with the card.
         Case {
             what: "more accelerators than any row claims",
-            got: admission_reason(&report("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"))),
+            got: admission_reason(&report(
+                "ubuntu2404-x86-l4-g2s8",
+                Some("multi-gpu-three-l4"),
+            )),
             want: PlatformReason::UnsupportedAcceleratorTopology,
         },
         Case {

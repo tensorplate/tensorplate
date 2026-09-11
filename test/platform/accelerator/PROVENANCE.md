@@ -50,6 +50,27 @@ listed so a future recording knows exactly what claim it replaces.
 | `ubuntu2404-x86-a100-80g-a2ug1.txt`, `...-a2ug8.txt` | `NVIDIA A100-SXM4-80GB` | Follows the SXM4 naming of the committed A100 40GB row. **Not recorded.** The 81920 MiB framebuffer is carried over from the earlier transcription and is also unverified. The 8-device file repeats the line with distinct synthetic UUIDs. |
 | `ubuntu2404-x86-h100-80g-a3hg1.txt`, `...-a3hg8.txt` | `NVIDIA H100 80GB HBM3` | Name and 81559 MiB framebuffer taken from observed `nvidia-smi` output on another provider's H100 host ([thundergolfer, "Why does an NVIDIA H100 80GB card offer 85.52 GB?"](https://thundergolfer.com/blog/nvidia-gpu-memory-capacity)). **Not recorded on GCP.** Consistent with GCP documenting `a3-highgpu-*` as H100 SXM; `a3-megagpu-8g` uses a different accelerator type (`nvidia-h100-mega-80gb`) and may report a different string, so it has no row. |
 
+| Multi-GPU fixtures at 2, 4 and 8 devices for A100 40GB (`a2hg2/4/8`), A100 80GB (`a2ug2/4`), H100 (`a3hg2/4`) and L4 (`g2s24/48/96`) | as the 1-GPU fixture of each card | Each repeats its card's line once per device, with distinct synthetic UUIDs. The counts and shapes come from GCP's own machine-type API (`gcloud compute machine-types list`, us-central1), not from documentation, which truncates before its tables. The SKU and framebuffer carry the same provenance as the 1-GPU fixture they were derived from -- **none is recorded**. |
+
+### One row per card and count, not per shape
+
+A row is needed for each distinct (SKU, device count). A second shape at
+an existing count needs none: it fails the row's machine-type check, so it
+resolves as outside the row's validated environment and is admitted
+against it when the row is supported. That covers `a3-edgegpu-8g` (H100,
+eight devices, same accelerator type as `a3-highgpu-8g`) and the four
+1-GPU L4 shapes besides `g2-standard-8`.
+
+Three GCP shapes have no row, deliberately:
+
+- `a2-megagpu-16g` -- sixteen A100 40GB. A count no other family offers,
+  and outside the 1/2/4/8 set requested.
+- `a3-megagpu-8g` -- a different accelerator type (`nvidia-h100-mega-80gb`)
+  that may report a different product name; a row with a guessed string
+  would never match.
+- `g4-standard-96/192/384` -- RTX PRO 6000 at 2, 4 and 8. The G4 row is
+  held as planned.
+
 ### The `NVIDIA ` prefix is driver-dependent
 
 NVIDIA's HGX A100 software guide shows `nvidia-smi` printing
@@ -67,7 +88,7 @@ what was reported if it does not match.
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
 | `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's card with `mig.mode.current` set to `Enabled`. The row is Planned; the partitioning refusal is checked before support level, so this fixture still exercises it. |
-| `multi-gpu-two-l4.txt` | `NVIDIA L4` | The L4 row's own **recorded** line, repeated with a second synthetic UUID. Not a recording: no two-GPU host has been observed. What it exercises is the device count, which needs no more fidelity than two identical cards — the SKU is deliberately the supported one, so the refusal cannot be mistaken for an off-matrix SKU. |
+| `multi-gpu-three-l4.txt` | `NVIDIA L4` | The L4 row's own **recorded** line, repeated for three devices with synthetic UUIDs. Not a recording: no multi-GPU host has been observed. What it exercises is the device count. **Three, deliberately**: GCP offers one, two, four, eight and sixteen of a card but never three, so no real shape can ever earn a row at this count. It was `multi-gpu-two-l4.txt` until an L4 row claimed two GPUs (`g2-standard-24`) and made the old example supported -- an unclaimed-count example has to be a count nothing will claim, or the next row falsifies every test that uses it. |
 
 UUIDs are synthetic. Driver versions are plausible for the generation and are
 not asserted on. Framebuffer sizes are approximately what each card reports,

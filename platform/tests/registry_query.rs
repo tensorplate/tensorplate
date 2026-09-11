@@ -102,7 +102,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
 #[test]
 fn the_committed_registry_loads_completely() {
     let registry = registry();
-    assert_eq!(registry.rows().count(), 16, "sixteen rows load");
+    assert_eq!(registry.rows().count(), 26, "twenty-six rows load");
     assert_eq!(
         registry.roadmap_targets().count(),
         4,
@@ -110,8 +110,8 @@ fn the_committed_registry_loads_completely() {
     );
     assert_eq!(
         registry.supported_rows().count(),
-        12,
-        "four Production plus eight Preview rows are supported combinations"
+        22,
+        "four Production plus eighteen Preview rows are supported combinations"
     );
 }
 
@@ -732,11 +732,21 @@ fn only_shape_scoped_rows_declare_a_machine_type() {
         scoped,
         [
             "ubuntu2404-x86-a100-40g-a2hg1",
+            "ubuntu2404-x86-a100-40g-a2hg2",
+            "ubuntu2404-x86-a100-40g-a2hg4",
+            "ubuntu2404-x86-a100-40g-a2hg8",
             "ubuntu2404-x86-a100-80g-a2ug1",
+            "ubuntu2404-x86-a100-80g-a2ug2",
+            "ubuntu2404-x86-a100-80g-a2ug4",
             "ubuntu2404-x86-a100-80g-a2ug8",
             "ubuntu2404-x86-h100-80g-a3hg1",
+            "ubuntu2404-x86-h100-80g-a3hg2",
+            "ubuntu2404-x86-h100-80g-a3hg4",
             "ubuntu2404-x86-h100-80g-a3hg8",
+            "ubuntu2404-x86-l4-g2s24",
+            "ubuntu2404-x86-l4-g2s48",
             "ubuntu2404-x86-l4-g2s8",
+            "ubuntu2404-x86-l4-g2s96",
             "ubuntu2404-x86-rtxpro6000se-g4s48"
         ],
         "only the cloud rows are shape-scoped"
@@ -1063,7 +1073,11 @@ fn distinct_device_counts_coexist_and_resolve_without_ambiguity() {
 fn supported_silicon_with_the_wrong_count_keeps_its_topology_reason() {
     let registry = registry();
     let mut detected = identity_of(&registry, "ubuntu2404-x86-l4-g2s8");
-    detected.accelerator = Some(accelerator_set("NVIDIA L4", 2));
+    // Three, not two: GCP offers one, two, four, eight and sixteen of a card
+    // but never three, so no real shape can ever earn a row at this count.
+    // It was two until an L4 row claimed two -- the example has to be a
+    // count nothing will claim, or the next row falsifies the test.
+    detected.accelerator = Some(accelerator_set("NVIDIA L4", 3));
     for machine_type in [Some("g2-standard-8"), None, Some("g2-standard-24")] {
         detected.host.machine_type = machine_type.map(str::to_string);
         assert_eq!(
@@ -1078,5 +1092,32 @@ fn supported_silicon_with_the_wrong_count_keeps_its_topology_reason() {
     assert_eq!(
         registry.resolve(&detected),
         RowMatch::Unsupported(PlatformReason::UnsupportedAcceleratorSku)
+    );
+}
+
+#[test]
+fn a_second_shape_at_an_existing_count_is_admitted_against_that_count_row() {
+    // A row is needed per (card, count), not per shape. `a3-edgegpu-8g`
+    // carries eight of the same H100 as `a3-highgpu-8g`: it fails that row's
+    // machine-type check, resolves as outside its validated environment,
+    // and a supported row admits it there. That is why it has no row.
+    //
+    // The count still has to pick the eight-device row. With H100 rows at
+    // one, two, four and eight, a topology dimension that stopped
+    // distinguishing counts would name the wrong row -- or, finding several
+    // equally near, name none.
+    let registry = registry();
+    let mut detected = identity_of(&registry, "ubuntu2404-x86-h100-80g-a3hg8");
+    detected.host.machine_type = Some("a3-edgegpu-8g".to_string());
+    assert_eq!(
+        registry.resolve(&detected),
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(
+                registry
+                    .row("ubuntu2404-x86-h100-80g-a3hg8")
+                    .expect("committed")
+            )
+        },
+        "eight H100s on a sibling shape resolve against the eight-device row"
     );
 }

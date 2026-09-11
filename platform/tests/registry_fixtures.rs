@@ -97,16 +97,16 @@ fn every_committed_row_decodes_and_validates() {
 }
 
 #[test]
-fn the_registry_holds_sixteen_rows_at_the_declared_levels() {
+fn the_registry_holds_twenty_six_rows_at_the_declared_levels() {
     let rows = committed_rows();
-    assert_eq!(rows.len(), 16, "sixteen rows are committed");
+    assert_eq!(rows.len(), 26, "twenty-six rows are committed");
     let count = |level: SupportLevel| {
         rows.iter()
             .filter(|(_, r)| r.support_level() == level)
             .count()
     };
     assert_eq!(count(SupportLevel::Production), 4, "four Production rows");
-    assert_eq!(count(SupportLevel::Preview), 8, "eight Preview rows");
+    assert_eq!(count(SupportLevel::Preview), 18, "eighteen Preview rows");
     assert_eq!(count(SupportLevel::Planned), 4, "four Planned rows");
     assert_eq!(
         count(SupportLevel::Experimental),
@@ -130,6 +130,16 @@ fn row_ids_are_unique_and_match_the_matrix() {
         "ubuntu2404-x86-a100-80g-a2ug8",
         "ubuntu2404-x86-h100-80g-a3hg1",
         "ubuntu2404-x86-h100-80g-a3hg8",
+        "ubuntu2404-x86-a100-40g-a2hg2",
+        "ubuntu2404-x86-a100-40g-a2hg4",
+        "ubuntu2404-x86-a100-40g-a2hg8",
+        "ubuntu2404-x86-a100-80g-a2ug2",
+        "ubuntu2404-x86-a100-80g-a2ug4",
+        "ubuntu2404-x86-h100-80g-a3hg2",
+        "ubuntu2404-x86-h100-80g-a3hg4",
+        "ubuntu2404-x86-l4-g2s24",
+        "ubuntu2404-x86-l4-g2s48",
+        "ubuntu2404-x86-l4-g2s96",
         "macos26-m1pro-16gb",
         "ubuntu2404-x86-cpu",
         "ubuntu2204-x86-cpu",
