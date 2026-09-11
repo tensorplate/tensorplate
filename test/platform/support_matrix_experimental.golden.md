@@ -5,7 +5,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 
 ## Supported combinations
 
-22 supported combination(s): 4 Production, 18 Preview.
+26 supported combination(s): 4 Production, 22 Preview.
 
 ### Production
 
@@ -26,6 +26,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 | `ubuntu2404-x86-a100-40g-a2hg2` | Ubuntu 24.04 | x86_64 (intel) | 2× NVIDIA A100-SXM4-40GB | `a2-highgpu-2g` only | — |
 | `ubuntu2404-x86-a100-40g-a2hg4` | Ubuntu 24.04 | x86_64 (intel) | 4× NVIDIA A100-SXM4-40GB | `a2-highgpu-4g` only | — |
 | `ubuntu2404-x86-a100-40g-a2hg8` | Ubuntu 24.04 | x86_64 (intel) | 8× NVIDIA A100-SXM4-40GB | `a2-highgpu-8g` only | — |
+| `ubuntu2404-x86-a100-40g-a2mg16` | Ubuntu 24.04 | x86_64 (intel) | 16× NVIDIA A100-SXM4-40GB | `a2-megagpu-16g` only | — |
 | `ubuntu2404-x86-a100-80g-a2ug1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA A100-SXM4-80GB | `a2-ultragpu-1g` only | — |
 | `ubuntu2404-x86-a100-80g-a2ug2` | Ubuntu 24.04 | x86_64 (intel) | 2× NVIDIA A100-SXM4-80GB | `a2-ultragpu-2g` only | — |
 | `ubuntu2404-x86-a100-80g-a2ug4` | Ubuntu 24.04 | x86_64 (intel) | 4× NVIDIA A100-SXM4-80GB | `a2-ultragpu-4g` only | — |
@@ -38,6 +39,9 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 | `ubuntu2404-x86-l4-g2s24` | Ubuntu 24.04 | x86_64 (intel) | 2× NVIDIA L4 | `g2-standard-24` only | — |
 | `ubuntu2404-x86-l4-g2s48` | Ubuntu 24.04 | x86_64 (intel) | 4× NVIDIA L4 | `g2-standard-48` only | — |
 | `ubuntu2404-x86-l4-g2s96` | Ubuntu 24.04 | x86_64 (intel) | 8× NVIDIA L4 | `g2-standard-96` only | — |
+| `ubuntu2404-x86-rtxpro6000se-g4s192` | Ubuntu 24.04 | x86_64 (amd) | 4× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-192` only | — |
+| `ubuntu2404-x86-rtxpro6000se-g4s384` | Ubuntu 24.04 | x86_64 (amd) | 8× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-384` only | — |
+| `ubuntu2404-x86-rtxpro6000se-g4s96` | Ubuntu 24.04 | x86_64 (amd) | 2× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-96` only | — |
 
 ## Experimental
 

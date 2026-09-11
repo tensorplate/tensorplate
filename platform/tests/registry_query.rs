@@ -102,7 +102,7 @@ fn identity_of(registry: &PlatformRegistry, row_id: &str) -> DetectedPlatform {
 #[test]
 fn the_committed_registry_loads_completely() {
     let registry = registry();
-    assert_eq!(registry.rows().count(), 26, "twenty-six rows load");
+    assert_eq!(registry.rows().count(), 30, "thirty rows load");
     assert_eq!(
         registry.roadmap_targets().count(),
         4,
@@ -110,8 +110,8 @@ fn the_committed_registry_loads_completely() {
     );
     assert_eq!(
         registry.supported_rows().count(),
-        22,
-        "four Production plus eighteen Preview rows are supported combinations"
+        26,
+        "four Production plus twenty-two Preview rows are supported combinations"
     );
 }
 
@@ -735,6 +735,7 @@ fn only_shape_scoped_rows_declare_a_machine_type() {
             "ubuntu2404-x86-a100-40g-a2hg2",
             "ubuntu2404-x86-a100-40g-a2hg4",
             "ubuntu2404-x86-a100-40g-a2hg8",
+            "ubuntu2404-x86-a100-40g-a2mg16",
             "ubuntu2404-x86-a100-80g-a2ug1",
             "ubuntu2404-x86-a100-80g-a2ug2",
             "ubuntu2404-x86-a100-80g-a2ug4",
@@ -747,7 +748,10 @@ fn only_shape_scoped_rows_declare_a_machine_type() {
             "ubuntu2404-x86-l4-g2s48",
             "ubuntu2404-x86-l4-g2s8",
             "ubuntu2404-x86-l4-g2s96",
-            "ubuntu2404-x86-rtxpro6000se-g4s48"
+            "ubuntu2404-x86-rtxpro6000se-g4s192",
+            "ubuntu2404-x86-rtxpro6000se-g4s384",
+            "ubuntu2404-x86-rtxpro6000se-g4s48",
+            "ubuntu2404-x86-rtxpro6000se-g4s96"
         ],
         "only the cloud rows are shape-scoped"
     );
@@ -1107,17 +1111,27 @@ fn a_second_shape_at_an_existing_count_is_admitted_against_that_count_row() {
     // distinguishing counts would name the wrong row -- or, finding several
     // equally near, name none.
     let registry = registry();
-    let mut detected = identity_of(&registry, "ubuntu2404-x86-h100-80g-a3hg8");
-    detected.host.machine_type = Some("a3-edgegpu-8g".to_string());
-    assert_eq!(
-        registry.resolve(&detected),
-        RowMatch::OutsideValidatedEnvironment {
-            candidate: Some(
-                registry
-                    .row("ubuntu2404-x86-h100-80g-a3hg8")
-                    .expect("committed")
-            )
-        },
-        "eight H100s on a sibling shape resolve against the eight-device row"
-    );
+    // `a3-megagpu-8g` is here on the same terms, with one condition stated
+    // rather than assumed. GCP names its accelerator differently
+    // (`nvidia-h100-mega-80gb`), but documents all three A3 variants as the
+    // same H100 SXM, and `nvidia-smi` reports the product name the GPU gives
+    // it rather than GCP's label. If it reports the H100 name, it needs no
+    // row. If a recording ever shows a different string, this case stops
+    // describing that machine and a row with the recorded name is what
+    // replaces it.
+    for shape in ["a3-edgegpu-8g", "a3-megagpu-8g"] {
+        let mut detected = identity_of(&registry, "ubuntu2404-x86-h100-80g-a3hg8");
+        detected.host.machine_type = Some(shape.to_string());
+        assert_eq!(
+            registry.resolve(&detected),
+            RowMatch::OutsideValidatedEnvironment {
+                candidate: Some(
+                    registry
+                        .row("ubuntu2404-x86-h100-80g-a3hg8")
+                        .expect("committed")
+                )
+            },
+            "eight H100s on {shape} resolve against the eight-device row"
+        );
+    }
 }

@@ -9,10 +9,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Added
 
 - Preview rows cover A100 40GB, A100 80GB, and H100 hosts with one, two,
-  four, or eight GPUs, plus L4 hosts with two, four, or eight GPUs. The
-  existing single-GPU A100 40GB row moves from Planned to Preview.
-  These rows carry no new hardware validation evidence; multi-device
-  bundle requests remain refused.
+  four, or eight GPUs, A100 40GB with sixteen, plus L4 and RTX PRO 6000
+  hosts with two, four, or eight GPUs -- every GPU shape GCP offers for
+  these cards. The existing single-GPU A100 40GB row moves from Planned to
+  Preview. These rows carry no new hardware validation evidence;
+  multi-device bundle requests remain refused.
 
 - The platform support matrix displays device counts for multi-GPU rows.
 

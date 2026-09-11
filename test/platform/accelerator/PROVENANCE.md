@@ -56,13 +56,15 @@ listed so a future recording knows exactly what claim it replaces.
 | `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
 | `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
 | `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's transcribed answer with `mig.mode.current` set to `Enabled`. The row is Preview; this fixture exercises the partitioning refusal independently of support level. |
+| `ubuntu2404-x86-a100-40g-a2mg16.txt` | `NVIDIA A100-SXM4-40GB` | The A100 40GB fixture's line repeated for sixteen devices with synthetic UUIDs. Same accelerator type as the `a2-highgpu` shapes per GCP's machine-type API; carries that fixture's provenance, so it is **not recorded**. |
+| `ubuntu2404-x86-rtxpro6000se-g4s96.txt`, `...-g4s192.txt`, `...-g4s384.txt` | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | The G4 fixture's line repeated for two, four and eight devices, varying only the UUID. The G4 half of the first-run recording was never captured, so these are **not recorded** either. |
 | `multi-gpu-three-l4.txt` | `NVIDIA L4` | The L4 row's recorded line, repeated for three devices with synthetic UUIDs. **Not a recording.** Three devices exercise an unclaimed count in the committed registry. This replaces the two-device refusal fixture because `g2-standard-24` now has a row for two L4s. |
 
 UUIDs in these fixtures are synthetic. Driver versions are plausible for
 the generation and are not asserted on. Transcribed framebuffer sizes are
 unverified; the L4 derivatives retain the recorded single-device reading.
 
-### Derived L4 host fixtures
+### Derived multi-GPU host fixtures
 
 The paired host fixtures
 `test/platform/host_identity/ubuntu2404-x86-l4-g2s24.json`,
@@ -75,6 +77,20 @@ establish the hardware inventory of the larger shapes. Paired with the
 synthetic accelerator answers above, these cases test matching and do not
 provide hardware-validation evidence.
 
+The same holds for `ubuntu2404-x86-a100-40g-a2mg16.json` (derived from the
+A100 40GB `a2-highgpu-1g` fixture) and
+`ubuntu2404-x86-rtxpro6000se-g4s96.json`, `...-g4s192.json` and
+`...-g4s384.json` (derived from the G4 `g4-standard-48` fixture, and so
+AMD EPYC, as G4 hosts are). All are `spec_authored`, and each note names
+the fixture it was derived from.
+
+Which host fixtures may claim `recorded` is a closed list,
+`RECORDED_HOST_FIXTURES` in `platform/tests/host_identity.rs`. The L4
+derivatives above first shipped claiming to be recordings -- a copy of a
+recording inherits its provenance and its note along with everything else
+-- and nothing failed. A new real capture belongs on that list; a derived
+fixture never does.
+
 ### One row per card and count, not per shape
 
 A row is needed for each distinct (SKU, device count). A second shape at
@@ -84,16 +100,22 @@ prerequisites and execution constraints. A catalog entry alone does not
 add multi-device execution: bundle requests for more than one device
 remain refused.
 
-These GCP shapes have no row, deliberately:
+Every GPU shape GCP offers for these cards is covered, one way or the
+other. `a2-megagpu-16g` has a row: it is the same accelerator type as the
+`a2-highgpu` shapes, so the only new fact is the count. G4 has rows at two,
+four and eight (`g4-standard-96/192/384`), at Preview, beside the
+single-device Production row -- which they do not change.
 
-- `a2-megagpu-16g` -- sixteen A100 40GB, outside the 1/2/4/8 set
-  represented by these fixtures.
-- `a3-megagpu-8g` -- a different accelerator type (`nvidia-h100-mega-80gb`)
-  that may report a different product name; a row with a guessed string
-  would never match.
-- `g4-standard-96/192/384` -- RTX PRO 6000 at 2, 4 and 8. The existing
-  single-device `g4-standard-48` row is Production; no multi-device G4
-  rows are added here.
+One shape has no row, deliberately: `a3-megagpu-8g`. GCP gives it a
+different accelerator name (`nvidia-h100-mega-80gb`) but documents all
+three A3 variants -- High, Mega and Edge -- as the same H100 SXM, and
+`nvidia-smi` reports the product name the GPU itself gives, not GCP's
+label. If it reports `NVIDIA H100 80GB HBM3`, it is already admitted
+against the `a3-highgpu-8g` row as outside-validated, exactly as
+`a3-edgegpu-8g` is -- `registry_query.rs` pins both. A row with a guessed
+name would add nothing if the guess were right, and would sit unmatched in
+the public matrix if it were wrong. That is conditional on the reported
+name, and the first recording of that shape settles it.
 
 ### The `NVIDIA ` prefix is driver-dependent
 

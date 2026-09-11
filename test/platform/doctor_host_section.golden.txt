@@ -160,6 +160,42 @@
 [ok] info platform_row — resolves to support row `ubuntu2404-x86-l4-g2s96`
 [ok] info model_class_rows — row `ubuntu2404-x86-l4-g2s96` claims no model classes at its current support level
 
+## ubuntu2404-x86-a100-40g-a2mg16
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-megagpu-16g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 16 accelerators: `NVIDIA A100-SXM4-40GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2mg16, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2mg16`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2mg16` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s96
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-96 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s96
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s96`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s96` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s192
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-192 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s192
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s192`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s192` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s384
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-384 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s384
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s384`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s384` claims no model classes at its current support level
+
 ## ubuntu2404-x86-l4-g2s8
 [ok] info host_facts — host arch=x86_64 vendor=intel
 [ok] info host_os — Ubuntu 24.04 on g2-standard-8 [exact: version 24.04.4 LTS (Noble Numbat)]
