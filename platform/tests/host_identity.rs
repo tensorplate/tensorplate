@@ -943,3 +943,40 @@ fn a_machine_with_no_pci_bus_is_not_a_machine_with_no_devices() {
         "a class this cannot parse is skipped, and does not take the bus with it"
     );
 }
+
+/// Host fixtures that genuinely are recordings: each was captured from a real
+/// machine, and each note says which one and when.
+///
+/// Closed for the same reason the accelerator UUID allowlist is. A fixture is
+/// usually made by copying an existing one and changing a field or two, and a
+/// copy of a recording inherits `"provenance": "recorded"` along with the
+/// note describing a capture it never had. The three multi-GPU L4 fixtures
+/// shipped exactly that way: derived from the `g2-standard-8` recording, they
+/// claimed to be recordings of shapes nobody had run, and every test passed.
+/// A new real recording belongs here -- adding it is a deliberate act, and
+/// it should be one.
+const RECORDED_HOST_FIXTURES: [&str; 4] = [
+    "dlvm-ubuntu2404-l4-g2s8",
+    "lab-jetson-orin-nano-l4t-r36.5",
+    "macos26-m1pro-16gb",
+    "ubuntu2404-x86-l4-g2s8",
+];
+
+#[test]
+fn only_real_recordings_claim_to_be_recorded() {
+    let claiming: Vec<String> = fixtures()
+        .into_iter()
+        .filter(|(_, fixture)| fixture["provenance"] == "recorded")
+        .map(|(name, _)| name)
+        .collect();
+    let allowed: Vec<String> = RECORDED_HOST_FIXTURES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    assert_eq!(
+        claiming, allowed,
+        "a fixture claiming `recorded` must be a real capture listed in \
+         RECORDED_HOST_FIXTURES; a derived fixture is `spec_authored` and \
+         must say what it was derived from"
+    );
+}

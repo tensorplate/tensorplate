@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1",
-  "row_id": "ubuntu2404-x86-a100-40g-a2hg1",
+  "row_id": "ubuntu2404-x86-a100-40g-a2hg2",
   "os": {
     "name": "Ubuntu",
     "version": "24.04"
@@ -19,7 +19,8 @@
     "sku": "NVIDIA A100-SXM4-40GB",
     "memory_bytes": 42949672960,
     "memory_profile": "discrete_gpu",
-    "partitioning": "unsupported"
+    "partitioning": "unsupported",
+    "device_count": 2
   },
   "backend_packages": [
     {
@@ -59,7 +60,7 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GCP a2-highgpu-1g (disposable), single GPU, non-partitioned",
-    "machine_type": "a2-highgpu-1g"
+    "identity": "GCP a2-highgpu-2g (disposable), 2 GPUs, non-partitioned",
+    "machine_type": "a2-highgpu-2g"
   }
 }

@@ -141,7 +141,7 @@ fn render(findings: &[Finding]) -> String {
 /// real host of that row would report. `None` is a row whose accelerator
 /// comes from the host sources themselves (Apple, Jetson) or which has
 /// none at all (CPU-only) -- both are cases the row match must handle.
-const GOLDEN_ROWS: [(&str, &str, Option<&str>); 8] = [
+const GOLDEN_ROWS: [(&str, &str, Option<&str>); 26] = [
     (
         "jetson-orin-nano-8gb-jp62",
         "jetson-orin-nano-8gb-jp62",
@@ -153,6 +153,96 @@ const GOLDEN_ROWS: [(&str, &str, Option<&str>); 8] = [
         "ubuntu2404-x86-a100-40g-a2hg1",
         "ubuntu2404-x86-a100-40g-a2hg1",
         Some("ubuntu2404-x86-a100-40g-a2hg1"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug1",
+        "ubuntu2404-x86-a100-80g-a2ug1",
+        Some("ubuntu2404-x86-a100-80g-a2ug1"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug8",
+        "ubuntu2404-x86-a100-80g-a2ug8",
+        Some("ubuntu2404-x86-a100-80g-a2ug8"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        Some("ubuntu2404-x86-h100-80g-a3hg1"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg8",
+        "ubuntu2404-x86-h100-80g-a3hg8",
+        Some("ubuntu2404-x86-h100-80g-a3hg8"),
+    ),
+    (
+        "ubuntu2404-x86-a100-40g-a2hg2",
+        "ubuntu2404-x86-a100-40g-a2hg2",
+        Some("ubuntu2404-x86-a100-40g-a2hg2"),
+    ),
+    (
+        "ubuntu2404-x86-a100-40g-a2hg4",
+        "ubuntu2404-x86-a100-40g-a2hg4",
+        Some("ubuntu2404-x86-a100-40g-a2hg4"),
+    ),
+    (
+        "ubuntu2404-x86-a100-40g-a2hg8",
+        "ubuntu2404-x86-a100-40g-a2hg8",
+        Some("ubuntu2404-x86-a100-40g-a2hg8"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug2",
+        "ubuntu2404-x86-a100-80g-a2ug2",
+        Some("ubuntu2404-x86-a100-80g-a2ug2"),
+    ),
+    (
+        "ubuntu2404-x86-a100-80g-a2ug4",
+        "ubuntu2404-x86-a100-80g-a2ug4",
+        Some("ubuntu2404-x86-a100-80g-a2ug4"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg2",
+        "ubuntu2404-x86-h100-80g-a3hg2",
+        Some("ubuntu2404-x86-h100-80g-a3hg2"),
+    ),
+    (
+        "ubuntu2404-x86-h100-80g-a3hg4",
+        "ubuntu2404-x86-h100-80g-a3hg4",
+        Some("ubuntu2404-x86-h100-80g-a3hg4"),
+    ),
+    (
+        "ubuntu2404-x86-l4-g2s24",
+        "ubuntu2404-x86-l4-g2s24",
+        Some("ubuntu2404-x86-l4-g2s24"),
+    ),
+    (
+        "ubuntu2404-x86-l4-g2s48",
+        "ubuntu2404-x86-l4-g2s48",
+        Some("ubuntu2404-x86-l4-g2s48"),
+    ),
+    (
+        "ubuntu2404-x86-l4-g2s96",
+        "ubuntu2404-x86-l4-g2s96",
+        Some("ubuntu2404-x86-l4-g2s96"),
+    ),
+    (
+        "ubuntu2404-x86-a100-40g-a2mg16",
+        "ubuntu2404-x86-a100-40g-a2mg16",
+        Some("ubuntu2404-x86-a100-40g-a2mg16"),
+    ),
+    (
+        "ubuntu2404-x86-rtxpro6000se-g4s96",
+        "ubuntu2404-x86-rtxpro6000se-g4s96",
+        Some("ubuntu2404-x86-rtxpro6000se-g4s96"),
+    ),
+    (
+        "ubuntu2404-x86-rtxpro6000se-g4s192",
+        "ubuntu2404-x86-rtxpro6000se-g4s192",
+        Some("ubuntu2404-x86-rtxpro6000se-g4s192"),
+    ),
+    (
+        "ubuntu2404-x86-rtxpro6000se-g4s384",
+        "ubuntu2404-x86-rtxpro6000se-g4s384",
+        Some("ubuntu2404-x86-rtxpro6000se-g4s384"),
     ),
     (
         "ubuntu2404-x86-l4-g2s8",
@@ -325,7 +415,7 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
     // a Warning saying detection failed invites them to debug their
     // driver or their nvidia-smi; an Unsupported row naming the topology
     // names the device-set constraint.
-    let report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"));
+    let report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-three-l4"));
     let registry = registry();
 
     let section = render_host_section(HostSectionDetection::Complete(&report), Ok(&registry));
@@ -379,7 +469,7 @@ fn a_multi_gpu_answer_names_its_topology_rather_than_failing_detection() {
 
 #[test]
 fn topology_guidance_survives_a_different_machine_shape() {
-    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-two-l4"));
+    let mut report = report_for("ubuntu2404-x86-l4-g2s8", Some("multi-gpu-three-l4"));
     let registry = registry();
     for machine_type in [None, Some("g2-standard-24")] {
         report.host.identity.machine_type = machine_type.map(str::to_string);

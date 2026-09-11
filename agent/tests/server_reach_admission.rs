@@ -542,10 +542,11 @@ fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault()
     //
     // Driven through the real probe rather than a hand-built value, so
     // the test breaks if multi-GPU stops being detected.
-    let two_cards = "NVIDIA L4, 23034, 550.54.15, GPU-1111, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-2222, Disabled";
+    // Three cards, a count no GCP shape offers, so no row can ever claim it.
+    let three_cards = "NVIDIA L4, 23034, 550.54.15, GPU-1111, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-2222, Disabled\n                     NVIDIA L4, 23034, 550.54.15, GPU-3333, Disabled";
     let registry = registry();
     let l4 = row(&registry, "ubuntu2404-x86-l4-g2s8");
-    let platform = report_from_accelerator_answer(l4, two_cards)
+    let platform = report_from_accelerator_answer(l4, three_cards)
         .expect("two readable devices are an answer, not a failure");
     let identity = &platform
         .accelerator
@@ -553,7 +554,7 @@ fn a_working_driver_reporting_a_topology_we_cannot_serve_is_not_a_driver_fault()
         .expect("a host with GPUs reports an accelerator")
         .identity;
     assert_eq!(
-        identity.device_count, 2,
+        identity.device_count, 3,
         "the count is the fact the verdict turns on"
     );
     assert_eq!(

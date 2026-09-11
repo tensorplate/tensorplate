@@ -31,9 +31,170 @@
 [ok] info accelerator_facts — 1 accelerator: `NVIDIA A100-SXM4-40GB`
 [ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2hg1, ubuntu2404-x86-cpu
     hint: several rows share this host profile; accelerator identity is needed to name one
-[unsupported] warning platform_row — resolves to row `ubuntu2404-x86-a100-40g-a2hg1`, which is Planned (row_planned_not_validated)
-    hint: the row names this hardware but carries no validation evidence yet; deploy admission refuses it
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2hg1`
 [ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2hg1` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-80g-a2ug1
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-ultragpu-1g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 1 accelerator: `NVIDIA A100-SXM4-80GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-80g-a2ug1, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-80g-a2ug1`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-80g-a2ug1` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-80g-a2ug8
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-ultragpu-8g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA A100-SXM4-80GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-80g-a2ug8, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-80g-a2ug8`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-80g-a2ug8` claims no model classes at its current support level
+
+## ubuntu2404-x86-h100-80g-a3hg1
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a3-highgpu-1g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 1 accelerator: `NVIDIA H100 80GB HBM3`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-h100-80g-a3hg1
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-h100-80g-a3hg1`
+[ok] info model_class_rows — row `ubuntu2404-x86-h100-80g-a3hg1` claims no model classes at its current support level
+
+## ubuntu2404-x86-h100-80g-a3hg8
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a3-highgpu-8g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA H100 80GB HBM3`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-h100-80g-a3hg8
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-h100-80g-a3hg8`
+[ok] info model_class_rows — row `ubuntu2404-x86-h100-80g-a3hg8` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-40g-a2hg2
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-highgpu-2g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA A100-SXM4-40GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2hg2, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2hg2`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2hg2` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-40g-a2hg4
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-highgpu-4g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA A100-SXM4-40GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2hg4, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2hg4`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2hg4` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-40g-a2hg8
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-highgpu-8g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA A100-SXM4-40GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2hg8, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2hg8`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2hg8` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-80g-a2ug2
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-ultragpu-2g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA A100-SXM4-80GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-80g-a2ug2, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-80g-a2ug2`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-80g-a2ug2` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-80g-a2ug4
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-ultragpu-4g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA A100-SXM4-80GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-80g-a2ug4, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-80g-a2ug4`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-80g-a2ug4` claims no model classes at its current support level
+
+## ubuntu2404-x86-h100-80g-a3hg2
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a3-highgpu-2g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA H100 80GB HBM3`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-h100-80g-a3hg2
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-h100-80g-a3hg2`
+[ok] info model_class_rows — row `ubuntu2404-x86-h100-80g-a3hg2` claims no model classes at its current support level
+
+## ubuntu2404-x86-h100-80g-a3hg4
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a3-highgpu-4g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA H100 80GB HBM3`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-h100-80g-a3hg4
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-h100-80g-a3hg4`
+[ok] info model_class_rows — row `ubuntu2404-x86-h100-80g-a3hg4` claims no model classes at its current support level
+
+## ubuntu2404-x86-l4-g2s24
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on g2-standard-24 [exact: version 24.04.4 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA L4`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s24
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-l4-g2s24`
+[ok] info model_class_rows — row `ubuntu2404-x86-l4-g2s24` claims no model classes at its current support level
+
+## ubuntu2404-x86-l4-g2s48
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on g2-standard-48 [exact: version 24.04.4 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA L4`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s48
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-l4-g2s48`
+[ok] info model_class_rows — row `ubuntu2404-x86-l4-g2s48` claims no model classes at its current support level
+
+## ubuntu2404-x86-l4-g2s96
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on g2-standard-96 [exact: version 24.04.4 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA L4`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s96
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-l4-g2s96`
+[ok] info model_class_rows — row `ubuntu2404-x86-l4-g2s96` claims no model classes at its current support level
+
+## ubuntu2404-x86-a100-40g-a2mg16
+[ok] info host_facts — host arch=x86_64 vendor=intel
+[ok] info host_os — Ubuntu 24.04 on a2-megagpu-16g [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 16 accelerators: `NVIDIA A100-SXM4-40GB`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-a100-40g-a2mg16, ubuntu2404-x86-cpu
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-a100-40g-a2mg16`
+[ok] info model_class_rows — row `ubuntu2404-x86-a100-40g-a2mg16` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s96
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-96 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 2 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s96
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s96`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s96` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s192
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-192 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 4 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s192
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s192`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s192` claims no model classes at its current support level
+
+## ubuntu2404-x86-rtxpro6000se-g4s384
+[ok] info host_facts — host arch=x86_64 vendor=amd
+[ok] info host_os — Ubuntu 24.04 on g4-standard-384 [exact: version 24.04.1 LTS (Noble Numbat)]
+[ok] info accelerator_facts — 8 accelerators: `NVIDIA RTX PRO 6000 Blackwell Server Edition`
+[ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s384
+    hint: several rows share this host profile; accelerator identity is needed to name one
+[ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s384`
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s384` claims no model classes at its current support level
 
 ## ubuntu2404-x86-l4-g2s8
 [ok] info host_facts — host arch=x86_64 vendor=intel

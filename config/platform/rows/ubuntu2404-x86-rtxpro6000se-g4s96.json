@@ -1,6 +1,6 @@
 {
   "schema_version": "0.1",
-  "row_id": "ubuntu2404-x86-a100-40g-a2hg1",
+  "row_id": "ubuntu2404-x86-rtxpro6000se-g4s96",
   "os": {
     "name": "Ubuntu",
     "version": "24.04"
@@ -11,15 +11,16 @@
   "cpu": {
     "architecture": "x86_64",
     "vendors": [
-      "intel"
+      "amd"
     ]
   },
   "accelerator": {
-    "family": "NVIDIA A100",
-    "sku": "NVIDIA A100-SXM4-40GB",
-    "memory_bytes": 42949672960,
+    "family": "NVIDIA RTX PRO Blackwell",
+    "sku": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "memory_bytes": 103079215104,
     "memory_profile": "discrete_gpu",
-    "partitioning": "unsupported"
+    "partitioning": "unsupported",
+    "device_count": 2
   },
   "backend_packages": [
     {
@@ -59,7 +60,7 @@
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
-    "identity": "GCP a2-highgpu-1g (disposable), single GPU, non-partitioned",
-    "machine_type": "a2-highgpu-1g"
+    "identity": "GCP g4-standard-96 (disposable), 2 GPUs, non-partitioned",
+    "machine_type": "g4-standard-96"
   }
 }

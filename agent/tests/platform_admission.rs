@@ -163,21 +163,21 @@ fn a_partitioned_accelerator_is_refused_with_mig_mode_enabled() {
 #[test]
 fn the_same_card_unpartitioned_is_not_refused_for_partitioning() {
     // The control for the case above. Without it, a check that refused
-    // everything would look correct. The A100 row is Planned, so the
-    // unpartitioned card is refused too -- but for that reason and not
-    // this one, which is what the control has to show.
+    // everything would look correct.
+    //
+    // This used to be a weaker control: the A100 row was Planned, so the
+    // unpartitioned card was refused too and the test had to show the
+    // refusal came for a different reason. The row is Preview now, so the
+    // same card with partitioning off is admitted outright -- which is the
+    // cleaner proof that the partitioned refusal is about partitioning.
     let registry = registry();
     let detected = detected_from_fixture(a100(&registry), "ubuntu2404-x86-a100-40g-a2hg1");
     match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
-        PlatformAdmission::Rejected {
-            row_id,
-            reason: Some(reason),
-            ..
-        } => {
-            assert_eq!(row_id.as_deref(), Some("ubuntu2404-x86-a100-40g-a2hg1"));
-            assert_eq!(reason, PlatformReason::RowPlannedNotValidated);
+        admission @ PlatformAdmission::Supported { .. } => {
+            assert_eq!(admission.row_id(), Some("ubuntu2404-x86-a100-40g-a2hg1"));
+            assert_eq!(admission.reason(), None);
         }
-        other => panic!("expected the Planned refusal, got {other:?}"),
+        other => panic!("the unpartitioned card must be admitted, got {other:?}"),
     }
 }
 
@@ -242,7 +242,7 @@ fn an_unknown_discrete_framebuffer_uses_the_row_budget_without_rejecting_capacit
 #[test]
 fn an_off_matrix_card_is_refused_with_the_sku_reason() {
     let registry = registry();
-    let detected = detected_from_fixture(a100(&registry), "unsupported-a100-80gb");
+    let detected = detected_from_fixture(a100(&registry), "unsupported-a100-pcie-40gb");
     match PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None) {
         PlatformAdmission::Rejected {
             reason: Some(reason),
