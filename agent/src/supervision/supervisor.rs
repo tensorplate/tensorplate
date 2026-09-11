@@ -213,6 +213,7 @@ impl WorkerSupervisor {
         inner.state.set_desired_active(
             desired.as_ref().map(|d| d.deployment_id.clone()),
             desired.as_ref().map(|d| d.backend.clone()),
+            desired.as_ref().and_then(|d| d.device_index),
         );
         if desired.is_none() {
             // Drop any in-flight backoff schedule; with no desired active
@@ -376,6 +377,7 @@ impl WorkerSupervisor {
                 inner.state.phase = SupervisionPhase::Starting;
                 inner.state.next_restart_at = None;
                 inner.state.actual_active = Some(handle.deployment_id.clone());
+                inner.state.actual_device_index = handle.device_index;
                 self.emit(
                     inner,
                     SupervisionEventKind::WorkerStarted,
@@ -502,6 +504,7 @@ impl WorkerSupervisor {
         let _ = self.process.force_terminate(handle);
         inner.handle = None;
         inner.state.actual_active = None;
+        inner.state.actual_device_index = None;
         let message = format!(
             "worker `{}` failed readiness ({:?})",
             handle.deployment_id, class
@@ -545,6 +548,7 @@ impl WorkerSupervisor {
     ) -> AgentResult<TickOutcome> {
         inner.handle = None;
         inner.state.actual_active = None;
+        inner.state.actual_device_index = None;
         let after_ready = inner.after_ready;
         inner.after_ready = false;
         let class = if after_ready {
@@ -564,6 +568,7 @@ impl WorkerSupervisor {
             inner.force_terminate_at = None;
             inner.state.phase = SupervisionPhase::Stopped;
             inner.state.actual_active = None;
+            inner.state.actual_device_index = None;
             exit_message = "worker stopped cleanly".to_string();
             let mut payload = self.build_payload(inner, SupervisionEventKind::WorkerStopped, now);
             payload.exit_code = status.code;
@@ -1183,5 +1188,114 @@ mod tests {
             }
             other => panic!("expected fault, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn status_reports_the_device_the_worker_was_launched_with() {
+        let process = Arc::new(MockWorkerProcess::new());
+        let probe = Arc::new(MockReadinessProbe::new());
+        probe.script(vec![ready_sample("d-1")]);
+        let clock = Arc::new(FakeClock::new());
+        let sink = Arc::new(RingEventSink::new(&EventSinkConfig::default()));
+        let supervisor =
+            build_supervisor(process.clone(), probe.clone(), clock.clone(), sink.clone());
+
+        // Before anything launches, the request is visible and the running
+        // pin is not: an operator must be able to tell "asked for device 2"
+        // from "device 2 is serving".
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+                device_index: Some(2),
+            }))
+            .expect("set desired");
+        let before = supervisor.status();
+        assert_eq!(before.desired_device_index, Some(2));
+        assert_eq!(
+            before.actual_device_index, None,
+            "nothing is running yet, so no device is actually serving"
+        );
+
+        supervisor.tick().expect("tick1");
+        let after = supervisor.status();
+        assert_eq!(after.actual_device_index, Some(2));
+        assert_eq!(after.desired_device_index, Some(2));
+    }
+
+    #[test]
+    fn a_pin_change_shows_the_old_device_until_the_new_worker_launches() {
+        // The window this pair of fields exists for. Changing a pin
+        // replaces the worker rather than moving it, so between the
+        // request and the relaunch the running worker is still on the old
+        // device -- and a status that showed only the request would tell
+        // an operator their model had moved when it had not.
+        let process = Arc::new(MockWorkerProcess::new());
+        let probe = Arc::new(MockReadinessProbe::new());
+        probe.script(vec![ready_sample("d-1")]);
+        let clock = Arc::new(FakeClock::new());
+        let sink = Arc::new(RingEventSink::new(&EventSinkConfig::default()));
+        let supervisor =
+            build_supervisor(process.clone(), probe.clone(), clock.clone(), sink.clone());
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+                device_index: Some(0),
+            }))
+            .expect("set desired");
+        supervisor.tick().expect("tick1");
+        assert_eq!(supervisor.status().actual_device_index, Some(0));
+
+        // Same deployment, different device.
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+                device_index: Some(3),
+            }))
+            .expect("repin");
+        let moving = supervisor.status();
+        assert_eq!(moving.desired_device_index, Some(3), "the request moved");
+        assert_eq!(
+            moving.actual_device_index,
+            Some(0),
+            "but the worker that is running is still on the device it started on"
+        );
+    }
+
+    #[test]
+    fn the_running_device_is_forgotten_when_the_deployment_is_cleared() {
+        // A stale pin would be worse than none: it would name a device
+        // nothing is using, and the whole point of the pair is that
+        // `actual` describes something that exists.
+        let process = Arc::new(MockWorkerProcess::new());
+        let probe = Arc::new(MockReadinessProbe::new());
+        probe.script(vec![ready_sample("d-1")]);
+        let clock = Arc::new(FakeClock::new());
+        let sink = Arc::new(RingEventSink::new(&EventSinkConfig::default()));
+        let supervisor =
+            build_supervisor(process.clone(), probe.clone(), clock.clone(), sink.clone());
+        supervisor
+            .set_desired_active(Some(DesiredWorker {
+                deployment_id: "d-1".into(),
+                backend: "mock".into(),
+                device_index: Some(1),
+            }))
+            .expect("set desired");
+        supervisor.tick().expect("tick1");
+        assert_eq!(supervisor.status().actual_device_index, Some(1));
+
+        supervisor.set_desired_active(None).expect("clear");
+        // Drive the stop through to completion.
+        for _ in 0..6 {
+            let _ = supervisor.tick();
+        }
+        let stopped = supervisor.status();
+        assert_eq!(stopped.desired_device_index, None);
+        assert_eq!(
+            stopped.actual_device_index, None,
+            "no worker is running, so no device is serving"
+        );
     }
 }

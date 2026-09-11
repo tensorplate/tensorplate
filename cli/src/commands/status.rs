@@ -194,6 +194,8 @@ fn supervision_block(s: &SupervisionStatusSummary) -> Value {
         "serving_state": serving_state_label(s.serving_state),
         "desired_active": s.desired_active,
         "actual_active": s.actual_active,
+        "desired_device_index": s.desired_device_index,
+        "actual_device_index": s.actual_device_index,
         "backend": s.backend,
         "restart_count": s.restart_count,
         "crash_loop_threshold": s.crash_loop_threshold,
@@ -311,6 +313,30 @@ fn severity_of(
     severity
 }
 
+fn accelerator_placement(s: &SupervisionStatusSummary) -> Option<String> {
+    // Active IDs describe worker presence; pins describe placement. A live
+    // worker can be unpinned, and clearing desired state requests a stop.
+    match (
+        s.actual_active.is_some(),
+        s.desired_active.is_some(),
+        s.actual_device_index,
+        s.desired_device_index,
+    ) {
+        (false, true, _, Some(desired)) => {
+            Some(format!("device={desired} requested, no worker running"))
+        }
+        (true, false, Some(actual), _) => Some(format!("device={actual} (stopping)")),
+        (true, true, Some(actual), None) => Some(format!("device={actual} (removing pin)")),
+        (true, true, Some(actual), Some(desired)) if actual != desired => {
+            Some(format!("device={actual} (moving to {desired})"))
+        }
+        (true, _, Some(actual), _) => Some(format!("device={actual}")),
+        (true, true, None, Some(desired)) => Some(format!("unpinned (moving to {desired})")),
+        // Keep ordinary unpinned deployments and idle status quiet.
+        (false, _, _, _) | (true, _, None, _) => None,
+    }
+}
+
 fn render_human(
     profile: &ResolvedProfile,
     status: Option<&AgentStatus>,
@@ -368,6 +394,9 @@ fn render_human(
                 if s.crash_loop { " (CRASH-LOOP)" } else { "" },
                 s.backend.as_deref().unwrap_or("<unknown>"),
             ));
+            if let Some(placement) = accelerator_placement(s) {
+                out.push_str(&format!("  accelerator: {placement}\n"));
+            }
             if let Some(err) = s.last_failure_message.as_deref() {
                 out.push_str(&format!(
                     "  last_failure: code={} message={}\n",
@@ -635,6 +664,8 @@ mod tests {
                 agent_state: SupervisionAgentState::Ready,
                 desired_active: Some("d-1".into()),
                 actual_active: Some("d-1".into()),
+                desired_device_index: None,
+                actual_device_index: None,
                 backend: Some("tensorrt".into()),
                 restart_count: 0,
                 crash_loop_threshold: 5,
@@ -873,5 +904,114 @@ mod tests {
             parsed["payload"]["observability"]["observability_state"],
             "no_heartbeat"
         );
+    }
+
+    #[test]
+    fn an_unpinned_worker_prints_no_accelerator_line() {
+        // Every deployment today is unpinned. A line reading "device=<none>"
+        // on every status would be noise an operator learns to skip past --
+        // and the one that matters would go with it.
+        let rendered = render_human(&profile(), Some(&agent_status_with_active()), None);
+        assert!(
+            !rendered.contains("accelerator: device"),
+            "unpinned status must stay quiet: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_worker_names_its_device() {
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.desired_device_index = Some(2);
+            sup.actual_device_index = Some(2);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("accelerator: device=2"),
+            "a pinned worker must say which device: {rendered}"
+        );
+        assert!(
+            !rendered.contains("moving to"),
+            "nothing is moving: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_worker_being_moved_names_both_devices() {
+        // The window the pair exists for. Printing only the request would
+        // tell an operator the model had moved while it was still serving
+        // from the old device.
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.actual_device_index = Some(0);
+            sup.desired_device_index = Some(3);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("device=0 (moving to 3)"),
+            "both the serving device and the target must appear: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_requested_device_with_no_worker_says_nothing_is_running() {
+        let mut status = agent_status_with_active();
+        if let Some(sup) = status.supervision.as_mut() {
+            sup.actual_active = None;
+            sup.serving_state = SupervisionServingState::Starting;
+            sup.actual_device_index = None;
+            sup.desired_device_index = Some(1);
+        }
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("device=1 requested, no worker running"),
+            "a request with nothing serving must not read as serving: {rendered}"
+        );
+    }
+
+    #[test]
+    fn adding_a_pin_reports_the_live_unpinned_worker() {
+        for phase in [
+            SupervisionServingState::Ready,
+            SupervisionServingState::Stopping,
+        ] {
+            let mut status = agent_status_with_active();
+            let sup = status.supervision.as_mut().expect("supervision");
+            sup.serving_state = phase;
+            sup.desired_device_index = Some(1);
+            let rendered = render_human(&profile(), Some(&status), None);
+            assert!(
+                rendered.contains("accelerator: unpinned (moving to 1)"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("no worker running"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn removing_a_pin_is_distinct_from_stopping_the_deployment() {
+        let mut status = agent_status_with_active();
+        status
+            .supervision
+            .as_mut()
+            .expect("supervision")
+            .actual_device_index = Some(0);
+        let removing = render_human(&profile(), Some(&status), None);
+        assert!(
+            removing.contains("accelerator: device=0 (removing pin)"),
+            "{removing}"
+        );
+
+        status
+            .supervision
+            .as_mut()
+            .expect("supervision")
+            .desired_active = None;
+        let stopping = render_human(&profile(), Some(&status), None);
+        assert!(
+            stopping.contains("accelerator: device=0 (stopping)"),
+            "{stopping}"
+        );
+        assert!(!stopping.contains("removing pin"), "{stopping}");
     }
 }

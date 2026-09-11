@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Supervision status reports requested and running accelerator pins in the
+  agent protocol and CLI, retaining the old worker's pin until it exits.
+
 - Worker supervision accepts an optional device pin at launch through
   `DesiredWorker`. A pin sets `CUDA_VISIBLE_DEVICES` after the environment
   allowlist; unpinned workers retain the allowlist behavior. Deployment
@@ -27,6 +30,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   homogeneous device sets.
 
 ### Fixed
+
+- Human-readable status distinguishes a live unpinned worker from an
+  absent worker and shows pending pin removal separately from stopping
+  the deployment.
 
 - Changing, adding, or removing a device pin for a running deployment
   stops the old worker before launching its replacement with the latest

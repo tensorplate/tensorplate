@@ -50,6 +50,8 @@ fn ready_status_response() -> ControlResponse {
             agent_state: SupervisionAgentState::Ready,
             desired_active: Some("d-1".into()),
             actual_active: Some("d-1".into()),
+            desired_device_index: None,
+            actual_device_index: None,
             backend: Some("tensorrt".into()),
             restart_count: 0,
             crash_loop_threshold: 5,
@@ -105,6 +107,108 @@ fn status_command_round_trips_against_local_stub() {
     assert_eq!(parsed["payload"]["severity"], "ready");
     let history = stub.history();
     assert_eq!(history.len(), 1);
+}
+
+fn assert_status_device_pins(
+    desired: Option<(&str, Option<u32>)>,
+    actual: Option<(&str, Option<u32>)>,
+    expected_accelerator_line: Option<&str>,
+) {
+    let stub = AgentStub::start();
+    let mut response = ready_status_response();
+    let supervision = response
+        .agent_status
+        .as_mut()
+        .expect("agent status")
+        .supervision
+        .as_mut()
+        .expect("supervision");
+    supervision.desired_active = desired.map(|(id, _)| id.into());
+    supervision.actual_active = actual.map(|(id, _)| id.into());
+    supervision.desired_device_index = desired.and_then(|(_, pin)| pin);
+    supervision.actual_device_index = actual.and_then(|(_, pin)| pin);
+    supervision.serving_state = if desired == actual {
+        SupervisionServingState::Ready
+    } else if actual.is_none() {
+        SupervisionServingState::Starting
+    } else {
+        SupervisionServingState::Stopping
+    };
+    stub.enqueue(response.clone());
+    let (code, stdout, stderr) = run_cli(&stub.socket, &["status"]);
+    assert_eq!(code, 0, "stdout: {stdout}; stderr: {stderr}");
+    let accelerator_lines: Vec<_> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("accelerator:"))
+        .collect();
+    assert_eq!(
+        accelerator_lines,
+        expected_accelerator_line.into_iter().collect::<Vec<_>>(),
+        "stdout: {stdout}"
+    );
+
+    stub.enqueue(response);
+    let (code, stdout, stderr) = run_cli(&stub.socket, &["--output", "json", "status"]);
+    assert_eq!(code, 0, "stdout: {stdout}; stderr: {stderr}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let supervision = &parsed["payload"]["agent"]["supervision"];
+    for (field, expected) in [
+        (
+            "desired_active",
+            serde_json::json!(desired.map(|(id, _)| id)),
+        ),
+        ("actual_active", serde_json::json!(actual.map(|(id, _)| id))),
+        (
+            "desired_device_index",
+            serde_json::json!(desired.and_then(|(_, pin)| pin)),
+        ),
+        (
+            "actual_device_index",
+            serde_json::json!(actual.and_then(|(_, pin)| pin)),
+        ),
+    ] {
+        assert_eq!(supervision.get(field), Some(&expected), "field: {field}");
+    }
+    assert_eq!(stub.history().len(), 2);
+}
+
+#[test]
+fn status_distinguishes_live_unpinned_worker_from_absent_worker() {
+    assert_status_device_pins(
+        Some(("d-1", Some(1))),
+        Some(("d-1", None)),
+        Some("accelerator: unpinned (moving to 1)"),
+    );
+    assert_status_device_pins(
+        Some(("d-1", Some(1))),
+        None,
+        Some("accelerator: device=1 requested, no worker running"),
+    );
+}
+
+#[test]
+fn status_distinguishes_removing_pin_from_stopping_worker() {
+    assert_status_device_pins(
+        Some(("d-1", None)),
+        Some(("d-1", Some(0))),
+        Some("accelerator: device=0 (removing pin)"),
+    );
+    assert_status_device_pins(
+        None,
+        Some(("d-1", Some(0))),
+        Some("accelerator: device=0 (stopping)"),
+    );
+}
+
+#[test]
+fn status_preserves_stable_pinned_and_unpinned_output() {
+    assert_status_device_pins(Some(("d-1", None)), Some(("d-1", None)), None);
+    assert_status_device_pins(
+        Some(("d-1", Some(0))),
+        Some(("d-1", Some(0))),
+        Some("accelerator: device=0"),
+    );
 }
 
 #[test]

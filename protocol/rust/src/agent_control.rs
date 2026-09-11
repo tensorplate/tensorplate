@@ -367,6 +367,14 @@ pub struct SupervisionStatusSummary {
     pub desired_active: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_active: Option<String>,
+    /// Requested and launch-time accelerator pins. With the corresponding
+    /// active deployment ID present, an absent pin means unpinned; without
+    /// that ID, no worker is requested or running. The pair can differ
+    /// during initial launch, restart, or a placement change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_device_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_device_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
     pub restart_count: u64,
@@ -1089,6 +1097,8 @@ mod tests {
                 agent_state: SupervisionAgentState::Failed,
                 desired_active: Some("d-1".into()),
                 actual_active: None,
+                desired_device_index: None,
+                actual_device_index: None,
                 backend: Some("mock".into()),
                 restart_count: 5,
                 crash_loop_threshold: 5,

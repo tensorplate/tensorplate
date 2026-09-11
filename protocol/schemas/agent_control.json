@@ -365,6 +365,16 @@
         },
         "desired_active": {"type": "string"},
         "actual_active": {"type": "string"},
+        "desired_device_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Requested accelerator pin. When desired_active is present, an absent pin means an unpinned worker is requested. When desired_active is absent, no worker is requested."
+        },
+        "actual_device_index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Accelerator pin used to launch the running worker. When actual_active is present, an absent pin means the worker is unpinned; when actual_active is absent, no worker is running. The actual and desired pins can differ during initial launch, restart, or a placement change."
+        },
         "backend": {"type": "string"},
         "restart_count": {"type": "integer", "minimum": 0},
         "crash_loop_threshold": {"type": "integer", "minimum": 0},
