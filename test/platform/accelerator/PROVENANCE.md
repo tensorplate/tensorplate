@@ -1,15 +1,18 @@
 # Accelerator detection fixtures
 
-One recorded `nvidia-smi` answer per file, in the exact shape
-`platform/src/accelerator.rs` asks for:
+One `nvidia-smi` answer per file, in the exact shape
+`platform/src/accelerator.rs` asks for. The provenance below distinguishes
+recorded answers from transcribed and synthetic fixtures.
 
 ```bash
 nvidia-smi --query-gpu=name,memory.total,driver_version,uuid,mig.mode.current \
   --format=csv,noheader,nounits
 ```
 
-The **product name is the only field a support row matches on**, and it is
-compared verbatim. Everything else is recorded for evidence and telemetry.
+Accelerator matching uses the product name, compared verbatim, together
+with the device count and partitioning state. Memory readings bound the
+per-device capability; they are not a match key. Driver versions and UUIDs
+are retained as evidence fields.
 
 ## Provenance by fixture
 
@@ -49,27 +52,48 @@ listed so a future recording knows exactly what claim it replaces.
 | `unsupported-a100-pcie-40gb.txt` | `NVIDIA A100-PCIE-40GB` | The canonical near miss: same family **and** same capacity as the A100 40GB row, differing only in form factor. It replaced `unsupported-a100-80gb.txt` when the A100 80GB became a Preview row, and it is the stronger near miss of the two. GCP's A100s are all SXM4, so this stays off-matrix. The spelling follows NVIDIA's form-factor naming and is not recorded; that is immaterial here, because the property under test is that a card no row names is refused rather than matched to its nearest row. |
 | `ubuntu2404-x86-a100-80g-a2ug1.txt`, `...-a2ug8.txt` | `NVIDIA A100-SXM4-80GB` | Follows the SXM4 naming of the committed A100 40GB row. **Not recorded.** The 81920 MiB framebuffer is carried over from the earlier transcription and is also unverified. The 8-device file repeats the line with distinct synthetic UUIDs. |
 | `ubuntu2404-x86-h100-80g-a3hg1.txt`, `...-a3hg8.txt` | `NVIDIA H100 80GB HBM3` | Name and 81559 MiB framebuffer taken from observed `nvidia-smi` output on another provider's H100 host ([thundergolfer, "Why does an NVIDIA H100 80GB card offer 85.52 GB?"](https://thundergolfer.com/blog/nvidia-gpu-memory-capacity)). **Not recorded on GCP.** Consistent with GCP documenting `a3-highgpu-*` as H100 SXM; `a3-megagpu-8g` uses a different accelerator type (`nvidia-h100-mega-80gb`) and may report a different string, so it has no row. |
+| Multi-GPU fixtures at 2, 4 and 8 devices for A100 40GB (`a2hg2/4/8`), A100 80GB (`a2ug2/4`), H100 (`a3hg2/4`) and L4 (`g2s24/48/96`) | as the 1-GPU fixture of each card | Each repeats its card's line once per device, with distinct synthetic UUIDs. The counts and shapes come from GCP's machine-type API (`gcloud compute machine-types list`, us-central1). The SKU and framebuffer retain the provenance of the single-device source; **none of these multi-GPU answers is a recording**. |
+| `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
+| `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
+| `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's transcribed answer with `mig.mode.current` set to `Enabled`. The row is Preview; this fixture exercises the partitioning refusal independently of support level. |
+| `multi-gpu-three-l4.txt` | `NVIDIA L4` | The L4 row's recorded line, repeated for three devices with synthetic UUIDs. **Not a recording.** Three devices exercise an unclaimed count in the committed registry. This replaces the two-device refusal fixture because `g2-standard-24` now has a row for two L4s. |
 
-| Multi-GPU fixtures at 2, 4 and 8 devices for A100 40GB (`a2hg2/4/8`), A100 80GB (`a2ug2/4`), H100 (`a3hg2/4`) and L4 (`g2s24/48/96`) | as the 1-GPU fixture of each card | Each repeats its card's line once per device, with distinct synthetic UUIDs. The counts and shapes come from GCP's own machine-type API (`gcloud compute machine-types list`, us-central1), not from documentation, which truncates before its tables. The SKU and framebuffer carry the same provenance as the 1-GPU fixture they were derived from -- **none is recorded**. |
+UUIDs in these fixtures are synthetic. Driver versions are plausible for
+the generation and are not asserted on. Transcribed framebuffer sizes are
+unverified; the L4 derivatives retain the recorded single-device reading.
+
+### Derived L4 host fixtures
+
+The paired host fixtures
+`test/platform/host_identity/ubuntu2404-x86-l4-g2s24.json`,
+`ubuntu2404-x86-l4-g2s48.json`, and `ubuntu2404-x86-l4-g2s96.json` are
+**spec_authored derivatives**, not recordings from those shapes. They copy
+the recorded `g2-standard-8` sources and change only the machine-type source
+and the fixture's row and expected machine identity. The copied CPU,
+memory, and PCI data remain from the single-device host; they do not
+establish the hardware inventory of the larger shapes. Paired with the
+synthetic accelerator answers above, these cases test matching and do not
+provide hardware-validation evidence.
 
 ### One row per card and count, not per shape
 
 A row is needed for each distinct (SKU, device count). A second shape at
-an existing count needs none: it fails the row's machine-type check, so it
-resolves as outside the row's validated environment and is admitted
-against it when the row is supported. That covers `a3-edgegpu-8g` (H100,
-eight devices, same accelerator type as `a3-highgpu-8g`) and the four
-1-GPU L4 shapes besides `g2-standard-8`.
+an existing count can resolve as outside that row's validated environment
+instead of needing another row. Admission still applies the row's
+prerequisites and execution constraints. A catalog entry alone does not
+add multi-device execution: bundle requests for more than one device
+remain refused.
 
-Three GCP shapes have no row, deliberately:
+These GCP shapes have no row, deliberately:
 
-- `a2-megagpu-16g` -- sixteen A100 40GB. A count no other family offers,
-  and outside the 1/2/4/8 set requested.
+- `a2-megagpu-16g` -- sixteen A100 40GB, outside the 1/2/4/8 set
+  represented by these fixtures.
 - `a3-megagpu-8g` -- a different accelerator type (`nvidia-h100-mega-80gb`)
   that may report a different product name; a row with a guessed string
   would never match.
-- `g4-standard-96/192/384` -- RTX PRO 6000 at 2, 4 and 8. The G4 row is
-  held as planned.
+- `g4-standard-96/192/384` -- RTX PRO 6000 at 2, 4 and 8. The existing
+  single-device `g4-standard-48` row is Production; no multi-device G4
+  rows are added here.
 
 ### The `NVIDIA ` prefix is driver-dependent
 
@@ -85,14 +109,6 @@ every NVIDIA row, not something these rows introduce -- but it means the
 first `tensorplate doctor --record` on each of these machines is what
 confirms the string, and its `accelerator_facts` finding will show exactly
 what was reported if it does not match.
-| `unsupported-rtx-a6000.txt` | `NVIDIA RTX A6000` | Named as explicitly out of matrix by the epic's non-goals. |
-| `unsupported-rtx-6000-ada.txt` | `NVIDIA RTX 6000 Ada Generation` | Named as explicitly out of matrix by the epic's non-goals. |
-| `mig-enabled-a100-40g.txt` | `NVIDIA A100-SXM4-40GB` | The A100 row's card with `mig.mode.current` set to `Enabled`. The row is Planned; the partitioning refusal is checked before support level, so this fixture still exercises it. |
-| `multi-gpu-three-l4.txt` | `NVIDIA L4` | The L4 row's own **recorded** line, repeated for three devices with synthetic UUIDs. Not a recording: no multi-GPU host has been observed. What it exercises is the device count. **Three, deliberately**: GCP offers one, two, four, eight and sixteen of a card but never three, so no real shape can ever earn a row at this count. It was `multi-gpu-two-l4.txt` until an L4 row claimed two GPUs (`g2-standard-24`) and made the old example supported -- an unclaimed-count example has to be a count nothing will claim, or the next row falsifies every test that uses it. |
-
-UUIDs are synthetic. Driver versions are plausible for the generation and are
-not asserted on. Framebuffer sizes are approximately what each card reports,
-which is not the same as the row's nominal capacity — see below.
 
 ### These must be replaced with recorded output
 
@@ -103,7 +119,7 @@ these files proves the parser and the matching path, not that the strings
 are what the fleet reports.
 
 - The A100 pair (`ubuntu2404-x86-a100-40g-a2hg1.txt`,
-  `mig-enabled-a100-40g.txt`) remains transcribed while the row is Planned;
+  `mig-enabled-a100-40g.txt`) remains transcribed while the row is Preview;
   both files must be regenerated from one recorded name in one session.
 - The RTX PRO 6000 Server Edition row carries evidence from the previous
   release cycle rather than a recording from this pipeline. The Workstation
@@ -119,9 +135,8 @@ An L4's row records 24 GiB (`25769803776` bytes). The card reports roughly
 `23034` MiB, because the row records nominal capacity and the tool reports
 the usable framebuffer.
 
-They do **not** always differ: an A100 40GB reports exactly its nominal
-40 GiB. That is the point — the two numbers *may* differ, and for at least
-one supported card they do, which is enough to disqualify memory as a match
-dimension. Matching on it would make that card miss its own row, and the
-gap is far too large for a tolerance to paper over. An equality that happens
-to hold for one card is not a property to build on.
+The transcribed A100 40GB fixture uses its nominal 40 GiB, but that value
+has not been confirmed by a recording. The recorded L4 difference is
+enough to show why memory cannot be an exact match dimension: it would
+make the card miss its own row. Memory instead bounds the per-device
+capability after the identity matches.

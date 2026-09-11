@@ -1,8 +1,8 @@
 {
   "row_id": "ubuntu2404-x86-l4-g2s48",
   "matches_row": true,
-  "provenance": "recorded",
-  "provenance_note": "recorded by `tensorplate doctor --record` on 2026-08-30; driver 595.71.05; device GPU-00000000-0000-0000-0000-000000000001 (uuid sanitized for publication)",
+  "provenance": "spec_authored",
+  "provenance_note": "Derived from ubuntu2404-x86-l4-g2s8.json for matching tests by changing the machine type and expected row identity. CPU, memory, and PCI sources remain from that single-GPU capture; this is not a recording of g2-standard-48.",
   "sources": {
     "uname_machine": "x86_64",
     "os_release": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n",
