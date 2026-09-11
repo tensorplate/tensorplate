@@ -44,7 +44,7 @@
         },
         "artifact_digest": {
           "type": "string",
-          "description": "sha256 of the installed package, when the harness can determine it. Binds the report to one artifact rather than to a version string anyone can reuse.",
+          "description": "sha256 of the one immutable artifact the install verified, recorded by the harness while the run was happening. Binds the report to specific bytes rather than to a version string anyone can reuse. Which artifact that is depends on how the row installs: for a package channel it is the release's signed SHA256SUMS, which commits transitively to every package installed; for a build-from-source channel it is the archive every formula is pinned to, which is that channel's only immutable artifact -- and therefore names the build input, not the bytes that landed. The harness records what it hashed in `artifact-digest.txt` beside the stage logs, since this object is closed and cannot carry it. Bare lowercase hex: the `sha256:`-prefixed spelling used for model artifacts is deliberately outside the pattern so the two cannot be confused. Optional, because a report is worth filing from a harness that cannot determine it -- but a value not captured during the run cannot be recovered afterwards, since nothing on an installed system reports which artifact it came from.",
           "pattern": "^[0-9a-f]{64}$"
         }
       }

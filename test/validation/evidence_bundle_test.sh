@@ -24,6 +24,18 @@ runner="${repo_root}/tools/validation/lifecycle-stages.sh"
 VERSION="0.2.1"
 failures=0
 
+# The producer refuses a malformed one, so an exported value would fail
+# these checks for a reason unrelated to what they test.
+unset TP_LIFECYCLE_SOURCE_REVISION
+
+# A recorded digest, from the tool the harnesses use rather than a
+# literal typed here.
+if command -v sha256sum >/dev/null 2>&1; then
+  DIGEST="$(sha256sum "$checker" | awk '{print $1}')"
+else
+  DIGEST="$(shasum -a 256 "$checker" | awk '{print $1}')"
+fi
+
 check() {
   local what="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -59,6 +71,9 @@ produce_bundle() (
   source "$runner"
   lifecycle_begin "$row" "${dir}/evidence/synthetic-row" "$version" test-harness
   trap 'lifecycle_abort $?' EXIT
+  # A real bundle names the artifact it installed, so the schema-valid
+  # direction below covers a report that carries one.
+  lifecycle_artifact_digest "$DIGEST" SHA256SUMS
   local stage skip skipped
   for stage in install upgrade deploy-smoke status-logs rollback restart crash-loop offline; do
     skipped=0
@@ -105,6 +120,10 @@ elif how == "escaping-log":
     report["stages"][0]["log"] = "../../../etc/passwd"
 elif how == "absent-log":
     report["stages"][0]["log"] = "never-written.log"
+elif how == "bad-digest":
+    report["subject"]["artifact_digest"] = "sha256:" + "a" * 64
+elif how == "uppercase-digest":
+    report["subject"]["artifact_digest"] = "A" * 64
 elif how == "extra-stage":
     report["stages"].append({
         "stage": "install", "status": "pass", "log": "install.log",
@@ -189,6 +208,22 @@ produce_bundle "$d" synthetic-row "$VERSION" >/dev/null 2>&1
 mutate_report "$d" drop-timestamps
 check "a report missing required timestamps fails" "1" "$(run_checker "$d")"
 check "  and says it violated the schema" "yes" "$(grep -q 'violates the schema' "${d}/out.txt" && echo yes || echo no)"
+
+# --- A malformed artifact digest is refused by the schema the gate
+# already validates against, which is why the gate itself needs no
+# check of its own. The passing direction above proves it is not a
+# blanket refusal of any report carrying a digest.
+d="${work}/baddigest"; stage_registry "$d" recorded
+produce_bundle "$d" synthetic-row "$VERSION" >/dev/null 2>&1
+mutate_report "$d" bad-digest
+check "a prefixed artifact digest fails" "1" "$(run_checker "$d")"
+check "  and says it violated the schema" "yes" \
+  "$(grep -q 'violates the schema at subject/artifact_digest' "${d}/out.txt" && echo yes || echo no)"
+
+d="${work}/updigest"; stage_registry "$d" recorded
+produce_bundle "$d" synthetic-row "$VERSION" >/dev/null 2>&1
+mutate_report "$d" uppercase-digest
+check "an uppercase artifact digest fails" "1" "$(run_checker "$d")"
 
 # --- Cited logs must exist, and must stay inside the bundle.
 d="${work}/nolog"; stage_registry "$d" recorded
