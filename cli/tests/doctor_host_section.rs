@@ -864,6 +864,59 @@ fn accelerator_facts_for(edit: impl Fn(&mut tensorplate_platform::AcceleratorIde
 }
 
 #[test]
+fn pci_only_accelerator_facts_do_not_claim_absence_or_invent_identity() {
+    // A missing nvidia-smi answer does not erase the host probe's PCI
+    // evidence. That evidence proves presence, but not a SKU or GPU count.
+    let report = report_for("ubuntu2404-x86-l4-g2s8", None);
+    assert!(report.accelerator.is_none());
+    assert_eq!(report.host.exact.nvidia_pci_functions, ["0000:00:03.0"]);
+    let registry = registry();
+    for registry_result in [Ok(&registry), Err(&NO_REGISTRY)] {
+        let section = render_host_section(HostSectionDetection::Complete(&report), registry_result);
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::AcceleratorFacts)
+            .expect("accelerator_facts");
+        assert_eq!(facts.status, FindingStatus::Skipped, "{facts:?}");
+        assert_eq!(facts.severity, Severity::Info, "{facts:?}");
+        assert_eq!(
+            facts.message,
+            "skipped: NVIDIA hardware detected on PCI, but accelerator identity is unavailable"
+        );
+        assert_eq!(
+            facts.hint.as_deref(),
+            Some("see the platform_row finding for why")
+        );
+        let row = section
+            .iter()
+            .find(|f| f.id == FindingId::PlatformRow)
+            .expect("platform_row");
+        assert_eq!(row.status, FindingStatus::Unsupported);
+        assert!(row.message.contains("missing_driver_runtime"), "{row:?}");
+        assert!(row.message.contains("0000:00:03.0"), "{row:?}");
+    }
+}
+
+#[test]
+fn cpu_only_accelerator_facts_report_true_absence() {
+    let report = report_for("ubuntu2404-x86-cpu", None);
+    assert!(report.accelerator.is_none());
+    assert!(report.host.exact.nvidia_pci_functions.is_empty());
+    let registry = registry();
+    for registry_result in [Ok(&registry), Err(&NO_REGISTRY)] {
+        let section = render_host_section(HostSectionDetection::Complete(&report), registry_result);
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::AcceleratorFacts)
+            .expect("accelerator_facts");
+        assert_eq!(facts.status, FindingStatus::Pass, "{facts:?}");
+        assert_eq!(facts.severity, Severity::Info, "{facts:?}");
+        assert_eq!(facts.message, "no accelerator detected");
+        assert!(facts.hint.is_none());
+    }
+}
+
+#[test]
 fn a_multi_gpu_host_names_the_count_its_verdict_is_about() {
     // The gap #192 left: platform_row said `unsupported_accelerator_topology`
     // and nothing said the count was eight. An operator had to run

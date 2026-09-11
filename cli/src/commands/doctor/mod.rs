@@ -506,14 +506,6 @@ fn render_model_class_rows(resolution: PlatformResolution<'_>) -> Finding {
     )
 }
 
-/// Which support row this machine IS, host and accelerator together.
-///
-/// `platform_profile` above answers from host identity alone and must
-/// report a set, because rows sharing an OS and CPU profile differ only by
-/// accelerator. This is the answer that set defers to. The two are
-/// deliberately separate findings: an operator whose accelerator probe
-/// fails still gets the host-level answer, and the pair says which half
-/// of the identity was the problem.
 /// What accelerator the host carries, and how many: the fact the
 /// `platform_row` verdict is about.
 ///
@@ -549,6 +541,14 @@ fn render_accelerator_facts(detected: HostSectionDetection<'_>) -> Finding {
                 }
                 Finding::ok(FindingId::AcceleratorFacts, Severity::Info, message, None)
             }
+            // PCI evidence proves hardware is present even when the tool
+            // cannot identify it. It does not establish a SKU or GPU count.
+            None if !report.host.exact.nvidia_pci_functions.is_empty() => Finding::skipped(
+                FindingId::AcceleratorFacts,
+                Severity::Info,
+                "skipped: NVIDIA hardware detected on PCI, but accelerator identity is unavailable",
+                Some("see the platform_row finding for why".into()),
+            ),
             None => Finding::ok(
                 FindingId::AcceleratorFacts,
                 Severity::Info,
@@ -574,6 +574,14 @@ fn render_accelerator_facts(detected: HostSectionDetection<'_>) -> Finding {
     }
 }
 
+/// Which support row this machine IS, host and accelerator together.
+///
+/// `platform_profile` above answers from host identity alone and must
+/// report a set, because rows sharing an OS and CPU profile differ only by
+/// accelerator. This is the answer that set defers to. The two are
+/// deliberately separate findings: an operator whose accelerator probe
+/// fails still gets the host-level answer, and the pair says which half
+/// of the identity was the problem.
 fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
     match resolution {
         PlatformResolution::MissingDriverRuntime { host, error } => Finding::unsupported(

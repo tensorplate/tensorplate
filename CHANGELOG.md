@@ -8,6 +8,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Doctor reports accelerator SKU and device count in an `accelerator_facts`
+  finding, including mixed-SKU and partitioned sets, separately from the
+  platform support verdict.
+
 - Supervision status reports requested and running accelerator pins in the
   agent protocol and CLI, retaining the old worker's pin until it exits.
 
@@ -30,6 +34,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   homogeneous device sets.
 
 ### Fixed
+
+- Doctor distinguishes an unavailable accelerator identity from absent
+  hardware when NVIDIA PCI evidence is present, directing operators to
+  the platform finding for the driver or runtime diagnosis.
 
 - Human-readable status distinguishes a live unpinned worker from an
   absent worker and shows pending pin removal separately from stopping
