@@ -66,7 +66,13 @@ readonly OBSERVABILITY_UNIT="tensorplate-observability"
 # fire, which is how a stage that certifies failures as passes ships.
 AGENT_SOCKET_PATH="${TP_CLOUD_AGENT_SOCKET:-/run/tensorplate/agent.sock}"
 LOG_DIR="${TP_CLOUD_LOG_DIR:-/var/log/tensorplate}"
-BUNDLE_STAGING_DIR="${TP_CLOUD_BUNDLE_STAGING:-/var/tmp/tensorplate-cloud-lifecycle-bundle}"
+# Outside every path the agent's unit hides from it. The unit sets
+# PrivateTmp=true, so /tmp and /var/tmp are a private namespace the agent
+# cannot see into, and ProtectHome=true, so nothing under /home is
+# visible either. ProtectSystem=strict leaves the rest of the filesystem
+# readable, which is all a bundle needs. The first real run staged under
+# /var/tmp and the agent reported the bundle as nonexistent.
+BUNDLE_STAGING_DIR="${TP_CLOUD_BUNDLE_STAGING:-/opt/tensorplate-validation/x86-fixture-smoke}"
 # RestartSec is 5 in the shipped unit, so every readiness wait has to sit
 # well above it rather than racing a restart.
 readonly READY_TIMEOUT_SECONDS=60
@@ -416,6 +422,7 @@ PY
   staged_bundle="$BUNDLE_STAGING_DIR"
   note "staging the bundle at ${staged_bundle} for the agent to read"
   step "stage the bundle" sudo rm -rf "$staged_bundle" || return
+  step "create the staging parent" sudo mkdir -p "$(dirname "$staged_bundle")" || return
   step "copy the bundle" sudo cp -R "$BUNDLE_DIR" "$staged_bundle" || return
   step "make the bundle readable" sudo chmod -R a+rX "$staged_bundle" || return
 

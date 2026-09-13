@@ -86,6 +86,42 @@ assert "artifact-digest.txt" not in before_begin, \
 print("stage coverage: 4 run, 4 skipped with reasons, digest recorded after install")
 PY
 
+# --- the bundle must be staged somewhere the sandboxed agent can see.
+#
+# The agent opens the bundle itself, as the tensorplate user, inside the
+# unit's filesystem sandbox. The first real run staged it under /var/tmp,
+# which PrivateTmp hides, and the agent reported a bundle it could not
+# see as one that did not exist. This reads the sandbox from the shipped
+# unit rather than from a list kept here, so tightening the unit fails
+# this check instead of a VM run.
+python3 - "$harness" "${repo_root}/packaging/debian/tensorplate-agent.service" <<'PY'
+import re, sys
+
+harness_path, unit_path = sys.argv[1:]
+body = open(harness_path, encoding="utf-8").read()
+unit = open(unit_path, encoding="utf-8").read()
+
+match = re.search(r'^BUNDLE_STAGING_DIR="\$\{TP_CLOUD_BUNDLE_STAGING:-([^}]+)\}"', body, re.M)
+assert match, "the harness does not declare a default bundle staging directory"
+staging = match.group(1)
+
+def enabled(key):
+    found = re.search(rf"^{key}=(\S+)", unit, re.M)
+    return found is not None and found.group(1).lower() not in ("false", "no", "0")
+
+hidden = []
+if enabled("PrivateTmp"):
+    hidden += ["/tmp", "/var/tmp"]
+if enabled("ProtectHome"):
+    hidden += ["/home", "/root", "/run/user"]
+for prefix in hidden:
+    assert not (staging == prefix or staging.startswith(prefix + "/")), (
+        f"the bundle is staged at {staging}, which the agent unit hides from the "
+        f"agent ({prefix}); the agent would report it as nonexistent"
+    )
+print(f"bundle staging: {staging} is visible to the sandboxed agent")
+PY
+
 # --- the honesty claim the PR rests on.
 grep -Fq 'does NOT' "$harness"
 grep -Fq 'accelerator_kernel_executed' "$harness"
