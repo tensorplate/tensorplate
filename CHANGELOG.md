@@ -70,6 +70,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Cloud lifecycle validation requires journal entries from each service's
+  current invocation, and verifies serving health and an inference echo
+  after restarting. Empty or stale journal captures and a deployment
+  recorded in status but unable to serve no longer pass those stages.
+
+- The cloud validation runbook requires PyTorch in the packaged backend
+  interpreter, `/usr/bin/python3`; selecting a virtualenv only through
+  the sidecar environment variable does not satisfy preflight or doctor.
+
 - Installer hardware validation verifies that the NVIDIA driver query
   succeeds when driver metadata is unavailable. An installed but unusable
   `nvidia-smi` now warns and fails under `--strict-hardware`.

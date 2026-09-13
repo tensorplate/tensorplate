@@ -407,57 +407,17 @@ PY
   pass "installed, services ready, doctor green, ${ROW} resolved by platform_row"
 }
 
-# --- deploy-smoke ------------------------------------------------------
-
-stage_deploy_smoke() {
-  local work deploy_output status_output infer_input infer_output staged_bundle
-  work="$(mktemp -d)"
-  deploy_output="${work}/deploy.json"
-  status_output="${work}/status.json"
+# Exercise the currently active worker without changing the deployment.
+# Both the initial deploy and restart must prove a live endpoint and a
+# successful inference: durable active metadata alone survives worker
+# failure in the packaged configuration, which has no supervisor block.
+# The optional deploy response adds the initial transaction assertions.
+check_worker_round_trip() {
+  local status_output="$1" result_output="$2" deploy_output="${3:-}"
+  local work infer_input infer_output
+  work="$(mktemp -d)" || return
   infer_input="${work}/sample_infer.json"
   infer_output="${work}/infer-response.json"
-
-  note "validating the deploy-smoke bundle before deploying it"
-  python3 - "$BUNDLE_DIR" <<'PY' || return
-import hashlib, json, pathlib, sys
-
-bundle = pathlib.Path(sys.argv[1]).resolve()
-manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
-if manifest.get("backend_hint") != "python_pytorch":
-    raise SystemExit("deploy-smoke bundle must declare backend_hint=python_pytorch")
-models = [a for a in manifest.get("artifacts", [])
-          if isinstance(a, dict) and a.get("role") == "model"]
-if len(models) != 1:
-    raise SystemExit("deploy-smoke bundle must declare exactly one model artifact")
-artifact = models[0]
-path = (bundle / artifact["path"]).resolve()
-if bundle not in path.parents:
-    raise SystemExit("deploy-smoke model artifact escapes the bundle root")
-digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-if digest != artifact.get("digest"):
-    raise SystemExit("deploy-smoke model artifact digest does not match its manifest")
-config = json.loads(path.read_text(encoding="utf-8"))
-if config.get("backend_profile") != "fixture":
-    raise SystemExit("deploy-smoke config must select the device-neutral fixture profile")
-print(json.dumps({"bundle": manifest.get("name"),
-                  "backend_profile": config["backend_profile"]}, sort_keys=True))
-PY
-
-  # The agent opens the bundle itself, as the tensorplate user, from the
-  # path the CLI sends -- the CLI does not upload it. A checkout under
-  # the operator's home is not readable by that user, so the bundle is
-  # staged somewhere it can be read before the path is handed over.
-  staged_bundle="$BUNDLE_STAGING_DIR"
-  note "staging the bundle at ${staged_bundle} for the agent to read"
-  step "stage the bundle" sudo rm -rf "$staged_bundle" || return
-  step "create the staging parent" sudo mkdir -p "$(dirname "$staged_bundle")" || return
-  step "copy the bundle" sudo cp -R "$BUNDLE_DIR" "$staged_bundle" || return
-  step "make the bundle readable" sudo chmod -R a+rX "$staged_bundle" || return
-
-  note "deploying"
-  step "deploy" bash -c \
-    'tensorplate deploy "$1" --deployment-id "$2" --output json >"$3"' \
-    _ "$staged_bundle" "$DEPLOYMENT_ID" "$deploy_output" || return
 
   note "issuing an inference request"
   python3 - "$infer_input" <<'PY' || return
@@ -483,11 +443,11 @@ PY
     'tensorplate status --output json >"$1"' _ "$status_output" || return
 
   python3 - "$deploy_output" "$status_output" "$infer_input" "$infer_output" "$DEPLOYMENT_ID" \
-    >"${EVIDENCE_DIR}/deploy-result.json" <<'PY' || return
+    >"$result_output" <<'PY' || return
 import json, sys, urllib.parse, urllib.request
 
 deploy_path, status_path, input_path, response_path, expected = sys.argv[1:]
-deploy = json.load(open(deploy_path, encoding="utf-8"))["payload"]
+deploy = json.load(open(deploy_path, encoding="utf-8"))["payload"] if deploy_path else None
 status = json.load(open(status_path, encoding="utf-8"))["payload"]
 request = json.load(open(input_path, encoding="utf-8"))
 response = json.load(open(response_path, encoding="utf-8"))
@@ -533,8 +493,6 @@ supervision_healthy = (
         and supervision.get("crash_loop") is False)
 )
 checks = {
-    "deployment_phase": deploy.get("phase") == "active",
-    "deployment_id": deploy.get("deployment_id") == expected,
     "status_severity": status.get("severity") == "ready",
     "agent_state": agent.get("agent_state") == "ready",
     "active_deployment": active.get("deployment_id") == expected,
@@ -546,9 +504,12 @@ checks = {
     "inference_echoed_the_input": tensor_echoed,
     "inference_preserved_the_payload": echoed.get("payload_b64") == sent["payload_b64"],
 }
+if deploy is not None:
+    checks["deployment_phase"] = deploy.get("phase") == "active"
+    checks["deployment_id"] = deploy.get("deployment_id") == expected
 failed = [name for name, ok in checks.items() if not ok]
 if failed:
-    raise SystemExit("deploy-smoke checks failed: " + ", ".join(failed))
+    raise SystemExit("worker round-trip checks failed: " + ", ".join(failed))
 print(json.dumps({
     "deployment_id": expected,
     "deployment_phase": "active",
@@ -562,11 +523,102 @@ print(json.dumps({
     "accelerator_kernel_executed": False,
 }, indent=2, sort_keys=True))
 PY
-  rm -rf "$work"
-  pass "bundle admitted, worker supervised, inference round-tripped"
+  step "remove inference scratch files" rm -rf "$work" || return
+}
+
+# --- deploy-smoke ------------------------------------------------------
+
+stage_deploy_smoke() {
+  local work deploy_output staged_bundle
+  work="$(mktemp -d)" || return
+  deploy_output="${work}/deploy.json"
+
+  note "validating the deploy-smoke bundle before deploying it"
+  python3 - "$BUNDLE_DIR" <<'PY' || return
+import hashlib, json, pathlib, sys
+
+bundle = pathlib.Path(sys.argv[1]).resolve()
+manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+if manifest.get("backend_hint") != "python_pytorch":
+    raise SystemExit("deploy-smoke bundle must declare backend_hint=python_pytorch")
+models = [a for a in manifest.get("artifacts", [])
+          if isinstance(a, dict) and a.get("role") == "model"]
+if len(models) != 1:
+    raise SystemExit("deploy-smoke bundle must declare exactly one model artifact")
+artifact = models[0]
+path = (bundle / artifact["path"]).resolve()
+if bundle not in path.parents:
+    raise SystemExit("deploy-smoke model artifact escapes the bundle root")
+digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+if digest != artifact.get("digest"):
+    raise SystemExit("deploy-smoke model artifact digest does not match its manifest")
+config = json.loads(path.read_text(encoding="utf-8"))
+if config.get("backend_profile") != "fixture":
+    raise SystemExit("deploy-smoke config must select the device-neutral fixture profile")
+print(json.dumps({"bundle": manifest.get("name"),
+                  "backend_profile": config["backend_profile"]}, sort_keys=True))
+PY
+
+  # The agent opens the bundle itself, as the tensorplate user, from the
+  # path the CLI sends -- the CLI does not upload it. A checkout under
+  # the operator's home is not readable by that user, so the bundle is
+  # staged somewhere it can be read before the path is handed over.
+  staged_bundle="$BUNDLE_STAGING_DIR"
+  note "staging the bundle at ${staged_bundle} for the agent to read"
+  step "stage the bundle" sudo rm -rf "$staged_bundle" || return
+  step "create the staging parent" sudo mkdir -p "$(dirname "$staged_bundle")" || return
+  step "copy the bundle" sudo cp -R "$BUNDLE_DIR" "$staged_bundle" || return
+  step "make the bundle readable" sudo chmod -R a+rX "$staged_bundle" || return
+
+  note "deploying"
+  step "deploy" bash -c \
+    'tensorplate deploy "$1" --deployment-id "$2" --output json >"$3"' \
+    _ "$staged_bundle" "$DEPLOYMENT_ID" "$deploy_output" || return
+
+  step "active worker round trip" check_worker_round_trip \
+    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$deploy_output" || return
+  step "remove deployment scratch files" rm -rf "$work" || return
+  pass "bundle admitted, worker ready, inference round-tripped"
 }
 
 # --- status-logs -------------------------------------------------------
+
+capture_current_journal() {
+  local unit="$1" output="$2" invocation
+  invocation="$(systemctl show -p InvocationID --value "$unit")" || return
+  [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] ||
+    { printf 'no current invocation ID for %s\n' "$unit" >&2; return 1; }
+  # Privilege is needed even when the operator can access the agent
+  # socket: membership in tensorplate does not grant journal access.
+  step "capture the ${unit} journal" bash -c \
+    'sudo journalctl -u "$1" "_SYSTEMD_INVOCATION_ID=$2" -n 100 --no-pager --output=json >"$3"' \
+    _ "$unit" "$invocation" "$output" || return
+  python3 - "$output" "${unit%.service}.service" "$invocation" <<'PY' || return
+import json, sys
+
+path, unit, invocation = sys.argv[1:]
+count = 0
+with open(path, encoding="utf-8") as journal:
+    for line in journal:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            raise SystemExit(f"{unit}: journal output is not a JSON record")
+        if not isinstance(entry, dict) or (
+            entry.get("_SYSTEMD_UNIT") != unit
+            or entry.get("_SYSTEMD_INVOCATION_ID") != invocation
+        ):
+            raise SystemExit(f"{unit}: journal record is not from the current service invocation")
+        if not isinstance(entry.get("MESSAGE"), str) or not entry["MESSAGE"].strip():
+            raise SystemExit(f"{unit}: journal record has no text message")
+        count += 1
+if not count:
+    raise SystemExit(f"{unit}: no journal records from the current service invocation")
+print(f"{unit}: captured {count} journal record(s) from the current invocation")
+PY
+}
 
 stage_status_logs() {
   local logs_status=0
@@ -607,56 +659,41 @@ PY
     note "tensorplate logs exited ${logs_status}: no component writes ${LOG_DIR}/tensorplate-agent.log on a packaged Linux install"
   fi
 
-  # Bounded journal captures. These carry the instance's host name, so
-  # they go to named side files and are sanitized before anything is
-  # committed.
-  step "capture the agent journal" bash -c \
-    'journalctl -u "$1" -n 100 --no-pager >"$2" 2>&1' \
-    _ "$AGENT_UNIT" "${EVIDENCE_DIR}/agent-journal.txt" || return
-  step "capture the observability journal" bash -c \
-    'journalctl -u "$1" -n 100 --no-pager >"$2" 2>&1' \
-    _ "$OBSERVABILITY_UNIT" "${EVIDENCE_DIR}/observability-journal.txt" || return
-  [[ -s "${EVIDENCE_DIR}/agent-journal.txt" ]] ||
-    { printf 'the agent journal is empty; the service logged nothing\n' >&2; return 1; }
+  # JSON distinguishes actual messages from journalctl diagnostics such
+  # as "-- No entries --". Restrict both captures to the current service
+  # invocations so old logs cannot certify a silent or inaccessible run.
+  # Raw journal metadata must still be sanitized before publication.
+  capture_current_journal "$AGENT_UNIT" "${EVIDENCE_DIR}/agent-journal.txt" || return
+  capture_current_journal "$OBSERVABILITY_UNIT" "${EVIDENCE_DIR}/observability-journal.txt" || return
   [[ -d "$LOG_DIR" ]] ||
     { printf 'log directory missing at %s\n' "$LOG_DIR" >&2; return 1; }
-  pass "status answered and still reports the deployment; journal captured; log command status recorded"
+  pass "status answered and still reports the deployment; both current service journals captured; log command status recorded"
 }
 
 # --- restart -----------------------------------------------------------
 
 stage_restart() {
   local before_agent before_observability after_agent after_observability
-  before_agent="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
-  before_observability="$(systemctl show -p MainPID --value "$OBSERVABILITY_UNIT")"
+  before_agent="$(systemctl show -p MainPID --value "$AGENT_UNIT")" || return
+  before_observability="$(systemctl show -p MainPID --value "$OBSERVABILITY_UNIT")" || return
   note "restarting both services (agent pid ${before_agent}, observability pid ${before_observability})"
 
   step "restart both units" sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
   step "services ready again" await_services_ready || return
 
-  after_agent="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
-  after_observability="$(systemctl show -p MainPID --value "$OBSERVABILITY_UNIT")"
+  after_agent="$(systemctl show -p MainPID --value "$AGENT_UNIT")" || return
+  after_observability="$(systemctl show -p MainPID --value "$OBSERVABILITY_UNIT")" || return
   [[ "$after_agent" != "$before_agent" ]] ||
     { printf 'agent MainPID did not change across the restart\n' >&2; return 1; }
   [[ "$after_observability" != "$before_observability" ]] ||
     { printf 'observability MainPID did not change across the restart\n' >&2; return 1; }
 
-  # The substance of this stage: not that a process came back, but that
-  # the agent re-warmed the deployment from durable state.
-  step "status after restart" bash -c \
-    'tensorplate status --output json >"$1"' _ "${EVIDENCE_DIR}/status-after-restart.json" || return
-  python3 - "${EVIDENCE_DIR}/status-after-restart.json" "$DEPLOYMENT_ID" <<'PY' || return
-import json, sys
-
-path, expected = sys.argv[1:]
-payload = json.load(open(path, encoding="utf-8"))["payload"]
-active = (payload.get("agent") or {}).get("active") or {}
-assert active.get("deployment_id") == expected, \
-    f"the agent did not re-warm {expected} after restart: {active.get('deployment_id')}"
-assert payload.get("severity") == "ready", payload.get("severity")
-print("restart: both services replaced their processes and the deployment came back")
-PY
-  pass "services restarted with new pids; deployment re-warmed from durable state"
+  # The agent opens its control socket after startup recovery finishes.
+  # Service readiness above therefore permits the same bounded live
+  # worker checks used after deploy, without submitting another deploy.
+  step "recovered worker round trip" check_worker_round_trip \
+    "${EVIDENCE_DIR}/status-after-restart.json" "${EVIDENCE_DIR}/restart-result.json" || return
+  pass "services restarted with new pids; recovered deployment answered health and inference"
 }
 
 # --- run ---------------------------------------------------------------

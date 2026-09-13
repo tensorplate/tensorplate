@@ -3,8 +3,8 @@
 The two Ubuntu 24.04 x86_64 rows are validated on a cloud VM the
 operator starts themselves. Unlike the Jetson and the MacBook, the
 machine is disposable and billed by the minute, which shapes this
-procedure: everything that can refuse a run refuses it *before* the
-first install, and the harness restores nothing when it finishes.
+procedure: host prerequisites are checked before the first install,
+and the harness restores nothing when it finishes.
 
 `tools/validation/ubuntu-l4-cloud-lifecycle.sh` **provisions nothing**.
 It does not create, start, resize or delete any cloud resource, and it
@@ -45,10 +45,22 @@ It proves the candidate installs through the shipped installer on this
 OS, that the services come up, that doctor's `platform_row` resolves
 this row **by live detection** with nothing failing, that the control
 plane admits a bundle and runs a worker for it, that an inference
-request round-trips through that worker, that `tensorplate status`
-answers and still reports the deployment, that the journal carries the
-services' output, and that both services restart with the deployment
-re-warmed from durable state.
+request returns the expected fixture echo through that worker, and that
+`tensorplate status` answers and still reports the deployment. Both
+services must have actual journal entries from their current invocation;
+an empty capture or entries from an earlier invocation do not pass.
+
+After restarting both services, the harness requires new service PIDs,
+the same active deployment in status, a healthy serving endpoint, and
+another successful inference with the expected echo. This checks that
+the deployment can serve again after being re-warmed from durable state.
+The live health and inference results are filed in `restart-result.json`
+alongside `status-after-restart.json`.
+
+The first reported L4 hardware run passed these four stages using the
+earlier assertions. The stronger journal and post-restart health and
+inference checks have not yet been rerun on hardware; T4 validation of
+the current harness remains pending.
 
 Three things it records rather than asserts, because asserting them
 would claim more than the run establishes:
@@ -113,7 +125,7 @@ describe a run of this harness as GPU validation.
    Ubuntu 24.04 marks its system interpreter externally-managed
    (PEP 668), so the command from
    [`python-pytorch-backend.md`](../install/python-pytorch-backend.md)
-   needs one of:
+   needs the externally-managed override on this disposable host:
 
    ```bash
    # On a disposable validation VM, installing into the system
@@ -121,7 +133,10 @@ describe a run of this harness as GPU validation.
    sudo /usr/bin/python3 -m pip install --break-system-packages torch
    ```
 
-   or a virtualenv with `TP_PYTHON_PYTORCH_EXECUTABLE` pointed at it.
+   A virtualenv selected only by `TP_PYTHON_PYTORCH_EXECUTABLE` does not
+   satisfy this prerequisite. That variable selects the serving
+   sidecar's interpreter; both this harness's preflight and doctor's
+   packaged backend probe still require PyTorch in `/usr/bin/python3`.
    Unlike the CPU-only CI smoke, do **not** use the CPU wheel index
    here: this row has an accelerator, and the default index resolves to
    the CUDA build.
@@ -132,7 +147,7 @@ describe a run of this harness as GPU validation.
    CUDA 13.0 build for which `torch.cuda.is_available()` is true and the
    device reports as `NVIDIA L4`. NumPy is not required;
    `python_pytorch_runtime` is ok without it. Verify
-   `python3 -c 'import torch'` before starting.
+   `/usr/bin/python3 -c 'import torch'` before starting.
 
 5. **A verified candidate artifact set** copied onto the VM: `install.sh`,
    the artifact manifest, `SHA256SUMS`, and the amd64 `.deb` packages.
@@ -178,18 +193,21 @@ token. Run it on a VM you are willing to delete.
 
 File the report and its stage logs under
 `docs/validation/evidence/<version>/<row_id>/`. **Sanitize first** — see
-that directory's README.
+the [release evidence rules](evidence/v0.2.1/README.md).
 
-What a real run on an L4 host actually carried, scanned for instance
-names, project ids, instance ids, internal addresses, account names and
-GPU UUIDs:
+The first L4 run's logs were scanned for instance names, project ids,
+instance ids, internal addresses, account names and GPU UUIDs. The
+current harness captures raw JSON journal records through `sudo`, up to
+100 entries per service from its current invocation. These richer
+captures require a fresh sanitization pass; the earlier scan does not
+cover them.
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt` | the instance host name, on every line |
-| `install.log` | the operator's account name, in the assets path the installer echoes |
-| `lifecycle-report.json` | nothing on a passing run — but a **failing** stage's `detail` is the tail of its log, so a failed install carries the host name from the journal lines it quotes |
-| `doctor.json`, `status.json`, `deploy-result.json` and the rest | nothing |
+| `agent-journal.txt`, `observability-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
+| `install.log` | may include the operator's account name in the assets path the installer echoes |
+| `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or journal records it quotes |
+| `doctor.json`, `status.json`, `deploy-result.json` and the rest | no identifiers were found in the earlier run; scan every current output as well |
 
 So the report itself is not automatically clean: check every `detail`
 before filing a run that did not pass. Put the assets directory

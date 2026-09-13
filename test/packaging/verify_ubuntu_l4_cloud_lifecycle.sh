@@ -286,9 +286,9 @@ check "an assets directory with no installer is refused" "1" \
 appliance="${td}/appliance"
 mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log"
 
-# sudo records and succeeds without executing: the harness purges
-# packages and removes system directories, and none of that may happen
-# to the machine running this suite.
+# sudo records without executing privileged commands. Journal requests
+# are routed only to the fixture below; package and filesystem mutations
+# must never reach the machine running this suite.
 cat >"${appliance}/bin/sudo" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >>"${TP_FAKE_SUDO_LOG}"
@@ -302,7 +302,12 @@ fi
 # A purge that succeeds empties dpkg's view of the packages.
 case "$*" in
   *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
+  *"systemctl restart"*) : >"${TP_FAKE_RESTART_MARKER}" ;;
 esac
+if [ "$1" = journalctl ]; then
+  shift
+  exec "${TP_FAKE_JOURNALCTL}" "$@"
+fi
 exit 0
 STUB
 # dpkg's package database, in the shape the harness queries it.
@@ -330,6 +335,13 @@ case "$1" in
   show)
     case "$*" in
       *ActiveState*) printf 'active\n' ;;
+      *InvocationID*)
+        case "$*" in
+          *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
+          *tensorplate-observability*) printf '22222222222222222222222222222222\n' ;;
+          *) exit 9 ;;
+        esac
+        ;;
       *MainPID*)
         # A restart must change the pid, so hand back a new one each call.
         count=$(cat "${TP_FAKE_PID_FILE}" 2>/dev/null || echo 100)
@@ -349,12 +361,39 @@ exit 0
 STUB
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
-printf 'stub journal line for %s\n' "$*"
+invocation=""
+json=0
+for arg in "$@"; do
+  case "$arg" in
+    _SYSTEMD_INVOCATION_ID=*) invocation="${arg#*=}" ;;
+    --output=json) json=1 ;;
+  esac
+done
+[ "$json" -eq 1 ] || exit 9
+case "$invocation" in
+  11111111111111111111111111111111) unit=tensorplate-agent.service ;;
+  22222222222222222222222222222222) unit=tensorplate-observability.service ;;
+  *) exit 9 ;;
+esac
+case "${TP_FAKE_MODE:-ok}:$unit" in
+  journal-command-fails:*) exit 9 ;;
+  journal-empty-agent:tensorplate-agent.service) exit 0 ;;
+  journal-no-entries:tensorplate-agent.service) printf '%s\n' '-- No entries --'; exit 0 ;;
+  journal-empty-observability:tensorplate-observability.service) exit 0 ;;
+  journal-stale-invocation:*) invocation=ffffffffffffffffffffffffffffffff ;;
+  journal-wrong-unit:*) unit=another.service ;;
+esac
+message='fixture service started'
+[ "${TP_FAKE_MODE:-ok}" = journal-empty-message ] && message=''
+printf '{"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
+  "$invocation" "$unit" "$message"
 STUB
 cat >"${appliance}/bin/tensorplate" <<'STUB'
 #!/bin/sh
 # A stubbed appliance. TP_FAKE_MODE selects which way it misbehaves.
 mode="${TP_FAKE_MODE:-ok}"
+phase=initial
+[ -f "${TP_FAKE_RESTART_MARKER}" ] && phase=restarted
 command="$1"
 shift
 out=""
@@ -391,13 +430,17 @@ JSON
       "${TP_FAKE_DEPLOYMENT_ID}"
     ;;
   status)
-    printf '{"command":"status","payload":{"severity":"ready","agent":{"agent_state":"ready","active":{"deployment_id":"%s","backend":"python_pytorch","serving_url":"http://127.0.0.1:%s/infer"}}}}\n' \
-      "${TP_FAKE_DEPLOYMENT_ID}" "${TP_FAKE_SERVING_PORT}"
+    serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
+    if [ "$mode:$phase" = restart-no-worker:restarted ]; then serving_url=null; fi
+    printf '{"command":"status","payload":{"severity":"ready","agent":{"agent_state":"ready","active":{"deployment_id":"%s","backend":"python_pytorch","serving_url":%s}}}}\n' \
+      "${TP_FAKE_DEPLOYMENT_ID}" "$serving_url"
     ;;
   infer)
+    printf '%s\n' "$phase" >>"${TP_FAKE_INFER_LOG}"
     name=echo_probe
     payload=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["inputs"][0]["payload_b64"])' "$input")
     if [ "$mode" = "infer-garbled" ]; then payload="AAAA"; fi
+    if [ "$mode:$phase" = restart-infer-garbled:restarted ]; then payload="AAAA"; fi
     cat >"$out" <<JSON
 {"outputs":[{"name":"${name}",
  "tensor":{"dtype":"float32","layout":"row_major","shape":[1,4],"byte_offset":0,"byte_size":16},
@@ -427,9 +470,18 @@ directory = pathlib.Path(sys.argv[1])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        restarted = (directory / "restarted").exists()
+        mode = (directory / "mode").read_text().strip()
+        phase = "restarted" if restarted else "initial"
+        with (directory / "health-requests.log").open("a") as log:
+            log.write(f"{phase} {self.path}\n")
+        state = "failed" if restarted and mode == "restart-unhealthy-health" else "ready"
+        deployment = (directory / "deployment-id").read_text().strip()
+        if restarted and mode == "restart-wrong-health":
+            deployment = "a-different-deployment"
         body = json.dumps({
-            "state": "ready",
-            "active_model_id": (directory / "deployment-id").read_text().strip(),
+            "state": state,
+            "active_model_id": deployment,
         }).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -470,6 +522,10 @@ run_stages() {
   local mode="$1" evidence="$2" sudo_fail="${3:-}"
   set +e
   : >"${appliance}/sudo.log"
+  : >"${appliance}/infer.log"
+  : >"${appliance}/health-requests.log"
+  rm -f "${appliance}/restarted"
+  printf '%s\n' "$mode" >"${appliance}/mode"
   env PATH="${appliance}/bin:${PATH}" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
     TP_FAKE_PURGE_MARKER="${evidence}.purged" \
@@ -482,6 +538,9 @@ run_stages() {
     TP_CLOUD_BUNDLE_STAGING="${appliance}/staged-bundle" \
     TP_FAKE_MODE="$mode" \
     TP_FAKE_SUDO_LOG="${appliance}/sudo.log" \
+    TP_FAKE_JOURNALCTL="${appliance}/bin/journalctl" \
+    TP_FAKE_RESTART_MARKER="${appliance}/restarted" \
+    TP_FAKE_INFER_LOG="${appliance}/infer.log" \
     TP_FAKE_PID_FILE="${appliance}/pid" \
     TP_FAKE_DEPLOYMENT_ID="$deployment_id" \
     TP_FAKE_SERVING_PORT="$serving_port" \
@@ -540,6 +599,16 @@ print(json.load(open(sys.argv[1]))["supervision_state"])' \
     "${ok_evidence}/deploy-result.json")"
 check "  and the log command outcome is filed" "1" \
   "$(cat "${ok_evidence}/logs-command.exit")"
+for phase in initial restarted; do
+  check "  ${phase} worker answers a fresh inference" yes \
+    "$(grep -Fxq "$phase" "${appliance}/infer.log" && echo yes || echo no)"
+  check "  ${phase} worker answers its health endpoint" yes \
+    "$(grep -Fxq "$phase /health" "${appliance}/health-requests.log" && echo yes || echo no)"
+done
+for invocation in 11111111111111111111111111111111 22222222222222222222222222222222; do
+  check "  journal capture selects current invocation ${invocation}" yes \
+    "$(grep -F "journalctl" "${appliance}/sudo.log" | grep -Fq "_SYSTEMD_INVOCATION_ID=${invocation}" && echo yes || echo no)"
+done
 
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "${ok_evidence}/lifecycle-report.json" <<'PY'
@@ -616,6 +685,27 @@ check "a host whose row does not resolve fails the install stage" "fail" \
 infer_evidence="${td}/stages-infer-garbled"
 check "an inference that does not echo the input fails deploy-smoke" "fail" \
   "$(run_stages infer-garbled "$infer_evidence" >/dev/null; stage_status "${infer_evidence}/lifecycle-report.json" deploy-smoke)"
+
+for mode in restart-no-worker restart-unhealthy-health restart-wrong-health restart-infer-garbled; do
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
+  check "  deployment passed before the restart regression" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
+  check "  the restarted worker failure is recorded against restart" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" restart)"
+done
+
+for mode in journal-command-fails journal-empty-agent journal-no-entries journal-empty-observability \
+            journal-stale-invocation journal-wrong-unit journal-empty-message; do
+  evidence="${td}/stages-${mode}"
+  expected_status=1
+  if [[ "$mode" == journal-command-fails ]]; then expected_status=9; fi
+  check "${mode} fails the run" "$expected_status" "$(run_stages "$mode" "$evidence")"
+  check "  deployment passed before the journal failure" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
+  check "  invalid journal evidence fails status-logs" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
+done
 
 check "no destructive command reached the host" "yes" \
   "$([[ -f "${appliance}/sudo.log" ]] && echo yes || echo no)"
