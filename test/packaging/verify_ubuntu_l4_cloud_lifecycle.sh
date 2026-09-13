@@ -299,7 +299,30 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
     *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
   esac
 fi
+# A purge that succeeds empties dpkg's view of the packages.
+case "$*" in
+  *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
+esac
 exit 0
+STUB
+# dpkg's package database, in the shape the harness queries it.
+cat >"${appliance}/bin/dpkg-query" <<'STUB'
+#!/bin/sh
+case "${TP_FAKE_MODE:-ok}" in
+  installed-runtime)
+    # A host with a previous install.sh run: the runtime set is present,
+    # and the metapackage -- which only the APT channel installs -- is not.
+    [ -f "${TP_FAKE_PURGE_MARKER}" ] && exit 0
+    for pkg in tensorplate-agent tensorplate-serving tensorplate-observability \
+               tensorplate-cli tensorplate-common; do
+      printf '%s installed\n' "$pkg"
+    done
+    ;;
+  purge-leaves-packages)
+    printf 'tensorplate-common config-files\n'
+    ;;
+  *) exit 0 ;;
+esac
 STUB
 cat >"${appliance}/bin/systemctl" <<'STUB'
 #!/bin/sh
@@ -446,8 +469,10 @@ trap cleanup EXIT
 run_stages() {
   local mode="$1" evidence="$2" sudo_fail="${3:-}"
   set +e
+  : >"${appliance}/sudo.log"
   env PATH="${appliance}/bin:${PATH}" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
+    TP_FAKE_PURGE_MARKER="${evidence}.purged" \
     TP_CLOUD_ARCH=x86_64 \
     TP_CLOUD_OS_RELEASE="${td}/os-release.noble" \
     TP_CLOUD_NVIDIA_VERSION="${td}/nvidia-version" \
@@ -543,6 +568,28 @@ check "  and install is recorded as a failure, not a pass" "fail" \
 check "  and the run does not certify itself" "fail" \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
      "${fail_evidence}/lifecycle-report.json")"
+
+# Found on a real host: re-running on a machine that already had an
+# install.sh install. The purge must name only packages dpkg knows. A
+# fixed list that included the `tensorplate` metapackage -- which
+# install.sh never installs -- made apt-get abort the whole purge, the
+# harness then deleted conffiles dpkg still owned, and the reinstall came
+# up with an empty /etc/tensorplate.
+rerun_evidence="${td}/stages-rerun"
+check "a re-run over an existing install completes" "0" \
+  "$(run_stages installed-runtime "$rerun_evidence")"
+purge_line="$(grep -F 'apt-get purge' "${appliance}/sudo.log" || true)"
+check "  and purges the runtime packages that were installed" "yes" \
+  "$(printf '%s\n' "$purge_line" | grep -qF 'tensorplate-agent' && echo yes || echo no)"
+check "  and never names the metapackage install.sh does not install" "no" \
+  "$(printf '%s\n' "$purge_line" | tr ' ' '\n' | grep -qx 'tensorplate' && echo yes || echo no)"
+
+leftover_evidence="${td}/stages-purge-leaves"
+check "packages surviving the purge fail install before state is cleared" "fail" \
+  "$(run_stages purge-leaves-packages "$leftover_evidence" >/dev/null; \
+     stage_status "${leftover_evidence}/lifecycle-report.json" install)"
+check "  and the state directories were never removed" "no" \
+  "$(grep -qF 'rm -rf' "${appliance}/sudo.log" && echo yes || echo no)"
 
 # A privileged step that fails must fail its stage. Without this, an
 # unguarded `sudo ...` inside a stage body is invisible: errexit is

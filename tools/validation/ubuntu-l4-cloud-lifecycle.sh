@@ -317,14 +317,42 @@ await_services_ready() {
 stage_install() {
   note "clearing any previous TensorPlate install"
   sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
-  sudo apt-get purge -y \
-    tensorplate \
-    tensorplate-agent \
-    tensorplate-serving \
-    tensorplate-observability \
-    tensorplate-cli \
-    tensorplate-common \
-    tensorplate-backend-python-pytorch >/dev/null 2>&1 || true
+
+  # Purge exactly the TensorPlate packages dpkg knows about, and check
+  # that it worked.
+  #
+  # A fixed list names packages that may never have been installed -- the
+  # `tensorplate` metapackage comes only from the APT channel, never from
+  # install.sh -- and apt-get aborts the WHOLE purge when any name is
+  # unknown, leaving every package installed. Deleting /etc/tensorplate
+  # after that removes conffiles dpkg still owns, and the reinstall treats
+  # them as deliberately deleted and does not put them back. That is what
+  # the first re-run on a real L4 host did: the purge failed silently, and
+  # the services came up against an empty /etc/tensorplate.
+  local purge=() pkg status
+  while read -r pkg status; do
+    if [[ -n "$pkg" && "$status" != "not-installed" ]]; then
+      purge+=("$pkg")
+    fi
+  done < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' 2>/dev/null || true)
+  if ((${#purge[@]} > 0)); then
+    step "purge ${purge[*]}" \
+      sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y "${purge[@]}" || return
+  fi
+
+  # Nothing may remain in dpkg -- installed or holding config files --
+  # before the state directories go, or the conffiles are stranded as
+  # described above.
+  local remaining=""
+  while read -r pkg status; do
+    if [[ -n "$pkg" && "$status" != "not-installed" ]]; then
+      remaining+="${pkg} (${status}) "
+    fi
+  done < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' 2>/dev/null || true)
+  if [[ -n "$remaining" ]]; then
+    printf 'TensorPlate packages remain after the purge: %s\n' "$remaining" >&2
+    return 1
+  fi
   step "clear installed state" sudo rm -rf \
     /etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate || return
 
