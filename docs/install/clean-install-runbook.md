@@ -7,8 +7,9 @@ validates the v0.1.0 architecture loop end-to-end.
 
 | Item | Required |
 | --- | --- |
-| Jetson Orin Nano 8GB Super (or Orin NX 16GB for production tier) | yes |
-| JetPack 6.x with the L4T 36.x BSP | yes |
+| Jetson Orin Nano 8GB Super (or Orin NX 16GB for production tier) | yes, for the Jetson path |
+| JetPack 6.x with the L4T 36.x BSP | yes, for the Jetson path |
+| Ubuntu 24.04 on x86_64 with an NVIDIA GPU | the alternative to the two rows above |
 | Networked apt repository serving the tensorplate packages | yes (or a local file copy of the `.deb`s) |
 | Operator account with sudo | yes |
 | `/var/lib/tensorplate` not present (clean install) | recommended |

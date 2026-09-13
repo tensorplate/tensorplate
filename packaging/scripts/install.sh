@@ -46,11 +46,14 @@ Options:
   --version VERSION          Release to install. Accepts 0.1.1, v0.1.1, or v0.1.1-rc.N.
                              Defaults to the pinned current release.
   --cli-only                 Install only the operator CLI for this host architecture.
-                             Skips Jetson OS/hardware validation, service enablement, and doctor.
+                             Skips runtime OS/hardware validation, service enablement, and doctor.
   --with-python-backend      Install tensorplate-backend-python-pytorch in addition to core packages.
                              Runtime install mode only.
   --yes, -y                  Continue without interactive prompts; intended for unattended provisioning.
   --force-os                 Continue on an unsupported OS. This is unsupported and at your own risk.
+                             Runtime install supports JetPack 6.x / L4T 36.x on Ubuntu 22.04 (arm64)
+                             and Ubuntu 24.04 (x86_64); the host is held to the one for its
+                             architecture.
   --strict-hardware          Treat hardware or architecture warnings as fatal.
   --dry-run                  Validate host gates and print planned actions without downloading or installing.
   --local-artifacts DIR      Install from a local artifact directory containing install.sh,
@@ -294,25 +297,60 @@ read_os_release_field() {
   ' "$file"
 }
 
+# Which supported runtime platform this host claims to be.
+#
+# Chosen by architecture alone, so the host is held to exactly one set of
+# expectations and the failure names the platform the operator is on
+# rather than listing every requirement TensorPlate has anywhere. The two
+# runtime platforms are the in-lab Jetson and the x86_64 cloud host.
+install_profile() {
+  case "${TP_INSTALL_ARCH:-$(uname -m)}" in
+    aarch64|arm64) printf 'jetson\n' ;;
+    x86_64|amd64) printf 'ubuntu-x86\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 validate_os() {
   local nv_file="${TP_INSTALL_NV_TEGRA_RELEASE:-/etc/nv_tegra_release}"
   local os_file="${TP_INSTALL_OS_RELEASE:-/etc/os-release}"
-  local os_id os_version
+  local profile os_id os_version expected
   local failures=()
 
-  if [[ ! -r "$nv_file" ]]; then
-    failures+=("missing ${nv_file}; expected NVIDIA Jetson L4T release metadata")
-  elif ! grep -Eq '(^|[^0-9])R36([^0-9]|$)' "$nv_file"; then
-    failures+=("${nv_file} is not L4T R36.x")
-  fi
-
+  profile="$(install_profile)"
   os_id="$(read_os_release_field ID || true)"
   os_version="$(read_os_release_field VERSION_ID || true)"
-  if [[ ! -r "$os_file" ]]; then
-    failures+=("missing ${os_file}; expected Ubuntu 22.04 base OS metadata")
-  elif [[ "$os_id" != "ubuntu" || "$os_version" != 22.04* ]]; then
-    failures+=("${os_file} reports ID=${os_id:-unknown}, VERSION_ID=${os_version:-unknown}; expected ubuntu 22.04")
-  fi
+
+  case "$profile" in
+    jetson)
+      expected="JetPack 6.x / L4T 36.x on Ubuntu 22.04"
+      if [[ ! -r "$nv_file" ]]; then
+        failures+=("missing ${nv_file}; expected NVIDIA Jetson L4T release metadata")
+      elif ! grep -Eq '(^|[^0-9])R36([^0-9]|$)' "$nv_file"; then
+        failures+=("${nv_file} is not L4T R36.x")
+      fi
+      if [[ ! -r "$os_file" ]]; then
+        failures+=("missing ${os_file}; expected Ubuntu 22.04 base OS metadata")
+      elif [[ "$os_id" != "ubuntu" || "$os_version" != 22.04* ]]; then
+        failures+=("${os_file} reports ID=${os_id:-unknown}, VERSION_ID=${os_version:-unknown}; expected ubuntu 22.04")
+      fi
+      ;;
+    ubuntu-x86)
+      # No Jetson metadata is expected or wanted here: an x86_64 host is
+      # never a Jetson, and demanding L4T release files of one is what
+      # made this platform uninstallable.
+      expected="Ubuntu 24.04 on x86_64"
+      if [[ ! -r "$os_file" ]]; then
+        failures+=("missing ${os_file}; expected Ubuntu 24.04 base OS metadata")
+      elif [[ "$os_id" != "ubuntu" || "$os_version" != 24.04* ]]; then
+        failures+=("${os_file} reports ID=${os_id:-unknown}, VERSION_ID=${os_version:-unknown}; expected ubuntu 24.04")
+      fi
+      ;;
+    *)
+      expected="JetPack 6.x / L4T 36.x on Ubuntu 22.04, or Ubuntu 24.04 on x86_64"
+      failures+=("architecture ${TP_INSTALL_ARCH:-$(uname -m)} is not a supported runtime architecture")
+      ;;
+  esac
 
   if ((${#failures[@]} > 0)); then
     local failure
@@ -323,10 +361,10 @@ validate_os() {
       warn "--force-os was provided; continuing on an unsupported OS"
       return 0
     fi
-    die "unsupported OS; TensorPlate ${TAG} supports JetPack 6.x / L4T 36.x by default"
+    die "unsupported OS; TensorPlate ${TAG} supports ${expected} for this architecture"
   fi
 
-  note "OS validation passed: JetPack 6.x / L4T 36.x baseline detected"
+  note "OS validation passed: ${expected} detected"
 }
 
 read_device_model() {
@@ -336,24 +374,45 @@ read_device_model() {
 }
 
 validate_hardware() {
-  local arch model
+  local arch model profile driver_file described
   local warnings=()
 
   arch="${TP_INSTALL_ARCH:-$(uname -m)}"
-  case "$arch" in
-    aarch64|arm64) ;;
-    *) warnings+=("architecture ${arch} is not arm64/aarch64") ;;
+  profile="$(install_profile)"
+
+  case "$profile" in
+    jetson)
+      model="$(read_device_model || true)"
+      described="${model:-unknown model}"
+      if [[ -z "$model" ]]; then
+        warnings+=("unable to read Jetson model from ${TP_INSTALL_DEVICE_MODEL:-/proc/device-tree/model}")
+      elif [[ "$model" != *"Jetson Orin Nano"* && "$model" != *"Jetson Orin NX"* ]]; then
+        warnings+=("unrecognized Jetson model: ${model}")
+      fi
+      ;;
+    ubuntu-x86)
+      # The cloud rows are all NVIDIA hosts, so an absent driver is worth
+      # saying out loud -- the packages install either way and the
+      # platform refuses the deployment later, which is a worse place to
+      # discover it. Advisory, like the Jetson model check.
+      driver_file="${TP_INSTALL_NVIDIA_VERSION:-/proc/driver/nvidia/version}"
+      described="x86_64 host"
+      if [[ -r "$driver_file" ]]; then
+        described="x86_64 host with an NVIDIA driver"
+      elif command_exists nvidia-smi; then
+        described="x86_64 host with nvidia-smi present"
+      else
+        warnings+=("no NVIDIA driver found: ${driver_file} is unreadable and nvidia-smi is not on PATH")
+      fi
+      ;;
+    *)
+      described="unknown platform"
+      warnings+=("architecture ${arch} is not arm64/aarch64 or x86_64")
+      ;;
   esac
 
-  model="$(read_device_model || true)"
-  if [[ -z "$model" ]]; then
-    warnings+=("unable to read Jetson model from ${TP_INSTALL_DEVICE_MODEL:-/proc/device-tree/model}")
-  elif [[ "$model" != *"Jetson Orin Nano"* && "$model" != *"Jetson Orin NX"* ]]; then
-    warnings+=("unrecognized Jetson model: ${model}")
-  fi
-
   if ((${#warnings[@]} == 0)); then
-    note "hardware validation passed: ${model:-unknown model}, arch=${arch}"
+    note "hardware validation passed: ${described}, arch=${arch}"
     return 0
   fi
 
@@ -857,7 +916,7 @@ main() {
     validate_os
     validate_hardware
   else
-    note "CLI-only mode selected; skipping Jetson OS and hardware validation"
+    note "CLI-only mode selected; skipping runtime OS and hardware validation"
   fi
   require_root
   require_install_commands

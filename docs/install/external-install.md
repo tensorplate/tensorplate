@@ -18,10 +18,10 @@ Runtime install:
 
 | Requirement | Release support |
 | --- | --- |
-| Hardware | Jetson Orin Nano 8GB Super hardware floor. |
-| OS | JetPack 6.x with L4T 36.x. |
-| Architecture | `arm64`. |
-| Package source | `.deb` files attached to the matching GitHub Release. |
+| Hardware | Jetson Orin Nano 8GB Super hardware floor, or an x86_64 host with an NVIDIA GPU. |
+| OS | JetPack 6.x with L4T 36.x on `arm64`; Ubuntu 24.04 on `x86_64`. |
+| Architecture | `arm64` or `x86_64`. Each is held to the OS above for that architecture. |
+| Package source | `.deb` files attached to the matching GitHub Release. The APT channel currently serves `jammy` only, so an `x86_64` host installs from release assets. |
 | Network posture | Services default to local-only endpoints. |
 
 Best-effort validation may run on Jetson Orin NX 16GB. Kria K26/K24,
@@ -60,10 +60,13 @@ published release, replace `v0.1.1` in the URL with that release tag.
 
 What the installer does:
 
-- validates the host OS as JetPack 6.x / L4T 36.x and aborts by default
-  on unsupported OS metadata.
-- warns on unrecognized Jetson hardware or non-`arm64` architecture; in
-  interactive mode it prompts before continuing.
+- validates the host OS against the platform for its architecture --
+  JetPack 6.x / L4T 36.x on `arm64`, Ubuntu 24.04 on `x86_64` -- and
+  aborts by default on unsupported OS metadata. An `x86_64` host is not
+  asked for Jetson L4T metadata, and an `arm64` host still is.
+- warns on unrecognized Jetson hardware, on an `x86_64` host with no
+  NVIDIA driver, or on an architecture that is neither; in interactive
+  mode it prompts before continuing.
 - downloads `tensorplate-${TP_TAG}-artifacts.json`, `SHA256SUMS`,
   `SHA256SUMS.cosign.bundle`, and the selected release artifacts listed in
   the manifest.
@@ -360,7 +363,7 @@ group.
 | Checksum mismatch | Delete the asset and download again. If it repeats, stop and file a release issue. |
 | Signature verification failed | Stop. Re-download `SHA256SUMS` and `SHA256SUMS.cosign.bundle`; if it repeats, do not install and report it privately per [`SECURITY.md`](../../SECURITY.md). |
 | Cosign bootstrap failed | Install cosign from <https://docs.sigstore.dev/cosign/installation> and rerun, or pass `--allow-unsigned` only for air-gapped/bootstrap installs at your own risk. |
-| Unsupported OS | The installer aborts by default unless `--force-os` is passed. v0.1 supports JetPack 6.x / L4T 36.x. |
+| Unsupported OS | The installer aborts by default unless `--force-os` is passed. Runtime install supports JetPack 6.x / L4T 36.x on `arm64` and Ubuntu 24.04 on `x86_64`; the message names the one expected for this host's architecture. |
 | Unsupported hardware or architecture | The installer warns and prompts in interactive mode. Use `--strict-hardware` to make this fatal, or `--yes` for unattended validated fleets. |
 | `path_layout = fail` | Reinstall `tensorplate-common`; attach `tensorplate doctor --output json` if it persists. |
 | `config_files = fail` | Reinstall the owning package or restore the dpkg conffile. |

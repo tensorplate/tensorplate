@@ -39,8 +39,10 @@ before release validation on Jetson Orin hardware.
 
 ## Hardware Assumptions
 
-- Jetson Orin Nano 8GB Super or Orin NX 16GB.
-- JetPack 6.x with the L4T 36.x BSP.
+- Jetson Orin Nano 8GB Super or Orin NX 16GB, or an x86_64 host with an
+  NVIDIA GPU.
+- JetPack 6.x with the L4T 36.x BSP on the Jetson; Ubuntu 24.04 on
+  x86_64.
 - TensorRT, CUDA, and optionally LibTorch installed by the platform
   runtime.
 - Python 3.10+ for the `python_pytorch` backend. PyTorch wheel choice is
