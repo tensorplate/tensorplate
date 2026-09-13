@@ -130,7 +130,15 @@ chmod +x "${td}/python-with-torch" "${td}/python-without-torch"
 assets="${td}/assets"
 mkdir -p "$assets"
 printf '#!/bin/sh\nexit 0\n' >"${assets}/install.sh"
-: >"${assets}/SHA256SUMS"
+# A real checksum line, not an empty file: the harness verifies this set
+# with `sha256sum -c`, and GNU coreutils rejects a checksum file with no
+# properly formatted lines. An empty one passed on macOS and failed on
+# the runner, which is the kind of difference a fixture should not have.
+if command -v sha256sum >/dev/null 2>&1; then
+  ( cd "$assets" && sha256sum install.sh >SHA256SUMS )
+else
+  ( cd "$assets" && shasum -a 256 install.sh >SHA256SUMS )
+fi
 bundle="${repo_root}/test/models/bundles/v0_1/x86_fixture_smoke"
 [[ -f "${bundle}/manifest.json" ]] || {
   printf 'FAIL: the deploy-smoke bundle fixture is missing\n' >&2
@@ -424,6 +432,12 @@ run_stages() {
       --confirm RESET-TENSORPLATE >"${evidence}.out" 2>"${evidence}.err"
   local status=$?
   set -e
+  # A probe that fails without saying why costs a CI round trip to
+  # diagnose, and the evidence directory is deleted with the temp dir.
+  if [[ ! -f "${evidence}/lifecycle-report.json" ]]; then
+    printf '  -- no report written; last lines of the harness:\n' >&2
+    tail -n 12 "${evidence}.err" 2>/dev/null | sed 's/^/     /' >&2 || true
+  fi
   printf '%s' "$status"
 }
 
