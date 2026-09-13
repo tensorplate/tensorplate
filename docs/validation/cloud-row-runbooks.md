@@ -57,13 +57,17 @@ would claim more than the run establishes:
   supervision block, so the run records `not_configured` rather than a
   healthy supervisor. On these rows that check is a statement about the
   configuration, not about a supervisor being exercised.
-- **`tensorplate logs`.** The packaged `cli.json` points `log_source` at
-  `/var/log/tensorplate/tensorplate-agent.log`, and nothing in the
-  product writes that file on a Linux package install — both services
-  log to the journal. The command is expected to fail, its exit status
-  is filed as `logs-command.exit`, and the stage requires the journal
-  capture instead. This is a product gap the run surfaces, not a
-  validation failure.
+- **`tensorplate logs`.** On a real package install it exits 2 with
+  `no log_source.path configured`. The CLI does not read the packaged
+  `/etc/tensorplate/cli.json` unless `--config` or
+  `TENSORPLATE_CLI_CONFIG` points at it; by default it uses built-in
+  settings, which name no log source. (Every other command still works
+  because those defaults happen to match the packaged socket.) Behind
+  that is a second gap: the file the packaged config names is one
+  nothing in the product writes, since both services log to the
+  journal. The exit status is filed as `logs-command.exit` and the stage
+  requires the journal capture instead — a product gap the run surfaces,
+  not a validation failure.
 - **The accelerator.** See below.
 
 It does **not** prove the accelerator computed anything. The
@@ -122,9 +126,13 @@ describe a run of this harness as GPU validation.
    here: this row has an accelerator, and the default index resolves to
    the CUDA build.
 
-   This step is unproven on Ubuntu 24.04 — nothing in this repository
-   has run it there — and it is the likeliest cause of a failed first
-   run. Verify `python3 -c 'import torch'` before starting.
+   Verified on an L4 host with the 580 driver: a plain `pip install
+   torch` into the system interpreter is refused with
+   `externally-managed-environment`, and the command above installs a
+   CUDA 13.0 build for which `torch.cuda.is_available()` is true and the
+   device reports as `NVIDIA L4`. NumPy is not required;
+   `python_pytorch_runtime` is ok without it. Verify
+   `python3 -c 'import torch'` before starting.
 
 5. **A verified candidate artifact set** copied onto the VM: `install.sh`,
    the artifact manifest, `SHA256SUMS`, and the amd64 `.deb` packages.
@@ -170,12 +178,56 @@ token. Run it on a VM you are willing to delete.
 
 File the report and its stage logs under
 `docs/validation/evidence/<version>/<row_id>/`. **Sanitize first** — see
-that directory's README. The captures from this row carry more host
-detail than the other two: `journalctl` output names the instance, and
-doctor and status carry cloud instance metadata. Every raw capture is
-written to a named side file for exactly that reason.
+that directory's README.
+
+What a real run on an L4 host actually carried, scanned for instance
+names, project ids, instance ids, internal addresses, account names and
+GPU UUIDs:
+
+| File | Carries |
+| --- | --- |
+| `agent-journal.txt`, `observability-journal.txt` | the instance host name, on every line |
+| `install.log` | the operator's account name, in the assets path the installer echoes |
+| `lifecycle-report.json` | nothing on a passing run — but a **failing** stage's `detail` is the tail of its log, so a failed install carries the host name from the journal lines it quotes |
+| `doctor.json`, `status.json`, `deploy-result.json` and the rest | nothing |
+
+So the report itself is not automatically clean: check every `detail`
+before filing a run that did not pass. Put the assets directory
+somewhere without an account name in its path to keep it out of
+`install.log`.
 
 Delete the VM when the run is done.
+
+## Producing the candidate artifact set
+
+No published release carries an amd64 runtime set yet, so a run today
+validates a snapshot built from source. `build-release-artifacts.sh
+--snapshot` does that, but its defaults are the arm64 Jetson release's,
+and three of them differ from the amd64 release build. Building on the
+host itself, as the first real run did:
+
+- Install `shellcheck` first. The script validates the installer with it
+  and refuses to start without it.
+- Match the amd64 release's CMake configuration:
+  `TP_ENABLE_TENSORRT=OFF TP_REQUIRE_TENSORRT_SDK=OFF`. The default
+  requires the TensorRT SDK, which an x86_64 host does not have.
+- Pass `CFLAGS=-gdwarf-4 CXXFLAGS=-gdwarf-4`. The release sets this; a
+  current clang emits DWARF 5 by default, which `dh_dwz` rejects when it
+  reaches the serving worker.
+- The installer requires the manifest to be named
+  `tensorplate-*-artifacts.json`. Pass that name to `--manifest`, or
+  rename it and correct its line in `SHA256SUMS` — the digest of the
+  bytes does not change, only the file name column.
+
+A candidate built on the validation host means that host carries a
+build toolchain, which a release install would not. Say so when filing
+the evidence.
+
+A Google Deep Learning VM image on Ubuntu 24.04 with the 580 driver
+exists (`pytorch-2-9-cu129-ubuntu-2404-nvidia-580`) and would skip the
+driver install and reboot. It has not been used for this harness yet:
+check that its PyTorch is importable by `/usr/bin/python3`, which the
+backend descriptor uses, before relying on it.
 
 ## What a failed run is worth
 

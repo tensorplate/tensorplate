@@ -589,14 +589,16 @@ PY
 
   # The operator-facing log command is recorded, not required.
   #
-  # The packaged cli.json points log_source at
-  # /var/log/tensorplate/tensorplate-agent.log, and nothing in the
-  # product writes that file on a Linux package install: both units log
-  # to stderr, which systemd routes to the journal. So the command is
-  # expected to fail here, and its status is filed as evidence of that
-  # gap rather than failing a stage for something the release did not
-  # cause. What this stage requires instead is the log path a packaged
-  # Linux install actually has.
+  # On a real package install it exits 2 with "no log_source.path
+  # configured". The CLI never reads the packaged /etc/tensorplate/cli.json
+  # by default -- it loads only --config or $TENSORPLATE_CLI_CONFIG and
+  # otherwise uses built-in defaults, which set no log source. Behind that
+  # is a second gap: the path the packaged config names is one nothing in
+  # the product writes, since both units log to the journal. The first was
+  # observed on an L4 host; the second is from reading the tree. Either
+  # way the failure is not something the release under test caused, so its
+  # status is filed as evidence and the stage requires the log path a
+  # packaged Linux install actually has.
   note "recording the operator-facing log command"
   tensorplate logs --component agent --tail 100 \
     >"${EVIDENCE_DIR}/agent-cli.log" 2>&1 || logs_status=$?
