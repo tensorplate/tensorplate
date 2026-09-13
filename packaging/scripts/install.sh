@@ -63,9 +63,10 @@ Options:
                              integrity. Unsupported; for air-gapped or bootstrap use at your own risk.
   --help, -h                 Show this help text.
 
-The supported OS baseline is NVIDIA Jetson Linux / JetPack 6.x with L4T 36.x.
-Hardware validation is advisory by default: unrecognized Jetson models or
-non-arm64 architectures warn and require confirmation in interactive mode.
+Runtime install supports JetPack 6.x / L4T 36.x on Ubuntu 22.04 (arm64)
+and Ubuntu 24.04 (x86_64). Hardware validation is advisory by default:
+unrecognized Jetson models or missing NVIDIA drivers on x86_64 warn and
+require confirmation in interactive mode.
 CLI-only mode is for Debian/Ubuntu desktops and requires a matching
 tensorplate-cli package asset for the host Debian architecture.
 
@@ -397,12 +398,15 @@ validate_hardware() {
       # discover it. Advisory, like the Jetson model check.
       driver_file="${TP_INSTALL_NVIDIA_VERSION:-/proc/driver/nvidia/version}"
       described="x86_64 host"
+      # The userspace utility can be installed without a working kernel
+      # driver. Only a successful query establishes the fallback.
       if [[ -r "$driver_file" ]]; then
         described="x86_64 host with an NVIDIA driver"
-      elif command_exists nvidia-smi; then
-        described="x86_64 host with nvidia-smi present"
+      elif command_exists nvidia-smi &&
+           nvidia-smi --query-gpu=driver_version --format=csv,noheader >/dev/null 2>&1; then
+        described="x86_64 host with an NVIDIA driver verified by nvidia-smi"
       else
-        warnings+=("no NVIDIA driver found: ${driver_file} is unreadable and nvidia-smi is not on PATH")
+        warnings+=("no NVIDIA driver found: ${driver_file} is unreadable and the nvidia-smi driver query is unavailable or failed")
       fi
       ;;
     *)

@@ -61,6 +61,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Installer hardware validation verifies that the NVIDIA driver query
+  succeeds when driver metadata is unavailable. An installed but unusable
+  `nvidia-smi` now warns and fails under `--strict-hardware`.
+
 - Clean macOS lifecycle installs remove the full TensorPlate formula
   graph so same-version components cannot retain an older source pin.
   Jetson and shared lifecycle retries clear the previous artifact digest

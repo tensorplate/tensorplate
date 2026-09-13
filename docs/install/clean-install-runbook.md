@@ -1,22 +1,29 @@
 # TensorPlate v0.1.0 clean-install runbook (Jetson Orin Nano 8GB Super)
 
-This is the release validation procedure for target hardware. It
-validates the v0.1.0 architecture loop end-to-end.
+This historical procedure validates the v0.1.0 architecture loop on
+Jetson, including a TensorRT deployment. It is not the Ubuntu 24.04 x86_64
+validation procedure: release amd64 workers include the Python/PyTorch
+sidecar and omit TensorRT, so installing TensorRT libraries on that host
+does not make step 4 runnable.
+
+For the x86_64 candidate install path, see
+[`external-install.md`](./external-install.md#runtime-install-on-ubuntu-2404-x86_64)
+and the linked Python/PyTorch prerequisites. A separate cloud lifecycle
+procedure and its hardware evidence remain pending.
 
 ## 0. Prerequisites
 
 | Item | Required |
 | --- | --- |
-| Jetson Orin Nano 8GB Super (or Orin NX 16GB for production tier) | yes, for the Jetson path |
-| JetPack 6.x with the L4T 36.x BSP | yes, for the Jetson path |
-| Ubuntu 24.04 on x86_64 with an NVIDIA GPU | the alternative to the two rows above |
+| Jetson Orin Nano 8GB Super (or Orin NX 16GB for production tier) | yes |
+| JetPack 6.x with the L4T 36.x BSP | yes |
 | Networked apt repository serving the tensorplate packages | yes (or a local file copy of the `.deb`s) |
 | Operator account with sudo | yes |
 | `/var/lib/tensorplate` not present (clean install) | recommended |
 
-The validation target is expected to be pre-flashed. Operators on other
-hardware follow the same steps; doctor probes will surface hardware
-mismatches.
+The Jetson validation target is expected to be pre-flashed. Doctor probes
+surface mismatches with that target; they do not establish equivalent
+coverage for other hardware.
 
 ## 1. Install the core packages
 
