@@ -22,6 +22,16 @@ ID=debian
 VERSION_ID="12"
 EOF
 
+# The x86_64 runtime platform. Each architecture is held to exactly one
+# OS, so 22.04 is the supported spelling on a Jetson and an unsupported
+# one on x86_64, and 24.04 is the reverse.
+cat >"${td}/os-release.noble" <<'EOF'
+ID=ubuntu
+VERSION_ID="24.04"
+EOF
+
+printf 'NVRM version: NVIDIA UNIX x86_64 Kernel Module  560.35.03\n' >"${td}/nvidia-version"
+
 cat >"${td}/nv-tegra.supported" <<'EOF'
 # R36 (release), REVISION: 4.0
 EOF
@@ -46,6 +56,48 @@ echo "Verified OK" >&2
 exit 0
 STUB
 chmod +x "${td}/bin/cosign-ok"
+
+# Probe fixtures must not inherit a developer GPU's nvidia-smi. Keep the
+# real tools needed by dry-run on an isolated PATH, then add the NVIDIA
+# fixture only for cases that explicitly need it.
+probe_tools="${td}/probe-tools"
+probe_nvidia="${td}/probe-nvidia"
+mkdir -p "$probe_tools" "$probe_nvidia"
+for tool in awk bash curl python3 sha256sum; do
+  ln -s "$(command -v "$tool")" "${probe_tools}/${tool}"
+done
+cat >"${probe_nvidia}/nvidia-smi" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"${TP_TEST_NVIDIA_LOG}"
+[ "$#" -eq 2 ] && [ "$1" = "--query-gpu=driver_version" ] &&
+  [ "$2" = "--format=csv,noheader" ] || exit 2
+if [ "${TP_TEST_NVIDIA_EXIT}" -eq 0 ]; then
+  printf '560.35.03\n'
+fi
+exit "${TP_TEST_NVIDIA_EXIT}"
+STUB
+chmod +x "${probe_nvidia}/nvidia-smi"
+
+run_x86_probe() {
+  probe_path="$1" probe_driver="$2" probe_exit="$3"
+  shift 3
+  PATH="$probe_path" \
+  TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+  TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+  TP_INSTALL_NVIDIA_VERSION="$probe_driver" \
+  TP_INSTALL_ARCH="x86_64" \
+  TP_INSTALL_DEB_ARCH="amd64" \
+  TP_TEST_NVIDIA_LOG="${td}/nvidia-query.log" \
+  TP_TEST_NVIDIA_EXIT="$probe_exit" \
+    bash "${installer}" --dry-run --yes "$@"
+}
+
+assert_nvidia_query() {
+  if [ "$(cat "${td}/nvidia-query.log")" != "--query-gpu=driver_version --format=csv,noheader" ]; then
+    echo "FAIL: NVIDIA fallback must query the driver exactly once" >&2
+    exit 1
+  fi
+}
 
 bootstrap_asset=""
 bootstrap_checksum_var=""
@@ -128,22 +180,145 @@ grep -q -- "--force-os was provided" "${td}/force-os.err"
 TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
 TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
 TP_INSTALL_DEVICE_MODEL="${td}/model.unknown" \
-TP_INSTALL_ARCH="x86_64" \
-TP_INSTALL_DEB_ARCH="amd64" \
+TP_INSTALL_ARCH="aarch64" \
+TP_INSTALL_DEB_ARCH="arm64" \
   bash "${installer}" --dry-run --yes >"${td}/hardware-warn.out" 2>"${td}/hardware-warn.err"
-grep -q "architecture x86_64 is not arm64/aarch64" "${td}/hardware-warn.err"
 grep -q "unrecognized Jetson model" "${td}/hardware-warn.err"
 
 if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
    TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
    TP_INSTALL_DEVICE_MODEL="${td}/model.unknown" \
-   TP_INSTALL_ARCH="x86_64" \
-   TP_INSTALL_DEB_ARCH="amd64" \
+   TP_INSTALL_ARCH="aarch64" \
+   TP_INSTALL_DEB_ARCH="arm64" \
      bash "${installer}" --dry-run --strict-hardware --yes >"${td}/strict.out" 2>"${td}/strict.err"; then
   echo "FAIL: strict hardware dry-run unexpectedly passed" >&2
   exit 1
 fi
 grep -q "strict-hardware" "${td}/strict.err"
+
+# The x86_64 runtime platform: Ubuntu 24.04, with no Jetson metadata on
+# the host. Demanding L4T release files of an x86_64 host is what made
+# this platform uninstallable.
+TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+TP_INSTALL_NVIDIA_VERSION="${td}/nvidia-version" \
+TP_INSTALL_ARCH="x86_64" \
+TP_INSTALL_DEB_ARCH="amd64" \
+  bash "${installer}" --dry-run --yes >"${td}/x86.out" 2>"${td}/x86.err"
+grep -q "Ubuntu 24.04 on x86_64 detected" "${td}/x86.out"
+grep -q "Would download:" "${td}/x86.out"
+grep -q "Install mode: runtime" "${td}/x86.out"
+if grep -qi "jetson\|L4T" "${td}/x86.err"; then
+  echo "FAIL: x86_64 host was held to Jetson expectations" >&2
+  exit 1
+fi
+
+# Each architecture is held to its own OS: the Jetson spelling of Ubuntu
+# is not accepted on x86_64, and 24.04 does not satisfy the Jetson
+# platform just because the widening happened.
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+   TP_INSTALL_NVIDIA_VERSION="${td}/nvidia-version" \
+   TP_INSTALL_ARCH="x86_64" \
+   TP_INSTALL_DEB_ARCH="amd64" \
+     bash "${installer}" --dry-run --yes >"${td}/x86-jammy.out" 2>"${td}/x86-jammy.err"; then
+  echo "FAIL: x86_64 dry-run on 22.04 unexpectedly passed" >&2
+  exit 1
+fi
+grep -q "expected ubuntu 24.04" "${td}/x86-jammy.err"
+
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+   TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+   TP_INSTALL_ARCH="aarch64" \
+   TP_INSTALL_DEB_ARCH="arm64" \
+     bash "${installer}" --dry-run --yes >"${td}/arm-noble.out" 2>"${td}/arm-noble.err"; then
+  echo "FAIL: aarch64 dry-run without L4T metadata unexpectedly passed" >&2
+  exit 1
+fi
+grep -q "expected NVIDIA Jetson L4T release metadata" "${td}/arm-noble.err"
+
+# Isolate the Jetson OS check from its separate L4T check: valid R36
+# metadata must not make Ubuntu 24.04 acceptable on arm64.
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+   TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+   TP_INSTALL_ARCH="aarch64" \
+   TP_INSTALL_DEB_ARCH="arm64" \
+     bash "${installer}" --dry-run --yes >"${td}/arm-noble-r36.out" 2>"${td}/arm-noble-r36.err"; then
+  echo "FAIL: aarch64 dry-run on 24.04 unexpectedly passed with valid L4T" >&2
+  exit 1
+fi
+grep -q "expected ubuntu 22.04" "${td}/arm-noble-r36.err"
+
+# The GPU check on x86_64 is advisory, like the Jetson model check, and
+# fatal only under --strict-hardware. An absent tool and a tool whose
+# query fails are distinct inputs; neither is a usable fallback driver.
+: >"${td}/nvidia-query.log"
+run_x86_probe "$probe_tools" "${td}/absent-nvidia-version" 9 \
+  >"${td}/x86-nogpu.out" 2>"${td}/x86-nogpu.err"
+grep -q "no NVIDIA driver found" "${td}/x86-nogpu.err"
+
+if run_x86_probe "$probe_tools" "${td}/absent-nvidia-version" 9 --strict-hardware \
+  >"${td}/x86-strict.out" 2>"${td}/x86-strict.err"; then
+  echo "FAIL: x86_64 strict hardware dry-run without a driver unexpectedly passed" >&2
+  exit 1
+fi
+grep -q "strict-hardware" "${td}/x86-strict.err"
+[ ! -s "${td}/nvidia-query.log" ]
+
+for strict in advisory strict; do
+  set --
+  if [ "$strict" = strict ]; then
+    set -- --strict-hardware
+  fi
+  : >"${td}/nvidia-query.log"
+  if run_x86_probe "${probe_nvidia}:${probe_tools}" "${td}/absent-nvidia-version" 9 "$@" \
+    >"${td}/x86-broken-${strict}.out" 2>"${td}/x86-broken-${strict}.err"; then
+    if [ "$strict" = strict ]; then
+      echo "FAIL: strict hardware accepted a failed NVIDIA driver query" >&2
+      exit 1
+    fi
+  elif [ "$strict" = advisory ]; then
+    echo "FAIL: advisory hardware refused a failed NVIDIA driver query" >&2
+    exit 1
+  fi
+  grep -q "no NVIDIA driver found" "${td}/x86-broken-${strict}.err"
+  if [ "$strict" = strict ]; then
+    grep -q "strict-hardware" "${td}/x86-broken-${strict}.err"
+  fi
+  assert_nvidia_query
+
+  : >"${td}/nvidia-query.log"
+  run_x86_probe "${probe_nvidia}:${probe_tools}" "${td}/absent-nvidia-version" 0 "$@" \
+    >"${td}/x86-query-${strict}.out" 2>"${td}/x86-query-${strict}.err"
+  grep -q "hardware validation passed" "${td}/x86-query-${strict}.out"
+  if grep -q "no NVIDIA driver found" "${td}/x86-query-${strict}.err"; then
+    echo "FAIL: successful NVIDIA query was reported as missing a driver" >&2
+    exit 1
+  fi
+  assert_nvidia_query
+done
+
+# A readable kernel driver file remains sufficient. The fallback is not
+# invoked, even if a present nvidia-smi would fail its query.
+: >"${td}/nvidia-query.log"
+run_x86_probe "${probe_nvidia}:${probe_tools}" "${td}/nvidia-version" 9 --strict-hardware \
+  >"${td}/x86-driver-file.out" 2>"${td}/x86-driver-file.err"
+grep -q "hardware validation passed" "${td}/x86-driver-file.out"
+[ ! -s "${td}/nvidia-query.log" ]
+
+# An architecture that is neither runtime platform is refused by name,
+# rather than falling through one platform's checks.
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+   TP_INSTALL_ARCH="riscv64" \
+   TP_INSTALL_DEB_ARCH="riscv64" \
+     bash "${installer}" --dry-run --yes >"${td}/riscv.out" 2>"${td}/riscv.err"; then
+  echo "FAIL: unsupported architecture dry-run unexpectedly passed" >&2
+  exit 1
+fi
+grep -q "not a supported runtime architecture" "${td}/riscv.err"
 
 # Self-check authenticates SHA256SUMS (cosign) before checking install.sh,
 # then proceeds to the root requirement.

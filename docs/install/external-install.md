@@ -1,6 +1,6 @@
 # TensorPlate External Install Guide (GitHub-assets fallback)
 
-The preferred install is the APT channel — see
+On Jetson, the preferred install is the APT channel — see
 [`tensorplate-ready.md`](./tensorplate-ready.md) for the two-command
 install and the one-time stock-machine bootstrap. This guide is the
 supported no-APT fallback starting from GitHub Release assets. It does
@@ -9,19 +9,23 @@ fallback path is the release `install.sh` script: download it and run it
 locally. The script self-checks against release `SHA256SUMS` before
 downloading or installing package assets. Do not use `curl | sh`.
 
-The concrete command below targets `v0.1.1`; later releases use the same
-shape with the tag changed in the URL.
+The historical Jetson command below targets `v0.1.1`. The Ubuntu 24.04
+x86_64 runtime gate is implemented in the current v0.2.1 source and targets
+the forthcoming v0.2.1 artifact set. Published v0.1.x releases carry only
+the CLI on amd64, not the runtime package set. See the
+[x86_64 candidate path](#runtime-install-on-ubuntu-2404-x86_64) before
+choosing an installer or release tag for that architecture.
 
 ## Supported Target
 
-Runtime install:
+Runtime installer support in the current v0.2.1 source:
 
 | Requirement | Release support |
 | --- | --- |
-| Hardware | Jetson Orin Nano 8GB Super hardware floor. |
-| OS | JetPack 6.x with L4T 36.x. |
-| Architecture | `arm64`. |
-| Package source | `.deb` files attached to the matching GitHub Release. |
+| Hardware | Jetson Orin Nano 8GB Super hardware floor, or an x86_64 host with an NVIDIA GPU. |
+| OS | JetPack 6.x with L4T 36.x on `arm64`; Ubuntu 24.04 on `x86_64`. |
+| Architecture | `arm64` or `x86_64`. Each is held to the OS above for that architecture. |
+| Package source | A complete `.deb` artifact set and its matching installer. Published v0.1.x runtime assets are arm64-only; x86_64 runtime installation targets forthcoming v0.2.1 assets or a verified candidate build. The APT channel currently serves `jammy` only. |
 | Network posture | Services default to local-only endpoints. |
 
 Best-effort validation may run on Jetson Orin NX 16GB. Kria K26/K24,
@@ -55,15 +59,21 @@ verifies its pinned SHA256, and runs it from there on Linux `arm64` and
 `amd64`. Pass `--allow-unsigned` only to accept checksum-only integrity at
 your own risk.
 
-The script uses the pinned current release by default. For a newer
-published release, replace `v0.1.1` in the URL with that release tag.
+Each published script uses its own pinned release by default. For a newer
+published release, download that release's `install.sh`; changing
+`--version` on an older script does not add the new script's platform
+validation logic. In particular, the historical v0.1.1 installer is not
+the Ubuntu 24.04 x86_64 runtime installer.
 
-What the installer does:
+What the current v0.2.1 installer does:
 
-- validates the host OS as JetPack 6.x / L4T 36.x and aborts by default
-  on unsupported OS metadata.
-- warns on unrecognized Jetson hardware or non-`arm64` architecture; in
-  interactive mode it prompts before continuing.
+- validates the host OS against the platform for its architecture --
+  JetPack 6.x / L4T 36.x on `arm64`, Ubuntu 24.04 on `x86_64` -- and
+  aborts by default on unsupported OS metadata. An `x86_64` host is not
+  asked for Jetson L4T metadata, and an `arm64` host still is.
+- warns on unrecognized Jetson hardware, on an `x86_64` host with no
+  NVIDIA driver, or on an architecture that is neither; in interactive
+  mode it prompts before continuing.
 - downloads `tensorplate-${TP_TAG}-artifacts.json`, `SHA256SUMS`,
   `SHA256SUMS.cosign.bundle`, and the selected release artifacts listed in
   the manifest.
@@ -84,7 +94,7 @@ Installer flags:
 | Flag | Behavior |
 | --- | --- |
 | `--version VERSION` | Selects the release tag/version. Accepts `0.1.1`, `v0.1.1`, or `v0.1.1-rc.N`. |
-| `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` for the host Debian architecture. Skips Jetson validation, service enablement, and doctor. |
+| `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` for the host Debian architecture. Skips runtime OS/hardware validation, service enablement, and doctor. |
 | `--with-python-backend` | Also installs `tensorplate-backend-python-pytorch`. |
 | `--yes` / `-y` | Continues without interactive prompts for unattended provisioning. |
 | `--force-os` | Overrides the OS gate. This is unsupported and at your own risk. |
@@ -109,6 +119,45 @@ sudo bash install.sh --with-python-backend
 The optional package does not install PyTorch. Install the
 Jetson-compatible PyTorch stack separately, then run `tensorplate doctor`
 and restart the agent if needed.
+
+## Runtime Install On Ubuntu 24.04 x86_64
+
+Use a complete candidate artifact directory produced from the v0.2.1
+source that includes this platform gate. It must contain `install.sh`,
+the artifact manifest, `SHA256SUMS`, and all selected packages, including
+the amd64 agent, serving worker, observability service, and CLI. Use the
+installer from that same artifact set. The v0.1.x downloads in the
+historical examples do not contain this runtime set.
+
+For an unsigned local snapshot or build-only candidate, after obtaining
+and verifying the artifact set, replace the directory below with its path:
+
+```bash
+sudo bash /path/to/candidate/install.sh \
+  --local-artifacts /path/to/candidate \
+  --with-python-backend --allow-unsigned
+```
+
+`--allow-unsigned` accepts checksum-only integrity for those unreleased
+artifacts; omit it for signed release assets. Once a release containing
+the amd64 runtime is published, use its matching installer and assets.
+The `jammy` APT channel and the historical Jetson APT commands are not this
+Ubuntu 24.04 install path.
+
+The release amd64 serving worker enables `python_pytorch` and disables
+TensorRT and LibTorch. Install the optional backend package as above,
+then follow the [descriptor interpreter and doctor
+checks](./python-pytorch-backend.md#2-install-pytorch-into-the-descriptors-interpreter).
+For GPU execution, choose a CUDA-capable PyTorch build supported by the
+host driver; the guide's Jetson wheel and x86 CPU-only examples are not
+the x86 GPU wheel selection. The backend package itself does not install
+PyTorch. Restart the agent after the runtime checks pass.
+
+Installing CUDA or TensorRT libraries does not add the TensorRT adapter
+to this binary. A GPU smoke run must use a Python/PyTorch bundle that
+actually executes on CUDA. These are install prerequisites; the separate
+cloud lifecycle procedure and its hardware-validation evidence remain
+pending.
 
 ## CLI-Only Install On Desktop
 
@@ -177,7 +226,11 @@ Snapshot caveats:
 
 ## Manual Fallback Variables
 
-Use these variables only when following the manual fallback flow below:
+The following values describe the historical v0.1.1 Jetson fallback.
+They do not select an x86_64 runtime: v0.1.x has no amd64 runtime assets.
+For a future published amd64 runtime, use its actual release and Debian
+package versions and set `TP_ARCH=amd64` before following the download
+steps. For an unreleased artifact set, use the local candidate path above.
 
 ```bash
 export TP_VERSION=0.1.1
@@ -360,7 +413,7 @@ group.
 | Checksum mismatch | Delete the asset and download again. If it repeats, stop and file a release issue. |
 | Signature verification failed | Stop. Re-download `SHA256SUMS` and `SHA256SUMS.cosign.bundle`; if it repeats, do not install and report it privately per [`SECURITY.md`](../../SECURITY.md). |
 | Cosign bootstrap failed | Install cosign from <https://docs.sigstore.dev/cosign/installation> and rerun, or pass `--allow-unsigned` only for air-gapped/bootstrap installs at your own risk. |
-| Unsupported OS | The installer aborts by default unless `--force-os` is passed. v0.1 supports JetPack 6.x / L4T 36.x. |
+| Unsupported OS | The installer aborts by default unless `--force-os` is passed. Runtime install supports JetPack 6.x / L4T 36.x on `arm64` and Ubuntu 24.04 on `x86_64`; the message names the one expected for this host's architecture. |
 | Unsupported hardware or architecture | The installer warns and prompts in interactive mode. Use `--strict-hardware` to make this fatal, or `--yes` for unattended validated fleets. |
 | `path_layout = fail` | Reinstall `tensorplate-common`; attach `tensorplate doctor --output json` if it persists. |
 | `config_files = fail` | Reinstall the owning package or restore the dpkg conffile. |

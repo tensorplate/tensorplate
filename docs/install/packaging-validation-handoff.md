@@ -2,7 +2,9 @@
 
 This document records the packaging artifacts, validation steps, package
 versions, hardware assumptions, and known risks that must be reviewed
-before release validation on Jetson Orin hardware.
+before release validation on Jetson Orin or Ubuntu 24.04 x86_64 hardware.
+The installed backend and the validation procedure depend on the
+architecture.
 
 ## Packaging Artifacts
 
@@ -20,13 +22,20 @@ before release validation on Jetson Orin hardware.
 
 ## Required Validation
 
-1. Run [`clean-install-runbook.md`](./clean-install-runbook.md) on a
-   Jetson Orin Nano 8GB Super or equivalent validation target.
+1. On Jetson, run
+   [`clean-install-runbook.md`](./clean-install-runbook.md). On Ubuntu
+   24.04 x86_64, use the
+   [candidate asset install path](./external-install.md#runtime-install-on-ubuntu-2404-x86_64)
+   and Python/PyTorch prerequisites. The cloud lifecycle procedure and
+   hardware evidence remain pending; installing the packages does not
+   complete that validation.
 2. Run `test/packaging/run.sh` on the target after package install.
 3. Run `tensorplate doctor` on a fresh install and again after deploy.
 4. Probe service start, status, restart, and stop with systemd.
-5. Deploy a TensorRT vision bundle and a Python/PyTorch bundle when those
-   paths are in release scope.
+5. On Jetson, deploy a TensorRT vision bundle and a Python/PyTorch bundle
+   when that optional backend is in scope. For release amd64 packages,
+   validate a Python/PyTorch bundle that actually executes on the NVIDIA
+   GPU. TensorRT is not compiled into that serving worker.
 
 ## Package Versions And Runtime Expectations
 
@@ -39,12 +48,18 @@ before release validation on Jetson Orin hardware.
 
 ## Hardware Assumptions
 
-- Jetson Orin Nano 8GB Super or Orin NX 16GB.
-- JetPack 6.x with the L4T 36.x BSP.
-- TensorRT, CUDA, and optionally LibTorch installed by the platform
-  runtime.
+- Jetson Orin Nano 8GB Super or Orin NX 16GB, or an x86_64 host with an
+  NVIDIA GPU.
+- JetPack 6.x with the L4T 36.x BSP on the Jetson; Ubuntu 24.04 on
+  x86_64.
+- On Jetson, the TensorRT validation path needs the platform's CUDA and
+  TensorRT runtime. On x86_64, the release worker ships with TensorRT and
+  LibTorch disabled and the Python/PyTorch sidecar enabled; installing
+  those native SDKs does not add their adapters to that binary.
 - Python 3.10+ for the `python_pytorch` backend. PyTorch wheel choice is
-  platform-specific and remains operator policy.
+  platform-specific and remains operator policy. The x86_64 GPU path
+  requires the optional backend package and a CUDA-capable PyTorch build
+  usable by the descriptor's interpreter.
 
 ## Known Risks
 
@@ -55,6 +70,12 @@ before release validation on Jetson Orin hardware.
   `dpkg-buildpackage` and package install behavior must still be checked
   on the target platform.
 - The Python/PyTorch backend package does not install PyTorch.
+- Published v0.1.x releases contain no amd64 runtime set to upgrade from.
+  The x86_64 install path targets the forthcoming v0.2.1 assets or a
+  complete candidate artifact set; an upgrade baseline must be supplied
+  explicitly or the upgrade stage recorded as skipped with a reason.
+- The APT channel serves `jammy` only. The Ubuntu 24.04 x86_64 candidate
+  path uses release or local build artifacts, not the Jetson APT recipe.
 - Sites that require custom systemd hardening may need drop-in overrides,
   which must be documented in validation evidence.
 
@@ -66,4 +87,7 @@ Validation can accept the packaging handoff when:
 2. `tensorplate doctor` reports no `fail` findings on a clean install.
 3. `systemctl enable --now tensorplate-agent` brings the agent to `ready`
    and the serving worker reaches a steady supervisor state.
-4. A TensorRT vision bundle deploys, serves, and is rollback-able.
+4. A bundle for the shipped backend deploys, serves, and is rollback-able:
+   TensorRT on the Jetson path, or Python/PyTorch with actual CUDA execution
+   on the x86_64 GPU path. A parser fixture or a CPU-only run is not GPU
+   validation evidence.

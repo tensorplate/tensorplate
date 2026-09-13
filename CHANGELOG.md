@@ -8,6 +8,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The release installer supports Ubuntu 24.04 on x86_64 as a runtime
+  platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
+  is validated against its own platform: an x86_64 host is no longer
+  asked for Jetson L4T metadata, and an arm64 host still is. Hardware
+  validation stays advisory and now warns when an x86_64 host has no
+  NVIDIA driver. The APT channel still serves `jammy` only, so x86_64
+  hosts install from release assets.
+
 - Lifecycle validation reports record which artifact a run installed, as
   `subject.artifact_digest`. Each harness writes an `artifact-digest.txt`
   beside its stage logs while the run is happening: the Jetson clean room
@@ -52,6 +60,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   homogeneous device sets.
 
 ### Fixed
+
+- Installer hardware validation verifies that the NVIDIA driver query
+  succeeds when driver metadata is unavailable. An installed but unusable
+  `nvidia-smi` now warns and fails under `--strict-hardware`.
 
 - Clean macOS lifecycle installs remove the full TensorPlate formula
   graph so same-version components cannot retain an older source pin.
