@@ -109,10 +109,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   roughly ninety minutes. Failing afterwards would waste the one runner
   and tell nobody anything sooner.
 
-  Reported on every run, enforced only when publishing. `develop` may
-  carry rows nobody has validated yet; a tag may not — and a build-only
+  Reported on every run, enforced only when publishing a final release.
+  `develop` may carry rows nobody has validated yet, and a build-only
   dispatch is how the pipeline itself gets exercised, so blocking that
-  would leave the gate untestable except by attempting a real release.
+  would leave the gate untestable except by attempting a real release. A
+  release candidate is not blocked either: the evidence is collected on
+  candidate artifacts, so a gate that refused candidates could never be
+  satisfied. A checker that fails to reach a verdict is refused on every
+  tag.
 
   A gate nothing depends on is an optional step wearing a gate's name,
   and that failure is silent: the workflow still runs green while

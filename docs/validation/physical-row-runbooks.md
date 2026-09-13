@@ -137,9 +137,10 @@ the device invalidates the glibc-floor comparison the run exists for.
    installs — `v0.2.1-rc.1` — and it is deliberately not the
    `<tested_version>` the report is filed under. A candidate's assets are
    what can be downloaded while the evidence is being collected: the
-   release workflow's evidence gate runs before the jobs that build and
-   publish, and a final release is created as a draft, so its assets are
-   not yet reachable at the public tag URL. Passing the bare version here
+   release workflow's evidence gate blocks only the final release, so a
+   candidate publishes before its evidence exists, while the final release
+   waits on that evidence and is created as a draft whose assets are not
+   reachable at the public tag URL. Passing the bare version here
    would send the harness after a tag that does not exist yet, and the
    run would stop at the download.
 
