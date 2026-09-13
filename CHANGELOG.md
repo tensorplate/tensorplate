@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
+  run by hand on a VM the operator starts themselves. It provisions no
+  cloud resources. Four canonical stages are exercised -- install,
+  deploy-smoke, status-logs and restart -- and four are skipped with
+  their reasons recorded: upgrade and rollback have no published amd64
+  predecessor to move between, and crash-loop and offline need mechanism
+  that is being added separately. Its deploy-smoke bundle selects a
+  device-neutral fixture profile and executes no accelerator kernel.
+
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
   is validated against its own platform: an x86_64 host is no longer

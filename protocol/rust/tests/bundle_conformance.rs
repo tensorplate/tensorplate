@@ -122,6 +122,29 @@ fn mps_python_pytorch_smoke_bundle_has_verified_config_artifact() {
 }
 
 #[test]
+fn x86_fixture_smoke_bundle_targets_the_cloud_row_device_family() {
+    // The deploy-smoke input for the Ubuntu x86_64 cloud rows. It names
+    // `x86_64` rather than `any` so admission matches it against that
+    // row's agent config exactly, instead of passing through the
+    // either-side-Any escape and proving nothing about the match.
+    let root = fixtures_root().join("x86_fixture_smoke");
+    let d = parse_bundle(&root).expect("x86 smoke fixture must parse");
+    assert_eq!(d.manifest.model_class, ModelClass::Custom);
+    assert_eq!(d.manifest.backend_hint, "python_pytorch");
+    assert_eq!(
+        d.manifest.target_hardware.device_family,
+        DeviceFamily::X86_64,
+        "the bundle must name the cloud rows' device family"
+    );
+    let model_artifact = d
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.role == ArtifactRole::Model)
+        .expect("model artifact present");
+    assert!(model_artifact.relative_path.ends_with("x86-smoke.json"));
+}
+
+#[test]
 fn language_reserved_parses_without_requiring_runtime() {
     let root = fixtures_root().join("language_reserved");
     let d = parse_bundle(&root).expect("language fixture must parse");
