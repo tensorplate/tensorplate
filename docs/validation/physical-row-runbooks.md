@@ -129,6 +129,10 @@ the device invalidates the glibc-floor comparison the run exists for.
      --confirm RESET-TENSORPLATE
    ```
 
+   Each confirmed run clears an earlier `artifact-digest.txt` before host
+   checks or downloads, then records a fresh digest only after asset
+   verification succeeds. Doctor recordings in the directory are preserved.
+
    `<asset_tag>` is the release **tag** whose published assets this run
    installs — `v0.2.1-rc.1` — and it is deliberately not the
    `<tested_version>` the report is filed under. A candidate's assets are

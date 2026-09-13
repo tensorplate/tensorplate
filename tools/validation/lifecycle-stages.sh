@@ -95,6 +95,10 @@ lifecycle_begin() {
     _lc_die "source revision \`${_lc_source_revision}\` is not a full git SHA"
   _lc_artifact_digest=""
   mkdir -p "$_lc_dir"
+  # The converter also reads this sidecar; resetting only the in-memory
+  # value would let it recover a previous run's digest after a retry.
+  rm -f "${_lc_dir}/artifact-digest.txt" ||
+    _lc_die "could not clear the previous artifact digest"
   _lc_report="${_lc_dir}/lifecycle-report.json"
   _lc_started="$(_lc_now)"
   _lc_records=()

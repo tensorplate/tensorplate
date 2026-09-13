@@ -161,6 +161,14 @@ prepare_paths() {
   EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"
 }
 
+clear_artifact_digest() {
+  # A retry may fail before verifying its assets. Do not let the report
+  # converter attach a previous attempt's digest to this run. Preserve
+  # other evidence, including doctor recordings collected before the run.
+  rm -f "${EVIDENCE_DIR}/artifact-digest.txt" ||
+    die "could not clear the previous artifact digest"
+}
+
 check_host() {
   [[ "${EUID}" -ne 0 ]] ||
     die "run as a normal user; this script calls sudo for privileged steps"
@@ -263,6 +271,7 @@ PY
 }
 
 verify_assets() {
+  clear_artifact_digest
   required artifacts-list bash -c 'cd "$1" && find . -maxdepth 1 -type f -print | sort' _ "$ASSETS_DIR"
   required checksums bash -c 'cd "$1" && sha256sum -c SHA256SUMS' _ "$ASSETS_DIR"
   # Identify the artifacts this run is about, now that the set has
@@ -475,6 +484,7 @@ archive_evidence() {
 
 cmd_download() {
   prepare_paths
+  clear_artifact_digest
   download_release_assets
   verify_assets
   printf 'assets_dir: %s\n' "$ASSETS_DIR"
@@ -493,6 +503,7 @@ cmd_run() {
   parse_args "$@"
   prepare_paths
   require_confirm
+  clear_artifact_digest
   check_host
   record_environment
   if [[ ! -f "${ASSETS_DIR}/install.sh" ]]; then

@@ -420,5 +420,9 @@ set -e
 check "  and carries a full SHA" "$revision" \
   "$(subject_field "${cv}/lifecycle-report.json" source_revision)"
 
+if ! bash "${repo_root}/test/validation/lifecycle_retry_test.sh"; then
+  failures=$((failures + 1))
+fi
+
 printf '\n%s\n' "$([[ "$failures" -eq 0 ]] && echo "all checks passed" || echo "${failures} check(s) failed")"
 exit "$failures"

@@ -502,15 +502,24 @@ install_candidate_clean() {
       python3 -c 'import json,sys; print(json.load(sys.stdin)["formulae"][0]["versions"]["stable"])'
   )"
   record_formula_graph
-  if formula_is_installed tensorplate; then
-    brew uninstall --formula tensorplate
-  fi
+  # Homebrew reuses installed dependencies at the same version even when
+  # their source archive changed. Remove the whole graph so the pin we
+  # record describes every component this run exercises, not just the
+  # newly installed umbrella formula.
+  remove_candidate_graph
+  for formula_name in "${FORMULAE[@]}"; do
+    if formula_is_installed "$formula_name"; then
+      die "formula remains installed before clean install: ${formula_name}"
+    fi
+  done
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew install --formula "${tap_name}/tensorplate"
   candidate_active=1
-  installed="$(linked_formula_version tensorplate)"
-  [[ "$installed" == "$candidate_version" ]] ||
-    die "candidate install produced ${installed:-missing}; expected ${candidate_version}"
+  for formula_name in "${FORMULAE[@]}"; do
+    installed="$(linked_formula_version "$formula_name")"
+    [[ "$installed" == "$candidate_version" ]] ||
+      die "candidate ${formula_name} install produced ${installed:-missing}; expected ${candidate_version}"
+  done
 }
 
 verify_packaged_closure() {

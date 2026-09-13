@@ -53,6 +53,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Clean macOS lifecycle installs remove the full TensorPlate formula
+  graph so same-version components cannot retain an older source pin.
+  Jetson and shared lifecycle retries clear the previous artifact digest
+  before recording new evidence, preventing failed attempts from
+  inheriting a digest from an earlier run.
+
 - Both lifecycle report producers refuse a `TP_LIFECYCLE_SOURCE_REVISION`
   that is not a full 40-character git SHA, rather than writing it into a
   report that fails schema validation at the release gate.
