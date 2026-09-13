@@ -41,8 +41,9 @@ fn validation_errors(compiled: &jsonschema::JSONSchema, doc: &Value) -> Vec<Stri
     }
 }
 
-/// Drive the shell harness and return the report it wrote.
-fn run_harness(script: &str) -> (Value, tempfile::TempDir) {
+/// Drive the shell harness, returning whether it exited 0 and the report
+/// it wrote, if it wrote one.
+fn run_harness_raw(script: &str) -> (bool, Option<Value>, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let harness = repo_root().join("tools/validation/lifecycle-stages.sh");
     let body = format!(
@@ -53,17 +54,27 @@ fn run_harness(script: &str) -> (Value, tempfile::TempDir) {
     );
     // Not `.status()` on a shell that may exit non-zero by design: the
     // failing-run case is one of the things under test.
-    let _ = Command::new("bash")
+    //
+    // The environment is cleared of the revision the producer reads: it
+    // is refused unless it is a full SHA, so a developer with one
+    // exported would fail these for an unrelated reason.
+    let output = Command::new("bash")
+        .env_remove("TP_LIFECYCLE_SOURCE_REVISION")
         .arg("-c")
         .arg(&body)
         .output()
         .expect("run harness");
     let report = dir.path().join("lifecycle-report.json");
-    let doc: Value = serde_json::from_str(
-        &std::fs::read_to_string(report).expect("the harness must write a report"),
-    )
-    .expect("report parses");
-    (doc, dir)
+    let doc = std::fs::read_to_string(report)
+        .ok()
+        .map(|text| serde_json::from_str(&text).expect("report parses"));
+    (output.status.success(), doc, dir)
+}
+
+/// Drive the shell harness and return the report it wrote.
+fn run_harness(script: &str) -> (Value, tempfile::TempDir) {
+    let (_ok, doc, dir) = run_harness_raw(script);
+    (doc.expect("the harness must write a report"), dir)
 }
 
 #[test]
@@ -99,8 +110,14 @@ fn an_aborted_run_still_validates_and_names_the_failed_stage() {
     assert_eq!(failed, vec!["deploy-smoke"]);
 }
 
-/// Run the converter over a harness-shaped stage log.
-fn convert(rows: &[(&str, &str)], maps: &[&str]) -> (Value, tempfile::TempDir) {
+/// Run the converter over a harness-shaped stage log, optionally with the
+/// artifact-digest sidecar a harness writes beside it. Returns whether it
+/// exited 0 and the report it wrote, if it wrote one.
+fn convert_raw(
+    rows: &[(&str, &str)],
+    maps: &[&str],
+    sidecar: Option<&str>,
+) -> (bool, Option<Value>, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let tsv = dir.path().join("stages.tsv");
     let mut body = String::from("stage\tstatus\tstarted_at\tfinished_at\tlog\n");
@@ -110,8 +127,13 @@ fn convert(rows: &[(&str, &str)], maps: &[&str]) -> (Value, tempfile::TempDir) {
         ));
     }
     std::fs::write(&tsv, body).expect("write stage log");
+    if let Some(line) = sidecar {
+        std::fs::write(dir.path().join("artifact-digest.txt"), format!("{line}\n"))
+            .expect("write digest sidecar");
+    }
     let out = dir.path().join("lifecycle-report.json");
     let status = Command::new(repo_root().join("tools/validation/lifecycle-report-from-stages.sh"))
+        .env_remove("TP_LIFECYCLE_SOURCE_REVISION")
         .arg(&tsv)
         .arg("macos26-m1pro-16gb")
         .arg("0.2.1")
@@ -120,10 +142,17 @@ fn convert(rows: &[(&str, &str)], maps: &[&str]) -> (Value, tempfile::TempDir) {
         .args(maps)
         .status()
         .expect("run converter");
-    assert!(status.success(), "converter must succeed on a valid log");
-    let doc: Value =
-        serde_json::from_str(&std::fs::read_to_string(out).expect("read report")).expect("parses");
-    (doc, dir)
+    let doc = std::fs::read_to_string(out)
+        .ok()
+        .map(|text| serde_json::from_str(&text).expect("parses"));
+    (status.success(), doc, dir)
+}
+
+/// Run the converter over a harness-shaped stage log.
+fn convert(rows: &[(&str, &str)], maps: &[&str]) -> (Value, tempfile::TempDir) {
+    let (ok, doc, dir) = convert_raw(rows, maps, None);
+    assert!(ok, "converter must succeed on a valid log");
+    (doc.expect("read report"), dir)
 }
 
 #[test]
@@ -158,6 +187,170 @@ fn a_converted_report_names_the_version_it_exercised() {
     // tag, because nothing distinguishes it from a run against them.
     let (doc, _dir) = convert(&[("clean-install", "pass")], &["clean-install=install"]);
     assert_eq!(doc["subject"]["tested_version"], "0.2.1");
+}
+
+/// A well-formed digest to feed the producers.
+///
+/// Deliberately not the sha256 of anything: what these assert is that a
+/// value survives the producer unchanged, and every check compares what
+/// came back against what went in. The shell suite drives the same path
+/// with real `sha256sum` output, which is what covers the file format
+/// the harnesses actually write.
+fn a_recorded_digest() -> String {
+    "0123456789abcdef".repeat(4)
+}
+
+#[test]
+fn a_run_that_records_a_digest_validates_and_carries_it() {
+    // The value binds the report to the bytes that were installed. It
+    // has to survive into the report exactly: the release gate's Python
+    // validator accepts a trailing newline that this one rejects, so a
+    // producer that passed the raw line through would pass a release and
+    // fail here, on identical bytes.
+    let digest = a_recorded_digest();
+    let (doc, _dir) = run_harness(&format!(
+        "lifecycle_stage install true\nlifecycle_artifact_digest {digest} SHA256SUMS\nlifecycle_finish"
+    ));
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "a report with a digest must validate: {errors:?}"
+    );
+    assert_eq!(doc["subject"]["artifact_digest"], digest.as_str());
+}
+
+#[test]
+fn a_converted_report_carries_the_digest_from_the_evidence_directory() {
+    // The converter is the producer both physical runbooks invoke, and
+    // it reads the digest from the evidence beside the stage log rather
+    // than from the operator, because nothing on an installed system
+    // reports which artifact it came from.
+    let digest = a_recorded_digest();
+    let (ok, doc, _dir) = convert_raw(
+        &[("clean-install", "pass")],
+        &["clean-install=install"],
+        Some(&format!("{digest}  SHA256SUMS")),
+    );
+    assert!(ok, "a well-formed sidecar must convert");
+    let doc = doc.expect("report written");
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "a converted report with a digest must validate: {errors:?}"
+    );
+    assert_eq!(doc["subject"]["artifact_digest"], digest.as_str());
+}
+
+#[test]
+fn a_report_without_a_digest_is_still_valid() {
+    // The control that keeps `optional` executable. Both producers run
+    // in CI on hosts with nothing installed, and a harness that cannot
+    // determine the artifact must still be able to file evidence.
+    let compiled = compiled_schema();
+    let (runner, _a) = run_harness("lifecycle_stage install true\nlifecycle_finish");
+    let (converted, _b) = convert(&[("clean-install", "pass")], &["clean-install=install"]);
+    for doc in [&runner, &converted] {
+        assert!(
+            doc["subject"].get("artifact_digest").is_none(),
+            "a run that recorded no digest must omit the field, not empty it"
+        );
+        assert!(validation_errors(&compiled, doc).is_empty());
+    }
+}
+
+#[test]
+fn both_producers_agree_on_what_a_digest_is() {
+    // Two producers, two languages, one rule -- and nothing else keeps
+    // them honest: the stage lists have a drift check, `subject` has
+    // none. Behavioural rather than by grepping for shared literals, so
+    // a rewrite that preserves the rule still passes.
+    let good = a_recorded_digest();
+    let cases = [
+        (good.clone(), true),
+        (format!("sha256:{good}"), false),
+        (good.to_uppercase(), false),
+        (good[..63].to_string(), false),
+    ];
+    for (value, expected) in cases {
+        let (runner_ok, runner_doc, _a) = run_harness_raw(&format!(
+            "lifecycle_stage install true\nlifecycle_artifact_digest {value} SHA256SUMS\nlifecycle_finish"
+        ));
+        let (converter_ok, converter_doc, _b) = convert_raw(
+            &[("clean-install", "pass")],
+            &["clean-install=install"],
+            Some(&format!("{value}  SHA256SUMS")),
+        );
+        assert_eq!(
+            runner_ok,
+            expected,
+            "the runner must {} `{value}`",
+            if expected { "accept" } else { "refuse" }
+        );
+        assert_eq!(
+            converter_ok,
+            expected,
+            "the converter must {} `{value}`",
+            if expected { "accept" } else { "refuse" }
+        );
+        // A refused value must not reach a report by either path. The
+        // runner still files the run's own evidence, so it is the field
+        // that has to be absent, not the file.
+        for doc in [runner_doc, converter_doc].into_iter().flatten() {
+            let carried = doc["subject"]
+                .get("artifact_digest")
+                .and_then(Value::as_str);
+            if expected {
+                assert_eq!(carried, Some(value.as_str()));
+            } else {
+                assert_eq!(carried, None, "a refused digest must not reach the report");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_malformed_source_revision_refuses_rather_than_filing_a_bad_report() {
+    // The digest's sibling field had the same defect: a tag or a short
+    // SHA was written through and only failed at the release gate, by
+    // which time the machine is gone.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let harness = repo_root().join("tools/validation/lifecycle-stages.sh");
+    let body = format!(
+        "source '{}'\nlifecycle_begin ubuntu2404-x86-l4-g2s8 '{}' 0.2.1 contract-test\n",
+        harness.display(),
+        dir.path().display()
+    );
+    let runner = Command::new("bash")
+        .env("TP_LIFECYCLE_SOURCE_REVISION", "v0.2.1")
+        .arg("-c")
+        .arg(&body)
+        .output()
+        .expect("run harness");
+    assert!(
+        !runner.status.success(),
+        "the runner must refuse a revision that is not a full SHA"
+    );
+
+    let tsv = dir.path().join("stages.tsv");
+    std::fs::write(
+        &tsv,
+        "stage\tstatus\tstarted_at\tfinished_at\tlog\nclean-install\tpass\t2026-09-03T03:00:00Z\t2026-09-03T03:01:00Z\tclean-install.log\n",
+    )
+    .expect("write stage log");
+    let out = dir.path().join("converted.json");
+    let converter =
+        Command::new(repo_root().join("tools/validation/lifecycle-report-from-stages.sh"))
+            .env("TP_LIFECYCLE_SOURCE_REVISION", "v0.2.1")
+            .arg(&tsv)
+            .arg("macos26-m1pro-16gb")
+            .arg("0.2.1")
+            .arg("contract-test")
+            .arg(&out)
+            .arg("clean-install=install")
+            .status()
+            .expect("run converter");
+    assert!(!converter.success(), "the converter must refuse it too");
+    assert!(!out.exists(), "no report is filed from a refused revision");
 }
 
 #[test]

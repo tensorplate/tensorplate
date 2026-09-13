@@ -15,7 +15,11 @@ fallback, while retaining the fallback's 16 GiB admission ceiling.
 The harness mutates Homebrew state. Close unrelated Homebrew work first and
 run it only on the validation Mac. It refuses a dirty TensorPlate tap
 checkout, preserves the original tap files, and restores the supplied
-CLI-only baseline formula before exit.
+CLI-only baseline formula before exit. The clean-install stage removes the
+entire TensorPlate formula graph, including any previously installed
+components, and checks that no TensorPlate kegs remain before installing
+the candidate. This prevents Homebrew from reusing a component built from
+an older source archive with the same version.
 
 ## Prepare immutable inputs
 
@@ -77,6 +81,15 @@ TP_HOMEBREW_LIFECYCLE_ALLOW=1 \
     --bundle-dir test/models/bundles/v0_1/mps_python_pytorch_smoke \
     --evidence-dir /private/tmp/tensorplate-macos-evidence
 ```
+
+After every candidate component is linked at the expected version, the
+harness writes `artifact-digest.txt`,
+holding the pinned source archive's checksum and its URL — the same
+`source_sha256` the formula pin and the sanitized transcript already
+carry. The digest identifies the source input from which the candidate
+components were built, not their compiled binary bytes. A failed graph
+removal or candidate install writes no digest. A `--preflight-only` run
+also writes none, because it downloads no archive.
 
 The run is successful only when every stage in `summary.json` and
 `sanitized-transcript.json` is `pass`. `host-facts.json` deliberately

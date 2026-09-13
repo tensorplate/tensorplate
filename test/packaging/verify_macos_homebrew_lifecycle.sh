@@ -26,6 +26,7 @@ fi
 grep -Fq 'state/lifecycle-marker.XXXXXX' "$harness"
 grep -Fq 'backend_profile") != "mps_fixture"' "$harness"
 grep -Fq 'mps_tensor_operation_required_for_load' "$harness"
+# shellcheck disable=SC2016 # Match the literal expression in the harness.
 grep -Fq 'wave-2b-macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)' "$harness"
 grep -Fq '"status_severity": status.get("severity") == "ready"' "$harness"
 grep -Fq 'serving_parts.hostname == "127.0.0.1"' "$harness"
@@ -33,10 +34,166 @@ grep -Fq '"serving_health_state": serving_health.get("state") == "ready"' "$harn
 grep -Fq 'serving_health.get("active_model_id") == expected_deployment' "$harness"
 grep -Fq '"supervision_healthy_when_configured": supervision_healthy' "$harness"
 grep -Fq 'sanitized-transcript.json' "$harness"
+grep -Fq 'artifact-digest.txt' "$harness"
+grep -Fq 'record_artifact_digest || die' "$harness"
+
+# The digest must be recorded after the install, not beside the formula
+# pin it reads. A preflight run returns before installing anything, so a
+# digest recorded at pin time would attest an archive nobody fetched.
+digest_line="$(grep -n 'record_artifact_digest || die' "$harness" | cut -d: -f1)"
+install_line="$(grep -n 'run_stage clean-install install_candidate_clean' "$harness" | cut -d: -f1)"
+if [[ "$digest_line" -le "$install_line" ]]; then
+  printf 'FAIL: the artifact digest must be recorded after the candidate install\n' >&2
+  exit 1
+fi
+
+# Execute the install and digest path with a fake Homebrew inventory. The
+# real helpers are extracted from the harness; no hardware or installed
+# Homebrew state is touched. Equal versions deliberately have different
+# source pins, which is the case a version-only assertion cannot detect.
+python3 - "$harness" <<'PY'
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+def function(name):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+arrays = []
+for name in ("FORMULAE", "COMPONENT_FORMULAE"):
+    match = re.search(r"^readonly " + name + r"=\(\n.*?^\)\n", source, re.M | re.S)
+    assert match, f"missing harness array: {name}"
+    arrays.append(match.group(0))
+formulae = re.findall(r"^  (tensorplate[\w-]*)$", arrays[0], re.M)
+assert len(formulae) == 6
+install_path = source.split("run_stage clean-install install_candidate_clean\n", 1)[1]
+install_path = "run_stage clean-install install_candidate_clean\n" + install_path.split(
+    "run_stage packaged-closure", 1
+)[0]
+
+fake_brew = r'''
+import json
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ["TP_FAKE_BREW_ROOT"])
+state_path = root / "installed.json"
+state = json.loads(state_path.read_text())
+formulae = json.loads((root / "formulae.json").read_text())
+mode = os.environ["TP_FAKE_BREW_MODE"]
+args = sys.argv[1:]
+with (root / "brew-calls.jsonl").open("a") as out:
+    out.write(json.dumps(args) + "\n")
+name = args[-1].split("/")[-1]
+if args[0] == "services":
+    assert args[1] == "stop"
+elif args[0] == "list":
+    sys.exit(0 if name in state else 1)
+elif args[0] == "info":
+    print(json.dumps({"formulae": [{
+        "name": name,
+        "versions": {"stable": "0.2.1-rc.1"},
+        "linked_keg": state.get(name, {}).get("version"),
+    }]}))
+elif args[0] == "deps":
+    print("tensorplate")
+elif args[0] == "uninstall":
+    # Model the dependency order used by the real formula graph.
+    if name != "tensorplate" and "tensorplate" in state:
+        sys.exit(11)
+    if name == "tensorplate-serving" and "tensorplate-agent" in state:
+        sys.exit(12)
+    if mode == "uninstall-failure" and name == "tensorplate-agent":
+        sys.exit(13)
+    if not (mode == "retained-keg" and name == "tensorplate-cli"):
+        state.pop(name, None)
+elif args[0] == "install":
+    assert name == "tensorplate"
+    if mode == "install-failure":
+        sys.exit(14)
+    for component in formulae:
+        if mode == "missing-component" and component == "tensorplate-cli":
+            continue
+        # Homebrew reuses dependencies whose version is already current.
+        if component not in state:
+            state[component] = {"version": "0.2.1-rc.1", "source": "b" * 64}
+    if mode == "wrong-component-version":
+        state["tensorplate-serving"]["version"] = "0.2.0"
+else:
+    raise AssertionError(f"unexpected fake brew invocation: {args}")
+state_path.write_text(json.dumps(state))
+'''
+
+helpers = "\n".join(function(name) for name in (
+    "die", "note", "pass", "run_stage", "stop_candidate_services",
+    "formula_is_installed", "linked_formula_version", "remove_candidate_graph",
+    "stage_candidate_tap", "record_formula_graph", "install_candidate_clean",
+    "record_artifact_digest",
+))
+script = "\n".join(arrays) + r'''
+set -Eeuo pipefail
+evidence_dir="$TP_FAKE_BREW_ROOT/evidence"
+formula_dir="$TP_FAKE_BREW_ROOT/formulae"
+tap_repo="$TP_FAKE_BREW_ROOT/tap"
+tap_backup="$TP_FAKE_BREW_ROOT/backup"
+stage_results="$evidence_dir/stages.tsv"
+tap_name=tensorplate/tap
+candidate_active=0
+brew() { python3 "$TP_FAKE_BREW_ROOT/fake-brew.py" "$@"; }
+''' + helpers + "\n" + install_path
+
+cases = (
+    "clean-baseline", "same-version-old-source", "uninstall-failure",
+    "retained-keg", "install-failure", "missing-component", "wrong-component-version",
+)
+for mode in cases:
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-binding-") as directory:
+        root = pathlib.Path(directory)
+        for name in ("evidence", "formulae", "tap/Formula", "backup"):
+            (root / name).mkdir(parents=True)
+        for name in formulae:
+            (root / "formulae" / f"{name}.rb").write_text("candidate formula\n")
+        state = {"tensorplate": {"version": "0.1.2", "source": "baseline"}}
+        if mode != "clean-baseline":
+            state.update({name: {"version": "0.2.1-rc.1", "source": "a" * 64}
+                          for name in formulae if name != "tensorplate"})
+        (root / "installed.json").write_text(json.dumps(state))
+        (root / "formulae.json").write_text(json.dumps(formulae))
+        (root / "fake-brew.py").write_text(fake_brew)
+        pin = {"source_sha256": "b" * 64, "source_url": "https://example.invalid/candidate-B.tar.gz"}
+        (root / "evidence/formula-pin.json").write_text(json.dumps(pin))
+        (root / "probe.sh").write_text(script)
+        env = dict(os.environ, TP_FAKE_BREW_ROOT=directory, TP_FAKE_BREW_MODE=mode)
+        result = subprocess.run(["bash", str(root / "probe.sh")], env=env,
+                                capture_output=True, text=True)
+        artifact = root / "evidence/artifact-digest.txt"
+        if mode in ("clean-baseline", "same-version-old-source"):
+            assert result.returncode == 0, (mode, result.stdout, result.stderr)
+            installed = json.loads((root / "installed.json").read_text())
+            assert set(installed) == set(formulae), (mode, installed)
+            assert all(item["source"] == pin["source_sha256"]
+                       for item in installed.values()), (mode, installed)
+            assert artifact.read_text() == f"{pin['source_sha256']}  {pin['source_url']}\n"
+        else:
+            assert result.returncode != 0, f"{mode}: unexpectedly succeeded"
+            assert not artifact.exists(), f"{mode}: attested a failed candidate install"
+        print(f"macOS artifact binding: {mode}: pass")
+PY
+
 grep -Fq 'run_stage m1-exact-row verify_m1_exact_row' "$harness"
 grep -Fq '"family_row_not_selected": selected_row != family_row' "$harness"
 grep -Fq '"family_row_16_gib_ceiling"' "$harness"
 grep -Fq 'current-run agent log contains no platform admission decision' "$harness"
+# shellcheck disable=SC2016 # Match the literal expression in the harness.
 grep -Fq 'agent_error_log_start="$(stat -f' "$harness"
 grep -Fq 'var/run/tensorplate")" == "700"' "$harness"
 grep -Fq 'var/run/tensorplate/agent.sock")" == "600"' "$harness"

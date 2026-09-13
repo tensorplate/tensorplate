@@ -1,8 +1,15 @@
 # Release evidence bundles
 
 One directory per Production support row, named by row id. Each holds the
-`lifecycle-report.json` that row's support claim rests on, plus the stage
-logs the report cites.
+`lifecycle-report.json` that row's support claim rests on, the stage logs
+the report cites, and the `artifact-digest.txt` the harness wrote naming
+the artifact it installed.
+
+That sidecar is what says *what* the report's `subject.artifact_digest`
+is a digest of, since the report itself has nowhere to carry it. Its
+second column is a released file name or a public archive URL, never a
+path off the machine that ran it — a property of how the harnesses write
+it, not something to clean up afterwards.
 
 `tools/release/check-evidence-bundles.sh` reads these during the release
 workflow's evidence gate, and every build and publish job sits behind that
