@@ -271,7 +271,6 @@ PY
 }
 
 verify_assets() {
-  clear_artifact_digest
   required artifacts-list bash -c 'cd "$1" && find . -maxdepth 1 -type f -print | sort' _ "$ASSETS_DIR"
   required checksums bash -c 'cd "$1" && sha256sum -c SHA256SUMS' _ "$ASSETS_DIR"
   # Identify the artifacts this run is about, now that the set has

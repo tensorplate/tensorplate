@@ -44,7 +44,7 @@ from pathlib import Path
 names = {
     "die", "note", "normalize_version", "parse_args", "require_confirm",
     "prepare_paths", "clear_artifact_digest", "capture", "required",
-    "verify_assets", "cmd_run", "cmd_reset",
+    "verify_assets", "cmd_run", "cmd_reset", "cmd_download",
 }
 source = Path(sys.argv[1]).read_text()
 functions = re.findall(r"^([a-z_]+)\(\) \{\n.*?^\}", source, re.M | re.S)
@@ -135,6 +135,18 @@ for command in cmd_run cmd_reset; do
   check "  and preserves the prior artifact sidecar" "$digest_b" \
     "$(awk '{print $1}' "${evidence}/artifact-digest.txt")"
 done
+
+# The download command re-fetches into the same directory, so it carries
+# the same hazard: a fetch that dies partway must not leave the previous
+# attempt's digest behind for the converter to pick up.
+jetson_attempt 0 RESET-TENSORPLATE cmd_download
+check "a failed download exits non-zero" 1 "$jetson_status"
+check "  and clears the previous artifact sidecar" no \
+  "$([[ -e "${evidence}/artifact-digest.txt" ]] && echo yes || echo no)"
+
+(cd "$assets" && sha256sum install.sh >SHA256SUMS)
+jetson_attempt
+check "a verified run after the failed download succeeds" 0 "$jetson_status"
 
 jetson_attempt 42
 check "an early host-check failure keeps its exit status" 42 "$jetson_status"
