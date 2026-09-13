@@ -40,15 +40,15 @@
   "model_class_rows": [
     {
       "model_class_row": "chunked_policy",
-      "support_level": "Production"
+      "support_level": "Preview"
     },
     {
       "model_class_row": "autoregressive_action_tokens",
-      "support_level": "Production"
+      "support_level": "Preview"
     },
     {
       "model_class_row": "flow_action_chunk",
-      "support_level": "Production"
+      "support_level": "Preview"
     }
   ],
   "gate_semantics": {
@@ -68,14 +68,11 @@
       "gate": "context_only"
     }
   },
-  "support_level": "Production",
+  "support_level": "Preview",
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
     "identity": "GCP g4-standard-48",
     "machine_type": "g4-standard-48"
-  },
-  "evidence": {
-    "location": "docs/validation/evidence/v0.2.1/ubuntu2404-x86-rtxpro6000se-g4s48/"
   }
 }

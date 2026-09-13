@@ -59,6 +59,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   one. Rows with different counts can coexist and match their respective
   homogeneous device sets.
 
+### Changed
+
+- The single-GPU H100 row (`ubuntu2404-x86-h100-80g-a3hg1`) is now a
+  Production row, and the RTX PRO 6000 Blackwell Server Edition row
+  (`ubuntu2404-x86-rtxpro6000se-g4s48`) is now Preview. The Production
+  set for this release is the Jetson Orin Nano, the MacBook Pro M1 Pro,
+  and the single-GPU L4 and H100 cloud rows. Every multi-GPU row stays
+  Preview: supported, and not yet validated. The RTX PRO 6000 row's
+  model-class claims move to Preview with it, and its evidence location
+  is removed, since a Preview row with no validation run has no evidence
+  to point at. The H100 row claims no model classes; it is validated as a
+  platform.
+
 ### Fixed
 
 - Installer hardware validation verifies that the NVIDIA driver query

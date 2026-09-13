@@ -642,9 +642,9 @@ fn malformed_integrated_accelerator_facts_do_not_erase_the_host() {
 fn the_model_classes_come_from_the_registry_not_a_list_here() {
     // The posture each row actually claims, read from its pointers. The
     // shapes differ per row and that is the point: the Jetson carries the
-    // one Production policy class, the G4 carries all three VLA shapes,
-    // and the deploy-smoke rows carry Preview. A hardcoded list would
-    // drift the first time a row changed.
+    // one Production policy class, the G4 carries all three VLA shapes at
+    // Preview, and the deploy-smoke rows carry one class at Preview. A
+    // hardcoded list would drift the first time a row changed.
     for (row_id, fixture_name, accelerator, expected) in [
         (
             "jetson-orin-nano-8gb-jp62",
@@ -657,9 +657,9 @@ fn the_model_classes_come_from_the_registry_not_a_list_here() {
             "ubuntu2404-x86-rtxpro6000se-g4s48",
             Some("ubuntu2404-x86-rtxpro6000se-g4s48"),
             vec![
-                "chunked_policy (Production)",
-                "autoregressive_action_tokens (Production)",
-                "flow_action_chunk (Production)",
+                "chunked_policy (Preview)",
+                "autoregressive_action_tokens (Preview)",
+                "flow_action_chunk (Preview)",
             ],
         ),
         (
@@ -693,22 +693,26 @@ fn the_model_classes_come_from_the_registry_not_a_list_here() {
 
 #[test]
 fn a_row_claiming_no_model_classes_says_so_rather_than_rendering_empty() {
-    // The A100 row is Planned, and the registry refuses to let a Planned
-    // row carry model-class claims. An empty render would read as a
-    // broken row rather than an honest one.
-    let section = section_for(
+    // An empty render would read as a broken row rather than an honest
+    // one, at any support level. The A100 row is Preview; the H100 row is
+    // Production -- a platform validated as a platform while claiming no
+    // model class nobody has run on it, which must not be mistaken for a
+    // row whose model classes failed to load.
+    for row in [
         "ubuntu2404-x86-a100-40g-a2hg1",
-        Some("ubuntu2404-x86-a100-40g-a2hg1"),
-    );
-    let finding = section
-        .iter()
-        .find(|f| f.id == FindingId::ModelClassRows)
-        .expect("a model-class finding");
-    assert!(
-        finding.message.contains("claims no model classes"),
-        "got {}",
-        finding.message
-    );
+        "ubuntu2404-x86-h100-80g-a3hg1",
+    ] {
+        let section = section_for(row, Some(row));
+        let finding = section
+            .iter()
+            .find(|f| f.id == FindingId::ModelClassRows)
+            .expect("a model-class finding");
+        assert!(
+            finding.message.contains("claims no model classes"),
+            "{row}: got {}",
+            finding.message
+        );
+    }
 }
 
 #[test]

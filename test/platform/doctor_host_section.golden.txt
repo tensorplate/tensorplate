@@ -212,7 +212,7 @@
 [ok] info platform_profile — host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-rtxpro6000se-g4s48
     hint: several rows share this host profile; accelerator identity is needed to name one
 [ok] info platform_row — resolves to support row `ubuntu2404-x86-rtxpro6000se-g4s48`
-[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s48` serves chunked_policy (Production), autoregressive_action_tokens (Production), flow_action_chunk (Production)
+[ok] info model_class_rows — row `ubuntu2404-x86-rtxpro6000se-g4s48` serves chunked_policy (Preview), autoregressive_action_tokens (Preview), flow_action_chunk (Preview)
 
 ## ubuntu2204-x86-cpu
 [ok] info host_facts — host arch=x86_64 vendor=intel

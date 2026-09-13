@@ -55,11 +55,14 @@
       "gate": "context_only"
     }
   },
-  "support_level": "Preview",
+  "support_level": "Production",
   "provenance": "spec_authored",
   "validation_environment": {
     "kind": "cloud_instance",
     "identity": "GCP a3-highgpu-1g (disposable), single GPU, non-partitioned",
     "machine_type": "a3-highgpu-1g"
+  },
+  "evidence": {
+    "location": "docs/validation/evidence/v0.2.1/ubuntu2404-x86-h100-80g-a3hg1/"
   }
 }
