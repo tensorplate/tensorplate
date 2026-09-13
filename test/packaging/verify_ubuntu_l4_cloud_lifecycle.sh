@@ -97,11 +97,13 @@ fi
 # --- eligibility, executed.
 stub_bin="${td}/bin"
 mkdir -p "$stub_bin"
+# Unconditionally, not only where the real tool is absent. On a Linux
+# runner the real systemctl and dpkg exist, and a probe that let them
+# through would query the actual host for services it never installed --
+# answering about the runner rather than about the harness.
 for tool in sudo systemctl dpkg; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    printf '#!/bin/sh\nexit 0\n' >"${stub_bin}/${tool}"
-    chmod +x "${stub_bin}/${tool}"
-  fi
+  printf '#!/bin/sh\nexit 0\n' >"${stub_bin}/${tool}"
+  chmod +x "${stub_bin}/${tool}"
 done
 
 cat >"${td}/os-release.noble" <<'EOF'

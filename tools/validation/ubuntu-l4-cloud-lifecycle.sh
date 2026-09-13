@@ -210,8 +210,12 @@ preflight() {
   [[ -f "${ASSETS_DIR}/SHA256SUMS" ]] || die "missing ${ASSETS_DIR}/SHA256SUMS"
 
   if [[ -z "$BUNDLE_DIR" ]]; then
-    BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/../test/models/bundles/v0_1/x86_fixture_smoke"
-    BUNDLE_DIR="$(cd "$BUNDLE_DIR" 2>/dev/null && pwd || true)"
+    local repo_root default_bundle
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    default_bundle="${repo_root}/test/models/bundles/v0_1/x86_fixture_smoke"
+    if [[ -d "$default_bundle" ]]; then
+      BUNDLE_DIR="$default_bundle"
+    fi
   fi
   [[ -n "$BUNDLE_DIR" && -f "${BUNDLE_DIR}/manifest.json" ]] ||
     die "--bundle-dir must contain manifest.json"
