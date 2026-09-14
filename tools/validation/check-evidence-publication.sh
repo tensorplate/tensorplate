@@ -240,8 +240,11 @@ def scan_line(line, literals):
     space: removing it keeps `Sep 14 01:42:03<styling> host` one space
     apart, and a space keeps `request<styling><uuid>` two words.
     """
-    variants = {line, TEXT_ESCAPE.sub(" ", CONTROL.sub("", line)),
-                TEXT_ESCAPE.sub(" ", CONTROL.sub(" ", line))}
+    variants = {line}
+    # Both patterns start with a backslash or ESC; most lines have neither.
+    if "\\" in line or "\x1b" in line:
+        variants.add(TEXT_ESCAPE.sub(" ", CONTROL.sub("", line)))
+        variants.add(TEXT_ESCAPE.sub(" ", CONTROL.sub(" ", line)))
     found = set()
     for variant in variants:
         found.update(scan_variant(variant, literals))
@@ -361,6 +364,30 @@ def scan_json(document, literals):
 JSON_START = re.compile(r"[\[{]")
 
 
+def decode_at(decoder, text, start):
+    """(value, end) for the JSON object or array at text[start], or None.
+
+    Not raw_decode on the whole text: a failed decode counts the lines
+    before the failure, so trying every bracket in a large log that way is
+    quadratic. The attempt starts with the rest of the line and at least
+    doubles, always ending at a line end, until the value decodes or fails
+    before the end of the attempt. A value is never cut mid-token by such
+    an end, because no JSON string or number contains a newline.
+    """
+    stop = start
+    while True:
+        newline = text.find("\n", start + 2 * (stop - start))
+        stop = len(text) if newline < 0 else newline
+        window = text[start:stop]
+        try:
+            value, end = decoder.raw_decode(window)
+        except ValueError as error:
+            if error.pos < len(window) or stop == len(text):
+                return None
+            continue
+        return value, start + end
+
+
 def json_values(text):
     """(first line, last line, value) for every JSON object or array in text.
 
@@ -379,11 +406,11 @@ def json_values(text):
         if match is None:
             return
         start = match.start()
-        try:
-            value, end = decoder.raw_decode(text, start)
-        except ValueError:
+        decoded = decode_at(decoder, text, start)
+        if decoded is None:
             index = start + 1
             continue
+        value, end = decoded
         line += text.count("\n", counted, start)
         first = line
         line += text.count("\n", start, end)
@@ -398,15 +425,19 @@ def scan_text(text, literals):
     A finding inside a JSON value is reported on the line the value starts
     on, unless a line the value spans already reported the same finding.
     """
-    found = set()
+    on_line = {}
     for number, line in enumerate(text.split("\n"), 1):
-        for cls, length in scan_line(line, literals):
-            found.add((number, cls, length))
+        findings = scan_line(line, literals)
+        if findings:
+            on_line[number] = set(findings)
+    found = set((number, cls, length)
+                for number, findings in on_line.items() for cls, length in findings)
     for first, last, value in json_values(text):
-        on_lines = set((cls, length) for number, cls, length in found
-                       if first <= number <= last)
+        spanned = set()
+        for number in range(first, last + 1):
+            spanned.update(on_line.get(number, ()))
         for cls, length in scan_json(value, literals):
-            if (cls, length) not in on_lines:
+            if (cls, length) not in spanned:
                 found.add((first, cls, length))
     return found
 

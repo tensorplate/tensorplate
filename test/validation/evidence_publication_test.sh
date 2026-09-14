@@ -309,6 +309,32 @@ new_case
 write_json "${d}/notes.log" truncated machine
 expect_finding "a record cut short carrying _MACHINE_ID" journal-field "$id32"
 
+# scan_within <seconds> <dir>: the --patterns-only exit status, or
+# "timeout". The scanner runs in its own process group so a timeout stops
+# its python as well as the wrapper.
+scan_within() {
+  python3 - "$scanner" "$2" "$1" <<'PY'
+import os, signal, subprocess, sys
+process = subprocess.Popen([sys.argv[1], "--patterns-only", sys.argv[2]],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           start_new_session=True)
+try:
+    print(process.wait(timeout=int(sys.argv[3])), end="")
+except subprocess.TimeoutExpired:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    print("timeout", end="")
+PY
+}
+
+# Every bracket is a decode attempt, and a failed attempt on the whole text
+# counts every line before it: that took about a minute per megabyte here,
+# against a second or two when attempts are bounded to the lines they need.
+new_case
+python3 -c 'import sys; open(sys.argv[1], "w").write("[INFO] {{{{ request [x] {y\n" * 80000)' \
+  "${d}/brackets.log" || die "could not write brackets.log"
+check "a large log of brackets that are not JSON is scanned within 30 seconds" "0" "$(scan_within 30 "$d")"
+
 # --- Journal host prefixes, in every short format journalctl prints.
 new_case
 add_line "Sep 14 01:42:03 ${host} tensorplate-agent[42]: started"
@@ -391,6 +417,10 @@ expect_finding "a Linux home path" home-path "$account"
 new_case
 add_line "evidence under /Users/${account}/evidence"
 expect_finding "a macOS home path" home-path "$account"
+
+new_case
+printf '{"\\u002fhome\\u002f%s\\u002fassets": "ok"}\n' "$account" >"${d}/paths.json" || die "could not write paths.json"
+expect_finding "a home path in a JSON key written with escaped slashes" home-path "$account"
 
 new_case
 add_line "NVIDIA L4, 23034, 580.173.02, GPU-${bare_uuid}, [N/A]"
