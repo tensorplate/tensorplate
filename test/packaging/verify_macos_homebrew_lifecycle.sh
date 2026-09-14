@@ -1017,6 +1017,15 @@ assert len(blocks) == 1, blocks
 mappings = re.findall(r"(?<!\S)([a-z0-9-]+=[a-z0-9-]+)(?!\S)", blocks[0])
 targets = {mapping.split("=", 1)[1] for mapping in mappings}
 assert targets == set(canonical), (sorted(targets), canonical)
+# Real names are not enough: m1-exact-row=status-logs names a real stage
+# and a canonical one, and claims status-logs for a stage that observes
+# neither. Changing which harness stage backs a canonical stage has to
+# change this list too.
+assert sorted(mappings) == sorted([
+    "clean-install=install", "upgrade=upgrade", "deploy-smoke=deploy-smoke",
+    "status-logs=status-logs", "rollback=rollback", "launchd-restart=restart",
+    "launchd-crash-loop=crash-loop", "offline-runtime=offline",
+]), mappings
 harness_stages = re.findall(r"^run_stage ([a-z0-9-]+) ", source, re.M)
 
 def convert(failing):
