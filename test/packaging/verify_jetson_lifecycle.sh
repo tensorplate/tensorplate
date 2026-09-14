@@ -403,11 +403,14 @@ case "$1" in
         esac
         ;;
       *MainPID*)
-        # A restart must change the pid, so hand back a new one each call.
-        if [ "${TP_FAKE_MODE:-ok}" = restart-pid-unchanged ]; then
-          printf '100\n'
-          exit 0
-        fi
+        # A restart must change the pid, so hand back a new one each call,
+        # except for the unit a mode says kept its process.
+        case "${TP_FAKE_MODE:-ok}:$*" in
+          restart-agent-pid-unchanged:*tensorplate-agent*|restart-observability-pid-unchanged:*tensorplate-observability*)
+            printf '100\n'
+            exit 0
+            ;;
+        esac
         count=$(cat "${TP_FAKE_PID_FILE}" 2>/dev/null || echo 100)
         count=$((count + 1))
         printf '%s\n' "$count" >"${TP_FAKE_PID_FILE}"
@@ -678,6 +681,7 @@ check "  and names the file it looked for" yes "$(said 'expected NVIDIA Jetson L
 # candidate spelling the artifacts were built as.
 check "a candidate version spelling is refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-rc" 0.2.1-rc.2 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and says a bare version is required" yes "$(said 'must be a bare X.Y.Z release version')"
 check "  and so is the tilde spelling" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-tilde" '0.2.1~rc.2' v0.2.1-rc.2 "$assets" "${confirm[@]}")"
 
@@ -870,6 +874,11 @@ print(value)' "$@" 2>/dev/null || echo "absent"
 sudo_line() {
   grep -nF -- "$1" "${appliance}/sudo.log" | head -n1 | cut -d: -f1
 }
+# Whether a stage log carries the failure a case exists to provoke. A
+# stage that fails for some other reason must not stand in for it.
+logged() {
+  grep -Fq -- "$2" "$1" && echo yes || echo no
+}
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence" "")"
@@ -1004,7 +1013,12 @@ check "  and the state directories were never removed" no \
 check "  and the survivor is named" yes \
   "$(grep -Fq 'remain after the purge: tensorplate-common config-files' "${leftover_evidence}/install.log" && echo yes || echo no)"
 
-for mode in doctor-failing wrong-row doctor-agent-unreachable stale-version package-missing; do
+for mode_case in "doctor-failing|doctor reports 1 failing finding" \
+                 "wrong-row|platform_row is warning" \
+                 "doctor-agent-unreachable|agent_reachable is warning" \
+                 "stale-version|tensorplate-agent: expected 'installed ${candidate_version}', dpkg reports 'installed 0.2.1~rc.1-1'" \
+                 "package-missing|tensorplate-serving: expected 'installed ${candidate_version}', dpkg reports 'not installed'"; do
+  mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
   check "  and install is recorded as a failure, not a pass" fail \
@@ -1013,43 +1027,59 @@ for mode in doctor-failing wrong-row doctor-agent-unreachable stale-version pack
     "$(report_field "${evidence}/lifecycle-report.json" outcome)"
   check "  and no digest is attested" absent \
     "$(report_field "${evidence}/lifecycle-report.json" subject artifact_digest)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/install.log" "${mode_case#*|}")"
 done
-check "a stale package version names the package" yes \
-  "$(grep -Fq "tensorplate-agent: expected 'installed ${candidate_version}', dpkg reports 'installed 0.2.1~rc.1-1'" \
-     "${td}/stages-stale-version/install.log" && echo yes || echo no)"
 
 # A privileged step that fails must fail its stage. Without this, an
 # unguarded `sudo ...` inside a stage body is invisible: errexit is
 # suspended there, so the stage runs on and returns 0.
-for injected in "install.sh" "rm -rf /etc/tensorplate" "systemctl enable --now tensorplate-agent"; do
+# Each case also names the step that failed, so a later check that
+# happens to fail for another reason cannot stand in for the missing one.
+for injected_case in "install.sh=install.sh" "rm -rf /etc/tensorplate=clear installed state" \
+                     "systemctl enable --now tensorplate-agent=enable tensorplate-agent"; do
+  injected="${injected_case%%=*}"
+  step_name="${injected_case#*=}"
   evidence="${td}/stages-sudo-fails-${injected//[^a-z]/-}"
   check "a failing '${injected}' is recorded as a failed install" fail \
     "$(run_stages ok "$evidence" "$injected" >/dev/null; \
        stage_status "${evidence}/lifecycle-report.json" install)"
+  check "  and the failed step is the one named" yes \
+    "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/install.log" && echo yes || echo no)"
 done
 
 # --- deploy-smoke.
-for variant in wrong-backend wrong-kind bad-digest; do
+for variant_case in "wrong-backend|must declare backend_hint=tensorrt" \
+                    "wrong-kind|must be a tensorrt_engine" \
+                    "bad-digest|digest does not match its manifest"; do
+  variant="${variant_case%%|*}"
   evidence="${td}/stages-bundle-${variant}"
   check "a ${variant} bundle fails deploy-smoke" fail \
     "$(run_stages ok "$evidence" "" --bundle-dir "${td}/bundle-${variant}" >/dev/null; \
        stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
   check "  and is never deployed" "" "$(cat "${appliance}/deploy.log")"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/deploy-smoke.log" "${variant_case#*|}")"
 done
-for mode in infer-garbled status-wrong-backend health-wrong-deployment deploy-not-active; do
+for mode_case in "infer-garbled|value mismatch at 1" \
+                 "status-wrong-backend|checks failed: active_backend" \
+                 "health-wrong-deployment|checks failed: serving_health_deployment" \
+                 "deploy-not-active|checks failed: deployment_phase"; do
+  mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
   check "  install passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" install)"
   check "  and deploy-smoke is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/deploy-smoke.log" "${mode_case#*|}")"
 done
-check "a garbled identity is caught by the response verifier" yes \
-  "$(grep -Fq 'value mismatch at 1' "${td}/stages-infer-garbled/deploy-smoke.log" && echo yes || echo no)"
-for injected in "cp -R" "chmod -R a+rX"; do
+for injected_case in "cp -R=copy the bundle" "chmod -R a+rX=make the bundle readable"; do
+  injected="${injected_case%%=*}"
+  step_name="${injected_case#*=}"
   evidence="${td}/stages-sudo-fails-${injected//[^a-z]/-}"
   check "a failing '${injected}' while staging is recorded as a failed deploy-smoke" fail \
     "$(run_stages ok "$evidence" "$injected" >/dev/null; \
        stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
+  check "  and the failed step is the one named" yes \
+    "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/deploy-smoke.log" && echo yes || echo no)"
 done
 
 # --- status-logs.
@@ -1067,7 +1097,7 @@ done
 
 # --- restart.
 for mode in restart-no-worker restart-unhealthy-health restart-wrong-health restart-infer-garbled \
-            restart-pid-unchanged; do
+            restart-agent-pid-unchanged restart-observability-pid-unchanged; do
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
   check "  status-logs passed before the restart regression" pass \
@@ -1075,6 +1105,10 @@ for mode in restart-no-worker restart-unhealthy-health restart-wrong-health rest
   check "  the restart failure is recorded against restart" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" restart)"
 done
+check "an agent that kept its process is named" yes \
+  "$(logged "${td}/stages-restart-agent-pid-unchanged/restart.log" 'agent MainPID did not change')"
+check "an observability service that kept its process is named" yes \
+  "$(logged "${td}/stages-restart-observability-pid-unchanged/restart.log" 'observability MainPID did not change')"
 evidence="${td}/stages-restart-fails"
 check "a restart that fails is recorded as a failed restart" fail \
   "$(run_stages ok "$evidence" "systemctl restart" >/dev/null; \
@@ -1100,14 +1134,19 @@ r=json.load(open(sys.argv[1]));print(r["active_state"],r["restarts"],r["result"]
 check "  and the recovered worker answered" tensorrt_identity \
   "$(report_field "${td}/stages-ok-again/crash-loop-recovery.json" inference_round_trip)"
 check "  and the original config bytes were restored" yes "$(config_restored)"
-for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-error \
-            crash-loop-never-fails crash-loop-stopped; do
+for mode_case in "crash-loop-keeps-restarting|the agent never settled" \
+                 "crash-loop-not-retried|checks failed: restarted_before_giving_up" \
+                 "crash-loop-other-error|checks failed: agent_rejected_the_config" \
+                 "crash-loop-never-fails|the agent never settled" \
+                 "crash-loop-stopped|checks failed: unit_failed"; do
+  mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
   check "  restart passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" restart)"
   check "  and crash-loop is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  and the agent config was restored anyway" yes "$(config_restored)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/crash-loop.log" "${mode_case#*|}")"
 done
 
 evidence="${td}/stages-corrupt-fails"
