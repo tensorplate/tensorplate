@@ -50,7 +50,9 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
+        dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
+        machine_type_record: text("machine_type_record"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -866,6 +868,53 @@ fn undetectable_host_identity_never_fails_doctor() {
             "{id:?} must be emitted exactly once"
         );
     }
+}
+
+#[test]
+fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
+    // An offline instance with no recorded machine type. Doctor must not
+    // guess a shape, must not fail, and must not send the operator to
+    // re-run as root -- the fix is one agent start with metadata reachable.
+    let mut offline = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    offline.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    offline.gce_machine_type = None;
+    let err = identify_platform(&offline).expect_err("no machine type can be established");
+    assert!(
+        matches!(err, PlatformProbeError::IdentityUnestablished { .. }),
+        "{err:?}"
+    );
+
+    let registry = registry();
+    let section = render_host_section(HostSectionDetection::HostProbeFailed(&err), Ok(&registry));
+    assert!(
+        section.iter().all(|f| f.status != FindingStatus::Fail),
+        "{}",
+        render(&section)
+    );
+    let facts = section
+        .iter()
+        .find(|f| f.id == FindingId::HostFacts)
+        .expect("host_facts");
+    assert_eq!(facts.status, FindingStatus::Warning);
+    assert!(
+        facts.message.contains("no machine type has been recorded"),
+        "{}",
+        facts.message
+    );
+    let hint = facts.hint.as_deref().expect("a hint");
+    assert!(
+        hint.contains("start tensorplate-agent once while the metadata service is reachable"),
+        "the hint names the fix: {hint}"
+    );
+    assert!(
+        !hint.contains("re-run as a user"),
+        "nothing here is a permission problem: {hint}"
+    );
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("platform_row");
+    assert_eq!(row.status, FindingStatus::Skipped);
 }
 
 #[test]

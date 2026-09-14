@@ -210,6 +210,12 @@ fn agent_socket_hint() -> &'static str {
     "is `tensorplate-agent` running? check its state in this platform's service supervisor"
 }
 
+/// What to do when a Compute Engine instance could not establish its machine
+/// type without the metadata service. Neither re-running as another user nor
+/// attaching output helps: the fix is one agent start with the service
+/// reachable, which records the machine type again.
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type; if a recorded fact changed, this instance's shape changed since it was recorded, and that start records the new one";
+
 /// Detection state consumed by the pure host-section renderer.
 ///
 /// Host detection and accelerator detection are deliberately represented
@@ -260,6 +266,7 @@ pub fn render_host_section(
                 PlatformProbeError::Unrecognized { .. } => {
                     "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"
                 }
+                PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT,
             };
             return vec![
                 Finding::warn(
@@ -612,6 +619,7 @@ fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
                 PlatformProbeError::Unrecognized { .. } =>
                     "the accelerator source answered but this release could not interpret it; attach `tensorplate doctor --output json` rather than reinstalling the driver"
                         .into(),
+                PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT.into(),
             }),
         ),
         PlatformResolution::HostDetectionFailed => Finding::skipped(

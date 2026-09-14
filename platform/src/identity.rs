@@ -97,6 +97,12 @@ pub struct HostIdentity {
     /// machine shape matches only a host reporting the same value, so an
     /// accelerator in an unvalidated chassis does not inherit a claim
     /// recorded on one specific shape.
+    ///
+    /// On Compute Engine this is the live metadata answer or, when the
+    /// metadata service cannot be reached, a metadata answer recorded on
+    /// this host whose CPU count, `MemTotal` and NVIDIA display devices
+    /// still match exactly. An instance that has neither fails detection
+    /// rather than reporting `None`.
     pub machine_type: Option<String>,
 }
 

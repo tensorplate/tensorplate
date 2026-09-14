@@ -20,9 +20,16 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::detect::{identify, identify_platform, HostReport, HostSources, PlatformReport};
+use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+
+use crate::detect::{identify, is_compute_engine, HostReport, HostSources};
 use crate::error::PlatformProbeError;
 use crate::identity::{HostIdentity, HostProbe};
+use crate::machine_type_record::{MachineTypeRecord, RecordWrite};
+
+/// Firmware product name. Readable without privileges, and how a Compute
+/// Engine instance is recognized without asking the network anything.
+const DMI_PRODUCT_NAME_PATH: &str = "/sys/class/dmi/id/product_name";
 
 /// The GCE metadata service, addressed by its link-local IP rather than by
 /// name so a broken resolver cannot turn detection into a DNS timeout.
@@ -56,7 +63,10 @@ impl SystemHostProbe {
     ///
     /// This stages the file-backed sources only. Commands and the metadata
     /// service describe the machine running the test, not the tree, so
-    /// under a root they are not consulted at all — including `uname`.
+    /// under a root they are not consulted at all — including `uname` — and
+    /// neither is the machine-type record, which is only ever read when the
+    /// metadata service was asked and could not be reached. Writing the
+    /// record does honour the root.
     /// [`Self::detect`] therefore fails on a staged tree rather than
     /// returning an identity that is part fixture and part host; fixture
     /// -driven detection goes through [`crate::detect::identify`] with
@@ -106,6 +116,7 @@ impl SystemHostProbe {
         let cpuinfo = self.read("/proc/cpuinfo")?;
         let nv_tegra_release = self.read("/etc/nv_tegra_release")?;
         let device_tree_model = self.read("/proc/device-tree/model")?;
+        let dmi_product_name = self.read(DMI_PRODUCT_NAME_PATH)?;
 
         // Staged trees exercise the file-backed sources only; the command
         // ones would describe the machine running the test, not the tree.
@@ -115,6 +126,13 @@ impl SystemHostProbe {
         // already identified itself as a Jetson, so it is only asked for
         // there — and a Jetson that cannot answer it is broken.
         let jetson = commands && cfg!(target_os = "linux") && nv_tegra_release.is_some();
+        let (gce_machine_type, machine_type_record) = if commands {
+            self.machine_type_sources(dmi_product_name.as_deref(), || {
+                query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT)
+            })?
+        } else {
+            (None, None)
+        };
 
         Ok(HostSources {
             // Deliberately absent under a staged root: borrowing the test
@@ -168,11 +186,9 @@ impl SystemHostProbe {
             } else {
                 None
             },
-            gce_machine_type: if commands {
-                self.gce_machine_type()?
-            } else {
-                None
-            },
+            dmi_product_name,
+            gce_machine_type,
+            machine_type_record,
             proc_meminfo: self.read("/proc/meminfo")?,
             pci_devices: self.pci_devices()?,
         })
@@ -185,15 +201,6 @@ impl SystemHostProbe {
     /// As [`crate::detect::identify`].
     pub fn detect(&self) -> Result<HostReport, PlatformProbeError> {
         identify(&self.sources()?)
-    }
-
-    /// Detect the host and accelerator from one source-gathering pass.
-    ///
-    /// # Errors
-    ///
-    /// As [`crate::detect::identify_platform`].
-    pub fn detect_platform(&self) -> Result<PlatformReport, PlatformProbeError> {
-        identify_platform(&self.sources()?)
     }
 
     /// The PCI bus as one line per function: `<address> <vendor> <device>
@@ -265,37 +272,101 @@ impl SystemHostProbe {
         Ok(Some(lines.join("\n")))
     }
 
-    /// The machine type, on machines that have one.
+    /// The machine-type sources: `(live answer, recorded machine type)`.
     ///
-    /// The metadata service is only contacted when the host already looks
-    /// like a Compute Engine instance. A physical workstation must come
-    /// back with no machine type — its row declares none — and must never
-    /// pay a network timeout to find that out.
-    fn gce_machine_type(&self) -> Result<Option<String>, PlatformProbeError> {
-        if !self.looks_like_gce()? {
-            return Ok(None);
+    /// `query` asks the metadata service, and is only called when the
+    /// firmware product name says this is a Compute Engine instance. A
+    /// physical workstation must come back with no machine type — its row
+    /// declares none — and must never pay a network timeout to find that
+    /// out.
+    ///
+    /// Only a service that could not be reached — nothing answered, or no
+    /// complete answer arrived within the budget — lets the record be read.
+    /// A service that answered, but not with a machine type, is a broken
+    /// source and stays one: falling back there would let a record outvote
+    /// the authority that just refused. A record that is absent is `None`
+    /// here; [`crate::detect::identify`] turns that into an error, because
+    /// an instance with no machine type is admitted as an unvalidated shape.
+    fn machine_type_sources(
+        &self,
+        dmi_product_name: Option<&str>,
+        query: impl FnOnce() -> Result<String, MetadataFailure>,
+    ) -> Result<(Option<String>, Option<String>), PlatformProbeError> {
+        if !dmi_product_name.is_some_and(is_compute_engine) {
+            return Ok((None, None));
         }
-        // A machine that says it is an instance but will not answer is a
-        // broken source, not a machine without a shape: reporting `None`
-        // would strip it of the very field its row is scoped to and quietly
-        // make that row unmatchable.
-        query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT)
-            .map(Some)
-            .map_err(|failure| PlatformProbeError::Unreadable {
+        match query() {
+            Ok(body) => Ok((Some(body), None)),
+            Err(MetadataFailure::Timeout) => Ok((None, self.read(MACHINE_TYPE_RECORD_PATH)?)),
+            Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
                     "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms)",
                     METADATA_TIMEOUT.as_millis()
                 ),
-            })
+            }),
+        }
     }
 
-    fn looks_like_gce(&self) -> Result<bool, PlatformProbeError> {
-        // Set by the firmware, so it is readable without privileges and
-        // without asking the network anything.
-        Ok(self
-            .read("/sys/class/dmi/id/product_name")?
-            .is_some_and(|name| name.trim() == "Google Compute Engine"))
+    /// Record the machine type a live metadata answer in `sources` names,
+    /// bound to the local facts it was answered on, for detection to use
+    /// when the metadata service cannot be reached.
+    ///
+    /// Writes nothing, and reports [`RecordWrite::NotApplicable`], when
+    /// `sources` carry no live answer — including sources whose machine type
+    /// was itself resolved from a record. Writes nothing, and reports
+    /// [`RecordWrite::Unchanged`], when the file already holds exactly these
+    /// bytes. Otherwise replaces the file atomically, group-readable and not
+    /// world-readable.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformProbeError::Unreadable`] naming the record when it cannot be
+    /// written. The state directory is never created here: it belongs to the
+    /// installer, and a missing one is a broken install.
+    pub fn write_machine_type_record(
+        &self,
+        sources: &HostSources,
+    ) -> Result<RecordWrite, PlatformProbeError> {
+        let Some(record) = MachineTypeRecord::for_live_sources(sources) else {
+            return Ok(RecordWrite::NotApplicable);
+        };
+        let target = self.path(MACHINE_TYPE_RECORD_PATH);
+        let failed = |detail: String| PlatformProbeError::Unreadable {
+            source_name: target.display().to_string(),
+            detail,
+        };
+        let body = record
+            .to_json()
+            .map_err(|err| failed(format!("cannot serialize the record: {err}")))?;
+        if std::fs::read(&target).ok().as_deref() == Some(body.as_bytes()) {
+            return Ok(RecordWrite::Unchanged);
+        }
+        let temporary = target.with_extension("json.tmp");
+        let write = || -> std::io::Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
+            let mut file = options.open(&temporary)?;
+            // `mode` applies only when the file is created; a temporary left
+            // behind by an interrupted write keeps whatever it had.
+            #[cfg(unix)]
+            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &target)?;
+            // Best effort, as the agent's state store does: the rename
+            // survives power loss where the platform supports it.
+            if let Some(parent) = target.parent() {
+                if let Ok(directory) = std::fs::File::open(parent) {
+                    let _ = directory.sync_all();
+                }
+            }
+            Ok(())
+        };
+        write().map_err(|err| failed(format!("cannot write the machine-type record: {err}")))?;
+        Ok(RecordWrite::Written)
     }
 }
 
@@ -541,23 +612,274 @@ fn response_is_complete(buffer: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    /// Sources for a live Compute Engine answer on a small synthetic shape.
+    fn live_gce_sources(machine_type: &str) -> HostSources {
+        HostSources {
+            cpuinfo: Some(
+                "processor\t: 0\nvendor_id\t: GenuineIntel\nprocessor\t: 1\n".to_string(),
+            ),
+            proc_meminfo: Some("MemTotal:        2048 kB\n".to_string()),
+            pci_devices: Some("0000:00:03.0 0x10de 0x27b8 0x030200".to_string()),
+            dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            gce_machine_type: Some(format!("projects/REDACTED/machineTypes/{machine_type}")),
+            ..HostSources::default()
+        }
+    }
+
+    fn staged_record(root: &tempfile::TempDir) -> std::path::PathBuf {
+        root.path()
+            .join(MACHINE_TYPE_RECORD_PATH.trim_start_matches('/'))
+    }
+
+    /// A staged root with the state directory the installer creates.
+    fn staged_state_root() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(
+            staged_record(&root)
+                .parent()
+                .expect("the record has a parent"),
+        )
+        .expect("stage the state directory");
+        root
+    }
+
+    #[test]
+    fn the_firmware_product_name_is_a_source_and_only_the_exact_gce_name_counts() {
+        let root = staged_state_root();
+        std::fs::create_dir_all(root.path().join("sys/class/dmi/id")).expect("stage");
+        std::fs::write(
+            root.path().join("sys/class/dmi/id/product_name"),
+            "Google Compute Engine\n",
+        )
+        .expect("write product name");
+        std::fs::write(staged_record(&root), "{}").expect("stage a record");
+
+        let sources = SystemHostProbe::with_root(root.path())
+            .sources()
+            .expect("staged sources read");
+        assert_eq!(
+            sources.dmi_product_name.as_deref(),
+            Some("Google Compute Engine\n"),
+            "the product name is carried as a source, so the gate is fixture-driven"
+        );
+        assert_eq!(
+            (sources.gce_machine_type, sources.machine_type_record),
+            (None, None),
+            "a staged tree never asks the metadata service, so it never reads the record"
+        );
+
+        assert!(is_compute_engine("Google Compute Engine\n"));
+        for other in [
+            "Precision 7960 Tower\n",
+            "Google Compute Engine Beta\n",
+            "google compute engine\n",
+            "",
+        ] {
+            assert!(!is_compute_engine(other), "`{other}` is not an instance");
+        }
+    }
+
+    const GCE: Option<&str> = Some("Google Compute Engine\n");
+
     #[test]
     fn a_machine_that_is_not_gce_is_never_asked_for_a_machine_type() {
         // The row for the physical workstation declares no machine type, so
-        // detection must produce none — without a network round trip.
-        let staging = std::env::temp_dir().join(format!("tp-probe-{}", std::process::id()));
-        std::fs::create_dir_all(staging.join("sys/class/dmi/id")).expect("stage");
-        std::fs::write(
-            staging.join("sys/class/dmi/id/product_name"),
-            "Precision 7960 Tower\n",
-        )
-        .expect("write product name");
+        // detection must produce none -- without a network round trip, and
+        // without reading a record (staged here as a directory, so reading
+        // it would be an error).
+        let root = staged_state_root();
+        std::fs::create_dir_all(staged_record(&root)).expect("stage a directory");
+        let probe = SystemHostProbe::with_root(root.path());
+        for dmi in [None, Some("Precision 7960 Tower\n")] {
+            assert_eq!(
+                probe
+                    .machine_type_sources(dmi, || panic!("{dmi:?}: the metadata service was asked"))
+                    .expect("no query attempted"),
+                (None, None),
+                "{dmi:?}"
+            );
+        }
+    }
 
-        let probe = SystemHostProbe::with_root(&staging);
-        assert!(!probe.looks_like_gce().expect("dmi readable"));
-        assert_eq!(probe.gce_machine_type().expect("no query attempted"), None);
+    #[test]
+    fn a_live_answer_is_used_and_the_record_is_never_read() {
+        // The record path is a directory, so reading it would be an error:
+        // the only way this passes is by not reading it at all.
+        let root = staged_state_root();
+        std::fs::create_dir_all(staged_record(&root)).expect("stage a directory");
+        let answer = "projects/REDACTED/machineTypes/g2-standard-8".to_string();
+        assert_eq!(
+            SystemHostProbe::with_root(root.path())
+                .machine_type_sources(GCE, || Ok(answer.clone()))
+                .expect("a live answer needs no record"),
+            (Some(answer), None)
+        );
+    }
 
-        std::fs::remove_dir_all(&staging).ok();
+    #[test]
+    fn an_unreachable_service_reads_the_record() {
+        let root = staged_state_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        assert_eq!(
+            probe
+                .machine_type_sources(GCE, || Err(MetadataFailure::Timeout))
+                .expect("an absent record is not an error here"),
+            (None, None),
+            "no record is carried as absence; identify refuses it"
+        );
+
+        std::fs::write(staged_record(&root), "recorded body").expect("stage a record");
+        assert_eq!(
+            probe
+                .machine_type_sources(GCE, || Err(MetadataFailure::Timeout))
+                .expect("a readable record"),
+            (None, Some("recorded body".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_service_that_answered_badly_is_never_outvoted_by_the_record() {
+        let root = staged_state_root();
+        let record = MachineTypeRecord::for_live_sources(&live_gce_sources("g2-standard-8"))
+            .expect("a live answer records")
+            .to_json()
+            .expect("serializes");
+        std::fs::write(staged_record(&root), record).expect("stage a valid record");
+
+        let err = SystemHostProbe::with_root(root.path())
+            .machine_type_sources(GCE, || {
+                Err(MetadataFailure::Answered(
+                    "metadata service answered `HTTP/1.0 403`".to_string(),
+                ))
+            })
+            .expect_err("an answer that is not a machine type is a broken source");
+        match err {
+            PlatformProbeError::Unreadable { detail, .. } => {
+                assert!(
+                    detail.contains("403"),
+                    "names what the service said: {detail}"
+                );
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_answer_is_recorded_group_readable_and_detection_accepts_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = staged_state_root();
+        let path = staged_record(&root);
+        // A world-readable temporary left behind by an interrupted write.
+        let leftover = path.with_extension("json.tmp");
+        std::fs::write(&leftover, "partial").expect("stage a leftover temporary");
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644))
+            .expect("make it world-readable");
+
+        let live = live_gce_sources("g2-standard-8");
+        assert_eq!(
+            SystemHostProbe::with_root(root.path())
+                .write_machine_type_record(&live)
+                .expect("writes"),
+            RecordWrite::Written
+        );
+
+        let mode = std::fs::metadata(&path)
+            .expect("written")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o640,
+            "group-readable, never world-readable: {mode:o}"
+        );
+        assert!(!leftover.exists(), "the temporary is renamed into place");
+
+        let mut offline = live;
+        offline.gce_machine_type = None;
+        offline.machine_type_record = Some(std::fs::read_to_string(&path).expect("readable"));
+        assert_eq!(
+            crate::machine_type_record::establish_machine_type(&offline).expect("accepted"),
+            Some((
+                "g2-standard-8".to_string(),
+                crate::MachineTypeSource::RecordedFromMetadata
+            ))
+        );
+    }
+
+    #[test]
+    fn only_a_live_answer_is_ever_recorded() {
+        let root = staged_state_root();
+        let mut resolved_from_a_record = live_gce_sources("g2-standard-8");
+        resolved_from_a_record.gce_machine_type = None;
+        resolved_from_a_record.machine_type_record = Some("anything".to_string());
+        assert_eq!(
+            SystemHostProbe::with_root(root.path())
+                .write_machine_type_record(&resolved_from_a_record)
+                .expect("nothing to do is not an error"),
+            RecordWrite::NotApplicable
+        );
+        assert!(!staged_record(&root).exists(), "nothing is written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_identical_record_is_not_rewritten_and_a_changed_one_is() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = staged_state_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        let path = staged_record(&root);
+        probe
+            .write_machine_type_record(&live_gce_sources("g2-standard-8"))
+            .expect("first write");
+        let (inode, bytes) = (
+            std::fs::metadata(&path).expect("written").ino(),
+            std::fs::read(&path).expect("readable"),
+        );
+
+        assert_eq!(
+            probe
+                .write_machine_type_record(&live_gce_sources("g2-standard-8"))
+                .expect("second write"),
+            RecordWrite::Unchanged
+        );
+        assert_eq!(
+            std::fs::metadata(&path).expect("still there").ino(),
+            inode,
+            "an unchanged record is not replaced"
+        );
+        assert_eq!(std::fs::read(&path).expect("readable"), bytes);
+
+        assert_eq!(
+            probe
+                .write_machine_type_record(&live_gce_sources("g2-standard-24"))
+                .expect("changed write"),
+            RecordWrite::Written
+        );
+        assert!(std::fs::read_to_string(&path)
+            .expect("readable")
+            .contains("g2-standard-24"));
+    }
+
+    #[test]
+    fn the_writer_never_creates_the_state_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let err = SystemHostProbe::with_root(root.path())
+            .write_machine_type_record(&live_gce_sources("g2-standard-8"))
+            .expect_err("a missing state directory is a broken install");
+        assert!(
+            err.to_string().contains("machine-type.json"),
+            "names the record: {err}"
+        );
+        assert!(
+            !staged_record(&root)
+                .parent()
+                .expect("the record has a parent")
+                .exists(),
+            "the state directory belongs to the installer"
+        );
     }
 
     #[test]
@@ -625,23 +947,6 @@ mod tests {
             .expect("bus present");
         assert!(listed.contains("0000:00:04.0"));
         assert!(!listed.contains("0000:00:05.0"));
-
-        std::fs::remove_dir_all(&staging).ok();
-    }
-
-    #[test]
-    fn a_gce_host_is_recognized_from_firmware_alone() {
-        let staging = std::env::temp_dir().join(format!("tp-probe-gce-{}", std::process::id()));
-        std::fs::create_dir_all(staging.join("sys/class/dmi/id")).expect("stage");
-        std::fs::write(
-            staging.join("sys/class/dmi/id/product_name"),
-            "Google Compute Engine\n",
-        )
-        .expect("write product name");
-
-        assert!(SystemHostProbe::with_root(&staging)
-            .looks_like_gce()
-            .expect("dmi readable"));
 
         std::fs::remove_dir_all(&staging).ok();
     }
@@ -774,7 +1079,8 @@ mod tests {
                 assert!(detail.contains("exited 3"), "names the exit code: {detail}");
                 assert!(detail.contains("boom"), "carries stderr: {detail}");
             }
-            other @ PlatformProbeError::Unrecognized { .. } => {
+            other @ (PlatformProbeError::Unrecognized { .. }
+            | PlatformProbeError::IdentityUnestablished { .. }) => {
                 panic!("expected Unreadable, got {other:?}")
             }
         }
@@ -823,7 +1129,8 @@ mod tests {
                     assert_eq!(source_name, "tp-definitely-not-a-real-binary");
                     assert!(detail.contains("PATH"), "says why: {detail}");
                 }
-                other @ PlatformProbeError::Unrecognized { .. } => {
+                other @ (PlatformProbeError::Unrecognized { .. }
+                | PlatformProbeError::IdentityUnestablished { .. }) => {
                     panic!("expected Unreadable, got {other:?}")
                 }
             }

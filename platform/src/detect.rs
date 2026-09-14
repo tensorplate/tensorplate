@@ -36,6 +36,7 @@ use crate::error::PlatformProbeError;
 use crate::identity::{
     AcceleratorIdentity, DetectedArchitecture, DetectedPlatform, DetectedVendor, HostIdentity,
 };
+use crate::machine_type_record::{establish_machine_type, MachineTypeSource};
 use crate::row::{CpuArchitecture, CpuVendor};
 
 /// The recorded content of every source host identity is derived from.
@@ -79,10 +80,22 @@ pub struct HostSources {
     /// `sysctl -n hw.memsize`, in bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hw_memsize: Option<String>,
+    /// `/sys/class/dmi/id/product_name`. Set by the firmware and readable
+    /// without privileges; `Google Compute Engine` on a GCE instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dmi_product_name: Option<String>,
     /// Body of the GCE metadata machine-type response, e.g.
     /// `projects/1234/machineTypes/g2-standard-8`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gce_machine_type: Option<String>,
+    /// The machine-type record `tensorplate-agent` wrote from an earlier live
+    /// metadata answer (see [`crate::machine_type_record`]).
+    ///
+    /// Read only on a Compute Engine instance whose metadata service could
+    /// not be reached, so it is `None` whenever [`Self::gce_machine_type`]
+    /// is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_type_record: Option<String>,
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
     /// Jetson's module capacity is told from its sibling's.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +149,8 @@ pub struct ExactHostFacts {
     /// where the bus could not be enumerated, which is why the raw source
     /// is kept in [`HostSources::pci_devices`] rather than only this.
     pub nvidia_pci_functions: Vec<String>,
+    /// Where [`HostIdentity::machine_type`] came from, whenever there is one.
+    pub machine_type_source: Option<MachineTypeSource>,
 }
 
 /// A detected host: the row-comparable identity plus the exact facts that
@@ -405,6 +420,29 @@ pub fn machine_type_from_metadata(body: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Whether a DMI product name is the one Compute Engine firmware reports.
+///
+/// Exact after trimming the newline: a product name that merely mentions
+/// Google is not an instance, and must not pay a metadata round trip or read
+/// a machine-type record.
+#[must_use]
+pub fn is_compute_engine(dmi_product_name: &str) -> bool {
+    dmi_product_name.trim() == "Google Compute Engine"
+}
+
+/// Logical CPUs in `/proc/cpuinfo`: one `processor` entry each, on x86 and
+/// arm64 alike.
+#[must_use]
+pub fn logical_cpu_count(cpuinfo: &str) -> usize {
+    cpuinfo
+        .lines()
+        .filter(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.trim() == "processor")
+        })
+        .count()
+}
+
 /// Strip the NUL terminator and squeeze whitespace in a device-tree
 /// string.
 #[must_use]
@@ -481,10 +519,12 @@ pub fn identify(sources: &HostSources) -> Result<HostReport, PlatformProbeError>
         .map(nvidia_pci_functions)
         .unwrap_or_default();
 
-    let machine_type = sources
-        .gce_machine_type
-        .as_deref()
-        .and_then(machine_type_from_metadata);
+    // A Compute Engine instance that cannot establish its machine type is
+    // an error here, never `None`: see `establish_machine_type`.
+    let machine_type = establish_machine_type(sources)?.map(|(machine_type, source)| {
+        exact.machine_type_source = Some(source);
+        machine_type
+    });
 
     Ok(HostReport {
         identity: HostIdentity {
@@ -897,23 +937,41 @@ const NVIDIA_PCI_VENDOR: &str = "0x10de";
 
 /// PCI addresses of NVIDIA display or 3D controllers in an enumeration.
 ///
-/// Reads only the vendor and class columns. The class is checked because a
+/// The addresses of [`nvidia_display_devices`].
+#[must_use]
+pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
+    nvidia_display_devices(body)
+        .into_iter()
+        .map(|(address, _id)| address)
+        .collect()
+}
+
+/// NVIDIA display or 3D controllers in an enumeration, as
+/// `(address, "<vendor>:<device>")` with the ids lowercased.
+///
+/// The ids never derive a machine type or a SKU. They are one of the facts a
+/// recorded machine type is checked against, where a second card or a
+/// different card has to read as a different machine.
+///
+/// Reads the vendor, device and class columns. The class is checked because a
 /// vendor match alone would also count an audio function — a discrete card
 /// commonly presents an HDMI audio device on the same board, and counting
 /// it would report two accelerators where the machine has one.
 ///
 /// A line this cannot parse is skipped rather than failing the whole
 /// enumeration: this fact is evidence, and one malformed line should not
-/// discard the devices either side of it. Nothing matches on the result,
-/// so a skipped line cannot admit a machine it should not.
+/// discard the devices either side of it. No row matches on the result; a
+/// recorded machine type is compared against it, and the record was built
+/// by this same function from the same probe, so a line skipped here was
+/// skipped when the record was written too.
 #[must_use]
-pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
+pub fn nvidia_display_devices(body: &str) -> Vec<(String, String)> {
     body.lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let address = fields.next()?;
             let vendor = fields.next()?;
-            let _device = fields.next()?;
+            let device = fields.next()?;
             let class = fields.next()?;
             if !vendor.eq_ignore_ascii_case(NVIDIA_PCI_VENDOR) {
                 return None;
@@ -928,7 +986,16 @@ pub fn nvidia_pci_functions(body: &str) -> Vec<String> {
             // separates VGA (0x00) from 3D (0x02). Both are the device an
             // accelerator presents, and neither is the audio function
             // (base class 0x04) on the same board.
-            ((value >> 16) & 0xff == 0x03).then(|| address.to_string())
+            ((value >> 16) & 0xff == 0x03).then(|| {
+                (
+                    address.to_string(),
+                    format!(
+                        "{}:{}",
+                        vendor.to_ascii_lowercase(),
+                        device.to_ascii_lowercase()
+                    ),
+                )
+            })
         })
         .collect()
 }

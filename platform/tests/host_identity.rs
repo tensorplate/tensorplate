@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tensorplate_platform::{
     identify, identify_accelerator, identify_jetson_accelerator, nvidia_pci_functions,
-    AcceleratorSources, CpuArchitecture, DetectedPlatform, HostSources, PlatformProbeError,
-    PlatformReason, PlatformRegistry, RowMatch,
+    AcceleratorSources, CpuArchitecture, DetectedPlatform, HostSources, MachineTypeRecord,
+    MachineTypeSource, PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -59,7 +59,9 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
+        dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
+        machine_type_record: text("machine_type_record"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -889,9 +891,15 @@ fn a_card_with_no_working_driver_is_still_visible_on_the_bus() {
 
 #[test]
 fn the_bus_reading_never_reaches_matching() {
-    // This PR records the fact and gates nothing on it. If a later change
-    // wires it into `HostIdentity`, this fails and whoever did it has to
-    // say so deliberately.
+    // The bus is recorded and never matched on. If a later change wires it
+    // into `HostIdentity`, this fails and whoever did it has to say so
+    // deliberately.
+    //
+    // Said deliberately once already: the NVIDIA display device ids are one
+    // of the facts a RECORDED GCE machine type is checked against when the
+    // metadata service cannot be reached. They validate that record and
+    // never derive a machine type -- and this fixture carries a live
+    // metadata answer, so the record path is not taken here at all.
     let (_, fixture) = fixtures()
         .into_iter()
         .find(|(_, f)| f["row_id"].as_str() == Some("ubuntu2404-x86-l4-g2s8"))
@@ -979,4 +987,359 @@ fn only_real_recordings_claim_to_be_recorded() {
          RECORDED_HOST_FIXTURES; a derived fixture is `spec_authored` and \
          must say what it was derived from"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A GCE machine type without the metadata service.
+//
+// Every case below starts from the recorded g2-standard-8 L4 fixture. No H100
+// host fixture has been recorded, so the a3-highgpu-1g row is not exercised
+// here with recorded facts.
+// ---------------------------------------------------------------------------
+
+const L4_ROW: &str = "ubuntu2404-x86-l4-g2s8";
+
+/// The record `tensorplate-agent` writes for the recorded L4 fixture, spelled
+/// out rather than built by the code under test: 8 `processor` entries,
+/// `MemTotal: 32860372 kB`, and one L4 display function.
+const L4_RECORD: &str = r#"{
+  "schema_version": 1,
+  "machine_type": "g2-standard-8",
+  "logical_cpus": 8,
+  "mem_total_bytes": 33649020928,
+  "nvidia_display_devices": [
+    "0x10de:0x27b8"
+  ]
+}
+"#;
+
+fn l4_live_sources() -> HostSources {
+    let (_, fixture) = fixtures()
+        .into_iter()
+        .find(|(name, _)| name == L4_ROW)
+        .expect("the recorded L4 fixture is committed");
+    sources_of(&fixture)
+}
+
+/// The L4 fixture as an offline probe gathers it: the firmware still says
+/// Compute Engine, the metadata service gave no answer, and the record is
+/// whatever is on disk.
+fn l4_offline_sources(record: Option<&str>) -> HostSources {
+    HostSources {
+        dmi_product_name: Some("Google Compute Engine\n".to_string()),
+        gce_machine_type: None,
+        machine_type_record: record.map(str::to_string),
+        ..l4_live_sources()
+    }
+}
+
+fn l4_detected(sources: &HostSources) -> DetectedPlatform {
+    let answer = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(format!("test/platform/accelerator/{L4_ROW}.txt")),
+    )
+    .expect("the recorded L4 accelerator answer exists");
+    let card = identify_accelerator(&AcceleratorSources {
+        nvidia_smi_query: Some(answer),
+    })
+    .expect("the recorded answer interprets")
+    .expect("the recording carries one accelerator");
+    DetectedPlatform::with_accelerator(identify(sources).expect("detects").identity, card.identity)
+}
+
+fn unestablished_detail(sources: &HostSources) -> String {
+    match identify(sources) {
+        Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => detail,
+        other => panic!("expected IdentityUnestablished, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_live_answer_outranks_any_record() {
+    let mut sources = l4_live_sources();
+    sources.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    sources.machine_type_record = Some(L4_RECORD.replace("g2-standard-8", "g2-standard-96"));
+
+    let report = identify(&sources).expect("detects");
+    assert_eq!(
+        report.identity.machine_type.as_deref(),
+        Some("g2-standard-8")
+    );
+    assert_eq!(
+        report.exact.machine_type_source,
+        Some(MachineTypeSource::GceMetadata)
+    );
+}
+
+#[test]
+fn a_live_answer_naming_no_machine_type_is_refused_not_shapeless() {
+    // Not a fallback case either: the service answered. A record that would
+    // match is on disk, and still neither it nor "no machine type" is used.
+    let mut sources = l4_live_sources();
+    sources.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    sources.gce_machine_type = Some("projects/REDACTED/machineTypes/".to_string());
+    sources.machine_type_record = Some(L4_RECORD.to_string());
+    match identify(&sources) {
+        Err(PlatformProbeError::Unrecognized {
+            source_name,
+            detail,
+        }) => {
+            assert_eq!(source_name, "GCE metadata service");
+            assert!(!detail.contains("REDACTED"), "no project slot: {detail}");
+        }
+        other => panic!("expected Unrecognized, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_offline_instance_with_a_matching_record_resolves_its_row() {
+    // The control for every refusal below.
+    let sources = l4_offline_sources(Some(L4_RECORD));
+    let report = identify(&sources).expect("a matching record establishes the machine type");
+    assert_eq!(
+        report.identity.machine_type.as_deref(),
+        Some("g2-standard-8")
+    );
+    assert_eq!(
+        report.exact.machine_type_source,
+        Some(MachineTypeSource::RecordedFromMetadata)
+    );
+    assert_eq!(
+        report.identity,
+        identify(&l4_live_sources()).expect("detects").identity,
+        "the offline identity is the one the live answer gives"
+    );
+    match committed_registry().resolve(&l4_detected(&sources)) {
+        RowMatch::Supported(row) => assert_eq!(row.row_id(), L4_ROW),
+        other => panic!("expected the L4 row, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_offline_instance_with_no_record_fails_rather_than_losing_its_shape() {
+    let detail = unestablished_detail(&l4_offline_sources(None));
+    assert!(
+        detail.contains("no machine type has been recorded")
+            && detail.contains("start tensorplate-agent"),
+        "says what is missing and how to fix it: {detail}"
+    );
+
+    // The trap this refuses to fall into. The same host reporting no machine
+    // type is not refused: the L4 row's signals are context only, so the
+    // shape miss lands on the row as a candidate, and admission lets that
+    // through as unvalidated.
+    let shapeless = HostSources {
+        dmi_product_name: None,
+        ..l4_offline_sources(None)
+    };
+    match committed_registry().resolve(&l4_detected(&shapeless)) {
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(row),
+        } => assert_eq!(row.row_id(), L4_ROW),
+        other => panic!("expected an environment-only miss on the L4 row, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_record_is_ignored_off_compute_engine() {
+    for dmi in [None, Some("Precision 7960 Tower\n")] {
+        let sources = HostSources {
+            dmi_product_name: dmi.map(str::to_string),
+            ..l4_offline_sources(Some(L4_RECORD))
+        };
+        let report = identify(&sources)
+            .unwrap_or_else(|err| panic!("{dmi:?}: not an instance, so no error: {err}"));
+        assert_eq!(report.identity.machine_type, None, "{dmi:?}");
+        assert_eq!(report.exact.machine_type_source, None, "{dmi:?}");
+    }
+
+    // And no committed fixture changes identity for carrying one: Jetson,
+    // macOS and the physical rows have no Compute Engine firmware, and the
+    // cloud fixtures carry a live answer.
+    for (name, fixture) in fixtures() {
+        let sources = sources_of(&fixture);
+        let with_record = HostSources {
+            machine_type_record: Some(L4_RECORD.to_string()),
+            ..sources.clone()
+        };
+        assert_eq!(
+            identify(&with_record)
+                .unwrap_or_else(|err| panic!("{name}: a record must not break detection: {err}")),
+            identify(&sources).expect("detects"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_record_whose_facts_changed_is_refused_naming_the_fact() {
+    let live = l4_live_sources();
+    let cpuinfo = live.cpuinfo.clone().expect("cpuinfo");
+    let meminfo = live.proc_meminfo.clone().expect("meminfo");
+    let bus = live.pci_devices.clone().expect("pci");
+    assert!(meminfo.contains("MemTotal:       32860372 kB"));
+    assert!(bus.contains("0x10de 0x27b8"));
+
+    let extra_cpus = (8..12)
+        .map(|n| format!("processor\t: {n}\nvendor_id\t: GenuineIntel\n\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    for (label, sources, expected) in [
+        (
+            "twelve logical CPUs",
+            HostSources {
+                cpuinfo: Some(format!("{cpuinfo}{extra_cpus}")),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "logical CPU count was 8 when recorded and is 12 now",
+        ),
+        (
+            "MemTotal one kB larger",
+            HostSources {
+                proc_meminfo: Some(meminfo.replace("32860372 kB", "32860373 kB")),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "MemTotal was 33649020928 bytes when recorded and is 33649021952 bytes now",
+        ),
+        (
+            "a second L4",
+            HostSources {
+                pci_devices: Some(format!("{bus}\n0000:00:07.0 0x10de 0x27b8 0x030200")),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "NVIDIA display devices were [0x10de:0x27b8] when recorded and are \
+             [0x10de:0x27b8, 0x10de:0x27b8] now",
+        ),
+        (
+            "a different card",
+            HostSources {
+                pci_devices: Some(bus.replace("0x10de 0x27b8", "0x10de 0x2330")),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "NVIDIA display devices were [0x10de:0x27b8] when recorded and are \
+             [0x10de:0x2330] now",
+        ),
+    ] {
+        let detail = unestablished_detail(&sources);
+        assert!(
+            detail.contains(expected) && detail.contains("g2-standard-8"),
+            "{label}: must name the fact, both values and the machine type: {detail}"
+        );
+    }
+}
+
+#[test]
+fn memtotal_is_compared_exactly_across_the_two_recorded_l4_images() {
+    // Both committed L4 recordings are g2-standard-8, on different images,
+    // and their MemTotal differs by 8 kB. A record written on one does not
+    // vouch for the other: exact equality refuses, and the next start with
+    // the metadata service reachable records the new value.
+    let (_, dlvm) = fixtures()
+        .into_iter()
+        .find(|(name, _)| name == "dlvm-ubuntu2404-l4-g2s8")
+        .expect("the recorded DLVM fixture is committed");
+    let on_dlvm = HostSources {
+        dmi_product_name: Some("Google Compute Engine\n".to_string()),
+        gce_machine_type: None,
+        machine_type_record: Some(L4_RECORD.to_string()),
+        ..sources_of(&dlvm)
+    };
+    let detail = unestablished_detail(&on_dlvm);
+    assert!(
+        detail
+            .contains("MemTotal was 33649020928 bytes when recorded and is 33649029120 bytes now"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_record_this_release_cannot_use_is_refused_never_ignored() {
+    for (label, record) in [
+        (
+            "an unknown field",
+            L4_RECORD.replace(
+                "\"schema_version\": 1,",
+                "\"schema_version\": 1,\n  \"boot_id\": \"x\",",
+            ),
+        ),
+        (
+            "another schema version",
+            L4_RECORD.replace("\"schema_version\": 1", "\"schema_version\": 2"),
+        ),
+        (
+            "a machine type no row could name",
+            L4_RECORD.replace("\"g2-standard-8\"", "\"G2 Standard 8\""),
+        ),
+        (
+            "a missing fact",
+            L4_RECORD.replace("  \"logical_cpus\": 8,\n", ""),
+        ),
+        ("not JSON", "g2-standard-8\n".to_string()),
+    ] {
+        let detail = unestablished_detail(&l4_offline_sources(Some(&record)));
+        assert!(
+            detail.contains("recorded machine type is unusable"),
+            "{label}: {detail}"
+        );
+    }
+}
+
+#[test]
+fn a_fact_that_cannot_be_read_now_never_counts_as_a_match() {
+    for (label, sources, fact) in [
+        (
+            "no processor entries",
+            HostSources {
+                cpuinfo: Some("vendor_id\t: GenuineIntel\n".to_string()),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "logical CPU count",
+        ),
+        (
+            "no MemTotal",
+            HostSources {
+                proc_meminfo: Some("MemFree:        28003732 kB\n".to_string()),
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "MemTotal",
+        ),
+        (
+            "no PCI bus",
+            HostSources {
+                pci_devices: None,
+                ..l4_offline_sources(Some(L4_RECORD))
+            },
+            "NVIDIA display devices",
+        ),
+    ] {
+        let detail = unestablished_detail(&sources);
+        assert!(
+            detail.contains("cannot be checked against this host") && detail.contains(fact),
+            "{label}: {detail}"
+        );
+    }
+}
+
+#[test]
+fn the_agent_records_exactly_what_detection_later_accepts() {
+    let record = MachineTypeRecord::for_live_sources(&l4_live_sources())
+        .expect("a live answer on readable facts records");
+    assert_eq!(
+        record.to_json().expect("serializes"),
+        L4_RECORD,
+        "the bare machine type and the facts, never the project-scoped name"
+    );
+    assert_eq!(MachineTypeRecord::parse(L4_RECORD).expect("parses"), record);
+    assert!(identify(&l4_offline_sources(Some(L4_RECORD))).is_ok());
+
+    // Only a live answer is recorded.
+    assert_eq!(
+        MachineTypeRecord::for_live_sources(&l4_offline_sources(Some(L4_RECORD))),
+        None
+    );
+    let mut not_canonical = l4_live_sources();
+    not_canonical.gce_machine_type =
+        Some("projects/REDACTED/machineTypes/G2_STANDARD_8".to_string());
+    assert_eq!(MachineTypeRecord::for_live_sources(&not_canonical), None);
 }

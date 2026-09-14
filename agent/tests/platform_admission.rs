@@ -705,7 +705,9 @@ fn host_fixture_sources(name: &str) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
+        dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
+        machine_type_record: text("machine_type_record"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -1079,4 +1081,80 @@ fn generated_projection_uses_no_outcome_only_for_not_applicable_signals() {
         validator.is_valid(&envelope),
         "generated projection must satisfy the public schema: {envelope}"
     );
+}
+
+/// The recorded L4 host as an offline agent start gathers it: no metadata
+/// answer, `dmi_product_name` as the firmware name, and `record` as the
+/// machine-type record. The discrete card comes from the recorded
+/// `nvidia-smi` answer.
+fn offline_l4_report(dmi_product_name: Option<&str>, record: Option<&str>) -> PlatformReport {
+    let mut sources = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
+    sources.dmi_product_name = dmi_product_name.map(str::to_string);
+    sources.gce_machine_type = None;
+    sources.machine_type_record = record.map(str::to_string);
+    let mut report = identify_platform(&sources).expect("detects");
+    let text = std::fs::read_to_string(
+        repo_root().join("test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt"),
+    )
+    .expect("read L4 fixture");
+    report.accelerator = Some(
+        identify_accelerator(&AcceleratorSources {
+            nvidia_smi_query: Some(text),
+        })
+        .expect("interprets")
+        .expect("one card")
+        .observation(),
+    );
+    report
+}
+
+#[test]
+fn an_offline_l4_with_a_matching_record_is_admitted_as_validated() {
+    let registry = registry();
+    let live = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
+    let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&live)
+        .expect("the live fixture records")
+        .to_json()
+        .expect("serializes");
+
+    let offline = offline_l4_report(Some("Google Compute Engine\n"), Some(&record));
+    let admission =
+        PlatformAdmission::evaluate(&registry, &offline, &ObservedStack::default(), None);
+    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-l4-g2s8"));
+    assert_eq!(
+        admission.validated(),
+        Some(true),
+        "the recorded machine type is the row's validated shape"
+    );
+    admission.ensure_supported().expect("it deploys");
+
+    // The trap the record exists to avoid. The same host with no machine
+    // type is not refused: it is admitted, unvalidated, on the same row.
+    // Detection therefore never hands admission a Compute Engine instance
+    // without a machine type -- it fails instead.
+    let shapeless = offline_l4_report(None, None);
+    let admission =
+        PlatformAdmission::evaluate(&registry, &shapeless, &ObservedStack::default(), None);
+    assert_eq!(admission.row_id(), Some("ubuntu2404-x86-l4-g2s8"));
+    assert_eq!(admission.validated(), Some(false));
+}
+
+#[test]
+fn an_unestablished_identity_refuses_every_deploy_and_says_why() {
+    let mut sources = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
+    sources.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    sources.gce_machine_type = None;
+    let err = identify_platform(&sources).expect_err("nothing recorded");
+
+    let admission = PlatformAdmission::detection_failed(err.to_string());
+    match admission.ensure_supported() {
+        Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+            assert_eq!(reason, None, "an undetected host has no platform reason");
+            assert!(
+                detail.contains("no machine type has been recorded"),
+                "the refusal carries the detection error: {detail}"
+            );
+        }
+        other => panic!("an unestablished identity must refuse deploys, got {other:?}"),
+    }
 }

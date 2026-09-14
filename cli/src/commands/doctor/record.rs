@@ -331,7 +331,9 @@ mod tests {
                 sw_vers_build_version: text("sw_vers_build_version"),
                 cpu_brand: text("cpu_brand"),
                 hw_memsize: text("hw_memsize"),
+                dmi_product_name: text("dmi_product_name"),
                 gce_machine_type: text("gce_machine_type"),
+                machine_type_record: text("machine_type_record"),
                 proc_meminfo: text("proc_meminfo"),
                 pci_devices: text("pci_devices"),
             },
@@ -482,6 +484,45 @@ mod tests {
         let recorded: Value = serde_json::from_str(&body).expect("recording parses");
         assert_eq!(recorded["matches_row"], true);
         assert_eq!(recorded["expect"], committed["expect"]);
+    }
+
+    #[test]
+    fn an_offline_instance_with_no_recorded_machine_type_is_still_recorded() {
+        // The metadata service unreachable and nothing recorded: detection
+        // refuses to establish an identity, and that refusal is a note. The
+        // sources that led to it -- the firmware name included -- are the
+        // deliverable.
+        let (mut sources, _) = sources_from_fixture("ubuntu2404-x86-l4-g2s8");
+        sources.dmi_product_name = Some("Google Compute Engine\n".to_string());
+        sources.gce_machine_type = None;
+        sources.machine_type_record = None;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = record(
+            &sources,
+            &AcceleratorSources {
+                nvidia_smi_query: Some(accelerator_text("ubuntu2404-x86-l4-g2s8")),
+            },
+            Some(&registry()),
+            dir.path(),
+            "2026-09-14",
+        )
+        .expect("an unestablished identity must not abort a recording");
+
+        assert!(
+            out.notes.iter().any(|n| n.contains("did not interpret")
+                && n.contains("no machine type has been recorded")),
+            "the refusal is a note naming why: {:?}",
+            out.notes
+        );
+        let recorded: Value = serde_json::from_str(
+            &std::fs::read_to_string(&out.fixture_path).expect("read recording"),
+        )
+        .expect("recording parses");
+        assert_eq!(
+            recorded["sources"]["dmi_product_name"],
+            "Google Compute Engine\n"
+        );
+        assert!(recorded.get("expect").is_none(), "nothing was interpreted");
     }
 
     #[test]

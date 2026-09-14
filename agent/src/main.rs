@@ -38,8 +38,8 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry, PlatformReport,
-    SystemHostProbe,
+    identify_platform, AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry,
+    PlatformReport, SystemHostProbe,
 };
 use tensorplate_protocol::install_paths;
 
@@ -331,7 +331,7 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
 /// detection failure.
 fn observe_platform(
 ) -> Result<(PlatformReport, ObservedStack, Option<PlatformProbeError>), PlatformProbeError> {
-    let mut report = SystemHostProbe::new().detect_platform()?;
+    let mut report = identify_platform(&SystemHostProbe::new().sources()?)?;
     let mut accelerator_probe_error = None;
     if report.accelerator.is_none() {
         match NvidiaSmiProbe::new().detect() {
