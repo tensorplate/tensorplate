@@ -249,9 +249,11 @@ cursor="s=${id32};i=1"
 printf '{\n  "__CURSOR": "%s"\n}\n' "$cursor" >"${d}/cursor.json" || die "could not write cursor.json"
 expect_finding "a non-journal object carrying __CURSOR" journal-field "$cursor"
 
-new_case
-add_line "    _BOOT_ID=${id32}"
-expect_finding "a verbose-format _BOOT_ID field" journal-field "$id32"
+for field in "_HOSTNAME=${host}" "_MACHINE_ID=${id32}" "_BOOT_ID=${id32}" "__CURSOR=s=${id32};i=1"; do
+  new_case
+  add_line "    ${field}"
+  expect_finding "a verbose-format ${field%%=*} field" journal-field "${field#*=}"
+done
 
 # write_json <file> <mode> <record>: appends two journal records. Records:
 # machine (carries _MACHINE_ID), bytes (a byte-array MESSAGE quoting an
@@ -332,9 +334,11 @@ new_case
 add_line "-- Boot ${id32} --"
 expect_finding "a journal boot separator" journal-host "$id32"
 
-new_case
-add_line "/var/log/journal/${id32}/system.journal"
-expect_finding "a journal directory machine id" journal-host "$id32"
+for journal_dir in /var/log/journal /run/log/journal; do
+  new_case
+  add_line "${journal_dir}/${id32}/system.journal"
+  expect_finding "a machine id in ${journal_dir}" journal-host "$id32"
+done
 
 # The failing-stage detail joins log lines with spaces, so the host rule
 # must match mid-line: the report itself is flagged, not only its log.
@@ -529,10 +533,11 @@ key_header="$(printf -- '-----BEGIN %s %s KEY-----' OPENSSH PRIVATE)"
 add_line "$key_header"
 expect_finding "a private key header" credential "$key_header"
 
-for token in "ghp_$(random_alnum 36)" "github_pat_$(random_alnum 40)" "ya29.$(random_alnum 40)"; do
+for prefix in ghp_ gho_ ghu_ ghs_ ghr_ github_pat_ ya29.; do
+  token="${prefix}$(random_alnum 40)"
   new_case
   add_line "Authorization: Bearer ${token}"
-  expect_finding "a ${token%%[_.]*} token" credential "$token"
+  expect_finding "a ${prefix} token" credential "$token"
 done
 
 # --- Planning identifiers belong only in CHANGELOG.md.
