@@ -1216,8 +1216,7 @@ def main(argv=None):
             opt("--pids-file"), opt("--all-tensorplate-processes", action="store_true"))
     command("process-tree", opt("--job", required=True), opt("--pids-out", required=True))
     command("quiesced", opt("--profile", required=True), opt("--attempts", type=int, default=30))
-    command("listeners", opt("--pids-file", required=True), opt("--job", action="append", default=[]),
-            opt("--status", required=True))
+    command("listeners", opt("--pids-file", required=True), opt("--status", required=True))
     command("control", opt("--ports", type=_port_pair, required=True))
     command("probe", opt("--agent-socket", required=True), opt("--health-url"),
             opt("--status"), opt("--ports", type=_port_pair, required=True),
@@ -1327,9 +1326,9 @@ def _run(args):
         if not tree:
             raise CheckFailed("the process tree is empty")
         # Every TensorPlate process, not only the agent's tree: the
-        # observability service, and anything else matching the pattern.
-        pids = list(dict.fromkeys(tree + [_job_pid(path) for path in args.job] +
-                                  tensorplate_processes()))
+        # observability service and anything else running a TensorPlate
+        # binary.
+        pids = list(dict.fromkeys(tree + tensorplate_processes()))
         _, _, url = status_check(_load_json(args.status), None, ())
         try:
             serving_port = urllib.parse.urlsplit(url).port

@@ -351,6 +351,12 @@ def test_sandbox_readback():
             with_patches({"sandbox_check": lambda pid, op: 0 if pid == os.getpid() else 0},
                          lambda: refused(lambda: m.discrimination_controls(profile),
                                          "does not read as sandboxed"))
+            # An identity check that notices a reaped process but not a
+            # zombie.
+            with_patches({"sandbox_check": recorded,
+                          "process_identity": lambda pid: (m.process_status(pid) or (None, None))[1]},
+                         lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "unreaped exited process passed the identity check"))
             # An identity check that never notices an exit.
             real_identity = m.process_identity
             with_patches({"sandbox_check": recorded,

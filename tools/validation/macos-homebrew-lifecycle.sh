@@ -1278,7 +1278,6 @@ verify_offline_runtime() {
     --out "${denial_dir}/tree-sandbox.json" ||
     die "a process in the service trees does not read back as sandboxed with the network denied"
   offline_helper listeners --pids-file "${denial_dir}/tree-pids.txt" \
-    --job "${denial_dir}/observability-denied.json" \
     --status "${denial_dir}/status-deployed.json" --out "${denial_dir}/listeners.json" ||
     die "a TensorPlate process holds a non-loopback socket, or the agent's tree holds no serving listener"
 
