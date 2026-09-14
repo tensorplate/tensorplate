@@ -19,6 +19,7 @@ Run by verify_macos_offline_runtime.sh. Four parts:
 
 import concurrent.futures
 import copy
+import errno
 import json
 import os
 import pathlib
@@ -110,14 +111,27 @@ def test_profile():
         "/private/var/run/mDNSResponder", "/var/run/mDNSResponder")
     lint_cases["ip_rules_port_scoped (address literal)"] = text.replace(
         '"localhost:18080"', '"127.0.0.1:18080"')
+    lint_cases["known_actions"] = text.replace(resolver, "(debug deny)" + resolver)
+    # A rule added with a filter the named rules do not parse, or with no
+    # filter at all, widens the profile without breaking any of them.
+    for extra in ("(allow network-outbound)", "(allow network-inbound)", "(allow network-bind)",
+                  '(allow network-outbound (remote tcp "*:443"))', "(allow network-outbound (remote udp))",
+                  '(allow network-inbound (local tcp "*:*"))',
+                  '(allow network-outbound (remote tcp "localhost:*"))',
+                  '(allow network-outbound (remote tcp "*:18080") (remote tcp "*:18081"))'):
+        lint_cases[f"only_expected_rules {extra}"] = text.replace(resolver, extra + resolver)
+    lint_cases["only_expected_rules (reordered)"] = text.replace(unix, "").replace(
+        "(deny network*)", "(deny network*)" + unix)
     for problem, mutant in lint_cases.items():
         found = m.lint_profile(mutant)
         assert problem.split(" ")[0] in found, (problem, found, mutant)
     refused(lambda: m.profile_ports(lint_cases["ip_rules_port_scoped"]), "not the rendered template")
     saved = m.PROFILE_TEMPLATE
     try:
-        m.PROFILE_TEMPLATE = saved.replace('"localhost:{candidate}"', '"localhost:*"')
-        refused(lambda: m.render_profile(18080, 18081), "template breaks")
+        for weakened in (saved.replace('"localhost:{candidate}"', '"localhost:*"'),
+                         saved.replace(resolver, "(allow network-outbound)" + resolver)):
+            m.PROFILE_TEMPLATE = weakened
+            refused(lambda: m.render_profile(18080, 18081), "template breaks")
     finally:
         m.PROFILE_TEMPLATE = saved
     passed("profile rendering and lint")
@@ -277,6 +291,28 @@ def test_sandbox_readback():
                  lambda: refused(lambda: m.read_sandbox_state(10), "exited or was replaced"))
     with_patches({"sandbox_check": lambda pid, op: -1, "process_identity": identities.get},
                  lambda: refused(lambda: m.read_sandbox_state(10), "returned [-1, -1, -1]"))
+    # A child that has exited but is not reaped yet is still listed by ps,
+    # and sandbox_check reads it as sandboxed.
+    zombie = subprocess.Popen(["/usr/bin/true"])
+    try:
+        deadline = time.time() + 10
+        while "Z" not in (m.process_status(zombie.pid) or ("",))[0]:
+            assert time.time() < deadline, "the exited child never showed as a zombie"
+            time.sleep(0.05)
+        assert m.process_identity(zombie.pid) is None
+        with_patches({"sandbox_check": lambda pid, op: 1},
+                     lambda: refused(lambda: m.read_sandbox_state(zombie.pid), "not running"))
+    finally:
+        zombie.wait()
+
+    # A probe child that could not be started sent nothing, whatever the
+    # errno of the failure.
+    def spawn_refused(*args, **kwargs):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+    outcome = with_patches({"subprocess": type("S", (), {"run": staticmethod(spawn_refused),
+                                                         "SubprocessError": subprocess.SubprocessError})},
+                           lambda: m.attempt(m.child_udp_send))
+    assert outcome == "child_not_run_PermissionError", outcome
 
     # The discrimination controls run a real sleeper under a stand-in
     # sandbox-exec that only records which pid it started.
@@ -383,22 +419,30 @@ def test_processes_and_listeners():
     sockets = m.parse_lsof(good)
     assert len(sockets) == 3 and sockets[0] == {
         "pid": 101, "protocol": "TCP", "name": "127.0.0.1:18080", "state": "LISTEN"}
-    assert m.check_listeners(sockets, {101, 102}, 18080) == []
-    for document, pids, failures in (
-        (good.replace("n127.0.0.1:18080\nTST=LISTEN", "n*:18080\nTST=LISTEN"), {101, 102},
+    tree = {101, 102}
+    assert m.check_listeners(sockets, tree | {200}, tree, 18080) == []
+    # pid 200 is a TensorPlate process outside the agent's tree, such as
+    # the observability service.
+    observability = "p200\nf4\nPTCP\nn*:18081\nTST=LISTEN\n"
+    for document, pids, tree_pids, failures in (
+        (good.replace("n127.0.0.1:18080\nTST=LISTEN", "n*:18080\nTST=LISTEN"), tree, tree,
          ["loopback_only", "serving_listener_in_tree"]),
-        (good + "f9\nPTCP\nn192.0.2.10:18081\nTST=LISTEN\n", {101, 102}, ["loopback_only"]),
-        (good + "f9\nPUDP\nn*:5353\n", {101, 102}, ["loopback_only"]),
+        (good + "f9\nPTCP\nn192.0.2.10:18081\nTST=LISTEN\n", tree, tree, ["loopback_only"]),
+        (good + "f9\nPUDP\nn*:5353\n", tree, tree, ["loopback_only"]),
+        (good + observability, tree | {200}, tree, ["loopback_only"]),
         # Never bound or connected: no port, nothing can reach it.
-        (good + "f9\nPUDP\nn*:*\n", {101, 102}, []),
-        (good + "f9\nPTCP\nn*:*\nTST=CLOSED\n", {101, 102}, []),
-        ("", {101}, ["serving_listener_in_tree"]),
-        (good, {102}, ["serving_listener_in_tree", "sockets_owned_by_tree"]),
-        (good.replace("n127.0.0.1:18080\nTST=LISTEN", "n[::1]:18080\nTST=LISTEN"), {101, 102},
+        (good + "f9\nPUDP\nn*:*\n", tree, tree, []),
+        (good + "f9\nPTCP\nn*:*\nTST=CLOSED\n", tree, tree, []),
+        ("", {101}, {101}, ["serving_listener_in_tree"]),
+        (good, {102}, {102}, ["serving_listener_in_tree", "sockets_owned_by_tensorplate_processes"]),
+        # The serving listener must belong to the agent's tree.
+        (good, tree, {102}, ["serving_listener_in_tree"]),
+        (good.replace("n127.0.0.1:18080\nTST=LISTEN", "n[::1]:18080\nTST=LISTEN"), tree, tree,
          ["serving_listener_in_tree"]),
-        (good.replace("TST=LISTEN", "TST=CLOSED"), {101, 102}, ["serving_listener_in_tree"]),
+        (good.replace("TST=LISTEN", "TST=CLOSED"), tree, tree, ["serving_listener_in_tree"]),
     ):
-        assert m.check_listeners(m.parse_lsof(document), pids, 18080) == failures, (document, failures)
+        assert m.check_listeners(m.parse_lsof(document), pids, tree_pids, 18080) == failures, \
+            (document, failures)
     refused(lambda: m.parse_lsof("f3\nPTCP\n"), "before its process")
     refused(lambda: m.parse_lsof("p1\nPTCP\n"), "outside a file")
 
@@ -407,13 +451,19 @@ def test_processes_and_listeners():
     with tempfile.TemporaryDirectory(prefix="tp-offline-tools-") as directory:
         root = pathlib.Path(directory)
         for tool in ("pgrep", "lsof"):
-            (root / tool).write_text("#!/bin/sh\nexit \"${TP_TOOL_STATUS}\"\n")
+            (root / tool).write_text("#!/bin/sh\nprintf '%s' \"${TP_TOOL_STDERR:-}\" >&2\n"
+                                     "exit \"${TP_TOOL_STATUS}\"\n")
             (root / tool).chmod(0o755)
         saved_env = dict(os.environ)
         os.environ["PATH"] = f"{root}{os.pathsep}{os.environ['PATH']}"
         try:
             os.environ["TP_TOOL_STATUS"] = "1"
             assert m.tensorplate_processes() == [] and m.child_pids(1) == [] and m.lsof(["-i"]) == ""
+            # lsof also exits 1, with nothing on stdout, when its query is
+            # not understood; quiesced would read that as no listener.
+            os.environ["TP_TOOL_STDERR"] = "lsof: unknown service notaport for tcp in: -i TCP:notaport"
+            refused(lambda: m.lsof(["-iTCP:notaport", "-sTCP:LISTEN"]), "lsof failed with status 1")
+            del os.environ["TP_TOOL_STDERR"]
             os.environ["TP_TOOL_STATUS"] = "2"
             refused(m.tensorplate_processes, "pgrep failed with status 2")
             refused(lambda: m.child_pids(1), "pgrep -P 1 failed with status 2")
@@ -427,18 +477,27 @@ def test_processes_and_listeners():
 # --- classification ----------------------------------------------------
 
 
+UNLISTED_BINDS = ["refused:tcp_listen_wildcard_unlisted_port", "refused:tcp_listen_loopback_unlisted_port",
+                  "refused:udp_bind_wildcard_unlisted_port"]
 RECORDED = {
     "final": [],
     "deny-network-only": ["allowed:unix_agent_socket", "allowed:tcp_loopback_listen_candidate_port",
                           "serving_health_ready", "serving_health_deployment"],
-    "draft-localhost-any-port": ["refused:udp_fe80_1_unlisted_port",
-                                 "refused:udp_loopback_unlisted_port"],
+    "draft-localhost-any-port": ["refused:udp_fe80_1_unlisted_port", "refused:udp_loopback_unlisted_port",
+                                 "refused:tcp_loopback_unlisted_port"] + UNLISTED_BINDS,
     "allow-all-local-ip": [f"refused:{name}" for name in m.DENIAL_NAMES
                            if name != "unix_mdnsresponder"],
     "resolver-deny-first": ["refused:unix_mdnsresponder"],
     "resolver-unresolved-path": ["refused:unix_mdnsresponder"],
-    "no-base-deny": ["refused:unix_mdnsresponder"],
+    "no-base-deny": UNLISTED_BINDS + ["refused:unix_mdnsresponder"],
     "no-inbound-allow": ["allowed:tcp_loopback_listen_candidate_port"],
+    "tcp-loopback-any-port": ["refused:tcp_loopback_unlisted_port"],
+    "tcp-any-host-serving-ports": [f"refused:tcp_{host}_{role}_port" for role in ("serving", "candidate")
+                                   for host in ("test_net_v4", "documentation_v6")],
+    "udp-any-host-serving-ports": [f"refused:udp_{host}_{role}_port" for role in ("serving", "candidate")
+                                   for host in ("test_net_v4", "documentation_v6")],
+    "tcp-listen-any-address": UNLISTED_BINDS[:2],
+    "udp-bind-any-address": UNLISTED_BINDS[2:],
 }
 
 
@@ -458,9 +517,17 @@ def test_classify():
     in_stage = copy.deepcopy(final["probe"])
     del in_stage["allowed"]["tcp_loopback_listen_candidate_port"]
     assert m.classify(in_stage, final["control"], m.PREFLIGHT_DEPLOYMENT) == []
+    # The probe and the control run the same operations, one per name.
+    assert [name for name, _ in m.denial_operations((18080, 18081))] == list(m.DENIAL_NAMES)
+    # Every operation's control counts: EPERM, or a socket that could not
+    # be pinned, outside the sandbox would make the sandbox's EPERM moot.
+    for name in m.DENIAL_NAMES:
+        for outcome in ("EPERM", "pin_failed"):
+            control = dict(final["control"], **{name: outcome})
+            expected = ["control_mdnsresponder_reachable"] if name == "unix_mdnsresponder" else \
+                [f"control_not_refused:{name}"]
+            assert m.classify(in_stage, control, m.PREFLIGHT_DEPLOYMENT) == expected, (name, outcome)
     for mutate, expected in (
-        (lambda probe, control: control.update(udp_test_net_v4="EPERM"),
-         ["control_not_refused:udp_test_net_v4"]),
         (lambda probe, control: control.pop("udp_fe80_1_unlisted_port"),
          ["control_not_refused:udp_fe80_1_unlisted_port"]),
         (lambda probe, control: control.update(unix_mdnsresponder="EPERM"),
@@ -488,8 +555,11 @@ def test_classify():
 
 
 def doctor_document(**overrides):
+    # Listed here rather than taken from m.DOCTOR_FINDINGS_OK, so dropping
+    # a finding from the helper's list is caught.
     findings = {name: {"id": name, "status": "ok", "severity": "info", "message": "ok"}
-                for name in m.DOCTOR_FINDINGS_OK}
+                for name in ("platform_row", "platform_profile", "agent_reachable",
+                             "agent_service_state", "observability_service_state")}
     findings["platform_row"]["message"] = "resolves to support row `macos26-m1pro-16gb`"
     for name, change in overrides.items():
         findings[name].update(change)
@@ -507,6 +577,9 @@ def test_cli_checks():
         (doctor_document(platform_row={"message": "resolves to support row `macos26-apple-m-series-preview`"}),
          0, ["platform_row_exact"]),
         (doctor_document(platform_row={"status": "unsupported"}), 0, ["platform_row_ok"]),
+        (doctor_document(platform_profile={"status": "warn"}), 0, ["platform_profile_ok"]),
+        # Nonzero with nothing failing: the exit status is checked on its own.
+        (doctor_document(), 10, ["doctor_exit_status"]),
         (doctor_document(agent_service_state={"status": "warn", "message": "is stopped"}), 0,
          ["agent_service_state_ok"]),
         (doctor_document(observability_service_state={"status": "skipped"}), 0,
@@ -532,6 +605,8 @@ def test_cli_checks():
          ["serving_url_on_allowed_loopback_port"]),
         (lambda s: s["payload"].update(severity="degraded"), ["status_severity_ready"]),
         (lambda s: s["payload"]["agent"].update(agent_state="starting"), ["agent_state_ready"]),
+        (lambda s: s.update(command="deploy"), ["status_command"]),
+        (lambda s: s["payload"]["agent"]["active"].update(backend="cpu"), ["active_backend"]),
     ):
         broken = copy.deepcopy(status)
         mutate(broken)
@@ -539,8 +614,12 @@ def test_cli_checks():
 
     deploy = {"command": "deploy", "payload": {"phase": "active", "deployment_id": "offline-1"}}
     assert m.deploy_check(deploy, "offline-1")[1] == []
-    assert m.deploy_check({"command": "deploy", "payload": {"phase": "failed", "deployment_id": "offline-1"}},
-                          "offline-1")[1] == ["deployment_phase_active"]
+    for broken, expected in (
+        (dict(deploy, payload={"phase": "failed", "deployment_id": "offline-1"}), ["deployment_phase_active"]),
+        (dict(deploy, payload={"phase": "active", "deployment_id": "smoke-1"}), ["deployment_id"]),
+        (dict(deploy, command="status"), ["deploy_command"]),
+    ):
+        assert m.deploy_check(broken, "offline-1")[1] == expected, expected
 
     request = m.infer_request()
     sent = request["inputs"][0]
@@ -695,15 +774,28 @@ def sandbox_check(pid, operation):
     return 0
 
 
-def ip_send(host, port, *args, **kwargs):
+def refuse(tcp=False):
     if sandboxed() and "probe-leaks" not in MODES:
         raise OSError(errno.EPERM, "Operation not permitted")
-    if not sandboxed() and "control-refused" in MODES:
+    if not sandboxed() and ("control-refused" in MODES or tcp and "control-refused-tcp" in MODES):
         # An application firewall refusing the unsandboxed control.
         raise OSError(errno.EPERM, "Operation not permitted")
+
+
+def udp_send(host, port, *args, **kwargs):
+    refuse()
     if host in ("127.0.0.1", "fe80::1"):
         return None
     raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+
+def tcp_connect(host, port, *args, **kwargs):
+    refuse(tcp=True)
+    raise OSError(errno.ECONNREFUSED if host == "127.0.0.1" else errno.ENETUNREACH, "not reached")
+
+
+def bind_unlisted_port(host, kind):
+    refuse()
 
 
 def unix_connect(path):
@@ -717,8 +809,9 @@ def unix_connect(path):
 
 
 m.sandbox_check = sandbox_check
-m.udp_send = ip_send
-m.tcp_connect = ip_send
+m.udp_send = udp_send
+m.tcp_connect = tcp_connect
+m.bind_unlisted_port = bind_unlisted_port
 m.unix_connect = unix_connect
 m.child_udp_send = lambda: "EPERM" if sandboxed() and "probe-leaks" not in MODES else "ENETUNREACH"
 m.http_get_json = lambda url: {
@@ -790,8 +883,11 @@ def make_world(root, scenario="normal", mode=""):
             document["Program"] = document["ProgramArguments"][0]
         with open(prefix / "opt" / service / f"homebrew.mxcl.{service}.plist", "wb") as handle:
             plistlib.dump(document, handle)
+    # Fake pids start above every OS pid range (macOS 99998, Linux at most
+    # 4194304): sandbox_check and ps answer from this table first, so a
+    # real helper pid equal to a fake one would read as that process.
     (root / "state.json").write_text(json.dumps(
-        {"labels": {}, "procs": {}, "next_pid": 5000, "active": "smoke-1", "sandboxed_pids": []}))
+        {"labels": {}, "procs": {}, "next_pid": 5000000, "active": "smoke-1", "sandboxed_pids": []}))
     if scenario == "empty":
         return
     for service in (OBSERVABILITY, AGENT):
@@ -874,7 +970,7 @@ def check_clean_run(world):
     world.assert_normal_supervision()
     text = (world.root / "evidence/offline-runtime.json").read_text()
     assert "/" not in text, f"offline-runtime.json carries a path: {text}"
-    assert not re.search(r"\b5[0-9]{3}\b", text), f"offline-runtime.json carries a pid: {text}"
+    assert not re.search(r"\b5[0-9]{6}\b", text), f"offline-runtime.json carries a pid: {text}"
     evidence = json.loads(text)
     assert evidence["services"]["agent"]["launchd_runs_through_stage"] == 1
     assert evidence["services_sandboxed_network_denied"]
@@ -916,13 +1012,17 @@ FAILURE_MODES = {
     "health-not-ready": ("the offline profile did not refuse the network as required", True),
     "no-sidecar": ("the agent's process tree lacks a serving worker or backend sidecar", True),
     "pgrep-empty": ("the agent's process tree lacks a serving worker or backend sidecar", True),
-    "wildcard-listener": ("the agent's process tree holds a non-loopback socket or no serving listener", True),
+    "wildcard-listener": ("a TensorPlate process holds a non-loopback socket, or the agent's tree holds no "
+                          "serving listener", True),
+    "observability-wildcard-listener": ("a TensorPlate process holds a non-loopback socket, or the agent's tree "
+                                        "holds no serving listener", True),
     "doctor-failing": ("doctor under the offline profile is not green on the exact row", True),
     "crash-during-doctor": ("tensorplate-agent restarted during the offline stage", True),
     "launchagents-drift": ("the tensorplate-agent LaunchAgents plist differs from the formula plist", True),
     "agent-not-ready-after": ("the agent did not answer outside the sandbox after the offline stage", True),
     "agent-config-wildcard-host": ("cannot render the offline profile from the installed agent config", True),
     "control-refused": ("the offline profile did not refuse the network as required", True),
+    "control-refused-tcp": ("the offline profile did not refuse the network as required", True),
     "formula-plist-program-key": ("cannot derive the sandboxed tensorplate-observability launchd plist", True),
     "run-rewrites-arguments": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "run-copies-plist": ("tensorplate-agent is not running as the sandboxed launchd job", True),
@@ -1299,7 +1399,22 @@ MUTANT_PROFILES = {
         "/private/var/run/mDNSResponder", "/var/run/mDNSResponder"),
     "no-inbound-allow": lambda p, c: BASE + f'(allow network-outbound (remote ip "localhost:{p}") '
                                      f'(remote ip "localhost:{c}"))' + UNIX + RESOLVER,
+    # Each adds one rule the lint refuses but a probe of only fixed
+    # destinations would miss: port scoping lost for TCP, host scoping
+    # lost on the serving ports, or binds on any address and port.
+    "tcp-loopback-any-port": lambda p, c: BASE + scoped(p, c) + '(allow network-outbound (remote tcp "localhost:*"))'
+                                          + UNIX + RESOLVER,
+    "tcp-any-host-serving-ports": lambda p, c: BASE + scoped(p, c) + f'(allow network-outbound (remote tcp "*:{p}") '
+                                               f'(remote tcp "*:{c}"))' + UNIX + RESOLVER,
+    "udp-any-host-serving-ports": lambda p, c: BASE + scoped(p, c) + f'(allow network-outbound (remote udp "*:{p}") '
+                                               f'(remote udp "*:{c}"))' + UNIX + RESOLVER,
+    "tcp-listen-any-address": lambda p, c: BASE + scoped(p, c) + '(allow network-inbound (local tcp "*:*"))'
+                                           + UNIX + RESOLVER,
+    "udp-bind-any-address": lambda p, c: BASE + scoped(p, c) + '(allow network-inbound (local udp "*:*"))'
+                                         + UNIX + RESOLVER,
 }
+NO_BASE_DENY = (lambda p, c: '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))'
+                f'(allow network-outbound (remote ip "localhost:{p}") (remote ip "localhost:{c}"))')
 
 
 def test_darwin():
@@ -1315,11 +1430,8 @@ def test_darwin():
             assert failures == RECORDED[variant], (variant, failures, result["probe"])
         # With no base deny, the probe is refused almost everything and only
         # the readback shows the profile does not deny inbound.
-        refused(lambda: m.preflight(
-            os.path.join(directory, "no-base-deny"),
-            render=lambda p, c: '(version 1)(allow default)(deny network-outbound (remote ip "*:*"))'
-                                f'(allow network-outbound (remote ip "localhost:{p}") (remote ip "localhost:{c}"))'),
-            "does not read as sandboxed with the network denied")
+        refused(lambda: m.preflight(os.path.join(directory, "no-base-deny"), render=NO_BASE_DENY),
+                "does not read as sandboxed with the network denied")
     passed("real sandbox-exec preflight against the rendered profile and its mutants")
 
 

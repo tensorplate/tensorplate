@@ -80,7 +80,10 @@ TENSORPLATE_PROCESS_PATTERN = (
 IP_BOUND_IF = 25
 IPV6_BOUND_IF = 125
 
-# Destinations the profile must refuse with EPERM, named by role.
+# Operations the profile must refuse with EPERM, named by role. The same
+# operations made without the sandbox must not be refused, or EPERM under
+# the sandbox would prove nothing about the sandbox; mDNSResponder must
+# answer the unsandboxed control outright.
 DENIAL_NAMES = (
     "tcp_public_v4",
     "tcp_metadata_link_local_v4",
@@ -88,12 +91,21 @@ DENIAL_NAMES = (
     "udp_documentation_v6",
     "udp_fe80_1_unlisted_port",
     "udp_loopback_unlisted_port",
+    "tcp_loopback_unlisted_port",
+    "tcp_test_net_v4_serving_port",
+    "udp_test_net_v4_serving_port",
+    "tcp_documentation_v6_serving_port",
+    "udp_documentation_v6_serving_port",
+    "tcp_test_net_v4_candidate_port",
+    "udp_test_net_v4_candidate_port",
+    "tcp_documentation_v6_candidate_port",
+    "udp_documentation_v6_candidate_port",
+    "tcp_listen_wildcard_unlisted_port",
+    "tcp_listen_loopback_unlisted_port",
+    "udp_bind_wildcard_unlisted_port",
     "udp_test_net_v4_from_child",
     "unix_mdnsresponder",
 )
-# The same sends made without the sandbox must not be refused, or EPERM
-# under the sandbox would prove nothing about the sandbox.
-CONTROL_NOT_REFUSED = ("udp_test_net_v4", "udp_fe80_1_unlisted_port")
 
 DOCTOR_FINDINGS_OK = (
     "platform_row",
@@ -186,7 +198,9 @@ def lint_profile(text):
     """Names of the structural rules a profile breaks; empty when sound.
 
     Written independently of PROFILE_TEMPLATE, so a change to the
-    template that weakens it is refused at render time.
+    template that weakens it is refused at render time. The named rules
+    say what broke; only_expected_rules also refuses a rule added with
+    any other filter, such as `(remote tcp ...)` or a bare operation.
     """
     problems = set()
     if "\n" in text or "\r" in text:
@@ -216,6 +230,17 @@ def lint_profile(text):
                 ports.append(int(port.group(1)))
     if len(ports) != 2:
         problems.add("two_serving_ports")
+    elif forms != [
+        "(version 1)",
+        "(allow default)",
+        "(deny network*)",
+        f'(allow network-inbound (local ip "localhost:{ports[0]}") (local ip "localhost:{ports[1]}"))',
+        f'(allow network-outbound (remote ip "localhost:{ports[0]}") (remote ip "localhost:{ports[1]}"))',
+        "(allow network-bind network-inbound (local unix-socket))",
+        "(allow network-outbound (remote unix-socket))",
+        '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
+    ]:
+        problems.add("only_expected_rules")
     for direction, filter_kind in (("inbound", "local"), ("outbound", "remote")):
         wanted = {f'({filter_kind} ip "localhost:{port}")' for port in ports}
         if not any(
@@ -410,12 +435,20 @@ def sandbox_check(pid, operation):
     return _SANDBOX_CHECK[0](pid, operation.encode("ascii") if operation else None, 0)
 
 
-def process_identity(pid):
-    """Start time and executable of a live process, or None."""
-    result = subprocess.run(["ps", "-o", "lstart=,comm=", "-p", str(pid)],
+def process_status(pid):
+    """(state, start time and executable) of a process ps lists, or None."""
+    result = subprocess.run(["ps", "-o", "stat=,lstart=,comm=", "-p", str(pid)],
                             capture_output=True, text=True)
-    text = result.stdout.strip()
-    return text if result.returncode == 0 and text else None
+    fields = result.stdout.strip().split(None, 1) if result.returncode == 0 else []
+    return (fields[0], fields[1]) if len(fields) == 2 else None
+
+
+def process_identity(pid):
+    """Start time and executable of a live process, or None. A zombie has
+    exited: sandbox_check reads it as sandboxed whatever it ran under. The
+    state is left out of the identity because a live process changes it."""
+    status = process_status(pid)
+    return None if status is None or "Z" in status[0] else status[1]
 
 
 def process_arguments(pid):
@@ -443,9 +476,28 @@ def read_sandbox_state(pid):
 
 def discrimination_controls(profile_path, attempts=100):
     """Prove, on this host and now, that the readback tells sandboxed from
-    unsandboxed processes and rejects a process that has exited."""
+    unsandboxed processes and rejects a process that has exited, whether
+    or not its parent has reaped it yet."""
     if any(read_sandbox_state(os.getpid()).values()):
         raise CheckFailed("readback control: this unsandboxed process reads as sandboxed")
+    exited = subprocess.Popen(["/usr/bin/true"])
+    try:
+        # Not reaped until the finally clause: ps lists it as a zombie.
+        for _ in range(attempts):
+            status = process_status(exited.pid)
+            if status and "Z" in status[0]:
+                break
+            time.sleep(0.05)
+        else:
+            raise CheckFailed("readback control: the exited process never showed as a zombie")
+        try:
+            read_sandbox_state(exited.pid)
+        except ProcessGone:
+            pass
+        else:
+            raise CheckFailed("readback control: an unreaped exited process passed the identity check")
+    finally:
+        exited.wait()
     sleeper = subprocess.Popen(["sandbox-exec", "-f", profile_path, "/bin/sleep", "60"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -471,11 +523,12 @@ def discrimination_controls(profile_path, attempts=100):
     except ProcessGone:
         pass
     else:
-        raise CheckFailed("readback control: an exited process passed the identity check")
+        raise CheckFailed("readback control: a reaped exited process passed the identity check")
     return {
         "unsandboxed_process_reads_unsandboxed": True,
         "sandboxed_process_reads_network_denied": True,
         "exited_process_rejected": True,
+        "unreaped_exited_process_rejected": True,
     }
 
 
@@ -564,10 +617,13 @@ def tensorplate_processes():
 
 
 def lsof(arguments):
-    result = subprocess.run(["lsof"] + arguments, capture_output=True, text=True)
+    # -w: warnings off, so anything on stderr is an error.
+    result = subprocess.run(["lsof", "-w"] + arguments, capture_output=True, text=True)
     # lsof exits 1 both when nothing matched and when any one of several
-    # -p processes has no matching file, so the output decides.
-    if result.returncode not in (0, 1):
+    # -p processes has no matching file, so the output decides; but it
+    # also exits 1, with nothing on stdout, when it could not run the
+    # query at all, and then only stderr tells.
+    if result.returncode not in (0, 1) or result.stderr.strip():
         raise CheckFailed(f"lsof failed with status {result.returncode}: {result.stderr.strip()}")
     return result.stdout
 
@@ -597,20 +653,22 @@ def parse_lsof(text):
     return sockets
 
 
-def check_listeners(sockets, pids, serving_port):
+def check_listeners(sockets, pids, tree_pids, serving_port):
+    """Every internet socket of the TensorPlate processes (`pids`) is on
+    loopback, and the agent's process tree holds the serving listener."""
     failures, listener = set(), False
     for item in sockets:
         local = (item["name"] or "").split("->", 1)[0]
         host = local.rpartition(":")[0]
         if item["pid"] not in pids:
-            failures.add("sockets_owned_by_tree")
+            failures.add("sockets_owned_by_tensorplate_processes")
         # `*:*` is a socket that was never bound or connected: it has no
         # port, so nothing can reach it. A wildcard address with a port is
         # a listener or bound socket any interface can reach.
         if host not in ("127.0.0.1", "[::1]") and local != "*:*":
             failures.add("loopback_only")
         if item["protocol"] == "TCP" and item["state"] == "LISTEN" and \
-                local == f"127.0.0.1:{serving_port}" and item["pid"] in pids:
+                local == f"127.0.0.1:{serving_port}" and item["pid"] in tree_pids:
             listener = True
     if not listener:
         failures.add("serving_listener_in_tree")
@@ -646,11 +704,23 @@ def udp_send(host, port, family=socket.AF_INET, scope_lo0=False):
         sock.close()
 
 
-def tcp_connect(host, port):
-    sock = _pinned(socket.AF_INET, socket.SOCK_STREAM)
+def tcp_connect(host, port, family=socket.AF_INET):
+    sock = _pinned(family, socket.SOCK_STREAM)
     sock.settimeout(3)
     try:
         sock.connect((host, port))
+    finally:
+        sock.close()
+
+
+def bind_unlisted_port(host, kind):
+    """Bind, and listen for TCP, on a port the kernel would pick: the
+    request names port 0, which is not a serving port."""
+    sock = socket.socket(socket.AF_INET, kind)
+    try:
+        sock.bind((host, 0))
+        if kind == socket.SOCK_STREAM:
+            sock.listen(1)
     finally:
         sock.close()
 
@@ -687,8 +757,12 @@ def http_get_json(url):
 
 def child_udp_send():
     """The same send from a child process, which inherits the sandbox."""
-    result = subprocess.run([sys.executable, os.path.abspath(__file__), "child-udp"],
-                            capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run([sys.executable, os.path.abspath(__file__), "child-udp"],
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        # A child that never ran sent nothing: its EPERM is not a refusal.
+        return f"child_not_run_{type(error).__name__}"
     return result.stdout.strip() if result.returncode == 0 else f"child_exit_{result.returncode}"
 
 
@@ -706,8 +780,11 @@ def attempt(operation):
     return outcome if isinstance(outcome, str) else "ok"
 
 
-def denial_operations():
-    return (
+def denial_operations(ports):
+    """(name, operation) for every DENIAL_NAMES entry. `ports` are the two
+    serving ports the profile allows on loopback: another host on those
+    ports, and loopback on any other port, must still be refused."""
+    operations = [
         ("tcp_public_v4", lambda: tcp_connect("1.1.1.1", 443)),
         ("tcp_metadata_link_local_v4", lambda: tcp_connect("169.254.169.254", 80)),
         ("udp_test_net_v4", lambda: udp_send("192.0.2.1", 9)),
@@ -715,18 +792,36 @@ def denial_operations():
         ("udp_fe80_1_unlisted_port",
          lambda: udp_send("fe80::1", 9, socket.AF_INET6, scope_lo0=True)),
         ("udp_loopback_unlisted_port", lambda: udp_send("127.0.0.1", 9)),
+        # Refused: EPERM. Allowed with nothing listening: ECONNREFUSED.
+        ("tcp_loopback_unlisted_port", lambda: tcp_connect("127.0.0.1", 9)),
+    ]
+    for role, port in zip(("serving", "candidate"), ports):
+        operations += [
+            (f"tcp_test_net_v4_{role}_port", lambda port=port: tcp_connect("192.0.2.1", port)),
+            (f"udp_test_net_v4_{role}_port", lambda port=port: udp_send("192.0.2.1", port)),
+            (f"tcp_documentation_v6_{role}_port",
+             lambda port=port: tcp_connect("2001:db8::1", port, socket.AF_INET6)),
+            (f"udp_documentation_v6_{role}_port",
+             lambda port=port: udp_send("2001:db8::1", port, socket.AF_INET6)),
+        ]
+    operations += [
+        ("tcp_listen_wildcard_unlisted_port",
+         lambda: bind_unlisted_port("0.0.0.0", socket.SOCK_STREAM)),
+        ("tcp_listen_loopback_unlisted_port",
+         lambda: bind_unlisted_port("127.0.0.1", socket.SOCK_STREAM)),
+        ("udp_bind_wildcard_unlisted_port",
+         lambda: bind_unlisted_port("0.0.0.0", socket.SOCK_DGRAM)),
         ("udp_test_net_v4_from_child", child_udp_send),
         ("unix_mdnsresponder", lambda: unix_connect(MDNS_SOCKET)),
-    )
+    ]
+    return operations
 
 
-def run_control():
-    operations = dict(denial_operations())
-    return {name: attempt(operations[name])
-            for name in CONTROL_NOT_REFUSED + ("unix_mdnsresponder",)}
+def run_control(ports):
+    return {name: attempt(operation) for name, operation in denial_operations(ports)}
 
 
-def run_probe(agent_socket, health_url, listen_port=None):
+def run_probe(agent_socket, health_url, ports, listen_port=None):
     allowed = {"unix_agent_socket": attempt(lambda: unix_connect(agent_socket))}
     if listen_port:
         allowed["tcp_loopback_listen_candidate_port"] = attempt(
@@ -734,7 +829,7 @@ def run_probe(agent_socket, health_url, listen_port=None):
     health = {}
     request = attempt(lambda: health.update(http_get_json(health_url)))
     return {
-        "denied": {name: attempt(operation) for name, operation in denial_operations()},
+        "denied": {name: attempt(operation) for name, operation in denial_operations(ports)},
         "allowed": allowed,
         "health": {
             "request": request,
@@ -746,11 +841,12 @@ def run_probe(agent_socket, health_url, listen_port=None):
 
 def classify(probe, control, expected_deployment, listen_port_checked=False):
     failures = []
-    for name in CONTROL_NOT_REFUSED:
-        if control.get(name) in (None, "EPERM", "pin_failed"):
+    for name in DENIAL_NAMES:
+        if name == "unix_mdnsresponder":
+            if control.get(name) != "ok":
+                failures.append("control_mdnsresponder_reachable")
+        elif control.get(name) in (None, "EPERM", "pin_failed"):
             failures.append(f"control_not_refused:{name}")
-    if control.get("unix_mdnsresponder") != "ok":
-        failures.append("control_mdnsresponder_reachable")
     denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
     for name in DENIAL_NAMES:
         if denied.get(name) != "EPERM":
@@ -844,13 +940,13 @@ def preflight(work_dir, render=None):
     socket_path = os.path.join(socket_dir, "agent.sock")
     try:
         with loopback_services(serving, socket_path, PREFLIGHT_DEPLOYMENT):
-            control = run_control()
+            control = run_control((serving, candidate))
             controls = discrimination_controls(profile_path)
             child = subprocess.run(
                 ["sandbox-exec", "-f", profile_path, sys.executable, os.path.abspath(__file__),
                  "probe", "--agent-socket", socket_path,
                  "--health-url", f"http://127.0.0.1:{serving}/health",
-                 "--listen-port", str(candidate)],
+                 "--ports", f"{serving},{candidate}", "--listen-port", str(candidate)],
                 capture_output=True, text=True, timeout=300,
             )
     finally:
@@ -1074,6 +1170,14 @@ def _emit(result, out, failures=(), what="checks"):
             handle.write(text + "\n")
 
 
+def _port_pair(text):
+    """`serving,candidate`, as profile-ports prints them."""
+    items = text.split(",")
+    if len(items) != 2 or not all(re.fullmatch(r"[0-9]+", item) for item in items):
+        raise argparse.ArgumentTypeError(f"expected two ports as serving,candidate, found {text!r}")
+    return int(items[0]), int(items[1])
+
+
 def _read_print(path):
     if path == "-":
         return sys.stdin.read()
@@ -1112,10 +1216,12 @@ def main(argv=None):
             opt("--pids-file"), opt("--all-tensorplate-processes", action="store_true"))
     command("process-tree", opt("--job", required=True), opt("--pids-out", required=True))
     command("quiesced", opt("--profile", required=True), opt("--attempts", type=int, default=30))
-    command("listeners", opt("--pids-file", required=True), opt("--status", required=True))
-    command("control")
+    command("listeners", opt("--pids-file", required=True), opt("--job", action="append", default=[]),
+            opt("--status", required=True))
+    command("control", opt("--ports", type=_port_pair, required=True))
     command("probe", opt("--agent-socket", required=True), opt("--health-url"),
-            opt("--status"), opt("--listen-port", type=int))
+            opt("--status"), opt("--ports", type=_port_pair, required=True),
+            opt("--listen-port", type=int))
     command("classify", opt("--probe", required=True), opt("--control", required=True),
             opt("--deployment", required=True))
     command("preflight", opt("--work-dir", required=True))
@@ -1217,9 +1323,13 @@ def _run(args):
             f"{len(pids)} TensorPlate processes and "
             f"{'a' if listening else 'no'} serving-port listener remain after the services stopped")
     elif name == "listeners":
-        pids = _pids_file(args.pids_file)
-        if not pids:
+        tree = _pids_file(args.pids_file)
+        if not tree:
             raise CheckFailed("the process tree is empty")
+        # Every TensorPlate process, not only the agent's tree: the
+        # observability service, and anything else matching the pattern.
+        pids = list(dict.fromkeys(tree + [_job_pid(path) for path in args.job] +
+                                  tensorplate_processes()))
         _, _, url = status_check(_load_json(args.status), None, ())
         try:
             serving_port = urllib.parse.urlsplit(url).port
@@ -1228,12 +1338,13 @@ def _run(args):
         output = lsof(["-nP", "-F", "pPnT", "-a", "-p", ",".join(str(pid) for pid in pids), "-i"])
         print(output, end="")
         sockets = parse_lsof(output)
-        failures = check_listeners(sockets, set(pids), serving_port)
-        _emit({"internet_sockets": len(sockets), "loopback_only": "loopback_only" not in failures,
+        failures = check_listeners(sockets, set(pids), set(tree), serving_port)
+        _emit({"tensorplate_processes": len(pids), "internet_sockets": len(sockets),
+               "loopback_only": "loopback_only" not in failures,
                "serving_listener_in_tree": "serving_listener_in_tree" not in failures},
               args.out, failures, "listener checks")
     elif name == "control":
-        _emit(run_control(), args.out)
+        _emit(run_control(args.ports), args.out)
     elif name == "probe":
         health_url = args.health_url
         if args.status:
@@ -1242,7 +1353,7 @@ def _run(args):
             health_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, "/health", "", ""))
         if not health_url:
             raise CheckFailed("probe needs --health-url or --status")
-        _emit(run_probe(args.agent_socket, health_url, args.listen_port), args.out)
+        _emit(run_probe(args.agent_socket, health_url, args.ports, args.listen_port), args.out)
     elif name == "classify":
         failures = classify(_load_json(args.probe), _load_json(args.control), args.deployment)
         _emit({"network_denied_except_loopback_serving_ports": True}, args.out, failures,

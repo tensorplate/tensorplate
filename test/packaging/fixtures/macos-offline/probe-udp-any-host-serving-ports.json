@@ -38,14 +38,14 @@
       "tcp_test_net_v4_serving_port": "EPERM",
       "udp_bind_wildcard_unlisted_port": "EPERM",
       "udp_documentation_v6": "EPERM",
-      "udp_documentation_v6_candidate_port": "EPERM",
-      "udp_documentation_v6_serving_port": "EPERM",
+      "udp_documentation_v6_candidate_port": "EHOSTUNREACH",
+      "udp_documentation_v6_serving_port": "EHOSTUNREACH",
       "udp_fe80_1_unlisted_port": "EPERM",
       "udp_loopback_unlisted_port": "EPERM",
       "udp_test_net_v4": "EPERM",
-      "udp_test_net_v4_candidate_port": "EPERM",
+      "udp_test_net_v4_candidate_port": "ENETUNREACH",
       "udp_test_net_v4_from_child": "EPERM",
-      "udp_test_net_v4_serving_port": "EPERM",
+      "udp_test_net_v4_serving_port": "ENETUNREACH",
       "unix_mdnsresponder": "EPERM"
     },
     "health": {
@@ -54,5 +54,5 @@
       "state": "ready"
     }
   },
-  "profile_variant": "final"
+  "profile_variant": "udp-any-host-serving-ports"
 }

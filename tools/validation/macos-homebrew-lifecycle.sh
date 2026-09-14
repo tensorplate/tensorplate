@@ -1119,7 +1119,8 @@ verify_normal_supervision() {
 # sandbox must be refused every other destination with EPERM, where an
 # unsandboxed control's sends are not; sandbox_check must read every process in
 # the service trees as sandboxed with the network denied; and every
-# internet socket the tree holds must be bound to loopback.
+# internet socket a TensorPlate process holds, other than one never bound,
+# must be on loopback.
 #
 # Accepted residual gaps: SBPL `localhost` matches every address
 # configured on the host whatever the interface, so fe80::1 (on lo0)
@@ -1155,7 +1156,9 @@ verify_offline_runtime() {
   offline_helper render-profile --agent-config "${prefix}/etc/tensorplate/agent.json" \
     --profile "$offline_profile" --out "${denial_dir}/profile.json" ||
     die "cannot render the offline profile from the installed agent config"
-  offline_helper control --out "${denial_dir}/control.json" ||
+  offline_ports="$(offline_helper profile-ports --profile "$offline_profile")" ||
+    die "cannot read the serving ports from the offline profile"
+  offline_helper control --ports "$offline_ports" --out "${denial_dir}/control.json" ||
     die "the unsandboxed network control failed"
   agent_log_offset="$(offline_helper log-size --log "${log_dir}/agent.error.log")" ||
     die "cannot size the agent launchd error log"
@@ -1229,7 +1232,8 @@ verify_offline_runtime() {
 
   run_denied "$python_bin" "$offline_helper_path" probe \
     --agent-socket "${prefix}/var/run/tensorplate/agent.sock" \
-    --status "${denial_dir}/status-deployed.json" --out "${denial_dir}/probe.json" ||
+    --status "${denial_dir}/status-deployed.json" --ports "$offline_ports" \
+    --out "${denial_dir}/probe.json" ||
     die "the network probe did not run under the offline profile"
   offline_helper classify --probe "${denial_dir}/probe.json" \
     --control "${denial_dir}/control.json" --deployment "$offline_deployment_id" \
@@ -1244,8 +1248,9 @@ verify_offline_runtime() {
     --out "${denial_dir}/tree-sandbox.json" ||
     die "a process in the service trees does not read back as sandboxed with the network denied"
   offline_helper listeners --pids-file "${denial_dir}/tree-pids.txt" \
+    --job "${denial_dir}/observability-denied.json" \
     --status "${denial_dir}/status-deployed.json" --out "${denial_dir}/listeners.json" ||
-    die "the agent's process tree holds a non-loopback socket or no serving listener"
+    die "a TensorPlate process holds a non-loopback socket, or the agent's tree holds no serving listener"
 
   doctor_status=0
   run_denied tensorplate doctor --output json >"${denial_dir}/doctor.json" \

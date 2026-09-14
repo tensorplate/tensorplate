@@ -36,7 +36,7 @@
       "tcp_public_v4": "EPERM",
       "tcp_test_net_v4_candidate_port": "EPERM",
       "tcp_test_net_v4_serving_port": "EPERM",
-      "udp_bind_wildcard_unlisted_port": "EPERM",
+      "udp_bind_wildcard_unlisted_port": "ok",
       "udp_documentation_v6": "EPERM",
       "udp_documentation_v6_candidate_port": "EPERM",
       "udp_documentation_v6_serving_port": "EPERM",
@@ -54,5 +54,5 @@
       "state": "ready"
     }
   },
-  "profile_variant": "final"
+  "profile_variant": "udp-bind-any-address"
 }

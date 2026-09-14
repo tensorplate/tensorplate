@@ -130,6 +130,7 @@ def unload_job(state, label):
         if MODES & {"orphan-sidecar", "slow-exit-sidecar"} and proc["sandboxed"] and \
                 "-m tensorplate_pytorch_backend" in proc["args"]:
             proc.update(parent=1, label=None)
+            state["orphaned_at_pgrep_call"] = state.get("pgrep_u_calls", 0)
             continue
         del state["procs"][pid]
 
@@ -159,10 +160,15 @@ def fake_brew(args):
         }]))
         return 0
     if action == "stop":
-        if "stop-leaves-loaded" not in MODES:
+        if "stop-leaves-loaded" not in MODES and not (
+                "stop-leaves-observability-loaded" in MODES and service == OBSERVABILITY):
             unload_job(state, label)
             if "--keep" not in rest:
                 os.unlink(launch_agent(service))
+            if "stop-leaves-process" in MODES and service == AGENT:
+                # A worker launchd no longer tracks, holding no listener.
+                new_process(state, [os.path.join(PREFIX, "opt/tensorplate-serving/libexec/tensorplate-serving"),
+                                    "--config", "worker.json"], False, 1, None)
         save_state(state)
         return 0
     if action == "run":
@@ -198,6 +204,12 @@ def fake_brew(args):
             state.get("offline_done") else launch_agent(service)
         load_job(state, service, loaded_from)
         save_state(state)
+        # Like Homebrew, report success after the job is loaded, and exit
+        # non-zero when that report cannot be written.
+        try:
+            print(f"==> Successfully started `{service}` (label: {label})", flush=True)
+        except OSError:
+            return 1
         return 0
     return 9
 
@@ -226,9 +238,13 @@ def fake_launchctl(args):
         if "print-error" in MODES:
             print("Unexpected launchctl failure", file=sys.stderr)
             return 5
-        print(launchctl_document(state, label), end="")
+        document = launchctl_document(state, label)
+        if "print-unparsable" in MODES:
+            # A format the parser does not know: no closing brace.
+            document = document[:document.rindex("}")]
+        print(document, end="")
         return 0
-    if "bootout-fails" in MODES:
+    if "bootout-fails" in MODES or ("bootout-fails-observability" in MODES and label == label_of(OBSERVABILITY)):
         return 5
     if "slow-bootout" in MODES:
         marker("bootout-started")
@@ -255,6 +271,8 @@ def fake_lsof(args):
             print("f9\nPTCP\nn127.0.0.1:18080->127.0.0.1:50000\nTST=ESTABLISHED")
             if "wildcard-listener" in MODES:
                 print("f11\nPTCP\nn*:18081\nTST=LISTEN")
+        if proc and proc["label"] == label_of(OBSERVABILITY) and "observability-wildcard-listener" in MODES:
+            print(f"p{pid}\nf5\nPUDP\nn*:18081")
     return 1
 
 
@@ -268,7 +286,8 @@ def fake_pgrep(args):
         # A sandboxed sidecar outlives its job's bootout for a moment: it
         # is still listed the first time the restore looks.
         state["pgrep_u_calls"] = state.get("pgrep_u_calls", 0) + 1
-        if "slow-exit-sidecar" in MODES and state["pgrep_u_calls"] >= 3:
+        if "slow-exit-sidecar" in MODES and "orphaned_at_pgrep_call" in state and \
+                state["pgrep_u_calls"] >= state["orphaned_at_pgrep_call"] + 2:
             state["procs"] = {pid: proc for pid, proc in state["procs"].items() if proc["label"]}
         save_state(state)
         found = [pid for pid, proc in state["procs"].items() if re.search(args[3], proc["args"])]
@@ -292,8 +311,8 @@ def fake_ps(args):
     proc = state["procs"].get(pid)
     if proc is None:
         os.execv(real_tool("ps"), ["ps"] + args)
-    if fields == "lstart=,comm=":
-        print(f"{proc['lstart']} {proc['comm']}")
+    if fields == "stat=,lstart=,comm=":
+        print(f"S {proc['lstart']} {proc['comm']}")
     elif fields == "args=":
         print(proc["args"])
     else:
@@ -397,11 +416,13 @@ def fake_tensorplate(args):
         findings = [{"id": name, "status": "ok", "severity": "info", "message": "ok"}
                     for name in ("platform_profile", "agent_reachable", "agent_service_state",
                                  "observability_service_state")]
+        if "--skip-agent" in args:
+            findings[1].update(status="skipped", message="agent probe skipped via --skip-agent")
         findings.append({"id": "platform_row", "status": "ok", "severity": "info",
                          "message": "resolves to support row `macos26-m1pro-16gb`"})
         print(json.dumps({"command": "doctor", "status": "ok",
                           "payload": {"failing": failing, "total": len(findings), "findings": findings}}))
-        return 10 if failing else 0
+        return 10 if failing or "doctor-exit-nonzero" in MODES else 0
     return 64
 
 

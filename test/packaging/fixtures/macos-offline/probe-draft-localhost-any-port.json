@@ -1,7 +1,24 @@
 {
   "control": {
+    "tcp_documentation_v6_candidate_port": "EHOSTUNREACH",
+    "tcp_documentation_v6_serving_port": "EHOSTUNREACH",
+    "tcp_listen_loopback_unlisted_port": "ok",
+    "tcp_listen_wildcard_unlisted_port": "ok",
+    "tcp_loopback_unlisted_port": "ECONNREFUSED",
+    "tcp_metadata_link_local_v4": "ENETUNREACH",
+    "tcp_public_v4": "ENETUNREACH",
+    "tcp_test_net_v4_candidate_port": "ENETUNREACH",
+    "tcp_test_net_v4_serving_port": "ENETUNREACH",
+    "udp_bind_wildcard_unlisted_port": "ok",
+    "udp_documentation_v6": "EHOSTUNREACH",
+    "udp_documentation_v6_candidate_port": "EHOSTUNREACH",
+    "udp_documentation_v6_serving_port": "EHOSTUNREACH",
     "udp_fe80_1_unlisted_port": "ok",
+    "udp_loopback_unlisted_port": "ok",
     "udp_test_net_v4": "ENETUNREACH",
+    "udp_test_net_v4_candidate_port": "ENETUNREACH",
+    "udp_test_net_v4_from_child": "ENETUNREACH",
+    "udp_test_net_v4_serving_port": "ENETUNREACH",
     "unix_mdnsresponder": "ok"
   },
   "probe": {
@@ -10,13 +27,25 @@
       "unix_agent_socket": "ok"
     },
     "denied": {
+      "tcp_documentation_v6_candidate_port": "EPERM",
+      "tcp_documentation_v6_serving_port": "EPERM",
+      "tcp_listen_loopback_unlisted_port": "ok",
+      "tcp_listen_wildcard_unlisted_port": "ok",
+      "tcp_loopback_unlisted_port": "ECONNREFUSED",
       "tcp_metadata_link_local_v4": "EPERM",
       "tcp_public_v4": "EPERM",
+      "tcp_test_net_v4_candidate_port": "EPERM",
+      "tcp_test_net_v4_serving_port": "EPERM",
+      "udp_bind_wildcard_unlisted_port": "ok",
       "udp_documentation_v6": "EPERM",
+      "udp_documentation_v6_candidate_port": "EPERM",
+      "udp_documentation_v6_serving_port": "EPERM",
       "udp_fe80_1_unlisted_port": "ok",
       "udp_loopback_unlisted_port": "ok",
       "udp_test_net_v4": "EPERM",
+      "udp_test_net_v4_candidate_port": "EPERM",
       "udp_test_net_v4_from_child": "EPERM",
+      "udp_test_net_v4_serving_port": "EPERM",
       "unix_mdnsresponder": "EPERM"
     },
     "health": {

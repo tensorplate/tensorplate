@@ -31,7 +31,7 @@
       "tcp_documentation_v6_serving_port": "EPERM",
       "tcp_listen_loopback_unlisted_port": "EPERM",
       "tcp_listen_wildcard_unlisted_port": "EPERM",
-      "tcp_loopback_unlisted_port": "EPERM",
+      "tcp_loopback_unlisted_port": "ECONNREFUSED",
       "tcp_metadata_link_local_v4": "EPERM",
       "tcp_public_v4": "EPERM",
       "tcp_test_net_v4_candidate_port": "EPERM",
@@ -54,5 +54,5 @@
       "state": "ready"
     }
   },
-  "profile_variant": "final"
+  "profile_variant": "tcp-loopback-any-port"
 }
