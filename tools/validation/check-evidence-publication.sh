@@ -22,19 +22,22 @@
 #
 # Every file and directory name below each PATH is scanned as well as
 # every file's contents. Contents are scanned line by line, then again as
-# decoded JSON strings (whole documents or JSON Lines), and JSON arrays of
-# byte values are decoded too, because journalctl encodes a non-printable
-# or non-UTF-8 field value that way. A symlink, a special file, and a file
-# that is not UTF-8 text or contains NUL are findings: archives and
-# terminal captures cannot be reviewed and are never publishable.
+# the decoded strings of every JSON object or array found in them: a whole
+# document, JSON Lines, concatenated pretty-printed records, or a record
+# quoted after other text. JSON arrays of byte values are decoded too,
+# because journalctl encodes a non-printable or non-UTF-8 field value that
+# way. A symlink, a special file, and a file that is not UTF-8 text or
+# contains NUL are findings: archives and terminal captures cannot be
+# reviewed and are never publishable.
 #
 # Findings print as `<ref>:<line>: <class> (<n> chars)`. `<ref>` is the
 # path relative to the PATH argument, or `path#N` when a component of the
 # path is itself a finding; N is line N of
-# `(cd PATH && find . -mindepth 1 | LC_ALL=C sort)`. Line 0 means the
-# finding came from a decoded JSON document rather than from one line, or
-# from the name rather than the contents. Literal findings name the
-# literal only by its line number in the literal file.
+# `(cd PATH && find . -mindepth 1 | LC_ALL=C sort)`. A finding inside a
+# JSON value is reported on the line the value starts on. Line 0 means the
+# finding is about the name or the whole file rather than the contents.
+# Literal findings name the literal only by its line number in the
+# literal file.
 #
 # Exit 0 when the evidence is publishable, 1 when there are findings, and
 # 2 when the scan did not reach a verdict (bad arguments or --help, an
@@ -104,6 +107,9 @@ JOURNAL_KEYS = frozenset((
 ))
 JOURNAL_TEXT_FIELD = re.compile(
     r"(?<![A-Za-z0-9_])(_HOSTNAME|_MACHINE_ID|_BOOT_ID|__CURSOR)=")
+# The same fields as a quoted key, where no JSON value can be decoded
+# around it: a record cut short by a log tail, or escaped inside a string.
+JOURNAL_QUOTED_KEY = re.compile(r"\\*[\"'](_[A-Za-z0-9_]+)\\*[\"'][ \t]*:")
 
 MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
 WEEKDAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
@@ -209,6 +215,9 @@ def scan_line(line, literals):
 
     for m in JOURNAL_TEXT_FIELD.finditer(line):
         add("journal-field", m.group(1))
+    for m in JOURNAL_QUOTED_KEY.finditer(line):
+        if m.group(1) not in JOURNAL_KEYS:
+            add("journal-field", m.group(1))
     for m in JOURNAL_SHORT.finditer(line):
         if m.group(1) != SYNTHETIC_HOST:
             add("journal-host", m.group(1))
@@ -280,13 +289,6 @@ def scan_line(line, literals):
     return found
 
 
-def scan_string(text, literals):
-    found = []
-    for line in text.split("\n"):
-        found.extend(scan_line(line, literals))
-    return found
-
-
 def is_byte_array(value):
     return bool(value) and all(
         type(item) is int and 0 <= item <= 255 for item in value)
@@ -299,49 +301,73 @@ def scan_json(document, literals):
     while pending:
         value = pending.pop()
         if isinstance(value, str):
-            found.extend(scan_string(value, literals))
+            found.extend((cls, length) for _, cls, length in scan_text(value, literals))
         elif isinstance(value, dict):
             journal = "MESSAGE" in value and any(k.startswith("_") for k in value)
             for key, child in value.items():
                 if key not in JOURNAL_KEYS and (journal or key.startswith("_")):
                     found.append(("journal-field", len(key)))
-                found.extend(scan_string(key, literals))
+                found.extend((cls, length) for _, cls, length in scan_text(key, literals))
                 pending.append(child)
         elif isinstance(value, list):
             if is_byte_array(value):
-                found.extend(scan_string(bytes(value).decode("utf-8", "replace"), literals))
+                text = bytes(value).decode("utf-8", "replace")
+                found.extend((cls, length) for _, cls, length in scan_text(text, literals))
             else:
                 pending.extend(value)
     return found
 
 
-def scan_contents(text, literals):
-    """Set of (line, class, length) for one file's text."""
-    lines = text.split("\n")
+JSON_START = re.compile(r"[\[{]")
+
+
+def json_values(text):
+    """(first line, last line, value) for every JSON object or array in text.
+
+    Not only a whole document or one record per line: jq's default output
+    and `journalctl -o json-pretty` concatenate pretty-printed records, and
+    a log line or a report detail can quote a record after other text.
+    Each value is decoded once, outermost first; scan_json walks what is
+    inside it.
+    """
+    decoder = json.JSONDecoder()
+    line = 1
+    counted = 0
+    index = 0
+    while True:
+        match = JSON_START.search(text, index)
+        if match is None:
+            return
+        start = match.start()
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except ValueError:
+            index = start + 1
+            continue
+        line += text.count("\n", counted, start)
+        first = line
+        line += text.count("\n", start, end)
+        counted = end
+        index = end
+        yield first, line, value
+
+
+def scan_text(text, literals):
+    """Set of (line, class, length) for text: its lines, then its JSON values.
+
+    A finding inside a JSON value is reported on the line the value starts
+    on, unless a line the value spans already reported the same finding.
+    """
     found = set()
-    for number, line in enumerate(lines, 1):
+    for number, line in enumerate(text.split("\n"), 1):
         for cls, length in scan_line(line, literals):
             found.add((number, cls, length))
-    try:
-        document = json.loads(text)
-    except ValueError:
-        for number, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if not stripped.startswith(("{", "[")):
-                continue
-            try:
-                record = json.loads(stripped)
-            except ValueError:
-                continue
-            for cls, length in scan_json(record, literals):
-                found.add((number, cls, length))
-        return found
-    # A whole-document finding is reported without a line unless the same
-    # finding was already reported on a line.
-    on_lines = set((cls, length) for _, cls, length in found)
-    for cls, length in scan_json(document, literals):
-        if (cls, length) not in on_lines:
-            found.add((0, cls, length))
+    for first, last, value in json_values(text):
+        on_lines = set((cls, length) for number, cls, length in found
+                       if first <= number <= last)
+        for cls, length in scan_json(value, literals):
+            if (cls, length) not in on_lines:
+                found.add((first, cls, length))
     return found
 
 
@@ -504,7 +530,7 @@ def main(argv):
             except UnicodeDecodeError:
                 report(0, "binary")
                 continue
-            for line, cls, length in scan_contents(text, literals):
+            for line, cls, length in scan_text(text, literals):
                 report(line, cls, length)
 
     if results:

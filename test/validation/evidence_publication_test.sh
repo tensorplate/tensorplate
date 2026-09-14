@@ -252,6 +252,60 @@ new_case
 add_line "    _BOOT_ID=${id32}"
 expect_finding "a verbose-format _BOOT_ID field" journal-field "$id32"
 
+# write_json <file> <mode> <record>: appends two journal records. Records:
+# machine (carries _MACHINE_ID), bytes (a byte-array MESSAGE quoting an
+# address) and code (carries CODE_FILE). Modes: pretty (jq's default
+# output: concatenated indented records), prefixed (each record on a log
+# line after other text), detail (records quoted inside one report string)
+# and truncated (one record cut short, as a log tail can leave it).
+write_json() {
+  python3 - "$1" "$2" "$3" "$host" "$id32" "$json_ipv4" <<'PY' || die "could not write $1"
+import json, sys
+path, mode, kind, host, id32, ipv4 = sys.argv[1:]
+record = {
+    "machine": {"MESSAGE": "started", "_PID": "42", "_MACHINE_ID": id32},
+    "bytes": {"MESSAGE": list(("peer " + ipv4 + " up").encode()), "_PID": "42"},
+    "code": {"MESSAGE": "started", "_PID": "42", "CODE_FILE": "src/" + host + ".c"},
+}[kind]
+records = [record, record]
+with open(path, "a") as handle:
+    if mode == "pretty":
+        handle.write("".join(json.dumps(r, indent=2) + "\n" for r in records))
+    elif mode == "prefixed":
+        handle.write("".join("record: " + json.dumps(r) + "\n" for r in records))
+    elif mode == "detail":
+        report = {"stages": [{"stage": "install", "detail": " ".join(json.dumps(r) for r in records)}]}
+        handle.write(json.dumps(report, indent=2) + "\n")
+    elif mode == "truncated":
+        handle.write("tail: " + json.dumps(records[0])[:-12] + "\n")
+PY
+}
+json_ipv4="198.18.$(random_octet).$(random_octet)"
+
+new_case
+write_json "${d}/agent-journal.txt" pretty machine
+expect_finding "concatenated pretty records carrying _MACHINE_ID" journal-field "$id32"
+
+new_case
+write_json "${d}/agent-journal.txt" pretty bytes
+expect_finding "concatenated pretty records with a byte-array MESSAGE" ipv4 "$json_ipv4"
+
+new_case
+write_json "${d}/agent-journal.txt" pretty code
+expect_finding "concatenated pretty records carrying CODE_FILE" journal-field "$host"
+
+new_case
+write_json "${d}/notes.log" prefixed bytes
+expect_finding "a record quoted after log text with a byte-array MESSAGE" ipv4 "$json_ipv4"
+
+new_case
+write_json "${d}/detail.json" detail bytes
+expect_finding "a record quoted in a report string with a byte-array MESSAGE" ipv4 "$json_ipv4"
+
+new_case
+write_json "${d}/notes.log" truncated machine
+expect_finding "a record cut short carrying _MACHINE_ID" journal-field "$id32"
+
 # --- Journal host prefixes, in every short format journalctl prints.
 new_case
 add_line "Sep 14 01:42:03 ${host} tensorplate-agent[42]: started"
