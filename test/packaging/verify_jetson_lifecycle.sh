@@ -276,13 +276,15 @@ case "$*" in
     : >"${TP_FAKE_CONFIG_BROKEN}"
     case "${TP_FAKE_MODE:-ok}" in
       crash-loop-signal-int) kill -INT "$PPID" ;;
-      crash-loop-signal-term) kill -TERM "$PPID" ;;
+      crash-loop-signal-term|crash-loop-signal-twice) kill -TERM "$PPID" ;;
       crash-loop-signal-hup) kill -HUP "$PPID" ;;
     esac
     ;;
   "cp -p "*" /etc/tensorplate/agent.json")
     case "$3" in "${TMPDIR}/"*/agent.json) ;; *) exit 9 ;; esac
     case "${TP_FAKE_MODE:-ok}" in
+      # A second signal while the first one's cleanup is restoring.
+      crash-loop-signal-twice) kill -TERM "$PPID" ;;
       crash-loop-restore-fails-once)
         if [ ! -f "${TP_FAKE_RESTORE_FAILED}" ]; then
           : >"${TP_FAKE_RESTORE_FAILED}"
@@ -411,6 +413,12 @@ case "$1" in
   show)
     broken=0
     [ -f "${TP_FAKE_CONFIG_BROKEN}" ] && broken=1
+    # systemctl failing to answer about the looping unit.
+    if [ "$broken" -eq 1 ]; then
+      case "${TP_FAKE_MODE:-ok}:$*" in
+        state-show-fails:*ActiveState*|restarts-show-fails:*NRestarts*|result-show-fails:*Result*) exit 1 ;;
+      esac
+    fi
     case "$*" in
       *ActiveState*)
         # A looping unit reads as failed between attempts, which is why
@@ -458,9 +466,6 @@ case "$1" in
         fi
         ;;
       *Result*)
-        if [ "$broken" -eq 1 ] && [ "${TP_FAKE_MODE:-ok}" = result-show-fails ]; then
-          exit 1
-        fi
         if [ "$broken" -eq 1 ]; then printf 'start-limit-hit\n'; else printf 'success\n'; fi
         ;;
       *InvocationID*)
@@ -1579,13 +1584,17 @@ for mode_case in "crash-loop-keeps-restarting|the agent never settled" \
   check "  for the reason the case provokes" yes "$(logged "${evidence}/crash-loop.log" "${mode_case#*|}")"
 done
 
-evidence="${td}/stages-result-show-fails"
-check "a unit result systemctl cannot report fails crash-loop" fail \
-  "$(run_stages result-show-fails "$evidence" "" --bundle-dir "${td}/bundle-good" >/dev/null; \
-     stage_status "${evidence}/lifecycle-report.json" crash-loop)"
-check "  before any journal is taken as evidence" no \
-  "$([[ -e "${evidence}/crash-loop-journal.txt" ]] && echo yes || echo no)"
-check "  and the config is still restored" yes "$(config_restored)"
+# A property systemctl cannot report is not a value to settle or judge
+# on: an empty state or restart count would otherwise read as settled.
+for mode in state-show-fails restarts-show-fails result-show-fails; do
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails crash-loop" fail \
+    "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  before any journal is taken as evidence" no \
+    "$([[ -e "${evidence}/crash-loop-journal.txt" ]] && echo yes || echo no)"
+  check "  and the config is still restored" yes "$(config_restored)"
+done
 
 evidence="${td}/stages-crash-loop-journal-fails"
 check "a crash-loop journal capture that fails is recorded as a failed crash-loop" fail \
@@ -1640,7 +1649,9 @@ for recovery_case in "ok|9|systemctl reset-failed|clear the agent's failed state
   check "  and the backup is kept for manual recovery" yes "$(backup_retained)"
 done
 
-for signal_case in int:130 term:143 hup:129; do
+# "twice" sends a second TERM while the first one's cleanup is restoring
+# the config, which must not cut the restoration short.
+for signal_case in int:130 term:143 hup:129 twice:143; do
   signal="${signal_case%:*}"
   expected_status="${signal_case#*:}"
   evidence="${td}/stages-crash-loop-signal-${signal}"
