@@ -6,9 +6,10 @@ memory, and macOS 26. The M1 Pro run backs that exact row and is the currently
 available hardware target for the broader M-series Preview compatibility
 envelope; it does not claim per-SKU validation for other M-series chips. It
 covers formula-graph closure, launchd behavior, filesystem and UDS contracts,
-packaged-only discovery, the PyTorch MPS capability, deploy smoke, status and
-log output, offline checks, upgrade continuity from the CLI-only formula,
-rollback, and uninstall.
+packaged-only discovery, the PyTorch MPS capability, deploy smoke, offline
+checks, upgrade continuity from the CLI-only formula, rollback, and uninstall.
+The harness also has a status-logs stage covering status and log output. It
+was added after the 2026-08-17 record, which therefore does not include it.
 The installed-registry stage also proves that live M1 Pro detection selects
 the exact Production row instead of the lower-priority M-series Preview
 fallback, while retaining the fallback's 16 GiB admission ceiling.
