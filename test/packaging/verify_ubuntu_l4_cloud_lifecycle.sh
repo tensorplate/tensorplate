@@ -1596,11 +1596,18 @@ for case in \
   "upgrade-observability-not-restarted::observability MainPID 4242 did not change across the upgrade" \
   "upgrade-resets-conffile::the upgrade did not keep the operator-edited" \
   "upgrade-wrong-row::platform_row is warning" \
-  "upgrade-loses-deployment::worker round-trip checks failed"; do
-  mode="${case%%::*}"
-  message="${case#*::}"
-  evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_upgrade_stages "$mode" "$evidence" "" set-rc1)"
+  "upgrade-loses-deployment::worker round-trip checks failed" \
+  "ok:set-rc1/install.sh:step failed (exit 9): install.sh" \
+  "ok:>>:step failed (exit 9): operator edit"; do
+  mode="${case%%:*}"
+  rest="${case#*:}"
+  sudo_fail="${rest%%:*}"
+  message="${rest#*:}"
+  expected_status=1
+  if [[ -n "$sudo_fail" ]]; then expected_status=9; fi
+  evidence="${td}/stages-${mode}-${sudo_fail//[!a-z0-9]/-}"
+  check "${mode}${sudo_fail:+ with a failing ${sudo_fail}} fails the run" "$expected_status" \
+    "$(run_upgrade_stages "$mode" "$evidence" "$sudo_fail" set-rc1)"
   check "  crash-loop passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  upgrade is recorded as a failure" fail "$(stage_status "${evidence}/lifecycle-report.json" upgrade)"
   check "  and rollback never ran" absent "$(stage_status "${evidence}/lifecycle-report.json" rollback)"
