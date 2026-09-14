@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Lifecycle evidence is scanned for identifiers before it can be
+  published. `tools/validation/check-evidence-publication.sh` fails
+  closed on host names in journal, `hostnamectl` and `uname` output,
+  machine and boot ids, home paths, device and other UUIDs, IP and MAC
+  addresses, email addresses, cloud project paths, `.internal` and
+  `.local` names, serials, credentials, planning identifiers, journal
+  fields beyond a service's own, and symlinks, archives or other files
+  that are not text. It reads JSON strings and journalctl's byte-array
+  values as well as raw lines, and scans file and directory names too.
+  Operators add their own host, account, project and instance names
+  from a literal file kept outside the repository. Findings name a file,
+  a line and a class but never the matched value. Exit 0 is publishable,
+  1 is findings and 2 is no verdict. A new "evidence publication scan"
+  workflow runs its tests and scans `docs/validation/evidence` on every
+  pull request and on pushes to main, develop and release branches. The
+  evidence README now lists the self-describing synthetic value for each
+  identifier, and the runbooks require deriving Jetson stage times
+  before any log is edited.
+
 - A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
   run by hand on a VM the operator starts themselves. It provisions no
   cloud resources. Five canonical stages are exercised -- install,
