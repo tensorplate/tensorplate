@@ -1116,8 +1116,8 @@ verify_normal_supervision() {
 # sandbox-exec profile (macos_offline_runtime.py PROFILE_TEMPLATE) that
 # denies every network operation except loopback on the two serving
 # ports and unix sockets other than mDNSResponder. A probe inside the
-# sandbox must be refused every other destination with EPERM, where the
-# same sends outside it are not; sandbox_check must read every process in
+# sandbox must be refused every other destination with EPERM, where an
+# unsandboxed control's sends are not; sandbox_check must read every process in
 # the service trees as sandboxed with the network denied; and every
 # internet socket the tree holds must be bound to loopback.
 #
