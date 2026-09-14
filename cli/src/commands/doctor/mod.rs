@@ -20,9 +20,9 @@ use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
     classify_accelerator_probe_failure, identify, identify_accelerator,
-    AcceleratorProbeFailureClass, HostIdentity, HostReport, NvidiaSmiProbe, PlatformProbeError,
-    PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport, ProfileSelection,
-    RowMatch, SystemHostProbe,
+    AcceleratorProbeFailureClass, HostIdentity, HostReport, MachineTypeSource, NvidiaSmiProbe,
+    PlatformProbeError, PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport,
+    ProfileSelection, RowMatch, SystemHostProbe,
 };
 
 use crate::args::DoctorArgs;
@@ -329,6 +329,17 @@ pub fn render_host_section(
     }
     if let Some(machine_type) = identity.machine_type.as_deref() {
         os.push_str(&format!(" on {machine_type}"));
+        // Where the shape came from. Offline, a recorded shape is as good
+        // as the live one only because every fact it is bound to still
+        // matches, and the operator filing evidence has to be able to say so.
+        match host.exact.machine_type_source {
+            Some(MachineTypeSource::GceMetadata) => os.push_str(" (from GCE metadata)"),
+            Some(MachineTypeSource::RecordedFromMetadata) => os.push_str(
+                " (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; \
+                 CPU count, MemTotal and NVIDIA devices unchanged)",
+            ),
+            None => {}
+        }
     }
     let exact = [
         host.exact

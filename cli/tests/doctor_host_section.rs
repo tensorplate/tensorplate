@@ -871,6 +871,58 @@ fn undetectable_host_identity_never_fails_doctor() {
 }
 
 #[test]
+fn host_os_says_which_source_established_the_machine_type() {
+    let registry = registry();
+    let host_os = |report: &PlatformReport| {
+        let section = render_host_section(HostSectionDetection::Complete(report), Ok(&registry));
+        let row = section
+            .iter()
+            .find(|f| f.id == FindingId::PlatformRow)
+            .expect("platform_row");
+        assert_eq!(row.status, FindingStatus::Pass, "{}", render(&section));
+        assert!(
+            row.message.contains("ubuntu2404-x86-l4-g2s8"),
+            "{}",
+            row.message
+        );
+        section
+            .iter()
+            .find(|f| f.id == FindingId::HostOs)
+            .expect("host_os")
+            .message
+            .clone()
+    };
+
+    let live = report_for("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
+    let message = host_os(&live);
+    assert!(
+        message.contains(" on g2-standard-8 (from GCE metadata)"),
+        "{message}"
+    );
+
+    // The same instance with the metadata service unreachable and the
+    // record the agent wrote while it was reachable.
+    let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&sources_of(&fixture(
+        "ubuntu2404-x86-l4-g2s8",
+    )))
+    .expect("the live fixture records")
+    .to_json()
+    .expect("serializes");
+    let mut offline = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    offline.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    offline.gce_machine_type = None;
+    offline.machine_type_record = Some(record);
+    let mut report = identify_platform(&offline).expect("a matching record detects");
+    report.accelerator = live.accelerator.clone();
+    let message = host_os(&report);
+    assert!(
+        message.contains(" on g2-standard-8 (recorded from GCE metadata by tensorplate-agent;"),
+        "{message}"
+    );
+    assert!(!message.contains("(from GCE metadata)"), "{message}");
+}
+
+#[test]
 fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
     // An offline instance with no recorded machine type. Doctor must not
     // guess a shape, must not fail, and must not send the operator to
