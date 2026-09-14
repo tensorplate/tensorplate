@@ -16,6 +16,7 @@ use serde_json::json;
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, ControlRequest, ResponseStatus, SupervisionStatusSummary,
 };
+use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
@@ -210,6 +211,12 @@ fn agent_socket_hint() -> &'static str {
     "is `tensorplate-agent` running? check its state in this platform's service supervisor"
 }
 
+/// What to do when a Compute Engine instance whose metadata service could not
+/// be reached has a machine-type record this user cannot read. The record
+/// lives in the state directory, which only root and the `tensorplate` group
+/// can enter; nothing about the record itself is wrong.
+const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reached and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
+
 /// What to do when a Compute Engine instance could not establish its machine
 /// type without the metadata service. Neither re-running as another user nor
 /// attaching output helps: the fix is one agent start with the service
@@ -260,6 +267,14 @@ pub fn render_host_section(
             // different hints. Telling someone whose `/etc/nv_tegra_release`
             // is malformed to re-run as root wastes their next ten minutes.
             let hint = match err {
+                // Read only on a Compute Engine instance whose metadata
+                // service could not be reached, from a directory only root
+                // and the tensorplate group can enter.
+                PlatformProbeError::Unreadable { source_name, .. }
+                    if source_name.ends_with(MACHINE_TYPE_RECORD_PATH) =>
+                {
+                    RECORD_UNREADABLE_HINT
+                }
                 PlatformProbeError::Unreadable { .. } => {
                     "a detection source could not be read — re-run as a user that can read /etc and /proc"
                 }

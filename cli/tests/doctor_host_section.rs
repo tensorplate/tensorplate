@@ -971,6 +971,40 @@ fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
 }
 
 #[test]
+fn an_unreadable_machine_type_record_points_at_the_tensorplate_group() {
+    // Offline, as an operator outside the group that owns the state
+    // directory. The record is fine; this user cannot read it.
+    let registry = registry();
+    let hint_for = |source_name: &str| {
+        let err = PlatformProbeError::Unreadable {
+            source_name: source_name.to_string(),
+            detail: "Permission denied (os error 13)".to_string(),
+        };
+        let section =
+            render_host_section(HostSectionDetection::HostProbeFailed(&err), Ok(&registry));
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::HostFacts)
+            .expect("host_facts");
+        assert_eq!(facts.status, FindingStatus::Warning);
+        facts.hint.clone().expect("a hint")
+    };
+
+    let hint = hint_for("/var/lib/tensorplate/state/machine-type.json");
+    assert!(
+        hint.contains("member of the `tensorplate` group"),
+        "names the fix: {hint}"
+    );
+    assert!(!hint.contains("/etc and /proc"), "{hint}");
+
+    let hint = hint_for("/etc/os-release");
+    assert!(
+        hint.contains("/etc and /proc") && !hint.contains("tensorplate` group"),
+        "every other unreadable source keeps its hint: {hint}"
+    );
+}
+
+#[test]
 fn a_missing_registry_skips_the_profile_without_touching_the_host_lines() {
     let report = identify_platform(&sources_of(&fixture("macos26-m1pro-16gb"))).expect("detects");
     let section = render_host_section(HostSectionDetection::Complete(&report), Err(&NO_REGISTRY));
