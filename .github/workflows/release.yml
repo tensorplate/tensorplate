@@ -293,23 +293,13 @@ jobs:
       - name: Build amd64 serving worker
         shell: bash
         env:
-          CC: clang
-          CXX: clang++
           DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
         run: |
           set -Eeuo pipefail
-          # TensorRT stays OFF. A hosted runner has no CUDA/TensorRT SDK, and
-          # building the adapter without one produces a backend that
-          # registers, passes deploy admission, and only then returns
-          # Unsupported at engine load. Leaving it out means a TensorRT
-          # deploy fails at lookup instead — early, and for the real reason.
-          # The x86_64 deploy-smoke path is the python_pytorch sidecar, which
-          # is unconditional and needs no vendor SDK.
-          # -gdwarf-4: clang emits DWARF 5, whose .debug_addr section jammy's
-          # dwz (0.14) cannot read, and dh_dwz turns that into a hard
-          # dpkg-buildpackage failure. Pin the DWARF version rather than
-          # relying on a compiler default, and keep it scoped to this build so
-          # the Jetson packaging path is untouched.
+          # The compiler, DWARF version and backend selection come from
+          # tools/release/amd64-build-profile.sh, which says why each is set.
+          # build-release-artifacts.sh --arch amd64 reads the same file, so a
+          # snapshot is configured the way this job is.
           # The C++ runtime takes its identity from CMake; the Rust crates
           # take theirs from TP_RELEASE_VERSION. Both have to be set on
           # both architectures or a candidate ships binaries that disagree.
@@ -317,18 +307,15 @@ jobs:
           if [[ "$DEB_VERSION" == *"~"* ]]; then
             runtime_suffix="${DEB_VERSION#*~}"
           fi
-          cmake -S . -B build/release \
+          . tools/release/amd64-build-profile.sh
+          CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B build/release \
             -DTP_RUNTIME_VERSION_SUFFIX="$runtime_suffix" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_CXX_FLAGS=-gdwarf-4 \
             -DTP_BUILD_TESTS=OFF \
             -DTP_BUILD_EXAMPLES=OFF \
             -DTP_ENABLE_SANITIZERS=OFF \
-            -DTP_ENABLE_TENSORRT=OFF \
-            -DTP_REQUIRE_TENSORRT_SDK=OFF \
-            -DTP_ENABLE_LIBTORCH=OFF \
-            -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON
+            "${TP_AMD64_CMAKE_ARGS[@]}"
           cmake --build build/release --target tp_serving_worker --parallel
           if [[ -x build/release/serving_worker/tensorplate-serving ]]; then
             install -m 0755 build/release/serving_worker/tensorplate-serving \

@@ -55,6 +55,11 @@ Options:
                          any other is refused.
   --target-os VALUE      Manifest target OS label.
   --arch ARCH            Manifest target architecture. Defaults to arm64.
+                         amd64 configures the serving worker from
+                         tools/release/amd64-build-profile.sh, as the release
+                         workflow does, and refuses TP_ENABLE_TENSORRT,
+                         TP_REQUIRE_TENSORRT_SDK, TP_ENABLE_LIBTORCH and
+                         TP_ENABLE_PYTHON_PYTORCH_SIDECAR overrides.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
   --snapshot             Build unreleased local-source snapshot artifacts.
   --branch BRANCH        Branch/provenance label for snapshot manifests.
@@ -324,6 +329,43 @@ require_in_artifacts_dir() {
 require_in_artifacts_dir --manifest "$MANIFEST" "tensorplate-${TAG}-artifacts.json"
 require_in_artifacts_dir --checksums "$CHECKSUMS" SHA256SUMS
 
+if [[ -z "$BUILD_DIR" ]]; then
+  if ((SNAPSHOT)); then
+    BUILD_DIR="build/snapshot-${TARGET_ARCH}"
+  else
+    BUILD_DIR="build/release"
+  fi
+fi
+
+# The amd64 serving worker is configured from the profile the release
+# workflow's amd64 job reads, so a snapshot is built the way the release is.
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  # Checked first: under errexit, bash 3.2 exits on a failed `.` before
+  # any `|| die` could name the file.
+  if [[ ! -r tools/release/amd64-build-profile.sh ]]; then
+    die "cannot read tools/release/amd64-build-profile.sh"
+  fi
+  # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+  . tools/release/amd64-build-profile.sh
+  for override in TP_ENABLE_TENSORRT TP_REQUIRE_TENSORRT_SDK TP_ENABLE_LIBTORCH TP_ENABLE_PYTHON_PYTORCH_SIDECAR; do
+    if [[ -n "${!override:-}" ]]; then
+      die "$override is set; an $SECONDARY_ARCH build takes it from tools/release/amd64-build-profile.sh, as the release does. Unset it"
+    fi
+  done
+  if ! command -v "$TP_AMD64_CXX" >/dev/null 2>&1; then
+    die "$TP_AMD64_CXX is required for an $SECONDARY_ARCH build (tools/release/amd64-build-profile.sh); install it first"
+  fi
+  # CMake reads CXX only when a build directory is first configured, so a
+  # directory configured with another compiler would silently keep it.
+  if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+    cached_cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")" ||
+      cached_cxx=""
+    if [[ "${cached_cxx##*/}" != "${TP_AMD64_CXX##*/}" ]]; then
+      die "$BUILD_DIR was configured with C++ compiler '${cached_cxx}', not $TP_AMD64_CXX; remove $BUILD_DIR or pass another --build-dir"
+    fi
+  fi
+fi
+
 if ((SNAPSHOT)); then
   write_staged_changelog UNRELEASED
 elif [[ "$DEB_VERSION" == *"~"* ]]; then
@@ -399,13 +441,6 @@ if ((CROSS_BUILD)); then
 fi
 
 note "configuring C++ release build"
-if [[ -z "$BUILD_DIR" ]]; then
-  if ((SNAPSHOT)); then
-    BUILD_DIR="build/snapshot-${TARGET_ARCH}"
-  else
-    BUILD_DIR="build/release"
-  fi
-fi
 # Everything after the tilde is the prerelease identity: `dev.DATE.SHA`
 # for a snapshot, `rc.N` for a candidate, absent for a final release. The
 # runtime reports it, so `tensorplate --version` distinguishes a candidate
@@ -419,11 +454,17 @@ cmake_args=(
   -DTP_BUILD_TESTS=OFF
   -DTP_BUILD_EXAMPLES=OFF
   -DTP_ENABLE_SANITIZERS=OFF
-  -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
-  -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
-  -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
-  -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
 )
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  cmake_args+=("${TP_AMD64_CMAKE_ARGS[@]}")
+else
+  cmake_args+=(
+    -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
+    -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
+    -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
+    -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
+  )
+fi
 
 vcpkg_toolchain=""
 if [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
@@ -451,7 +492,12 @@ elif [[ -n "$vcpkg_toolchain" ]]; then
   cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}")
 fi
 
-cmake "${cmake_args[@]}"
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake "${cmake_args[@]}" ||
+    die "C++ configure failed"
+else
+  cmake "${cmake_args[@]}"
+fi
 
 note "building serving worker"
 cmake --build "$BUILD_DIR" --target tp_serving_worker --parallel
