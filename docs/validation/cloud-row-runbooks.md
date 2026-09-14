@@ -110,8 +110,7 @@ over the running baseline. It passes when:
   baseline's durable state within the installer's own readiness wait.
 
 **rollback** follows the procedure in
-[`docs/install/lifecycle.md`](../install/lifecycle.md). It refuses to
-start if `/var/lib/tensorplate/state.bak` already exists, stops both
+[`docs/install/lifecycle.md`](../install/lifecycle.md). It stops both
 services, moves durable state aside to `state.bak`, and removes — never
 purges — every installed TensorPlate package except
 `tensorplate-apt-source`. Every package, because any newer one left
@@ -124,6 +123,12 @@ It passes when exactly the baseline's packages are installed, the edited
 rolled-back agent answers with no active or previous deployment — it did
 not load the newer agent's state — and a fresh deploy answers health and
 inference.
+
+No `state.bak` from before the run survives it: install and upgrade each
+delete `/var/lib/tensorplate` while clearing the host, so copy any earlier
+`state.bak` off the VM before running the harness. Rollback still refuses
+to start if `state.bak` exists when it begins, so the move can never
+nest state inside, or replace, a directory it did not create.
 
 A run with a baseline ends with the baseline installed.
 

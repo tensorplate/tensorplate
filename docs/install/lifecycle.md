@@ -115,11 +115,15 @@ to restore `state.bak` (manually verify the schema_version of each journal
 first) or to redeploy from a known-good bundle.
 
 `<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
-`test/packaging/apt-lifecycle-e2e.sh` rehearses this procedure with `dpkg`,
-and asserts that the downgrade guard stays armed both with and without
-durable state present. On the Ubuntu x86_64 cloud rows,
-`tools/validation/ubuntu-l4-cloud-lifecycle.sh --baseline-assets-dir`
-runs the upgrade and this rollback through each release's `install.sh`.
+`test/packaging/apt-lifecycle-e2e.sh` asserts with `dpkg` that the downgrade
+guard stays armed both with and without durable state present, and rehearses
+an older form of this rollback: it downgrades `tensorplate-common` in place,
+then removes and freshly installs only the agent, serving, observability and
+cli packages. Only
+`tools/validation/ubuntu-l4-cloud-lifecycle.sh --baseline-assets-dir`, on the
+Ubuntu x86_64 cloud rows, runs the upgrade and the full procedure above —
+every package removed, the older release installed through its own
+`install.sh`.
 
 ## Remove
 

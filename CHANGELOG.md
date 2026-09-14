@@ -102,14 +102,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
-- The package lifecycle documentation no longer claims dpkg restarts the
-  services on upgrade. The package scripts stop both units and nothing in
-  the packages starts them; `systemctl enable --now`, which the release
-  installer runs, brings them back. The rollback procedure removes every
-  installed TensorPlate package except `tensorplate-apt-source`, including
-  `tensorplate-common` and `tensorplate-backend-python-pytorch`, since a
-  newer package left behind makes the older install a downgrade that
-  `apt-get -y` refuses.
+- The package lifecycle and services documentation no longer claims dpkg
+  restarts the services on upgrade. The package scripts stop both units
+  and nothing in the packages starts them; `systemctl enable --now`, which
+  the release installer runs, brings them back, and the v0.1.1 to v0.1.2
+  APT upgrade steps now include it before doctor must be green. The
+  rollback procedure, in the lifecycle and post-release documentation,
+  removes every installed TensorPlate package except
+  `tensorplate-apt-source`, including `tensorplate-common` and
+  `tensorplate-backend-python-pytorch`, since a newer package left behind
+  makes the older install a downgrade that `apt-get -y` refuses.
 
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
