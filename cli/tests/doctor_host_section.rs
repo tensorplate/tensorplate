@@ -913,7 +913,7 @@ fn host_os_says_which_source_established_the_machine_type() {
     offline.gce_machine_type = None;
     offline.machine_type_record = Some(record);
     let mut report = identify_platform(&offline).expect("a matching record detects");
-    report.accelerator = live.accelerator.clone();
+    report.accelerator.clone_from(&live.accelerator);
     let message = host_os(&report);
     assert!(
         message.contains(" on g2-standard-8 (recorded from GCE metadata by tensorplate-agent;"),
