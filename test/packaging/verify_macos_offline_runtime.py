@@ -1173,7 +1173,8 @@ def stage_cases():
                 "exit 0\n")
         world = run_world(stage_script(body=body))
         assert world.returncode == 1, ("cleanup did not fail the run", world.context())
-        assert (world.root / "work/agent.json").read_text() == '{"good": true}\n', "the only good config is gone"
+        backup = world.root / "work/agent.json"
+        assert backup.exists() and backup.read_text() == '{"good": true}\n', "the only good config is gone"
         assert f"error: the agent config was not restored; copy {world.root}/work/agent.json to " in world.stderr, \
             world.context()
         assert "restore_tap" in world.cleanup_calls, world.cleanup_calls
@@ -1311,11 +1312,12 @@ def lost_terminal_run(source, sig, terminal):
 def check_lost_terminal(world, sig):
     code = 128 + int(sig)
     cleanup_log = world.root / "evidence/cleanup.log"
-    context = world.context() + "\n--- cleanup.log\n" + (cleanup_log.read_text() if cleanup_log.exists() else "")
+    cleanup_text = cleanup_log.read_text() if cleanup_log.exists() else ""
+    context = world.context() + "\n--- cleanup.log\n" + cleanup_text
     assert world.returncode == code, (sig, context)
     assert "offline-runtime\tfail\t" in world.rows, context
     world.assert_normal_supervision()
-    assert f"error: stage offline-runtime failed with exit {code}" in cleanup_log.read_text(), context
+    assert f"error: stage offline-runtime failed with exit {code}" in cleanup_text, context
     assert "restore_tap" in world.cleanup_calls, (world.cleanup_calls, context)
 
 
