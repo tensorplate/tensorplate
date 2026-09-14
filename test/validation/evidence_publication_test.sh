@@ -327,6 +327,101 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+# --- Decoded JSON members, field context and bounded decoding.
+json_literal="json$(random_word 12)"
+json_literal_file="${work}/private/json-literals.txt"
+printf '%s\n' "$json_literal" >"$json_literal_file" || die "could not write JSON literals"
+
+new_case
+python3 - "${d}/duplicate.json" "$json_literal" <<'PY' || die "could not write duplicate JSON"
+import json, sys
+value = "".join("\\u%04x" % ord(char) for char in sys.argv[2])
+with open(sys.argv[1], "w") as handle:
+    handle.write('{"MESSAGE":"' + value + '","MESSAGE":"ready"}\n')
+PY
+expect_finding "an earlier duplicate JSON member retains its decoded literal" \
+  "operator-literal literal #1" "$json_literal" --literals "$json_literal_file"
+
+json_token="ghp_$(random_alnum 30)"
+new_case
+python3 - "${d}/duplicate.json" "$json_token" <<'PY' || die "could not write duplicate credential"
+import sys
+value = "\\u%04x" % ord(sys.argv[2][0]) + sys.argv[2][1:]
+with open(sys.argv[1], "w") as handle:
+    handle.write('{"MESSAGE":"' + value + '","MESSAGE":"ready"}\n')
+PY
+expect_finding "an earlier duplicate JSON member retains its decoded credential" credential "$json_token"
+
+json_serial="SN$(random_alnum 14)"
+new_case
+python3 - "${d}/serial.json" "$json_serial" <<'PY' || die "could not write escaped serial"
+import json, sys
+with open(sys.argv[1], "w") as handle:
+    handle.write('{\n  "ser\\u0069al":\n  ' + json.dumps(sys.argv[2]) + '\n}\n')
+PY
+expect_finding "an escaped JSON serial key retains its value context" serial "$json_serial"
+
+new_case
+python3 - "${d}/serial.json" <<'PY' || die "could not write numeric serial"
+import secrets, sys
+with open(sys.argv[1], "w") as handle:
+    handle.write('{"ser\\u0069al":%d}\n' % (100000000 + secrets.randbelow(900000000)))
+PY
+expect_finding "a decoded numeric serial retains its field context" serial ""
+
+new_case
+python3 - "${d}/serial.json" "$json_serial" <<'PY' || die "could not write byte-array UDID"
+import json, sys
+with open(sys.argv[1], "w") as handle:
+    handle.write('{"\\u0055DID":' + json.dumps(list(sys.argv[2].encode())) + '}\n')
+PY
+expect_finding "a decoded byte-array UDID retains its field context" serial "$json_serial"
+
+# Padding shifts valid tokens across every initial and doubling-window
+# boundary. Each independent record carries an escaped literal, so checking
+# the finding count detects any record silently skipped during decoding.
+new_case
+python3 - "${d}/boundaries.json" "$json_literal" <<'PY' || die "could not write boundary records"
+import json, sys
+secret = "".join("\\u%04x" % ord(char) for char in sys.argv[2])
+quoted = json.dumps('safe"\\\n\t\b\f\ré漢😀' + 'x' * 1000)[1:-1]
+with open(sys.argv[1], "w") as handle:
+    for pad in range(128):
+        space = " " * pad
+        handle.write('{' + space + '"MESSAGE":"' + quoted + ' ' + secret + '"}\n')
+        handle.write('{' + space + '"n":-1.25e-123,"b":false,"MESSAGE":"' + secret + '"}\n')
+        handle.write('[' + space + json.dumps('safe ' * 200) + ',1.25E+100,"' + secret + '"]\n')
+PY
+check "valid JSON tokens crossing decode windows are all scanned" 1 \
+  "$(scan "${d}.out" --literals "$json_literal_file" "$d")"
+check "  every boundary record retains its decoded literal" 384 \
+  "$(grep -c ': operator-literal literal #1 ' "${d}.out")"
+check "  without printing the decoded literal" no "$(has "$json_literal" "${d}.out")"
+
+new_case
+python3 - "${d}/long-json.json" <<'PY' || die "could not write long JSON"
+import json, sys
+with open(sys.argv[1], "w") as handle:
+    handle.write(json.dumps({"message": "safe text " * 100000}) + "\n")
+    handle.write(json.dumps({"items": ["safe"] * 2000}, indent=2) + "\n")
+PY
+check "long JSON strings and concatenated pretty arrays remain publishable" 0 \
+  "$(scan_within 30 "$d")"
+
+new_case
+python3 -c 'import sys; open(sys.argv[1], "w").write("[INFO] {{{{ request [x] {y " * 160000)' \
+  "${d}/single-line.log" || die "could not write single-line brackets"
+check "a long single-line log of non-JSON brackets is scanned within 30 seconds" 0 \
+  "$(scan_within 30 "$d")"
+
+new_case
+cat >"${d}/synthetic-json.json" <<'EOF' || die "could not write synthetic JSON controls"
+{"ser\u0069al":"REDACTED","UDID":0}
+{"MESSAGE":"ready","MESSAGE":"still ready"}
+EOF
+check "synthetic decoded field values and harmless duplicate members pass" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
+
 # Every bracket is a decode attempt, and a failed attempt on the whole text
 # counts every line before it: that took about a minute per megabyte here,
 # against a second or two when attempts are bounded to the lines they need.
@@ -570,6 +665,69 @@ for prefix in ghp_ gho_ ghu_ ghs_ ghr_ github_pat_ ya29.; do
   expect_finding "a ${prefix} token" credential "$token"
 done
 
+# --- HTTP credentials, journal text allowlists, and package-name ambiguity.
+# Uses the passing bundle and helpers above. Every candidate value is synthetic.
+opaque_token="$(random_alnum 40)"
+for auth_header in \
+  "Authorization: Bearer ${opaque_token}" \
+  "authorization: basic ${opaque_token}" \
+  "Proxy-Authorization: bEaReR ${opaque_token}" \
+  "Authorization=Basic ${opaque_token}" \
+  "{\"aUtHoRiZaTiOn\":\"bEaReR ${opaque_token}\"}" \
+  "{'Authorization': 'Basic ${opaque_token}'}"; do
+  new_case
+  add_line "$auth_header"
+  expect_finding "an opaque credential in a header or serialized field" credential "$opaque_token"
+done
+
+new_case
+printf '{\n  "Authoriz\\u0061tion":\n    "Bearer %s"\n}\n' "$opaque_token" \
+  >"${d}/headers.json" || die "could not write escaped auth header"
+expect_finding "an opaque credential in a multiline escaped JSON field" credential "$opaque_token"
+
+for field in _UID _GID _CMDLINE _AUDIT_LOGINUID _SYSTEMD_CGROUP \
+  CODE_FILE CODE_LINE CODE_FUNC SYSLOG_FACILITY SYSLOG_PID; do
+  new_case
+  metadata="meta-$(random_word 12)"
+  add_line "    ${field}=${metadata}"
+  expect_finding "a text ${field} field outside the journal allowlist" journal-field "$metadata"
+done
+
+new_case
+cat >>"${d}/notes.log" <<EOF || die "could not append journal allowlist controls"
+MESSAGE=ready
+PRIORITY=6
+SYSLOG_IDENTIFIER=tensorplate-agent
+UNIT=tensorplate-agent.service
+_PID=42
+_SYSTEMD_UNIT=tensorplate-agent.service
+_SYSTEMD_INVOCATION_ID=${zeros}
+__REALTIME_TIMESTAMP=1757814123000000
+CC=clang CXX=clang++ VCPKG_ROOT=/opt/vcpkg
+EOF
+check "allowed text journal fields and ordinary shell assignments pass" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
+
+ambiguous_ipv4="198.18.$(random_octet).$(random_octet)"
+for suffix in -disconnected .log .service .dist-info-backup -cp310-none-linux_aarch64.whl.log; do
+  new_case
+  add_line "peer-${ambiguous_ipv4}${suffix}"
+  expect_finding "an address before a non-package suffix ${suffix}" ipv4 "$ambiguous_ipv4"
+done
+
+new_case
+cat >>"${d}/notes.log" <<'EOF' || die "could not append package version controls"
+ii  tensorrt  10.3.0.30-1+cuda12.6  arm64
+tensorrt==10.3.0.30
+tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
+tensorrt-10.3.0.30-1-py2.py3-none-any.whl
+nvidia_cudnn_cu12-9.3.0.75-py3-none-manylinux2014_aarch64.whl
+/usr/lib/python3/dist-packages/tensorrt-10.3.0.30.dist-info/METADATA
+tensorrt-10.3.0.30.dist-info
+EOF
+check "complete wheel and dist-info names, Debian revisions and pip pins pass" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
+
 # --- Planning identifiers belong only in CHANGELOG.md.
 planning_id="$(printf 'V%03d-E%02d-F%02d-T%02d' 21 5 1 1)"
 new_case
@@ -618,6 +776,37 @@ check "  and the path is referenced by number" "yes" "$(has "path#" "${d}.out")"
 entry="$(sed -n 's/^path#\([0-9]*\):0: operator-literal.*/\1/p' "${d}.out" | head -n 1)"
 check "  whose number is that entry in the sorted listing" "./${literal}-run" \
   "$(cd "$d" && find . -mindepth 1 | LC_ALL=C sort | sed -n "${entry:-0}p")"
+
+# --- Directory context must survive path scanning and output masking.
+for prefix in logs/home home logs/Users; do
+  new_case
+  mkdir -p "${d}/${prefix}/${account}" || die "could not create an account directory"
+  printf 'ready\n' >"${d}/${prefix}/${account}/agent.log" || die "could not write a path probe"
+  expect_finding "an account in a ${prefix} directory path" home-path "$account"
+  check "  and the account path is masked" "yes" "$(has 'path#' "${d}.out")"
+done
+
+new_case
+mkdir -p "${d}/logs/home/${account}" || die "could not create an account directory"
+printf '%s\n' "$key_header" >"${d}/logs/home/${account}/agent.log" || die "could not write a path probe"
+expect_finding "a credential reported under an account path" credential "$account"
+check "  without printing the credential" "no" "$(has "$key_header" "${d}.out")"
+
+new_case
+mkdir -p "${d}/logs/projects/${project}" || die "could not create a project directory"
+printf 'ready\n' >"${d}/logs/projects/${project}/run.log" || die "could not write a path probe"
+expect_finding "a cloud project in a directory path" cloud-project "$project"
+check "  and the project path is masked" "yes" "$(has 'path#' "${d}.out")"
+
+new_case
+mkdir -p "${d}/projects/${project}" || die "could not create an empty project directory"
+expect_finding "an empty cloud project directory" cloud-project "$project"
+
+new_case
+mkdir -p "${d}/home/tp-synthetic-operator/projects/REDACTED" || die "could not create synthetic directories"
+printf 'ready\n' >"${d}/home/tp-synthetic-operator/projects/REDACTED/run.log" || die "could not write a synthetic path probe"
+check "synthetic account and project paths remain publishable" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
 
 # --- Files that cannot be reviewed as text.
 new_case
@@ -697,6 +886,18 @@ fi
 
 mkdir "${work}/empty-dir" || die "could not create a directory"
 check "a scan of nothing is a fault" "2" "$(scan "$out" --patterns-only "${work}/empty-dir")"
+
+# Nearly valid overlapping candidates must stop with no verdict rather
+# than consume unbounded work or print any of the text being scanned.
+new_case
+python3 - "${d}/ambiguous.json" "$json_literal" <<'PY' || die "could not write ambiguous JSON"
+import sys
+with open(sys.argv[1], "w") as handle:
+    handle.write("[" * 96 + '"' + "safe " * 1000 + sys.argv[2])
+PY
+check "exhausted JSON work is no verdict" "2" "$(scan "${d}.out" --patterns-only "$d")"
+check "  identifies work exhaustion" "yes" "$(has 'JSON scan work limit exceeded' "${d}.out")"
+check "  without printing scanned text" "no" "$(has "$json_literal" "${d}.out")"
 
 # A crash must not read as a verdict: Python exits 1 on an uncaught
 # exception, and JSON nested deeper than the decoder's recursion limit

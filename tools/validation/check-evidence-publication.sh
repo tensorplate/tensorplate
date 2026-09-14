@@ -41,7 +41,7 @@
 #
 # Exit 0 when the evidence is publishable, 1 when there are findings, and
 # 2 when the scan did not reach a verdict (bad arguments or --help, an
-# unreadable file, nothing to scan, an internal error).
+# unreadable file, nothing to scan, exhausted JSON work, an internal error).
 #
 # Usage:
 #   check-evidence-publication.sh --literals FILE PATH...
@@ -105,8 +105,12 @@ JOURNAL_KEYS = frozenset((
     "_SYSTEMD_INVOCATION_ID",
     "__REALTIME_TIMESTAMP",
 ))
+# Trusted metadata starts with an underscore; CODE_ and SYSLOG_ are the
+# other journal namespaces captured here. Apply the same allowlist to
+# these text fields without treating unrelated shell assignments as
+# journal records.
 JOURNAL_TEXT_FIELD = re.compile(
-    r"(?<![A-Za-z0-9_])(_HOSTNAME|_MACHINE_ID|_BOOT_ID|__CURSOR)=")
+    r"(?<![A-Za-z0-9_])(_[A-Za-z0-9_]+|(?:CODE|SYSLOG)_[A-Z0-9_]+)=")
 # The same fields as a quoted key, where no JSON value can be decoded
 # around it: a record cut short by a log tail, or escaped inside a string.
 JOURNAL_QUOTED_KEY = re.compile(r"\\*[\"'](_[A-Za-z0-9_]+)\\*[\"'][ \t]*:")
@@ -155,11 +159,15 @@ IPV4 = re.compile(
 # 10.3.0.30-1+cuda12.6: a Debian revision follows. Not when the dash starts
 # another address, as in a range whose other end was already replaced.
 DEBIAN_REVISION = re.compile(r"-\d(?!\d{0,2}(?:\.\d{1,3}){3}(?![0-9]))")
-# tensorrt-10.3.0.30-cp310-...whl, tensorrt-10.3.0.30.dist-info: a package
-# name and a dash before, and more of a file name after. A name and a dash
-# alone, as in peer-<address> connected, is an address.
+# Only a complete wheel suffix (optional build, then Python/ABI/platform
+# tags) or a dist-info directory makes a name-and-dash a package context.
+# A generic extension or dash would also exempt peer-<address>.log and
+# peer-<address>-disconnected.
 PACKAGE_NAME_DASH = re.compile(r"[A-Za-z0-9]-$")
-FILE_NAME_PART = re.compile(r"-|\.[A-Za-z]")
+PACKAGE_FILE_SUFFIX = re.compile(
+    r"(?:\.dist-info|-(?:\d[A-Za-z0-9_]*-)?"
+    r"[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl)"
+    r"(?=$|[/\\\s\"':;,()\[\]{}])")
 IPV4_ALLOWED = frozenset(("0.0.0.0", "169.254.169.254"))
 IPV6 = re.compile(
     r"(?<![0-9A-Za-z:.])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![0-9A-Za-z:.])")
@@ -200,6 +208,13 @@ CREDENTIAL = re.compile(
     r"|(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}"
     r"|(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}"
     r"|(?<![A-Za-z0-9_.])ya29\.[A-Za-z0-9_-]{20,}")
+# HTTP auth credentials need no vendor prefix. Accept both raw headers
+# and their quoted key/value form in JSON or a diagnostic dictionary.
+# Case insensitivity applies to the header and authentication scheme.
+AUTH_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:Proxy-)?Authorization\\*[\"']?[ \t]*[:=][ \t]*"
+    r"\\*[\"']?[ \t]*(?:Bearer|Basic)[ \t]+[A-Za-z0-9._~+/-]+=*",
+    re.IGNORECASE)
 
 # Planning identifiers belong in CHANGELOG.md only, with or without the
 # epic segment.
@@ -220,7 +235,7 @@ def is_version(line, start, end):
     if DEBIAN_REVISION.match(line, end):
         return True
     return bool(PACKAGE_NAME_DASH.search(line[max(0, start - 2):start])
-                and FILE_NAME_PART.match(line, end))
+                and PACKAGE_FILE_SUFFIX.match(line, end))
 
 
 # A terminal control sequence (colour, bold), raw or escaped the way JSON,
@@ -258,7 +273,8 @@ def scan_variant(line, literals):
         found.append((cls, len(value)))
 
     for m in JOURNAL_TEXT_FIELD.finditer(line):
-        add("journal-field", m.group(1))
+        if m.group(1) not in JOURNAL_KEYS:
+            add("journal-field", m.group(1))
     for m in JOURNAL_QUOTED_KEY.finditer(line):
         if m.group(1) not in JOURNAL_KEYS:
             add("journal-field", m.group(1))
@@ -324,6 +340,8 @@ def scan_variant(line, literals):
             add("serial", m.group(1))
     for m in CREDENTIAL.finditer(line):
         add("credential", m.group(0))
+    for m in AUTH_CREDENTIAL.finditer(line):
+        add("credential", m.group(0))
     for m in PLANNING_ID.finditer(line):
         add("planning-id", m.group(0))
     for number, pattern, length in literals:
@@ -337,20 +355,54 @@ def is_byte_array(value):
         type(item) is int and 0 <= item <= 255 for item in value)
 
 
+class JsonObjectPairs(list):
+    """An object with every member retained, including duplicate keys.
+
+    A dictionary silently drops earlier values. Those bytes still appear
+    in the evidence being published, so the scanner must inspect them too.
+    The marker distinguishes an object from a JSON array of byte values.
+    """
+
+
+def json_field_values(value):
+    """Decoded scalar values that retain their containing field's name."""
+    pending = [value]
+    while pending:
+        child = pending.pop()
+        if isinstance(child, JsonObjectPairs):
+            continue
+        if isinstance(child, list):
+            if is_byte_array(child):
+                yield bytes(child).decode("utf-8", "replace")
+            else:
+                pending.extend(child)
+        elif isinstance(child, str):
+            yield child
+        elif child is not None:
+            yield str(child)
+
+
 def scan_json(document, literals):
-    """Findings in the decoded strings, keys and byte arrays of a document."""
+    """Findings in decoded members, strings and byte arrays of a document."""
     found = []
     pending = [document]
     while pending:
         value = pending.pop()
         if isinstance(value, str):
             found.extend((cls, length) for _, cls, length in scan_text(value, literals))
-        elif isinstance(value, dict):
-            journal = "MESSAGE" in value and any(k.startswith("_") for k in value)
-            for key, child in value.items():
+        elif isinstance(value, JsonObjectPairs):
+            keys = [key for key, _ in value]
+            journal = "MESSAGE" in keys and any(k.startswith("_") for k in keys)
+            for key, child in value:
                 if key not in JOURNAL_KEYS and (journal or key.startswith("_")):
                     found.append(("journal-field", len(key)))
                 found.extend((cls, length) for _, cls, length in scan_text(key, literals))
+                # Rules for serials, UDIDs and authentication headers need
+                # the association, not just the isolated key and value.
+                # This also handles escaped keys and multiline JSON. Scan
+                # the context only as text; children are decoded below.
+                for field_value in json_field_values(child):
+                    found.extend(scan_line(key + ": " + field_value, literals))
                 pending.append(child)
         elif isinstance(value, list):
             if is_byte_array(value):
@@ -364,26 +416,51 @@ def scan_json(document, literals):
 JSON_START = re.compile(r"[\[{]")
 
 
-def decode_at(decoder, text, start):
+def incomplete_json(error, window):
+    """Whether a decode could succeed with more input after this window.
+
+    Windows may end inside a string, escape, keyword or number. Structural
+    errors elsewhere already prove this bracket is not a JSON start.
+    """
+    if error.pos >= len(window) or error.msg.startswith("Unterminated string"):
+        return True
+    tail = window[error.pos:]
+    if error.msg.startswith("Invalid \\uXXXX escape"):
+        # CPython also reports this at a complete four-digit escape when
+        # the window ends before the next string character or closing quote.
+        return bool(re.fullmatch(r"u[0-9a-fA-F]{0,4}", tail))
+    if error.msg == "Expecting value":
+        return bool(tail) and any(token.startswith(tail) for token in (
+            "true", "false", "null", "NaN", "Infinity", "-Infinity"))
+    if error.msg == "Expecting ',' delimiter":
+        # raw_decode accepts a number's complete prefix before an unfinished
+        # fractional part or exponent, then expects the container delimiter.
+        return bool(re.fullmatch(r"\.|[eE][+-]?", tail))
+    return False
+
+
+def decode_at(decoder, text, start, budget):
     """(value, end) for the JSON object or array at text[start], or None.
 
-    Not raw_decode on the whole text: a failed decode counts the lines
-    before the failure, so trying every bracket in a large log that way is
-    quadratic. The attempt starts with the rest of the line and at least
-    doubles, always ending at a line end, until the value decodes or fails
-    before the end of the attempt. A value is never cut mid-token by such
-    an end, because no JSON string or number contains a newline.
+    Copying the rest of a line for every bracket is quadratic on long
+    single-line captures, just as decoding against the whole file is on
+    multiline logs. Start with a small window and double only when the
+    failure can mean incomplete input. A shared work budget bounds even
+    overlapping, nearly valid candidates; exhaustion is no verdict.
     """
-    stop = start
+    size = 64
     while True:
-        newline = text.find("\n", start + 2 * (stop - start))
-        stop = len(text) if newline < 0 else newline
+        stop = min(len(text), start + size)
+        budget[0] -= stop - start
+        if budget[0] < 0:
+            fault("JSON scan work limit exceeded; no verdict")
         window = text[start:stop]
         try:
             value, end = decoder.raw_decode(window)
-        except ValueError as error:
-            if error.pos < len(window) or stop == len(text):
+        except json.JSONDecodeError as error:
+            if stop == len(text) or not incomplete_json(error, window):
                 return None
+            size *= 2
             continue
         return value, start + end
 
@@ -397,7 +474,11 @@ def json_values(text):
     Each value is decoded once, outermost first; scan_json walks what is
     inside it.
     """
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(object_pairs_hook=JsonObjectPairs)
+    # Every candidate costs at least its window length. Ordinary log
+    # brackets fail in the first 64 characters; complete documents cost
+    # less than four times their size across all growing windows.
+    budget = [64 * len(text) + 4096]
     line = 1
     counted = 0
     index = 0
@@ -406,7 +487,7 @@ def json_values(text):
         if match is None:
             return
         start = match.start()
-        decoded = decode_at(decoder, text, start)
+        decoded = decode_at(decoder, text, start, budget)
         if decoded is None:
             index = start + 1
             continue
@@ -580,7 +661,12 @@ def main(argv):
         flagged = set()
         for ordinal, (rel, mode) in enumerate(entries, 1):
             parts = rel.split(os.sep)
-            name_findings = scan_line(parts[-1], literals)
+            # Keep separators: home/account and projects/project are sensitive
+            # because of their parent directories, not their basenames alone.
+            # Treat the evidence root as a boundary and retain a directory's
+            # trailing separator for resource-path patterns.
+            scan_path = os.sep + rel + (os.sep if stat.S_ISDIR(mode) else "")
+            name_findings = scan_line(scan_path, literals)
             if name_findings:
                 flagged.add(rel)
             masked = any(os.sep.join(parts[:i]) in flagged for i in range(1, len(parts) + 1))

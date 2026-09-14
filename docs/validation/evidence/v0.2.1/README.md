@@ -86,14 +86,21 @@ tools/validation/check-evidence-publication.sh \
 ```
 
 Exit 0 means publishable, 1 means findings, and 2 means the scan reached
-no verdict. Each finding names a file, a line and an identifier class,
+no verdict, including when JSON decoding exceeds its work limit. An
+incomplete scan does not clear a bundle for publication.
+Each finding names a file, a line and an identifier class,
 never the value it matched, and a path whose own name matched prints as
-`path#N` instead. Scan
+`path#N` instead. This includes account and project identifiers that only
+become recognizable when directory names are read together. Scan
 the sanitized copy and only then run `git add`: a finding after a commit
 means rewriting the branch. CI runs the same scanner with
 `--patterns-only` on every pull request, but it cannot know the
 run's own names — only the local `--literals` scan can.
 
+- Remove authorization headers carrying Basic or Bearer credentials,
+  including ones recorded as JSON fields. Encoding a value or field name
+  in JSON does not sanitize it; the scan checks decoded fields and values
+  and retains repeated object members for inspection.
 - Never commit terminal captures, shell history, or archives. The
   scanner treats binary and non-UTF-8 files as findings because they
   cannot be reviewed.

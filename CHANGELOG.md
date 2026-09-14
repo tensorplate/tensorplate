@@ -19,7 +19,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   backslash escapes taken out, and the strings and journalctl byte-array
   values of every JSON object or array in a file, including
   concatenated pretty-printed records and records quoted after other
-  text, and it scans file and directory names too.
+  text. Repeated JSON members and decoded field/value associations are
+  retained for inspection, and complete relative paths are checked before
+  they can appear in diagnostics. Authorization headers and journal text
+  metadata are checked too; four-part versions are exempt only in
+  recognized package forms. Long physical log lines use bounded JSON
+  decode work.
   Operators add their own host, account, project and instance names
   from a literal file kept outside the repository. Findings name a file,
   a line and a class but never the matched value. Exit 0 is publishable,
