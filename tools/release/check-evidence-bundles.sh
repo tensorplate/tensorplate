@@ -42,10 +42,18 @@ expect_version=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --registry) registry_dir="${2:?}"; shift 2 ;;
-    --root) root_dir="${2:?}"; shift 2 ;;
-    --schema) schema="${2:?}"; shift 2 ;;
-    --version) expect_version="${2:?}"; shift 2 ;;
+    --registry|--root|--schema|--version)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        printf 'check-evidence-bundles: %s requires a nonempty value\n' "$1" >&2
+        exit 2
+      fi
+      ;;
+  esac
+  case "$1" in
+    --registry) registry_dir="$2"; shift 2 ;;
+    --root) root_dir="$2"; shift 2 ;;
+    --schema) schema="$2"; shift 2 ;;
+    --version) expect_version="$2"; shift 2 ;;
     -h|--help) sed -n '3,37p' "$0"; exit 0 ;;
     *) printf 'check-evidence-bundles: unknown argument `%s`\n' "$1" >&2; exit 2 ;;
   esac
@@ -68,7 +76,12 @@ done
   exit 2
 }
 
-python3 - "$registry_dir" "$root_dir" "$schema" "$expect_version" <<'PY'
+# Python uses exit 1 for uncaught exceptions and startup/syntax errors.
+# Reserve exit 3 exclusively for its normal incomplete-evidence verdict,
+# then map it to the public exit 1 below. Every other Python failure is an
+# internal fault, so a release candidate cannot waive a broken checker.
+checker_status=0
+python3 - "$registry_dir" "$root_dir" "$schema" "$expect_version" <<'PY' || checker_status=$?
 import json, os, sys
 
 try:
@@ -244,5 +257,14 @@ if incomplete:
         "verified. Record the evidence or lower the row's support level.",
         file=sys.stderr,
     )
-    sys.exit(1)
+    sys.exit(3)
 PY
+
+case "$checker_status" in
+    0) exit 0 ;;
+    3) exit 1 ;;
+    *)
+        printf 'check-evidence-bundles: checker failed before reaching a verdict (Python exit %s)\n' "$checker_status" >&2
+        exit 2
+        ;;
+esac

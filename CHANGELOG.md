@@ -70,6 +70,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The release evidence gate captures checker exit codes under GitHub
+  Actions' `bash -e` shell. Incomplete evidence permits candidate
+  publication and build-only validation; final publication still requires
+  complete evidence, and checker execution failures block every mode.
+  Python failures, including malformed registry or schema JSON, are
+  classified as internal faults instead of incomplete evidence.
 - Cloud lifecycle validation requires journal entries from each service's
   current invocation, and verifies serving health and an inference echo
   after restarting. Empty or stale journal captures and a deployment
@@ -127,10 +133,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   roughly ninety minutes. Failing afterwards would waste the one runner
   and tell nobody anything sooner.
 
-  Reported on every run, enforced only when publishing. `develop` may
-  carry rows nobody has validated yet; a tag may not — and a build-only
+  Reported on every run, enforced only when publishing a final release.
+  `develop` may carry rows nobody has validated yet, and a build-only
   dispatch is how the pipeline itself gets exercised, so blocking that
-  would leave the gate untestable except by attempting a real release.
+  would leave the gate untestable except by attempting a real release. A
+  release candidate is not blocked either: the evidence is collected on
+  candidate artifacts, so a gate that refused candidates could never be
+  satisfied. A checker that fails to reach a verdict is refused on every
+  tag.
 
   A gate nothing depends on is an optional step wearing a gate's name,
   and that failure is silent: the workflow still runs green while

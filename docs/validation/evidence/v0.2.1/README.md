@@ -15,7 +15,12 @@ it, not something to clean up afterwards.
 workflow's evidence gate, and every build and publish job sits behind that
 gate. A row whose directory is absent, whose report fails schema
 validation, whose subject names a different version, or whose stages did
-not all pass will block the release.
+not all pass will block the final release.
+
+Release candidates may publish with incomplete evidence so their artifacts
+can be used to collect it. Build-only runs also report incomplete evidence
+without blocking. A checker that fails to reach a verdict blocks every
+mode; only an incomplete-evidence verdict receives those exemptions.
 
 ## Why these are tracked
 
