@@ -13,8 +13,8 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 | --- | --- | --- | --- | --- | --- |
 | `jetson-orin-nano-8gb-jp62` | JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) | arm64 (nvidia_soc) | Jetson Orin Nano 8GB Super | Jetson Orin Nano 8GB Super, Super power mode (in lab) | `chunked_policy` (Production) |
 | `macos26-m1pro-16gb` | macOS 26 | arm64 (apple) | Apple M1 Pro | MacBook Pro, Apple M1 Pro 16GB (in lab) | `chunked_policy` (Preview) |
+| `ubuntu2404-x86-h100-80g-a3hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA H100 80GB HBM3 | `a3-highgpu-1g` only | — |
 | `ubuntu2404-x86-l4-g2s8` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA L4 | `g2-standard-8` only | `chunked_policy` (Preview) |
-| `ubuntu2404-x86-rtxpro6000se-g4s48` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-48` only | `chunked_policy` (Production)<br>`autoregressive_action_tokens` (Production)<br>`flow_action_chunk` (Production) |
 
 ### Preview
 
@@ -32,7 +32,6 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 | `ubuntu2404-x86-a100-80g-a2ug4` | Ubuntu 24.04 | x86_64 (intel) | 4× NVIDIA A100-SXM4-80GB | `a2-ultragpu-4g` only | — |
 | `ubuntu2404-x86-a100-80g-a2ug8` | Ubuntu 24.04 | x86_64 (intel) | 8× NVIDIA A100-SXM4-80GB | `a2-ultragpu-8g` only | — |
 | `ubuntu2404-x86-cpu` | Ubuntu 24.04 | x86_64 (amd, intel) | none | Any x86_64 Ubuntu 24.04 host; smoke validated on GitHub-hosted runners | — |
-| `ubuntu2404-x86-h100-80g-a3hg1` | Ubuntu 24.04 | x86_64 (intel) | NVIDIA H100 80GB HBM3 | `a3-highgpu-1g` only | — |
 | `ubuntu2404-x86-h100-80g-a3hg2` | Ubuntu 24.04 | x86_64 (intel) | 2× NVIDIA H100 80GB HBM3 | `a3-highgpu-2g` only | — |
 | `ubuntu2404-x86-h100-80g-a3hg4` | Ubuntu 24.04 | x86_64 (intel) | 4× NVIDIA H100 80GB HBM3 | `a3-highgpu-4g` only | — |
 | `ubuntu2404-x86-h100-80g-a3hg8` | Ubuntu 24.04 | x86_64 (intel) | 8× NVIDIA H100 80GB HBM3 | `a3-highgpu-8g` only | — |
@@ -41,6 +40,7 @@ with `UPDATE_GOLDEN=1 cargo test -p tensorplate-platform --test support_matrix`.
 | `ubuntu2404-x86-l4-g2s96` | Ubuntu 24.04 | x86_64 (intel) | 8× NVIDIA L4 | `g2-standard-96` only | — |
 | `ubuntu2404-x86-rtxpro6000se-g4s192` | Ubuntu 24.04 | x86_64 (amd) | 4× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-192` only | — |
 | `ubuntu2404-x86-rtxpro6000se-g4s384` | Ubuntu 24.04 | x86_64 (amd) | 8× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-384` only | — |
+| `ubuntu2404-x86-rtxpro6000se-g4s48` | Ubuntu 24.04 | x86_64 (amd) | NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-48` only | `chunked_policy` (Preview)<br>`autoregressive_action_tokens` (Preview)<br>`flow_action_chunk` (Preview) |
 | `ubuntu2404-x86-rtxpro6000se-g4s96` | Ubuntu 24.04 | x86_64 (amd) | 2× NVIDIA RTX PRO 6000 Blackwell Server Edition | `g4-standard-96` only | — |
 
 ## Experimental

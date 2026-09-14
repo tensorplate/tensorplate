@@ -102,9 +102,9 @@ remain refused.
 
 Every GPU shape GCP offers for these cards is covered, one way or the
 other. `a2-megagpu-16g` has a row: it is the same accelerator type as the
-`a2-highgpu` shapes, so the only new fact is the count. G4 has rows at two,
-four and eight (`g4-standard-96/192/384`), at Preview, beside the
-single-device Production row -- which they do not change.
+`a2-highgpu` shapes, so the only new fact is the count. G4 has Preview
+rows at one, two, four and eight devices
+(`g4-standard-48/96/192/384`).
 
 One shape has no row, deliberately: `a3-megagpu-8g`. GCP gives it a
 different accelerator name (`nvidia-h100-mega-80gb`) but documents all
@@ -143,10 +143,10 @@ are what the fleet reports.
 - The A100 pair (`ubuntu2404-x86-a100-40g-a2hg1.txt`,
   `mig-enabled-a100-40g.txt`) remains transcribed while the row is Preview;
   both files must be regenerated from one recorded name in one session.
-- The RTX PRO 6000 Server Edition row carries evidence from the previous
-  release cycle rather than a recording from this pipeline. The Workstation
-  Edition fixture remains unrecorded and is annotated unverifiable in
-  release evidence.
+- The RTX PRO 6000 Server Edition and Workstation Edition fixtures remain
+  unrecorded. Both rows are `spec_authored`: Server Edition is Preview
+  and Workstation Edition is Planned. Neither row carries release
+  evidence; hardware validation remains pending.
 - The `unsupported-*` fixtures stay transcribed by design: they name
   hardware the matrix refuses, and recording them would require the very
   machines the rows exclude.
