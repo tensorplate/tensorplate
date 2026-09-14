@@ -182,9 +182,11 @@ INTERNAL_DNS = re.compile(
     r"(?<![A-Za-z0-9.-])((?:[A-Za-z0-9-]+\.)+(?:internal|local))(?![A-Za-z0-9-])(?!\.[A-Za-z0-9])")
 INTERNAL_DNS_ALLOWED = "metadata.google.internal"
 
+# Up to 16 other characters may sit between the keyword and the separator,
+# plus any column padding: `nvidia-smi -q` aligns its separators.
 SERIAL = re.compile(
     r"(?i)(?:serial(?:[\s_-]?(?:number|no\.?))?|(?<![a-z])udid)(?![a-z])"
-    r"[^:=\n]{0,16}?[:=][ \t]*[\"']?([^\s\"',;}]*)")
+    r"(?:[ \t]*[^:=\n \t]){0,16}?[ \t]*[:=][ \t]*[\"']?([^\s\"',;}]*)")
 SERIAL_ALLOWED = re.compile(r"REDACTED|0+")
 
 CREDENTIAL = re.compile(
@@ -193,8 +195,9 @@ CREDENTIAL = re.compile(
     r"|(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}"
     r"|(?<![A-Za-z0-9_.])ya29\.[A-Za-z0-9_-]{20,}")
 
-# Planning identifiers belong in CHANGELOG.md only.
-PLANNING_ID = re.compile(r"(?<![A-Za-z0-9])V\d{2,3}-E\d{2}(?:-F\d{2})?(?:-T\d{2})?(?![A-Za-z0-9])")
+# Planning identifiers belong in CHANGELOG.md only, with or without the
+# epic segment.
+PLANNING_ID = re.compile(r"(?<![A-Za-z0-9])V\d{2,3}(?:-[EFT]\d{2})+(?![A-Za-z0-9])")
 
 
 def fault(message):

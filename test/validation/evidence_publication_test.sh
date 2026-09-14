@@ -505,6 +505,10 @@ new_case
 add_line "Provisioning UDID: ${serial}"
 expect_finding "a UDID" serial "$serial"
 
+new_case
+add_line "    Serial Number                         : ${serial}"
+expect_finding "a column-padded nvidia-smi -q serial" serial "$serial"
+
 # --- Credentials, built at runtime so no scanner flags this file.
 new_case
 key_header="$(printf -- '-----BEGIN %s %s KEY-----' OPENSSH PRIVATE)"
@@ -522,6 +526,11 @@ planning_id="$(printf 'V%03d-E%02d-F%02d-T%02d' 21 5 1 1)"
 new_case
 add_line "implements ${planning_id}"
 expect_finding "a planning identifier" planning-id "$planning_id"
+
+planning_id="$(printf 'V%03d-F%02d-T%02d' 21 5 1)"
+new_case
+add_line "ii  tensorplate-agent  0.2.1  amd64  agent (${planning_id})"
+expect_finding "a planning identifier without an epic segment" planning-id "$planning_id"
 
 # --- Operator literals.
 lit_file="${work}/private/case-literals.txt"
