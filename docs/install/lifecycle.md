@@ -105,7 +105,10 @@ reactivates the prior state with zero data migration.
 In addition to everything `remove` does, purge runs the postrm in
 `purge` mode and clears:
 
-- `/var/lib/tensorplate/state/`
+- `/var/lib/tensorplate/state/`, including the Compute Engine machine
+  type the agent recorded. Until the agent next starts with the GCE
+  metadata service reachable, a reinstalled instance cannot establish
+  its machine type offline.
 - `/var/lib/tensorplate/bundles/`
 - `/var/lib/tensorplate/worker-configs/`
 - `/var/log/tensorplate/`
