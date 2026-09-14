@@ -17,7 +17,8 @@ for v in "${here}/verify_layout.sh" \
          "${here}/verify_lifecycle_scripts.sh" \
          "${here}/verify_macos_homebrew_lifecycle.sh" \
          "${here}/verify_descriptor.sh" \
-         "${here}/verify_installer.sh"; do
+         "${here}/verify_installer.sh" \
+         "${here}/verify_ubuntu_l4_cloud_lifecycle.sh"; do
   ran=$((ran + 1))
   echo "==> $(basename "${v}")"
   "${v}"

@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "name": "x86-fixture-smoke",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp32",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "x86-smoke.json",
+      "digest": "sha256:eb2baacb5bbb66db67d13b40ed98e224c2dac6a3ecf7ef4b5427b4ca2f062697",
+      "byte_size": 35,
+      "description": "Package validation configuration for the device-neutral fixture backend."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64",
+    "memory_estimate_bytes": 1048576
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.1.0"
+  }
+}
