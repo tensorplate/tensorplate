@@ -93,12 +93,17 @@ def load_job(state, service, path):
     executed = arguments[3:] if sandboxed else arguments
     if sandboxed and "run-rewrites-arguments" in MODES:
         arguments = arguments[:2] + ["/private/tmp/other-profile.sb"] + arguments[3:]
+    # A Program key would make launchd run the service binary directly,
+    # outside the sandbox, whatever the arguments say.
+    program = executed[0] if sandboxed and "run-sets-program" in MODES else arguments[0]
     label = label_of(service)
     pid = new_process(state, executed,
-                      sandboxed and not ("unsandboxed-observability" in MODES and service == OBSERVABILITY),
+                      sandboxed and program == SANDBOX_EXEC and
+                      not ("unsandboxed-observability" in MODES and service == OBSERVABILITY),
                       1, label)
     runs = 2 if sandboxed and service == AGENT and "crashed-at-start" in MODES else 1
-    state["labels"][label] = {"file": path, "arguments": arguments, "pid": pid, "runs": runs}
+    state["labels"][label] = {"file": path, "arguments": arguments, "program": program, "pid": pid,
+                              "runs": runs}
     if service == AGENT:
         serving = new_process(
             state, [os.path.join(PREFIX, "opt/tensorplate-serving/libexec/tensorplate-serving"),
@@ -202,7 +207,7 @@ def launchctl_document(state, label):
     arguments = "".join(f"\t\t{item}\n" for item in job["arguments"])
     return (
         f"gui/501/{label} = {{\n\tactive count = 1\n\tpath = {job['file']}\n"
-        f"\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = {job['arguments'][0]}\n"
+        f"\ttype = LaunchAgent\n\tstate = running\n\n\tprogram = {job['program']}\n"
         f"\targuments = {{\n{arguments}\t}}\n\n\tenvironment = {{\n\t\tXPC_SERVICE_NAME => {label}\n\t}}\n\n"
         f"\truns = {job['runs']}\n\tpid = {job['pid']}\n\tlast exit code = (never exited)\n\n"
         f"\tresource coalition = {{\n\t\tID = 1\n\t\tstate = active\n\t\tpid = 1\n\t}}\n}}\n"
@@ -246,9 +251,10 @@ def fake_lsof(args):
     for pid in pids:
         proc = state["procs"].get(pid)
         if proc and os.path.basename(proc["args"].split()[0]) == "tensorplate-serving":
-            host = "*" if "wildcard-listener" in MODES else "127.0.0.1"
-            print(f"p{pid}\nf3\nPTCP\nn{host}:18080\nTST=LISTEN\nTQR=0\nTQS=0")
+            print(f"p{pid}\nf3\nPTCP\nn127.0.0.1:18080\nTST=LISTEN\nTQR=0\nTQS=0")
             print("f9\nPTCP\nn127.0.0.1:18080->127.0.0.1:50000\nTST=ESTABLISHED")
+            if "wildcard-listener" in MODES:
+                print("f11\nPTCP\nn*:18081\nTST=LISTEN")
     return 1
 
 
@@ -365,8 +371,9 @@ def fake_tensorplate(args):
             request = json.load(handle)
         sent = request["inputs"][0]
         tensor = dict(sent["tensor"], byte_offset=0, byte_size=16)
-        outputs = [] if "infer-no-echo" in MODES else [
-            {"name": "echo_probe", "tensor": tensor, "payload_b64": sent["payload_b64"]}]
+        if "infer-no-echo" in MODES:
+            tensor["shape"] = [4]
+        outputs = [{"name": "echo_probe", "tensor": tensor, "payload_b64": sent["payload_b64"]}]
         with open(args[args.index("--output-file") + 1], "w", encoding="utf-8") as handle:
             json.dump({"outputs": outputs}, handle)
         return 0

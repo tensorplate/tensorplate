@@ -239,9 +239,9 @@ restore_baseline() {
   fi
 }
 
-# Boot out one service's launchd job if, and only if, it runs under
-# sandbox-exec: a normal job is left alone. Called from cleanup, so it
-# returns a status instead of calling die.
+# Boot out one service's launchd job if, and only if, it was loaded to run
+# under sandbox-exec: a normal job is left alone. Called from cleanup, so
+# it returns a status instead of calling die.
 purge_offline_job() {
   purge_target="gui/$(id -u)/homebrew.mxcl.$1"
   purge_status=0
@@ -252,9 +252,9 @@ purge_offline_job() {
     printf 'error: launchctl print %s failed with status %s\n' "$purge_target" "$purge_status" >&2
     return 1
   fi
-  purge_program="$(printf '%s\n' "$purge_print" | offline_helper launchd-job --print - --field program)" ||
-    return 1
-  [[ "$purge_program" == "/usr/bin/sandbox-exec" ]] || return 0
+  purge_sandboxed="$(printf '%s\n' "$purge_print" |
+    offline_helper launchd-job --print - --field runs_sandbox_exec)" || return 1
+  [[ "$purge_sandboxed" == "yes" ]] || return 0
   # Whether the bootout took effect is read back below, not trusted.
   launchctl bootout "$purge_target" >/dev/null 2>&1 || true
   for ((purge_attempt = 1; purge_attempt <= 30; purge_attempt += 1)); do

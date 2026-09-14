@@ -190,7 +190,16 @@ def test_launchd_job():
     derived_path = "/private/var/folders/xx/T/tmp.synthetic/offline-denial/homebrew.mxcl.tensorplate-agent.plist"
     assert job == {"label": "homebrew.mxcl.tensorplate-agent", "path": derived_path,
                    "program": "/usr/bin/sandbox-exec", "arguments": expected,
-                   "pid": 4242, "runs": 1}, job
+                   "pid": 4242, "runs": 1, "runs_sandbox_exec": True}, job
+    # Cleanup's test for a job it must boot out: either launchd's program or
+    # the first argument is sandbox-exec.
+    service = "/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent"
+    program_overridden = text.replace("\tprogram = /usr/bin/sandbox-exec", f"\tprogram = {service}")
+    assert m.parse_launchd_job(program_overridden)["runs_sandbox_exec"]
+    normal = program_overridden.replace("\t\t/usr/bin/sandbox-exec\n\t\t-f\n", "").replace(
+        f"\t\t{profile}\n", "")
+    assert m.parse_launchd_job(normal)["arguments"] == formula["ProgramArguments"]
+    assert not m.parse_launchd_job(normal)["runs_sandbox_exec"]
     good = dict(program="/usr/bin/sandbox-exec", path=derived_path, arguments=expected,
                 runs=1, same_pid_as=4242)
     assert m.check_launchd_job(job, **good) == []
@@ -917,6 +926,7 @@ FAILURE_MODES = {
     "formula-plist-program-key": ("cannot derive the sandboxed tensorplate-observability launchd plist", True),
     "run-rewrites-arguments": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "run-copies-plist": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "run-sets-program": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "unsandboxed-observability": ("a launchd service does not read back as sandboxed with the network denied",
                                   True),
     "deploy-phase-failed": ("the deploy under the offline profile did not activate offline-1", True),

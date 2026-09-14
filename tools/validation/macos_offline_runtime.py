@@ -338,13 +338,17 @@ def parse_launchd_job(text):
         value = fields.get(name)
         return int(value) if value is not None and re.fullmatch(r"[0-9]+", value) else None
 
+    program = fields.get("program")
     return {
         "label": lines[0].rsplit(" = {", 1)[0].rsplit("/", 1)[-1],
         "path": fields.get("path"),
-        "program": fields.get("program"),
+        "program": program,
         "arguments": arguments,
         "pid": number("pid"),
         "runs": number("runs"),
+        # Loaded from a derived plist, whether or not launchd honours the
+        # prefix: cleanup boots out any such job.
+        "runs_sandbox_exec": SANDBOX_EXEC in (program, (arguments or [None])[0]),
     }
 
 
@@ -1162,7 +1166,10 @@ def _run(args):
     elif name == "launchd-job":
         job = parse_launchd_job(_read_print(args.print_file))
         if args.field:
-            print(job[args.field] if job[args.field] is not None else "")
+            value = job[args.field]
+            if isinstance(value, bool):
+                value = "yes" if value else "no"
+            print("" if value is None else value)
             return 0
         arguments = None
         if args.sandboxed_arguments_from:
