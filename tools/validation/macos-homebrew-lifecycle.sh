@@ -599,7 +599,7 @@ exact_row = "macos26-m1pro-16gb"
 family_row = "macos26-apple-m-series-preview"
 matches = re.findall(
     r"platform admission: row=(\S+) reason=(\S+) "
-    r"max_resident_model_memory=(\d+)",
+    r".*?max_resident_model_memory=(\d+)",
     agent_log,
 )
 if not matches:

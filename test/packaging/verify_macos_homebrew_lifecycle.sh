@@ -366,6 +366,54 @@ run_stage probe fails_midway
 print("macOS errexit rules: pass")
 PY
 
+# The m1-exact-row stage reads the agent's admission line from its
+# launchd log. Render that line from the format string the agent prints
+# it with, and require the harness's own pattern to recover row, reason
+# and memory ceiling from it, so a field added to the line cannot leave
+# the stage matching nothing on hardware.
+python3 - "$harness" "${repo_root}/agent/src/main.rs" <<'PY'
+import pathlib
+import re
+import sys
+
+harness = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+agent = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+
+literal = re.search(r'"(platform admission:(?:[^"\\]|\\.)*)"', agent, re.S)
+assert literal, "agent/src/main.rs no longer prints a `platform admission:` line"
+template = re.sub(r"\\\n\s*", "", literal.group(1))
+assert "\n" not in template and "\\" not in template, template
+
+findall = re.search(r"re\.findall\(\s*((?:r\"[^\"]*\"\s*)+),\s*agent_log,", harness)
+assert findall, "harness no longer parses the admission line with re.findall"
+pattern = "".join(re.findall(r'r"([^"]*)"', findall.group(1)))
+
+row, reason, memory = "macos26-m1pro-16gb", "none", "17179869184"
+for posture, posture_from, evidence in (
+    ("validated_row_required", "row", "validated"),
+    ("technical_prerequisites", "operator",
+     "unvalidated (admitted on technical prerequisites)"),
+    ("none", "none", "none"),
+):
+    positional = iter((row, reason, memory))
+    named = {"posture": posture, "posture_from": posture_from, "evidence": evidence}
+
+    def fill(match):
+        name = match.group(1)
+        return next(positional) if not name else named[name]
+
+    line = re.sub(r"\{(\w*)\}", fill, template)
+    assert next(positional, None) is None, f"unexpected placeholders in {template!r}"
+    log = (
+        "platform registry: rows=12 supported=4 roadmap_targets=2 dir=registry\n"
+        + line
+        + "\ntensorplate-agent listening on agent.sock\n"
+    )
+    matches = re.findall(pattern, log)
+    assert matches == [(row, reason, memory)], (pattern, line, matches)
+print("macOS admission line contract: pass")
+PY
+
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$harness"
 else

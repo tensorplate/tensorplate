@@ -102,6 +102,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `run_stage` call that is not a top-level statement, and shows that a
   failing stage body records no pass.
 
+- The macOS Homebrew lifecycle harness's M1 exact-row stage parses the
+  agent's platform admission line again. The line gained `posture` and
+  `evidence` fields between the reason and the memory ceiling, and the
+  stage's pattern stopped matching it, so the stage would have failed on
+  any current agent with "no platform admission decision". The packaging
+  verifier renders the line from the agent's own format string and
+  requires the harness pattern to recover the row, reason and ceiling.
+
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
   publication and build-only validation; final publication still requires
