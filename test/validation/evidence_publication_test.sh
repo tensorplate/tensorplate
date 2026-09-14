@@ -200,7 +200,8 @@ Hardware Serial: 0000000000
 ii  tensorrt  10.3.0.30-1+cuda12.6  arm64
 tensorrt==10.3.0.30
 tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
-Successfully installed tensorrt-10.3.0.30 numpy-1.26.4
+nvidia_cudnn_cu12-9.3.0.75-py3-none-manylinux2014_aarch64.whl
+/usr/lib/python3/dist-packages/tensorrt-10.3.0.30.dist-info/METADATA
 firmware 36.4.3.1.2
 EOF
 
@@ -428,6 +429,19 @@ local_ipv4="10.$(random_octet).$(random_octet).$(random_octet)"
 new_case
 add_line "Started sshd@3-${local_ipv4}:22-203.0.113.9:$((1024 + RANDOM)).service"
 expect_finding "an address with a port behind a dash, as in an sshd connection unit" ipv4 "$local_ipv4"
+
+dash_ipv4="10.$(random_octet).$(random_octet).$(random_octet)"
+new_case
+add_line "peer-${dash_ipv4} connected"
+expect_finding "an address after a word and a dash, with no file name after it" ipv4 "$dash_ipv4"
+
+new_case
+add_line "allowed ${dash_ipv4}-192.0.2.20"
+expect_finding "a range whose other end was already replaced" ipv4 "$dash_ipv4"
+
+new_case
+add_line "PTR ${dash_ipv4}.in-addr.arpa"
+expect_finding "an address followed by a domain with no package name before it" ipv4 "$dash_ipv4"
 
 new_case
 exact_ipv4="198.18.$(random_octet).$(random_octet)"

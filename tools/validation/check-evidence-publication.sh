@@ -144,16 +144,22 @@ DEVICE_PREFIX = re.compile(r"(?:GPU|MIG)-$")
 # agent/src/coordinator.rs (tx-), cli/src/commands/deploy.rs (deploy-).
 RANDOM_ID_PREFIX = re.compile(r"(?<![A-Za-z0-9_-])(?:cli|tx|deploy)-$")
 
-# Excludes dotted-quad runs inside version strings: a Debian version such
-# as 10.3.0.30-1, a longer dotted run, and a pip pin such as ==10.3.0.30.
+# A four-part package version is also a dotted quad. The regex leaves out
+# a longer dotted run and a pip pin such as ==10.3.0.30; is_version leaves
+# out the dash forms packaging tools print. Anything else is an address,
+# including one between dashes: sshd's per-connection unit names write
+# sshd@3-<local>:22-<peer>:<port>.service.
 IPV4 = re.compile(
-    r"(?<![A-Za-z0-9~+-])(?<!\d\.)(?<![=<>!~]=)(\d{1,3}(?:\.\d{1,3}){3})"
-    r"(?![A-Za-z0-9~+-])(?!\.\d)")
-# A version string is never followed by a port, so an address with one is
-# matched whatever precedes it: sshd's per-connection unit names put a dash
-# before each endpoint (sshd@3-<local>:22-<peer>:<port>.service), which the
-# version exclusion above would otherwise let through.
-IPV4_WITH_PORT = re.compile(r"(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}(?!\d)")
+    r"(?<![A-Za-z0-9~+])(?<!\d\.)(?<![=<>!~]=)(\d{1,3}(?:\.\d{1,3}){3})"
+    r"(?![A-Za-z0-9~+])(?!\.\d)")
+# 10.3.0.30-1+cuda12.6: a Debian revision follows. Not when the dash starts
+# another address, as in a range whose other end was already replaced.
+DEBIAN_REVISION = re.compile(r"-\d(?!\d{0,2}(?:\.\d{1,3}){3}(?![0-9]))")
+# tensorrt-10.3.0.30-cp310-...whl, tensorrt-10.3.0.30.dist-info: a package
+# name and a dash before, and more of a file name after. A name and a dash
+# alone, as in peer-<address> connected, is an address.
+PACKAGE_NAME_DASH = re.compile(r"[A-Za-z0-9]-$")
+FILE_NAME_PART = re.compile(r"-|\.[A-Za-z]")
 IPV4_ALLOWED = frozenset(("0.0.0.0", "169.254.169.254"))
 IPV6 = re.compile(
     r"(?<![0-9A-Za-z:.])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![0-9A-Za-z:.])")
@@ -207,6 +213,14 @@ def fault(message):
 
 def in_network(address, networks):
     return any(address.version == net.version and address in net for net in networks)
+
+
+def is_version(line, start, end):
+    """Whether the dotted quad at line[start:end] is a package version."""
+    if DEBIAN_REVISION.match(line, end):
+        return True
+    return bool(PACKAGE_NAME_DASH.search(line[max(0, start - 2):start])
+                and FILE_NAME_PART.match(line, end))
 
 
 # A terminal control sequence (colour, bold), raw or escaped the way JSON,
@@ -270,11 +284,10 @@ def scan_variant(line, literals):
                 add("device-uuid", value)
         elif not RANDOM_ID_PREFIX.search(before) and not value.startswith(ZERO_UUID_PREFIX):
             add("uuid", value)
-    ipv4 = {}
-    for pattern in (IPV4, IPV4_WITH_PORT):
-        for m in pattern.finditer(line):
-            ipv4[m.start(1)] = m.group(1)
-    for value in ipv4.values():
+    for m in IPV4.finditer(line):
+        value = m.group(1)
+        if is_version(line, m.start(1), m.end(1)):
+            continue
         try:
             address = ipaddress.ip_address(value)
         except ValueError:
