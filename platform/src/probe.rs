@@ -358,19 +358,24 @@ impl SystemHostProbe {
         }
         let temporary = target.with_extension("json.tmp");
         let write = || -> std::io::Result<()> {
-            // Whatever is at the temporary name -- a leftover from an
-            // interrupted write, or a link planted there -- is removed, not
-            // opened: `create_new` never follows a link and never inherits an
-            // existing file's permissions.
-            match std::fs::remove_file(&temporary) {
-                Err(err) if err.kind() != ErrorKind::NotFound => return Err(err),
-                _ => {}
-            }
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
-            let mut file = options.open(&temporary)?;
+            // `create_new` never follows a link and never inherits an existing
+            // file's permissions. Whatever already holds the temporary name --
+            // a leftover from an interrupted write, or a link planted there --
+            // is removed and the create tried once more, never opened.
+            let create = || {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
+                options.open(&temporary)
+            };
+            let mut file = match create() {
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                    std::fs::remove_file(&temporary)?;
+                    create()?
+                }
+                created => created?,
+            };
             file.write_all(body.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&temporary, &target)?;
