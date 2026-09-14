@@ -29,10 +29,6 @@
 #   crash-loop    an agent that cannot load its config is retried and then
 #                 given up on by systemd rather than restarted forever, and
 #                 recovers its deployment once the config is restored
-#   offline       with every non-loopback address denied to both services
-#                 and to doctor, the appliance still comes up, doctor
-#                 still resolves this row with nothing failing, and the
-#                 worker still answers
 #
 # WHAT IT DOES NOT PROVE
 #   The deploy-smoke bundle selects the device-neutral `fixture` backend
@@ -42,13 +38,11 @@
 #   accelerator computed anything. There is no CUDA fixture backend to
 #   select yet. Do not describe a run of this harness as GPU validation.
 #
-# The offline stage denies the network to the installed services and to
-# doctor, not to the harness: the CLI calls that drive inference and
-# status still run in the operator's session.
-#
-# Two stages are skipped, each with its reason recorded in the report
+# Three stages are skipped, each with its reason recorded in the report
 # rather than omitted: upgrade and rollback have no published amd64
-# predecessor to move between.
+# predecessor to move between. Offline is deferred until cloud platform
+# detection can resolve this row without querying GCE metadata. No network
+# policy is changed and no offline behavior is certified by this harness.
 #
 # Usage:
 #   tools/validation/ubuntu-l4-cloud-lifecycle.sh \
@@ -86,15 +80,14 @@ BUNDLE_STAGING_DIR="${TP_CLOUD_BUNDLE_STAGING:-/opt/tensorplate-validation/x86-f
 # well above it rather than racing a restart.
 readonly READY_TIMEOUT_SECONDS=60
 readonly AGENT_CONFIG="/etc/tensorplate/agent.json"
-# Runtime drop-ins, not /etc: a harness that dies with the network denied
-# must not leave an appliance that stays offline across a reboot.
-readonly SYSTEMD_RUNTIME_DIR="/run/systemd/system"
-readonly OFFLINE_DROPIN="50-tensorplate-validation-offline.conf"
 # Longer than RestartSec, so a unit that is still looping has restarted
 # at least once between two samples. Overridable only so the settling
 # logic can be driven without waiting in CI.
 CRASH_LOOP_POLL_SECONDS="${TP_CLOUD_CRASH_LOOP_POLL_SECONDS:-7}"
 readonly CRASH_LOOP_POLLS=40
+# Registered after the backup succeeds and before the config is changed.
+# Kept until restoration and service recovery succeed, including on EXIT.
+CRASH_LOOP_BACKUP=""
 
 ROW="$DEFAULT_ROW"
 ASSETS_DIR=""
@@ -210,7 +203,6 @@ preflight() {
     die "run as a normal user; this script calls sudo for privileged steps"
   require_command sudo
   require_command systemctl
-  require_command systemd-run
   require_command python3
   require_command sha256sum
   require_command dpkg
@@ -723,6 +715,55 @@ stage_restart() {
 
 # --- crash-loop --------------------------------------------------------
 
+# Cleanup is safe to retry after a partial failure. Keep the original
+# config available if restoration or service recovery fails, and report
+# its location so the operator can recover it manually if needed.
+cleanup_crash_loop() {
+  [[ -n "$CRASH_LOOP_BACKUP" ]] || return 0
+  local status=0
+  note "restoring the agent config"
+  step "restore the agent config" sudo cp -p "$CRASH_LOOP_BACKUP" "$AGENT_CONFIG" || status=$?
+  if ((status != 0)); then
+    printf 'agent config backup retained at %s\n' "$CRASH_LOOP_BACKUP" >&2
+    return "$status"
+  fi
+  step "clear the agent's failed state" sudo systemctl reset-failed "$AGENT_UNIT" || status=$?
+  step "start the agent" sudo systemctl start "$AGENT_UNIT" || status=$?
+  step "services ready again" await_services_ready || status=$?
+  if ((status != 0)); then
+    printf 'agent config backup retained at %s\n' "$CRASH_LOOP_BACKUP" >&2
+    return "$status"
+  fi
+  step "remove crash-loop scratch files" rm -rf "$(dirname "$CRASH_LOOP_BACKUP")" || return
+  CRASH_LOOP_BACKUP=""
+}
+
+# Signal traps exit through this handler while the lifecycle runner still
+# knows which stage was active. A second catchable signal must not interrupt
+# restoration; SIGKILL and machine failure cannot be handled by a shell.
+finish_with_cleanup() {
+  local status="$1" cleanup_status=0
+  trap - EXIT
+  trap '' INT TERM HUP
+  # Do not make restoration depend on opening another evidence file.
+  cleanup_crash_loop || cleanup_status=$?
+  if ((status == 0)); then
+    status="$cleanup_status"
+    if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
+      status=1
+    fi
+  fi
+  lifecycle_abort "$status"
+  exit "$status"
+}
+
+install_cleanup_traps() {
+  trap 'finish_with_cleanup $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+
 # Break the agent's config so every start fails, and watch what systemd
 # does with it. The unit restarts on failure under a start limit, so the
 # contract is a unit that is retried and then given up on -- and the
@@ -804,151 +845,23 @@ PY
 }
 
 stage_crash_loop() {
-  local work since status=0
+  local work since status=0 cleanup_status=0
   work="$(mktemp -d)" || return
   step "back up the agent config" sudo cp -p "$AGENT_CONFIG" "${work}/agent.json" || return
+  CRASH_LOOP_BACKUP="${work}/agent.json"
   since="$(date +%s)" || return
 
   observe_crash_loop "$since" || status=$?
 
   # Restored whatever the observation concluded, so a failed stage leaves
   # an appliance that can be inspected rather than one that cannot start.
-  note "restoring the agent config"
-  step "restore the agent config" sudo cp -p "${work}/agent.json" "$AGENT_CONFIG" || return
-  step "clear the agent's failed state" sudo systemctl reset-failed "$AGENT_UNIT" || return
-  step "start the agent" sudo systemctl start "$AGENT_UNIT" || return
-  step "services ready again" await_services_ready || return
+  cleanup_crash_loop || cleanup_status=$?
   ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
 
   step "recovered worker round trip" check_worker_round_trip \
     "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" || return
-  step "remove crash-loop scratch files" rm -rf "$work" || return
   pass "agent retried and given up on under a broken config; recovered deployment answered once restored"
-}
-
-# --- offline -----------------------------------------------------------
-
-# One UDP datagram to a documentation address and one to loopback. UDP
-# needs no listener and no reply, so an unrestricted host sends both. A
-# denial by the cgroup address filter systemd applies surfaces as EPERM
-# from sendto, which no remote end can produce.
-NETWORK_PROBE="$(cat <<'PY'
-import errno, json, socket
-
-def send(address):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.sendto(b"tensorplate-offline-probe", (address, 9))
-        return "sent"
-    except PermissionError:
-        return "denied"
-    except OSError as error:
-        return errno.errorcode.get(error.errno, str(error.errno))
-    finally:
-        sock.close()
-
-print(json.dumps({"external": send("192.0.2.1"), "loopback": send("127.0.0.1")}, sort_keys=True))
-PY
-)"
-
-# Run a command as the operator in a transient unit, with any unit
-# properties given before `--`. The offline properties are applied this
-# way for the same reason the services get them from a drop-in: it is
-# systemd's mechanism being exercised, not a stand-in for it.
-run_transient() {
-  local output="$1"
-  shift
-  # The operator writes the evidence file; only the unit needs privilege.
-  # shellcheck disable=SC2024
-  sudo systemd-run --quiet --wait --pipe --collect -p User="$(id -un)" "$@" >"$output"
-}
-
-check_network_probe() {
-  python3 - "$1" "$2" <<'PY'
-import json, sys
-
-path, expected_external = sys.argv[1:]
-probe = json.load(open(path, encoding="utf-8"))
-if probe.get("loopback") != "sent":
-    raise SystemExit(f"loopback was not reachable: {probe}")
-if probe.get("external") != expected_external:
-    raise SystemExit(f"expected a non-loopback send to be {expected_external}: {probe}")
-print(f"network probe: external {probe['external']}, loopback {probe['loopback']}")
-PY
-}
-
-observe_offline() {
-  local work="$1" unit deny allow
-
-  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
-    step "install the offline drop-in for ${unit}" sudo install -D -m 0644 \
-      "${work}/${OFFLINE_DROPIN}" "${SYSTEMD_RUNTIME_DIR}/${unit}.service.d/${OFFLINE_DROPIN}" || return
-  done
-  step "reload systemd" sudo systemctl daemon-reload || return
-  step "restart both units offline" sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
-  step "services ready offline" await_services_ready || return
-
-  # A drop-in systemd did not load would leave a run that looks offline
-  # and is not. The property is read back from the running unit.
-  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
-    deny="$(systemctl show -p IPAddressDeny --value "$unit")" || return
-    allow="$(systemctl show -p IPAddressAllow --value "$unit")" || return
-    [[ "$deny" == *"0.0.0.0/0"* && "$allow" == *"127.0.0.0/8"* ]] ||
-      { printf '%s is not network-denied: IPAddressDeny=%s IPAddressAllow=%s\n' "$unit" "$deny" "$allow" >&2; return 1; }
-  done
-
-  # A kernel or systemd that cannot enforce the filter accepts the
-  # property and filters nothing. Only a send that is refused shows it
-  # is enforced.
-  step "denied network probe" run_transient "${EVIDENCE_DIR}/offline-denied-probe.json" \
-    -p IPAddressDeny=any -p IPAddressAllow=localhost -- \
-    "$(command -v python3)" -c "$NETWORK_PROBE" || return
-  check_network_probe "${EVIDENCE_DIR}/offline-denied-probe.json" denied || return
-
-  note "running doctor with the network denied to it as well"
-  step "offline doctor" run_transient "${EVIDENCE_DIR}/offline-doctor.json" \
-    -p IPAddressDeny=any -p IPAddressAllow=localhost -- \
-    "$(command -v tensorplate)" doctor --output json || return
-  check_doctor_green "${EVIDENCE_DIR}/offline-doctor.json" || return
-
-  step "offline worker round trip" check_worker_round_trip \
-    "${EVIDENCE_DIR}/status-offline.json" "${EVIDENCE_DIR}/offline-result.json" || return
-}
-
-stage_offline() {
-  local work unit status=0 deny
-  work="$(mktemp -d)" || return
-  printf '[Service]\nIPAddressDeny=any\nIPAddressAllow=localhost\n' \
-    >"${work}/${OFFLINE_DROPIN}" || return
-
-  # Without this, a host that already had no route out would pass the
-  # denied probe for a reason that has nothing to do with the drop-in.
-  note "checking the network is reachable before denying it"
-  step "control network probe" run_transient "${EVIDENCE_DIR}/offline-control-probe.json" -- \
-    "$(command -v python3)" -c "$NETWORK_PROBE" || return
-  check_network_probe "${EVIDENCE_DIR}/offline-control-probe.json" sent || return
-
-  observe_offline "$work" || status=$?
-
-  # Removed whatever the observation concluded, and checked, so the
-  # appliance the run leaves behind is the one it installed.
-  note "restoring network access to the services"
-  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
-    step "remove the offline drop-in for ${unit}" sudo rm -f \
-      "${SYSTEMD_RUNTIME_DIR}/${unit}.service.d/${OFFLINE_DROPIN}" || return
-  done
-  step "reload systemd" sudo systemctl daemon-reload || return
-  step "restart both units online" sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
-  step "services ready online" await_services_ready || return
-  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
-    deny="$(systemctl show -p IPAddressDeny --value "$unit")" || return
-    [[ -z "$deny" ]] ||
-      { printf '%s is still network-denied after cleanup: IPAddressDeny=%s\n' "$unit" "$deny" >&2; return 1; }
-  done
-  ((status == 0)) || return "$status"
-
-  step "remove offline scratch files" rm -rf "$work" || return
-  pass "services, worker and doctor ran with non-loopback addresses denied and enforced; network restored"
 }
 
 # --- run ---------------------------------------------------------------
@@ -973,7 +886,7 @@ main() {
   # shellcheck source=tools/validation/lifecycle-stages.sh disable=SC1091
   source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lifecycle-stages.sh"
   lifecycle_begin "$ROW" "$EVIDENCE_DIR" "$TESTED_VERSION" ubuntu-l4-cloud-lifecycle
-  trap 'lifecycle_abort $?' EXIT
+  install_cleanup_traps
 
   lifecycle_stage install stage_install
   # Recorded after the install stage passes, so the digest attests an
@@ -986,7 +899,8 @@ main() {
   lifecycle_stage status-logs stage_status_logs
   lifecycle_stage restart stage_restart
   lifecycle_stage crash-loop stage_crash_loop
-  lifecycle_stage offline stage_offline
+  lifecycle_skip offline \
+    "deferred: GCE platform detection requires live metadata at 169.254.169.254; offline validation needs product support for identity detection without network access"
 
   lifecycle_skip upgrade \
     "no published amd64 predecessor exists for this row: no released tag carries an amd64 runtime package set, so there is nothing to upgrade from"
@@ -995,7 +909,7 @@ main() {
 
   lifecycle_finish
   printf 'evidence: %s\n' "$EVIDENCE_DIR"
-  pass "lifecycle run complete; six stages exercised, two skipped with reasons"
+  pass "lifecycle run complete; five stages exercised, three skipped with reasons"
 }
 
 main "$@"

@@ -4,7 +4,9 @@ The two Ubuntu 24.04 x86_64 rows are validated on a cloud VM the
 operator starts themselves. Unlike the Jetson and the MacBook, the
 machine is disposable and billed by the minute, which shapes this
 procedure: host prerequisites are checked before the first install,
-and the harness restores nothing when it finishes.
+and the harness leaves the candidate installed when it finishes. It
+restores the configuration changed by crash-loop testing, but does not
+restore the install or state removed at the start of the run.
 
 `tools/validation/ubuntu-l4-cloud-lifecycle.sh` **provisions nothing**.
 It does not create, start, resize or delete any cloud resource, and it
@@ -30,7 +32,7 @@ row.** That is the accurate state rather than a defect:
 | rollback | **skipped** — no published amd64 predecessor |
 | restart | covered |
 | crash-loop | covered |
-| offline | covered |
+| offline | **skipped** — GCE platform detection requires live metadata |
 
 No released tag carries an amd64 runtime package set: `v0.1.x` published
 only the CLI for that architecture. So on these rows there is nothing to
@@ -68,32 +70,28 @@ started again and must answer health and inference for the same
 deployment. Filed as `crash-loop-result.json`, `crash-loop-journal.txt`
 and `crash-loop-recovery.json`.
 
-**offline** adds a runtime drop-in under `/run/systemd/system` to both
-services, setting `IPAddressDeny=any` and `IPAddressAllow=localhost`,
-and restarts them. It checks four things:
+Cleanup also attempts restoration on `SIGINT`, `SIGTERM`, `SIGHUP`, and
+shell exit. If restoration fails, the run fails and retains the backup,
+with its path reported for manual recovery. Uncatchable termination such
+as `SIGKILL` cannot run cleanup.
 
-- Both running units report the denial.
-- A probe running under the same properties is refused a send to a
-  non-loopback address, while a control probe run before the drop-in
-  was allowed the same send. A kernel that accepts the property but
-  cannot enforce it fails here.
-- `tensorplate doctor` runs under the same denial and still resolves
-  this row with nothing failing.
-- The worker still answers health and inference.
+**offline is deferred.** On GCE, both the agent's platform detection and
+`tensorplate doctor` query `169.254.169.254` for the machine type. Removing
+network access makes that source unreadable, so doctor cannot resolve
+the row. Offline validation requires product support for trustworthy
+identity detection without network access; exempting metadata or treating
+an undetected row as a pass would not establish that behavior.
 
-The drop-ins are removed and the services restarted whether or not
-those checks pass, and the stage fails if either unit is still denied
-afterwards. Being in `/run`, the drop-ins would also be gone after a
-reboot if the harness died first. The CLI calls that drive status and
-inference run in the operator's session, so they are not denied; the
-services, the worker they supervise, and doctor are. Filed as
-`offline-control-probe.json`, `offline-denied-probe.json`,
-`offline-doctor.json` and `offline-result.json`.
+The harness records this dependency as the offline skip reason. It does
+not install network drop-ins or produce offline pass artifacts. The
+report remains `incomplete`, and cannot satisfy the release lifecycle
+evidence gate, until offline and the other skipped stages are implemented
+and validated.
 
 The first reported L4 hardware run passed install, deploy-smoke,
 status-logs and restart using the earlier assertions. The stronger
 journal and post-restart health and inference checks, and the
-crash-loop and offline stages, have not yet been run on hardware; T4
+crash-loop stage, have not yet been run on hardware; T4
 validation of the current harness remains pending.
 
 Three things it records rather than asserts, because asserting them

@@ -53,8 +53,8 @@ assert sorted(named) == sorted(canonical), (
 )
 assert len(set(named)) == len(named), f"a stage is named twice: {named}"
 assert set(run) == {"install", "deploy-smoke", "status-logs", "restart",
-                    "crash-loop", "offline"}, sorted(run)
-assert set(skipped) == {"upgrade", "rollback"}, sorted(skipped)
+                    "crash-loop"}, sorted(run)
+assert set(skipped) == {"upgrade", "rollback", "offline"}, sorted(skipped)
 
 # Every skip states a reason. An unexplained skip is indistinguishable
 # from a stage nobody thought about.
@@ -84,7 +84,7 @@ assert begin_call, "the harness never calls lifecycle_begin"
 before_begin = body[: begin_call.start()]
 assert "artifact-digest.txt" not in before_begin, \
     "the harness writes the digest sidecar before lifecycle_begin, which clears it"
-print("stage coverage: 6 run, 2 skipped with reasons, digest recorded after install")
+print("stage coverage: 5 run, 3 skipped with reasons, digest recorded after install")
 PY
 
 # --- the bundle must be staged somewhere the sandboxed agent can see.
@@ -138,7 +138,7 @@ mkdir -p "$stub_bin"
 # runner the real systemctl and dpkg exist, and a probe that let them
 # through would query the actual host for services it never installed --
 # answering about the runner rather than about the harness.
-for tool in sudo systemctl systemd-run dpkg; do
+for tool in sudo systemctl dpkg; do
   printf '#!/bin/sh\nexit 0\n' >"${stub_bin}/${tool}"
   chmod +x "${stub_bin}/${tool}"
 done
@@ -277,7 +277,7 @@ check "an assets directory with no installer is refused" "1" \
 
 # --- the stages, executed against a stubbed appliance.
 #
-# The four running stages issue real commands against a real install, so
+# The five running stages issue real commands against a real install, so
 # CI cannot run them for their own sake. What CI must be able to see is
 # whether their assertions FIRE: lifecycle_stage calls a stage function
 # from a tested context, which suspends errexit inside it, so a stage
@@ -285,7 +285,16 @@ check "an assets directory with no installer is refused" "1" \
 # status of its last command. That defect certifies a broken host as a
 # validated one, and it is invisible to any amount of reading.
 appliance="${td}/appliance"
-mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log"
+mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log" "${appliance}/scratch"
+real_mktemp="$(command -v mktemp)"
+
+# An explicit template keeps every harness scratch directory inside the
+# fixture, including backups deliberately retained after failed cleanup.
+cat >"${appliance}/bin/mktemp" <<'STUB'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = -d ] || exit 9
+exec "${TP_FAKE_MKTEMP}" -d "${TMPDIR}/tmp.XXXXXXXXXX"
+STUB
 
 # sudo records without executing privileged commands. Journal requests
 # are routed only to the fixture below; package and filesystem mutations
@@ -300,39 +309,44 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
     *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
   esac
 fi
-# A purge that succeeds empties dpkg's view of the packages. Breaking
-# the agent config and installing the offline drop-in change what the
-# stubbed systemctl reports, until they are undone.
+# Config operations touch only the fixture and the harness's temporary
+# backup. This verifies the bytes can actually be restored, rather than
+# treating a logged copy command as a successful restoration.
 case "$*" in
   *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
   *"systemctl restart"*) : >"${TP_FAKE_RESTART_MARKER}" ;;
-  *"invalid json"*) : >"${TP_FAKE_CONFIG_BROKEN}" ;;
-  "cp -p "*" /etc/tensorplate/agent.json") rm -f "${TP_FAKE_CONFIG_BROKEN}" ;;
-  "install -D "*)
-    [ "${TP_FAKE_MODE:-ok}" = offline-dropin-ignored ] || : >"${TP_FAKE_OFFLINE_DROPIN}" ;;
-  "rm -f "*".service.d/"*)
-    [ "${TP_FAKE_MODE:-ok}" = offline-dropin-sticks ] || rm -f "${TP_FAKE_OFFLINE_DROPIN}" ;;
+  "cp -p /etc/tensorplate/agent.json "*)
+    case "$4" in "${TMPDIR}/"*/agent.json) ;; *) exit 9 ;; esac
+    cp "${TP_FAKE_AGENT_CONFIG}" "$4" || exit
+    printf '%s\n' "$4" >"${TP_FAKE_BACKUP_PATH}"
+    ;;
+  *"invalid json"*)
+    printf '{ invalid json\n' >"${TP_FAKE_AGENT_CONFIG}"
+    : >"${TP_FAKE_CONFIG_BROKEN}"
+    case "${TP_FAKE_MODE:-ok}" in
+      crash-loop-signal-int) kill -INT "$PPID" ;;
+      crash-loop-signal-term) kill -TERM "$PPID" ;;
+      crash-loop-signal-hup) kill -HUP "$PPID" ;;
+    esac
+    ;;
+  "cp -p "*" /etc/tensorplate/agent.json")
+    case "$3" in "${TMPDIR}/"*/agent.json) ;; *) exit 9 ;; esac
+    case "${TP_FAKE_MODE:-ok}" in
+      crash-loop-restore-fails-once)
+        if [ ! -f "${TP_FAKE_RESTORE_FAILED}" ]; then
+          : >"${TP_FAKE_RESTORE_FAILED}"
+          exit 9
+        fi
+        ;;
+      crash-loop-restore-always-fails) exit 9 ;;
+    esac
+    cp "$3" "${TP_FAKE_AGENT_CONFIG}" || exit
+    rm -f "${TP_FAKE_CONFIG_BROKEN}"
+    ;;
 esac
 if [ "$1" = journalctl ]; then
   shift
   exec "${TP_FAKE_JOURNALCTL}" "$@"
-fi
-# A transient unit runs its command here, without systemd. Address
-# denial is emulated in the one place the harness observes it -- a
-# Python sendto -- so each way enforcement can go wrong is selectable.
-if [ "$1" = systemd-run ]; then
-  shift
-  denied=0
-  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
-    case "$1" in IPAddressDeny=*) denied=1 ;; esac
-    shift
-  done
-  [ "$#" -gt 0 ] && shift
-  case "${TP_FAKE_MODE:-ok}" in
-    offline-not-enforced) denied=0 ;;
-    offline-control-denied) denied=1 ;;
-  esac
-  TP_FAKE_NETWORK_DENIED="$denied" PYTHONPATH="${TP_FAKE_SITE}" exec "$@"
 fi
 exit 0
 STUB
@@ -391,12 +405,6 @@ case "$1" in
       *Result*)
         if [ "$broken" -eq 1 ]; then printf 'start-limit-hit\n'; else printf 'success\n'; fi
         ;;
-      *IPAddressDeny*)
-        if [ -f "${TP_FAKE_OFFLINE_DROPIN}" ]; then printf '0.0.0.0/0 ::/0\n'; else printf '\n'; fi
-        ;;
-      *IPAddressAllow*)
-        if [ -f "${TP_FAKE_OFFLINE_DROPIN}" ]; then printf '127.0.0.0/8 ::1/128\n'; else printf '\n'; fi
-        ;;
       *InvocationID*)
         case "$*" in
           *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
@@ -420,12 +428,6 @@ STUB
 cat >"${appliance}/bin/dpkg" <<'STUB'
 #!/bin/sh
 exit 0
-STUB
-# Present for the preflight check. Transient units need root, so reaching
-# this directly rather than through sudo is a harness defect.
-cat >"${appliance}/bin/systemd-run" <<'STUB'
-#!/bin/sh
-exit 9
 STUB
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
@@ -491,9 +493,6 @@ case "$command" in
     row_status=ok
     if [ "$mode" = "doctor-failing" ]; then failing=1; fi
     if [ "$mode" = "wrong-row" ]; then row_status=warning; fi
-    if [ "$mode" = "offline-doctor-failing" ] && [ "${TP_FAKE_NETWORK_DENIED:-0}" = 1 ]; then
-      failing=1
-    fi
     cat <<JSON
 {"command":"doctor","payload":{"failing":${failing},"findings":[
  {"id":"platform_row","status":"${row_status}","message":"resolved ubuntu2404-x86-l4-g2s8"},
@@ -540,27 +539,6 @@ JSON
 esac
 STUB
 chmod +x "${appliance}/bin/"*
-
-# What the kernel does to a send from a network-denied cgroup: EPERM for
-# anything but loopback. Loaded only into commands the stubbed
-# systemd-run starts.
-mkdir -p "${appliance}/site"
-cat >"${appliance}/site/sitecustomize.py" <<'PY'
-import os, socket
-
-_denied = os.environ.get("TP_FAKE_NETWORK_DENIED") == "1"
-_sendto = socket.socket.sendto
-
-def sendto(self, data, *args):
-    address = args[-1]
-    if address[0] in ("127.0.0.1", "::1"):
-        return _sendto(self, data, *args)
-    if _denied:
-        raise PermissionError(1, "Operation not permitted")
-    return len(data)
-
-socket.socket.sendto = sendto
-PY
 
 # A serving /health endpoint, which the deploy-smoke checker fetches.
 #
@@ -630,9 +608,12 @@ run_stages() {
   : >"${appliance}/infer.log"
   : >"${appliance}/health-requests.log"
   rm -f "${appliance}/restarted" "${appliance}/config-broken" \
-    "${appliance}/offline-dropin" "${appliance}/restarts"
+    "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path"
+  printf '{"fixture":"original agent config"}\n' >"${appliance}/agent-config"
   printf '%s\n' "$mode" >"${appliance}/mode"
   env PATH="${appliance}/bin:${PATH}" \
+    TMPDIR="${appliance}/scratch" \
+    TP_FAKE_MKTEMP="$real_mktemp" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
     TP_FAKE_PURGE_MARKER="${evidence}.purged" \
     TP_CLOUD_ARCH=x86_64 \
@@ -651,9 +632,10 @@ run_stages() {
     TP_FAKE_DEPLOYMENT_ID="$deployment_id" \
     TP_FAKE_SERVING_PORT="$serving_port" \
     TP_FAKE_CONFIG_BROKEN="${appliance}/config-broken" \
-    TP_FAKE_OFFLINE_DROPIN="${appliance}/offline-dropin" \
+    TP_FAKE_AGENT_CONFIG="${appliance}/agent-config" \
+    TP_FAKE_BACKUP_PATH="${appliance}/backup-path" \
+    TP_FAKE_RESTORE_FAILED="${appliance}/restore-failed" \
     TP_FAKE_RESTARTS_FILE="${appliance}/restarts" \
-    TP_FAKE_SITE="${appliance}/site" \
     TP_CLOUD_CRASH_LOOP_POLL_SECONDS=0 \
     bash "$harness" \
       --assets-dir "$assets" \
@@ -686,12 +668,26 @@ print(next((s["status"] for s in report["stages"] if s["stage"]==sys.argv[2]), "
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence")"
-for stage in install deploy-smoke status-logs restart crash-loop offline; do
+for stage in install deploy-smoke status-logs restart crash-loop; do
   check "  ${stage} is recorded as a pass" "pass" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
-for stage in upgrade rollback; do
+for stage in upgrade rollback offline; do
   check "  ${stage} is recorded as skipped" "skipped" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
+check "  the skipped stages keep the run incomplete" incomplete \
+  "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
+    "${ok_evidence}/lifecycle-report.json")"
+check "  offline explains the missing metadata-independent identity support" yes \
+  "$(python3 - "${ok_evidence}/lifecycle-report.json" <<'PY'
+import json, sys
+
+stage = next(s for s in json.load(open(sys.argv[1]))["stages"] if s["stage"] == "offline")
+detail = stage.get("detail", "").lower()
+print("yes" if "metadata" in detail and "identity" in detail else "no")
+PY
+)"
+check "  a deferred offline stage never mutates network policy" no \
+  "$(grep -Eq 'IPAddress(Deny|Allow)|systemd-run|validation-offline' "${appliance}/sudo.log" && echo yes || echo no)"
 check "  the artifact digest reaches the report" "yes" \
   "$(python3 -c 'import json,sys,re
 subject=json.load(open(sys.argv[1]))["subject"]
@@ -818,19 +814,18 @@ for mode in journal-command-fails journal-empty-agent journal-no-entries journal
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
 done
 
-# --- crash-loop and offline.
+# --- crash-loop recovery.
 #
-# Both stages break the appliance on purpose and must put it back, so
-# each is checked for the undo as well as for the verdict.
+# This stage breaks the appliance on purpose, so check restoration as
+# well as the stage verdict, including interruption and restore failure.
 sudo_line() {
   grep -nF -- "$1" "${appliance}/sudo.log" | head -n1 | cut -d: -f1
 }
 restore_line='/agent.json /etc/tensorplate/agent.json'
-dropin_removals() {
-  grep -cE '^rm -f /run/systemd/system/tensorplate-(agent|observability)\.service\.d/50-tensorplate-validation-offline\.conf$' \
-    "${appliance}/sudo.log" || true
+config_restored() {
+  [[ ! -e "${appliance}/config-broken" && \
+     "$(cat "${appliance}/agent-config")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no
 }
-
 run_stages ok "${td}/stages-ok-again" >/dev/null
 check "the ok run breaks the agent config, then restores it" yes \
   "$(broke="$(sudo_line 'invalid json')"; restored="$(sudo_line "$restore_line")"
@@ -841,22 +836,7 @@ r=json.load(open(sys.argv[1]));print(r["active_state"],r["restarts"],r["result"]
     "${td}/stages-ok-again/crash-loop-result.json")"
 check "  and the recovered worker answered" yes \
   "$([[ -s "${td}/stages-ok-again/crash-loop-recovery.json" ]] && echo yes || echo no)"
-check "the offline drop-ins are runtime drop-ins for both units" 2 \
-  "$(grep -cE '^install -D -m 0644 .* /run/systemd/system/tensorplate-(agent|observability)\.service\.d/50-tensorplate-validation-offline\.conf$' \
-     "${appliance}/sudo.log" || true)"
-check "  and both are removed afterwards" 2 "$(dropin_removals)"
-check "  doctor ran under the address denial" yes \
-  "$(grep -E '^systemd-run .*IPAddressDeny=any.* -- .*/tensorplate doctor --output json$' \
-     "${appliance}/sudo.log" >/dev/null && echo yes || echo no)"
-check "  the denial was observed as enforced" "denied sent" \
-  "$(python3 -c 'import json,sys
-p=json.load(open(sys.argv[1]));print(p["external"],p["loopback"])' \
-    "${td}/stages-ok-again/offline-denied-probe.json")"
-check "  against a control that could reach the network" "sent sent" \
-  "$(python3 -c 'import json,sys
-p=json.load(open(sys.argv[1]));print(p["external"],p["loopback"])' \
-    "${td}/stages-ok-again/offline-control-probe.json")"
-
+check "  and the original config bytes were restored" yes "$(config_restored)"
 for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-error \
             crash-loop-never-fails crash-loop-stopped; do
   evidence="${td}/stages-${mode}"
@@ -865,7 +845,7 @@ for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-
   check "  and crash-loop is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  and the agent config was restored anyway" yes \
-    "$([[ -n "$(sudo_line "$restore_line")" ]] && echo yes || echo no)"
+    "$(config_restored)"
 done
 
 evidence="${td}/stages-corrupt-fails"
@@ -873,28 +853,36 @@ check "a config corruption that fails is recorded as a failed crash-loop" fail \
   "$(run_stages ok "$evidence" "invalid json" >/dev/null; \
      stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 check "  and the config is still restored" yes \
-  "$([[ -n "$(sudo_line "$restore_line")" ]] && echo yes || echo no)"
+  "$(config_restored)"
 
-for mode in offline-dropin-ignored offline-not-enforced offline-control-denied \
-            offline-doctor-failing offline-dropin-sticks; do
-  evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
-  check "  crash-loop passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
-  check "  and offline is recorded as a failure" fail \
-    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
-  # A host that cannot reach the network fails before any drop-in exists;
-  # every other failure has installed them and must take them away.
-  expected_removals=2
-  [[ "$mode" == offline-control-denied ]] && expected_removals=0
-  check "  and the drop-ins were removed as far as they were installed" "$expected_removals" \
-    "$(dropin_removals)"
+for signal_case in int:130 term:143 hup:129; do
+  signal="${signal_case%:*}"
+  expected_status="${signal_case#*:}"
+  evidence="${td}/stages-crash-loop-signal-${signal}"
+  check "${signal} during config corruption preserves the signal exit status" "$expected_status" \
+    "$(run_stages "crash-loop-signal-${signal}" "$evidence")"
+  check "  the interrupted crash-loop stage is recorded as failed" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  the signal cleanup restores the original config bytes" yes "$(config_restored)"
+  check "  and starts the restored agent" yes \
+    "$(grep -Fxq 'systemctl start tensorplate-agent' "${appliance}/sudo.log" && echo yes || echo no)"
 done
 
-evidence="${td}/stages-dropin-install-fails"
-check "a drop-in that cannot be installed is recorded as a failed offline" fail \
-  "$(run_stages ok "$evidence" "install -D" >/dev/null; \
-     stage_status "${evidence}/lifecycle-report.json" offline)"
-check "  and the removal still runs" 2 "$(dropin_removals)"
+evidence="${td}/stages-crash-loop-restore-fails-once"
+check "a failed config restore is retried on exit without hiding its failure" 9 \
+  "$(run_stages crash-loop-restore-fails-once "$evidence")"
+check "  the failed restore still fails the crash-loop stage" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  the exit retry restores the original config bytes" yes "$(config_restored)"
+
+evidence="${td}/stages-crash-loop-restore-always-fails"
+check "a persistent config restore failure refuses the run" 9 \
+  "$(run_stages crash-loop-restore-always-fails "$evidence")"
+check "  and preserves the backup for manual recovery" yes \
+  "$(backup="$(cat "${appliance}/backup-path")"
+     [[ -f "$backup" && "$(cat "$backup")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no)"
+check "  the report does not certify the failed recovery" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 
 check "no destructive command reached the host" "yes" \
   "$([[ -f "${appliance}/sudo.log" ]] && echo yes || echo no)"
