@@ -504,15 +504,15 @@ assert not disabled, (
 )
 calls, bad = run_stage_call_violations(source)
 assert calls >= 18, f"expected the harness's run_stage calls, found {calls}"
+assert not bad, (
+    "run_stage must be called as a bare top-level statement, or errexit is "
+    f"suspended in its body; see lines {bad}"
+)
 # The assertion lint reads the harness through mask(); a quote or
 # substitution it mis-scanned would blank the rest of the file and hide
 # every statement after it. The run_stage calls are last, so they show it.
 assert len(re.findall(r"^run_stage ", mask(without_heredocs(source)), re.M)) == calls, \
     "the assertion lint cannot see the harness's run_stage calls"
-assert not bad, (
-    "run_stage must be called as a bare top-level statement, or errexit is "
-    f"suspended in its body; see lines {bad}"
-)
 
 with tempfile.TemporaryDirectory(prefix="tp-homebrew-run-stage-") as directory:
     root = pathlib.Path(directory)
