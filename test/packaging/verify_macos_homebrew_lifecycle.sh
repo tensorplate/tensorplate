@@ -817,7 +817,13 @@ for mode, expected in cases.items():
             (root / "work").mkdir()
             earlier_agent = "platform admission: row=earlier\n"
             earlier_observability = "tensorplate-observability interval=1000ms (earlier)\n"
-            earlier_events = event("service.startup", 1111)
+            # Several whole events, longer than either launchd log's earlier
+            # part: an offset taken from the wrong file lands inside the
+            # first one and lets the later ones through as current-run.
+            earlier_events = (event("service.startup", 1111) + event("service.tick", 1112)
+                              + event("service.tick", 1113))
+            assert len(event("service.startup", 1111)) > max(
+                len(earlier_agent), len(earlier_observability))
             (logs / "agent.error.log").write_text(earlier_agent + (
                 "" if mode == "agent-log-stale-only"
                 else "tensorplate-agent listening on agent.sock\n"))
@@ -867,8 +873,12 @@ fi
                 summary = json.loads(summary_text)
                 assert "/" not in summary_text, summary_text
                 assert summary["deployment_id"] == "smoke-1", summary
-                assert summary["logs_entries_returned"] == 2, summary
+                assert summary["logs_entries_returned"] == 4, summary
                 assert summary["current_run_structured_events"] == 1, summary
+                assert summary["agent_launchd_log_current_run_bytes"] == len(
+                    "tensorplate-agent listening on agent.sock"), summary
+                assert summary["observability_launchd_log_current_run_bytes"] == len(
+                    "tensorplate-observability interval=1000ms"), summary
                 # Record-first: the raw CLI documents are in the local stage log.
                 assert '"command": "logs"' in log and '"command": "status"' in log, log
             else:
@@ -885,14 +895,68 @@ assert (call_line("run_stage deploy-smoke deploy_smoke")
         < call_line("run_stage status-logs verify_status_logs")
         < call_line("run_stage launchd-restart restart_services")), "status-logs is out of order"
 
-# The offsets must be taken before either service starts, or this run's
-# startup output would sit before them and never be seen.
+# launchd-start must record each log's size before either service starts,
+# or this run's startup output would sit before the offset and never be
+# seen. Run the real stage against a fake prefix whose services append to
+# their logs when started, with each log present at a distinct size or
+# absent, and require every offset to be that file's size before start.
 start_services = function("start_services")
-start_index = start_services.index("brew services start tensorplate-agent")
-for offset in ('agent_error_log_start="$(stat -f',
-               'observability_error_log_start="$(stat -f',
-               'events_log_start="$(stat -f'):
-    assert -1 < start_services.find(offset) < start_index, f"{offset} is not taken before start"
+start_script = "\n".join(function(name) for name in (
+    "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
+    "start_services",
+)) + r'''
+set -Eeuo pipefail
+evidence_dir="$TP_ROOT/evidence"
+stage_results="$evidence_dir/stages.tsv"
+agent_error_log_start=unset
+observability_error_log_start=unset
+events_log_start=unset
+logs="$TP_ROOT/prefix/var/log/tensorplate"
+brew() {
+  case "$*" in
+    --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
+    "services start tensorplate-agent")
+      printf 'tensorplate-agent listening\n' >>"$logs/agent.error.log" ;;
+    "services start tensorplate-observability")
+      printf 'tensorplate-observability started\n' >>"$logs/observability.error.log"
+      printf '{"component": "observability"}\n' >>"$logs/events.ndjson" ;;
+    "services list")
+      printf 'tensorplate-agent started\ntensorplate-observability started\n' ;;
+    *) return 9 ;;
+  esac
+}
+stat() {
+  case "$1 $2" in
+    "-f %z") python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$3" ;;
+    "-f %Lp") printf '600\n' ;;
+    *) return 9 ;;
+  esac
+}
+launchctl() { printf 'state = running\n'; }
+sleep() { :; }
+tensorplate() { printf '{}\n'; }
+run_stage launchd-start start_services
+printf 'offsets %s %s %s\n' \
+  "$agent_error_log_start" "$observability_error_log_start" "$events_log_start"
+'''
+earlier_sizes = {"agent.error.log": 11, "observability.error.log": 23, "events.ndjson": 37}
+for absent in (None, *earlier_sizes):
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-launchd-start-") as directory:
+        root = pathlib.Path(directory)
+        logs = root / "prefix/var/log/tensorplate"
+        logs.mkdir(parents=True)
+        (root / "evidence").mkdir()
+        for name, size in earlier_sizes.items():
+            if name != absent:
+                (logs / name).write_text("x" * (size - 1) + "\n")
+        (root / "probe.sh").write_text(start_script)
+        result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True,
+                                text=True, env=dict(os.environ, TP_ROOT=directory))
+        expected = "offsets " + " ".join(
+            str(0 if name == absent else size) for name, size in earlier_sizes.items())
+        context = (absent, expected, result.returncode, result.stdout, result.stderr)
+        assert result.returncode == 0, context
+        assert expected in result.stdout.splitlines(), context
 
 # The formulae decide where launchd writes each service's stderr and the
 # harness reads those paths; neither side can move without the other.
