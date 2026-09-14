@@ -10,11 +10,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
   run by hand on a VM the operator starts themselves. It provisions no
-  cloud resources. Five canonical stages are exercised -- install,
-  deploy-smoke, status-logs, restart and crash-loop -- and three
-  are skipped with their reasons recorded: upgrade and rollback have no
-  published amd64 predecessor to move between, and offline is deferred
+  cloud resources. Five canonical stages are always exercised -- install,
+  deploy-smoke, status-logs, restart and crash-loop. Upgrade and rollback
+  run after them when a published, signed predecessor release is supplied
+  with `--baseline-assets-dir`, and are skipped with a reason naming that
+  option otherwise. Offline stays skipped with its reason recorded, deferred
   until cloud platform detection can work without GCE metadata access.
+  Upgrade runs the candidate's installer over a baseline install that is
+  serving a deployment, and requires the exact candidate package set,
+  services restarted by the installer alone, an operator conffile edit
+  kept, doctor green and the deployment re-warmed. Rollback follows the
+  documented procedure: state set aside as `state.bak`, every TensorPlate
+  package except `tensorplate-apt-source` removed, and the baseline
+  installed fresh with the edit kept, the set-aside state not loaded, and
+  a working deploy. The baseline is always installed with its signature
+  verified, its digest is filed separately, and the report's artifact
+  digest stays the candidate's.
   Crash-loop breaks the agent's config and requires systemd to retry and
   then give up on the agent, and the deployment to recover once the
   config is restored.
@@ -90,6 +101,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   before it can qualify for release.
 
 ### Fixed
+
+- The package lifecycle documentation no longer claims dpkg restarts the
+  services on upgrade. The package scripts stop both units and nothing in
+  the packages starts them; `systemctl enable --now`, which the release
+  installer runs, brings them back. The rollback procedure removes every
+  installed TensorPlate package except `tensorplate-apt-source`, including
+  `tensorplate-common` and `tensorplate-backend-python-pytorch`, since a
+  newer package left behind makes the older install a downgrade that
+  `apt-get -y` refuses.
 
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
