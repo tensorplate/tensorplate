@@ -380,6 +380,9 @@ class BuildConfigurationTests(unittest.TestCase):
         # The documented form: the manifest and checksums take their defaults.
         result = self.run_builder(["--artifacts-dir", "artifacts"], arch="amd64")
         call = self.assert_reached_configure(result)
+        # The stub cmake fails configure; the builder stops there and says so.
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("error: C++ configure failed", result.stdout)
         self.assertEqual(call["args"], AMD64_SNAPSHOT_COMMON_ARGS + profile["args"])
         self.assertTrue(profile["CC"] and profile["CXX"], profile)
         self.assertEqual((call["CC"], call["CXX"]), (profile["CC"], profile["CXX"]))
