@@ -206,8 +206,32 @@ def in_network(address, networks):
     return any(address.version == net.version and address in net for net in networks)
 
 
+# A terminal control sequence (colour, bold), raw or escaped the way JSON,
+# Python or C text prints it. It ends in a letter, so `\x1b[1m` directly
+# before a value hides it from every rule that needs a boundary there.
+CONTROL = re.compile(r"(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))\[[0-?]*[ -/]*[@-~]")
+# A backslash escape in text that was not decoded: `\n` or `\t` before a
+# value hides it the same way.
+TEXT_ESCAPE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[0-7]{1,3}|\S)")
+
+
 def scan_line(line, literals):
-    """(class, matched length) for every finding on one line of text."""
+    """(class, matched length) for every finding on one line of text.
+
+    The line is scanned as it is and with control sequences and escapes
+    taken out. A control sequence is both removed and replaced with a
+    space: removing it keeps `Sep 14 01:42:03<styling> host` one space
+    apart, and a space keeps `request<styling><uuid>` two words.
+    """
+    variants = {line, TEXT_ESCAPE.sub(" ", CONTROL.sub("", line)),
+                TEXT_ESCAPE.sub(" ", CONTROL.sub(" ", line))}
+    found = set()
+    for variant in variants:
+        found.update(scan_variant(variant, literals))
+    return sorted(found)
+
+
+def scan_variant(line, literals):
     found = []
 
     def add(cls, value):

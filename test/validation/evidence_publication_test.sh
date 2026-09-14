@@ -435,6 +435,34 @@ add_line "peer ${exact_ipv4}"
 check "findings print as ref:line: class (n chars)" "notes.log:2: ipv4 (${#exact_ipv4} chars)" \
   "$(scan "${d}.out" --patterns-only "$d" >/dev/null; grep -E '^notes\.log:' "${d}.out")"
 
+# --- Values behind terminal styling or a backslash escape: the sequence
+# ends in a letter, which would otherwise read as part of a word.
+esc=$'\033'
+styled_ipv4="10.$(random_octet).$(random_octet).$(random_octet)"
+new_case
+byte_message_record "${d}/agent-journal.txt" "addr=${esc}[1m${styled_ipv4}"
+expect_finding "an address styled inside a byte-array MESSAGE" ipv4 "$styled_ipv4"
+
+new_case
+byte_message_record "${d}/agent-journal.txt" "request${esc}[1m${bare_uuid}"
+expect_finding "a UUID styled directly after a word" uuid "$bare_uuid"
+
+new_case
+add_line "${esc}[2mSep 14 01:42:03${esc}[0m ${host} tensorplate-agent[42]: started"
+expect_finding "a styled short-format journal timestamp" journal-host "$host"
+
+new_case
+add_line "stderr: 'peer \\u001b[1m${styled_ipv4}\\u001b[0m'"
+expect_finding "an address behind an escaped control sequence" ipv4 "$styled_ipv4"
+
+new_case
+add_line "error: \"refused\\nSep 14 01:42:03 ${host} tensorplate-agent[42]: refused\""
+expect_finding "a journal host behind an escaped newline" journal-host "$host"
+
+new_case
+add_line "Err(\"peers\\t${styled_ipv4}\")"
+expect_finding "an address behind an escaped tab" ipv4 "$styled_ipv4"
+
 ula="fd$(random_hex 1):$(random_hex 2):$(random_hex 2)::$(random_hex 2)"
 new_case
 add_line "inet6 ${ula}/64"
