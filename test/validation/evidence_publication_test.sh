@@ -200,6 +200,7 @@ Hardware Serial: 0000000000
 ii  tensorrt  10.3.0.30-1+cuda12.6  arm64
 tensorrt==10.3.0.30
 tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
+Successfully installed tensorrt-10.3.0.30 numpy-1.26.4
 firmware 36.4.3.1.2
 EOF
 
