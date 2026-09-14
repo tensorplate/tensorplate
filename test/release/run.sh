@@ -17,6 +17,7 @@ publish_homebrew_script="tools/release/publish-homebrew-formula.sh"
 verify_homebrew_formulas="test/release/verify_homebrew_formulas.sh"
 verify_artifact_identity="test/release/test_artifact_identity.py"
 verify_build_source_identity="test/release/test_build_source_identity.py"
+verify_build_configuration="test/release/test_build_configuration.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -36,6 +37,7 @@ bash -n "$publish_homebrew_script"
 "$verify_homebrew_formulas"
 python3 "$verify_artifact_identity"
 python3 "$verify_build_source_identity"
+python3 "$verify_build_configuration"
 
 # Patch tags live on the per-minor maintenance line, not per-version
 # release branches.

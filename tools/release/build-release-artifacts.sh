@@ -33,8 +33,8 @@ readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  build-release-artifacts.sh --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR --manifest FILE --checksums FILE [options]
-  build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR --manifest FILE --checksums FILE [options]
+  build-release-artifacts.sh --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR [options]
+  build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR [options]
 
 Options:
   --version VERSION      Canonical release version, for example 0.1.0. Always
@@ -48,8 +48,11 @@ Options:
                          from the candidate.
   --tag TAG              Git tag being published, for example v0.1.0.
   --artifacts-dir DIR    Output directory for .deb artifacts.
-  --manifest FILE        Artifact manifest JSON path.
-  --checksums FILE       SHA256SUMS output path.
+  --manifest FILE        Artifact manifest JSON path. Defaults to
+                         DIR/tensorplate-TAG-artifacts.json, the only name
+                         and place install.sh reads; any other is refused.
+  --checksums FILE       SHA256SUMS output path. Defaults to DIR/SHA256SUMS;
+                         any other is refused.
   --target-os VALUE      Manifest target OS label.
   --arch ARCH            Manifest target architecture. Defaults to arm64.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
@@ -107,8 +110,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$ARTIFACTS_DIR" ]] || die "--artifacts-dir is required"
-[[ -n "$MANIFEST" ]] || die "--manifest is required"
-[[ -n "$CHECKSUMS" ]] || die "--checksums is required"
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
   die "not inside a git repository"
@@ -290,6 +291,38 @@ if [[ "$TARGET_ARCH" != "$host_arch" ]]; then
     die "runner architecture $host_arch does not match release target $TARGET_ARCH"
   fi
 fi
+
+# The checks from here to the changelog staging refuse, before anything is
+# compiled, a build that would otherwise fail or produce an uninstallable
+# set only after cargo and the C++ build had run.
+
+# install.sh --local-artifacts reads exactly one tensorplate-*-artifacts.json
+# and SHA256SUMS from the artifacts directory itself, and a URL install
+# fetches tensorplate-${TAG}-artifacts.json by that name. A manifest written
+# anywhere else produces a set nothing can install.
+MANIFEST="${MANIFEST:-${ARTIFACTS_DIR%/}/tensorplate-${TAG}-artifacts.json}"
+CHECKSUMS="${CHECKSUMS:-${ARTIFACTS_DIR%/}/SHA256SUMS}"
+
+# Directories are compared physically, so a symlink or `..` spelling of the
+# artifacts directory is accepted. CDPATH is cleared because with it set
+# `cd` prints the directory it changed to, and the substitution would
+# return that path twice.
+physical_dir() {
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+artifacts_dir_physical="$(mkdir -p -- "$ARTIFACTS_DIR" && physical_dir "$ARTIFACTS_DIR")" ||
+  die "cannot create --artifacts-dir $ARTIFACTS_DIR"
+
+require_in_artifacts_dir() {
+  local flag="$1" path="$2" name="$3" parent=""
+  parent="$(physical_dir "$(dirname -- "$path")")" || parent=""
+  if [[ "${path##*/}" != "$name" || "$parent" != "$artifacts_dir_physical" ]]; then
+    die "$flag must be ${ARTIFACTS_DIR%/}/${name}, the file install.sh reads; omit $flag to use it"
+  fi
+}
+require_in_artifacts_dir --manifest "$MANIFEST" "tensorplate-${TAG}-artifacts.json"
+require_in_artifacts_dir --checksums "$CHECKSUMS" SHA256SUMS
 
 if ((SNAPSHOT)); then
   write_staged_changelog UNRELEASED
