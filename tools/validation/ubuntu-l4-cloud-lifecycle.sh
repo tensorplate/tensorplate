@@ -326,7 +326,16 @@ await_services_ready() {
 
 # --- install -----------------------------------------------------------
 
-stage_install() {
+# Every TensorPlate package dpkg knows about, one `name status version`
+# line each. dpkg-query exits non-zero when nothing matches, which is an
+# empty database here rather than a failure; callers decide what an
+# empty listing means for them.
+tensorplate_packages() {
+  dpkg-query -W -f='${binary:Package} ${db:Status-Status} ${Version}\n' 'tensorplate*' 2>/dev/null || true
+}
+
+# Remove every trace of a previous install: packages, conffiles and state.
+clear_install() {
   note "clearing any previous TensorPlate install"
   sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
 
@@ -342,11 +351,11 @@ stage_install() {
   # the first re-run on a real L4 host did: the purge failed silently, and
   # the services came up against an empty /etc/tensorplate.
   local purge=() pkg status
-  while read -r pkg status; do
+  while read -r pkg status _; do
     if [[ -n "$pkg" && "$status" != "not-installed" ]]; then
       purge+=("$pkg")
     fi
-  done < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' 2>/dev/null || true)
+  done < <(tensorplate_packages)
   if ((${#purge[@]} > 0)); then
     step "purge ${purge[*]}" \
       sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y "${purge[@]}" || return
@@ -356,22 +365,34 @@ stage_install() {
   # before the state directories go, or the conffiles are stranded as
   # described above.
   local remaining=""
-  while read -r pkg status; do
+  while read -r pkg status _; do
     if [[ -n "$pkg" && "$status" != "not-installed" ]]; then
       remaining+="${pkg} (${status}) "
     fi
-  done < <(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' 2>/dev/null || true)
+  done < <(tensorplate_packages)
   if [[ -n "$remaining" ]]; then
     printf 'TensorPlate packages remain after the purge: %s\n' "$remaining" >&2
     return 1
   fi
   step "clear installed state" sudo rm -rf \
     /etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate || return
+}
+
+# Install one artifact set through its own shipped installer.
+install_set() {
+  local dir="$1" allow_unsigned="$2"
+  local flags=(--local-artifacts "$dir" --yes --with-python-backend)
+  if ((allow_unsigned)); then
+    flags+=(--allow-unsigned)
+  fi
+  step "install.sh" sudo bash "${dir}/install.sh" "${flags[@]}" || return
+}
+
+stage_install() {
+  clear_install || return
 
   note "installing the candidate through the shipped installer"
-  local flags=(--local-artifacts "$ASSETS_DIR" --yes --with-python-backend)
-  ((ALLOW_UNSIGNED)) && flags+=(--allow-unsigned)
-  step "install.sh" sudo bash "${ASSETS_DIR}/install.sh" "${flags[@]}" || return
+  install_set "$ASSETS_DIR" "$ALLOW_UNSIGNED" || return
 
   note "enabling the services"
   step "enable ${AGENT_UNIT}" sudo systemctl enable --now "$AGENT_UNIT" || return
@@ -545,7 +566,11 @@ PY
 
 # --- deploy-smoke ------------------------------------------------------
 
-stage_deploy_smoke() {
+# Stage the smoke bundle, deploy it as DEPLOYMENT_ID, and prove the new
+# worker answers health and inference. The live results go to the named
+# file.
+deploy_bundle() {
+  local result_output="$1"
   local work deploy_output staged_bundle
   work="$(mktemp -d)" || return
   deploy_output="${work}/deploy.json"
@@ -593,8 +618,12 @@ PY
     _ "$staged_bundle" "$DEPLOYMENT_ID" "$deploy_output" || return
 
   step "active worker round trip" check_worker_round_trip \
-    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$deploy_output" || return
+    "${work}/status.json" "$result_output" "$deploy_output" || return
   step "remove deployment scratch files" rm -rf "$work" || return
+}
+
+stage_deploy_smoke() {
+  deploy_bundle "${EVIDENCE_DIR}/deploy-result.json" || return
   pass "bundle admitted, worker ready, inference round-tripped"
 }
 
