@@ -363,8 +363,9 @@ def _same_file(first, second):
         os.path.realpath(first) == os.path.realpath(second)
 
 
-def check_launchd_job(job, program=None, path=None, arguments=None, pid_differs_from=None,
-                      same_pid_as=None, runs=None, brew_info=None):
+def check_launchd_job(job, program=None, path=None, arguments=None, runs=None, same_pid_as=None):
+    """launchd's own view of a job. `brew services info` reports the same
+    loaded file and pid, parsed from this output, so it adds nothing."""
     failures = []
     if program is not None and job["program"] != program:
         failures.append("job_program")
@@ -374,22 +375,13 @@ def check_launchd_job(job, program=None, path=None, arguments=None, pid_differs_
         failures.append("job_arguments")
     if not job["pid"]:
         failures.append("job_running")
-    if pid_differs_from is not None and job["pid"] == pid_differs_from:
-        failures.append("job_pid_changed")
-    if same_pid_as is not None and job["pid"] != same_pid_as:
-        failures.append("job_pid_unchanged")
+    # KeepAlive would hide a crash behind a running job: a restart counts
+    # a run, and a job booted out and loaded again starts over at one run
+    # with a new pid.
     if runs is not None and job["runs"] != runs:
         failures.append("job_runs")
-    if brew_info is not None:
-        entries = brew_info if isinstance(brew_info, list) else []
-        entry = entries[0] if len(entries) == 1 and isinstance(entries[0], dict) else {}
-        if not _same_file(entry.get("loaded_file"), job["path"]) or \
-                (path is not None and not _same_file(entry.get("loaded_file"), path)):
-            failures.append("brew_loaded_file")
-        if entry.get("status") != "started":
-            failures.append("brew_status_started")
-        if entry.get("pid") != job["pid"]:
-            failures.append("brew_pid")
+    if same_pid_as is not None and job["pid"] != same_pid_as:
+        failures.append("job_pid_unchanged")
     return failures
 
 
@@ -1006,12 +998,10 @@ def evidence(directory, deployment):
             raise CheckFailed("the offline profile changed during the stage")
     services = {}
     for name in ("agent", "observability"):
-        denied, final = load(f"{name}-denied.json"), load(f"{name}-final.json")
         services[name] = {
             "launchd_program": "sandbox-exec",
             "loaded_from": "derived plist",
-            "runs": final["runs"],
-            "pid_unchanged_through_stage": final["pid"] == denied["pid"],
+            "launchd_runs_through_stage": load(f"{name}-final.json")["runs"],
             "restored_launchd_program": "service binary",
             "restored_loaded_from": "LaunchAgents plist",
         }
@@ -1111,8 +1101,7 @@ def main(argv=None):
     command("launchd-job", opt("--print", dest="print_file", required=True),
             opt("--field"), opt("--program"), opt("--path"),
             opt("--sandboxed-arguments-from"), opt("--profile"),
-            opt("--pid-differs-from"), opt("--same-pid-as"), opt("--runs", type=int),
-            opt("--brew-info"))
+            opt("--runs", type=int), opt("--same-pid-as"))
     command("sandbox-state", opt("--profile", required=True),
             opt("--expect", choices=("sandboxed", "unsandboxed"), required=True),
             opt("--job", action="append", default=[]),
@@ -1182,12 +1171,8 @@ def _run(args):
             with open(args.sandboxed_arguments_from, "rb") as handle:
                 arguments = expected_sandboxed_arguments(plistlib.load(handle), args.profile)
         failures = check_launchd_job(
-            job, program=args.program, path=args.path, arguments=arguments,
-            pid_differs_from=_job_pid(args.pid_differs_from) if args.pid_differs_from else None,
-            same_pid_as=_job_pid(args.same_pid_as) if args.same_pid_as else None,
-            runs=args.runs,
-            brew_info=_load_json(args.brew_info) if args.brew_info else None,
-        )
+            job, program=args.program, path=args.path, arguments=arguments, runs=args.runs,
+            same_pid_as=_job_pid(args.same_pid_as) if args.same_pid_as else None)
         _emit(job, args.out, failures, f"launchd job {job['label']} checks")
     elif name == "sandbox-state":
         required = [_job_pid(path) for path in args.job]

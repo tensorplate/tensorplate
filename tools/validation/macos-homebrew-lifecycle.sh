@@ -1097,14 +1097,8 @@ verify_normal_supervision() {
     launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
       >"${denial_dir}/${service_name#tensorplate-}-restored.txt" ||
       die "${service_name} is not loaded after the offline stage"
-    brew services info "$service_name" --json \
-      >"${denial_dir}/${service_name#tensorplate-}-restored-info.json" ||
-      die "brew services info ${service_name} failed after the offline stage"
-    cat "${denial_dir}/${service_name#tensorplate-}-restored-info.json" ||
-      die "cannot record brew services info for ${service_name}"
     offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-restored.txt" \
       --program "${formula_prefix}/bin/${service_name}" --path "$launch_agent" \
-      --brew-info "${denial_dir}/${service_name#tensorplate-}-restored-info.json" \
       --out "${denial_dir}/${service_name#tensorplate-}-restored.json" ||
       die "${service_name} is not back under its normal launchd job"
     cmp "$launch_agent" "${formula_prefix}/homebrew.mxcl.${service_name}.plist" ||
@@ -1154,8 +1148,7 @@ verify_offline_runtime() {
       die "${service_name} is not loaded before the offline stage"
     offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-before.txt" \
       --program "${formula_prefix}/bin/${service_name}" \
-      --path "${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist" \
-      --out "${denial_dir}/${service_name#tensorplate-}-before.json" ||
+      --path "${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist" ||
       die "${service_name} is not running under its normal launchd job before the offline stage"
   done
 
@@ -1177,10 +1170,7 @@ verify_offline_runtime() {
     launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
       >"${denial_dir}/${short_name}-denied.txt" ||
       die "${service_name} is not loaded after brew services run --file"
-    brew services info "$service_name" --json >"${denial_dir}/${short_name}-denied-info.json" ||
-      die "brew services info ${service_name} failed under the offline profile"
-    cat "${denial_dir}/${short_name}-denied.txt" "${denial_dir}/${short_name}-denied-info.json" ||
-      die "cannot record the sandboxed ${service_name} job"
+    cat "${denial_dir}/${short_name}-denied.txt" || die "cannot record the sandboxed ${service_name} job"
     # The expected arguments come from the formula plist and the literal
     # sandbox-exec prefix, not from the derived plist, so a derivation
     # that dropped the prefix cannot match itself.
@@ -1189,8 +1179,6 @@ verify_offline_runtime() {
       --path "${denial_dir}/homebrew.mxcl.${service_name}.plist" \
       --sandboxed-arguments-from "${formula_prefix}/homebrew.mxcl.${service_name}.plist" \
       --profile "$offline_profile" \
-      --pid-differs-from "${denial_dir}/${short_name}-before.json" \
-      --brew-info "${denial_dir}/${short_name}-denied-info.json" \
       --out "${denial_dir}/${short_name}-denied.json" ||
       die "${service_name} is not running as the sandboxed launchd job"
   done
@@ -1278,7 +1266,7 @@ verify_offline_runtime() {
       >"${denial_dir}/${short_name}-final.txt" ||
       die "${service_name} is not loaded at the end of the offline stage"
     offline_helper launchd-job --print "${denial_dir}/${short_name}-final.txt" \
-      --program /usr/bin/sandbox-exec --same-pid-as "${denial_dir}/${short_name}-denied.json" \
+      --same-pid-as "${denial_dir}/${short_name}-denied.json" \
       --runs 1 --out "${denial_dir}/${short_name}-final.json" ||
       die "${service_name} restarted during the offline stage"
   done

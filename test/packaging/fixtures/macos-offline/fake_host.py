@@ -91,9 +91,14 @@ def load_job(state, service, path):
         arguments = plistlib.load(handle)["ProgramArguments"]
     sandboxed = arguments[0] == SANDBOX_EXEC
     executed = arguments[3:] if sandboxed else arguments
+    if sandboxed and "run-rewrites-arguments" in MODES:
+        arguments = arguments[:2] + ["/private/tmp/other-profile.sb"] + arguments[3:]
     label = label_of(service)
-    pid = new_process(state, executed, sandboxed, 1, label)
-    state["labels"][label] = {"file": path, "arguments": arguments, "pid": pid, "runs": 1}
+    pid = new_process(state, executed,
+                      sandboxed and not ("unsandboxed-observability" in MODES and service == OBSERVABILITY),
+                      1, label)
+    runs = 2 if sandboxed and service == AGENT and "crashed-at-start" in MODES else 1
+    state["labels"][label] = {"file": path, "arguments": arguments, "pid": pid, "runs": runs}
     if service == AGENT:
         serving = new_process(
             state, [os.path.join(PREFIX, "opt/tensorplate-serving/libexec/tensorplate-serving"),
@@ -166,6 +171,9 @@ def fake_brew(args):
             return 0
         if "run-fails" in MODES and service == OBSERVABILITY:
             return 1
+        if "run-copies-plist" in MODES:
+            shutil.copyfile(path, launch_agent(service))
+            path = launch_agent(service)
         load_job(state, service, path)
         save_state(state)
         return 0
@@ -173,13 +181,17 @@ def fake_brew(args):
         if job is not None:
             print(f"Service `{service}` already started, use `brew services restart {service}` to restart.")
             return 0
-        if "start-fails" in MODES:
+        if "start-fails" in MODES and state.get("offline_done"):
             return 1
+        if "start-not-started" in MODES and state.get("offline_done"):
+            return 0
         shutil.copyfile(formula_plist(service), launch_agent(service))
-        if "launchagents-drift" in MODES:
+        if "launchagents-drift" in MODES and state.get("offline_done"):
             with open(launch_agent(service), "ab") as handle:
                 handle.write(b"\n")
-        load_job(state, service, launch_agent(service))
+        loaded_from = formula_plist(service) if "start-loads-formula-plist" in MODES and \
+            state.get("offline_done") else launch_agent(service)
+        load_job(state, service, loaded_from)
         save_state(state)
         return 0
     return 9
@@ -206,6 +218,9 @@ def fake_launchctl(args):
         print(f"Could not find service \"{label}\" in domain", file=sys.stderr)
         return 113
     if args[0] == "print":
+        if "print-error" in MODES:
+            print("Unexpected launchctl failure", file=sys.stderr)
+            return 5
         print(launchctl_document(state, label), end="")
         return 0
     if "bootout-fails" in MODES:
@@ -335,8 +350,9 @@ def fake_tensorplate(args):
             state["active"] = deployment
         state["offline_done"] = True
         save_state(state)
+        phase = "failed" if "deploy-phase-failed" in MODES else "active"
         print(json.dumps({"command": "deploy", "status": "ok",
-                          "payload": {"phase": "active", "deployment_id": deployment}}))
+                          "payload": {"phase": phase, "deployment_id": deployment}}))
         return 0
     if command == "infer":
         if "infer-blocks" in MODES:
@@ -360,6 +376,16 @@ def fake_tensorplate(args):
             job["runs"] += 1
             job["pid"] = new_process(state, ["agent-restarted"], True, 1, label_of(AGENT))
             save_state(state)
+        if "rebootstrap-during-doctor" in MODES:
+            path = state["labels"][label_of(AGENT)]["file"]
+            unload_job(state, label_of(AGENT))
+            load_job(state, AGENT, path)
+            save_state(state)
+        if "profile-changed" in MODES:
+            profile = os.path.join(ROOT, "work", "offline-denial", "network-denied.sb")
+            os.chmod(profile, 0o644)
+            with open(profile, "a", encoding="utf-8") as handle:
+                handle.write("(allow network*)")
         failing = 1 if "doctor-failing" in MODES else 0
         findings = [{"id": name, "status": "ok", "severity": "info", "message": "ok"}
                     for name in ("platform_profile", "agent_reachable", "agent_service_state",
@@ -379,8 +405,9 @@ def fake_python(args):
               file=sys.stderr)
         return 97
     sys.stdin.read()
-    print(json.dumps({"accelerator_runtime_built": True, "accelerator_runtime_available": True}))
-    return 0
+    available = "mps-unavailable" not in MODES
+    print(json.dumps({"accelerator_runtime_built": True, "accelerator_runtime_available": available}))
+    return 0 if available else 1
 
 
 def main():

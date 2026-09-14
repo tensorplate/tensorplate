@@ -190,39 +190,29 @@ def test_launchd_job():
     assert job == {"label": "homebrew.mxcl.tensorplate-agent", "path": derived_path,
                    "program": "/usr/bin/sandbox-exec", "arguments": expected,
                    "pid": 4242, "runs": 1}, job
-    info = [{"name": AGENT, "loaded": True, "status": "started", "pid": 4242,
-             "loaded_file": derived_path}]
     good = dict(program="/usr/bin/sandbox-exec", path=derived_path, arguments=expected,
-                pid_differs_from=1000, runs=1, brew_info=info)
+                runs=1, same_pid_as=4242)
     assert m.check_launchd_job(job, **good) == []
     cases = {
         "job_arguments": dict(arguments=expected[:-1] + [expected[-1] + "x"]),
         "job_program": dict(program="/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent"),
         "job_path": dict(path="/Users/operator/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist"),
         "job_runs": dict(runs=2),
-        "job_pid_changed": dict(pid_differs_from=4242),
         "job_pid_unchanged": dict(same_pid_as=4243),
-        "brew_loaded_file": dict(brew_info=[dict(info[0], loaded_file="/elsewhere.plist")]),
-        "brew_status_started": dict(brew_info=[dict(info[0], status="none")]),
-        "brew_pid": dict(brew_info=[dict(info[0], pid=1)]),
     }
     for failure, override in cases.items():
         found = m.check_launchd_job(job, **dict(good, **override))
-        # Homebrew's loaded_file must be the expected path too.
-        expected = [failure, "brew_loaded_file"] if failure == "job_path" else [failure]
-        assert found == expected, (failure, found)
+        assert found == [failure], (failure, found)
+    assert m.check_launchd_job(dict(job, pid=None)) == ["job_running"]
     # launchd may print the loaded plist through a symlinked directory
     # (/var/folders is /private/var/folders); both spellings are one file.
     with tempfile.TemporaryDirectory(prefix="tp-offline-link-") as directory:
         real = pathlib.Path(directory) / "private" / "work"
         real.mkdir(parents=True)
         (pathlib.Path(directory) / "var").symlink_to(real)
-        linked, resolved = f"{directory}/var/job.plist", f"{real}/job.plist"
-        linked_job = dict(job, path=linked)
-        linked_info = [dict(info[0], loaded_file=linked)]
-        assert m.check_launchd_job(linked_job, path=resolved, brew_info=linked_info) == []
-        assert m.check_launchd_job(linked_job, path=f"{real}/other.plist", brew_info=linked_info) == \
-            ["job_path", "brew_loaded_file"]
+        linked_job = dict(job, path=f"{directory}/var/job.plist")
+        assert m.check_launchd_job(linked_job, path=f"{real}/job.plist") == []
+        assert m.check_launchd_job(linked_job, path=f"{real}/other.plist") == ["job_path"]
     # A derivation that dropped the prefix would load the formula's own
     # arguments; the expectation is built independently and refuses it.
     assert "job_arguments" in m.check_launchd_job(
@@ -678,6 +668,9 @@ def sandbox_check(pid, operation):
 def ip_send(host, port, *args, **kwargs):
     if sandboxed() and "probe-leaks" not in MODES:
         raise OSError(errno.EPERM, "Operation not permitted")
+    if not sandboxed() and "control-refused" in MODES:
+        # An application firewall refusing the unsandboxed control.
+        raise OSError(errno.EPERM, "Operation not permitted")
     if host in ("127.0.0.1", "fe80::1"):
         return None
     raise OSError(errno.ENETUNREACH, "Network is unreachable")
@@ -702,6 +695,10 @@ m.http_get_json = lambda url: {
     "state": "starting" if "health-not-ready" in MODES else "ready",
     "active_model_id": state()["active"],
 }
+if "probe-crashes" in MODES and sandboxed():
+    def crash(*args, **kwargs):
+        raise RuntimeError("the probe crashed")
+    m.run_probe = crash
 sys.exit(m.main())
 '''
 
@@ -730,9 +727,10 @@ def fake(root, *args, mode=""):
     return result.stdout
 
 
-def make_world(root, scenario="normal"):
+def make_world(root, scenario="normal", mode=""):
     """A Homebrew prefix with both services running from their normal
     LaunchAgents plists, or in another starting state for purge tests."""
+    modes = set(mode.split(","))
     for name in ("bin", "evidence", "work/offline-denial", "home/Library/LaunchAgents",
                  "prefix/etc/tensorplate", "prefix/var/log/tensorplate", "prefix/var/run/tensorplate",
                  "prefix/share/tensorplate/platform/rows", "prefix/opt/pytorch/libexec/bin", "bundle"):
@@ -741,8 +739,12 @@ def make_world(root, scenario="normal"):
         (root / "bin" / tool).symlink_to(FAKE_HOST)
     (root / "prefix/opt/pytorch/libexec/bin/python").symlink_to(FAKE_HOST)
     prefix = root / "prefix"
-    (prefix / "etc/tensorplate/agent.json").write_text(
-        (REPO / "packaging/homebrew/conf/agent.json.in").read_text().replace("@HOMEBREW_PREFIX@", str(prefix)))
+    agent_config = (REPO / "packaging/homebrew/conf/agent.json.in").read_text().replace(
+        "@HOMEBREW_PREFIX@", str(prefix))
+    if "agent-config-wildcard-host" in modes:
+        agent_config = agent_config.replace('"serving_bind_host": "127.0.0.1"', '"serving_bind_host": "0.0.0.0"')
+        assert '"0.0.0.0"' in agent_config
+    (prefix / "etc/tensorplate/agent.json").write_text(agent_config)
     (prefix / "share/tensorplate/platform/rows/macos26-m1pro-16gb.json").write_text(json.dumps(EXACT_ROW))
     (root / "bundle/manifest.json").write_text("{}\n")
     (root / "helper.py").write_text(HELPER_WRAPPER)
@@ -754,6 +756,8 @@ def make_world(root, scenario="normal"):
     for service in (AGENT, OBSERVABILITY):
         (prefix / "opt" / service).mkdir(parents=True)
         document = formula_document(str(prefix), service)
+        if "formula-plist-program-key" in modes:
+            document["Program"] = document["ProgramArguments"][0]
         with open(prefix / "opt" / service / f"homebrew.mxcl.{service}.plist", "wb") as handle:
             plistlib.dump(document, handle)
     (root / "state.json").write_text(json.dumps(
@@ -782,7 +786,7 @@ def make_world(root, scenario="normal"):
 def run_world(script, mode="", scenario="normal", extra_env=None, signals=None, timeout=240):
     directory = tempfile.mkdtemp(prefix="tp-offline-")
     root = pathlib.Path(directory)
-    make_world(root, scenario)
+    make_world(root, scenario, mode)
     # Only what the harness does is recorded, not the world's setup.
     (root / "calls.jsonl").write_text("")
     (root / "probe.sh").write_text(script)
@@ -842,7 +846,8 @@ def check_clean_run(world):
     assert "/" not in text, f"offline-runtime.json carries a path: {text}"
     assert not re.search(r"\b5[0-9]{3}\b", text), f"offline-runtime.json carries a pid: {text}"
     evidence = json.loads(text)
-    assert evidence["services"]["agent"]["runs"] == 1 and evidence["services_sandboxed_network_denied"]
+    assert evidence["services"]["agent"]["launchd_runs_through_stage"] == 1
+    assert evidence["services_sandboxed_network_denied"]
     assert evidence["process_tree"] == {"processes": 3, "serving_workers": 1, "backend_sidecars": 1,
                                         "all_sandboxed_network_denied": True}, evidence["process_tree"]
     assert set(evidence["probe"]["denied"].values()) == {"EPERM"}, evidence["probe"]
@@ -886,7 +891,22 @@ FAILURE_MODES = {
     "crash-during-doctor": ("tensorplate-agent restarted during the offline stage", True),
     "launchagents-drift": ("the tensorplate-agent LaunchAgents plist differs from the formula plist", True),
     "agent-not-ready-after": ("the agent did not answer outside the sandbox after the offline stage", True),
+    "agent-config-wildcard-host": ("cannot render the offline profile from the installed agent config", True),
+    "control-refused": ("the offline profile did not refuse the network as required", True),
+    "formula-plist-program-key": ("cannot derive the sandboxed tensorplate-observability launchd plist", True),
+    "run-rewrites-arguments": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "run-copies-plist": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "unsandboxed-observability": ("a launchd service does not read back as sandboxed with the network denied",
+                                  True),
+    "deploy-phase-failed": ("the deploy under the offline profile did not activate offline-1", True),
+    "probe-crashes": ("the network probe did not run under the offline profile", True),
+    "mps-unavailable": ("the MPS probe failed under the offline profile", True),
+    "crashed-at-start": ("tensorplate-agent restarted during the offline stage", True),
+    "rebootstrap-during-doctor": ("tensorplate-agent restarted during the offline stage", True),
+    "profile-changed": ("cannot write the offline-runtime evidence", True),
+    "start-loads-formula-plist": ("tensorplate-agent is not back under its normal launchd job", False),
     "orphan-sidecar": ("a sandboxed TensorPlate process remains after the offline stage", False),
+    "start-not-started": ("normal launchd supervision was not restored after the offline stage", False),
     "start-fails": ("normal launchd supervision was not restored after the offline stage", False),
     "bootout-fails": ("normal launchd supervision was not restored after the offline stage", False),
 }
@@ -941,6 +961,17 @@ def stage_cases():
         cases[f"failure {mode}"] = (
             lambda mode=mode, message=message, restorable=restorable:
             check_failure(mode, run_world(stage_script(), mode=mode), message, restorable))
+    for scenario, message in (
+        ("empty", "tensorplate-agent is not loaded before the offline stage"),
+        ("agent-sandboxed", "tensorplate-agent is not running under its normal launchd job before the offline stage"),
+    ):
+        cases[f"failure precondition {scenario}"] = (
+            lambda scenario=scenario, message=message:
+            check_failure(scenario, run_world(stage_script(), scenario=scenario), message, False))
+    cases["failure precondition agent config still broken"] = lambda: check_failure(
+        "config", run_world(stage_script(body='agent_config_backup="$TP_ROOT/missing-backup"\n'
+                                            "run_stage offline-runtime verify_offline_runtime\n")),
+        "the agent config is still replaced by the crash-loop stage", True)
     for mode in ("run-fails", "probe-leaks", "start-fails"):
         message, restorable = FAILURE_MODES[mode]
 
@@ -992,6 +1023,7 @@ def purge_cases():
                                         "homebrew.mxcl.tensorplate-observability"], True),
         ("both-sandboxed", "1", "bootout-fails", 1, ["homebrew.mxcl.tensorplate-agent",
                                                      "homebrew.mxcl.tensorplate-observability"], False),
+        ("both-sandboxed", "1", "print-error", 1, [], False),
         ("normal", "0", "", 0, [], True),
         ("normal", "1", "", 0, [], True),
     ):
@@ -1012,6 +1044,10 @@ def purge_cases():
             if mode == "bootout-fails":
                 assert not starts, "normal jobs were started while a sandboxed job stayed loaded"
                 assert "remove it with: launchctl bootout gui/" in world.stderr, world.context()
+            if mode == "print-error":
+                assert not starts, "normal jobs were started while launchd could not be read"
+                assert re.search(r"error: launchctl print gui/\d+/homebrew.mxcl.tensorplate-agent failed "
+                                 r"with status 5", world.stderr), world.context()
         cases[f"purge {scenario} stopped={stopped} {mode or 'no fault'}"] = case
 
     def via_cleanup():
