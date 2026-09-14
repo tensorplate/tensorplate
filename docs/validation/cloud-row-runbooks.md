@@ -29,8 +29,8 @@ row.** That is the accurate state rather than a defect:
 | status-logs | covered |
 | rollback | **skipped** — no published amd64 predecessor |
 | restart | covered |
-| crash-loop | **skipped** — separate change |
-| offline | **skipped** — separate change |
+| crash-loop | covered |
+| offline | covered |
 
 No released tag carries an amd64 runtime package set: `v0.1.x` published
 only the CLI for that architecture. So on these rows there is nothing to
@@ -57,10 +57,44 @@ the deployment can serve again after being re-warmed from durable state.
 The live health and inference results are filed in `restart-result.json`
 alongside `status-after-restart.json`.
 
-The first reported L4 hardware run passed these four stages using the
-earlier assertions. The stronger journal and post-restart health and
-inference checks have not yet been rerun on hardware; T4 validation of
-the current harness remains pending.
+**crash-loop** replaces `/etc/tensorplate/agent.json` with invalid JSON
+and restarts the agent. It passes when systemd retries the agent at
+least once and then gives up: the unit ends `failed` and its restart
+count stops changing across a sample longer than `RestartSec`. The
+journal must also show the agent refusing the config on at least two of
+those starts, so the loop is known to be about the config. The original
+config is restored whether or not those checks pass. The agent is then
+started again and must answer health and inference for the same
+deployment. Filed as `crash-loop-result.json`, `crash-loop-journal.txt`
+and `crash-loop-recovery.json`.
+
+**offline** adds a runtime drop-in under `/run/systemd/system` to both
+services, setting `IPAddressDeny=any` and `IPAddressAllow=localhost`,
+and restarts them. It checks four things:
+
+- Both running units report the denial.
+- A probe running under the same properties is refused a send to a
+  non-loopback address, while a control probe run before the drop-in
+  was allowed the same send. A kernel that accepts the property but
+  cannot enforce it fails here.
+- `tensorplate doctor` runs under the same denial and still resolves
+  this row with nothing failing.
+- The worker still answers health and inference.
+
+The drop-ins are removed and the services restarted whether or not
+those checks pass, and the stage fails if either unit is still denied
+afterwards. Being in `/run`, the drop-ins would also be gone after a
+reboot if the harness died first. The CLI calls that drive status and
+inference run in the operator's session, so they are not denied; the
+services, the worker they supervise, and doctor are. Filed as
+`offline-control-probe.json`, `offline-denied-probe.json`,
+`offline-doctor.json` and `offline-result.json`.
+
+The first reported L4 hardware run passed install, deploy-smoke,
+status-logs and restart using the earlier assertions. The stronger
+journal and post-restart health and inference checks, and the
+crash-loop and offline stages, have not yet been run on hardware; T4
+validation of the current harness remains pending.
 
 Three things it records rather than asserts, because asserting them
 would claim more than the run establishes:
@@ -204,7 +238,7 @@ cover them.
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
 | `install.log` | may include the operator's account name in the assets path the installer echoes |
 | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or journal records it quotes |
 | `doctor.json`, `status.json`, `deploy-result.json` and the rest | no identifiers were found in the earlier run; scan every current output as well |
