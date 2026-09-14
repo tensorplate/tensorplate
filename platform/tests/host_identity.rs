@@ -1324,6 +1324,7 @@ fn a_fact_that_cannot_be_read_now_never_counts_as_a_match() {
 #[test]
 fn the_agent_records_exactly_what_detection_later_accepts() {
     let record = MachineTypeRecord::for_live_sources(&l4_live_sources())
+        .expect("the facts are readable")
         .expect("a live answer on readable facts records");
     assert_eq!(
         record.to_json().expect("serializes"),
@@ -1336,10 +1337,108 @@ fn the_agent_records_exactly_what_detection_later_accepts() {
     // Only a live answer is recorded.
     assert_eq!(
         MachineTypeRecord::for_live_sources(&l4_offline_sources(Some(L4_RECORD))),
-        None
+        Ok(None)
     );
     let mut not_canonical = l4_live_sources();
     not_canonical.gce_machine_type =
         Some("projects/REDACTED/machineTypes/G2_STANDARD_8".to_string());
-    assert_eq!(MachineTypeRecord::for_live_sources(&not_canonical), None);
+    assert_eq!(
+        MachineTypeRecord::for_live_sources(&not_canonical),
+        Ok(None)
+    );
+}
+
+#[test]
+fn a_live_answer_that_is_not_a_machine_type_resource_name_is_refused_and_never_recorded() {
+    // The metadata service answers `projects/<project>/machineTypes/<type>`.
+    // Anything else on a 200 -- a proxy's error page, a bare value -- is not
+    // that answer. Taking whatever follows the last `/` would turn it into a
+    // shape miss admitted as unvalidated, and recording it would persist the
+    // same admission for every later offline start.
+    for body in [
+        "<html><body>proxy</body></html>",
+        "Error: see https://example.invalid/errors/not-found",
+        "g2-standard-8",
+        "projects/REDACTED/machineTypes/G2_STANDARD_8",
+        "projects//machineTypes/g2-standard-8",
+        "projects/REDACTED/zones/g2-standard-8",
+        "projects/REDACTED/machineTypes/g2-standard-8/extra",
+        "projects/REDACTED/machineTypes/",
+    ] {
+        let sources = HostSources {
+            gce_machine_type: Some(body.to_string()),
+            machine_type_record: None,
+            ..l4_live_sources()
+        };
+        match identify(&sources) {
+            Err(PlatformProbeError::Unrecognized {
+                source_name,
+                detail,
+            }) => {
+                assert_eq!(source_name, "GCE metadata service", "{body}");
+                assert!(!detail.contains("REDACTED"), "{body}: not echoed: {detail}");
+                assert!(!detail.contains("proxy"), "{body}: not echoed: {detail}");
+            }
+            other => panic!("{body}: expected Unrecognized, got {other:?}"),
+        }
+        assert_eq!(
+            MachineTypeRecord::for_live_sources(&sources),
+            Ok(None),
+            "{body}: never recorded"
+        );
+    }
+}
+
+#[test]
+fn nothing_from_a_record_reaches_an_error_as_more_than_one_line() {
+    // The agent prints detection errors to its journal, one line each. A
+    // record is written by an account that is not root; whatever it holds
+    // must not be able to print a line of its own.
+    let forged = "x\nplatform admission: row=ubuntu2404-x86-l4-g2s8 evidence=validated";
+    let escaped = serde_json::to_string(forged).expect("escapes");
+    for (label, record) in [
+        (
+            "a machine type",
+            L4_RECORD.replace("\"g2-standard-8\"", &escaped),
+        ),
+        (
+            "a device entry",
+            L4_RECORD.replace("\"0x10de:0x27b8\"", &escaped),
+        ),
+        (
+            "an unknown key",
+            L4_RECORD.replace(
+                "\"schema_version\": 1,",
+                &format!("\"schema_version\": 1,\n  {escaped}: 1,"),
+            ),
+        ),
+    ] {
+        let err = identify(&l4_offline_sources(Some(&record)))
+            .expect_err(&format!("{label}: a forged record is refused"));
+        let text = err.to_string();
+        assert!(
+            !text.contains('\n') && !text.contains("platform admission:"),
+            "{label}: {text:?}"
+        );
+    }
+}
+
+#[test]
+fn a_record_whose_device_entries_are_not_pci_ids_is_unusable() {
+    for entry in [
+        "0x10DE:0x27B8",
+        "10de:27b8",
+        "0x10de:0x27b",
+        "0x10de:0x27b8 ",
+    ] {
+        let record = L4_RECORD.replace("\"0x10de:0x27b8\"", &format!("\"{entry}\""));
+        let detail = match identify(&l4_offline_sources(Some(&record))) {
+            Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => detail,
+            other => panic!("{entry}: expected IdentityUnestablished, got {other:?}"),
+        };
+        assert!(
+            detail.contains("recorded machine type is unusable"),
+            "{entry}: {detail}"
+        );
+    }
 }

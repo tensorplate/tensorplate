@@ -29,6 +29,7 @@
 // not thrown away: they are carried in [`ExactHostFacts`] for evidence
 // recording, which needs the precision matching deliberately discards.
 
+use tensorplate_protocol::serde_shape::is_canonical_identifier;
 use tensorplate_protocol::PlatformMemoryProfileName;
 
 use crate::capability::AcceleratorObservation;
@@ -414,10 +415,29 @@ pub fn macos_row_version(product_version: &str) -> Option<String> {
 /// The metadata server answers with the fully qualified resource name
 /// `projects/<number>/machineTypes/g2-standard-8`; a row records the bare
 /// machine type.
+///
+/// Anything that is not exactly that shape, with a canonical machine type,
+/// is `None`. A 200 carrying something else -- a proxy's error page, a bare
+/// value -- is not the service's answer, and taking whatever follows its last
+/// `/` would hand matching a shape no row names, which a context-only row
+/// admits as unvalidated.
 #[must_use]
 pub fn machine_type_from_metadata(body: &str) -> Option<String> {
-    let value = body.trim().rsplit('/').next()?.trim();
-    (!value.is_empty()).then(|| value.to_string())
+    let mut segments = body.trim().split('/');
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("projects"), Some(project), Some("machineTypes"), Some(machine_type), None)
+            if !project.is_empty() && is_canonical_identifier(machine_type) =>
+        {
+            Some(machine_type.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Whether a DMI product name is the one Compute Engine firmware reports.

@@ -905,6 +905,7 @@ fn host_os_says_which_source_established_the_machine_type() {
     let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&sources_of(&fixture(
         "ubuntu2404-x86-l4-g2s8",
     )))
+    .expect("the facts are readable")
     .expect("the live fixture records")
     .to_json()
     .expect("serializes");

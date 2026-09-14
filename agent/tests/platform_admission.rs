@@ -1113,6 +1113,7 @@ fn an_offline_l4_with_a_matching_record_is_admitted_as_validated() {
     let registry = registry();
     let live = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
     let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&live)
+        .expect("the facts are readable")
         .expect("the live fixture records")
         .to_json()
         .expect("serializes");

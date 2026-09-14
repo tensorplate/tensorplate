@@ -380,7 +380,7 @@ fn platform_identity_line(
     record: &Result<RecordWrite, PlatformProbeError>,
 ) -> String {
     let record = match record {
-        Ok(write) => write.as_str().to_string(),
+        Ok(write) => write.to_string(),
         Err(err) => format!("failed ({err})"),
     };
     format!(

@@ -45,6 +45,9 @@ const METADATA_TIMEOUT: Duration = Duration::from_millis(250);
 /// an unbounded read from an unauthenticated endpoint is not on offer.
 const MAX_METADATA_RESPONSE: u64 = 8 * 1024;
 
+/// Ceiling on the machine-type record. A record is a few hundred bytes.
+const MAX_MACHINE_TYPE_RECORD: u64 = 4 * 1024;
+
 /// Reads host identity from the running machine.
 #[derive(Clone, Debug, Default)]
 pub struct SystemHostProbe {
@@ -280,13 +283,14 @@ impl SystemHostProbe {
     /// declares none — and must never pay a network timeout to find that
     /// out.
     ///
-    /// Only a service that could not be reached — nothing answered, or no
-    /// complete answer arrived within the budget — lets the record be read.
-    /// A service that answered, but not with a machine type, is a broken
-    /// source and stays one: falling back there would let a record outvote
-    /// the authority that just refused. A record that is absent is `None`
-    /// here; [`crate::detect::identify`] turns that into an error, because
-    /// an instance with no machine type is admitted as an unvalidated shape.
+    /// Only a service that could not be reached — the connect or the request
+    /// failed, or nothing at all came back within the budget — lets the
+    /// record be read. A service that sent anything, closed, or reset, but
+    /// did not answer with a machine type, is a broken source and stays one:
+    /// falling back there would let a record outvote the authority that just
+    /// answered. A record that is absent is `None` here;
+    /// [`crate::detect::identify`] turns that into an error, because an
+    /// instance with no machine type is admitted as an unvalidated shape.
     fn machine_type_sources(
         &self,
         dmi_product_name: Option<&str>,
@@ -297,7 +301,10 @@ impl SystemHostProbe {
         }
         match query() {
             Ok(body) => Ok((Some(body), None)),
-            Err(MetadataFailure::Timeout) => Ok((None, self.read(MACHINE_TYPE_RECORD_PATH)?)),
+            Err(MetadataFailure::Timeout) => Ok((
+                None,
+                read_machine_type_record(&self.path(MACHINE_TYPE_RECORD_PATH))?,
+            )),
             Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
@@ -316,8 +323,10 @@ impl SystemHostProbe {
     /// `sources` carry no live answer — including sources whose machine type
     /// was itself resolved from a record. Writes nothing, and reports
     /// [`RecordWrite::Unchanged`], when the file already holds exactly these
-    /// bytes. Otherwise replaces the file atomically, group-readable and not
-    /// world-readable.
+    /// bytes. Writes nothing, and reports [`RecordWrite::FactsUnavailable`],
+    /// when there is a live answer but a fact it would be bound to cannot be
+    /// read. Otherwise replaces the file atomically, created `0640`: never
+    /// world-readable, and group-readable under the agent unit's umask.
     ///
     /// # Errors
     ///
@@ -328,8 +337,10 @@ impl SystemHostProbe {
         &self,
         sources: &HostSources,
     ) -> Result<RecordWrite, PlatformProbeError> {
-        let Some(record) = MachineTypeRecord::for_live_sources(sources) else {
-            return Ok(RecordWrite::NotApplicable);
+        let record = match MachineTypeRecord::for_live_sources(sources) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(RecordWrite::NotApplicable),
+            Err(fact) => return Ok(RecordWrite::FactsUnavailable(fact)),
         };
         let target = self.path(MACHINE_TYPE_RECORD_PATH);
         let failed = |detail: String| PlatformProbeError::Unreadable {
@@ -339,20 +350,27 @@ impl SystemHostProbe {
         let body = record
             .to_json()
             .map_err(|err| failed(format!("cannot serialize the record: {err}")))?;
-        if std::fs::read(&target).ok().as_deref() == Some(body.as_bytes()) {
+        // Read the way detection reads it, so a link or an oversized file
+        // holding these bytes is replaced rather than left for detection to
+        // refuse.
+        if read_machine_type_record(&target).ok().flatten().as_deref() == Some(body.as_str()) {
             return Ok(RecordWrite::Unchanged);
         }
         let temporary = target.with_extension("json.tmp");
         let write = || -> std::io::Result<()> {
+            // Whatever is at the temporary name -- a leftover from an
+            // interrupted write, or a link planted there -- is removed, not
+            // opened: `create_new` never follows a link and never inherits an
+            // existing file's permissions.
+            match std::fs::remove_file(&temporary) {
+                Err(err) if err.kind() != ErrorKind::NotFound => return Err(err),
+                _ => {}
+            }
             let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
+            options.write(true).create_new(true);
             #[cfg(unix)]
             std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
             let mut file = options.open(&temporary)?;
-            // `mode` applies only when the file is created; a temporary left
-            // behind by an interrupted write keeps whatever it had.
-            #[cfg(unix)]
-            file.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o640))?;
             file.write_all(body.as_bytes())?;
             file.sync_all()?;
             std::fs::rename(&temporary, &target)?;
@@ -387,6 +405,54 @@ fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
             detail: err.to_string(),
         }),
     }
+}
+
+/// Read the machine-type record without following a link and without
+/// reading more than any record can be.
+///
+/// Absent is `None`, and a record that cannot be read -- typically an
+/// operator outside the `tensorplate` group, which owns the state directory
+/// -- is [`PlatformProbeError::Unreadable`], as for every other source. A
+/// path that is not a regular file, or a file larger than any record, is
+/// [`PlatformProbeError::IdentityUnestablished`]: there is something there,
+/// and it is not a record detection will use.
+///
+/// The link check and the open are two steps. Swapping the file between them
+/// takes write access to the state directory, which only root and the agent's
+/// own account have.
+fn read_machine_type_record(path: &Path) -> Result<Option<String>, PlatformProbeError> {
+    let unreadable = |err: std::io::Error| PlatformProbeError::Unreadable {
+        source_name: path.display().to_string(),
+        detail: err.to_string(),
+    };
+    let unusable = |what: String| PlatformProbeError::IdentityUnestablished {
+        source_name: path.display().to_string(),
+        detail: format!(
+            "the machine-type record {what}; start tensorplate-agent once while the metadata \
+             service is reachable to record it again"
+        ),
+    };
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(unreadable(err)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(unusable("is not a regular file".to_string()));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_MACHINE_TYPE_RECORD + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(unreadable)?;
+    if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MACHINE_TYPE_RECORD) {
+        return Err(unusable(format!(
+            "is larger than {MAX_MACHINE_TYPE_RECORD} bytes"
+        )));
+    }
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// What a non-zero exit from a detection command means.
@@ -488,16 +554,18 @@ fn run(
 /// direction.
 #[derive(Debug)]
 enum MetadataFailure {
-    /// The budget ran out before a complete answer arrived.
+    /// The service was not reached: the connect or the request failed, or
+    /// nothing at all came back before the budget ran out.
     Timeout,
-    /// The service answered, but not with a machine type.
+    /// The service was reached -- it sent something, closed, or reset --
+    /// but did not answer with a machine type.
     Answered(String),
 }
 
 impl std::fmt::Display for MetadataFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Timeout => write!(f, "no complete answer within the budget"),
+            Self::Timeout => write!(f, "no answer within the budget"),
             Self::Answered(detail) => write!(f, "{detail}"),
         }
     }
@@ -535,13 +603,19 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     let mut reader = stream.take(MAX_METADATA_RESPONSE);
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 512];
-    // Out of budget, EOF, or a read error all stop the loop; anything
-    // already received still counts if it is a complete, self-describing
-    // answer.
-    while let Some(left) = remaining(deadline) {
+    // Out of budget, EOF (or the size cap), or a read error all stop the
+    // loop; anything already received still counts if it is a complete,
+    // self-describing answer.
+    let mut out_of_budget = false;
+    loop {
+        let Some(left) = remaining(deadline) else {
+            out_of_budget = true;
+            break;
+        };
         reader.get_mut().set_read_timeout(Some(left)).ok();
         match reader.read(&mut chunk) {
-            Ok(n) if n > 0 => {
+            Ok(0) => break,
+            Ok(n) => {
                 buffer.extend_from_slice(&chunk[..n]);
                 // Stop as soon as the response is complete rather than
                 // waiting for the peer to close. Waiting for EOF would
@@ -550,19 +624,43 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
                     break;
                 }
             }
-            _ => break,
+            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+            Err(err) => {
+                out_of_budget = matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut);
+                break;
+            }
         }
     }
 
+    // Unreachable means nothing came back at all before the budget ran out.
+    // A peer that closed, reset, or sent anything was reached, and whatever
+    // it sent that is not a machine type is its answer: only the first case
+    // may let a recorded machine type stand in for the live one.
+    if buffer.is_empty() {
+        return Err(if out_of_budget {
+            MetadataFailure::Timeout
+        } else {
+            MetadataFailure::Answered(
+                "metadata service closed the connection without answering".to_string(),
+            )
+        });
+    }
+    let incomplete = || {
+        MetadataFailure::Answered(
+            "metadata service sent an incomplete or unparseable response".to_string(),
+        )
+    };
     let response = String::from_utf8_lossy(&buffer);
     let Some((head, body)) = split_response(&response) else {
-        return Err(MetadataFailure::Timeout);
+        return Err(incomplete());
     };
     let status = head.lines().next().unwrap_or_default();
-    if !status.split_whitespace().any(|token| token == "200") {
+    if status.split_whitespace().nth(1) != Some("200") {
+        // One journal line: whatever the peer put in its status line is
+        // escaped rather than printed.
         return Err(MetadataFailure::Answered(format!(
             "metadata service answered `{}`",
-            status.trim()
+            status.trim().escape_debug()
         )));
     }
     // A declared length that the body does not reach means a truncated
@@ -570,7 +668,7 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     // silently makes a supported instance unsupported.
     if let Some(declared) = content_length(head) {
         if body.len() < declared {
-            return Err(MetadataFailure::Timeout);
+            return Err(incomplete());
         }
     }
     let body = body.trim();
@@ -741,6 +839,7 @@ mod tests {
     fn a_service_that_answered_badly_is_never_outvoted_by_the_record() {
         let root = staged_state_root();
         let record = MachineTypeRecord::for_live_sources(&live_gce_sources("g2-standard-8"))
+            .expect("the facts are readable")
             .expect("a live answer records")
             .to_json()
             .expect("serializes");
@@ -817,6 +916,7 @@ mod tests {
         resolved_from_a_record.gce_machine_type = None;
         resolved_from_a_record.machine_type_record = Some(
             MachineTypeRecord::for_live_sources(&live)
+                .expect("the facts are readable")
                 .expect("a live answer records")
                 .to_json()
                 .expect("serializes"),
@@ -895,6 +995,164 @@ mod tests {
     }
 
     #[test]
+    fn a_live_answer_on_facts_that_cannot_be_read_says_it_was_not_recorded() {
+        // Not "there was no live answer": there was one, and the record is
+        // missing for a different reason the operator can act on.
+        let root = staged_state_root();
+        let live = HostSources {
+            pci_devices: None,
+            ..live_gce_sources("g2-standard-8")
+        };
+        match SystemHostProbe::with_root(root.path())
+            .write_machine_type_record(&live)
+            .expect("not an error")
+        {
+            RecordWrite::FactsUnavailable(fact) => {
+                assert!(fact.contains("NVIDIA display devices"), "{fact}");
+            }
+            other => panic!("expected FactsUnavailable, got {other:?}"),
+        }
+        assert!(!staged_record(&root).exists(), "nothing is written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_is_an_error_not_absence() {
+        // An operator outside the tensorplate group, offline. "I could not
+        // read it" must not become "nothing was recorded".
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = staged_valid_record_root();
+        let state = staged_record(&root)
+            .parent()
+            .expect("the record has a parent")
+            .to_path_buf();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let denied = std::fs::read_dir(&state).is_err();
+        let result = SystemHostProbe::with_root(root.path())
+            .machine_type_sources(GCE, || Err(MetadataFailure::Timeout));
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o750)).expect("chmod");
+        // Running as root defeats the permission bit; skip rather than
+        // assert something the environment cannot produce.
+        if denied {
+            match result {
+                Err(PlatformProbeError::Unreadable { source_name, .. }) => {
+                    assert!(
+                        source_name.ends_with(MACHINE_TYPE_RECORD_PATH),
+                        "{source_name}"
+                    );
+                }
+                other => panic!("an unreadable record must not read as absent: {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_that_is_not_a_regular_file_is_never_followed() {
+        let root = staged_state_root();
+        let elsewhere = root.path().join("elsewhere.json");
+        std::fs::write(
+            &elsewhere,
+            MachineTypeRecord::for_live_sources(&live_gce_sources("g2-standard-8"))
+                .expect("the facts are readable")
+                .expect("records")
+                .to_json()
+                .expect("serializes"),
+        )
+        .expect("stage a valid record outside the state directory");
+        std::os::unix::fs::symlink(&elsewhere, staged_record(&root)).expect("symlink");
+        match SystemHostProbe::with_root(root.path())
+            .machine_type_sources(GCE, || Err(MetadataFailure::Timeout))
+        {
+            Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
+                assert!(detail.contains("not a regular file"), "{detail}");
+            }
+            other => panic!("a symlinked record must not be read: {other:?}"),
+        }
+
+        std::fs::remove_file(staged_record(&root)).expect("unlink");
+        std::fs::create_dir(staged_record(&root)).expect("stage a directory");
+        assert!(
+            matches!(
+                SystemHostProbe::with_root(root.path())
+                    .machine_type_sources(GCE, || Err(MetadataFailure::Timeout)),
+                Err(PlatformProbeError::IdentityUnestablished { .. })
+            ),
+            "a directory is not a record"
+        );
+    }
+
+    #[test]
+    fn an_oversized_record_is_refused_without_reading_it_all() {
+        let root = staged_state_root();
+        std::fs::write(
+            staged_record(&root),
+            vec![b' '; usize::try_from(MAX_MACHINE_TYPE_RECORD).expect("fits") + 1],
+        )
+        .expect("stage an oversized record");
+        match SystemHostProbe::with_root(root.path())
+            .machine_type_sources(GCE, || Err(MetadataFailure::Timeout))
+        {
+            Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
+                assert!(detail.contains("larger than"), "{detail}");
+            }
+            other => panic!("an oversized record must be refused: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_writer_never_writes_through_a_planted_link() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = staged_state_root();
+        let path = staged_record(&root);
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&victim, "precious").expect("stage a victim");
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).expect("symlink");
+
+        let probe = SystemHostProbe::with_root(root.path());
+        let live = live_gce_sources("g2-standard-8");
+        assert_eq!(
+            probe.write_machine_type_record(&live).expect("writes"),
+            RecordWrite::Written
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim"),
+            "precious"
+        );
+        assert_eq!(
+            std::fs::metadata(&victim)
+                .expect("victim")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .expect("written")
+            .file_type()
+            .is_file());
+
+        // A record that is a link to identical bytes is still replaced: the
+        // reader refuses links, so leaving it would refuse every offline start.
+        let body = std::fs::read(&path).expect("readable");
+        std::fs::write(&victim, body).expect("identical bytes elsewhere");
+        std::fs::remove_file(&path).expect("unlink");
+        std::os::unix::fs::symlink(&victim, &path).expect("symlink");
+        assert_eq!(
+            probe.write_machine_type_record(&live).expect("writes"),
+            RecordWrite::Written
+        );
+        assert!(std::fs::symlink_metadata(&path)
+            .expect("written")
+            .file_type()
+            .is_file());
+    }
+
+    #[test]
     fn an_unreadable_pci_attribute_is_an_error_not_a_missing_device() {
         // The discipline this module opens with, applied to the files
         // inside the directory rather than only to the directory. A denied
@@ -968,12 +1226,15 @@ mod tests {
         // Port 9 discards; connecting must fail or time out rather than
         // producing a value or hanging.
         let started = std::time::Instant::now();
-        assert!(query_metadata(
+        let result = query_metadata(
             "169.254.169.254:9",
             METADATA_PATH,
-            Duration::from_millis(100)
-        )
-        .is_err());
+            Duration::from_millis(100),
+        );
+        assert!(
+            matches!(result, Err(MetadataFailure::Timeout)),
+            "nothing answered: {result:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "detection must stay bounded, took {:?}",
@@ -983,17 +1244,157 @@ mod tests {
 
     /// Serve one fixed reply on loopback, optionally holding the socket
     /// open afterwards, and return the address.
-    fn serve_once(reply: &'static str, linger: Duration) -> String {
+    ///
+    /// The request is read first, so closing the socket afterwards is an
+    /// orderly close rather than a reset over unread bytes.
+    fn serve_once(reply: impl AsRef<[u8]> + Send + 'static, linger: Duration) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         std::thread::spawn(move || {
             if let Ok((mut socket, _)) = listener.accept() {
-                let _ = socket.write_all(reply.as_bytes());
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 256];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut chunk) {
+                        Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                let _ = socket.write_all(reply.as_ref());
                 let _ = socket.flush();
                 std::thread::sleep(linger);
             }
         });
         addr
+    }
+
+    /// A GCE-looking probe whose record is valid for `live_gce_sources`, so
+    /// any fallback to it would succeed.
+    fn staged_valid_record_root() -> tempfile::TempDir {
+        let root = staged_state_root();
+        let record = MachineTypeRecord::for_live_sources(&live_gce_sources("g2-standard-8"))
+            .expect("the facts are readable")
+            .expect("a live answer records")
+            .to_json()
+            .expect("serializes");
+        std::fs::write(staged_record(&root), record).expect("stage a valid record");
+        root
+    }
+
+    #[test]
+    fn a_connect_that_fails_is_the_unreachable_case() {
+        // What a unit denied network access sees: the connect itself fails.
+        // This is the one failure the record may stand in for, so it must
+        // stay classified as unreachable rather than as an answer. Port 0
+        // can never be listened on, so unlike a port freed by a dropped
+        // listener, no concurrently running test can end up answering it.
+        let addr = "127.0.0.1:0";
+        let result = query_metadata(addr, METADATA_PATH, Duration::from_millis(500));
+        assert!(
+            matches!(result, Err(MetadataFailure::Timeout)),
+            "a refused connect is unreachable: {result:?}"
+        );
+        let root = staged_valid_record_root();
+        assert!(
+            matches!(
+                SystemHostProbe::with_root(root.path()).machine_type_sources(GCE, || {
+                    query_metadata(addr, METADATA_PATH, Duration::from_millis(500))
+                }),
+                Ok((None, Some(_)))
+            ),
+            "and it reads the record"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_never_says_anything_is_the_unreachable_case() {
+        let addr = serve_once("", Duration::from_secs(30));
+        let started = std::time::Instant::now();
+        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(200));
+        assert!(
+            matches!(result, Err(MetadataFailure::Timeout)),
+            "nothing arrived within the budget: {result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_peer_that_sent_anything_but_a_complete_answer_answered() {
+        // Each of these is a service that was reached. None of them may be
+        // mistaken for an unreachable one, because only that lets the record
+        // stand in for the live answer.
+        let oversized_head = format!(
+            "HTTP/1.0 200 OK\r\nX-Padding: {}\r\n\r\nprojects/1/machineTypes/g2-standard-8",
+            "a".repeat(9000)
+        );
+        for (label, reply, linger) in [
+            ("non-HTTP bytes then close", "garbage\n".to_string(), 0),
+            (
+                "a status line whose head never ends",
+                "HTTP/1.0 403 Forbidden\r\nContent-Type: text/plain\r\n".to_string(),
+                0,
+            ),
+            ("an accept then close", String::new(), 0),
+            ("a head past the size cap", oversized_head, 0),
+            (
+                "a body shorter than its length, then close",
+                "HTTP/1.0 200 OK\r\nContent-Length: 999\r\n\r\nprojects/1/machineTypes/g2"
+                    .to_string(),
+                0,
+            ),
+            (
+                "a body shorter than its length, held open",
+                "HTTP/1.0 200 OK\r\nContent-Length: 999\r\n\r\nprojects/1/machineTypes/g2"
+                    .to_string(),
+                30_000,
+            ),
+            (
+                "another protocol's banner",
+                "SSH-2.0-OpenSSH_9.6\r\n".to_string(),
+                0,
+            ),
+            (
+                "a 200 that is not the status",
+                "HTTP/1.0 404 200\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-standard-8"
+                    .to_string(),
+                0,
+            ),
+        ] {
+            let addr = serve_once(reply.clone(), Duration::from_millis(linger));
+            let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+            assert!(
+                matches!(result, Err(MetadataFailure::Answered(_))),
+                "{label}: {result:?}"
+            );
+
+            let addr = serve_once(reply, Duration::from_millis(linger));
+            let root = staged_valid_record_root();
+            match SystemHostProbe::with_root(root.path()).machine_type_sources(GCE, || {
+                query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
+            }) {
+                Err(PlatformProbeError::Unreadable { source_name, .. }) => {
+                    assert_eq!(source_name, "GCE metadata service", "{label}");
+                }
+                other => panic!("{label}: the record must not outvote an answer: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_service_said_reaches_the_journal_as_one_line() {
+        let addr = serve_once(
+            "HTTP/1.0 403 Forbidden\rplatform admission: row=x evidence=validated\r\n\r\n",
+            Duration::from_millis(10),
+        );
+        let err = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+            .expect_err("403 is not a machine type");
+        let text = err.to_string();
+        assert!(text.contains("403"), "{text}");
+        assert!(
+            !text.contains('\r') && !text.contains('\n'),
+            "control characters are escaped: {text:?}"
+        );
     }
 
     #[test]
@@ -1028,9 +1429,11 @@ mod tests {
             "HTTP/1.0 200 OK\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-stan",
             Duration::from_secs(30),
         );
+        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
         assert!(
-            query_metadata(&addr, METADATA_PATH, Duration::from_millis(300)).is_err(),
-            "a body shorter than its declared length must be rejected"
+            matches!(result, Err(MetadataFailure::Answered(_))),
+            "a body shorter than its declared length is rejected, and the service was reached: \
+             {result:?}"
         );
     }
 
@@ -1053,7 +1456,11 @@ mod tests {
             }
         });
         let started = std::time::Instant::now();
-        assert!(query_metadata(&addr, METADATA_PATH, Duration::from_millis(200)).is_err());
+        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(200));
+        assert!(
+            matches!(result, Err(MetadataFailure::Answered(_))),
+            "a peer that sent bytes was reached, however slowly: {result:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "the budget is an overall deadline, took {:?}",
@@ -1070,7 +1477,7 @@ mod tests {
         let err = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
             .expect_err("403 is not a machine type");
         assert!(
-            err.to_string().contains("403"),
+            matches!(err, MetadataFailure::Answered(_)) && err.to_string().contains("403"),
             "an instant refusal must not read as a timeout: {err}"
         );
     }

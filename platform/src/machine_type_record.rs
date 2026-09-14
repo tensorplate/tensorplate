@@ -33,7 +33,7 @@ use crate::error::PlatformProbeError;
 
 /// What every unestablished-identity error opens with.
 const CONTEXT: &str =
-    "host reports as a Compute Engine instance and the metadata service gave no complete answer";
+    "host reports as a Compute Engine instance and the metadata service could not be reached";
 
 /// The only record layout this release reads or writes.
 pub const MACHINE_TYPE_RECORD_SCHEMA_VERSION: u32 = 1;
@@ -69,16 +69,19 @@ pub enum RecordWrite {
     Unchanged,
     /// There was no live metadata answer to record.
     NotApplicable,
+    /// There was a live answer, but this fact it would be bound to is
+    /// unavailable; nothing was written.
+    FactsUnavailable(&'static str),
 }
 
-impl RecordWrite {
+impl std::fmt::Display for RecordWrite {
     /// The token the agent logs.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Written => "written",
-            Self::Unchanged => "unchanged",
-            Self::NotApplicable => "not_applicable",
+            Self::Written => f.write_str("written"),
+            Self::Unchanged => f.write_str("unchanged"),
+            Self::NotApplicable => f.write_str("not_applicable"),
+            Self::FactsUnavailable(fact) => write!(f, "not_recorded (unavailable: {fact})"),
         }
     }
 }
@@ -159,13 +162,29 @@ impl MachineTypeRecord {
     /// # Errors
     ///
     /// Says why the content is not a record this release can use: not JSON,
-    /// an unknown or missing field, another schema version, or a machine type
+    /// an unknown or missing field, another schema version, a machine type
     /// that is not a canonical identifier -- which no row names, so a record
-    /// carrying one would resolve as an unvalidated shape. Fact values are
-    /// not range-checked here: a record is only ever used when they equal
-    /// the live host's exactly.
+    /// carrying one would resolve as an unvalidated shape -- or a device
+    /// entry that is not a lowercase `0x<vendor>:0x<device>` PCI id. Fact
+    /// values are not range-checked here: a record is only ever used when
+    /// they equal the live host's exactly.
+    ///
+    /// The reason never quotes the file. Detection errors reach the agent's
+    /// journal, and a record is written by an account that is not root.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let record: Self = serde_json::from_str(body).map_err(|err| err.to_string())?;
+        let record: Self = serde_json::from_str(body).map_err(|err| {
+            let kind = match err.classify() {
+                serde_json::error::Category::Io => "I/O",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "data",
+                serde_json::error::Category::Eof => "truncated",
+            };
+            format!(
+                "not a valid record ({kind} error at line {}, column {})",
+                err.line(),
+                err.column()
+            )
+        })?;
         if record.schema_version != MACHINE_TYPE_RECORD_SCHEMA_VERSION {
             return Err(format!(
                 "schema_version {} is not {MACHINE_TYPE_RECORD_SCHEMA_VERSION}",
@@ -173,35 +192,44 @@ impl MachineTypeRecord {
             ));
         }
         if !is_canonical_identifier(&record.machine_type) {
-            return Err(format!(
-                "machine type `{}` is not a canonical identifier",
-                record.machine_type
-            ));
+            return Err("the machine type is not a canonical identifier".to_string());
+        }
+        if !record.nvidia_display_devices.iter().all(|id| is_pci_id(id)) {
+            return Err(
+                "an NVIDIA display device entry is not a `0x<vendor>:0x<device>` PCI id"
+                    .to_string(),
+            );
         }
         Ok(record)
     }
 
     /// The record for a live metadata answer, or `None` when these sources
-    /// carry none.
+    /// carry no live answer naming a machine type.
     ///
     /// Only a live answer is ever recorded. A record built from sources that
     /// were themselves resolved from a record would launder a stale machine
     /// type into a fresh one.
-    #[must_use]
-    pub fn for_live_sources(sources: &HostSources) -> Option<Self> {
-        let machine_type = sources
+    ///
+    /// # Errors
+    ///
+    /// Names the fact that is unavailable when there is a live answer but
+    /// the record could not be bound to what it was answered on.
+    pub fn for_live_sources(sources: &HostSources) -> Result<Option<Self>, &'static str> {
+        let Some(machine_type) = sources
             .gce_machine_type
             .as_deref()
             .and_then(machine_type_from_metadata)
-            .filter(|machine_type| is_canonical_identifier(machine_type))?;
-        let facts = LocalShapeFacts::from_sources(sources).ok()?;
-        Some(Self {
+        else {
+            return Ok(None);
+        };
+        let facts = LocalShapeFacts::from_sources(sources)?;
+        Ok(Some(Self {
             schema_version: MACHINE_TYPE_RECORD_SCHEMA_VERSION,
             machine_type,
             logical_cpus: facts.logical_cpus,
             mem_total_bytes: facts.mem_total_bytes,
             nvidia_display_devices: facts.nvidia_display_devices,
-        })
+        }))
     }
 
     /// The exact bytes the record file holds.
@@ -240,12 +268,27 @@ impl MachineTypeRecord {
     }
 }
 
+/// Whether `id` is `0x<vendor>:0x<device>` with four lowercase hex digits
+/// each, as [`nvidia_display_devices`] spells a sysfs PCI id.
+fn is_pci_id(id: &str) -> bool {
+    let hex4 = |part: &str| {
+        part.len() == 4
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    id.strip_prefix("0x")
+        .and_then(|rest| rest.split_once(":0x"))
+        .is_some_and(|(vendor, device)| hex4(vendor) && hex4(device))
+}
+
 /// The machine type these sources establish, and where it came from.
 ///
 /// In order:
 ///
 /// 1. A live metadata answer wins, and any record is ignored. An answer
-///    that names no machine type is uninterpretable, not absent.
+///    that is not a machine-type resource name is uninterpretable, not
+///    absent.
 /// 2. A host whose firmware does not say it is a Compute Engine instance has
 ///    no machine type, and any record is ignored.
 /// 3. A Compute Engine instance without a live answer uses the recorded
@@ -254,8 +297,8 @@ impl MachineTypeRecord {
 ///
 /// # Errors
 ///
-/// [`PlatformProbeError::Unrecognized`] for a live answer that names no
-/// machine type, and [`PlatformProbeError::IdentityUnestablished`] for every
+/// [`PlatformProbeError::Unrecognized`] for a live answer that is not a
+/// machine-type resource name, and [`PlatformProbeError::IdentityUnestablished`] for every
 /// other Compute Engine case without one. Never `Ok(None)` on Compute
 /// Engine: an instance reporting no machine type is admitted as an
 /// unvalidated shape rather than refused.
@@ -263,12 +306,16 @@ pub fn establish_machine_type(
     sources: &HostSources,
 ) -> Result<Option<(String, MachineTypeSource)>, PlatformProbeError> {
     if let Some(body) = sources.gce_machine_type.as_deref() {
-        // The body is not echoed: it carries the project number.
+        // The body is not echoed: it carries the project number, and it is
+        // whatever the peer sent.
         return machine_type_from_metadata(body)
             .map(|machine_type| Some((machine_type, MachineTypeSource::GceMetadata)))
             .ok_or_else(|| PlatformProbeError::Unrecognized {
                 source_name: "GCE metadata service".to_string(),
-                detail: "the machine-type answer ends without a machine type".to_string(),
+                detail: "the machine-type answer is not \
+                         `projects/<project>/machineTypes/<machine-type>` with a canonical \
+                         machine type"
+                    .to_string(),
             });
     }
     if !sources
@@ -332,9 +379,13 @@ mod tests {
             MachineTypeSource::RecordedFromMetadata.as_str(),
             "recorded_gce_metadata"
         );
-        assert_eq!(RecordWrite::Written.as_str(), "written");
-        assert_eq!(RecordWrite::Unchanged.as_str(), "unchanged");
-        assert_eq!(RecordWrite::NotApplicable.as_str(), "not_applicable");
+        assert_eq!(RecordWrite::Written.to_string(), "written");
+        assert_eq!(RecordWrite::Unchanged.to_string(), "unchanged");
+        assert_eq!(RecordWrite::NotApplicable.to_string(), "not_applicable");
+        assert_eq!(
+            RecordWrite::FactsUnavailable("MemTotal").to_string(),
+            "not_recorded (unavailable: MemTotal)"
+        );
     }
 
     #[test]
