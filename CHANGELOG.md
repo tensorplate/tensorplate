@@ -37,6 +37,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   to the tested version and to the manifest's release tag, purges every
   TensorPlate package except the apt channel bootstrap, and checks each
   runtime package's installed version against its candidate package.
+  Before anything is purged it refuses an operator session outside the
+  `tensorplate` group and any assets, evidence or bundle directory that
+  the run itself would delete.
   Deploy-smoke is a TensorRT identity engine round trip with no Python
   backend installed; it makes no accuracy, throughput or compute claim.
   The Jetson runbook now uses this harness, and its prerequisites no
