@@ -154,9 +154,12 @@ done
 #
 # As `dpkg` it compares versions, because the upgrade path is refused or
 # admitted on that comparison, and a stub that answered 0 for everything
-# would admit any pair. It knows only the two version shapes release
-# builds produce, and exits 2 on anything else the way dpkg does on a
-# version it cannot parse.
+# would admit any pair. It knows the two version shapes release builds
+# produce, and treats an empty version as older than any other, as dpkg
+# does -- so a manifest with no version is admitted by the comparison
+# alone, and only the harness's own version check refuses it. Any other
+# shape exits 2, where dpkg would reject some and only warn about others;
+# the harness refuses those before comparing as well.
 #
 # As `fake-dpkg-db` it is the appliance's package database: install.sh
 # installs a set's runtime packages from its manifest, apt-get purges and
@@ -177,6 +180,8 @@ RUNTIME = (
 PACKAGED_CLI_CONFIG = '{"fixture": "packaged cli config"}\n'
 
 def version_key(version):
+    if version == "":
+        return ()
     match = VERSION.fullmatch(version)
     if not match:
         return None
@@ -260,6 +265,12 @@ def install(db, directory):
         if mode == "upgrade-leaves-baseline-package" and phase == "upgraded" \
                 and name == "tensorplate-serving":
             continue
+        # At the right version but never configured, as a package whose
+        # postinst failed is left.
+        if mode == "upgrade-leaves-unpacked" and phase == "upgraded" \
+                and name == "tensorplate-serving":
+            packages[name] = {"status": "unpacked", "version": version}
+            continue
         if mode == "rollback-leaves-candidate-package" and phase == "rolled-back" \
                 and name == "tensorplate-cli":
             packages[name]["status"] = "installed"
@@ -274,6 +285,8 @@ def install(db, directory):
     (varlib / "state").mkdir(parents=True, exist_ok=True)
     if mode == "upgrade-loses-deployment" and phase == "upgraded":
         shutil.rmtree(varlib / "state")
+    # A real run has deleted /var/lib/tensorplate by now, so this plants
+    # the directory where only the rollback's own refusal can catch it.
     if mode == "rollback-state-aside-exists" and phase == "upgraded":
         (varlib / "state.bak").mkdir()
         (varlib / "state.bak" / "state.json").write_text('{"fixture": "an earlier rollback"}\n')
@@ -391,7 +404,7 @@ root = pathlib.Path(sys.argv[1])
 PER_ARCH = ("tensorplate-agent", "tensorplate-serving", "tensorplate-observability", "tensorplate-cli")
 ALL_ARCH = ("tensorplate-common", "tensorplate-backend-python-pytorch", "tensorplate-apt-source", "tensorplate")
 
-def make(name, rc, *, manifest=True, snapshot=False, drop=()):
+def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None, extra=()):
     directory = root / name
     directory.mkdir(parents=True)
     deb_version = f"0.2.1~rc.{rc}-1"
@@ -404,15 +417,15 @@ def make(name, rc, *, manifest=True, snapshot=False, drop=()):
             artifacts.append({
                 "file": f"{package}_{deb_version}_{arch}.deb",
                 "package": package,
-                "version": deb_version,
+                "version": (versions or {}).get(package, deb_version),
                 "architecture": arch,
             })
+    artifacts.extend(extra)
     listed = ["install.sh"]
     if manifest:
         release = {"project": "tensorplate", "version": "0.2.1", "tag": f"v0.2.1-rc.{rc}",
                    "provenance": "github-release", "unreleased": False}
-        if snapshot:
-            release.update({"provenance": "local-source-snapshot", "unreleased": True})
+        release.update(release_fields or {})
         manifest_name = f"tensorplate-v0.2.1-rc.{rc}-artifacts.json"
         (directory / manifest_name).write_text(json.dumps(
             {"release": release, "artifacts": artifacts}, indent=2) + "\n")
@@ -426,8 +439,26 @@ def make(name, rc, *, manifest=True, snapshot=False, drop=()):
 make("assets-rc2", 2)
 make("set-rc1", 1)
 make("set-rc1-nomanifest", 1, manifest=False)
-make("set-rc1-snapshot", 1, snapshot=True)
+make("set-rc1-snapshot", 1,
+     release_fields={"provenance": "local-source-snapshot", "unreleased": True})
+# Each half of the published-release refusal on its own, so neither can
+# be dropped behind the other.
+make("set-rc1-unreleased", 1, release_fields={"unreleased": True})
+make("set-rc1-local-provenance", 1, release_fields={"provenance": "local-source-snapshot"})
 make("set-rc1-missing-backend", 1, drop=("tensorplate-backend-python-pytorch",))
+# A release also publishes wheels; one naming a runtime package for amd64
+# is not a second .deb of it.
+make("set-rc1-wheel-named-agent", 1, extra=({
+    "file": "tensorplate_agent-0.2.1rc1-py3-none-any.whl",
+    "package": "tensorplate-agent",
+    "version": "0.2.1~rc.1-1",
+    "architecture": "amd64",
+},))
+# dpkg --compare-versions reads an empty version as older than any other,
+# so only the harness's own check refuses this set.
+make("set-rc1-empty-version", 1, versions={"tensorplate-backend-python-pytorch": ""})
+(make("set-rc1-noinstaller", 1) / "install.sh").unlink()
+(make("set-rc1-nosums", 1) / "SHA256SUMS").unlink()
 tampered = make("set-rc1-tampered", 1)
 with open(tampered / "install.sh", "a") as installer:
     installer.write("# changed after SHA256SUMS was written\n")
@@ -586,6 +617,34 @@ check "a snapshot baseline is refused" "1" \
   "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-snapshot" "${td}/evidence-upgrade-snapshot")"
 check "  and says it is not a published release" yes \
   "$(preflight_said 'the baseline set is not a published release')"
+
+check "a baseline labelled github-release but unreleased is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-unreleased" "${td}/evidence-upgrade-unreleased")"
+check "  and names what its manifest records" yes \
+  "$(preflight_said "unreleased=True provenance='github-release'")"
+
+check "a released baseline from a local source snapshot is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-local-provenance" "${td}/evidence-upgrade-local-provenance")"
+check "  and names what its manifest records" yes \
+  "$(preflight_said "unreleased=False provenance='local-source-snapshot'")"
+
+check "a baseline with no installer is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-noinstaller" "${td}/evidence-upgrade-noinstaller")"
+check "  and names the missing installer" yes \
+  "$(preflight_said "missing ${fixtures}/set-rc1-noinstaller/install.sh")"
+
+check "a baseline with no SHA256SUMS is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-nosums" "${td}/evidence-upgrade-nosums")"
+check "  and names the missing checksum file" yes \
+  "$(preflight_said "missing ${fixtures}/set-rc1-nosums/SHA256SUMS")"
+
+check "a wheel naming a runtime package is not counted as its .deb" "0" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-wheel-named-agent" "${td}/evidence-upgrade-wheel")"
+
+check "a baseline package with an empty version is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-empty-version" "${td}/evidence-upgrade-empty-version")"
+check "  and names the package and its version" yes \
+  "$(preflight_said "the baseline set lists tensorplate-backend-python-pytorch at version '', which is not a Debian version")"
 
 check "the candidate passed as its own baseline is refused" "1" \
   "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/assets-rc2" "${td}/evidence-upgrade-same")"
@@ -925,9 +984,15 @@ JSON
       printf '{"command":"status","payload":{"severity":"blocked","agent":{"available":false}}}\n'
       exit 0
     fi
-    # An agent with no durable deployment reports none.
+    # An agent with no durable deployment reports none -- unless it kept
+    # the previous one from state it should not have loaded.
     if [ ! -f "$state_file" ]; then
-      printf '{"command":"status","payload":{"severity":"ready","agent":{"available":true,"agent_state":"ready","active":null,"previous_active":null}}}\n'
+      previous=null
+      if [ "$mode:$installed" = rollback-keeps-previous:rolled-back ]; then
+        previous="{\"deployment_id\":\"${TP_FAKE_DEPLOYMENT_ID}\",\"backend\":\"python_pytorch\"}"
+      fi
+      printf '{"command":"status","payload":{"severity":"ready","agent":{"available":true,"agent_state":"ready","active":null,"previous_active":%s}}}\n' \
+        "$previous"
       exit 0
     fi
     serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
@@ -1446,8 +1511,15 @@ check "  and removes the backend with the rest of the set" yes \
   "$(sed -n "${remove_line:-0}p" "${appliance}/sudo.log" | tr ' ' '\n' | grep -qx 'tensorplate-backend-python-pytorch' && echo yes || echo no)"
 check "  and never purges after the last candidate install" no \
   "$(sudo_after "$last_candidate_install" 'apt-get purge')"
-check "  the harness starts no service once the baseline is in play" "no no" \
-  "$(sudo_after "$first_baseline_install" 'systemctl enable') $(sudo_after "$first_baseline_install" 'systemctl start')"
+# Every privileged systemctl call once the baseline is installed, as a
+# whole: only the rollback's stop may be there. Matching verbs instead
+# would let restart, try-restart, `--now enable` or a systemctl inside
+# `bash -c` bring the services back for an installer that no longer does.
+check "  the harness's only systemctl call once the baseline is in play is the rollback's stop" \
+  "systemctl stop tensorplate-agent tensorplate-observability" \
+  "$(if [[ -z "$first_baseline_install" ]]; then echo missing; else
+       tail -n "+$((first_baseline_install + 1))" "${appliance}/sudo.log" |
+         { grep -F systemctl || true; } | tr '\n' '|' | sed 's/|$//'; fi)"
 check "  no crash-loop restore runs once packages are being purged" no \
   "$(sudo_after "$(sudo_line 'apt-get purge')" "$restore_line")"
 check "  the removal left every package holding its conffiles" \
@@ -1518,6 +1590,7 @@ for case in \
   "candidate-set-changed::SHA256SUMS changed after it was verified" \
   "upgrade-install-fails::step failed (exit 1): install.sh" \
   "upgrade-leaves-baseline-package::tensorplate-serving is installed 0.2.1~rc.1-1, expected installed 0.2.1~rc.2-1" \
+  "upgrade-leaves-unpacked::tensorplate-serving is unpacked 0.2.1~rc.2-1, expected installed 0.2.1~rc.2-1" \
   "upgrade-leaves-unlisted-package::tensorplate-unlisted 0.2.1~rc.1-1 is installed but is not in v0.2.1-rc.2" \
   "upgrade-agent-not-restarted::agent MainPID 4242 did not change across the upgrade" \
   "upgrade-observability-not-restarted::observability MainPID 4242 did not change across the upgrade" \
@@ -1556,7 +1629,8 @@ for case in \
   "rollback-leaves-candidate-package::tensorplate-cli is installed 0.2.1~rc.2-1, expected installed 0.2.1~rc.1-1" \
   "rollback-resets-conffile::the rollback did not keep the operator-edited" \
   "rollback-state-not-preserved::step failed (exit 1): the set-aside state is preserved" \
-  "rollback-keeps-state::loaded state it should not have" \
+  "rollback-keeps-state::the rolled-back agent reports active" \
+  "rollback-keeps-previous::the rolled-back agent reports previous_active" \
   "rollback-agent-unavailable::the agent is not available after the rollback" \
   "rollback-infer-garbled::worker round-trip checks failed" \
   "ok:systemctl stop:step failed (exit 9): stop the services" \

@@ -316,7 +316,7 @@ readonly BASELINE_ALLOW_UNSIGNED=0
 
 read_upgrade_path() {
   python3 - "$BASELINE_DIR" "$ASSETS_DIR" <<'PY'
-import json, pathlib, subprocess, sys
+import json, pathlib, re, subprocess, sys
 
 # The set install.sh installs with --with-python-backend, which is also
 # the set rollback has to remove: the backend only Recommends the agent,
@@ -329,6 +329,11 @@ RUNTIME = (
     "tensorplate-cli",
     "tensorplate-backend-python-pytorch",
 )
+# The shape of a Debian version: an optional epoch, then an upstream
+# version starting with a digit. dpkg --compare-versions cannot be the
+# check: it treats an empty version as older than any other, and only
+# warns about some malformed ones before comparing them anyway.
+DEBIAN_VERSION = re.compile(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~-]*")
 
 def read_set(label, directory):
     manifests = sorted(pathlib.Path(directory).glob("tensorplate-*-artifacts.json"))
@@ -355,7 +360,13 @@ def read_set(label, directory):
         # The version parsed from the package file name, which is the
         # Debian version dpkg records; release.version is the canonical
         # spelling and is the same for every candidate of a release.
-        packages[package] = str(matches[0].get("version", ""))
+        version = matches[0].get("version")
+        if not isinstance(version, str) or not DEBIAN_VERSION.fullmatch(version):
+            raise SystemExit(
+                f"the {label} set lists {package} at version {version!r}, "
+                "which is not a Debian version"
+            )
+        packages[package] = version
     return manifest.get("release") or {}, packages
 
 baseline_release, baseline = read_set("baseline", sys.argv[1])
@@ -372,7 +383,7 @@ if baseline_release.get("unreleased") is not False \
     )
 
 # Strictly older, package by package. This also refuses the same set
-# passed twice. dpkg exits 2 on a version it cannot parse, which is
+# passed twice. dpkg exits 2 on a version it rejects outright, which is
 # refused the same way.
 for package in RUNTIME:
     older = subprocess.run(
@@ -1234,9 +1245,12 @@ PY
 
 stage_rollback() {
   local remove=() pkg status
-  # Checked before anything changes. mv -T would refuse a non-empty
-  # target anyway, but an earlier rollback's copy is evidence someone may
-  # still need, and refusing by name says so.
+  # Checked before anything changes. A state.bak from before the run is
+  # already gone -- install and upgrade delete /var/lib/tensorplate while
+  # clearing the host -- so this does not keep an earlier copy. It makes
+  # sure the move below lands on a name nothing else holds, refused by
+  # name before the services are stopped, rather than leaving mv -T to
+  # replace an empty directory or refuse a full one halfway through.
   step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
 
   note "rolling back by the documented procedure"
