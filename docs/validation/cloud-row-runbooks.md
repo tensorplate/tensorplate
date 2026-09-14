@@ -4,7 +4,9 @@ The two Ubuntu 24.04 x86_64 rows are validated on a cloud VM the
 operator starts themselves. Unlike the Jetson and the MacBook, the
 machine is disposable and billed by the minute, which shapes this
 procedure: host prerequisites are checked before the first install,
-and the harness restores nothing when it finishes.
+and the harness leaves the candidate installed when it finishes. It
+restores the configuration changed by crash-loop testing, but does not
+restore the install or state removed at the start of the run.
 
 `tools/validation/ubuntu-l4-cloud-lifecycle.sh` **provisions nothing**.
 It does not create, start, resize or delete any cloud resource, and it
@@ -29,8 +31,8 @@ row.** That is the accurate state rather than a defect:
 | status-logs | covered |
 | rollback | **skipped** — no published amd64 predecessor |
 | restart | covered |
-| crash-loop | **skipped** — separate change |
-| offline | **skipped** — separate change |
+| crash-loop | covered |
+| offline | **skipped** — GCE platform detection requires live metadata |
 
 No released tag carries an amd64 runtime package set: `v0.1.x` published
 only the CLI for that architecture. So on these rows there is nothing to
@@ -57,10 +59,40 @@ the deployment can serve again after being re-warmed from durable state.
 The live health and inference results are filed in `restart-result.json`
 alongside `status-after-restart.json`.
 
-The first reported L4 hardware run passed these four stages using the
-earlier assertions. The stronger journal and post-restart health and
-inference checks have not yet been rerun on hardware; T4 validation of
-the current harness remains pending.
+**crash-loop** replaces `/etc/tensorplate/agent.json` with invalid JSON
+and restarts the agent. It passes when systemd retries the agent at
+least once and then gives up: the unit ends `failed` and its restart
+count stops changing across a sample longer than `RestartSec`. The
+journal must also show the agent refusing the config on at least two of
+those starts, so the loop is known to be about the config. The original
+config is restored whether or not those checks pass. The agent is then
+started again and must answer health and inference for the same
+deployment. Filed as `crash-loop-result.json`, `crash-loop-journal.txt`
+and `crash-loop-recovery.json`.
+
+Cleanup also attempts restoration on `SIGINT`, `SIGTERM`, `SIGHUP`, and
+shell exit. If restoration fails, the run fails and retains the backup,
+with its path reported for manual recovery. Uncatchable termination such
+as `SIGKILL` cannot run cleanup.
+
+**offline is deferred.** On GCE, both the agent's platform detection and
+`tensorplate doctor` query `169.254.169.254` for the machine type. Removing
+network access makes that source unreadable, so doctor cannot resolve
+the row. Offline validation requires product support for trustworthy
+identity detection without network access; exempting metadata or treating
+an undetected row as a pass would not establish that behavior.
+
+The harness records this dependency as the offline skip reason. It does
+not install network drop-ins or produce offline pass artifacts. The
+report remains `incomplete`, and cannot satisfy the release lifecycle
+evidence gate, until offline and the other skipped stages are implemented
+and validated.
+
+The first reported L4 hardware run passed install, deploy-smoke,
+status-logs and restart using the earlier assertions. The stronger
+journal and post-restart health and inference checks, and the
+crash-loop stage, have not yet been run on hardware; T4
+validation of the current harness remains pending.
 
 Three things it records rather than asserts, because asserting them
 would claim more than the run establishes:
@@ -204,7 +236,7 @@ cover them.
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
 | `install.log` | may include the operator's account name in the assets path the installer echoes |
 | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or journal records it quotes |
 | `doctor.json`, `status.json`, `deploy-result.json` and the rest | no identifiers were found in the earlier run; scan every current output as well |

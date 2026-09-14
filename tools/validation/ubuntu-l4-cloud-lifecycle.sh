@@ -26,6 +26,9 @@
 #                 the services' journal carries their output
 #   restart       both services restart and the agent re-warms its
 #                 deployment from durable state
+#   crash-loop    an agent that cannot load its config is retried and then
+#                 given up on by systemd rather than restarted forever, and
+#                 recovers its deployment once the config is restored
 #
 # WHAT IT DOES NOT PROVE
 #   The deploy-smoke bundle selects the device-neutral `fixture` backend
@@ -35,11 +38,11 @@
 #   accelerator computed anything. There is no CUDA fixture backend to
 #   select yet. Do not describe a run of this harness as GPU validation.
 #
-# Four stages are skipped, each with its reason recorded in the report
+# Three stages are skipped, each with its reason recorded in the report
 # rather than omitted: upgrade and rollback have no published amd64
-# predecessor to move between, and crash-loop and offline need mechanism
-# that has no precedent in this repository and is being added
-# separately.
+# predecessor to move between. Offline is deferred until cloud platform
+# detection can resolve this row without querying GCE metadata. No network
+# policy is changed and no offline behavior is certified by this harness.
 #
 # Usage:
 #   tools/validation/ubuntu-l4-cloud-lifecycle.sh \
@@ -76,6 +79,15 @@ BUNDLE_STAGING_DIR="${TP_CLOUD_BUNDLE_STAGING:-/opt/tensorplate-validation/x86-f
 # RestartSec is 5 in the shipped unit, so every readiness wait has to sit
 # well above it rather than racing a restart.
 readonly READY_TIMEOUT_SECONDS=60
+readonly AGENT_CONFIG="/etc/tensorplate/agent.json"
+# Longer than RestartSec, so a unit that is still looping has restarted
+# at least once between two samples. Overridable only so the settling
+# logic can be driven without waiting in CI.
+CRASH_LOOP_POLL_SECONDS="${TP_CLOUD_CRASH_LOOP_POLL_SECONDS:-7}"
+readonly CRASH_LOOP_POLLS=40
+# Registered after the backup succeeds and before the config is changed.
+# Kept until restoration and service recovery succeed, including on EXIT.
+CRASH_LOOP_BACKUP=""
 
 ROW="$DEFAULT_ROW"
 ASSETS_DIR=""
@@ -369,7 +381,13 @@ stage_install() {
   dpkg -l 'tensorplate*' >"${EVIDENCE_DIR}/packages.txt" 2>&1 || true
   step "doctor" bash -c \
     'tensorplate doctor --output json >"$1"' _ "${EVIDENCE_DIR}/doctor.json" || return
-  python3 - "${EVIDENCE_DIR}/doctor.json" "$ROW" <<'PY' || return
+  check_doctor_green "${EVIDENCE_DIR}/doctor.json" || return
+  pass "installed, services ready, doctor green, ${ROW} resolved by platform_row"
+}
+
+# Doctor has nothing failing and resolves this row by live detection.
+check_doctor_green() {
+  python3 - "$1" "$ROW" <<'PY'
 import json, sys
 
 path, expected_row = sys.argv[1:]
@@ -404,7 +422,6 @@ for required_ok in ("platform_registry", "agent_reachable", "agent_socket",
 print(f"accelerator: {by_id['accelerator_facts']['message']}")
 print(f"doctor: {len(payload['findings'])} findings, 0 failing, row {expected_row}")
 PY
-  pass "installed, services ready, doctor green, ${ROW} resolved by platform_row"
 }
 
 # Exercise the currently active worker without changing the deployment.
@@ -696,6 +713,157 @@ stage_restart() {
   pass "services restarted with new pids; recovered deployment answered health and inference"
 }
 
+# --- crash-loop --------------------------------------------------------
+
+# Cleanup is safe to retry after a partial failure. Keep the original
+# config available if restoration or service recovery fails, and report
+# its location so the operator can recover it manually if needed.
+cleanup_crash_loop() {
+  [[ -n "$CRASH_LOOP_BACKUP" ]] || return 0
+  local status=0
+  note "restoring the agent config"
+  step "restore the agent config" sudo cp -p "$CRASH_LOOP_BACKUP" "$AGENT_CONFIG" || status=$?
+  if ((status != 0)); then
+    printf 'agent config backup retained at %s\n' "$CRASH_LOOP_BACKUP" >&2
+    return "$status"
+  fi
+  step "clear the agent's failed state" sudo systemctl reset-failed "$AGENT_UNIT" || status=$?
+  step "start the agent" sudo systemctl start "$AGENT_UNIT" || status=$?
+  step "services ready again" await_services_ready || status=$?
+  if ((status != 0)); then
+    printf 'agent config backup retained at %s\n' "$CRASH_LOOP_BACKUP" >&2
+    return "$status"
+  fi
+  step "remove crash-loop scratch files" rm -rf "$(dirname "$CRASH_LOOP_BACKUP")" || return
+  CRASH_LOOP_BACKUP=""
+}
+
+# Signal traps exit through this handler while the lifecycle runner still
+# knows which stage was active. A second catchable signal must not interrupt
+# restoration; SIGKILL and machine failure cannot be handled by a shell.
+finish_with_cleanup() {
+  local status="$1" cleanup_status=0
+  trap - EXIT
+  trap '' INT TERM HUP
+  # Do not make restoration depend on opening another evidence file.
+  cleanup_crash_loop || cleanup_status=$?
+  if ((status == 0)); then
+    status="$cleanup_status"
+    if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
+      status=1
+    fi
+  fi
+  lifecycle_abort "$status"
+  exit "$status"
+}
+
+install_cleanup_traps() {
+  trap 'finish_with_cleanup $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+}
+
+# Break the agent's config so every start fails, and watch what systemd
+# does with it. The unit restarts on failure under a start limit, so the
+# contract is a unit that is retried and then given up on -- and the
+# failures have to be the agent refusing that config, not something else
+# failing at the same time.
+observe_crash_loop() {
+  local since="$1"
+  local state="" restarts="" last_restarts="" settled=0 attempt result
+
+  note "breaking the agent config so every start fails"
+  step "corrupt the agent config" \
+    sudo bash -c 'printf "{ invalid json\n" >"$1"' _ "$AGENT_CONFIG" || return
+  # Not checked: whether this command reports success depends on how fast
+  # the agent exits. What it caused is observed below, and an agent that
+  # was never restarted stays active and fails the settling check.
+  sudo systemctl restart "$AGENT_UNIT" >/dev/null 2>&1 || true
+
+  # Settled means not running and no longer being restarted: the count
+  # stays the same across a sample longer than RestartSec. A failed state
+  # alone does not show that, because a looping unit passes through it
+  # between attempts.
+  for ((attempt = 0; attempt < CRASH_LOOP_POLLS; attempt++)); do
+    sleep "$CRASH_LOOP_POLL_SECONDS"
+    state="$(systemctl show -p ActiveState --value "$AGENT_UNIT")" || return
+    restarts="$(systemctl show -p NRestarts --value "$AGENT_UNIT")" || return
+    if [[ "$state" != "active" && "$state" != "activating" && "$restarts" == "$last_restarts" ]]; then
+      settled=1
+      break
+    fi
+    last_restarts="$restarts"
+  done
+  result="$(systemctl show -p Result --value "$AGENT_UNIT")" || return
+  if ((settled != 1)); then
+    printf 'the agent never settled: ActiveState=%s NRestarts=%s Result=%s\n' \
+      "$state" "$restarts" "$result" >&2
+    return 1
+  fi
+
+  step "capture the crash-loop journal" bash -c \
+    'sudo journalctl -u "$1" --since "@$2" --no-pager --output=json >"$3"' \
+    _ "$AGENT_UNIT" "$since" "${EVIDENCE_DIR}/crash-loop-journal.txt" || return
+  python3 - "${EVIDENCE_DIR}/crash-loop-journal.txt" "${AGENT_UNIT}.service" \
+    "$state" "$restarts" "$result" >"${EVIDENCE_DIR}/crash-loop-result.json" <<'PY'
+import json, sys
+
+path, unit, state, restarts, result = sys.argv[1:]
+config_errors = 0
+with open(path, encoding="utf-8") as journal:
+    for line in journal:
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        message = entry.get("MESSAGE")
+        if entry.get("_SYSTEMD_UNIT") == unit and isinstance(message, str) \
+                and message.startswith("config error"):
+            config_errors += 1
+
+checks = {
+    # Given up on, not merely stopped.
+    "unit_failed": state == "failed",
+    # Restart=on-failure fired at least once before the start limit held.
+    "restarted_before_giving_up": restarts.isdigit() and int(restarts) >= 1,
+    # The starts that failed were the agent rejecting the broken config.
+    "agent_rejected_the_config": config_errors >= 2,
+}
+failed = [name for name, ok in checks.items() if not ok]
+if failed:
+    raise SystemExit(
+        f"crash-loop checks failed: {', '.join(failed)} "
+        f"(ActiveState={state} NRestarts={restarts} Result={result} config_errors={config_errors})"
+    )
+print(json.dumps({
+    "active_state": state,
+    "restarts": int(restarts),
+    "result": result,
+    "config_error_records": config_errors,
+}, indent=2, sort_keys=True))
+PY
+}
+
+stage_crash_loop() {
+  local work since status=0 cleanup_status=0
+  work="$(mktemp -d)" || return
+  step "back up the agent config" sudo cp -p "$AGENT_CONFIG" "${work}/agent.json" || return
+  CRASH_LOOP_BACKUP="${work}/agent.json"
+  since="$(date +%s)" || return
+
+  observe_crash_loop "$since" || status=$?
+
+  # Restored whatever the observation concluded, so a failed stage leaves
+  # an appliance that can be inspected rather than one that cannot start.
+  cleanup_crash_loop || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+
+  step "recovered worker round trip" check_worker_round_trip \
+    "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" || return
+  pass "agent retried and given up on under a broken config; recovered deployment answered once restored"
+}
+
 # --- run ---------------------------------------------------------------
 
 main() {
@@ -718,7 +886,7 @@ main() {
   # shellcheck source=tools/validation/lifecycle-stages.sh disable=SC1091
   source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lifecycle-stages.sh"
   lifecycle_begin "$ROW" "$EVIDENCE_DIR" "$TESTED_VERSION" ubuntu-l4-cloud-lifecycle
-  trap 'lifecycle_abort $?' EXIT
+  install_cleanup_traps
 
   lifecycle_stage install stage_install
   # Recorded after the install stage passes, so the digest attests an
@@ -730,19 +898,18 @@ main() {
   lifecycle_stage deploy-smoke stage_deploy_smoke
   lifecycle_stage status-logs stage_status_logs
   lifecycle_stage restart stage_restart
+  lifecycle_stage crash-loop stage_crash_loop
+  lifecycle_skip offline \
+    "deferred: GCE platform detection requires live metadata at 169.254.169.254; offline validation needs product support for identity detection without network access"
 
   lifecycle_skip upgrade \
     "no published amd64 predecessor exists for this row: no released tag carries an amd64 runtime package set, so there is nothing to upgrade from"
   lifecycle_skip rollback \
     "no published amd64 predecessor exists for this row, so there is no released version to roll back to"
-  lifecycle_skip crash-loop \
-    "the restart-settling check has only ever driven stub binaries; exercising it against the real agent is a separate change"
-  lifecycle_skip offline \
-    "network-denied validation has no precedent on Linux in this repository and is a separate change"
 
   lifecycle_finish
   printf 'evidence: %s\n' "$EVIDENCE_DIR"
-  pass "lifecycle run complete; four stages exercised, four skipped with reasons"
+  pass "lifecycle run complete; five stages exercised, three skipped with reasons"
 }
 
 main "$@"

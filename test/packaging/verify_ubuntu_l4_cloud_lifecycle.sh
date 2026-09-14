@@ -52,8 +52,9 @@ assert sorted(named) == sorted(canonical), (
     f"harness covers {sorted(named)}, the schema names {sorted(canonical)}"
 )
 assert len(set(named)) == len(named), f"a stage is named twice: {named}"
-assert set(run) == {"install", "deploy-smoke", "status-logs", "restart"}, sorted(run)
-assert set(skipped) == {"upgrade", "rollback", "crash-loop", "offline"}, sorted(skipped)
+assert set(run) == {"install", "deploy-smoke", "status-logs", "restart",
+                    "crash-loop"}, sorted(run)
+assert set(skipped) == {"upgrade", "rollback", "offline"}, sorted(skipped)
 
 # Every skip states a reason. An unexplained skip is indistinguishable
 # from a stage nobody thought about.
@@ -83,7 +84,7 @@ assert begin_call, "the harness never calls lifecycle_begin"
 before_begin = body[: begin_call.start()]
 assert "artifact-digest.txt" not in before_begin, \
     "the harness writes the digest sidecar before lifecycle_begin, which clears it"
-print("stage coverage: 4 run, 4 skipped with reasons, digest recorded after install")
+print("stage coverage: 5 run, 3 skipped with reasons, digest recorded after install")
 PY
 
 # --- the bundle must be staged somewhere the sandboxed agent can see.
@@ -276,7 +277,7 @@ check "an assets directory with no installer is refused" "1" \
 
 # --- the stages, executed against a stubbed appliance.
 #
-# The four running stages issue real commands against a real install, so
+# The five running stages issue real commands against a real install, so
 # CI cannot run them for their own sake. What CI must be able to see is
 # whether their assertions FIRE: lifecycle_stage calls a stage function
 # from a tested context, which suspends errexit inside it, so a stage
@@ -284,7 +285,16 @@ check "an assets directory with no installer is refused" "1" \
 # status of its last command. That defect certifies a broken host as a
 # validated one, and it is invisible to any amount of reading.
 appliance="${td}/appliance"
-mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log"
+mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log" "${appliance}/scratch"
+real_mktemp="$(command -v mktemp)"
+
+# An explicit template keeps every harness scratch directory inside the
+# fixture, including backups deliberately retained after failed cleanup.
+cat >"${appliance}/bin/mktemp" <<'STUB'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = -d ] || exit 9
+exec "${TP_FAKE_MKTEMP}" -d "${TMPDIR}/tmp.XXXXXXXXXX"
+STUB
 
 # sudo records without executing privileged commands. Journal requests
 # are routed only to the fixture below; package and filesystem mutations
@@ -299,10 +309,40 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
     *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
   esac
 fi
-# A purge that succeeds empties dpkg's view of the packages.
+# Config operations touch only the fixture and the harness's temporary
+# backup. This verifies the bytes can actually be restored, rather than
+# treating a logged copy command as a successful restoration.
 case "$*" in
   *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
   *"systemctl restart"*) : >"${TP_FAKE_RESTART_MARKER}" ;;
+  "cp -p /etc/tensorplate/agent.json "*)
+    case "$4" in "${TMPDIR}/"*/agent.json) ;; *) exit 9 ;; esac
+    cp "${TP_FAKE_AGENT_CONFIG}" "$4" || exit
+    printf '%s\n' "$4" >"${TP_FAKE_BACKUP_PATH}"
+    ;;
+  *"invalid json"*)
+    printf '{ invalid json\n' >"${TP_FAKE_AGENT_CONFIG}"
+    : >"${TP_FAKE_CONFIG_BROKEN}"
+    case "${TP_FAKE_MODE:-ok}" in
+      crash-loop-signal-int) kill -INT "$PPID" ;;
+      crash-loop-signal-term) kill -TERM "$PPID" ;;
+      crash-loop-signal-hup) kill -HUP "$PPID" ;;
+    esac
+    ;;
+  "cp -p "*" /etc/tensorplate/agent.json")
+    case "$3" in "${TMPDIR}/"*/agent.json) ;; *) exit 9 ;; esac
+    case "${TP_FAKE_MODE:-ok}" in
+      crash-loop-restore-fails-once)
+        if [ ! -f "${TP_FAKE_RESTORE_FAILED}" ]; then
+          : >"${TP_FAKE_RESTORE_FAILED}"
+          exit 9
+        fi
+        ;;
+      crash-loop-restore-always-fails) exit 9 ;;
+    esac
+    cp "$3" "${TP_FAKE_AGENT_CONFIG}" || exit
+    rm -f "${TP_FAKE_CONFIG_BROKEN}"
+    ;;
 esac
 if [ "$1" = journalctl ]; then
   shift
@@ -333,8 +373,38 @@ cat >"${appliance}/bin/systemctl" <<'STUB'
 #!/bin/sh
 case "$1" in
   show)
+    broken=0
+    [ -f "${TP_FAKE_CONFIG_BROKEN}" ] && broken=1
     case "$*" in
-      *ActiveState*) printf 'active\n' ;;
+      *ActiveState*)
+        # A looping unit reads as failed between attempts, which is why
+        # the harness must not settle on that state alone. One stopped by
+        # something else reads as inactive, which is not a crash loop.
+        case "${broken}:${TP_FAKE_MODE:-ok}" in
+          1:crash-loop-never-fails|0:*) printf 'active\n' ;;
+          1:crash-loop-stopped) printf 'inactive\n' ;;
+          *) printf 'failed\n' ;;
+        esac
+        ;;
+      *NRestarts*)
+        if [ "$broken" -eq 0 ]; then
+          printf '0\n'
+        else
+          case "${TP_FAKE_MODE:-ok}" in
+            crash-loop-not-retried) printf '0\n' ;;
+            crash-loop-keeps-restarting)
+              count=$(cat "${TP_FAKE_RESTARTS_FILE}" 2>/dev/null || echo 0)
+              count=$((count + 1))
+              printf '%s\n' "$count" >"${TP_FAKE_RESTARTS_FILE}"
+              printf '%s\n' "$count"
+              ;;
+            *) printf '4\n' ;;
+          esac
+        fi
+        ;;
+      *Result*)
+        if [ "$broken" -eq 1 ]; then printf 'start-limit-hit\n'; else printf 'success\n'; fi
+        ;;
       *InvocationID*)
         case "$*" in
           *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
@@ -363,13 +433,26 @@ cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
 invocation=""
 json=0
+since=""
+previous=""
 for arg in "$@"; do
   case "$arg" in
     _SYSTEMD_INVOCATION_ID=*) invocation="${arg#*=}" ;;
     --output=json) json=1 ;;
   esac
+  [ "$previous" = --since ] && since="$arg"
+  previous="$arg"
 done
 [ "$json" -eq 1 ] || exit 9
+# The agent's starts under a broken config, each refusing it.
+if [ -n "$since" ]; then
+  message='config error: agent.json is not valid JSON'
+  [ "${TP_FAKE_MODE:-ok}" = crash-loop-other-error ] && message='state store error: permission denied'
+  for _ in 1 2 3 4 5; do
+    printf '{"_SYSTEMD_UNIT":"tensorplate-agent.service","MESSAGE":"%s"}\n' "$message"
+  done
+  exit 0
+fi
 case "$invocation" in
   11111111111111111111111111111111) unit=tensorplate-agent.service ;;
   22222222222222222222222222222222) unit=tensorplate-observability.service ;;
@@ -524,9 +607,13 @@ run_stages() {
   : >"${appliance}/sudo.log"
   : >"${appliance}/infer.log"
   : >"${appliance}/health-requests.log"
-  rm -f "${appliance}/restarted"
+  rm -f "${appliance}/restarted" "${appliance}/config-broken" \
+    "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path"
+  printf '{"fixture":"original agent config"}\n' >"${appliance}/agent-config"
   printf '%s\n' "$mode" >"${appliance}/mode"
   env PATH="${appliance}/bin:${PATH}" \
+    TMPDIR="${appliance}/scratch" \
+    TP_FAKE_MKTEMP="$real_mktemp" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
     TP_FAKE_PURGE_MARKER="${evidence}.purged" \
     TP_CLOUD_ARCH=x86_64 \
@@ -544,6 +631,12 @@ run_stages() {
     TP_FAKE_PID_FILE="${appliance}/pid" \
     TP_FAKE_DEPLOYMENT_ID="$deployment_id" \
     TP_FAKE_SERVING_PORT="$serving_port" \
+    TP_FAKE_CONFIG_BROKEN="${appliance}/config-broken" \
+    TP_FAKE_AGENT_CONFIG="${appliance}/agent-config" \
+    TP_FAKE_BACKUP_PATH="${appliance}/backup-path" \
+    TP_FAKE_RESTORE_FAILED="${appliance}/restore-failed" \
+    TP_FAKE_RESTARTS_FILE="${appliance}/restarts" \
+    TP_CLOUD_CRASH_LOOP_POLL_SECONDS=0 \
     bash "$harness" \
       --assets-dir "$assets" \
       --bundle-dir "$bundle" \
@@ -575,12 +668,26 @@ print(next((s["status"] for s in report["stages"] if s["stage"]==sys.argv[2]), "
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence")"
-for stage in install deploy-smoke status-logs restart; do
+for stage in install deploy-smoke status-logs restart crash-loop; do
   check "  ${stage} is recorded as a pass" "pass" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
-for stage in upgrade rollback crash-loop offline; do
+for stage in upgrade rollback offline; do
   check "  ${stage} is recorded as skipped" "skipped" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
+check "  the skipped stages keep the run incomplete" incomplete \
+  "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
+    "${ok_evidence}/lifecycle-report.json")"
+check "  offline explains the missing metadata-independent identity support" yes \
+  "$(python3 - "${ok_evidence}/lifecycle-report.json" <<'PY'
+import json, sys
+
+stage = next(s for s in json.load(open(sys.argv[1]))["stages"] if s["stage"] == "offline")
+detail = stage.get("detail", "").lower()
+print("yes" if "metadata" in detail and "identity" in detail else "no")
+PY
+)"
+check "  a deferred offline stage never mutates network policy" no \
+  "$(grep -Eq 'IPAddress(Deny|Allow)|systemd-run|validation-offline' "${appliance}/sudo.log" && echo yes || echo no)"
 check "  the artifact digest reaches the report" "yes" \
   "$(python3 -c 'import json,sys,re
 subject=json.load(open(sys.argv[1]))["subject"]
@@ -706,6 +813,76 @@ for mode in journal-command-fails journal-empty-agent journal-no-entries journal
   check "  invalid journal evidence fails status-logs" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
 done
+
+# --- crash-loop recovery.
+#
+# This stage breaks the appliance on purpose, so check restoration as
+# well as the stage verdict, including interruption and restore failure.
+sudo_line() {
+  grep -nF -- "$1" "${appliance}/sudo.log" | head -n1 | cut -d: -f1
+}
+restore_line='/agent.json /etc/tensorplate/agent.json'
+config_restored() {
+  [[ ! -e "${appliance}/config-broken" && \
+     "$(cat "${appliance}/agent-config")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no
+}
+run_stages ok "${td}/stages-ok-again" >/dev/null
+check "the ok run breaks the agent config, then restores it" yes \
+  "$(broke="$(sudo_line 'invalid json')"; restored="$(sudo_line "$restore_line")"
+     [[ -n "$broke" && -n "$restored" && "$broke" -lt "$restored" ]] && echo yes || echo no)"
+check "  and files what systemd did with the loop" "failed 4 start-limit-hit" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]));print(r["active_state"],r["restarts"],r["result"])' \
+    "${td}/stages-ok-again/crash-loop-result.json")"
+check "  and the recovered worker answered" yes \
+  "$([[ -s "${td}/stages-ok-again/crash-loop-recovery.json" ]] && echo yes || echo no)"
+check "  and the original config bytes were restored" yes "$(config_restored)"
+for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-error \
+            crash-loop-never-fails crash-loop-stopped; do
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
+  check "  restart passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" restart)"
+  check "  and crash-loop is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and the agent config was restored anyway" yes \
+    "$(config_restored)"
+done
+
+evidence="${td}/stages-corrupt-fails"
+check "a config corruption that fails is recorded as a failed crash-loop" fail \
+  "$(run_stages ok "$evidence" "invalid json" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  and the config is still restored" yes \
+  "$(config_restored)"
+
+for signal_case in int:130 term:143 hup:129; do
+  signal="${signal_case%:*}"
+  expected_status="${signal_case#*:}"
+  evidence="${td}/stages-crash-loop-signal-${signal}"
+  check "${signal} during config corruption preserves the signal exit status" "$expected_status" \
+    "$(run_stages "crash-loop-signal-${signal}" "$evidence")"
+  check "  the interrupted crash-loop stage is recorded as failed" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  the signal cleanup restores the original config bytes" yes "$(config_restored)"
+  check "  and starts the restored agent" yes \
+    "$(grep -Fxq 'systemctl start tensorplate-agent' "${appliance}/sudo.log" && echo yes || echo no)"
+done
+
+evidence="${td}/stages-crash-loop-restore-fails-once"
+check "a failed config restore is retried on exit without hiding its failure" 9 \
+  "$(run_stages crash-loop-restore-fails-once "$evidence")"
+check "  the failed restore still fails the crash-loop stage" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  the exit retry restores the original config bytes" yes "$(config_restored)"
+
+evidence="${td}/stages-crash-loop-restore-always-fails"
+check "a persistent config restore failure refuses the run" 9 \
+  "$(run_stages crash-loop-restore-always-fails "$evidence")"
+check "  and preserves the backup for manual recovery" yes \
+  "$(backup="$(cat "${appliance}/backup-path")"
+     [[ -f "$backup" && "$(cat "$backup")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no)"
+check "  the report does not certify the failed recovery" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 
 check "no destructive command reached the host" "yes" \
   "$([[ -f "${appliance}/sudo.log" ]] && echo yes || echo no)"
