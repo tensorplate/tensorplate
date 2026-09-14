@@ -1111,12 +1111,9 @@ verify_normal_supervision() {
       die "the ${service_name} LaunchAgents plist differs from the formula plist"
   done
   wait_for_agent_ready || die "the agent did not answer outside the sandbox after the offline stage"
-  offline_helper tensorplate-processes --pids-out "${denial_dir}/restored-pids.txt" ||
-    die "cannot list TensorPlate processes after the offline stage"
   offline_helper sandbox-state --profile "$offline_profile" --expect unsandboxed \
     --job "${denial_dir}/agent-restored.json" --job "${denial_dir}/observability-restored.json" \
-    --pids-file "${denial_dir}/restored-pids.txt" --pids-file-may-exit \
-    --out "${denial_dir}/restored-sandbox.json" ||
+    --all-tensorplate-processes --out "${denial_dir}/restored-sandbox.json" ||
     die "a sandboxed TensorPlate process remains after the offline stage"
 }
 

@@ -211,6 +211,18 @@ def test_launchd_job():
         # Homebrew's loaded_file must be the expected path too.
         expected = [failure, "brew_loaded_file"] if failure == "job_path" else [failure]
         assert found == expected, (failure, found)
+    # launchd may print the loaded plist through a symlinked directory
+    # (/var/folders is /private/var/folders); both spellings are one file.
+    with tempfile.TemporaryDirectory(prefix="tp-offline-link-") as directory:
+        real = pathlib.Path(directory) / "private" / "work"
+        real.mkdir(parents=True)
+        (pathlib.Path(directory) / "var").symlink_to(real)
+        linked, resolved = f"{directory}/var/job.plist", f"{real}/job.plist"
+        linked_job = dict(job, path=linked)
+        linked_info = [dict(info[0], loaded_file=linked)]
+        assert m.check_launchd_job(linked_job, path=resolved, brew_info=linked_info) == []
+        assert m.check_launchd_job(linked_job, path=f"{real}/other.plist", brew_info=linked_info) == \
+            ["job_path", "brew_loaded_file"]
     # A derivation that dropped the prefix would load the formula's own
     # arguments; the expectation is built independently and refuses it.
     assert "job_arguments" in m.check_launchd_job(
@@ -328,6 +340,19 @@ def test_sandbox_readback():
                     {"sandbox_check": lambda pid, op: 1 if pid == live.pid else recorded(pid, op)},
                     lambda: m.sandbox_states(profile, [], [live.pid], "unsandboxed"))
                 assert failures == ["process_unsandboxed"], failures
+                # A sandboxed leftover that exits within the wait passes;
+                # one that stays fails.
+                listings = [[live.pid], [live.pid], []]
+                result, failures = with_patches(
+                    {"sandbox_check": lambda pid, op: 1 if pid == live.pid else recorded(pid, op),
+                     "tensorplate_processes": lambda: listings.pop(0) if len(listings) > 1 else listings[0]},
+                    lambda: m.no_sandboxed_tensorplate_process(profile, [], attempts=5))
+                assert failures == [] and result["none_sandboxed"], (result, failures)
+                result, failures = with_patches(
+                    {"sandbox_check": lambda pid, op: 1 if pid == live.pid else recorded(pid, op),
+                     "tensorplate_processes": lambda: [live.pid]},
+                    lambda: m.no_sandboxed_tensorplate_process(profile, [], attempts=3))
+                assert failures == ["process_unsandboxed"] and not result["none_sandboxed"], failures
             finally:
                 live.kill()
                 live.wait()
@@ -364,6 +389,9 @@ def test_processes_and_listeners():
          ["loopback_only", "serving_listener_in_tree"]),
         (good + "f9\nPTCP\nn192.0.2.10:18081\nTST=LISTEN\n", {101, 102}, ["loopback_only"]),
         (good + "f9\nPUDP\nn*:5353\n", {101, 102}, ["loopback_only"]),
+        # Never bound or connected: no port, nothing can reach it.
+        (good + "f9\nPUDP\nn*:*\n", {101, 102}, []),
+        (good + "f9\nPTCP\nn*:*\nTST=CLOSED\n", {101, 102}, []),
         ("", {101}, ["serving_listener_in_tree"]),
         (good, {102}, ["serving_listener_in_tree", "sockets_owned_by_tree"]),
         (good.replace("n127.0.0.1:18080\nTST=LISTEN", "n[::1]:18080\nTST=LISTEN"), {101, 102},
@@ -905,6 +933,8 @@ UNSANDBOXED_CALLS = {
 
 def stage_cases():
     cases = {"clean run": lambda: check_clean_run(run_world(stage_script()))}
+    cases["clean run with a sandboxed sidecar slow to exit after the bootout"] = lambda: check_clean_run(
+        run_world(stage_script(), mode="slow-exit-sidecar"))
     cases["clean run with errexit suspended by the caller"] = lambda: check_clean_run(run_world(
         stage_script(body="run_stage offline-runtime verify_offline_runtime || exit 1\n")))
     for mode, (message, restorable) in FAILURE_MODES.items():

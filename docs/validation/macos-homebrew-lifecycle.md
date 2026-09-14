@@ -65,8 +65,9 @@ brew trust --formula \
 ```
 
 Before the mutating run, add `--preflight-only` to the command below. The
-preflight writes the host, formula-pin, baseline, and tap-trust artifacts but
-does not alter packages, tap files, or services. The harness disables
+preflight writes the host, formula-pin, baseline, tap-trust, and
+offline-profile artifacts but does not alter packages, tap files, or
+services. The harness disables
 Homebrew's automatic dependency removal for the entire run.
 
 ## Run
@@ -162,8 +163,9 @@ deploy of the MPS fixture under a new deployment id, status, inference,
 pass under the same profile. A probe inside the sandbox must be refused
 with `EPERM` for a public address, the link-local metadata address,
 IPv4 and IPv6 documentation addresses, `fe80::1`, a loopback port other
-than the serving ports, a child process's send, and mDNSResponder, while
-an unsandboxed control making the same sends is not refused. The probe's
+than the serving ports, a child process's send, and mDNSResponder. An
+unsandboxed control's IPv4 documentation and `fe80::1` sends and its
+mDNSResponder connection must not be refused. The probe's
 non-loopback sockets are pinned to `lo0`, so no probe packet leaves the
 Mac even if the sandbox failed to enforce.
 
@@ -174,8 +176,9 @@ same one, because `sandbox_check` reports an exited pid as sandboxed, and
 every run first proves the readback tells a sandboxed process from an
 unsandboxed or exited one. Every internet socket the agent's process
 tree holds must be bound to loopback, with the serving listener among
-them, and both jobs must end the stage on the pid they started with,
-after one launchd run. The stage then boots out both sandboxed jobs,
+them. A socket that was never bound has no port and is not counted. Both
+jobs must end the stage on the pid they started with, after one launchd
+run. The stage then boots out both sandboxed jobs,
 starts the normal ones, and requires their loaded plists to match the
 formula plists and no sandboxed TensorPlate process to remain.
 `offline-runtime.json` records the profile hash and ports, probe and
@@ -215,7 +218,9 @@ formulae that disappear during uninstall; the harness re-adds only those
 missing component entries for the later upgrade stage and removes exactly
 the entries it added before exit.
 
-Run the harness from a terminal you keep open. On a failure, or on INT,
+Run the harness directly in a terminal you keep open, not through a
+pipe such as `| tee`: a Ctrl-C also stops the reader, and cleanup's next
+write to the closed pipe would end the harness. On a failure, or on INT,
 TERM or HUP, cleanup records the interrupted stage as failed and prints
 to that terminal. It then boots out any TensorPlate launchd job still
 running under `sandbox-exec`, starts the normal jobs again if the offline

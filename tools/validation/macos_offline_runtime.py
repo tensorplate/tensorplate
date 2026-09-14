@@ -356,12 +356,19 @@ def expected_sandboxed_arguments(formula_document, profile_path):
     )
 
 
+def _same_file(first, second):
+    # /var/folders is a symlink to /private/var/folders; launchd may print
+    # either spelling of the plist it loaded.
+    return isinstance(first, str) and isinstance(second, str) and \
+        os.path.realpath(first) == os.path.realpath(second)
+
+
 def check_launchd_job(job, program=None, path=None, arguments=None, pid_differs_from=None,
                       same_pid_as=None, runs=None, brew_info=None):
     failures = []
     if program is not None and job["program"] != program:
         failures.append("job_program")
-    if path is not None and job["path"] != path:
+    if path is not None and not _same_file(job["path"], path):
         failures.append("job_path")
     if arguments is not None and job["arguments"] != arguments:
         failures.append("job_arguments")
@@ -376,7 +383,8 @@ def check_launchd_job(job, program=None, path=None, arguments=None, pid_differs_
     if brew_info is not None:
         entries = brew_info if isinstance(brew_info, list) else []
         entry = entries[0] if len(entries) == 1 and isinstance(entries[0], dict) else {}
-        if entry.get("loaded_file") != job["path"] or (path is not None and entry.get("loaded_file") != path):
+        if not _same_file(entry.get("loaded_file"), job["path"]) or \
+                (path is not None and not _same_file(entry.get("loaded_file"), path)):
             failures.append("brew_loaded_file")
         if entry.get("status") != "started":
             failures.append("brew_status_started")
@@ -475,10 +483,7 @@ def discrimination_controls(profile_path, attempts=100):
     }
 
 
-def sandbox_states(profile_path, required_pids, optional_pids, expect):
-    controls = discrimination_controls(profile_path)
-    if expect == "sandboxed" and not required_pids and not optional_pids:
-        raise CheckFailed("there are no processes to read back")
+def _read_states(required_pids, optional_pids, expect):
     failures, read = [], 0
     for pid, required in [(pid, True) for pid in required_pids] + \
             [(pid, False) for pid in optional_pids]:
@@ -495,9 +500,31 @@ def sandbox_states(profile_path, required_pids, optional_pids, expect):
             failures.append("process_unsandboxed")
     if expect == "sandboxed" and read == 0:
         failures.append("processes_read")
+    return read, sorted(set(failures))
+
+
+def sandbox_states(profile_path, required_pids, optional_pids, expect):
+    controls = discrimination_controls(profile_path)
+    if expect == "sandboxed" and not required_pids and not optional_pids:
+        raise CheckFailed("there are no processes to read back")
+    read, failures = _read_states(required_pids, optional_pids, expect)
     result = {"readback_controls": controls, "processes_read": read}
     result["all_sandboxed" if expect == "sandboxed" else "none_sandboxed"] = not failures
-    return result, sorted(set(failures))
+    return result, failures
+
+
+def no_sandboxed_tensorplate_process(profile_path, required_pids, attempts=30):
+    """After the sandboxed jobs are booted out, launchd's SIGTERM may still
+    be reaching their children; wait for every TensorPlate process that
+    still reads as sandboxed to exit."""
+    controls = discrimination_controls(profile_path)
+    for remaining in range(attempts, 0, -1):
+        read, failures = _read_states(required_pids, tensorplate_processes(), "unsandboxed")
+        if not failures or remaining == 1:
+            break
+        time.sleep(1)
+    return {"readback_controls": controls, "processes_read": read,
+            "none_sandboxed": not failures}, failures
 
 
 def child_pids(pid):
@@ -581,7 +608,10 @@ def check_listeners(sockets, pids, serving_port):
         host = local.rpartition(":")[0]
         if item["pid"] not in pids:
             failures.add("sockets_owned_by_tree")
-        if host not in ("127.0.0.1", "[::1]"):
+        # `*:*` is a socket that was never bound or connected: it has no
+        # port, so nothing can reach it. A wildcard address with a port is
+        # a listener or bound socket any interface can reach.
+        if host not in ("127.0.0.1", "[::1]") and local != "*:*":
             failures.add("loopback_only")
         if item["protocol"] == "TCP" and item["state"] == "LISTEN" and \
                 local == f"127.0.0.1:{serving_port}" and item["pid"] in pids:
@@ -1086,9 +1116,8 @@ def main(argv=None):
     command("sandbox-state", opt("--profile", required=True),
             opt("--expect", choices=("sandboxed", "unsandboxed"), required=True),
             opt("--job", action="append", default=[]),
-            opt("--pids-file"), opt("--pids-file-may-exit", action="store_true"))
+            opt("--pids-file"), opt("--all-tensorplate-processes", action="store_true"))
     command("process-tree", opt("--job", required=True), opt("--pids-out", required=True))
-    command("tensorplate-processes", opt("--pids-out", required=True))
     command("quiesced", opt("--profile", required=True), opt("--attempts", type=int, default=30))
     command("listeners", opt("--pids-file", required=True), opt("--status", required=True))
     command("control")
@@ -1161,11 +1190,14 @@ def _run(args):
         )
         _emit(job, args.out, failures, f"launchd job {job['label']} checks")
     elif name == "sandbox-state":
-        optional = _pids_file(args.pids_file) if args.pids_file else []
         required = [_job_pid(path) for path in args.job]
-        if args.pids_file and not args.pids_file_may_exit:
-            required, optional = required + optional, []
-        result, failures = sandbox_states(args.profile, required, optional, args.expect)
+        required += _pids_file(args.pids_file) if args.pids_file else []
+        if args.all_tensorplate_processes:
+            if args.expect != "unsandboxed":
+                raise CheckFailed("--all-tensorplate-processes reads back an unsandboxed expectation")
+            result, failures = no_sandboxed_tensorplate_process(args.profile, required)
+        else:
+            result, failures = sandbox_states(args.profile, required, [], args.expect)
         _emit(result, args.out, failures, "sandbox readback checks")
     elif name == "process-tree":
         pids = process_tree(_job_pid(args.job))
@@ -1178,11 +1210,6 @@ def _run(args):
                                                ("tree_has_backend_sidecar", result["backend_sidecars"]))
                     if count == 0]
         _emit(result, args.out, failures, "process tree checks")
-    elif name == "tensorplate-processes":
-        pids = tensorplate_processes()
-        with open(args.pids_out, "w", encoding="utf-8") as handle:
-            handle.write("".join(f"{pid}\n" for pid in pids))
-        _emit({"processes": len(pids)}, args.out)
     elif name == "quiesced":
         ports = ",".join(str(port) for port in profile_ports(read_profile(args.profile)))
         for remaining in range(args.attempts, 0, -1):

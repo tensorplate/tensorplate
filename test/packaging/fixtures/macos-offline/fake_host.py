@@ -117,7 +117,8 @@ def unload_job(state, label):
     for pid, proc in list(state["procs"].items()):
         if proc["label"] != label:
             continue
-        if "orphan-sidecar" in MODES and proc["sandboxed"] and "-m tensorplate_pytorch_backend" in proc["args"]:
+        if MODES & {"orphan-sidecar", "slow-exit-sidecar"} and proc["sandboxed"] and \
+                "-m tensorplate_pytorch_backend" in proc["args"]:
             proc.update(parent=1, label=None)
             continue
         del state["procs"][pid]
@@ -243,6 +244,12 @@ def fake_pgrep(args):
     if args[:1] == ["-P"]:
         found = [pid for pid, proc in state["procs"].items() if str(proc["parent"]) == args[1]]
     elif args[:1] == ["-u"] and args[2] == "-f":
+        # A sandboxed sidecar outlives its job's bootout for a moment: it
+        # is still listed the first time the restore looks.
+        state["pgrep_u_calls"] = state.get("pgrep_u_calls", 0) + 1
+        if "slow-exit-sidecar" in MODES and state["pgrep_u_calls"] >= 3:
+            state["procs"] = {pid: proc for pid, proc in state["procs"].items() if proc["label"]}
+        save_state(state)
         found = [pid for pid, proc in state["procs"].items() if re.search(args[3], proc["args"])]
     else:
         return 2
