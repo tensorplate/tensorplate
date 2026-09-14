@@ -155,6 +155,8 @@ tap_staged=0
 baseline_version=""
 candidate_version=""
 candidate_active=0
+# The installed agent config and the crash-loop stage's copy of it.
+agent_config=""
 agent_config_backup=""
 trust_added=()
 active_stage=""
@@ -191,11 +193,24 @@ stop_candidate_services() {
   brew services stop tensorplate-observability >/dev/null 2>&1 || true
 }
 
+# Cleanup calls this more than once. The backup is forgotten only once it
+# is back in place, so a failed copy is retried and cleanup keeps the file.
 restore_agent_config() {
   [[ -n "$agent_config_backup" && -f "$agent_config_backup" ]] || return 0
-  cp "$agent_config_backup" "$(brew --prefix)/etc/tensorplate/agent.json"
-  chmod 0640 "$(brew --prefix)/etc/tensorplate/agent.json"
+  { cp "$agent_config_backup" "$agent_config" && chmod 0640 "$agent_config"; } || return 1
   agent_config_backup=""
+}
+
+# A message for the operator: into cleanup.log, or the stage log in a
+# stage, and onto the terminal saved at startup. An external printf
+# writes the terminal copy. A builtin write that fails, because the
+# terminal hung up or its pipe reader is gone, stays in bash 3.2's output
+# buffer and lands in the next command substitution's output, and a
+# closed pipe would kill the harness with SIGPIPE; the external printf
+# only fails itself.
+tell_operator() {
+  printf '%s\n' "$*" >&2
+  /usr/bin/printf '%s\n' "$*" >&4 2>/dev/null || true
 }
 
 restore_formula_trust() {
@@ -249,11 +264,14 @@ purge_offline_job() {
   # launchctl print exits 113 for a label that is not loaded.
   [[ "$purge_status" -ne 113 ]] || return 0
   if [[ "$purge_status" -ne 0 ]]; then
-    printf 'error: launchctl print %s failed with status %s\n' "$purge_target" "$purge_status" >&2
+    tell_operator "error: launchctl print ${purge_target} failed with status ${purge_status}"
     return 1
   fi
-  purge_sandboxed="$(printf '%s\n' "$purge_print" |
-    offline_helper launchd-job --print - --field runs_sandbox_exec)" || return 1
+  if ! purge_sandboxed="$(printf '%s\n' "$purge_print" |
+    offline_helper launchd-job --print - --field runs_sandbox_exec)"; then
+    tell_operator "error: cannot tell whether ${purge_target} runs under sandbox-exec; inspect it with: launchctl print ${purge_target}"
+    return 1
+  fi
   [[ "$purge_sandboxed" == "yes" ]] || return 0
   # Whether the bootout took effect is read back below, not trusted.
   launchctl bootout "$purge_target" >/dev/null 2>&1 || true
@@ -263,8 +281,7 @@ purge_offline_job() {
     [[ "$purge_status" -ne 113 ]] || return 0
     sleep 1
   done
-  printf 'error: the sandboxed launchd job %s is still loaded; remove it with: launchctl bootout %s\n' \
-    "$purge_target" "$purge_target" >&2
+  tell_operator "error: the sandboxed launchd job ${purge_target} is still loaded; remove it with: launchctl bootout ${purge_target}"
   return 1
 }
 
@@ -284,7 +301,7 @@ restore_offline_supervision() {
   wait_for_service tensorplate-observability || restore_status=1
   wait_for_service tensorplate-agent || restore_status=1
   if [[ "$restore_status" -ne 0 ]]; then
-    printf '%s\n' 'error: normal launchd supervision is not restored; run: brew services start tensorplate-observability && brew services start tensorplate-agent' >&2
+    tell_operator 'error: normal launchd supervision is not restored; run: brew services start tensorplate-observability && brew services start tensorplate-agent'
     return 1
   fi
   offline_services_stopped=0
@@ -297,18 +314,21 @@ cleanup() {
   # come back before the Homebrew restore, which an operator may need to
   # interrupt.
   trap '' INT TERM HUP
-  # A stage that fails inside run_stage still has its output redirected
-  # to the stage log; the operator reads cleanup's messages on the
-  # terminal saved at startup.
-  exec 1>&3 2>&4
   set +e
+  # Everything cleanup and its commands print goes to cleanup.log, not
+  # to the failed stage's log that run_stage may still have open, nor to
+  # the terminal: after a hangup, or with a `| tee` reader gone, writing
+  # there fails, and Homebrew exits non-zero on a failed write after it
+  # has already done the work. tell_operator copies the messages to the
+  # terminal.
+  exec 1>>"${evidence_dir}/cleanup.log" 2>&1
   if [[ "$status" -ne 0 && -n "$active_stage" ]]; then
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '%s\tfail\t%s\t%s\t%s\n' \
       "$active_stage" "$active_stage_started" "$finished_at" \
       "$(basename "$active_stage_log")" >>"$stage_results"
-    tail -n 40 "$active_stage_log" >&2 || true
-    printf 'error: stage %s failed with exit %s\n' "$active_stage" "$status" >&2
+    tail -n 40 "$active_stage_log" >&4 2>/dev/null
+    tell_operator "error: stage ${active_stage} failed with exit ${status}"
   fi
   restore_agent_config
   restore_offline_supervision || { [[ "$status" -ne 0 ]] || status=1; }
@@ -318,7 +338,7 @@ cleanup() {
   if [[ -n "$tap_repo" && -d "$tap_repo" && -n "$baseline_version" ]]; then
     current_version="$(linked_formula_version tensorplate)"
     if [[ "$candidate_active" == "1" || "$current_version" != "$baseline_version" ]]; then
-      note "restoring baseline tensorplate ${baseline_version}"
+      tell_operator "==> restoring baseline tensorplate ${baseline_version}"
       restore_baseline
     else
       restore_agent_config
@@ -330,10 +350,19 @@ cleanup() {
   fi
   [[ -z "$lifecycle_marker" ]] || rm -f "$lifecycle_marker"
   restore_formula_trust
-  rm -rf "$work_dir"
+  if [[ -n "$agent_config_backup" && -f "$agent_config_backup" ]]; then
+    # Every restore attempt failed: keep the work directory, which holds
+    # the only copy of the agent config, and fail the run.
+    [[ "$status" -ne 0 ]] || status=1
+    tell_operator "error: the agent config was not restored; copy ${agent_config_backup} to etc/tensorplate/agent.json under the Homebrew prefix"
+  else
+    rm -rf "$work_dir"
+  fi
+  [[ "$status" -eq 0 ]] || tell_operator "cleanup output: ${evidence_dir}/cleanup.log"
   exit "$status"
 }
-exec 3>&1 4>&2
+# The terminal, kept for tell_operator: a stage's output goes to its log.
+exec 4>&2
 # Without these, bash runs the EXIT trap with status 0 after TERM or HUP,
 # and the interrupted stage would record no fail row.
 trap 'exit 130' INT

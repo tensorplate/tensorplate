@@ -28,9 +28,11 @@ import plistlib
 import re
 import shutil
 import signal
+import pty
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -701,7 +703,7 @@ def heredoc_function(source, name):
 
 
 STAGE_FUNCTIONS = (
-    "die", "note", "pass", "run_stage", "offline_helper", "restore_agent_config",
+    "die", "note", "pass", "run_stage", "offline_helper", "restore_agent_config", "tell_operator",
     "restore_formula_trust", "purge_offline_job", "restore_offline_supervision", "cleanup",
     "wait_for_service", "wait_for_agent_ready", "run_denied", "enter_offline_denial",
     "wait_for_denied_status", "verify_normal_supervision", "verify_offline_runtime",
@@ -716,6 +718,7 @@ stage_results="$evidence_dir/stages.tsv"
 tap_repo="${TP_TAP_REPO:-}"
 baseline_version="${TP_BASELINE_VERSION:-}"
 candidate_active=1
+agent_config="$TP_ROOT/prefix/etc/tensorplate/agent.json"
 agent_config_backup=""
 trust_added=()
 active_stage=""
@@ -731,7 +734,13 @@ offline_deployment_id=offline-1
 offline_helper_path="$TP_ROOT/helper.py"
 python_bin=python3
 restore_tap() { printf 'restore_tap\n' >>"$TP_ROOT/cleanup-calls"; }
-restore_baseline() { printf 'restore_baseline\n' >>"$TP_ROOT/cleanup-calls"; }
+restore_baseline() {
+  printf 'restore_baseline\n' >>"$TP_ROOT/cleanup-calls"
+  if [[ -n "${TP_SLOW_BASELINE:-}" ]]; then
+    : >"$TP_ROOT/baseline-started"
+    /bin/sleep 10
+  fi
+}
 linked_formula_version() { printf '0.1.2\n'; }
 '''
 
@@ -827,7 +836,7 @@ sys.exit(m.main())
 
 
 def trap_block(source):
-    match = re.search(r"^exec 3>&1 4>&2\n.*?^trap cleanup EXIT\n", source, re.M | re.S)
+    match = re.search(r"^# The terminal, kept for tell_operator.*?^trap cleanup EXIT\n", source, re.M | re.S)
     assert match, "the harness no longer saves the terminal and installs its traps before cleanup"
     return match.group(0)
 
@@ -909,9 +918,19 @@ def make_world(root, scenario="normal", mode=""):
         fake(root, "brew", "services", "stop", "--keep", OBSERVABILITY)
 
 
+CASE = threading.local()
+
+
+def new_world_root():
+    """A directory for one world, removed by run_parallel when its case
+    passes and kept for debugging when it fails."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="tp-offline-"))
+    getattr(CASE, "roots", []).append(root)
+    return root
+
+
 def run_world(script, mode="", scenario="normal", extra_env=None, signals=None, timeout=240):
-    directory = tempfile.mkdtemp(prefix="tp-offline-")
-    root = pathlib.Path(directory)
+    root = new_world_root()
     make_world(root, scenario, mode)
     # Only what the harness does is recorded, not the world's setup.
     (root / "calls.jsonl").write_text("")
@@ -960,9 +979,6 @@ class World:
         return [call["args"][1].rsplit("/", 1)[-1] for call in self.calls
                 if call["tool"] == "launchctl" and call["args"][0] == "bootout"]
 
-    def cleanup_output(self):
-        shutil.rmtree(self.root, ignore_errors=True)
-
 
 def check_clean_run(world):
     assert world.returncode == 0, world.context()
@@ -995,7 +1011,12 @@ def check_clean_run(world):
 FAILURE_MODES = {
     # mode: (message in the stage log, whether cleanup can restore normal supervision)
     "stop-leaves-loaded": ("tensorplate-agent is still loaded after brew services stop --keep", True),
+    # The agent is already stopped when observability fails to stop, so
+    # cleanup must start the agent again.
+    "stop-leaves-observability-loaded": ("tensorplate-observability is still loaded after brew services stop "
+                                         "--keep", True),
     "port-collision": ("a TensorPlate process or serving-port listener outlived the stopped services", True),
+    "stop-leaves-process": ("a TensorPlate process or serving-port listener outlived the stopped services", True),
     "run-fails": ("brew services run --file failed for tensorplate-observability", True),
     "stop-reloads": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "unsandboxed-sidecar": ("a process in the service trees does not read back as sandboxed with the "
@@ -1017,6 +1038,7 @@ FAILURE_MODES = {
     "observability-wildcard-listener": ("a TensorPlate process holds a non-loopback socket, or the agent's tree "
                                         "holds no serving listener", True),
     "doctor-failing": ("doctor under the offline profile is not green on the exact row", True),
+    "doctor-exit-nonzero": ("doctor under the offline profile is not green on the exact row", True),
     "crash-during-doctor": ("tensorplate-agent restarted during the offline stage", True),
     "launchagents-drift": ("the tensorplate-agent LaunchAgents plist differs from the formula plist", True),
     "agent-not-ready-after": ("the agent did not answer outside the sandbox after the offline stage", True),
@@ -1135,6 +1157,21 @@ def stage_cases():
         assert [job for job in world.state["labels"].values()
                 if job["arguments"][0] == "/usr/bin/sandbox-exec"], "restore ran without the cleanup call"
     cases["guard: without the cleanup restore the sandboxed jobs stay loaded"] = restore_call_removed
+
+    def agent_config_not_restored():
+        # The crash-loop stage's copy of the good config, and a config
+        # directory that cannot take it back.
+        body = ('agent_config_backup="$work_dir/agent.json"\n'
+                "printf '{\"good\": true}\\n' >\"$agent_config_backup\"\n"
+                'rm -rf "$TP_ROOT/prefix/etc/tensorplate"\n: >"$TP_ROOT/prefix/etc/tensorplate"\n'
+                "exit 0\n")
+        world = run_world(stage_script(body=body))
+        assert world.returncode == 1, ("cleanup did not fail the run", world.context())
+        assert (world.root / "work/agent.json").read_text() == '{"good": true}\n', "the only good config is gone"
+        assert f"error: the agent config was not restored; copy {world.root}/work/agent.json to " in world.stderr, \
+            world.context()
+        assert "restore_tap" in world.cleanup_calls, world.cleanup_calls
+    cases["cleanup keeps the agent config backup and fails when it cannot restore it"] = agent_config_not_restored
     return cases
 
 
@@ -1155,6 +1192,11 @@ def purge_cases():
         ("both-sandboxed", "1", "bootout-fails", 1, ["homebrew.mxcl.tensorplate-agent",
                                                      "homebrew.mxcl.tensorplate-observability"], False),
         ("both-sandboxed", "1", "print-error", 1, [], False),
+        # launchctl print in a shape the parser does not know.
+        ("both-sandboxed", "1", "print-unparsable", 1, [], False),
+        # The agent's job goes, observability's stays.
+        ("both-sandboxed", "1", "bootout-fails-observability", 1, ["homebrew.mxcl.tensorplate-agent",
+                                                                   "homebrew.mxcl.tensorplate-observability"], False),
         ("normal", "0", "", 0, [], True),
         ("normal", "1", "", 0, [], True),
     ):
@@ -1172,9 +1214,14 @@ def purge_cases():
                 assert not world.state["labels"], world.state
             starts = [call for call in world.calls
                       if call["tool"] == "brew" and call["args"][:2] == ["services", "start"]]
-            if mode == "bootout-fails":
+            if mode in ("bootout-fails", "bootout-fails-observability"):
                 assert not starts, "normal jobs were started while a sandboxed job stayed loaded"
-                assert "remove it with: launchctl bootout gui/" in world.stderr, world.context()
+                assert re.search(r"remove it with: launchctl bootout gui/\d+/homebrew.mxcl.tensorplate-observability",
+                                 world.stderr), world.context()
+            if mode == "print-unparsable":
+                assert not starts, "normal jobs were started while launchd could not be read"
+                assert re.search(r"error: cannot tell whether gui/\d+/homebrew.mxcl.tensorplate-agent runs under "
+                                 r"sandbox-exec", world.stderr), world.context()
             if mode == "print-error":
                 assert not starts, "normal jobs were started while launchd could not be read"
                 assert re.search(r"error: launchctl print gui/\d+/homebrew.mxcl.tensorplate-agent failed "
@@ -1228,6 +1275,68 @@ def check_signalled(world, sig):
     assert message not in world.log, ("cleanup wrote to the stage log", world.context())
 
 
+def lost_terminal_run(source, sig, terminal):
+    """The harness's output on a terminal that goes away mid-stage, then
+    `sig` to its group: a pty whose master closes, as when a Terminal
+    window closes or an ssh session drops, or a pipe whose reader exits,
+    as when Ctrl-C also stops `| tee`."""
+    root = new_world_root()
+    make_world(root, "normal", "infer-blocks")
+    (root / "calls.jsonl").write_text("")
+    (root / "probe.sh").write_text(stage_script(source))
+    reader, writer = pty.openpty() if terminal == "pty" else os.pipe()
+    process = subprocess.Popen(["bash", str(root / "probe.sh")], env=tool_env(root, "infer-blocks"),
+                               stdin=subprocess.DEVNULL, stdout=writer, stderr=writer, start_new_session=True)
+    os.close(writer)
+    try:
+        wait_for(root / "infer-blocked")
+    finally:
+        os.close(reader)
+    os.killpg(process.pid, sig)
+    try:
+        process.wait(timeout=240)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        raise AssertionError(f"stage run timed out after the terminal went away ({terminal})")
+    return World(root, process.returncode, "", "")
+
+
+def check_lost_terminal(world, sig):
+    code = 128 + int(sig)
+    cleanup_log = world.root / "evidence/cleanup.log"
+    context = world.context() + "\n--- cleanup.log\n" + (cleanup_log.read_text() if cleanup_log.exists() else "")
+    assert world.returncode == code, (sig, context)
+    assert "offline-runtime\tfail\t" in world.rows, context
+    world.assert_normal_supervision()
+    assert f"error: stage offline-runtime failed with exit {code}" in cleanup_log.read_text(), context
+    assert "restore_tap" in world.cleanup_calls, (world.cleanup_calls, context)
+
+
+def must_fail_lost_terminal(source, sig, terminal):
+    """The lost-terminal test must fail on this copy of the harness."""
+    def case():
+        world = lost_terminal_run(source, sig, terminal)
+        try:
+            check_lost_terminal(world, sig)
+        except AssertionError:
+            return
+        raise AssertionError("the lost-terminal test passed without the guard")
+    return case
+
+
+def rearmed_run(first, second):
+    """`first` mid-stage, then `second` while cleanup restores the Homebrew
+    baseline, which an operator must still be able to interrupt."""
+    def deliver(root, process):
+        wait_for(root / "infer-blocked")
+        os.killpg(process.pid, first)
+        wait_for(root / "baseline-started")
+        os.killpg(process.pid, second)
+    return run_world(stage_script(), mode="infer-blocks", signals=deliver,
+                     extra_env={"TP_TAP_REPO": "/", "TP_BASELINE_VERSION": "0.1.2", "TP_SLOW_BASELINE": "1"})
+
+
 def signal_cases():
     cases = {}
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -1238,6 +1347,25 @@ def signal_cases():
         lambda: check_signalled(signal_run(SOURCE, signal.SIGTERM, second=signal.SIGINT), signal.SIGTERM))
     cases["SIGTERM to the harness pid only"] = lambda: check_signalled(
         signal_run(SOURCE, signal.SIGTERM, to_group=False, mode="infer-blocks-short"), signal.SIGTERM)
+    cases["SIGHUP after the terminal hung up"] = lambda: check_lost_terminal(
+        lost_terminal_run(SOURCE, signal.SIGHUP, "pty"), signal.SIGHUP)
+    cases["SIGINT after the output pipe's reader exited"] = lambda: check_lost_terminal(
+        lost_terminal_run(SOURCE, signal.SIGINT, "pipe"), signal.SIGINT)
+    for first, second in ((signal.SIGTERM, signal.SIGINT), (signal.SIGINT, signal.SIGTERM),
+                          (signal.SIGINT, signal.SIGHUP)):
+        def rearmed(first=first, second=second):
+            world = rearmed_run(first, second)
+            assert world.returncode == 128 + int(second), (
+                f"{second.name} did not end the baseline restore", world.context())
+        cases[f"{first.name} then {second.name} during the baseline restore ends it"] = rearmed
+
+    # Cleanup writing to the terminal itself, as it did before cleanup.log:
+    # a closed pipe kills bash with SIGPIPE on any bash.
+    cases["guard: without cleanup.log a lost output pipe stops the restore"] = must_fail_lost_terminal(
+        mutated('  exec 1>>"${evidence_dir}/cleanup.log" 2>&1\n', "  exec 1>&4 2>&4\n"), signal.SIGINT, "pipe")
+    cases["guard: a builtin write to the terminal in tell_operator stops the restore"] = must_fail_lost_terminal(
+        mutated("  /usr/bin/printf '%s\\n' \"$*\" >&4 2>/dev/null || true\n",
+                "  printf '%s\\n' \"$*\" >&4 2>/dev/null || true\n"), signal.SIGINT, "pipe")
 
     def must_fail(source, sig, symptom, second=None):
         """The signal test must fail on this copy, showing `symptom`."""
@@ -1276,8 +1404,12 @@ def signal_cases():
         lambda world: world.returncode != 129 or "offline-runtime\tfail\t" not in world.rows)
     cases["guard: without ignoring signals in cleanup a second TERM interrupts the restore"] = must_fail(
         mutated("  trap '' INT TERM HUP\n", ""), signal.SIGTERM, still_sandboxed, second=signal.SIGTERM)
-    cases["guard: without restoring the terminal cleanup messages land in the stage log"] = must_fail(
-        mutated("  exec 1>&3 2>&4\n", ""), signal.SIGTERM,
+    # bash 3.2 keeps a failed builtin write buffered and writes it into the
+    # next command substitution, which corrupts the launchctl target.
+    cases["guard: without cleanup.log a hung-up terminal stops the restore"] = must_fail_lost_terminal(
+        mutated('  exec 1>>"${evidence_dir}/cleanup.log" 2>&1\n', "  exec 1>&4 2>&4\n"), signal.SIGHUP, "pty")
+    cases["guard: without the cleanup log redirection cleanup messages land in the stage log"] = must_fail(
+        mutated('  exec 1>>"${evidence_dir}/cleanup.log" 2>&1\n', ""), signal.SIGTERM,
         lambda world: "error: stage offline-runtime failed with exit 143" in world.log)
     return cases
 
@@ -1303,22 +1435,31 @@ def test_static():
         "offline-profile must run in the preflight path before any Homebrew change"
     assert not re.search(r"run_denied\s+(HOMEBREW_\w+=\S+\s+)*brew\b", SOURCE), "run_denied wraps brew"
     assert trap_block(SOURCE) == (
-        "exec 3>&1 4>&2\n"
+        "# The terminal, kept for tell_operator: a stage's output goes to its log.\n"
+        "exec 4>&2\n"
         "# Without these, bash runs the EXIT trap with status 0 after TERM or HUP,\n"
         "# and the interrupted stage would record no fail row.\n"
         "trap 'exit 130' INT\ntrap 'exit 143' TERM\ntrap 'exit 129' HUP\ntrap cleanup EXIT\n"
     ), trap_block(SOURCE)
     # cleanup reaches these; die would skip the rest of the restore.
     for name in ("purge_offline_job", "restore_offline_supervision", "wait_for_service",
-                 "offline_helper", "restore_agent_config"):
+                 "offline_helper", "restore_agent_config", "tell_operator"):
         assert not re.search(r"\bdie\b", function(SOURCE, name)), f"{name} calls die"
     cleanup = function(SOURCE, "cleanup")
     assert cleanup.startswith("cleanup() {\n  status=$?\n"), "cleanup must read the exit status first"
-    assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("exec 1>&3 2>&4") < \
-        cleanup.index("printf '%s\\tfail"), "cleanup must reach the terminal before it reports"
+    redirect = 'exec 1>>"${evidence_dir}/cleanup.log" 2>&1'
+    # errexit would end cleanup at a failed redirection.
+    assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("set +e") < cleanup.index(redirect) < \
+        cleanup.index("printf '%s\\tfail"), "cleanup must leave the stage log before it reports"
     assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("restore_agent_config") < \
-        cleanup.index("restore_offline_supervision") < cleanup.index("trap 'exit 130' INT") < \
-        cleanup.index("restore_baseline"), "cleanup ignores signals outside the critical restore"
+        cleanup.index("restore_offline_supervision") < cleanup.index("restore_baseline"), cleanup
+    rearm = cleanup.index("trap 'exit 130' INT\n  trap 'exit 143' TERM\n  trap 'exit 129' HUP\n")
+    assert cleanup.index("restore_offline_supervision") < rearm < cleanup.index("restore_baseline"), \
+        "cleanup ignores signals outside the critical restore"
+    # Only external commands write to the terminal copy.
+    for function_name in ("cleanup", "purge_offline_job", "restore_offline_supervision"):
+        body = function(SOURCE, function_name)
+        assert not re.search(r"^\s*(printf|echo)\b.*>&[24]", body, re.M), f"{function_name} writes with a builtin"
 
     runbook = (REPO / "docs/validation/physical-row-runbooks.md").read_text()
     section = runbook.split("\n## MacBook Pro M1 Pro\n", 1)[1].split("\n## ", 1)[0]
@@ -1435,24 +1576,42 @@ def test_darwin():
     passed("real sandbox-exec preflight against the rendered profile and its mutants")
 
 
+def run_case(case):
+    CASE.roots = []
+    try:
+        case()
+    except Exception as error:
+        error.world_roots = CASE.roots
+        raise
+    for root in CASE.roots:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def run_parallel(cases):
     failures = []
     workers = min(8, os.cpu_count() or 2)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(case): name for name, case in cases.items()}
+        futures = {pool.submit(run_case, case): name for name, case in cases.items()}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
             try:
                 future.result()
                 passed(name)
             except Exception as error:  # report every failing case, then fail
-                failures.append(f"{name}: {type(error).__name__}: {error}")
+                kept = " ".join(str(root) for root in getattr(error, "world_roots", []))
+                failures.append(f"{name}: {type(error).__name__}: {error}\n(kept: {kept or 'nothing'})")
     if failures:
         raise SystemExit("FAIL:\n" + "\n\n".join(failures))
 
 
 def main():
     only = sys.argv[1:]
+    # Started in the background by a non-interactive shell, this process
+    # inherits SIGINT ignored, and so would every harness it runs: bash
+    # cannot trap a signal ignored at entry, and the INT cases would fail.
+    # A handler, unlike SIG_IGN, is reset to the default across exec.
+    if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
     for test in (test_profile, test_derive_plist, test_launchd_job, test_sandbox_readback,
                  test_processes_and_listeners, test_classify, test_cli_checks, test_admission,
                  test_static, test_preflight_stage_body):
