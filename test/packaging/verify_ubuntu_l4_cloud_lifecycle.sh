@@ -252,9 +252,6 @@ def install(db, directory):
     if mode == "candidate-set-changed" and phase == "baseline":
         with open(os.path.join(os.environ["TP_FAKE_CANDIDATE_DIR"], "SHA256SUMS"), "a") as sums:
             sums.write("\n")
-    if mode == "upgrade-install-fails" and phase == "upgraded":
-        print("E: fixture installer failed", file=sys.stderr)
-        return 1
     if mode == "upgrade-signal-term" and phase == "upgraded":
         # The sudo stub signals the harness, which is its parent.
         return 200
@@ -270,6 +267,8 @@ def install(db, directory):
         packages[name] = {"status": "installed", "version": version}
     if mode == "apt-source-installed":
         packages["tensorplate-apt-source"] = {"status": "installed", "version": "0.1.2-1"}
+    if mode == "upgrade-leaves-unlisted-package" and phase == "upgraded":
+        packages["tensorplate-unlisted"] = {"status": "installed", "version": "0.2.1~rc.1-1"}
 
     # install-paths.sh lays out the state directory at configure time.
     (varlib / "state").mkdir(parents=True, exist_ok=True)
@@ -288,6 +287,11 @@ def install(db, directory):
         cli_config.write_text(PACKAGED_CLI_CONFIG)
     db["phase"] = phase
     save(db)
+    # The installer's later steps -- readiness, doctor -- can fail after
+    # apt has already installed the set, which leaves nothing else amiss.
+    if mode == "upgrade-install-fails" and phase == "upgraded":
+        print("E: fixture installer failed after installing the packages", file=sys.stderr)
+        return 1
     return 0
 
 def forget(db, names, keep_conffiles):
@@ -805,6 +809,18 @@ esac
 STUB
 cp "$fake_dpkg" "${appliance}/bin/dpkg"
 cp "$fake_dpkg" "${appliance}/bin/fake-dpkg-db"
+# The real checksum tool, except that the baseline's digest can be made
+# unreadable, so the harness's refusal of a digest it could not compute
+# is exercised rather than assumed.
+real_sha256sum="$(command -v sha256sum || true)"
+cat >"${appliance}/bin/sha256sum" <<'STUB'
+#!/bin/sh
+if [ "${TP_FAKE_MODE:-ok}" = baseline-digest-unreadable ] && [ "$*" = SHA256SUMS ]; then
+  case "$(pwd)" in */set-rc1) exit 0 ;; esac
+fi
+[ -n "${TP_FAKE_SHA256SUM}" ] || exit 127
+exec "${TP_FAKE_SHA256SUM}" "$@"
+STUB
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
 invocation=""
@@ -1036,6 +1052,7 @@ run_harness() {
     TP_FAKE_INFER_VERSIONS="${appliance}/infer-versions.log" \
     TMPDIR="${appliance}/scratch" \
     TP_FAKE_MKTEMP="$real_mktemp" \
+    TP_FAKE_SHA256SUM="$real_sha256sum" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
     TP_FAKE_PURGE_MARKER="${evidence}.purged" \
     TP_CLOUD_ARCH=x86_64 \
@@ -1415,9 +1432,11 @@ check "  deploys ran on candidate, baseline, rolled-back baseline" \
 check "  inferences ran on each install in turn" \
   "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
   "$(one_line "${appliance}/infer-versions.log")"
-first_baseline_install="$(sudo_line 'set-rc1/install.sh --local-artifacts')"
-last_candidate_install="$(last_sudo_line 'assets-rc2/install.sh --local-artifacts')"
-remove_line="$(sudo_line 'apt-get remove')"
+# Empty when the line is missing, which every check below treats as a
+# failure; `|| true` keeps a missing line from ending the suite early.
+first_baseline_install="$(sudo_line 'set-rc1/install.sh --local-artifacts' || true)"
+last_candidate_install="$(last_sudo_line 'assets-rc2/install.sh --local-artifacts' || true)"
+remove_line="$(sudo_line 'apt-get remove' || true)"
 check "  the candidate is purged before the baseline is installed" yes \
   "$(purge="$(last_sudo_line 'apt-get purge')"
      [[ -n "$purge" && -n "$first_baseline_install" && "$purge" -lt "$first_baseline_install" ]] && echo yes || echo no)"
@@ -1484,11 +1503,22 @@ check "  before a report is written" no \
 check "  and before anything privileged runs" 0 \
   "$(wc -l <"${appliance}/sudo.log" | tr -d ' ')"
 
+evidence="${td}/stages-baseline-digest-unreadable"
+check "a baseline whose digest cannot be computed refuses the run" 1 \
+  "$(run_upgrade_stages baseline-digest-unreadable "$evidence" "" set-rc1 2>/dev/null)"
+check "  and says so" yes \
+  "$(grep -Fq 'could not compute a digest for' "${evidence}.err" && echo yes || echo no)"
+check "  before a report is written" no \
+  "$([[ -e "${evidence}/lifecycle-report.json" ]] && echo yes || echo no)"
+check "  and before anything privileged runs" 0 \
+  "$(wc -l <"${appliance}/sudo.log" | tr -d ' ')"
+
 for case in \
   "baseline-install-noop::tensorplate-common is not-installed -, expected installed 0.2.1~rc.1-1" \
   "candidate-set-changed::SHA256SUMS changed after it was verified" \
   "upgrade-install-fails::step failed (exit 1): install.sh" \
   "upgrade-leaves-baseline-package::tensorplate-serving is installed 0.2.1~rc.1-1, expected installed 0.2.1~rc.2-1" \
+  "upgrade-leaves-unlisted-package::tensorplate-unlisted 0.2.1~rc.1-1 is installed but is not in v0.2.1-rc.2" \
   "upgrade-agent-not-restarted::agent MainPID 4242 did not change across the upgrade" \
   "upgrade-observability-not-restarted::observability MainPID 4242 did not change across the upgrade" \
   "upgrade-resets-conffile::the upgrade did not keep the operator-edited" \
