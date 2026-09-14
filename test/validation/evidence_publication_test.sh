@@ -636,6 +636,11 @@ mkdir -p "${fake_repo}-private" || die "could not create a sibling directory"
 printf '%s\n' "$literal" >"${fake_repo}-private/literals.txt" || die "could not write a literal file"
 check "a literal file beside the repository with a shared name prefix is accepted" "0" \
   "$(TP_EVIDENCE_REPO_ROOT="$fake_repo" scan "$out" --literals "${fake_repo}-private/literals.txt" "$pass")"
+outer_checkout="${work}/outer-checkout"
+mkdir -p "${outer_checkout}/.git" "${outer_checkout}/worktrees/inner" || die "could not create nested checkouts"
+printf '%s\n' "$literal" >"${outer_checkout}/literals.txt" || die "could not write a literal file"
+check "a literal file in a checkout enclosing the repository is a fault" "2" \
+  "$(TP_EVIDENCE_REPO_ROOT="${outer_checkout}/worktrees/inner" scan "$out" --literals "${outer_checkout}/literals.txt" "$pass")"
 check "a repository root that does not exist is a fault" "2" \
   "$(TP_EVIDENCE_REPO_ROOT="${work}/no-such-repo" scan "$out" --literals "$lit_file" "$pass")"
 

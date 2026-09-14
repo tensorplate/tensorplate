@@ -418,11 +418,23 @@ def load_literals(path, repo_root):
         fault("the literal file does not exist or cannot be read")
     if not stat.S_ISREG(info.st_mode):
         fault("the literal file is not a regular file")
+    # A worktree can sit inside another checkout (.claude/worktrees/<name>),
+    # and a literal file in that enclosing checkout is one `git add` away
+    # from being committed too.
+    roots = [repo_root]
+    current = os.path.realpath(repo_root)
+    while True:
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        if os.path.lexists(os.path.join(current, ".git")):
+            roots.append(current)
     # Identity, not string prefixes: a symlinked or differently spelled
     # path to a file inside the checkout is still inside it.
     current = os.path.realpath(path)
     while True:
-        if os.path.samefile(current, repo_root):
+        if any(os.path.samefile(current, root) for root in roots):
             fault("the literal file is inside the repository; keep it outside, "
                   "where it cannot be committed")
         parent = os.path.dirname(current)
