@@ -80,19 +80,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `/var/lib/tensorplate/state/machine-type.json` (`0640`, removed by
   purge), together with the logical CPU count, `MemTotal` and NVIDIA
   display device ids it was answered on. When the service cannot be
-  reached, detection in the agent and in `doctor` uses that record, but
-  only while all three facts still match exactly. If there is no record,
-  the record cannot be read, or a fact changed, detection fails with an
-  error naming the reason. It never reports the instance without a
-  machine type, because the shape-scoped cloud rows would then admit it
-  as unvalidated. A service that answers with an error, or with an answer
-  naming no machine type, still fails detection; the record never
-  overrides it. The agent logs `platform identity: machine_type=...
-  source=gce_metadata|recorded_gce_metadata|none record=...` on every
-  start, and a failed detection as `platform detection failed: ...`.
-  `doctor` shows the source after the machine type in `host_os`.
-  `doctor --record` now captures an instance whose identity could not be
-  established, with a note, instead of aborting. The cloud lifecycle
+  reached (the connection or the request fails, or nothing at all comes
+  back within the budget), detection in the agent and in `doctor` uses
+  that record, but only while all three facts still match exactly. If
+  there is no record, the record is not a regular file, is oversized or
+  unusable, or a fact changed, detection fails with an error naming the
+  reason. It never reports the instance without a machine type, because
+  the shape-scoped cloud rows would then admit it as unvalidated. A
+  service that sends anything else still fails detection and the record
+  never overrides it: an error status, a closed or reset connection, an
+  incomplete or unparseable response, or a 200 whose body is not
+  `projects/<project>/machineTypes/<machine-type>`. Such an answer is
+  never recorded. The record lives in a directory only root and the
+  `tensorplate` group can read, so offline `doctor` run by anyone else
+  reports it as unreadable, with a hint to re-run as root or as a group
+  member. The agent logs `platform identity: machine_type=...
+  source=gce_metadata|recorded_gce_metadata|none
+  record=written|unchanged|not_applicable|not_recorded (...)|failed (...)`
+  on every start, and a failed detection as
+  `platform detection failed: ...`. `doctor` shows the source after the
+  machine type in `host_os`. `doctor --record` now captures an instance
+  with no usable or matching record, with a note, instead of aborting; a
+  record it cannot read at all still stops the recording. The cloud lifecycle
   harness still skips its offline stage; that stage is follow-up work.
   The tests use the recorded L4 `g2-standard-8` host fixture and
   synthetic cases. The H100 row has no recorded host fixture yet, so it
