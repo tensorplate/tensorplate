@@ -39,11 +39,20 @@ and refuses to proceed if:
    apt — see the manual reset procedure below.
 
 When the preflight passes, dpkg unpacks the new package and runs
-`tensorplate-agent.postinst configure`. dpkg restarts the agent and
-observability units automatically (the units land via
-`dh_installsystemd`). The agent re-warms the active deployment from
-durable state; the previous deployment is still available for
-`tensorplate rollback`.
+`tensorplate-agent.postinst configure`. dpkg does **not** restart the
+services. The agent and observability `prerm` scripts stop both units
+for the upgrade, and nothing in the packages starts them again: the
+units are installed with `dh_installsystemd --no-start`. Start them
+yourself after the upgrade:
+
+```bash
+sudo systemctl enable --now tensorplate-agent tensorplate-observability
+```
+
+The release `install.sh` runs that command itself after installing, so an
+upgrade through it brings the services back. On start, the agent re-warms
+the active deployment from durable state; the previous deployment is
+still available for `tensorplate rollback`.
 
 ## Downgrade and rollback
 
@@ -53,35 +62,64 @@ compares the incoming version against the installed one and aborts, without
 looking at durable state. Setting state aside therefore does not unlock a
 downgrade — the guard is about version ordering, not about what state exists.
 
-Rolling back means removing the runtime set and installing the older version
-as a fresh install. `apt remove` keeps `/etc/tensorplate` conffiles and
-everything under `/var/lib/tensorplate`, so operator config and durable state
-survive the cycle:
+Rolling back means removing the installed TensorPlate packages and installing
+the older version as a fresh install. `apt remove` keeps `/etc/tensorplate`
+conffiles and everything under `/var/lib/tensorplate`, so operator config and
+durable state survive the cycle.
+
+Remove every installed TensorPlate package except `tensorplate-apt-source`,
+rather than a fixed list. Any newer package left installed turns the older
+install into a downgrade, which `apt-get -y` refuses without
+`--allow-downgrades` — and the release `install.sh` runs `apt-get -y`.
+`tensorplate-common` and `tensorplate-backend-python-pytorch` are the easy ones
+to miss: the backend only Recommends the agent, so removing the agent leaves
+it installed. `tensorplate-apt-source` only configures the APT channel and can
+stay.
 
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
-# Move durable state aside so the older agent cannot misinterpret it.
+# Move durable state aside so the older agent cannot misinterpret it. If
+# state.bak already exists from an earlier rollback, move that elsewhere
+# first: mv would otherwise put state inside it.
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
 # `remove`, not `purge`: this keeps /etc/tensorplate and /var/lib/tensorplate.
-sudo apt remove -y tensorplate tensorplate-agent tensorplate-serving \
-  tensorplate-observability tensorplate-cli
+sudo apt remove -y $(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' |
+  awk '$1 != "tensorplate-apt-source" && $2 != "not-installed" && $2 != "config-files" {print $1}')
+```
+
+Then install the older release fresh. Its own `install.sh` installs the set
+and enables and starts the services:
+
+```bash
+sudo bash <older-release>/install.sh --local-artifacts <older-release> \
+  --yes --with-python-backend
+```
+
+Or install its packages directly, then check and start the services:
+
+```bash
 sudo apt install ./tensorplate-common_<older-version>_all.deb \
   ./tensorplate-agent_<older-version>_<arch>.deb \
   ./tensorplate-serving_<older-version>_<arch>.deb \
   ./tensorplate-observability_<older-version>_<arch>.deb \
-  ./tensorplate-cli_<older-version>_<arch>.deb
+  ./tensorplate-cli_<older-version>_<arch>.deb \
+  ./tensorplate-backend-python-pytorch_<older-version>_all.deb
 tensorplate doctor
 sudo systemctl enable --now tensorplate-agent tensorplate-observability
 ```
+
+Leave out `tensorplate-backend-python-pytorch` if it was not installed.
 
 The older agent will report "no active deployment" until you decide whether
 to restore `state.bak` (manually verify the schema_version of each journal
 first) or to redeploy from a known-good bundle.
 
 `<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
-`test/packaging/apt-lifecycle-e2e.sh` rehearses this procedure, and asserts
-that the downgrade guard stays armed both with and without durable state
-present.
+`test/packaging/apt-lifecycle-e2e.sh` rehearses this procedure with `dpkg`,
+and asserts that the downgrade guard stays armed both with and without
+durable state present. On the Ubuntu x86_64 cloud rows,
+`tools/validation/ubuntu-l4-cloud-lifecycle.sh --baseline-assets-dir`
+runs the upgrade and this rollback through each release's `install.sh`.
 
 ## Remove
 
