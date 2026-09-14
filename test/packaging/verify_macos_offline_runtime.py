@@ -1155,22 +1155,25 @@ def signal_cases():
         return any(job["arguments"][0] == "/usr/bin/sandbox-exec" for job in world.state["labels"].values()) \
             or len(world.state["labels"]) < 2
 
-    # macOS /bin/bash 3.2 runs the EXIT trap with status 0 after an
-    # untrapped TERM or HUP. Newer bash may not, so this discrimination is
-    # run under 3.2; test_static requires the traps on every bash.
+    # These guards answer how macOS /bin/bash 3.2 behaves, which is the only
+    # shell the harness runs under: after an untrapped TERM or HUP it runs
+    # the EXIT trap with status 0, a second signal during cleanup runs its
+    # exit trap, and cleanup inherits the failed stage's redirection. Another
+    # bash may differ, so the guards are removed and exercised under 3.2
+    # only; test_static requires them in the harness on every bash.
     bash_version = subprocess.run(["bash", "-c", "printf %s \"${BASH_VERSINFO[0]}\""],
                                   capture_output=True, text=True).stdout
-    if bash_version == "3":
-        cases["guard: without the TERM trap the TERM test fails"] = must_fail(
-            mutated("trap 'exit 143' TERM\ntrap 'exit 129' HUP\ntrap cleanup EXIT",
-                    "trap 'exit 129' HUP\ntrap cleanup EXIT"), signal.SIGTERM,
-            lambda world: world.returncode != 143 or "offline-runtime\tfail\t" not in world.rows)
-        cases["guard: without the HUP trap the HUP test fails"] = must_fail(
-            mutated("trap 'exit 129' HUP\ntrap cleanup EXIT", "trap cleanup EXIT"), signal.SIGHUP,
-            lambda world: world.returncode != 129 or "offline-runtime\tfail\t" not in world.rows)
-    else:
-        print(f"macOS offline runtime: untrapped TERM and HUP discrimination: skipped (bash {bash_version}, "
+    if bash_version != "3":
+        print(f"macOS offline runtime: signal guard discrimination: skipped (bash {bash_version}, "
               "not macOS /bin/bash 3.2)")
+        return cases
+    cases["guard: without the TERM trap the TERM test fails"] = must_fail(
+        mutated("trap 'exit 143' TERM\ntrap 'exit 129' HUP\ntrap cleanup EXIT",
+                "trap 'exit 129' HUP\ntrap cleanup EXIT"), signal.SIGTERM,
+        lambda world: world.returncode != 143 or "offline-runtime\tfail\t" not in world.rows)
+    cases["guard: without the HUP trap the HUP test fails"] = must_fail(
+        mutated("trap 'exit 129' HUP\ntrap cleanup EXIT", "trap cleanup EXIT"), signal.SIGHUP,
+        lambda world: world.returncode != 129 or "offline-runtime\tfail\t" not in world.rows)
     cases["guard: without ignoring signals in cleanup a second TERM interrupts the restore"] = must_fail(
         mutated("  trap '' INT TERM HUP\n", ""), signal.SIGTERM, still_sandboxed, second=signal.SIGTERM)
     cases["guard: without restoring the terminal cleanup messages land in the stage log"] = must_fail(
@@ -1210,6 +1213,9 @@ def test_static():
                  "offline_helper", "restore_agent_config"):
         assert not re.search(r"\bdie\b", function(SOURCE, name)), f"{name} calls die"
     cleanup = function(SOURCE, "cleanup")
+    assert cleanup.startswith("cleanup() {\n  status=$?\n"), "cleanup must read the exit status first"
+    assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("exec 1>&3 2>&4") < \
+        cleanup.index("printf '%s\\tfail"), "cleanup must reach the terminal before it reports"
     assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("restore_agent_config") < \
         cleanup.index("restore_offline_supervision") < cleanup.index("trap 'exit 130' INT") < \
         cleanup.index("restore_baseline"), "cleanup ignores signals outside the critical restore"
