@@ -161,22 +161,33 @@ log exactly one admission decision since the services restarted, for
 deploy of the MPS fixture under a new deployment id, status, inference,
 `tensorplate doctor` with its agent probe, and the MPS probe must all
 pass under the same profile. A probe inside the sandbox must be refused
-with `EPERM` for a public address, the link-local metadata address,
-IPv4 and IPv6 documentation addresses, `fe80::1`, a loopback port other
-than the serving ports, a child process's send, and mDNSResponder. An
-unsandboxed control's IPv4 documentation and `fe80::1` sends and its
-mDNSResponder connection must not be refused. The probe's
-non-loopback sockets are pinned to `lo0`, so no probe packet leaves the
-Mac even if the sandbox failed to enforce.
+with `EPERM` for:
+
+- a public address, the link-local metadata address, IPv4 and IPv6
+  documentation addresses and `fe80::1`;
+- TCP and UDP to a loopback port other than the serving ports;
+- TCP and UDP from the IPv4 and IPv6 documentation addresses to each
+  serving port, so only loopback is allowed there;
+- a TCP listen and a UDP bind on a port other than the serving ports;
+- a child process's send, and mDNSResponder.
+
+An unsandboxed control runs every one of those operations, and none may
+be refused, so an `EPERM` in the sandbox comes from the sandbox; the
+control must also reach mDNSResponder. The probe's non-loopback sockets
+are pinned to `lo0`, so no probe packet leaves the Mac even if the
+sandbox failed to enforce.
 
 `sandbox_check` must read the agent, its serving worker and backend
 sidecar, and the observability service as sandboxed with the network
 denied. Each read is bracketed by a check that the process is still the
-same one, because `sandbox_check` reports an exited pid as sandboxed, and
-every run first proves the readback tells a sandboxed process from an
-unsandboxed or exited one. Every internet socket the agent's process
-tree holds must be bound to loopback, with the serving listener among
-them. A socket that was never bound has no port and is not counted. Both
+same one and has not exited, because `sandbox_check` reports an exited
+pid, reaped or not, as sandboxed. Every run first proves the readback
+tells a sandboxed process from an unsandboxed one, an exited one and an
+unreaped one. Every internet socket a TensorPlate process holds must be
+bound to loopback: the agent's process tree, the observability service
+and any other process running a TensorPlate binary. The agent's tree
+must hold the serving listener. A socket that was never bound has no
+port and is not counted. Both
 jobs must end the stage on the pid they started with, after one launchd
 run. The stage then boots out both sandboxed jobs,
 starts the normal ones, and requires their loaded plists to match the
@@ -218,16 +229,20 @@ formulae that disappear during uninstall; the harness re-adds only those
 missing component entries for the later upgrade stage and removes exactly
 the entries it added before exit.
 
-Run the harness directly in a terminal you keep open, not through a
-pipe such as `| tee`: a Ctrl-C also stops the reader, and cleanup's next
-write to the closed pipe would end the harness. On a failure, or on INT,
-TERM or HUP, cleanup records the interrupted stage as failed and prints
-to that terminal. It then boots out any TensorPlate launchd job still
-running under `sandbox-exec`, starts the normal jobs again if the offline
-stage stopped them, and restores the agent config. It ignores INT, TERM
-and HUP while it does those, so a second Ctrl-C cannot leave a sandboxed
+On a failure, or on INT, TERM or HUP, cleanup records the interrupted
+stage as failed. It writes its own output and that of the commands it
+runs to `cleanup.log` in the evidence directory, and copies its messages
+to the terminal. A terminal that closes, or a `| tee` that a Ctrl-C also
+stops, therefore does not stop or fail the restore.
+
+Cleanup then restores the agent config, boots out any TensorPlate
+launchd job still running under `sandbox-exec`, and starts the normal
+jobs again if the offline stage stopped them. It ignores INT, TERM and
+HUP while it does those, so a second Ctrl-C cannot leave a sandboxed
 service behind. The Homebrew restore that follows can still be
-interrupted. The sandboxed jobs are never copied into
+interrupted. If the agent config cannot be copied back, cleanup keeps
+the harness's work directory, prints the path of the good copy and fails
+the run. The sandboxed jobs are never copied into
 `~/Library/LaunchAgents`, so a logout or reboot also drops them. If
 cleanup reports that a sandboxed job is still loaded, remove it and start
 the normal jobs:

@@ -6,14 +6,19 @@ Inputs for `test/packaging/verify_macos_offline_runtime.sh`, which tests
 
 | File | Kind | What it is |
 | --- | --- | --- |
-| `probe-final.json` | Recorded | The helper's unsandboxed control and its sandboxed probe under the rendered profile, on two ephemeral loopback ports. Every refusal is `EPERM`. |
+| `probe-final.json` | Recorded | The helper's unsandboxed control and its sandboxed probe under the rendered profile, on two ephemeral loopback ports. Every refusal is `EPERM`, and no control operation is refused. |
 | `probe-deny-network-only.json` | Recorded | The same under `(deny network*)` alone, the profile the stage used before: loopback, the agent socket and the health endpoint are refused too. |
-| `probe-draft-localhost-any-port.json` | Recorded | Loopback allowed on every port: `fe80::1` and `127.0.0.1:9` are not refused. |
+| `probe-draft-localhost-any-port.json` | Recorded | Loopback allowed on every port: `fe80::1`, loopback port 9 and binds on unlisted ports are not refused. |
 | `probe-allow-all-local-ip.json` | Recorded | `(allow network* (local ip "localhost:*"))`: every remote send gets past the sandbox and fails only because the socket is pinned to `lo0` (`ENETUNREACH`, `EHOSTUNREACH`). |
 | `probe-resolver-deny-first.json` | Recorded | The mDNSResponder deny placed before the unix-socket allows, which override it. |
 | `probe-resolver-unresolved-path.json` | Recorded | The mDNSResponder deny naming `/var/run/...`, which silently matches nothing. |
-| `probe-no-base-deny.json` | Recorded | An outbound-only deny with no `(deny network*)`: the probe is refused almost everything, which is why the stage also reads back `sandbox_check`. |
+| `probe-no-base-deny.json` | Recorded | An outbound-only deny with no `(deny network*)`: every send is refused, but binds and mDNSResponder are not. `sandbox_check` also does not read the network as denied, which is why the stage reads it back as well as probing. |
 | `probe-no-inbound-allow.json` | Recorded | No inbound rule: the loopback listen on the candidate port is refused. |
+| `probe-tcp-loopback-any-port.json` | Recorded | The rendered profile plus `(allow network-outbound (remote tcp "localhost:*"))`: only the TCP connect to loopback port 9 gets through. |
+| `probe-tcp-any-host-serving-ports.json` | Recorded | Plus TCP to any host on the two serving ports: only the TCP sends from documentation addresses to those ports get through. |
+| `probe-udp-any-host-serving-ports.json` | Recorded | The same for UDP. |
+| `probe-tcp-listen-any-address.json` | Recorded | Plus `(allow network-inbound (local tcp "*:*"))`: only the TCP listens on unlisted ports succeed. |
+| `probe-udp-bind-any-address.json` | Recorded | Plus `(allow network-inbound (local udp "*:*"))`: only the UDP bind on an unlisted port succeeds. |
 | `launchctl-print-sandboxed-agent.txt` | Synthetic | The shape of `launchctl print` for the agent job run from the derived plist, with nested blocks that carry their own `pid` and `state` lines. |
 | `fake_host.py` | Test support | The fake Homebrew, launchd, process table and CLI the stage tests run against. |
 
