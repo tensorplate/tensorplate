@@ -90,10 +90,10 @@ produce_bundle() (
 )
 
 run_checker() {
-  local dir="$1" version="${2:-$VERSION}"
+  local dir="$1" version="${2:-$VERSION}" schema_path="${3:-$schema}"
   set +e
   "$checker" --registry "${dir}/registry" --root "$dir" \
-    --schema "$schema" --version "$version" >"${dir}/out.txt" 2>&1
+    --schema "$schema_path" --version "$version" >"${dir}/out.txt" 2>&1
   local status=$?
   set -e
   printf '%s' "$status"
@@ -241,6 +241,28 @@ check "  and calls it unsafe" "yes" "$(grep -q 'unsafe log path' "${d}/out.txt" 
 # distinguishable from evidence that is merely incomplete.
 d="${work}/empty"; mkdir -p "${d}/registry/rows"
 check "an empty registry is an internal fault, not a pass" "2" "$(run_checker "$d")"
+
+# Malformed checker inputs are internal faults, not incomplete evidence.
+# Python's default exception exit of 1 would make either fault waivable by
+# the candidate release gate, so exercise the real parser failures.
+d="${work}/malformed-registry"; stage_registry "$d" recorded
+printf '{\n' >"${d}/registry/rows/synthetic-row.json"
+check "malformed registry JSON is an internal fault" "2" "$(run_checker "$d")"
+
+d="${work}/malformed-schema"; stage_registry "$d" recorded
+produce_bundle "$d" synthetic-row "$VERSION" >/dev/null 2>&1
+printf '{\n' >"${d}/malformed-schema.json"
+check "malformed schema JSON is an internal fault" "2" \
+  "$(run_checker "$d" "$VERSION" "${d}/malformed-schema.json")"
+
+for option in --version --registry --schema --root; do
+  status=0
+  "$checker" "$option" >"${work}/invalid-args.txt" 2>&1 || status=$?
+  check "${option} without a value is an invocation fault" "2" "$status"
+  status=0
+  "$checker" "$option" "" >"${work}/invalid-args.txt" 2>&1 || status=$?
+  check "${option} with an empty value is an invocation fault" "2" "$status"
+done
 
 printf '\n%s\n' "$([[ "$failures" -eq 0 ]] && echo "all checks passed" || echo "${failures} check(s) failed")"
 exit "$failures"

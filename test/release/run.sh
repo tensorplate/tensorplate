@@ -838,11 +838,12 @@ PYGATE
   chmod +x "$tmp/gate-tree/tools/release/check-evidence-bundles.sh"
 
   gate_exit() {
-    local publish="$1" prerelease="$2" checker="$3" status=0
+    local publish="$1" prerelease="$2" checker="${3:-0}" status=0
     (
       cd "$tmp/gate-tree"
       PUBLISH="$publish" PRERELEASE="$prerelease" VERSION="0.2.1" \
-        TP_GATE_STUB_STATUS="$checker" bash "$tmp/gate-step.sh" >/dev/null 2>&1
+        TP_GATE_STUB_STATUS="$checker" \
+          bash --noprofile --norc -e -o pipefail "$tmp/gate-step.sh" >/dev/null 2>&1
     ) || status=$?
     printf '%s' "$status"
   }
@@ -858,6 +859,7 @@ PYGATE
   # Evidence complete: nothing is ever blocked.
   expect "a final release with complete evidence publishes"      0 "$(gate_exit true false 0)"
   expect "a candidate with complete evidence publishes"          0 "$(gate_exit true true 0)"
+  expect "a build-only run with complete evidence proceeds"      0 "$(gate_exit false false 0)"
 
   # Evidence incomplete: only the final release is refused.
   expect "a final release with incomplete evidence is refused"   1 "$(gate_exit true false 1)"
@@ -872,6 +874,48 @@ PYGATE
   expect "a final release whose checker did not run is refused"  2 "$(gate_exit true false 2)"
   expect "a candidate whose checker did not run is refused"      2 "$(gate_exit true true 2)"
   expect "a build-only run whose checker did not run is refused" 2 "$(gate_exit false false 2)"
+
+  # Match the Actions shell's inherited errexit above: invoking plain bash
+  # hid the candidate deadlock because the workflow's own `set -uo pipefail`
+  # did not turn errexit off. Only the documented incomplete-evidence status
+  # is waivable. Preserve every other failure, including unexpected checker
+  # errors, launch failures (126/127), and termination (137).
+  for checker_status in 3 126 127 137 255; do
+    expect "final release preserves checker failure ${checker_status}" \
+      "$checker_status" "$(gate_exit true false "$checker_status")"
+    expect "candidate preserves checker failure ${checker_status}" \
+      "$checker_status" "$(gate_exit true true "$checker_status")"
+    expect "build-only run preserves checker failure ${checker_status}" \
+      "$checker_status" "$(gate_exit false false "$checker_status")"
+  done
+
+  # The real checker must distinguish incomplete evidence from a Python
+  # parser failure. A stub returning 2 cannot catch an exception escaping
+  # with status 1 and being waived by this same workflow step.
+  cp tools/release/check-evidence-bundles.sh "$tmp/gate-tree/tools/release/check-evidence-bundles.sh"
+  mkdir -p "$tmp/gate-tree/config/platform/rows" "$tmp/gate-tree/config/schemas"
+  cp config/schemas/lifecycle_report.json "$tmp/gate-tree/config/schemas/lifecycle_report.json"
+  cat >"$tmp/gate-row.json" <<'JSON'
+{
+  "row_id": "synthetic-row",
+  "support_level": "Production",
+  "provenance": "recorded",
+  "evidence": { "location": "evidence/synthetic-row/" }
+}
+JSON
+  cp "$tmp/gate-row.json" "$tmp/gate-tree/config/platform/rows/synthetic-row.json"
+  expect "the real checker refuses final releases with missing evidence" 1 "$(gate_exit true false)"
+  expect "the real checker's incomplete verdict permits candidates" 0 "$(gate_exit true true)"
+  expect "the real checker's incomplete verdict permits build-only runs" 0 "$(gate_exit false false)"
+
+  printf '{\n' >"$tmp/gate-tree/config/platform/rows/synthetic-row.json"
+  expect "a candidate cannot waive malformed registry JSON" 2 "$(gate_exit true true)"
+  expect "a build-only run cannot waive malformed registry JSON" 2 "$(gate_exit false false)"
+
+  cp "$tmp/gate-row.json" "$tmp/gate-tree/config/platform/rows/synthetic-row.json"
+  printf '{\n' >"$tmp/gate-tree/config/schemas/lifecycle_report.json"
+  expect "a candidate cannot waive malformed schema JSON" 2 "$(gate_exit true true)"
+  expect "a build-only run cannot waive malformed schema JSON" 2 "$(gate_exit false false)"
 
   echo "evidence gate enforces on final releases only, and never waives a checker that did not run"
 )

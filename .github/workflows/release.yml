@@ -164,9 +164,9 @@ jobs:
       # The final tag is where the claim is made, so the final tag is where
       # it is enforced.
       #
-      # A checker that could not run is never waived, on any tag -- exit 2
-      # means the gate did not reach a verdict, and a gate with no verdict
-      # must not be mistaken for one that passed.
+      # A checker that could not run is never waived: only exit 0 (complete)
+      # and exit 1 (incomplete) are verdicts. Exit 2 is an internal fault;
+      # launch failures or termination must also fail on every run.
       - name: Production rows carry the evidence they claim
         shell: bash
         env:
@@ -174,12 +174,14 @@ jobs:
           PRERELEASE: ${{ needs.meta.outputs.prerelease }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          set -uo pipefail
-          tools/release/check-evidence-bundles.sh --version "$VERSION"
-          status=$?
-          if [[ "$status" -eq 2 ]]; then
-            printf '::error::the evidence checker did not run; this is never waived\n'
-            exit 2
+          set -euo pipefail
+          # Actions enables errexit. Capture the expected incomplete verdict
+          # explicitly so it reaches the publishing policy below.
+          status=0
+          tools/release/check-evidence-bundles.sh --version "$VERSION" || status=$?
+          if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
+            printf '::error::the evidence checker did not reach a verdict (exit %s); this is never waived\n' "$status"
+            exit "$status"
           fi
           if [[ "$status" -ne 0 && "$PUBLISH" != "true" ]]; then
             printf '::warning::evidence incomplete; not blocking a build-only run\n'

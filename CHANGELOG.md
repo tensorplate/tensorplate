@@ -61,6 +61,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The release evidence gate captures checker exit codes under GitHub
+  Actions' `bash -e` shell. Incomplete evidence permits candidate
+  publication and build-only validation; final publication still requires
+  complete evidence, and checker execution failures block every mode.
+  Python failures, including malformed registry or schema JSON, are
+  classified as internal faults instead of incomplete evidence.
+
 - Installer hardware validation verifies that the NVIDIA driver query
   succeeds when driver metadata is unavailable. An installed but unusable
   `nvidia-smi` now warns and fails under `--strict-hardware`.
