@@ -6,8 +6,9 @@ memory, and macOS 26. The M1 Pro run backs that exact row and is the currently
 available hardware target for the broader M-series Preview compatibility
 envelope; it does not claim per-SKU validation for other M-series chips. It
 covers formula-graph closure, launchd behavior, filesystem and UDS contracts,
-packaged-only discovery, the PyTorch MPS capability, deploy smoke, offline
-checks, upgrade continuity from the CLI-only formula, rollback, and uninstall.
+packaged-only discovery, the PyTorch MPS capability, deploy smoke, status and
+log output, offline checks, upgrade continuity from the CLI-only formula,
+rollback, and uninstall.
 The installed-registry stage also proves that live M1 Pro detection selects
 the exact Production row instead of the lower-priority M-series Preview
 fallback, while retaining the fallback's 16 GiB admission ceiling.
@@ -95,9 +96,9 @@ The run is successful only when every stage in `summary.json` and
 `sanitized-transcript.json` is `pass`. `host-facts.json` deliberately
 excludes serial numbers, hardware UUIDs, and provisioning identifiers.
 Attach the summary, sanitized transcript, host facts, formula pin, deploy
-input, and deploy result to the pull request. Keep the raw `*.log` files
-local; the transcript contains only allowlisted structured results and
-excludes operator paths and environment values.
+input, deploy result, and status-logs result to the pull request. Keep the
+raw `*.log` files local; the transcript contains only allowlisted structured
+results and excludes operator paths and environment values.
 
 The current post-hardening Apple M1 Pro evidence is committed as the
 [`curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17.json)
@@ -119,6 +120,20 @@ PyTorch formula and calls the packaged backend probe. The separate
 deploy-smoke stage proves the package-installed sidecar itself loads through
 MPS and reaches an active, ready deployment. The fixture is not a real model
 and makes no SmolVLA support claim.
+
+The status-logs stage runs after deploy smoke. It requires `tensorplate
+status` to still report the smoke deployment as ready, and both launchd
+stderr logs, `agent.error.log` and `observability.error.log`, to have
+gained output after the launchd-start stage recorded their sizes. It then
+runs `tensorplate logs --component observability`, which must read the
+packaged `events.ndjson` and return an event the observability service
+wrote during this run. Neither launchd nor the formulae truncate these
+logs, so byte offsets separate this run's output from earlier runs'. The
+agent component is not queried because the agent writes no structured
+events. Run the harness with `TENSORPLATE_CLI_CONFIG` unset, since the
+launcher honours an existing value. The raw status and logs output stays
+in the local `status-logs.log`; `status-logs.json` carries only the
+deployment id, counts and pass results.
 
 The offline stage runs the installed doctor with its agent probe skipped and
 the PyTorch MPS probe under a macOS sandbox that denies network access. The

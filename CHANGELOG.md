@@ -8,6 +8,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The macOS Homebrew lifecycle harness has a status-logs stage, so the
+  M1 Pro runbook maps all eight canonical lifecycle stages. After deploy
+  smoke it requires `tensorplate status` to still report the deployment
+  as ready, both launchd stderr logs to have gained output since the
+  services started, and `tensorplate logs` to read the packaged structured
+  event log and return an observability event from the current run. The
+  deploy-smoke stage no longer runs `tensorplate logs --component agent`,
+  which returned no entries because the agent writes no structured events.
+
 - A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
   run by hand on a VM the operator starts themselves. It provisions no
   cloud resources. Five canonical stages are exercised -- install,

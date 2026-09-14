@@ -3,7 +3,7 @@
 #
 # Derive the canonical lifecycle report from a harness's own stage log.
 #
-# The macOS harness records nineteen stages under its own names and the
+# The macOS harness records its stages under its own names and the
 # Jetson harness records none; both predate the shared report and both
 # run only on hardware. Rewriting their stage calls would mean editing,
 # untested, the code whose whole purpose is to be trustworthy on a

@@ -580,9 +580,12 @@ fn the_runbooks_map_only_stages_that_exist() {
     // behaviour. That one stays a human judgement, which is why the
     // runbook states the coverage gaps explicitly instead of filling
     // them with the nearest plausible stage.
+    //
+    // Nine Jetson mappings and eight macOS mappings, one per canonical
+    // stage. A floor below that lets a deleted mapping pass unnoticed.
     let mappings = documented_mappings();
     assert!(
-        mappings.len() >= 10,
+        mappings.len() >= 17,
         "expected the runbooks to document mappings, found {}",
         mappings.len()
     );

@@ -152,6 +152,8 @@ active_stage_log=""
 active_stage_started=""
 lifecycle_marker=""
 agent_error_log_start=0
+observability_error_log_start=0
+events_log_start=0
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -639,6 +641,18 @@ start_services() {
   else
     agent_error_log_start=0
   fi
+  observability_error_log="$(brew --prefix)/var/log/tensorplate/observability.error.log"
+  if [[ -f "$observability_error_log" ]]; then
+    observability_error_log_start="$(stat -f '%z' "$observability_error_log")"
+  else
+    observability_error_log_start=0
+  fi
+  events_log="$(brew --prefix)/var/log/tensorplate/events.ndjson"
+  if [[ -f "$events_log" ]]; then
+    events_log_start="$(stat -f '%z' "$events_log")"
+  else
+    events_log_start=0
+  fi
   brew services start tensorplate-agent
   brew services start tensorplate-observability
   wait_for_service tensorplate-agent
@@ -684,7 +698,6 @@ deploy_smoke() {
     --deployment-id "$smoke_deployment_id" \
     --output json >"$deploy_output"
   tensorplate status --output json >"$status_output"
-  tensorplate logs --component agent --tail 100
   cd - >/dev/null
   python3 - "$deploy_output" "$status_output" "${evidence_dir}/deploy-input.json" \
     "$smoke_deployment_id" \
@@ -757,6 +770,102 @@ print(json.dumps({
     "backend_profile": deploy_input["backend_profile"],
     "device": deploy_input["device"],
     "mps_tensor_operation_required_for_load": True,
+}, indent=2, sort_keys=True))
+PY
+}
+
+# Status still reports the deploy-smoke deployment; both launchd stderr
+# logs gained output after launchd-start recorded their sizes; and
+# `tensorplate logs` reads the packaged structured event log and returns
+# an event this run's observability service wrote. The agent component
+# is not queried: the agent writes no structured events, so that filter
+# returns nothing on every install. Every command here checks its own
+# status rather than relying on errexit.
+verify_status_logs() {
+  log_dir="$(brew --prefix)/var/log/tensorplate" || die "brew --prefix failed"
+  status_logs_status="${work_dir}/status-logs-status.json"
+  status_logs_cli="${work_dir}/status-logs-cli.json"
+  tensorplate status --output json >"$status_logs_status" ||
+    die "tensorplate status did not answer"
+  tensorplate logs --component observability --tail 100 --output json \
+    >"$status_logs_cli" ||
+    die "tensorplate logs failed on the Homebrew install"
+  # The raw documents go to this stage's local log only; status-logs.json
+  # carries path-free results.
+  cat "$status_logs_status" "$status_logs_cli" ||
+    die "could not record the status and logs output"
+  # The log files are read after the CLI ran, so the current-run event
+  # slice holds every event the CLI could have returned.
+  python3 - "$status_logs_status" "$status_logs_cli" "$log_dir" \
+    "$smoke_deployment_id" "$agent_error_log_start" \
+    "$observability_error_log_start" "$events_log_start" \
+    >"${evidence_dir}/status-logs.json" <<'PY' || die "status-logs checks failed"
+import json
+import pathlib
+import sys
+
+(status_path, cli_path, log_dir, expected_deployment,
+ agent_start, observability_start, events_start) = sys.argv[1:]
+log_dir = pathlib.Path(log_dir)
+
+def since(name, offset):
+    # Bytes appended after launchd-start recorded the file's size. A file
+    # that shrank or rotated since then yields nothing, which fails closed.
+    try:
+        with open(log_dir / name, "rb") as handle:
+            handle.seek(int(offset))
+            return handle.read()
+    except OSError as error:
+        raise SystemExit(f"cannot read {name}: {error.strerror}")
+
+status_document = json.load(open(status_path, encoding="utf-8"))
+status = status_document.get("payload") or {}
+active = (status.get("agent") or {}).get("active") or {}
+logs_document = json.load(open(cli_path, encoding="utf-8"))
+logs = logs_document.get("payload") or {}
+entries = logs.get("entries") or []
+agent_output = since("agent.error.log", agent_start).strip()
+observability_output = since("observability.error.log", observability_start).strip()
+current_events = []
+for line in since("events.ndjson", events_start).decode("utf-8", "replace").splitlines():
+    # Skipped like the CLI skips them: a torn or non-JSON line is not an event.
+    try:
+        current_events.append(json.loads(line))
+    except ValueError:
+        pass
+
+checks = {
+    "status_command": status_document.get("command") == "status",
+    "status_severity": status.get("severity") == "ready",
+    "status_active_deployment": active.get("deployment_id") == expected_deployment,
+    "agent_log_current_run_output": bool(agent_output),
+    "observability_log_current_run_output": bool(observability_output),
+    "logs_command": logs_document.get("command") == "logs",
+    "logs_source_is_packaged_file": (
+        logs.get("kind") == "file"
+        and logs.get("source") == str(log_dir / "events.ndjson")
+    ),
+    "logs_include_current_run": bool(entries) and entries[-1] in current_events,
+}
+failed = [name for name, passed in checks.items() if not passed]
+if "logs_source_is_packaged_file" in failed:
+    print(
+        "tensorplate logs did not read the packaged events.ndjson; a "
+        "TENSORPLATE_CLI_CONFIG set in this shell overrides the packaged cli.json",
+        file=sys.stderr,
+    )
+if failed:
+    raise SystemExit("status-logs checks failed: " + ", ".join(failed))
+print(json.dumps({
+    "deployment_id": expected_deployment,
+    "status_severity": "ready",
+    "status_reports_deployment": True,
+    "agent_launchd_log_current_run_bytes": len(agent_output),
+    "observability_launchd_log_current_run_bytes": len(observability_output),
+    "logs_command": "pass",
+    "logs_source": "packaged events.ndjson",
+    "logs_entries_returned": len(entries),
+    "current_run_structured_events": len(current_events),
 }, indent=2, sort_keys=True))
 PY
 }
@@ -949,6 +1058,7 @@ details = {
     },
     "mps-capability": load_json("mps-capability.log"),
     "deploy-smoke": load_json("deploy-result.json"),
+    "status-logs": load_json("status-logs.json"),
     "launchd-restart": {"agent": "restarted", "observability": "restarted"},
     "launchd-crash-loop": {"agent_recovered": True},
     "offline-runtime": {"network_denied_doctor": "pass", "network_denied_mps": "pass"},
@@ -1028,6 +1138,7 @@ run_stage launchd-start start_services
 run_stage m1-exact-row verify_m1_exact_row
 run_stage mps-capability probe_mps
 run_stage deploy-smoke deploy_smoke
+run_stage status-logs verify_status_logs
 run_stage launchd-restart restart_services
 run_stage launchd-crash-loop exercise_crash_loop
 run_stage offline-runtime verify_offline_runtime

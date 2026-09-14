@@ -522,6 +522,285 @@ for mode, (earlier, message) in cases.items():
     print(f"macOS launchd crash-loop: {mode}: pass")
 PY
 
+# status-logs: run the real stage body against a fake Homebrew prefix and
+# a fake CLI whose logs output is built from the event file the way the
+# real CLI builds it. Each log file holds an earlier run's output before
+# the offset launchd-start would have recorded and this run's after it.
+# Every case runs as a bare run_stage call and again with errexit
+# suspended, because this body must fail through its own checks.
+python3 - "$harness" "$repo_root" <<'PY'
+import csv
+import io
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+repo_root = pathlib.Path(sys.argv[2])
+
+def function(name):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+def heredoc_function(name):
+    # The naive pattern above stops at a column-0 `}` inside a Python
+    # heredoc; this one ends at the heredoc terminator.
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^PY\n\}\n", source, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+fake_tensorplate = r'''
+import json
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ["TP_ROOT"])
+mode = os.environ["TP_MODE"]
+events = root / "prefix/var/log/tensorplate/events.ndjson"
+args = sys.argv[1:]
+if args == ["status", "--output", "json"]:
+    print(json.dumps({
+        "command": "doctor" if mode == "status-wrong-command" else "status",
+        "status": "ok",
+        "payload": {
+            "severity": "degraded" if mode == "status-degraded" else "ready",
+            "agent": {"active": {
+                "deployment_id": "other" if mode == "status-other-deployment" else "smoke-1",
+            }},
+        },
+    }))
+    # A well-formed document does not excuse a failing exit status.
+    sys.exit(1 if mode == "status-fails" else 0)
+if args == ["logs", "--component", "observability", "--tail", "100", "--output", "json"]:
+    entries = []
+    for line in events.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if entry.get("component") == "observability":
+            entries.append(entry)
+    entries = entries[-100:]
+    if mode == "logs-no-entries":
+        entries = []
+    source = "/elsewhere/events.ndjson" if mode == "logs-other-source" else str(events)
+    print(json.dumps({
+        "command": "status" if mode == "logs-wrong-command" else "logs",
+        "status": "ok",
+        "payload": {
+            "source": source,
+            "kind": "directory" if mode == "logs-kind-directory" else "file",
+            "entries": entries,
+        },
+    }))
+    if mode == "logs-exit-2":
+        print("error: tensorplate logs: no log_source.path configured", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
+print(f"unexpected tensorplate invocation: {args}", file=sys.stderr)
+sys.exit(64)
+'''
+
+def event(name, timestamp):
+    return json.dumps({
+        "schema_version": "0.1", "component": "observability", "event": name,
+        "level": "info", "monotonic_timestamp_ns": timestamp,
+    }) + "\n"
+
+checks_failed = "status-logs checks failed: "
+cases = {
+    "pass": None,
+    "brew-prefix-fails": "error: brew --prefix failed",
+    "status-fails": "error: tensorplate status did not answer",
+    "record-fails": "error: could not record the status and logs output",
+    "status-wrong-command": checks_failed + "status_command",
+    "status-degraded": checks_failed + "status_severity",
+    "status-other-deployment": checks_failed + "status_active_deployment",
+    "agent-log-stale-only": checks_failed + "agent_log_current_run_output",
+    "observability-log-stale-only": checks_failed + "observability_log_current_run_output",
+    "agent-log-missing": "cannot read agent.error.log: No such file or directory",
+    "observability-log-missing": "cannot read observability.error.log: No such file or directory",
+    "logs-exit-2": "error: tensorplate logs failed on the Homebrew install",
+    "logs-wrong-command": checks_failed + "logs_command",
+    "logs-kind-directory": checks_failed + "logs_source_is_packaged_file",
+    "logs-other-source": checks_failed + "logs_source_is_packaged_file",
+    "logs-no-entries": checks_failed + "logs_include_current_run",
+    "logs-stale-entries-only": checks_failed + "logs_include_current_run",
+}
+helpers = "\n".join(function(name) for name in ("die", "note", "pass", "run_stage"))
+helpers += "\n" + heredoc_function("verify_status_logs")
+for mode, expected in cases.items():
+    for call in ("run_stage status-logs verify_status_logs",
+                 "run_stage status-logs verify_status_logs || true"):
+        with tempfile.TemporaryDirectory(prefix="tp-homebrew-status-logs-") as directory:
+            root = pathlib.Path(directory)
+            logs = root / "prefix/var/log/tensorplate"
+            logs.mkdir(parents=True)
+            (root / "evidence").mkdir()
+            (root / "work").mkdir()
+            earlier_agent = "platform admission: row=earlier\n"
+            earlier_observability = "tensorplate-observability interval=1000ms (earlier)\n"
+            earlier_events = event("service.startup", 1111)
+            (logs / "agent.error.log").write_text(earlier_agent + (
+                "" if mode == "agent-log-stale-only"
+                else "tensorplate-agent listening on agent.sock\n"))
+            (logs / "observability.error.log").write_text(earlier_observability + (
+                "" if mode == "observability-log-stale-only"
+                else "tensorplate-observability interval=1000ms\n"))
+            (logs / "events.ndjson").write_text(earlier_events + (
+                "" if mode == "logs-stale-entries-only"
+                else "not a json line\n" + event("service.startup", 2222)))
+            if mode == "agent-log-missing":
+                (logs / "agent.error.log").unlink()
+            if mode == "observability-log-missing":
+                (logs / "observability.error.log").unlink()
+            (root / "fake-tensorplate.py").write_text(fake_tensorplate)
+            script = helpers + f'''
+set -Eeuo pipefail
+agent_error_log_start={len(earlier_agent)}
+observability_error_log_start={len(earlier_observability)}
+events_log_start={len(earlier_events)}
+''' + r'''
+evidence_dir="$TP_ROOT/evidence"
+work_dir="$TP_ROOT/work"
+stage_results="$evidence_dir/stages.tsv"
+smoke_deployment_id=smoke-1
+brew() {
+  [[ "$*" == "--prefix" && "$TP_MODE" != "brew-prefix-fails" ]] || return 9
+  printf '%s\n' "$TP_ROOT/prefix"
+}
+tensorplate() { python3 "$TP_ROOT/fake-tensorplate.py" "$@"; }
+if [[ "$TP_MODE" == "record-fails" ]]; then
+  cat() { return 1; }
+fi
+''' + call + "\n"
+            (root / "probe.sh").write_text(script)
+            env = dict(os.environ, TP_ROOT=directory, TP_MODE=mode)
+            result = subprocess.run(["bash", str(root / "probe.sh")], env=env,
+                                    capture_output=True, text=True)
+            rows_path = root / "evidence/stages.tsv"
+            rows = rows_path.read_text() if rows_path.exists() else ""
+            log_path = root / "evidence/status-logs.log"
+            log = log_path.read_text() if log_path.exists() else ""
+            context = (mode, call, result.returncode, log, result.stderr)
+            if expected is None:
+                assert result.returncode == 0, context
+                assert "status-logs\tpass\t" in rows, context
+                summary_text = (root / "evidence/status-logs.json").read_text()
+                summary = json.loads(summary_text)
+                assert "/" not in summary_text, summary_text
+                assert summary["deployment_id"] == "smoke-1", summary
+                assert summary["logs_entries_returned"] == 2, summary
+                assert summary["current_run_structured_events"] == 1, summary
+                # Record-first: the raw CLI documents are in the local stage log.
+                assert '"command": "logs"' in log and '"command": "status"' in log, log
+            else:
+                assert result.returncode != 0, context
+                assert "status-logs\tpass\t" not in rows, context
+                assert expected in log.splitlines(), (expected, context)
+    print(f"macOS status-logs: {mode}: pass")
+
+# Stage order: status-logs observes the deployment deploy-smoke made,
+# before launchd-restart replaces the processes that wrote the logs.
+def call_line(text):
+    return next(i for i, line in enumerate(source.splitlines()) if line == text)
+assert (call_line("run_stage deploy-smoke deploy_smoke")
+        < call_line("run_stage status-logs verify_status_logs")
+        < call_line("run_stage launchd-restart restart_services")), "status-logs is out of order"
+
+# The offsets must be taken before either service starts, or this run's
+# startup output would sit before them and never be seen.
+start_services = function("start_services")
+start_index = start_services.index("brew services start tensorplate-agent")
+for offset in ('agent_error_log_start="$(stat -f',
+               'observability_error_log_start="$(stat -f',
+               'events_log_start="$(stat -f'):
+    assert -1 < start_services.find(offset) < start_index, f"{offset} is not taken before start"
+
+# The formulae decide where launchd writes each service's stderr and the
+# harness reads those paths; neither side can move without the other.
+formula_dir = repo_root / "packaging/homebrew/Formula"
+assert 'error_log_path var/"log/tensorplate/agent.error.log"' in (
+    formula_dir / "tensorplate-agent.rb").read_text()
+assert 'error_log_path var/"log/tensorplate/observability.error.log"' in (
+    formula_dir / "tensorplate-observability.rb").read_text()
+assert '"file_path": "@HOMEBREW_PREFIX@/var/log/tensorplate/events.ndjson"' in (
+    repo_root / "packaging/homebrew/conf/observability.json.in").read_text()
+assert '"path": "@HOMEBREW_PREFIX@/var/log/tensorplate/events.ndjson"' in (
+    repo_root / "packaging/homebrew/conf/cli.json.in").read_text()
+for path in ("var/log/tensorplate/agent.error.log",
+             "var/log/tensorplate/observability.error.log",
+             "var/log/tensorplate/events.ndjson"):
+    assert path in start_services, f"launchd-start does not size {path}"
+for name in ("agent.error.log", "observability.error.log", "events.ndjson"):
+    assert f'since("{name}"' in source, f"status-logs does not read {name}"
+
+# The sanitized transcript carries only allowlisted stage results; without
+# the status-logs entry the stage would fall back to {"completed": true}.
+with tempfile.TemporaryDirectory(prefix="tp-homebrew-transcript-") as directory:
+    root = pathlib.Path(directory)
+    summary = {"deployment_id": "smoke-1", "logs_source": "packaged events.ndjson"}
+    (root / "status-logs.json").write_text(json.dumps(summary))
+    (root / "stages.tsv").write_text(
+        "stage\tstatus\tstarted_at\tfinished_at\tlog\n"
+        "status-logs\tpass\t2026-01-01T00:00:00Z\t2026-01-01T00:00:01Z\tstatus-logs.log\n")
+    script = heredoc_function("write_sanitized_transcript") + r'''
+set -Eeuo pipefail
+stage_results="$TP_ROOT/stages.tsv"
+evidence_dir="$TP_ROOT"
+baseline_version=0.1.2
+candidate_version=0.2.1
+write_sanitized_transcript
+'''
+    (root / "probe.sh").write_text(script)
+    result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True,
+                            text=True, env=dict(os.environ, TP_ROOT=directory))
+    assert result.returncode == 0, result.stderr
+    transcript = json.loads((root / "sanitized-transcript.json").read_text())
+    stage = transcript["stages"][0]
+    assert stage["stage"] == "status-logs" and stage["summary"] == summary, transcript
+print("macOS status-logs order, offsets, log paths and transcript: pass")
+
+# The macOS runbook mapping is a coverage claim: it must name all eight
+# canonical stages, and a run where every harness stage passes must
+# convert to a passing report.
+schema = json.loads((repo_root / "config/schemas/lifecycle_report.json").read_text())
+canonical = schema["properties"]["stages"]["items"]["properties"]["stage"]["enum"]
+runbook = (repo_root / "docs/validation/physical-row-runbooks.md").read_text()
+section = runbook.split("\n## MacBook Pro M1 Pro\n", 1)[1].split("\n## ", 1)[0]
+blocks = [block for block in re.findall(r"```bash\n(.*?)```", section, re.S)
+          if "lifecycle-report-from-stages.sh" in block]
+assert len(blocks) == 1, blocks
+mappings = re.findall(r"(?<!\S)([a-z0-9-]+=[a-z0-9-]+)(?!\S)", blocks[0])
+targets = {mapping.split("=", 1)[1] for mapping in mappings}
+assert targets == set(canonical), (sorted(targets), canonical)
+harness_stages = re.findall(r"^run_stage ([a-z0-9-]+) ", source, re.M)
+with tempfile.TemporaryDirectory(prefix="tp-homebrew-report-") as directory:
+    root = pathlib.Path(directory)
+    rows = io.StringIO()
+    writer = csv.writer(rows, delimiter="\t", lineterminator="\n")
+    writer.writerow(["stage", "status", "started_at", "finished_at", "log"])
+    for name in harness_stages:
+        writer.writerow([name, "pass", "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z",
+                         f"{name}.log"])
+    (root / "stages.tsv").write_text(rows.getvalue())
+    result = subprocess.run(
+        ["bash", str(repo_root / "tools/validation/lifecycle-report-from-stages.sh"),
+         str(root / "stages.tsv"), "macos26-m1pro-16gb", "0.2.1",
+         "macos-homebrew-lifecycle", str(root / "report.json"), *mappings],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    report = json.loads((root / "report.json").read_text())
+    assert report["outcome"] == "pass", report
+print("macOS runbook mapping covers all eight stages: pass")
+PY
+
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$harness"
 else
