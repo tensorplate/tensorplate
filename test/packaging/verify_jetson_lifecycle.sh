@@ -157,14 +157,14 @@ sha256_of() {
 # install.sh, one manifest, SHA256SUMS and its cosign bundle, and debs.
 # Each fixture .deb is a control-style text file the dpkg-deb stub reads.
 make_assets() {
-  local dir="$1" manifest_tag="$2" version="$3"
+  local dir="$1" manifest_tag="$2" version="$3" variant="${4:-}"
   mkdir -p "$dir"
   printf '#!/bin/sh\nexit 0\n' >"${dir}/install.sh"
   printf '{}\n' >"${dir}/SHA256SUMS.cosign.bundle"
-  python3 - "$dir" "$manifest_tag" "$version" <<'PY'
+  python3 - "$dir" "$manifest_tag" "$version" "$variant" <<'PY'
 import json, pathlib, sys
 
-directory, tag, version = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+directory, tag, version, variant = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 artifacts = []
 for package, arch, deb_version in (
     ("tensorplate-common", "all", version),
@@ -183,7 +183,12 @@ for package, arch, deb_version in (
         f"Package: {package}\nVersion: {deb_version}\nArchitecture: {arch}\n", encoding="utf-8"
     )
     artifacts.append({"file": name, "package": package, "architecture": arch})
-manifest = {"release": {"tag": tag, "version": version}, "artifacts": artifacts}
+if variant == "duplicate-cli":
+    # A manifest naming the CLI twice for this architecture, which leaves
+    # no single package to compare the installed version against.
+    artifacts.append({"file": f"tensorplate-cli_{version}_arm64.deb",
+                      "package": "tensorplate-cli", "architecture": "arm64"})
+manifest ={"release": {"tag": tag, "version": version}, "artifacts": artifacts}
 (directory / "tensorplate-v0.2.1-rc.2-artifacts.json").write_text(
     json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
 )
@@ -210,6 +215,7 @@ candidate_digest="$(sha256_of "${assets}/SHA256SUMS")"
 stub_bin="${td}/bin"
 mkdir -p "$stub_bin" "${td}/run" "${td}/log" "${td}/scratch"
 real_mktemp="$(command -v mktemp)"
+real_sha256sum="$(command -v sha256sum || true)"
 
 # An explicit template keeps every scratch directory -- the harness's and
 # the bundle generator's -- inside the fixture, including backups
@@ -240,8 +246,19 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
 fi
 case "$*" in
   *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
-  *"systemctl restart"*) : >"${TP_FAKE_RESTART_MARKER}" ;;
-  "bash "*"/install.sh --local-artifacts "*) : >"${TP_FAKE_INSTALLED_MARKER}" ;;
+  *"systemctl restart"*)
+    : >"${TP_FAKE_RESTART_MARKER}"
+    if [ "${TP_FAKE_MODE:-ok}" = restart-socket-missing ]; then
+      rm -f "${TP_FAKE_SOCKET}"
+    fi
+    ;;
+  *"systemctl start"*) : >"${TP_FAKE_START_MARKER}" ;;
+  "bash "*"/install.sh --local-artifacts "*)
+    : >"${TP_FAKE_INSTALLED_MARKER}"
+    if [ "${TP_FAKE_MODE:-ok}" = install-socket-missing ]; then
+      rm -f "${TP_FAKE_SOCKET}"
+    fi
+    ;;
   "rm -rf ${TP_FAKE_STAGING}") rm -rf "${TP_FAKE_STAGING}" ;;
   "mkdir -p "*)
     [ "$3" = "$(dirname "${TP_FAKE_STAGING}")" ] || exit 9
@@ -288,13 +305,16 @@ STUB
 # dpkg's package database, in the two shapes the harness queries it: a
 # `name status` listing of tensorplate*, and one package's status and
 # version. The apt channel's bootstrap package is always installed, so
-# every run shows whether the harness leaves it alone.
+# every run shows whether the harness leaves it alone, and dpkg always
+# remembers a package that was once available but is not installed,
+# which the purge must not name.
 cat >"${stub_bin}/dpkg-query" <<'STUB'
 #!/bin/sh
 mode="${TP_FAKE_MODE:-ok}"
 case "$*" in
   *'binary:Package'*)
     printf 'tensorplate-apt-source installed\n'
+    printf 'tensorplate-backend-python-pytorch not-installed\n'
     case "$mode" in
       installed-runtime)
         [ -f "${TP_FAKE_PURGE_MARKER}" ] && exit 0
@@ -322,12 +342,38 @@ STUB
 cat >"${stub_bin}/dpkg-deb" <<'STUB'
 #!/bin/sh
 [ "$1" = -f ] && [ "$3" = Version ] || exit 9
+case "${TP_FAKE_MODE:-ok}:$2" in
+  deb-unreadable:*/tensorplate-cli_*)
+    printf 'dpkg-deb: error: archive has premature member\n' >&2
+    exit 2
+    ;;
+esac
 sed -n 's/^Version: //p' "$2"
 STUB
 
 cat >"${stub_bin}/dpkg" <<'STUB'
 #!/bin/sh
 exit 0
+STUB
+
+# The group database and this session's groups. The tensorplate group
+# exists and the session is in it, unless a case says the device never
+# had TensorPlate installed or the operator has not joined the group.
+cat >"${stub_bin}/getent" <<'STUB'
+#!/bin/sh
+[ "$1" = group ] && [ "$2" = tensorplate ] || exit 2
+[ "${TP_FAKE_GROUP:-member}" = absent ] && exit 2
+printf 'tensorplate:x:998:\n'
+STUB
+
+cat >"${stub_bin}/id" <<'STUB'
+#!/bin/sh
+[ "$1" = -nG ] || exit 9
+if [ "${TP_FAKE_GROUP:-member}" = member ]; then
+  printf 'operator adm sudo tensorplate\n'
+else
+  printf 'operator adm sudo\n'
+fi
 STUB
 
 cat >"${stub_bin}/nvpmodel" <<'STUB'
@@ -370,11 +416,30 @@ case "$1" in
         # A looping unit reads as failed between attempts, which is why
         # the harness must not settle on that state alone. One stopped by
         # something else reads as inactive, which is not a crash loop.
-        case "${broken}:${TP_FAKE_MODE:-ok}" in
-          1:crash-loop-never-fails|0:*) printf 'active\n' ;;
-          1:crash-loop-stopped) printf 'inactive\n' ;;
-          *) printf 'failed\n' ;;
-        esac
+        state=active
+        if [ "$broken" -eq 1 ]; then
+          case "${TP_FAKE_MODE:-ok}" in
+            crash-loop-never-fails) state=active ;;
+            crash-loop-activating) state=activating ;;
+            crash-loop-stopped) state=inactive ;;
+            *) state=failed ;;
+          esac
+        else
+          # A unit that never comes up: after install, after the restart
+          # stage, or after crash-loop restores the config and starts it.
+          case "${TP_FAKE_MODE:-ok}:$*" in
+            install-agent-inactive:*tensorplate-agent*|install-observability-inactive:*tensorplate-observability*)
+              state=inactive
+              ;;
+            restart-agent-inactive:*tensorplate-agent*)
+              if [ -f "${TP_FAKE_RESTART_MARKER}" ]; then state=inactive; fi
+              ;;
+            crash-loop-agent-not-ready:*tensorplate-agent*)
+              if [ -f "${TP_FAKE_START_MARKER}" ]; then state=inactive; fi
+              ;;
+          esac
+        fi
+        printf '%s\n' "$state"
         ;;
       *NRestarts*)
         if [ "$broken" -eq 0 ]; then
@@ -393,10 +458,15 @@ case "$1" in
         fi
         ;;
       *Result*)
+        if [ "$broken" -eq 1 ] && [ "${TP_FAKE_MODE:-ok}" = result-show-fails ]; then
+          exit 1
+        fi
         if [ "$broken" -eq 1 ]; then printf 'start-limit-hit\n'; else printf 'success\n'; fi
         ;;
       *InvocationID*)
-        case "$*" in
+        case "${TP_FAKE_MODE:-ok}:$*" in
+          # A unit that is not running has no current invocation.
+          invocation-empty:*tensorplate-agent*) printf '\n' ;;
           *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
           *tensorplate-observability*) printf '22222222222222222222222222222222\n' ;;
           *) exit 9 ;;
@@ -404,7 +474,14 @@ case "$1" in
         ;;
       *MainPID*)
         # A restart must change the pid, so hand back a new one each call,
-        # except for the unit a mode says kept its process.
+        # except for the unit a mode says kept its process, or the one
+        # read a mode says systemctl could not answer.
+        reads=$(cat "${TP_FAKE_MAINPID_CALLS}" 2>/dev/null || echo 0)
+        reads=$((reads + 1))
+        printf '%s\n' "$reads" >"${TP_FAKE_MAINPID_CALLS}"
+        if [ "${TP_FAKE_MODE:-ok}" = "mainpid-show-fails-${reads}" ]; then
+          exit 1
+        fi
         case "${TP_FAKE_MODE:-ok}:$*" in
           restart-agent-pid-unchanged:*tensorplate-agent*|restart-observability-pid-unchanged:*tensorplate-observability*)
             printf '100\n'
@@ -441,9 +518,17 @@ done
 # The agent's starts under a broken config, each refusing it.
 if [ -n "$since" ]; then
   message='config error: agent.json is not valid JSON'
-  [ "${TP_FAKE_MODE:-ok}" = crash-loop-other-error ] && message='state store error: permission denied'
-  for _ in 1 2 3 4 5; do
-    printf '{"_SYSTEMD_UNIT":"tensorplate-agent.service","MESSAGE":"%s"}\n' "$message"
+  unit=tensorplate-agent.service
+  records=5
+  case "${TP_FAKE_MODE:-ok}" in
+    crash-loop-other-error) message='state store error: permission denied' ;;
+    crash-loop-other-unit) unit=tensorplate-observability.service ;;
+    crash-loop-one-config-error) records=1 ;;
+  esac
+  written=0
+  while [ "$written" -lt "$records" ]; do
+    printf '{"_SYSTEMD_UNIT":"%s","MESSAGE":"%s"}\n' "$unit" "$message"
+    written=$((written + 1))
   done
   exit 0
 fi
@@ -456,6 +541,7 @@ case "${TP_FAKE_MODE:-ok}:$unit" in
   journal-command-fails:*) exit 9 ;;
   journal-empty-agent:tensorplate-agent.service) exit 0 ;;
   journal-no-entries:tensorplate-agent.service) printf '%s\n' '-- No entries --'; exit 0 ;;
+  journal-not-object:tensorplate-agent.service) printf '%s\n' '"fixture service started"'; exit 0 ;;
   journal-empty-observability:tensorplate-observability.service) exit 0 ;;
   journal-stale-invocation:*) invocation=ffffffffffffffffffffffffffffffff ;;
   journal-wrong-unit:*) unit=another.service ;;
@@ -487,49 +573,127 @@ while [ "$#" -gt 0 ]; do
 done
 case "$command" in
   doctor)
+    # Row identity comes from the messages, so a mode can resolve another
+    # row without changing any status. A failing finding makes the real
+    # CLI exit 10 after writing its report, and the stub does the same.
     failing=0
     row_status=ok
-    reachable=ok
-    [ "$mode" = doctor-failing ] && failing=1
-    [ "$mode" = wrong-row ] && row_status=warning
-    [ "$mode" = doctor-agent-unreachable ] && reachable=warning
+    row=jetson-orin-nano-8gb-jp62
+    profile_row=jetson-orin-nano-8gb-jp62
+    warned=""
+    case "$mode" in
+      doctor-failing) failing=1 ;;
+      wrong-row) row_status=warning ;;
+      other-row) row=jetson-orin-nx-16gb-jp62 ;;
+      profile-other-row) profile_row=jetson-orin-nx-16gb-jp62 ;;
+      doctor-warns-*) warned="${mode#doctor-warns-}" ;;
+    esac
+    status_of() {
+      if [ "$1" = "$warned" ]; then printf warning; else printf ok; fi
+    }
+    serving_status="$(status_of serving_binary_installed)"
+    if [ "$failing" -ne 0 ]; then
+      serving_status=fail
+    fi
     cat <<JSON
 {"command":"doctor","payload":{"failing":${failing},"findings":[
- {"id":"platform_row","status":"${row_status}","message":"resolved jetson-orin-nano-8gb-jp62"},
- {"id":"platform_profile","status":"ok","message":"host matches 1 candidate support row(s): jetson-orin-nano-8gb-jp62"},
+ {"id":"platform_row","status":"${row_status}","message":"resolved ${row}"},
+ {"id":"platform_profile","status":"ok","message":"host matches 1 candidate support row(s): ${profile_row}"},
  {"id":"host_os","status":"ok","message":"JetPack 6.2 (L4T r36.4.3)"},
  {"id":"accelerator_facts","status":"ok","message":"integrated accelerator: Orin"},
  {"id":"tensorrt_runtime","status":"ok","message":"libnvinfer present"},
  {"id":"cuda_runtime","status":"ok","message":"libcudart present"},
- {"id":"platform_registry","status":"ok","message":"ok"},
- {"id":"agent_reachable","status":"${reachable}","message":"ok"},
- {"id":"agent_socket","status":"ok","message":"ok"},
- {"id":"serving_binary_installed","status":"ok","message":"ok"},
+ {"id":"platform_registry","status":"$(status_of platform_registry)","message":"ok"},
+ {"id":"agent_reachable","status":"$(status_of agent_reachable)","message":"ok"},
+ {"id":"agent_socket","status":"$(status_of agent_socket)","message":"ok"},
+ {"id":"serving_binary_installed","status":"${serving_status}","message":"ok"},
  {"id":"python_pytorch_backend","status":"missing","message":"no Python/PyTorch backend descriptor"},
- {"id":"path_layout","status":"ok","message":"ok"},
- {"id":"config_files","status":"ok","message":"ok"}]}}
+ {"id":"path_layout","status":"$(status_of path_layout)","message":"ok"},
+ {"id":"config_files","status":"$(status_of config_files)","message":"ok"}]}}
 JSON
+    if [ "$failing" -ne 0 ]; then
+      exit 10
+    fi
+    if [ "$mode" = doctor-exits-nonzero ]; then
+      exit 1
+    fi
     ;;
   deploy)
     printf '%s\n' "$bundle" >>"${TP_FAKE_DEPLOY_LOG}"
+    if [ "$mode" = deploy-fails ]; then
+      printf 'error: the agent rejected the deployment\n' >&2
+      exit 3
+    fi
     deploy_phase=active
+    deployed="${TP_FAKE_DEPLOYMENT_ID}"
     [ "$mode" = deploy-not-active ] && deploy_phase=rolled_back
+    [ "$mode" = deploy-other-id ] && deployed=a-different-deployment
     printf '{"command":"deploy","payload":{"phase":"%s","deployment_id":"%s"}}\n' \
-      "$deploy_phase" "${TP_FAKE_DEPLOYMENT_ID}"
+      "$deploy_phase" "$deployed"
     ;;
   status)
-    serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
-    [ "$mode:$phase" = restart-no-worker:restarted ] && serving_url=null
+    # Status is read once by deploy-smoke, once by status-logs, and once
+    # each by the restart and crash-loop recoveries, so a mode can target
+    # the status-logs read alone by its position.
+    reads=$(cat "${TP_FAKE_STATUS_CALLS}" 2>/dev/null || echo 0)
+    reads=$((reads + 1))
+    printf '%s\n' "$reads" >"${TP_FAKE_STATUS_CALLS}"
+    command_name=status
+    severity=ready
+    agent_state=ready
+    active_id="${TP_FAKE_DEPLOYMENT_ID}"
     backend=tensorrt
-    [ "$mode" = status-wrong-backend ] && backend=python_pytorch
-    printf '{"command":"status","payload":{"severity":"ready","agent":{"agent_state":"ready","active":{"deployment_id":"%s","backend":"%s","serving_url":%s}}}}\n' \
-      "${TP_FAKE_DEPLOYMENT_ID}" "$backend" "$serving_url"
+    supervision=""
+    serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
+    case "$mode" in
+      status-fails)
+        printf 'error: agent unreachable\n' >&2
+        exit 4
+        ;;
+      status-degraded) severity=degraded ;;
+      agent-not-ready) agent_state=recovering ;;
+      status-other-deployment) active_id=a-different-deployment ;;
+      status-wrong-backend) backend=python_pytorch ;;
+      supervision-ready) supervision=',"supervision":{"serving_state":"ready","crash_loop":false}' ;;
+      supervision-failed) supervision=',"supervision":{"serving_state":"failed","crash_loop":false}' ;;
+      supervision-crash-loop) supervision=',"supervision":{"serving_state":"ready","crash_loop":true}' ;;
+      url-not-http) serving_url="\"https://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\"" ;;
+      url-not-loopback) serving_url="\"http://localhost:${TP_FAKE_SERVING_PORT}/infer\"" ;;
+      url-wrong-path) serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/predict\"" ;;
+    esac
+    [ "$mode:$phase" = restart-no-worker:restarted ] && serving_url=null
+    if [ "$reads" -eq 2 ]; then
+      case "$mode" in
+        statuslogs-status-fails)
+          printf 'error: agent unreachable\n' >&2
+          exit 4
+          ;;
+        statuslogs-degraded) severity=degraded ;;
+        statuslogs-lost-deployment) active_id=a-different-deployment ;;
+        statuslogs-wrong-command) command_name=doctor ;;
+      esac
+    fi
+    printf '{"command":"%s","payload":{"severity":"%s","agent":{"agent_state":"%s","active":{"deployment_id":"%s","backend":"%s","serving_url":%s}%s}}}\n' \
+      "$command_name" "$severity" "$agent_state" "$active_id" "$backend" "$serving_url" "$supervision"
     ;;
   infer)
     printf '%s %s\n' "$phase" "$input" >>"${TP_FAKE_INFER_LOG}"
+    # An agent that cannot load its config serves nothing, so a recovery
+    # checked before the config is restored cannot pass.
+    if [ -f "${TP_FAKE_CONFIG_BROKEN}" ]; then
+      printf 'error: agent unavailable\n' >&2
+      exit 4
+    fi
+    if [ "$mode" = infer-fails ]; then
+      printf 'error: inference failed\n' >&2
+      exit 11
+    fi
     garble=0
     [ "$mode" = infer-garbled ] && garble=1
     [ "$mode:$phase" = restart-infer-garbled:restarted ] && garble=1
+    # Only once crash-loop has backed up the config, so every stage
+    # before it passes and only the recovery answers wrongly.
+    [ "$mode" = crashloop-recovery-garbled ] && [ -f "${TP_FAKE_BACKUP_PATH}" ] && garble=1
     python3 - "$input" "$out" "$garble" <<'PY' || exit 1
 import base64, json, struct, sys
 
@@ -566,7 +730,7 @@ chmod +x "${stub_bin}/"*
 env PATH="${stub_bin}:${PATH}" TMPDIR="${td}/scratch" TP_FAKE_MKTEMP="$real_mktemp" \
   TP_FAKE_CXX_LOG="${td}/cxx-prebuild.log" CUDA_HOME="${td}/cuda" \
   sh "$builder" "${td}/bundle-good" >/dev/null
-for variant in wrong-backend wrong-kind bad-digest; do
+for variant in wrong-backend wrong-kind bad-digest two-models escapes-root bad-sample no-sample no-manifest; do
   cp -R "${td}/bundle-good" "${td}/bundle-${variant}"
 done
 python3 - "$td" <<'PY'
@@ -576,13 +740,20 @@ root = pathlib.Path(sys.argv[1])
 for variant, edit in (
     ("wrong-backend", lambda m: m.update(backend_hint="python_pytorch")),
     ("wrong-kind", lambda m: m["artifacts"][0].update(kind="onnx_model")),
+    ("two-models", lambda m: m["artifacts"].append(dict(m["artifacts"][0]))),
+    # The same engine bytes and digest, reached from outside the bundle.
+    ("escapes-root", lambda m: m["artifacts"][0].update(path="../bundle-good/model.engine")),
 ):
     path = root / f"bundle-{variant}" / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["role"] == "model", manifest
     edit(manifest)
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 with (root / "bundle-bad-digest" / "model.engine").open("a", encoding="utf-8") as engine:
     engine.write("tampered\n")
+(root / "bundle-bad-sample" / "sample_infer.json").write_text("not a request\n", encoding="utf-8")
+(root / "bundle-no-sample" / "sample_infer.json").unlink()
+(root / "bundle-no-manifest" / "manifest.json").unlink()
 PY
 
 failures=0
@@ -601,6 +772,11 @@ check() {
 # Runs preflight with every seam pointed at a fixture and returns the
 # harness's exit status. --preflight-only stops before the first
 # privileged command; the sudo log shows it did.
+#
+# A case may set preflight_group (member, not-member or absent),
+# preflight_staging (the bundle staging seam; empty means the harness
+# default) or preflight_path (directories put ahead of the stubs) for
+# the one call.
 preflight() {
   local arch="$1" os_release="$2" nv="$3" evidence="$4" version="$5" tag="$6" assets_dir="$7"
   shift 7
@@ -609,7 +785,10 @@ preflight() {
   mkdir -p "${td}/preflight-scratch"
   : >"${td}/preflight-sudo.log"
   : >"${td}/preflight-cxx.log"
-  env PATH="${stub_bin}:${PATH}" \
+  env PATH="${preflight_path:-}${stub_bin}:${PATH}" \
+    TP_FAKE_GROUP="${preflight_group:-member}" \
+    TP_JETSON_BUNDLE_STAGING="${preflight_staging:-}" \
+    TP_FAKE_REAL_SHA256SUM="$real_sha256sum" \
     TMPDIR="${td}/preflight-scratch" \
     TP_FAKE_MKTEMP="$real_mktemp" \
     TP_FAKE_SUDO_LOG="${td}/preflight-sudo.log" \
@@ -652,10 +831,44 @@ check "a pre-built --bundle-dir passes preflight" "0" \
      --bundle-dir "${td}/bundle-good" "${confirm[@]}")"
 check "  and compiles nothing" "" "$(cat "${td}/preflight-cxx.log")"
 
-check "a --bundle-dir without a sample request is refused" "1" \
-  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-nobundle" 0.2.1 v0.2.1-rc.2 "$assets" \
-     --bundle-dir "${td}/cuda" "${confirm[@]}")"
-check "  and names what the bundle lacks" yes "$(said 'must contain manifest.json and sample_infer.json')"
+for lacking in no-sample no-manifest; do
+  check "a --bundle-dir with ${lacking} is refused" "1" \
+    "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-${lacking}" 0.2.1 v0.2.1-rc.2 "$assets" \
+       --bundle-dir "${td}/bundle-${lacking}" "${confirm[@]}")"
+  check "  and names what the bundle lacks" yes "$(said 'must contain manifest.json and sample_infer.json')"
+done
+
+# The run deletes these before it reads or writes what they hold, after
+# the device has already been purged. The clean-room smoke's own bundle
+# location is under /var/lib/tensorplate, and each path is refused for
+# where it is, whether or not it exists on this machine.
+for deleted in /etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate; do
+  check "a --bundle-dir under ${deleted} is refused" "1" \
+    "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-bundle-deleted" 0.2.1 v0.2.1-rc.2 "$assets" \
+       --bundle-dir "${deleted}/validation/tensorplate-trt-identity-bundle" "${confirm[@]}")"
+  check "  and says the run deletes it" yes "$(said "is under ${deleted}, which this run deletes")"
+done
+check "a --bundle-dir that is the default staging copy is refused" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-bundle-staged" 0.2.1 v0.2.1-rc.2 "$assets" \
+     --bundle-dir /opt/tensorplate-validation/trt-identity "${confirm[@]}")"
+check "  and says the run deletes it" yes \
+  "$(said 'is under /opt/tensorplate-validation/trt-identity, which this run deletes')"
+check "an assets directory that is the staging directory is refused" "1" \
+  "$(preflight_staging="$assets" \
+     preflight aarch64 "$jammy" "$r36" "${td}/evidence-assets-staged" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and names the option" yes "$(said "--candidate-assets-dir ${assets} is under")"
+check "an evidence directory under the staging directory is refused" "1" \
+  "$(preflight_staging="${td}/staging" \
+     preflight aarch64 "$jammy" "$r36" "${td}/staging/evidence" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and names the option" yes "$(said "--evidence-dir ${td}/staging/evidence is under")"
+
+check "a session outside the tensorplate group is refused" "1" \
+  "$(preflight_group=not-member \
+     preflight aarch64 "$jammy" "$r36" "${td}/evidence-nogroup" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and says how to join it" yes "$(said 'not in the tensorplate group; run sudo usermod -aG tensorplate')"
+check "a device that never had the group passes preflight" "0" \
+  "$(preflight_group=absent \
+     preflight aarch64 "$jammy" "$r36" "${td}/evidence-groupless" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
 
 check "a run without the confirmation token is refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-noconfirm" 0.2.1 v0.2.1-rc.2 "$assets")"
@@ -725,6 +938,75 @@ cp -R "$assets" "$no_installer"
 rm "${no_installer}/install.sh"
 check "an assets directory with no installer is refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-noinstaller" 0.2.1 v0.2.1-rc.2 "$no_installer" "${confirm[@]}")"
+check "  and names the missing installer" yes "$(said "missing ${no_installer}/install.sh")"
+
+no_checksums="${td}/assets-no-checksums"
+cp -R "$assets" "$no_checksums"
+rm "${no_checksums}/SHA256SUMS"
+check "an assets directory with no SHA256SUMS is refused" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-nochecksums" 0.2.1 v0.2.1-rc.2 "$no_checksums" "${confirm[@]}")"
+check "  and names the missing checksum file" yes "$(said "missing ${no_checksums}/SHA256SUMS")"
+
+check "an assets directory that does not exist is refused" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-noassets" 0.2.1 v0.2.1-rc.2 "${td}/absent-assets" "${confirm[@]}")"
+check "  and says it must be a directory" yes "$(said '--candidate-assets-dir must name a directory')"
+
+check "a run without an evidence directory is refused" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and says it is required" yes "$(said '--evidence-dir is required')"
+
+check "a run without a tested version is refused" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-noversion" "" v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and says it is required" yes "$(said '--tested-version is required')"
+
+check "an unreadable os-release is refused" "1" \
+  "$(preflight aarch64 "${td}/absent-os-release" "$r36" "${td}/evidence-noos" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and names the file" yes "$(said "cannot read ${td}/absent-os-release")"
+
+printf 'ID=debian\nVERSION_ID="22.04"\n' >"${td}/os-release.debian"
+check "another distribution at the same version is refused" "1" \
+  "$(preflight aarch64 "${td}/os-release.debian" "$r36" "${td}/evidence-debian" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and names what it found" yes "$(said 'host reports ID=debian VERSION_ID=22.04')"
+
+# Every command preflight requires is refused by name when it is absent,
+# before any host fact is read. The PATH holds only the other required
+# commands and dirname, which locating the repository needs.
+required_commands=(sudo systemctl journalctl python3 sha256sum dpkg-query dpkg-deb)
+for missing in "${required_commands[@]}"; do
+  restricted="${td}/path-without-${missing}"
+  mkdir -p "$restricted"
+  for tool in "${required_commands[@]}" dirname; do
+    if [[ "$tool" != "$missing" ]]; then
+      ln -s "$(PATH="${stub_bin}:${PATH}" command -v "$tool")" "${restricted}/${tool}"
+    fi
+  done
+  set +e
+  env PATH="$restricted" TP_JETSON_ARCH=aarch64 TP_JETSON_OS_RELEASE="$jammy" TP_JETSON_NV_TEGRA_RELEASE="$r36" \
+    "$BASH" "$harness" --candidate-tag v0.2.1-rc.2 --candidate-assets-dir "$assets" \
+      --evidence-dir "${td}/evidence-without-${missing}" --tested-version 0.2.1 \
+      --preflight-only "${confirm[@]}" >"${td}/preflight.out" 2>"${td}/preflight.err"
+  missing_status=$?
+  set -e
+  check "a host without ${missing} is refused" 1 "$missing_status"
+  check "  and names it" yes "$(said "missing required command: ${missing}")"
+done
+
+# A digest that is not sha256 hex would be refused only when it is
+# recorded, after the install stage has purged the device.
+mkdir -p "${td}/bad-digest-bin"
+cat >"${td}/bad-digest-bin/sha256sum" <<'STUB'
+#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = SHA256SUMS ]; then
+  printf 'sha256:not-hex  SHA256SUMS\n'
+  exit 0
+fi
+exec "${TP_FAKE_REAL_SHA256SUM}" "$@"
+STUB
+chmod +x "${td}/bad-digest-bin/sha256sum"
+check "a checksum file whose digest cannot be computed is refused" "1" \
+  "$(preflight_path="${td}/bad-digest-bin:" \
+     preflight aarch64 "$jammy" "$r36" "${td}/evidence-baddigest" 0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}")"
+check "  and says so before anything is installed" yes "$(said 'could not compute a digest')"
 
 # --- the stages, executed against a stubbed appliance.
 appliance="${td}/appliance"
@@ -793,6 +1075,15 @@ trap cleanup EXIT
 python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
   "${appliance}/run/agent.sock"
 
+# Signals ignored when a shell starts cannot be trapped by it, and a
+# background job of a non-interactive shell starts with SIGINT ignored.
+# The harness is started with the default dispositions restored, so the
+# signal cases exercise its traps however this suite was launched.
+default_signals='import os, signal, sys
+for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(number, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])'
+
 run_stages() {
   local mode="$1" evidence="$2" sudo_fail="${3:-}"
   shift 3
@@ -806,10 +1097,25 @@ run_stages() {
   mkdir -p "${appliance}/scratch"
   rm -f "${appliance}/restarted" "${appliance}/config-broken" "${appliance}/installed" \
     "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path" \
-    "${appliance}/pid"
+    "${appliance}/pid" "${appliance}/started" "${appliance}/status-reads" "${appliance}/mainpid-reads"
+  # A case may have removed the control socket.
+  if [[ ! -S "${appliance}/run/agent.sock" ]]; then
+    python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
+      "${appliance}/run/agent.sock"
+  fi
+  local log_dir="${appliance}/log"
+  if [[ "$mode" == log-dir-missing ]]; then
+    log_dir="${appliance}/absent-log"
+  fi
   printf '{"fixture":"original agent config"}\n' >"${appliance}/agent-config"
   printf '%s\n' "$mode" >"${appliance}/mode"
   env PATH="${stub_bin}:${PATH}" \
+    TP_FAKE_GROUP=member \
+    TP_FAKE_SOCKET="${appliance}/run/agent.sock" \
+    TP_FAKE_START_MARKER="${appliance}/started" \
+    TP_FAKE_STATUS_CALLS="${appliance}/status-reads" \
+    TP_FAKE_MAINPID_CALLS="${appliance}/mainpid-reads" \
+    TP_JETSON_READY_TIMEOUT_SECONDS=1 \
     TMPDIR="${appliance}/scratch" \
     TP_FAKE_MKTEMP="$real_mktemp" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
@@ -823,7 +1129,7 @@ run_stages() {
     TP_JETSON_OS_RELEASE="$jammy" \
     TP_JETSON_NV_TEGRA_RELEASE="$r36" \
     TP_JETSON_AGENT_SOCKET="${appliance}/run/agent.sock" \
-    TP_JETSON_LOG_DIR="${appliance}/log" \
+    TP_JETSON_LOG_DIR="$log_dir" \
     TP_JETSON_BUNDLE_STAGING="${appliance}/staged-bundle" \
     TP_JETSON_CRASH_LOOP_POLL_SECONDS=0 \
     TP_FAKE_MODE="$mode" \
@@ -840,7 +1146,7 @@ run_stages() {
     TP_FAKE_BACKUP_PATH="${appliance}/backup-path" \
     TP_FAKE_RESTORE_FAILED="${appliance}/restore-failed" \
     TP_FAKE_RESTARTS_FILE="${appliance}/restarts" \
-    "$BASH" "$harness" \
+    python3 -c "$default_signals" "$BASH" "$harness" \
       --candidate-tag v0.2.1-rc.2 \
       --candidate-assets-dir "$assets" \
       --evidence-dir "$evidence" \
@@ -996,6 +1302,8 @@ check "  and purges the runtime packages that were installed" yes \
   "$(printf '%s\n' "$purge_line" | grep -qF 'tensorplate-agent' && echo yes || echo no)"
 check "  and leaves the apt channel's bootstrap package installed" no \
   "$(printf '%s\n' "$purge_line" | tr ' ' '\n' | grep -qx 'tensorplate-apt-source' && echo yes || echo no)"
+check "  and never names a package dpkg reports as not installed" no \
+  "$(printf '%s\n' "$purge_line" | tr ' ' '\n' | grep -qx 'tensorplate-backend-python-pytorch' && echo yes || echo no)"
 check "  and never names the metapackage install.sh does not install" no \
   "$(printf '%s\n' "$purge_line" | tr ' ' '\n' | grep -qx 'tensorplate' && echo yes || echo no)"
 check "  purge, clear, install run in that order" yes \
@@ -1013,14 +1321,33 @@ check "  and the state directories were never removed" no \
 check "  and the survivor is named" yes \
   "$(grep -Fq 'remain after the purge: tensorplate-common config-files' "${leftover_evidence}/install.log" && echo yes || echo no)"
 
-for mode_case in "doctor-failing|doctor reports 1 failing finding" \
+evidence="${td}/stages-purge-fails"
+check "a failing purge is recorded as a failed install" fail \
+  "$(run_stages installed-runtime "$evidence" "apt-get purge" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" install)"
+check "  and the failed step is the one named" yes "$(logged "${evidence}/install.log" 'step failed (exit 9): purge')"
+check "  and the stage stopped there rather than at the leftover check" no \
+  "$(logged "${evidence}/install.log" 'remain after the purge')"
+
+install_cases=()
+for id in platform_registry agent_reachable agent_socket serving_binary_installed path_layout config_files; do
+  install_cases+=("doctor-warns-${id}|${id} is warning")
+done
+for mode_case in "doctor-failing|doctor reports 1 failing finding(s): serving_binary_installed" \
+                 "doctor-exits-nonzero|step failed (exit 1): doctor" \
                  "wrong-row|platform_row is warning" \
-                 "doctor-agent-unreachable|agent_reachable is warning" \
+                 "other-row|platform_row did not name jetson-orin-nano-8gb-jp62" \
+                 "profile-other-row|jetson-orin-nano-8gb-jp62 is not among the host's candidate rows" \
+                 "${install_cases[@]}" \
                  "stale-version|tensorplate-agent: expected 'installed ${candidate_version}', dpkg reports 'installed 0.2.1~rc.1-1'" \
-                 "package-missing|tensorplate-serving: expected 'installed ${candidate_version}', dpkg reports 'not installed'"; do
+                 "package-missing|tensorplate-serving: expected 'installed ${candidate_version}', dpkg reports 'not installed'" \
+                 "deb-unreadable|tensorplate-cli: could not read the Version of tensorplate-cli_" \
+                 "install-agent-inactive|step failed (exit 1): services ready" \
+                 "install-observability-inactive|step failed (exit 1): services ready" \
+                 "install-socket-missing|step failed (exit 1): services ready"; do
   mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
+  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
   check "  and install is recorded as a failure, not a pass" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" install)"
   check "  and the run does not certify itself" fail \
@@ -1029,6 +1356,24 @@ for mode_case in "doctor-failing|doctor reports 1 failing finding" \
     "$(report_field "${evidence}/lifecycle-report.json" subject artifact_digest)"
   check "  for the reason the case provokes" yes "$(logged "${evidence}/install.log" "${mode_case#*|}")"
 done
+# The real CLI exits 10 after writing a report with a failing finding.
+# The report is still read, so the log names the finding and the exit.
+check "a failing doctor names its exit status as well as its finding" yes \
+  "$(logged "${td}/stages-doctor-failing/install.log" 'step failed (exit 10): doctor')"
+for mode in install-agent-inactive install-observability-inactive install-socket-missing; do
+  check "${mode} stops install before doctor" no \
+    "$([[ -e "${td}/stages-${mode}/doctor.json" ]] && echo yes || echo no)"
+done
+
+duplicate_assets="${td}/assets-duplicate-cli"
+make_assets "$duplicate_assets" v0.2.1-rc.2 "$candidate_version" duplicate-cli
+evidence="${td}/stages-duplicate-cli"
+check "a manifest naming one package twice fails install" fail \
+  "$(run_stages ok "$evidence" "" --bundle-dir "${td}/bundle-good" \
+       --candidate-assets-dir "$duplicate_assets" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" install)"
+check "  for the reason the case provokes" yes \
+  "$(logged "${evidence}/install.log" 'tensorplate-cli: the manifest selects 2 .deb files, not one')"
 
 # A privileged step that fails must fail its stage. Without this, an
 # unguarded `sudo ...` inside a stage body is invisible: errexit is
@@ -1036,12 +1381,13 @@ done
 # Each case also names the step that failed, so a later check that
 # happens to fail for another reason cannot stand in for the missing one.
 for injected_case in "install.sh=install.sh" "rm -rf /etc/tensorplate=clear installed state" \
-                     "systemctl enable --now tensorplate-agent=enable tensorplate-agent"; do
+                     "systemctl enable --now tensorplate-agent=enable tensorplate-agent" \
+                     "systemctl enable --now tensorplate-observability=enable tensorplate-observability"; do
   injected="${injected_case%%=*}"
   step_name="${injected_case#*=}"
   evidence="${td}/stages-sudo-fails-${injected//[^a-z]/-}"
   check "a failing '${injected}' is recorded as a failed install" fail \
-    "$(run_stages ok "$evidence" "$injected" >/dev/null; \
+    "$(run_stages ok "$evidence" "$injected" --bundle-dir "${td}/bundle-good" >/dev/null; \
        stage_status "${evidence}/lifecycle-report.json" install)"
   check "  and the failed step is the one named" yes \
     "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/install.log" && echo yes || echo no)"
@@ -1054,7 +1400,10 @@ done
 # --- deploy-smoke.
 for variant_case in "wrong-backend|must declare backend_hint=tensorrt" \
                     "wrong-kind|must be a tensorrt_engine" \
-                    "bad-digest|digest does not match its manifest"; do
+                    "bad-digest|digest does not match its manifest" \
+                    "two-models|must declare exactly one model artifact" \
+                    "escapes-root|escapes the bundle root" \
+                    "bad-sample|Expecting value"; do
   variant="${variant_case%%|*}"
   evidence="${td}/stages-bundle-${variant}"
   check "a ${variant} bundle fails deploy-smoke" fail \
@@ -1063,24 +1412,56 @@ for variant_case in "wrong-backend|must declare backend_hint=tensorrt" \
   check "  and is never deployed" "" "$(cat "${appliance}/deploy.log")"
   check "  for the reason the case provokes" yes "$(logged "${evidence}/deploy-smoke.log" "${variant_case#*|}")"
 done
-for mode_case in "infer-garbled|value mismatch at 1" \
-                 "status-wrong-backend|checks failed: active_backend" \
-                 "health-wrong-deployment|checks failed: serving_health_deployment" \
-                 "deploy-not-active|checks failed: deployment_phase"; do
+for mode_case in "infer-garbled|1|value mismatch at 1" \
+                 "infer-fails|11|step failed (exit 11): infer" \
+                 "deploy-fails|3|step failed (exit 3): deploy" \
+                 "deploy-not-active|1|checks failed: deployment_phase" \
+                 "deploy-other-id|1|checks failed: deployment_id" \
+                 "status-fails|4|step failed (exit 4): status" \
+                 "status-degraded|1|checks failed: status_severity" \
+                 "agent-not-ready|1|checks failed: agent_state" \
+                 "status-other-deployment|1|checks failed: active_deployment" \
+                 "status-wrong-backend|1|checks failed: active_backend" \
+                 "url-not-http|1|checks failed: active_serving_url" \
+                 "url-not-loopback|1|checks failed: active_serving_url" \
+                 "url-wrong-path|1|checks failed: active_serving_url" \
+                 "health-wrong-deployment|1|checks failed: serving_health_deployment" \
+                 "supervision-failed|1|checks failed: supervision_healthy_when_configured" \
+                 "supervision-crash-loop|1|checks failed: supervision_healthy_when_configured"; do
   mode="${mode_case%%|*}"
+  rest="${mode_case#*|}"
   evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
+  check "${mode} fails the run" "${rest%%|*}" \
+    "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
   check "  install passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" install)"
   check "  and deploy-smoke is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
-  check "  for the reason the case provokes" yes "$(logged "${evidence}/deploy-smoke.log" "${mode_case#*|}")"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/deploy-smoke.log" "${rest#*|}")"
+  if [[ "$mode" == deploy-fails ]]; then
+    check "  and no inference is issued against it" "" "$(cat "${appliance}/infer.log")"
+  fi
 done
-for injected_case in "cp -R=copy the bundle" "chmod -R a+rX=make the bundle readable"; do
+# Each command's failure stops the round trip where it happened, rather
+# than leaving a later check to fail on what the command never wrote.
+check "a failed inference is never handed to the identity verifier" no \
+  "$(logged "${td}/stages-infer-fails/deploy-smoke.log" 'the engine returned its input unchanged')"
+check "a failed status is never parsed" no \
+  "$(logged "${td}/stages-status-fails/deploy-smoke.log" 'Traceback')"
+
+evidence="${td}/stages-supervision-ready"
+check "a healthy supervised worker passes" 0 \
+  "$(run_stages supervision-ready "$evidence" "" --bundle-dir "${td}/bundle-good")"
+check "  and records the supervision state it saw" ready \
+  "$(report_field "${evidence}/deploy-result.json" supervision_state)"
+
+for injected_case in "rm -rf ${appliance}/staged-bundle=stage the bundle" \
+                     "mkdir -p=create the staging parent" \
+                     "cp -R=copy the bundle" "chmod -R a+rX=make the bundle readable"; do
   injected="${injected_case%%=*}"
   step_name="${injected_case#*=}"
-  evidence="${td}/stages-sudo-fails-${injected//[^a-z]/-}"
-  check "a failing '${injected}' while staging is recorded as a failed deploy-smoke" fail \
-    "$(run_stages ok "$evidence" "$injected" >/dev/null; \
+  evidence="${td}/stages-sudo-fails-${step_name// /-}"
+  check "a failing '${step_name}' while staging is recorded as a failed deploy-smoke" fail \
+    "$(run_stages ok "$evidence" "$injected" --bundle-dir "${td}/bundle-good" >/dev/null; \
        stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
   check "  and the failed step is the one named" yes \
     "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/deploy-smoke.log" && echo yes || echo no)"
@@ -1091,36 +1472,67 @@ for injected_case in "cp -R=copy the bundle" "chmod -R a+rX=make the bundle read
 done
 
 # --- status-logs.
-for mode in journal-command-fails journal-empty-agent journal-no-entries journal-empty-observability \
-            journal-stale-invocation journal-wrong-unit journal-empty-message; do
+for mode_case in "journal-command-fails|9|step failed (exit 9): capture the tensorplate-agent journal" \
+                 "journal-empty-agent|1|tensorplate-agent.service: no journal records from the current service invocation" \
+                 "journal-no-entries|1|tensorplate-agent.service: journal output is not a JSON record" \
+                 "journal-not-object|1|tensorplate-agent.service: journal record is not from the current service invocation" \
+                 "journal-empty-observability|1|tensorplate-observability.service: no journal records from the current service invocation" \
+                 "journal-stale-invocation|1|tensorplate-agent.service: journal record is not from the current service invocation" \
+                 "journal-wrong-unit|1|tensorplate-agent.service: journal record is not from the current service invocation" \
+                 "journal-empty-message|1|tensorplate-agent.service: journal record has no text message" \
+                 "invocation-empty|1|no current invocation ID for tensorplate-agent" \
+                 "statuslogs-status-fails|4|step failed (exit 4): status" \
+                 "statuslogs-wrong-command|1|AssertionError: {'command': 'doctor'" \
+                 "statuslogs-degraded|1|AssertionError: degraded" \
+                 "statuslogs-lost-deployment|1|status no longer reports jetson-lifecycle-smoke as active" \
+                 "log-dir-missing|1|log directory missing at ${appliance}/absent-log"; do
+  mode="${mode_case%%|*}"
+  rest="${mode_case#*|}"
   evidence="${td}/stages-${mode}"
-  expected_status=1
-  if [[ "$mode" == journal-command-fails ]]; then expected_status=9; fi
-  check "${mode} fails the run" "$expected_status" "$(run_stages "$mode" "$evidence" "")"
-  check "  deployment passed before the journal failure" pass \
+  check "${mode} fails the run" "${rest%%|*}" \
+    "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
+  check "  deployment passed before the status-logs failure" pass \
     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
-  check "  invalid journal evidence fails status-logs" fail \
+  check "  and status-logs is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/status-logs.log" "${rest#*|}")"
 done
+check "a failed status read stops status-logs before anything else is recorded" no \
+  "$([[ -e "${td}/stages-statuslogs-status-fails/logs-command.exit" ]] && echo yes || echo no)"
 
 # --- restart.
-for mode in restart-no-worker restart-unhealthy-health restart-wrong-health restart-infer-garbled \
-            restart-agent-pid-unchanged restart-observability-pid-unchanged; do
+for mode_case in "restart-no-worker|checks failed: active_serving_url" \
+                 "restart-unhealthy-health|checks failed: serving_health_state" \
+                 "restart-wrong-health|checks failed: serving_health_deployment" \
+                 "restart-infer-garbled|value mismatch at 1" \
+                 "restart-agent-pid-unchanged|agent MainPID did not change" \
+                 "restart-observability-pid-unchanged|observability MainPID did not change" \
+                 "restart-agent-inactive|step failed (exit 1): services ready again" \
+                 "restart-socket-missing|step failed (exit 1): services ready again"; do
+  mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
+  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
   check "  status-logs passed before the restart regression" pass \
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
   check "  the restart failure is recorded against restart" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" restart)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/restart.log" "${mode_case#*|}")"
 done
-check "an agent that kept its process is named" yes \
-  "$(logged "${td}/stages-restart-agent-pid-unchanged/restart.log" 'agent MainPID did not change')"
-check "an observability service that kept its process is named" yes \
-  "$(logged "${td}/stages-restart-observability-pid-unchanged/restart.log" 'observability MainPID did not change')"
+# systemctl failing to report a pid, before and after the restart. A
+# value nobody read cannot show the process changed.
+for read in 1 2 3 4; do
+  evidence="${td}/stages-mainpid-show-fails-${read}"
+  check "a MainPID read ${read} that fails is recorded as a failed restart" fail \
+    "$(run_stages "mainpid-show-fails-${read}" "$evidence" "" --bundle-dir "${td}/bundle-good" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" restart)"
+  check "  and the recovered worker is never credited" no \
+    "$(grep -q '^restarted ' "${appliance}/infer.log" && echo yes || echo no)"
+done
 evidence="${td}/stages-restart-fails"
 check "a restart that fails is recorded as a failed restart" fail \
-  "$(run_stages ok "$evidence" "systemctl restart" >/dev/null; \
+  "$(run_stages ok "$evidence" "systemctl restart" --bundle-dir "${td}/bundle-good" >/dev/null; \
      stage_status "${evidence}/lifecycle-report.json" restart)"
+check "  for the reason the case provokes" yes "$(logged "${evidence}/restart.log" 'step failed (exit 9): restart both units')"
 
 # --- crash-loop recovery.
 #
@@ -1131,7 +1543,12 @@ config_restored() {
   [[ ! -e "${appliance}/config-broken" && \
      "$(cat "${appliance}/agent-config")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no
 }
-run_stages ok "${td}/stages-ok-again" "" >/dev/null
+backup_retained() {
+  local backup
+  backup="$(cat "${appliance}/backup-path" 2>/dev/null)" || { echo no; return 0; }
+  [[ -f "$backup" && "$(cat "$backup")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no
+}
+run_stages ok "${td}/stages-ok-again" "" --bundle-dir "${td}/bundle-good" >/dev/null
 check "the ok run breaks the agent config, then restores it" yes \
   "$(broke="$(sudo_line 'invalid json')"; restored="$(sudo_line "$restore_line")"
      [[ -n "$broke" && -n "$restored" && "$broke" -lt "$restored" ]] && echo yes || echo no)"
@@ -1142,14 +1559,19 @@ r=json.load(open(sys.argv[1]));print(r["active_state"],r["restarts"],r["result"]
 check "  and the recovered worker answered" tensorrt_identity \
   "$(report_field "${td}/stages-ok-again/crash-loop-recovery.json" inference_round_trip)"
 check "  and the original config bytes were restored" yes "$(config_restored)"
+check "  and the backup was removed once the agent recovered" no "$(backup_retained)"
 for mode_case in "crash-loop-keeps-restarting|the agent never settled" \
                  "crash-loop-not-retried|checks failed: restarted_before_giving_up" \
                  "crash-loop-other-error|checks failed: agent_rejected_the_config" \
+                 "crash-loop-other-unit|checks failed: agent_rejected_the_config" \
+                 "crash-loop-one-config-error|checks failed: agent_rejected_the_config" \
                  "crash-loop-never-fails|the agent never settled" \
-                 "crash-loop-stopped|checks failed: unit_failed"; do
+                 "crash-loop-activating|the agent never settled" \
+                 "crash-loop-stopped|checks failed: unit_failed" \
+                 "crashloop-recovery-garbled|value mismatch at 1"; do
   mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "")"
+  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
   check "  restart passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" restart)"
   check "  and crash-loop is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
@@ -1157,11 +1579,66 @@ for mode_case in "crash-loop-keeps-restarting|the agent never settled" \
   check "  for the reason the case provokes" yes "$(logged "${evidence}/crash-loop.log" "${mode_case#*|}")"
 done
 
+evidence="${td}/stages-result-show-fails"
+check "a unit result systemctl cannot report fails crash-loop" fail \
+  "$(run_stages result-show-fails "$evidence" "" --bundle-dir "${td}/bundle-good" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  before any journal is taken as evidence" no \
+  "$([[ -e "${evidence}/crash-loop-journal.txt" ]] && echo yes || echo no)"
+check "  and the config is still restored" yes "$(config_restored)"
+
+evidence="${td}/stages-crash-loop-journal-fails"
+check "a crash-loop journal capture that fails is recorded as a failed crash-loop" fail \
+  "$(run_stages ok "$evidence" "journalctl -u tensorplate-agent --since" --bundle-dir "${td}/bundle-good" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  for the reason the case provokes" yes \
+  "$(logged "${evidence}/crash-loop.log" 'step failed (exit 9): capture the crash-loop journal')"
+check "  and the empty capture is never judged" no "$(logged "${evidence}/crash-loop.log" 'crash-loop checks failed')"
+check "  and the config is still restored" yes "$(config_restored)"
+
+# Without a backup there is nothing to restore from, so the config must
+# never be broken.
+evidence="${td}/stages-backup-fails"
+check "a config backup that fails is recorded as a failed crash-loop" fail \
+  "$(run_stages ok "$evidence" "cp -p /etc/tensorplate/agent.json" --bundle-dir "${td}/bundle-good" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  for the reason the case provokes" yes \
+  "$(logged "${evidence}/crash-loop.log" 'step failed (exit 9): back up the agent config')"
+check "  and the config is never corrupted" no \
+  "$(grep -Fq 'invalid json' "${appliance}/sudo.log" && echo yes || echo no)"
+check "  and the config bytes are intact" yes "$(config_restored)"
+
 evidence="${td}/stages-corrupt-fails"
 check "a config corruption that fails is recorded as a failed crash-loop" fail \
-  "$(run_stages ok "$evidence" "invalid json" >/dev/null; \
+  "$(run_stages ok "$evidence" "invalid json" --bundle-dir "${td}/bundle-good" >/dev/null; \
      stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  for the reason the case provokes" yes \
+  "$(logged "${evidence}/crash-loop.log" 'step failed (exit 9): corrupt the agent config')"
+check "  and the loop is never observed" no "$(logged "${evidence}/crash-loop.log" 'the agent never settled')"
 check "  and the config is still restored" yes "$(config_restored)"
+
+# Restoring the bytes is not recovery: a failed state that is not
+# cleared, an agent that is not started, or one that never comes back
+# fails the stage, and the backup is kept for the operator.
+for recovery_case in "ok|9|systemctl reset-failed|clear the agent's failed state" \
+                     "ok|9|systemctl start tensorplate-agent|start the agent" \
+                     "crash-loop-agent-not-ready|1||services ready again"; do
+  mode="${recovery_case%%|*}"
+  rest="${recovery_case#*|}"
+  expected_status="${rest%%|*}"
+  rest="${rest#*|}"
+  injected="${rest%%|*}"
+  step_name="${rest#*|}"
+  evidence="${td}/stages-recovery-${step_name//[^a-z]/-}"
+  check "an agent whose '${step_name}' fails refuses the run" "$expected_status" \
+    "$(run_stages "$mode" "$evidence" "$injected" --bundle-dir "${td}/bundle-good")"
+  check "  and crash-loop is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  for the reason the case provokes" yes \
+    "$(logged "${evidence}/crash-loop.log" "step failed (exit ${expected_status}): ${step_name}")"
+  check "  and the config bytes were restored" yes "$(config_restored)"
+  check "  and the backup is kept for manual recovery" yes "$(backup_retained)"
+done
 
 for signal_case in int:130 term:143 hup:129; do
   signal="${signal_case%:*}"
@@ -1180,17 +1657,15 @@ done
 
 evidence="${td}/stages-crash-loop-restore-fails-once"
 check "a failed config restore is retried on exit without hiding its failure" 9 \
-  "$(run_stages crash-loop-restore-fails-once "$evidence" "")"
+  "$(run_stages crash-loop-restore-fails-once "$evidence" "" --bundle-dir "${td}/bundle-good")"
 check "  the failed restore still fails the crash-loop stage" fail \
   "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 check "  the exit retry restores the original config bytes" yes "$(config_restored)"
 
 evidence="${td}/stages-crash-loop-restore-always-fails"
 check "a persistent config restore failure refuses the run" 9 \
-  "$(run_stages crash-loop-restore-always-fails "$evidence" "")"
-check "  and preserves the backup for manual recovery" yes \
-  "$(backup="$(cat "${appliance}/backup-path")"
-     [[ -f "$backup" && "$(cat "$backup")" == '{"fixture":"original agent config"}' ]] && echo yes || echo no)"
+  "$(run_stages crash-loop-restore-always-fails "$evidence" "" --bundle-dir "${td}/bundle-good")"
+check "  and preserves the backup for manual recovery" yes "$(backup_retained)"
 check "  the report does not certify the failed recovery" fail \
   "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 

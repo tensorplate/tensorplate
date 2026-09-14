@@ -91,9 +91,16 @@ LOG_DIR="${TP_JETSON_LOG_DIR:-/var/log/tensorplate}"
 # readable, which is all a bundle needs.
 BUNDLE_STAGING_DIR="${TP_JETSON_BUNDLE_STAGING:-/opt/tensorplate-validation/trt-identity}"
 # RestartSec is 5 in the shipped unit, so every readiness wait has to sit
-# well above it rather than racing a restart.
-readonly READY_TIMEOUT_SECONDS=60
+# well above it rather than racing a restart. Overridable only so a unit
+# that never becomes ready can be driven without waiting in CI.
+READY_TIMEOUT_SECONDS="${TP_JETSON_READY_TIMEOUT_SECONDS:-60}"
 readonly AGENT_CONFIG="/etc/tensorplate/agent.json"
+# What the install stage deletes once the purge has succeeded. An input
+# under any of these, or under the bundle staging directory, would be
+# gone by the time the run reads it, so preflight refuses one.
+CLEARED_STATE_DIRS=(/etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate)
+# The group the packages create and the agent's control socket belongs to.
+readonly SERVICE_GROUP="tensorplate"
 # Longer than RestartSec, so a unit that is still looping has restarted
 # at least once between two samples. Overridable only so the settling
 # logic can be driven without waiting in CI.
@@ -156,6 +163,10 @@ Options:
                               build one on this device with
                               tools/validation/create_trt_identity_bundle.sh
                               before anything is purged.
+                              The assets, evidence and bundle directories
+                              must lie outside what the run deletes:
+                              /etc, /var/lib, /var/log and /run tensorplate,
+                              and ${BUNDLE_STAGING_DIR}.
   --deployment-id ID          Deployment id for the smoke. Default: ${DEPLOYMENT_ID}
   --preflight-only            Check host eligibility and the inputs, and build
                               the bundle in a temporary directory, then stop
@@ -258,6 +269,17 @@ preflight() {
   require_command dpkg-query
   require_command dpkg-deb
 
+  # Every CLI call the harness makes as the operator goes through the
+  # agent's group-only control socket. The group exists only once a
+  # TensorPlate package has installed, and it survives the purge, so a
+  # session that predates joining it is refused here rather than failing
+  # doctor after the purge. Membership is read from this session, which
+  # is what the CLI calls inherit, not from the group database.
+  if getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    [[ " $(id -nG 2>/dev/null) " == *" ${SERVICE_GROUP} "* ]] ||
+      die "this session is not in the ${SERVICE_GROUP} group; run sudo usermod -aG ${SERVICE_GROUP} \"\$USER\" and start a new session"
+  fi
+
   [[ "$HOST_ARCH" == "aarch64" ]] ||
     die "this harness validates aarch64 Jetson rows; host reports ${HOST_ARCH}"
 
@@ -300,6 +322,29 @@ PY
   ARTIFACT_DIGEST="$(cd "$ASSETS_DIR" && sha256sum SHA256SUMS | awk '{print $1}')"
   [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
     die "could not compute a digest for ${ASSETS_DIR}/SHA256SUMS"
+
+  # Checked before the bundle's contents, so a bundle already gone from
+  # a deleted directory is still refused for where it is. The clean-room
+  # smoke builds its bundle under /var/lib/tensorplate, and this run
+  # leaves its staged copy in place, so both are paths an operator may
+  # reasonably pass.
+  python3 - "${CLEARED_STATE_DIRS[@]}" "$BUNDLE_STAGING_DIR" -- \
+    --candidate-assets-dir "$ASSETS_DIR" --evidence-dir "$EVIDENCE_DIR" \
+    ${BUNDLE_DIR:+--bundle-dir "$BUNDLE_DIR"} <<'PY' || die "an input lies in a directory this run deletes"
+import os, sys
+
+separator = sys.argv.index("--")
+deleted, given = sys.argv[1:separator], sys.argv[separator + 1:]
+for option, value in zip(given[::2], given[1::2]):
+    path = os.path.realpath(value)
+    for directory in deleted:
+        root = os.path.realpath(directory)
+        if path == root or path.startswith(root.rstrip("/") + "/"):
+            raise SystemExit(
+                f"{option} {value} is under {directory}, which this run deletes; "
+                "use a directory outside it"
+            )
+PY
 
   if [[ -n "$BUNDLE_DIR" ]]; then
     [[ -f "${BUNDLE_DIR}/manifest.json" && -f "${BUNDLE_DIR}/sample_infer.json" ]] ||
@@ -441,8 +486,7 @@ stage_install() {
     printf 'TensorPlate packages remain after the purge: %s\n' "$(printf '%s' "$listing" | tr '\n' ' ')" >&2
     return 1
   fi
-  step "clear installed state" sudo rm -rf \
-    /etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate || return
+  step "clear installed state" sudo rm -rf "${CLEARED_STATE_DIRS[@]}" || return
 
   # No --allow-unsigned: install.sh verifies the SHA256SUMS signature
   # with the cosign bundle that was downloaded with the set. No
@@ -456,9 +500,14 @@ stage_install() {
   step "services ready" await_services_ready || return
 
   step "installed versions" check_installed_versions "${EVIDENCE_DIR}/packages.txt" || return
+  # Doctor writes its report and then exits non-zero when anything fails,
+  # so the report is read before the exit status decides the stage: the
+  # log then names the failing findings rather than only the exit code.
+  local doctor_status=0
   step "doctor" bash -c \
-    'tensorplate doctor --output json >"$1"' _ "${EVIDENCE_DIR}/doctor.json" || return
+    'tensorplate doctor --output json >"$1"' _ "${EVIDENCE_DIR}/doctor.json" || doctor_status=$?
   check_doctor_green "${EVIDENCE_DIR}/doctor.json" || return
+  ((doctor_status == 0)) || return "$doctor_status"
   pass "installed at the candidate's package versions, services ready, doctor green, ${ROW} resolved by platform_row"
 }
 
@@ -481,12 +530,13 @@ artifacts = json.loads(manifest_path.read_text(encoding="utf-8")).get("artifacts
 problems = []
 for package in packages:
     # The same selection install.sh makes: this package's .deb for the
-    # host architecture or for all architectures.
+    # host architecture or for all architectures. install.sh has already
+    # refused a manifest naming a file outside the assets directory.
     debs = [
         a["file"] for a in artifacts
         if isinstance(a, dict) and a.get("package") == package
         and isinstance(a.get("file"), str) and a["file"].endswith(".deb")
-        and "/" not in a["file"] and a.get("architecture") in ("all", deb_arch)
+        and a.get("architecture") in ("all", deb_arch)
     ]
     if len(debs) != 1:
         problems.append(f"{package}: the manifest selects {len(debs)} .deb files, not one")
@@ -522,7 +572,8 @@ path, expected_row = sys.argv[1:]
 payload = json.load(open(path, encoding="utf-8"))["payload"]
 by_id = {f["id"]: f for f in payload["findings"]}
 
-assert payload["failing"] == 0, f"doctor reports {payload['failing']} failing finding(s)"
+assert payload["failing"] == 0, "doctor reports {} failing finding(s): {}".format(
+    payload["failing"], ", ".join(f["id"] for f in payload["findings"] if f.get("status") == "fail"))
 
 # platform_row is the finding that resolves host identity AND accelerator
 # to one row; platform_profile answers from host identity alone and is
