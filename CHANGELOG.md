@@ -78,8 +78,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Preview: supported, and not yet validated. The RTX PRO 6000 row's
   model-class claims move to Preview with it, and its evidence location
   is removed, since a Preview row with no validation run has no evidence
-  to point at. The H100 row claims no model classes; it is validated as a
-  platform.
+  to point at. The H100 row claims no model classes; it is a Production
+  target whose platform validation is still pending. Its provenance
+  remains `spec_authored`, and the release gate requires recorded evidence
+  before it can qualify for release.
 
 ### Fixed
 

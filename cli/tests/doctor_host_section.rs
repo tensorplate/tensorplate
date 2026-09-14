@@ -695,9 +695,9 @@ fn the_model_classes_come_from_the_registry_not_a_list_here() {
 fn a_row_claiming_no_model_classes_says_so_rather_than_rendering_empty() {
     // An empty render would read as a broken row rather than an honest
     // one, at any support level. The A100 row is Preview; the H100 row is
-    // Production -- a platform validated as a platform while claiming no
-    // model class nobody has run on it, which must not be mistaken for a
-    // row whose model classes failed to load.
+    // a Production target with platform validation still pending. Neither
+    // claims any model classes; this must not be mistaken for a row whose
+    // model classes failed to load.
     for row in [
         "ubuntu2404-x86-a100-40g-a2hg1",
         "ubuntu2404-x86-h100-80g-a3hg1",
