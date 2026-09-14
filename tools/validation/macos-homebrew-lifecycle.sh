@@ -253,12 +253,15 @@ trap cleanup EXIT
 # A stage's pass row is written as soon as its body returns, so what
 # stops a failing body is errexit, and errexit is only active inside the
 # body because every call below is a bare top-level statement. Calling
-# run_stage from an `if`, `while`, `!`, or either side of `||` or `&&`
-# suspends errexit for the whole body, and a failed command would then
-# record pass. For the same reason a body must not use a bare `[[ ]]` or
-# `(( ))` statement as an assertion: macOS /bin/bash is 3.2, which does
-# not apply errexit to either, so each one needs an explicit `|| die`.
-# test/packaging/verify_macos_homebrew_lifecycle.sh enforces both rules.
+# run_stage as an `if`, `while` or `until` condition, after `!`, or on the
+# left of `||` or `&&` suspends errexit for the whole body, and a failed
+# command would then record pass; so does `set +e`, which only cleanup
+# uses. For the same reason a body must not end an assertion with a
+# `[[ ]]`, `(( ))` or `!` command: macOS /bin/bash is 3.2, which does not
+# apply errexit to `[[ ]]` or `(( ))`, and no bash applies it to `!`, so
+# each one needs an explicit `|| die`.
+# test/packaging/verify_macos_homebrew_lifecycle.sh lints the harness for
+# these forms; it accepts a run_stage call only as a bare statement.
 run_stage() {
   active_stage="$1"
   shift

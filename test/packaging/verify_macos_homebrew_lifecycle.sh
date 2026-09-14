@@ -230,10 +230,12 @@ fi
 
 # run_stage writes a pass row as soon as its body returns, so a failing
 # body is stopped only by errexit. That holds only while every call is a
-# bare top-level statement and no body asserts with a bare `[[ ]]` or
-# `(( ))`, which macOS /bin/bash 3.2 exempts from errexit. Lint both
-# rules against the harness, prove each lint discriminates on a control,
-# and run the real run_stage to show a failing body records no pass.
+# bare top-level statement, nothing but cleanup runs `set +e`, and no
+# body ends an assertion with `[[ ]]` or `(( ))`, which macOS /bin/bash
+# 3.2 exempts from errexit, or with `!`, which every bash exempts. Lint
+# these rules against the harness, prove each lint discriminates on a
+# control, and run the real run_stage to show a failing body records no
+# pass.
 python3 - "$harness" <<'PY'
 import os
 import pathlib
@@ -250,38 +252,174 @@ def function(name):
     return match.group(0)
 
 HEREDOC = re.compile(r"(?<!<)<<-?'?([A-Z_][A-Z0-9_]*)'?(?:\s|$)")
+SPACE = " \t\n\x01"
+
+def without_heredocs(text):
+    """The text with heredoc bodies and terminators blanked, lines kept."""
+    lines = text.split("\n")
+    heredoc_end = None
+    for index, line in enumerate(lines):
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            lines[index] = ""
+            continue
+        heredoc = HEREDOC.search(line)
+        if heredoc and not line.lstrip().startswith("#"):
+            heredoc_end = heredoc.group(1)
+    return "\n".join(lines)
+
+def mask(text):
+    """Blank everything that cannot separate or join commands: quoted
+    strings, command substitutions, comments, and the insides of `[[ ]]`
+    and `(( ))`. A newline inside them becomes \\x01, so line numbers
+    survive but a list does not split there."""
+    out = list(text)
+    n = len(text)
+
+    def blank(start, end):
+        for k in range(start, min(end, n)):
+            out[k] = "\x01" if text[k] == "\n" else "x"
+
+    def single(i):
+        j = text.find("'", i + 1)
+        return n if j < 0 else j + 1
+
+    def double(i):
+        j = i + 1
+        while j < n and text[j] != '"':
+            if text[j] == "\\":
+                j += 2
+            elif text.startswith("$(", j):
+                j = subst(j)
+            else:
+                j += 1
+        return min(j + 1, n)
+
+    def subst(i):
+        depth, j = 0, i + 1
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == "'":
+                j = single(j)
+                continue
+            if text[j] == '"':
+                j = double(j)
+                continue
+            if text[j] == "(":
+                depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return j + 1
+            j += 1
+        return n
+
+    def test(i, closer):
+        j = i + 2
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+            elif text[j] == "'":
+                j = single(j)
+            elif text[j] == '"':
+                j = double(j)
+            elif text.startswith("$(", j):
+                j = subst(j)
+            elif text.startswith(closer, j) and text[j + 2:j + 3] in ("", ";", "&", "|", ")") + tuple(SPACE):
+                return j + 2
+            else:
+                j += 1
+        return n
+
+    i = 0
+    while i < n:
+        at_word = i == 0 or text[i - 1] in " \t\n;&|(!{"
+        if text[i] == "\\":
+            blank(i, i + 2)
+            i += 2
+        elif text[i] in "'\"" or text.startswith("$(", i):
+            j = single(i) if text[i] == "'" else double(i) if text[i] == '"' else subst(i)
+            blank(i, j)
+            i = j
+        elif text[i] == "#" and at_word:
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif at_word and text.startswith(("[[", "(("), i):
+            j = test(i, "]]" if text[i] == "[" else "))")
+            blank(i + 2, j - 2)
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+def and_or_lists(masked):
+    """(offset, text) of each and-or list: split at `;`, `&` and newlines,
+    but not at a newline that follows `&&`, `||` or `|`."""
+    found, start, i, n = [], 0, 0, len(masked)
+    while i < n:
+        if masked.startswith(("&&", "||"), i) or masked[i] == "|":
+            i += 2 if masked.startswith(("&&", "||"), i) else 1
+            while i < n and masked[i] in SPACE:
+                i += 1
+            continue
+        if masked[i] in ";\n" or (masked[i] == "&" and masked[i - 1:i] not in (">", "<")
+                                  and masked[i + 1:i + 2] != ">"):
+            found.append((start, masked[start:i]))
+            start = i + 1
+        i += 1
+    found.append((start, masked[start:]))
+    return found
+
+def line_of(masked, offset):
+    return masked.count("\n", 0, offset) + masked.count("\x01", 0, offset) + 1
 
 def bare_assertions(text):
-    """Line numbers of `[[`/`((` statements not followed by `||` or `&&`."""
-    lines = text.splitlines()
+    """Line numbers of assertions errexit never acts on under bash 3.2: a
+    list, outside an if/elif/while/until condition, whose last command is
+    `[[ ]]`, `(( ))` or a `!` pipeline."""
+    masked = mask(without_heredocs(text))
     found = []
-    heredoc_end = None
-    index = 0
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if heredoc_end is not None:
-            if stripped == heredoc_end:
-                heredoc_end = None
-            index += 1
+    for offset, rest in and_or_lists(masked):
+        while True:
+            stripped = rest.lstrip(SPACE)
+            offset += len(rest) - len(stripped)
+            rest = stripped
+            lead = re.match(r"(?:then|do|else|\{|[A-Za-z_]\w*\(\)\s*\{)(?=\s|$)", rest)
+            if not lead:
+                break
+            offset += lead.end()
+            rest = rest[lead.end():]
+        if not rest or re.match(r"(?:if|elif|while|until)(?=\s|$)", rest):
             continue
-        heredoc = HEREDOC.search(lines[index])
-        if heredoc and not stripped.startswith("#"):
-            heredoc_end = heredoc.group(1)
-        opener = stripped[:2]
-        if opener not in ("[[", "(("):
-            index += 1
-            continue
-        closer = re.compile(re.escape("]]" if opener == "[[" else "))") + r"(?=\s|$)")
-        start = index
-        statement = stripped
-        while not closer.search(statement) and index + 1 < len(lines):
-            index += 1
-            statement += " " + lines[index].strip()
-        close = closer.search(statement)
-        after = statement[close.end():].strip() if close else ""
-        if not after.startswith(("||", "&&")):
-            found.append(start + 1)
-        index += 1
+        operators = list(re.finditer(r"&&|\|\|", rest))
+        tail_start = operators[-1].end() if operators else 0
+        tail = rest[tail_start:]
+        offset += tail_start + len(tail) - len(tail.lstrip(SPACE))
+        tail = tail.lstrip(SPACE)
+        if tail.startswith(("[[", "((")) or re.match(r"!\s", tail):
+            found.append(line_of(masked, offset))
+    return found
+
+def errexit_disabled(text):
+    """Line numbers of `set +e` or `set +o errexit` outside cleanup()."""
+    lines = text.split("\n")
+    allowed = set()
+    for index, line in enumerate(lines):
+        if line.startswith("cleanup() {"):
+            end = next(k for k in range(index, len(lines)) if lines[k] == "}")
+            allowed.update(range(index + 1, end + 2))
+    masked = mask(without_heredocs(text))
+    found = []
+    for match in re.finditer(r"(?:^|[\s;&|{(])set\s+(?:\+[A-Za-z]*e|\+o\s+errexit)(?=\s|$)",
+                             masked):
+        number = line_of(masked, match.end())
+        if number not in allowed:
+            found.append(number)
     return found
 
 def run_stage_call_violations(text):
@@ -318,6 +456,27 @@ f() {
 ((3))
 DOC
   [[ -n g ]]
+  [[ -n h ]] && [[ -n i ]]
+  ! test -e j
+  if [[ -n k ]]; then [[ -n l ]]; fi
+  true; [[ -n m ]]
+  true || (( 2 ))
+  if ! test -e n; then :; fi
+  while ! test -e o; do break; done
+  printf 'a; [[ b ]]'
+  x="$(true; [[ -n p ]])" || die p
+  echo q # ; [[ -n q ]]
+  [[ -n r ]] || ! test -e s || die rs
+  [[ -n t ]] && echo t; [[ -n u ]] || die u
+}
+g() { [[ -n v ]]; }
+cleanup() {
+  set +e
+}
+h() {
+  set +e
+  set +o errexit
+  set -e
 }
 run_stage ok f
   run_stage nested f
@@ -327,17 +486,29 @@ if run_stage conditional f; then :; fi
 run_stage continued \\
   f
 """
-assert bare_assertions(control) == [2, 5, 7, 18], bare_assertions(control)
-assert run_stage_call_violations(control) == (6, [21, 22, 23, 24, 25]), \
+assert bare_assertions(control) == [2, 5, 7, 18, 19, 20, 21, 22, 23, 32], \
+    bare_assertions(control)
+assert errexit_disabled(control) == [37, 38], errexit_disabled(control)
+assert run_stage_call_violations(control) == (6, [42, 43, 44, 45, 46]), \
     run_stage_call_violations(control)
 
 bare = bare_assertions(source)
 assert not bare, (
-    "harness statements assert with a bare [[ ]] or (( )), which bash 3.2 "
-    f"does not apply errexit to; add || die at lines {bare}"
+    "harness statements end an assertion with [[ ]], (( )) or !, which bash "
+    f"3.2 errexit does not act on; add || die at lines {bare}"
+)
+disabled = errexit_disabled(source)
+assert not disabled, (
+    "set +e outside cleanup() suspends errexit, which is what stops a failing "
+    f"stage body; see lines {disabled}"
 )
 calls, bad = run_stage_call_violations(source)
 assert calls >= 18, f"expected the harness's run_stage calls, found {calls}"
+# The assertion lint reads the harness through mask(); a quote or
+# substitution it mis-scanned would blank the rest of the file and hide
+# every statement after it. The run_stage calls are last, so they show it.
+assert len(re.findall(r"^run_stage ", mask(without_heredocs(source)), re.M)) == calls, \
+    "the assertion lint cannot see the harness's run_stage calls"
 assert not bad, (
     "run_stage must be called as a bare top-level statement, or errexit is "
     f"suspended in its body; see lines {bad}"

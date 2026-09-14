@@ -107,9 +107,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   across a launchd restart, LaunchAgent removal on uninstall, and the
   rollback state marker could all fail and still record a passing stage.
   Each now fails its stage with a message naming the check. The
-  packaging verifier rejects a bare `[[ ]]` or `(( ))` assertion and any
-  `run_stage` call that is not a top-level statement, and shows that a
-  failing stage body records no pass.
+  packaging verifier rejects an assertion that ends in `[[ ]]`, `(( ))`
+  or `!` without an explicit check, `set +e` outside the exit cleanup,
+  and any `run_stage` call that is not a top-level statement, and shows
+  that a failing stage body records no pass.
 
 - The macOS Homebrew lifecycle harness's M1 exact-row stage parses the
   agent's platform admission line again. The line gained `posture` and
