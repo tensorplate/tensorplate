@@ -113,6 +113,7 @@ def test_profile():
     for problem, mutant in lint_cases.items():
         found = m.lint_profile(mutant)
         assert problem.split(" ")[0] in found, (problem, found, mutant)
+    refused(lambda: m.profile_ports(lint_cases["ip_rules_port_scoped"]), "not the rendered template")
     saved = m.PROFILE_TEMPLATE
     try:
         m.PROFILE_TEMPLATE = saved.replace('"localhost:{candidate}"', '"localhost:*"')
@@ -391,6 +392,26 @@ def test_processes_and_listeners():
         assert m.check_listeners(m.parse_lsof(document), pids, 18080) == failures, (document, failures)
     refused(lambda: m.parse_lsof("f3\nPTCP\n"), "before its process")
     refused(lambda: m.parse_lsof("p1\nPTCP\n"), "outside a file")
+
+    # pgrep and lsof exit 1 for "nothing matched"; anything else is an
+    # error, never an empty answer.
+    with tempfile.TemporaryDirectory(prefix="tp-offline-tools-") as directory:
+        root = pathlib.Path(directory)
+        for tool in ("pgrep", "lsof"):
+            (root / tool).write_text("#!/bin/sh\nexit \"${TP_TOOL_STATUS}\"\n")
+            (root / tool).chmod(0o755)
+        saved_env = dict(os.environ)
+        os.environ["PATH"] = f"{root}{os.pathsep}{os.environ['PATH']}"
+        try:
+            os.environ["TP_TOOL_STATUS"] = "1"
+            assert m.tensorplate_processes() == [] and m.child_pids(1) == [] and m.lsof(["-i"]) == ""
+            os.environ["TP_TOOL_STATUS"] = "2"
+            refused(m.tensorplate_processes, "pgrep failed with status 2")
+            refused(lambda: m.child_pids(1), "pgrep -P 1 failed with status 2")
+            refused(lambda: m.lsof(["-i"]), "lsof failed with status 2")
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
     passed("process roles and loopback-only listeners")
 
 
