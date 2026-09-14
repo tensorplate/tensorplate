@@ -811,9 +811,21 @@ mod tests {
     #[test]
     fn only_a_live_answer_is_ever_recorded() {
         let root = staged_state_root();
-        let mut resolved_from_a_record = live_gce_sources("g2-standard-8");
+        let live = live_gce_sources("g2-standard-8");
+        // A record detection would accept: the facts still match.
+        let mut resolved_from_a_record = live.clone();
         resolved_from_a_record.gce_machine_type = None;
-        resolved_from_a_record.machine_type_record = Some("anything".to_string());
+        resolved_from_a_record.machine_type_record = Some(
+            MachineTypeRecord::for_live_sources(&live)
+                .expect("a live answer records")
+                .to_json()
+                .expect("serializes"),
+        );
+        assert!(
+            crate::machine_type_record::establish_machine_type(&resolved_from_a_record)
+                .expect("the record is accepted")
+                .is_some()
+        );
         assert_eq!(
             SystemHostProbe::with_root(root.path())
                 .write_machine_type_record(&resolved_from_a_record)
