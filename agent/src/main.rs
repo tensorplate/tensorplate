@@ -38,8 +38,8 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    identify_platform, AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry,
-    PlatformReport, SystemHostProbe,
+    identify_platform, AdmissionPosture, MachineTypeSource, NvidiaSmiProbe, PlatformProbeError,
+    PlatformRegistry, PlatformReport, RecordWrite, SystemHostProbe,
 };
 use tensorplate_protocol::install_paths;
 
@@ -224,7 +224,12 @@ fn evaluate_platform_admission(
         Ok((report, observed, None)) => {
             PlatformAdmission::evaluate(registry, &report, &observed, operator_posture)
         }
-        Err(err) => PlatformAdmission::detection_failed(err.to_string()),
+        Err(err) => {
+            // The admission line below carries no detail for an undetected
+            // host, so this is where an offline refusal says why.
+            eprintln!("platform detection failed: {err}");
+            PlatformAdmission::detection_failed(err.to_string())
+        }
     };
     admission.apply_memory_limit(config);
     // The posture is reported with its provenance, not just its value. An
@@ -331,7 +336,21 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
 /// detection failure.
 fn observe_platform(
 ) -> Result<(PlatformReport, ObservedStack, Option<PlatformProbeError>), PlatformProbeError> {
-    let mut report = identify_platform(&SystemHostProbe::new().sources()?)?;
+    let probe = SystemHostProbe::new();
+    let sources = probe.sources()?;
+    let mut report = identify_platform(&sources)?;
+    // Refreshed on every start where the metadata service answered, and
+    // never from a machine type that was itself read from the record. A
+    // failed write is reported, not fatal: this start has its identity.
+    let record = probe.write_machine_type_record(&sources);
+    eprintln!(
+        "{}",
+        platform_identity_line(
+            report.host.identity.machine_type.as_deref(),
+            report.host.exact.machine_type_source,
+            &record,
+        )
+    );
     let mut accelerator_probe_error = None;
     if report.accelerator.is_none() {
         match NvidiaSmiProbe::new().detect() {
@@ -349,6 +368,26 @@ fn observe_platform(
         installed_packages: installed_packages(),
     };
     Ok((report, observed, accelerator_probe_error))
+}
+
+/// The `platform identity:` start-up line: the machine type, where it came
+/// from, and what recording it did. The only place outside doctor that says
+/// whether an instance's shape came from the metadata service or from the
+/// record, so the offline lifecycle stage can require the right one.
+fn platform_identity_line(
+    machine_type: Option<&str>,
+    source: Option<MachineTypeSource>,
+    record: &Result<RecordWrite, PlatformProbeError>,
+) -> String {
+    let record = match record {
+        Ok(write) => write.as_str().to_string(),
+        Err(err) => format!("failed ({err})"),
+    };
+    format!(
+        "platform identity: machine_type={} source={} record={record}",
+        machine_type.unwrap_or("none"),
+        source.map_or("none", MachineTypeSource::as_str)
+    )
 }
 
 fn load_runtime_config(
@@ -501,7 +540,55 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_dpkg_packages, parse_homebrew_packages};
+    use super::{parse_dpkg_packages, parse_homebrew_packages, platform_identity_line};
+    use tensorplate_platform::{MachineTypeSource, PlatformProbeError, RecordWrite};
+
+    #[test]
+    fn the_identity_line_names_the_machine_type_its_source_and_the_record_write() {
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::GceMetadata),
+                &Ok(RecordWrite::Written)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=written"
+        );
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::GceMetadata),
+                &Ok(RecordWrite::Unchanged)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged"
+        );
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::RecordedFromMetadata),
+                &Ok(RecordWrite::NotApplicable)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=recorded_gce_metadata \
+             record=not_applicable"
+        );
+        assert_eq!(
+            platform_identity_line(None, None, &Ok(RecordWrite::NotApplicable)),
+            "platform identity: machine_type=none source=none record=not_applicable"
+        );
+        let failed = platform_identity_line(
+            Some("g2-standard-8"),
+            Some(MachineTypeSource::GceMetadata),
+            &Err(PlatformProbeError::Unreadable {
+                source_name: "/var/lib/tensorplate/state/machine-type.json".to_string(),
+                detail: "permission denied".to_string(),
+            }),
+        );
+        assert!(
+            failed.starts_with(
+                "platform identity: machine_type=g2-standard-8 source=gce_metadata record=failed ("
+            ) && failed.contains("permission denied"),
+            "{failed}"
+        );
+    }
 
     #[test]
     fn homebrew_inventory_uses_formula_names() {
