@@ -76,8 +76,8 @@ belongs in evidence, so remove them.
 `tools/validation/check-evidence-publication.sh` is the check. List the
 run's own host name and FQDN, account name, cloud project id and number,
 instance id and zone in a literal file, one per line, kept **outside**
-the repository (the scanner refuses a literal file inside the checkout),
-then scan the bundle:
+the repository (the scanner refuses a literal file inside the checkout
+or inside a checkout that encloses it), then scan the bundle:
 
 ```bash
 tools/validation/check-evidence-publication.sh \

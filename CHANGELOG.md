@@ -15,8 +15,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   addresses, email addresses, cloud project paths, `.internal` and
   `.local` names, serials, credentials, planning identifiers, journal
   fields beyond a service's own, and symlinks, archives or other files
-  that are not text. It reads JSON strings and journalctl's byte-array
-  values as well as raw lines, and scans file and directory names too.
+  that are not text. It reads raw lines, lines with terminal styling and
+  backslash escapes taken out, and the strings and journalctl byte-array
+  values of every JSON object or array in a file, including
+  concatenated pretty-printed records and records quoted after other
+  text, and it scans file and directory names too.
   Operators add their own host, account, project and instance names
   from a literal file kept outside the repository. Findings name a file,
   a line and a class but never the matched value. Exit 0 is publishable,

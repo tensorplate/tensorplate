@@ -252,13 +252,13 @@ stage meaningless.
    stage that never ran.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
-   Convert before sanitizing, as for the Jetson, so the report is derived
-   from what the harness recorded; then sanitize the report's `detail`
-   and the logs it quotes with the same synthetic values. **Sanitize
-   before the first commit** — see that directory's README — then scan
-   the sanitized copy with the Mac's computer name, local host name,
-   account name and any other name of this machine listed in a literal
-   file kept outside the repository, and file only on exit 0:
+   Convert first, so the report reflects the harness's own `stages.tsv`.
+   The converter's `detail` names harness stages and never quotes a log,
+   so the report needs no sanitizing; the logs do. **Sanitize before the
+   first commit** — see that directory's README — then scan the sanitized
+   copy with the Mac's computer name, local host name, account name and
+   any other name of this machine listed in a literal file kept outside
+   the repository, and file only on exit 0:
 
    ```bash
    tools/validation/check-evidence-publication.sh \
