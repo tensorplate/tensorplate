@@ -794,6 +794,13 @@ restart_services() {
 
 exercise_crash_loop() {
   agent_config="$(brew --prefix)/etc/tensorplate/agent.json"
+  # launchd appends to this log and nothing truncates it, so config errors
+  # from earlier runs are still in it. Only output written after the
+  # config is broken shows the agent failing on this run's config.
+  crash_loop_agent_log="$(brew --prefix)/var/log/tensorplate/agent.error.log" ||
+    die "brew --prefix failed"
+  crash_loop_agent_log_start="$(stat -f '%z' "$crash_loop_agent_log")" ||
+    die "cannot size the agent launchd error log before breaking the config"
   agent_config_backup="${work_dir}/agent.json"
   cp "$agent_config" "$agent_config_backup"
   printf '{ invalid json\n' >"$agent_config"
@@ -801,7 +808,11 @@ exercise_crash_loop() {
   brew services restart tensorplate-agent >/dev/null 2>&1 || true
   sleep 12
   launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
-  grep -q "config" "$(brew --prefix)/var/log/tensorplate/agent.error.log"
+  tail -c "+$((crash_loop_agent_log_start + 1))" "$crash_loop_agent_log" \
+    >"${work_dir}/agent-error-crash-loop.log" ||
+    die "cannot read the agent launchd error log after breaking the config"
+  grep -q "config" "${work_dir}/agent-error-crash-loop.log" ||
+    die "agent logged no config error after its config was broken"
   cp "$agent_config_backup" "$agent_config"
   chmod 0640 "$agent_config"
   agent_config_backup=""

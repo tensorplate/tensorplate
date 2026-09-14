@@ -110,6 +110,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   verifier renders the line from the agent's own format string and
   requires the harness pattern to recover the row, reason and ceiling.
 
+- The macOS Homebrew lifecycle harness's launchd crash-loop stage
+  requires a config error written after it broke the agent config. It
+  previously searched the whole append-only `agent.error.log`, so a
+  config error left by any earlier run on the same Mac satisfied it
+  even if the agent never re-read the broken config.
+
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
   publication and build-only validation; final publication still requires

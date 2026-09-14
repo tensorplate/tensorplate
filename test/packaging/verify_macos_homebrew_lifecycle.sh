@@ -414,6 +414,114 @@ for posture, posture_from, evidence in (
 print("macOS admission line contract: pass")
 PY
 
+# launchd-crash-loop must see a config error written after it broke the
+# config, not one left in the append-only agent log by an earlier run.
+# Run the real stage body against a fake Homebrew prefix and launchd.
+# Every case also runs from a context where errexit is suspended, so each
+# failure is shown to come from the stage's own explicit check.
+python3 - "$harness" <<'PY'
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+def function(name):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+fake_restart = r'''
+import json
+import os
+import pathlib
+
+root = pathlib.Path(os.environ["TP_ROOT"])
+config = root / "prefix/etc/tensorplate/agent.json"
+log = root / "prefix/var/log/tensorplate/agent.error.log"
+try:
+    json.loads(config.read_text())
+    line = "tensorplate-agent listening on agent.sock\n"
+except ValueError:
+    line = "" if os.environ["TP_MODE"] == "agent-silent" else "config error: agent.json is not valid JSON\n"
+with log.open("a") as handle:
+    handle.write(line)
+'''
+
+helpers = "\n".join(function(name) for name in (
+    "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
+    "exercise_crash_loop",
+))
+stubs = r'''
+set -Eeuo pipefail
+evidence_dir="$TP_ROOT/evidence"
+work_dir="$TP_ROOT/work"
+stage_results="$evidence_dir/stages.tsv"
+brew() {
+  case "$*" in
+    --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
+    "services list") printf 'tensorplate-agent started\n' ;;
+    "services restart tensorplate-agent") python3 "$TP_ROOT/fake-restart.py" ;;
+    *) return 9 ;;
+  esac
+}
+stat() {
+  [[ "$1 $2" == "-f %z" ]] || return 9
+  python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$3"
+}
+launchctl() { printf 'state = running\n'; }
+sleep() { :; }
+tensorplate() { printf '{}\n'; }
+'''
+
+prior_config_error = "config error: agent.json is not valid JSON\n"
+cases = {
+    # mode: (earlier-run log content, expected failure message or None)
+    "config-error-this-run": ("tensorplate-agent listening on agent.sock\n", None),
+    "config-error-earlier-run-only": (
+        prior_config_error, "agent logged no config error after its config was broken"),
+    "agent-silent": ("", "agent logged no config error after its config was broken"),
+    "agent-log-missing": (
+        None, "cannot size the agent launchd error log before breaking the config"),
+}
+for mode, (earlier, message) in cases.items():
+    fake_mode = "agent-silent" if mode in ("config-error-earlier-run-only", "agent-silent") else mode
+    for call in ("run_stage launchd-crash-loop exercise_crash_loop",
+                 "run_stage launchd-crash-loop exercise_crash_loop || true"):
+        with tempfile.TemporaryDirectory(prefix="tp-homebrew-crash-loop-") as directory:
+            root = pathlib.Path(directory)
+            for name in ("evidence", "work", "prefix/etc/tensorplate",
+                         "prefix/var/log/tensorplate"):
+                (root / name).mkdir(parents=True)
+            original_config = '{"listen": "agent.sock"}\n'
+            (root / "prefix/etc/tensorplate/agent.json").write_text(original_config)
+            if earlier is not None:
+                (root / "prefix/var/log/tensorplate/agent.error.log").write_text(earlier)
+            (root / "fake-restart.py").write_text(fake_restart)
+            (root / "probe.sh").write_text(helpers + stubs + call + "\n")
+            env = dict(os.environ, TP_ROOT=directory, TP_MODE=fake_mode)
+            result = subprocess.run(["bash", str(root / "probe.sh")], env=env,
+                                    capture_output=True, text=True)
+            rows_path = root / "evidence/stages.tsv"
+            rows = rows_path.read_text() if rows_path.exists() else ""
+            log_path = root / "evidence/launchd-crash-loop.log"
+            log = log_path.read_text() if log_path.exists() else ""
+            context = (mode, call, result.returncode, log, result.stderr)
+            if message is None:
+                assert result.returncode == 0, context
+                assert "launchd-crash-loop\tpass\t" in rows, context
+                restored = (root / "prefix/etc/tensorplate/agent.json").read_text()
+                assert restored == original_config, context
+            else:
+                assert result.returncode != 0, context
+                assert "launchd-crash-loop\tpass\t" not in rows, context
+                assert f"error: {message}" in log, context
+    print(f"macOS launchd crash-loop: {mode}: pass")
+PY
+
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$harness"
 else
