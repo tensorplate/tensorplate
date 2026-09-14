@@ -355,12 +355,14 @@ if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
   if ! command -v "$TP_AMD64_CXX" >/dev/null 2>&1; then
     die "$TP_AMD64_CXX is required for an $SECONDARY_ARCH build (tools/release/amd64-build-profile.sh); install it first"
   fi
-  # CMake reads CXX only when a build directory is first configured, so a
-  # directory configured with another compiler would silently keep it.
+  # CMake reads CXX only until a build directory records a compiler, so a
+  # directory configured with another compiler would silently keep it. A
+  # cache with no compiler recorded, left by a configure that stopped before
+  # compiler detection (no Ninja, say), still takes CXX from the environment.
   if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
     cached_cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")" ||
       cached_cxx=""
-    if [[ "${cached_cxx##*/}" != "${TP_AMD64_CXX##*/}" ]]; then
+    if [[ -n "$cached_cxx" && "${cached_cxx##*/}" != "${TP_AMD64_CXX##*/}" ]]; then
       die "$BUILD_DIR was configured with C++ compiler '${cached_cxx}', not $TP_AMD64_CXX; remove $BUILD_DIR or pass another --build-dir"
     fi
   fi

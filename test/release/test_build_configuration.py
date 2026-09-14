@@ -435,10 +435,23 @@ class BuildConfigurationTests(unittest.TestCase):
     # -- amd64 refusals --------------------------------------------------------
 
     def test_amd64_refuses_backend_overrides(self) -> None:
-        result = self.run_builder(
-            self.artifact_paths(), arch="amd64", env={"TP_ENABLE_TENSORRT": "OFF"}
-        )
-        self.assert_refused(result, "TP_ENABLE_TENSORRT", PROFILE)
+        # Each value disagrees with the profile. amd64 never reads these
+        # variables, so one the builder stopped refusing would be ignored
+        # without a word instead of changing the build.
+        overrides = {
+            "TP_ENABLE_TENSORRT": "ON",
+            "TP_REQUIRE_TENSORRT_SDK": "ON",
+            "TP_ENABLE_LIBTORCH": "ON",
+            "TP_ENABLE_PYTHON_PYTORCH_SIDECAR": "OFF",
+        }
+        for name, value in overrides.items():
+            with self.subTest(name=name):
+                self.cmake_log.unlink(missing_ok=True)
+                self.cargo_marker.unlink(missing_ok=True)
+                result = self.run_builder(
+                    self.artifact_paths(), arch="amd64", env={name: value}
+                )
+                self.assert_refused(result, f"{name} is set", PROFILE)
 
     def test_amd64_refuses_a_missing_profile_compiler(self) -> None:
         profile = self.repo / PROFILE
@@ -473,6 +486,18 @@ class BuildConfigurationTests(unittest.TestCase):
         )
         result = self.run_builder(self.artifact_paths(), arch="amd64")
         self.assert_reached_configure(result)
+
+    def test_amd64_reuses_a_build_dir_whose_cache_names_no_compiler(self) -> None:
+        # A first configure that stops before compiler detection, for example
+        # because Ninja is not installed, leaves a cache like this one. CMake
+        # still takes CXX from the environment on the next run.
+        cache = self.repo / "build/snapshot-amd64/CMakeCache.txt"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("CMAKE_MAKE_PROGRAM:FILEPATH=CMAKE_MAKE_PROGRAM-NOTFOUND\n")
+        profile = self.profile()
+        result = self.run_builder(self.artifact_paths(), arch="amd64")
+        call = self.assert_reached_configure(result)
+        self.assertEqual((call["CC"], call["CXX"]), (profile["CC"], profile["CXX"]))
 
     # -- manifest and checksums paths ------------------------------------------
 
