@@ -248,6 +248,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A stage's pass row is written as soon as its body returns, so what
+# stops a failing body is errexit, and errexit is only active inside the
+# body because every call below is a bare top-level statement. Calling
+# run_stage from an `if`, `while`, `!`, or either side of `||` or `&&`
+# suspends errexit for the whole body, and a failed command would then
+# record pass. For the same reason a body must not use a bare `[[ ]]` or
+# `(( ))` statement as an assertion: macOS /bin/bash is 3.2, which does
+# not apply errexit to either, so each one needs an explicit `|| die`.
+# test/packaging/verify_macos_homebrew_lifecycle.sh enforces both rules.
 run_stage() {
   active_stage="$1"
   shift
@@ -528,13 +537,20 @@ verify_packaged_closure() {
     formula_is_installed "$formula_name" ||
       die "formula is not installed: ${formula_name}"
   done
-  [[ "$(command -v tensorplate)" == "${prefix}/bin/tensorplate" ]]
-  [[ -x "$(brew --prefix tensorplate-agent)/bin/tensorplate-agent" ]]
-  [[ -x "$(brew --prefix tensorplate-serving)/libexec/tensorplate-serving" ]]
-  [[ -x "$(brew --prefix tensorplate-observability)/bin/tensorplate-observability" ]]
-  [[ -x "$(brew --prefix tensorplate-backend-python-pytorch)/bin/tensorplate-backend-python-pytorch" ]]
-  [[ -f "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" ]]
-  [[ -f "${prefix}/share/tensorplate/backends/python_pytorch/backend.json" ]]
+  [[ "$(command -v tensorplate)" == "${prefix}/bin/tensorplate" ]] ||
+    die "tensorplate on PATH is not the Homebrew launcher at ${prefix}/bin/tensorplate"
+  [[ -x "$(brew --prefix tensorplate-agent)/bin/tensorplate-agent" ]] ||
+    die "tensorplate-agent binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-serving)/libexec/tensorplate-serving" ]] ||
+    die "tensorplate-serving binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-observability)/bin/tensorplate-observability" ]] ||
+    die "tensorplate-observability binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-backend-python-pytorch)/bin/tensorplate-backend-python-pytorch" ]] ||
+    die "tensorplate-backend-python-pytorch binary is missing or not executable"
+  [[ -f "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" ]] ||
+    die "installed platform registry is missing the macos26-m1pro-16gb row"
+  [[ -f "${prefix}/share/tensorplate/backends/python_pytorch/backend.json" ]] ||
+    die "installed python_pytorch backend descriptor is missing"
 
   for directory in \
     "${prefix}/etc/tensorplate" \
@@ -546,9 +562,12 @@ verify_packaged_closure() {
   done
   [[ "$(stat -f '%Lp' "${prefix}/var/run/tensorplate")" == "700" ]] ||
     die "unexpected mode for ${prefix}/var/run/tensorplate"
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/agent.json")" == "640" ]]
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/observability.json")" == "640" ]]
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]]
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/agent.json")" == "640" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/agent.json"
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/observability.json")" == "640" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/observability.json"
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/cli.json"
 }
 
 verify_m1_exact_row() {
@@ -625,7 +644,8 @@ start_services() {
   wait_for_service tensorplate-agent
   wait_for_service tensorplate-observability
   wait_for_agent_ready
-  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "600" ]]
+  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "600" ]] ||
+    die "agent socket is not mode 0600"
   if brew services list | awk '$1 == "tensorplate-serving" {found = 1} END {exit !found}'; then
     die "tensorplate-serving unexpectedly exposes a Homebrew service"
   fi
@@ -763,9 +783,11 @@ restart_services() {
     launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
-  [[ -n "$before_agent" && -n "$after_agent" && "$before_agent" != "$after_agent" ]]
+  [[ -n "$before_agent" && -n "$after_agent" && "$before_agent" != "$after_agent" ]] ||
+    die "agent PID did not change across restart: ${before_agent:-none} -> ${after_agent:-none}"
   [[ -n "$before_observability" && -n "$after_observability" &&
-    "$before_observability" != "$after_observability" ]]
+    "$before_observability" != "$after_observability" ]] ||
+    die "observability PID did not change across restart: ${before_observability:-none} -> ${after_observability:-none}"
   printf 'agent %s -> %s\nobservability %s -> %s\n' \
     "$before_agent" "$after_agent" "$before_observability" "$after_observability"
 }
@@ -814,9 +836,12 @@ uninstall_candidate() {
       die "formula remains installed after uninstall: ${formula_name}"
     fi
   done
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]]
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]]
-  [[ ! -e "$(brew --prefix)/bin/tensorplate" ]]
+  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]] ||
+    die "tensorplate-agent LaunchAgent plist remains after uninstall"
+  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]] ||
+    die "tensorplate-observability LaunchAgent plist remains after uninstall"
+  [[ ! -e "$(brew --prefix)/bin/tensorplate" ]] ||
+    die "tensorplate launcher remains after uninstall"
 }
 
 install_baseline() {
@@ -853,8 +878,10 @@ rollback_to_baseline() {
   printf 'preserve-across-formula-rollback\n' >"$lifecycle_marker"
   remove_candidate_graph
   install_baseline
-  [[ "$(cat "$lifecycle_marker")" == "preserve-across-formula-rollback" ]]
-  [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]]
+  [[ "$(cat "$lifecycle_marker")" == "preserve-across-formula-rollback" ]] ||
+    die "lifecycle state marker did not survive the rollback"
+  [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]] ||
+    die "rollback did not link the baseline tensorplate ${baseline_version}"
   rm -f "$lifecycle_marker"
   lifecycle_marker=""
 }

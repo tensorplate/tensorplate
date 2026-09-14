@@ -228,6 +228,144 @@ if "$harness" \
   exit 1
 fi
 
+# run_stage writes a pass row as soon as its body returns, so a failing
+# body is stopped only by errexit. That holds only while every call is a
+# bare top-level statement and no body asserts with a bare `[[ ]]` or
+# `(( ))`, which macOS /bin/bash 3.2 exempts from errexit. Lint both
+# rules against the harness, prove each lint discriminates on a control,
+# and run the real run_stage to show a failing body records no pass.
+python3 - "$harness" <<'PY'
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+
+def function(name):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+HEREDOC = re.compile(r"(?<!<)<<-?'?([A-Z_][A-Z0-9_]*)'?(?:\s|$)")
+
+def bare_assertions(text):
+    """Line numbers of `[[`/`((` statements not followed by `||` or `&&`."""
+    lines = text.splitlines()
+    found = []
+    heredoc_end = None
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if heredoc_end is not None:
+            if stripped == heredoc_end:
+                heredoc_end = None
+            index += 1
+            continue
+        heredoc = HEREDOC.search(lines[index])
+        if heredoc and not stripped.startswith("#"):
+            heredoc_end = heredoc.group(1)
+        opener = stripped[:2]
+        if opener not in ("[[", "(("):
+            index += 1
+            continue
+        closer = re.compile(re.escape("]]" if opener == "[[" else "))") + r"(?=\s|$)")
+        start = index
+        statement = stripped
+        while not closer.search(statement) and index + 1 < len(lines):
+            index += 1
+            statement += " " + lines[index].strip()
+        close = closer.search(statement)
+        after = statement[close.end():].strip() if close else ""
+        if not after.startswith(("||", "&&")):
+            found.append(start + 1)
+        index += 1
+    return found
+
+def run_stage_call_violations(text):
+    """Line numbers of run_stage calls that are not bare top-level statements."""
+    calls = 0
+    bad = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith("#") or line.startswith("run_stage() {"):
+            continue
+        if not re.search(r"\brun_stage\b", line):
+            continue
+        calls += 1
+        if (not re.fullmatch(r"run_stage [a-z0-9][a-z0-9-]* [^|&;]+", line)
+                or line.rstrip().endswith("\\")):
+            bad.append(number)
+    return calls, bad
+
+control = """\
+f() {
+  [[ -e x ]]
+  [[ -e y ]] || die y
+  if [[ -e z ]]; then :; fi
+  [[ -n a &&
+    -n b ]]
+  (( 0 ))
+  for ((i = 0; i < 1; i += 1)); do :; done
+  [[ -n c &&
+    -n d ]] ||
+    die cd
+  (( 1 )) || die one
+  [[ -n e ]] && echo e
+  python3 - <<'DOC'
+[[1, 2]]
+((3))
+DOC
+  [[ -n g ]]
+}
+run_stage ok f
+  run_stage nested f
+run_stage masked f || true
+run_stage chained f && true
+if run_stage conditional f; then :; fi
+run_stage continued \\
+  f
+"""
+assert bare_assertions(control) == [2, 5, 7, 18], bare_assertions(control)
+assert run_stage_call_violations(control) == (6, [21, 22, 23, 24, 25]), \
+    run_stage_call_violations(control)
+
+bare = bare_assertions(source)
+assert not bare, (
+    "harness statements assert with a bare [[ ]] or (( )), which bash 3.2 "
+    f"does not apply errexit to; add || die at lines {bare}"
+)
+calls, bad = run_stage_call_violations(source)
+assert calls >= 18, f"expected the harness's run_stage calls, found {calls}"
+assert not bad, (
+    "run_stage must be called as a bare top-level statement, or errexit is "
+    f"suspended in its body; see lines {bad}"
+)
+
+with tempfile.TemporaryDirectory(prefix="tp-homebrew-run-stage-") as directory:
+    root = pathlib.Path(directory)
+    script = "\n".join(function(name) for name in ("die", "note", "pass", "run_stage"))
+    script += r'''
+set -Eeuo pipefail
+evidence_dir="$TP_ROOT"
+stage_results="$TP_ROOT/stages.tsv"
+succeeds() { touch "$TP_ROOT/succeeded"; }
+fails_midway() { false; touch "$TP_ROOT/after-failure"; }
+run_stage control succeeds
+run_stage probe fails_midway
+'''
+    (root / "probe.sh").write_text(script)
+    result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True,
+                            text=True, env=dict(os.environ, TP_ROOT=directory))
+    rows = (root / "stages.tsv").read_text() if (root / "stages.tsv").exists() else ""
+    assert (root / "succeeded").exists() and "control\tpass\t" in rows, (rows, result.stderr)
+    assert result.returncode != 0, "run_stage returned success for a failing body"
+    assert "probe\tpass\t" not in rows, f"run_stage recorded pass for a failing body: {rows}"
+    assert not (root / "after-failure").exists(), "run_stage kept running a failed body"
+print("macOS errexit rules: pass")
+PY
+
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$harness"
 else

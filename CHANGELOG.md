@@ -91,6 +91,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The macOS Homebrew lifecycle harness enforces sixteen assertions that
+  macOS `/bin/bash` 3.2 silently skipped: bash 3.2 does not apply errexit
+  to a failing `[[ ]]` statement, so the launcher, binary and descriptor
+  presence checks, config file modes, the `0600` agent socket, PID changes
+  across a launchd restart, LaunchAgent removal on uninstall, and the
+  rollback state marker could all fail and still record a passing stage.
+  Each now fails its stage with a message naming the check. The
+  packaging verifier rejects a bare `[[ ]]` or `(( ))` assertion and any
+  `run_stage` call that is not a top-level statement, and shows that a
+  failing stage body records no pass.
+
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
   publication and build-only validation; final publication still requires
