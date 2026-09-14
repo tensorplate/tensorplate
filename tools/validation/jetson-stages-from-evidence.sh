@@ -9,6 +9,10 @@
 # converter reads, so the documented Jetson runbook had a converter step
 # with no possible input.
 #
+# The Jetson row's lifecycle report now comes from jetson-lifecycle.sh,
+# which writes it natively. This adapter is no longer part of that
+# runbook; it is kept, and tested, until it is retired.
+#
 # Instrumenting the harness itself would mean editing, untested, code that
 # only runs on a device nobody can reach from CI. This reads its evidence
 # instead: an adapter over files, which is testable here.
