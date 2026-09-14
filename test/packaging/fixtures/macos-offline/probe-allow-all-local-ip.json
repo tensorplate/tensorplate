@@ -1,0 +1,29 @@
+{
+  "control": {
+    "udp_fe80_1_unlisted_port": "ok",
+    "udp_test_net_v4": "ENETUNREACH",
+    "unix_mdnsresponder": "ok"
+  },
+  "probe": {
+    "allowed": {
+      "tcp_loopback_listen_candidate_port": "ok",
+      "unix_agent_socket": "ok"
+    },
+    "denied": {
+      "tcp_metadata_link_local_v4": "ENETUNREACH",
+      "tcp_public_v4": "ENETUNREACH",
+      "udp_documentation_v6": "EHOSTUNREACH",
+      "udp_fe80_1_unlisted_port": "ok",
+      "udp_loopback_unlisted_port": "ok",
+      "udp_test_net_v4": "ENETUNREACH",
+      "udp_test_net_v4_from_child": "ENETUNREACH",
+      "unix_mdnsresponder": "EPERM"
+    },
+    "health": {
+      "active_model_id": "offline-profile-preflight",
+      "request": "ok",
+      "state": "ready"
+    }
+  },
+  "profile_variant": "allow-all-local-ip"
+}

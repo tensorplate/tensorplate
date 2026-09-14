@@ -1,0 +1,29 @@
+{
+  "control": {
+    "udp_fe80_1_unlisted_port": "ok",
+    "udp_test_net_v4": "ENETUNREACH",
+    "unix_mdnsresponder": "ok"
+  },
+  "probe": {
+    "allowed": {
+      "tcp_loopback_listen_candidate_port": "ok",
+      "unix_agent_socket": "ok"
+    },
+    "denied": {
+      "tcp_metadata_link_local_v4": "EPERM",
+      "tcp_public_v4": "EPERM",
+      "udp_documentation_v6": "EPERM",
+      "udp_fe80_1_unlisted_port": "EPERM",
+      "udp_loopback_unlisted_port": "EPERM",
+      "udp_test_net_v4": "EPERM",
+      "udp_test_net_v4_from_child": "EPERM",
+      "unix_mdnsresponder": "ok"
+    },
+    "health": {
+      "active_model_id": "offline-profile-preflight",
+      "request": "ok",
+      "state": "ready"
+    }
+  },
+  "profile_variant": "resolver-deny-first"
+}
