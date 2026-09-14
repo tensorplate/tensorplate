@@ -365,6 +365,9 @@ def fake_tensorplate(args):
         if "agent-not-ready-after" in MODES and not denial_active(state) and state.get("offline_done"):
             return 3
         print(json.dumps(status_document(state)))
+        # A good document with a failing exit, once the fresh deploy is in.
+        if "status-exit-nonzero-after-deploy" in MODES and state.get("offline_done") and denial_active(state):
+            return 1
         return 0
     if command == "deploy":
         if "deploy-fails" in MODES:
@@ -395,7 +398,8 @@ def fake_tensorplate(args):
         outputs = [{"name": "echo_probe", "tensor": tensor, "payload_b64": sent["payload_b64"]}]
         with open(args[args.index("--output-file") + 1], "w", encoding="utf-8") as handle:
             json.dump({"outputs": outputs}, handle)
-        return 0
+        # An echoed response with a failing exit.
+        return 1 if "infer-exit-nonzero" in MODES else 0
     if command == "doctor":
         if "crash-during-doctor" in MODES:
             job = state["labels"][label_of(AGENT)]

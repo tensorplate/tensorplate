@@ -380,6 +380,10 @@ def test_sandbox_readback():
                 with_patches({"sandbox_check": recorded},
                              lambda: refused(lambda: m.sandbox_states(profile, [], [], "sandboxed"),
                                              "no processes"))
+                # Only optional processes, all gone: nothing was read.
+                result, failures = with_patches(
+                    {"sandbox_check": recorded}, lambda: m.sandbox_states(profile, [], [99999], "sandboxed"))
+                assert failures == ["processes_read"] and result["processes_read"] == 0, (result, failures)
                 result, failures = with_patches(
                     {"sandbox_check": lambda pid, op: 1 if pid == live.pid else recorded(pid, op)},
                     lambda: m.sandbox_states(profile, [], [live.pid], "unsandboxed"))
@@ -1034,7 +1038,9 @@ FAILURE_MODES = {
                         "evidence", True),
     "deploy-fails": ("tensorplate deploy failed under the offline profile with status 4", True),
     "deploy-keeps-smoke": ("status under the offline profile does not report the new deployment", True),
+    "status-exit-nonzero-after-deploy": ("tensorplate status failed under the offline profile after the deploy", True),
     "infer-no-echo": ("inference under the offline profile did not echo the request", True),
+    "infer-exit-nonzero": ("tensorplate infer failed under the offline profile", True),
     "probe-leaks": ("the offline profile did not refuse the network as required", True),
     "health-not-ready": ("the offline profile did not refuse the network as required", True),
     "no-sidecar": ("the agent's process tree lacks a serving worker or backend sidecar", True),
