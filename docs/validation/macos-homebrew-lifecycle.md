@@ -10,6 +10,10 @@ packaged-only discovery, the PyTorch MPS capability, deploy smoke, offline
 checks, upgrade continuity from the CLI-only formula, rollback, and uninstall.
 The harness also has a status-logs stage covering status and log output. It
 was added after the 2026-08-17 record, which therefore does not include it.
+That record's offline checks ran doctor, without its agent probe, and an MPS
+check under a sandbox that denied all networking. The offline-runtime stage
+now runs the services themselves with the network denied, and the
+offline-profile preflight stage is new. Neither has a hardware record yet.
 The installed-registry stage also proves that live M1 Pro detection selects
 the exact Production row instead of the lower-priority M-series Preview
 fallback, while retaining the fallback's 16 GiB admission ceiling.
@@ -97,7 +101,8 @@ The run is successful only when every stage in `summary.json` and
 `sanitized-transcript.json` is `pass`. `host-facts.json` deliberately
 excludes serial numbers, hardware UUIDs, and provisioning identifiers.
 Attach the summary, sanitized transcript, host facts, formula pin, deploy
-input, deploy result, and status-logs result to the pull request. Keep the
+input, deploy result, status-logs result, offline-profile result and
+offline-runtime result to the pull request. Keep the
 raw `*.log` files local; the transcript contains only allowlisted structured
 results and excludes operator paths and environment values.
 
@@ -136,11 +141,69 @@ launcher honours an existing value. The raw status and logs output stays
 in the local `status-logs.log`; `status-logs.json` carries only the
 deployment id, counts and pass results.
 
-The offline stage runs the installed doctor with its agent probe skipped and
-the PyTorch MPS probe under a macOS sandbox that denies network access. The
-agent probe is skipped because the sandbox denies local socket access along
-with external networking. The stage does not disable the Mac's network
-interface and therefore does not disrupt the operator session.
+The offline-runtime stage runs the installed services and CLI with the
+network denied, without touching the Mac's interfaces or the operator
+session. It renders a `sandbox-exec` profile from the installed
+`agent.json` that denies every network operation except loopback on the
+worker's serving and candidate ports (18080 and 18081) and unix sockets
+other than mDNSResponder, so host names do not resolve. It refuses to
+render unless the worker binds `127.0.0.1` on two distinct ports. Both
+launchd jobs are stopped with `brew services stop --keep` and run again
+with `brew services run --file` from plists that differ from the
+formula's only by starting the program under `sandbox-exec`. launchd
+keeps supervising them, and the plists in `~/Library/LaunchAgents` stay
+the normal ones.
+
+Under that profile the agent must recover the deploy-smoke deployment and
+log exactly one admission decision since the services restarted, for
+`macos26-m1pro-16gb` with reason `none` and validated evidence. A fresh
+deploy of the MPS fixture under a new deployment id, status, inference,
+`tensorplate doctor` with its agent probe, and the MPS probe must all
+pass under the same profile. A probe inside the sandbox must be refused
+with `EPERM` for a public address, the link-local metadata address,
+IPv4 and IPv6 documentation addresses, `fe80::1`, a loopback port other
+than the serving ports, a child process's send, and mDNSResponder, while
+an unsandboxed control making the same sends is not refused. The probe's
+non-loopback sockets are pinned to `lo0`, so no probe packet leaves the
+Mac even if the sandbox failed to enforce.
+
+`sandbox_check` must read the agent, its serving worker and backend
+sidecar, and the observability service as sandboxed with the network
+denied. Each read is bracketed by a check that the process is still the
+same one, because `sandbox_check` reports an exited pid as sandboxed, and
+every run first proves the readback tells a sandboxed process from an
+unsandboxed or exited one. Every internet socket the agent's process
+tree holds must be bound to loopback, with the serving listener among
+them, and both jobs must end the stage on the pid they started with,
+after one launchd run. The stage then boots out both sandboxed jobs,
+starts the normal ones, and requires their loaded plists to match the
+formula plists and no sandboxed TensorPlate process to remain.
+`offline-runtime.json` records the profile hash and ports, probe and
+control results as errno names, the readback and socket results, process
+counts and the admission decision, with no pids, paths or addresses.
+
+The offline-profile stage runs in the preflight path, before anything is
+installed. It renders the same profile on two ephemeral loopback ports and
+runs the probe, the control and the readback controls against a local
+listener. A macOS update that changes how `sandbox-exec` or its profile
+language behaves therefore fails the run before Homebrew is touched. It
+proves nothing about the installed services, so it is not mapped to a
+canonical lifecycle stage.
+
+The profile is weaker than an IP firewall, and these gaps are accepted:
+
+- The profile language's `localhost` matches every address configured on
+  the Mac, whatever the interface. macOS configures `fe80::1` on `lo0`, so
+  `fe80::1` reached through another interface — often the LAN router's
+  address — is allowed on the two serving ports.
+- A service listening on a wildcard address on those ports would accept
+  LAN connections. The stage's loopback-only socket assertion refuses it.
+- Brokers reachable over unix sockets or XPC, such as the Docker Desktop
+  socket or `nsurlsessiond`, are outside what the profile covers.
+  TensorPlate uses none.
+
+`sandbox-exec` is deprecated. The offline-profile and in-stage probes fail
+the run if it stops enforcing the profile or disappears.
 
 ## Rollback and recovery
 
@@ -152,9 +215,31 @@ formulae that disappear during uninstall; the harness re-adds only those
 missing component entries for the later upgrade stage and removes exactly
 the entries it added before exit.
 
-If the harness is interrupted outside its cleanup path:
+Run the harness from a terminal you keep open. On a failure, or on INT,
+TERM or HUP, cleanup records the interrupted stage as failed and prints
+to that terminal. It then boots out any TensorPlate launchd job still
+running under `sandbox-exec`, starts the normal jobs again if the offline
+stage stopped them, and restores the agent config. It ignores INT, TERM
+and HUP while it does those, so a second Ctrl-C cannot leave a sandboxed
+service behind. The Homebrew restore that follows can still be
+interrupted. The sandboxed jobs are never copied into
+`~/Library/LaunchAgents`, so a logout or reboot also drops them. If
+cleanup reports that a sandboxed job is still loaded, remove it and start
+the normal jobs:
 
 ```bash
+launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
+launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
+brew services start tensorplate-observability
+brew services start tensorplate-agent
+```
+
+If the harness is killed with SIGKILL, or is otherwise interrupted
+outside its cleanup path:
+
+```bash
+launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
+launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
 brew services stop tensorplate-agent
 brew services stop tensorplate-observability
 brew uninstall tensorplate tensorplate-agent \

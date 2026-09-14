@@ -198,7 +198,12 @@ restores a baseline on exit and a half-cleaned host makes its rollback
 stage meaningless. `TENSORPLATE_CLI_CONFIG` must be unset in the shell
 that runs the harness: the Homebrew launcher honours a value that is
 already set, and the status-logs stage fails unless the CLI reads the
-packaged configuration.
+packaged configuration. Run it from a terminal that stays open: on a
+failure or an INT, TERM or HUP, cleanup prints there and puts both
+services back under their normal launchd jobs before restoring the
+baseline. If it reports a sandboxed job still loaded, run the
+`launchctl bootout` command it prints; `macos-homebrew-lifecycle.md`
+has the full recovery.
 
 1. Confirm identity, as above. PASS: `platform_row` resolves
    `macos26-m1pro-16gb`, and `model_class_rows` reports `chunked_policy
@@ -255,6 +260,20 @@ packaged configuration.
    agent writes no structured events. `host-facts` stays unmapped: it
    collects inventory before anything is installed and observes neither
    status nor logs.
+
+   `offline-runtime` backs `offline`. Both launchd services, startup
+   recovery, a fresh deploy, inference, doctor and the MPS probe run
+   under a `sandbox-exec` profile. The profile allows only loopback on
+   the two serving ports, plus unix sockets other than mDNSResponder, so
+   names do not resolve. A probe inside the sandbox must be refused every
+   other destination. This is not an IP firewall. `fe80::1`, reached
+   through another interface on those two ports, is an accepted gap, and
+   so are unix-socket and XPC brokers; `macos-homebrew-lifecycle.md`
+   lists them. `offline-profile` stays unmapped. It checks the profile
+   against `sandbox-exec` during preflight, before anything is
+   installed. The converter keeps each canonical stage's worst status,
+   so mapping it to `offline` would let a `--preflight-only` run report
+   offline as passed.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
    **Sanitize first** — see that directory's README.

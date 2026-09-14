@@ -85,6 +85,34 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The macOS Homebrew lifecycle harness's offline stage now runs the
+  installed services with the network denied, not just doctor and an MPS
+  check. Both launchd services run under a `sandbox-exec` profile that
+  allows only loopback on the worker's serving and candidate ports and
+  unix sockets other than mDNSResponder, loaded from derived plists so
+  launchd still supervises them. Under that profile the agent must
+  recover the deploy-smoke deployment on the exact M1 Pro row with
+  validated evidence, and a fresh deploy, inference, doctor with its
+  agent probe and the MPS probe must pass. A probe inside the sandbox
+  must be refused every other destination with `EPERM` while the same
+  sends outside it are not; every process in the service trees must read
+  back as sandboxed with the network denied; every socket they hold must
+  be bound to loopback; and neither service may restart during the stage.
+  The stage then puts both services back under their normal launchd jobs
+  and checks that nothing sandboxed remains. Accepted gaps, documented in
+  the runbook: `fe80::1` through another interface on the two serving
+  ports, and brokers reachable over unix sockets or XPC. A new
+  `offline-profile` preflight stage checks the profile semantics against
+  `sandbox-exec` before any Homebrew change and is not mapped to a
+  canonical stage.
+
+- The macOS Homebrew lifecycle harness restores normal launchd
+  supervision and the agent config on every exit, ignoring INT, TERM and
+  HUP only while it does. INT, TERM and HUP now exit with 130, 143 and
+  129, so an interrupted stage records a fail row where TERM and HUP used
+  to leave none, and cleanup's messages reach the terminal instead of the
+  failed stage's log.
+
 - The single-GPU H100 row (`ubuntu2404-x86-h100-80g-a3hg1`) is now a
   Production row, and the RTX PRO 6000 Blackwell Server Edition row
   (`ubuntu2404-x86-rtxpro6000se-g4s48`) is now Preview. The Production
