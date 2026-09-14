@@ -106,12 +106,21 @@ Prerequisites:
   calls `sudo` for privileged steps.
 - The operator is in the `tensorplate` group, in a fresh session. The
   agent's control socket is group-only, so every CLI call the harness
-  makes as the operator needs it; the group survives a purge. Without it
-  the install stage fails on doctor's `agent_reachable` finding:
+  makes as the operator needs it. Only the TensorPlate packages create
+  that group, and a purge keeps it. On a device that has never had
+  TensorPlate installed, download the assets (step 3) and install once
+  first, then add the group and start a new session; the harness purges
+  that install when it runs:
 
   ```bash
+  sudo bash /var/tmp/tensorplate-<asset_tag>/assets/install.sh \
+    --local-artifacts /var/tmp/tensorplate-<asset_tag>/assets --yes
   sudo usermod -aG tensorplate "$USER"
   ```
+
+  Preflight refuses a session outside the group once the group exists.
+  Without the first install there is no group to check, and the install
+  stage fails on doctor's `agent_reachable` finding instead.
 
 - The device can build the TensorRT identity bundle: a C++ compiler, the
   CUDA headers and `libnvinfer`. `tools/validation/create_trt_identity_bundle.sh`
@@ -122,7 +131,13 @@ Prerequisites:
   that the run was made on a device carrying a build toolchain. Where
   the device under test has no toolchain, build the bundle on a Jetson
   with the same JetPack and TensorRT and pass it with `--bundle-dir`; the
-  harness builds nothing when one is given.
+  harness builds nothing when one is given. Keep that bundle, the assets
+  and the evidence directory outside `/etc/tensorplate`,
+  `/var/lib/tensorplate`, `/var/log/tensorplate`, `/run/tensorplate` and
+  `/opt/tensorplate-validation/trt-identity`: the run deletes those after
+  purging the device, so preflight refuses an input under any of them,
+  including the bundle the clean-room smoke leaves under
+  `/var/lib/tensorplate/validation`.
 - Network access for the installer, which runs `apt-get update` and
   verifies the release signature with cosign.
 - A checkout of this repository on the device at the revision under
@@ -199,8 +214,10 @@ Prerequisites:
    R36; a `--tested-version` that is not a bare `X.Y.Z`; a tag whose
    `X.Y.Z` is not the tested version; an assets directory without exactly
    one artifact manifest, whose manifest's `release.tag` is not the tag
-   given, or whose files fail `SHA256SUMS`; and a device that cannot build
-   the bundle. The manifest binding matters because the installer accepts
+   given, or whose files fail `SHA256SUMS`; an assets, evidence or bundle
+   directory under a directory the run deletes; a session outside the
+   `tensorplate` group once that group exists; and a device that cannot
+   build the bundle. The manifest binding matters because the installer accepts
    a signature from any release tag, so a signed set is not thereby the
    set for the tag you named.
 
@@ -229,7 +246,8 @@ Prerequisites:
    without the Python backend, requires each of the five runtime packages
    to be installed at the version its candidate `.deb` declares, and
    requires doctor to report nothing failing, `platform_row` to resolve
-   this row, and the agent, socket, serving binary, path layout and
+   this row, `platform_profile` to list it among the host's candidate
+   rows, and the registry, agent, socket, serving binary, path layout and
    config files to be ok. `host_os`, `accelerator_facts`,
    `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted.
 
@@ -275,7 +293,7 @@ Prerequisites:
    | File | Carries |
    | --- | --- |
    | `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal records in JSON, including host metadata fields such as the host name and the machine and boot ids; inspect every field before publishing |
-   | `install.log` | the assets path the installer echoes, which names an account if the assets were under a home directory |
+   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log` | everything the stage's commands printed. `install.log` carries the assets path the installer echoes, which names an account if the assets were under a home directory. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
    | `host-facts.txt` | kernel release, OS name, the first line of `/etc/nv_tegra_release`, the systemd version and the power mode; no host name or serial is read, but check the release line |
    | `doctor.json` | host OS and accelerator facts |
    | `packages.txt`, `checksums.txt`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `agent-cli.log` | package versions, file names, the deployment id and loopback serving URLs; scan them as well |
