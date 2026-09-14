@@ -32,17 +32,76 @@ passing direction achievable rather than theoretical.
 
 ## Sanitize before the first commit
 
-These are published in a public repository. Before committing a bundle,
-remove from the report and from every log:
+These are published in a public repository, and a value that reaches a
+commit stays in the branch history until that history is rewritten.
+Before committing a bundle, remove from the report and from every log:
 
-- cloud project ids, account ids, and billing identifiers
+- cloud project ids and numbers, instance ids, account ids, and billing
+  identifiers
 - device serial numbers and GPU UUIDs
-- host names, user names, and internal network addresses
+- host names, user names, machine and boot ids, and network addresses
 - fleet, quota, or authentication status
 
-Replace them with synthetic values and say in the log that they are
-synthetic. Retain the raw, unsanitized run privately alongside the
-release record — it is the artifact a later regression gets diffed
-against.
+Replace each with the synthetic value below rather than a note in the
+log. These values say they are synthetic by themselves, they are the
+forms the scanner below accepts, and they are plain text, so no JSON,
+schema or matcher is affected. Replace a value the same way everywhere it appears:
+a failing stage's `detail` quotes the tail of its log, and the two must
+still agree.
+
+| Identifier | Synthetic value |
+| --- | --- |
+| host name, in any journal prefix, `hostnamectl` or `uname` line | `tp-synthetic-host` |
+| `.internal` or `.local` host name | `tp-synthetic-host`, without the suffix |
+| account name in a home path | `/home/tp-synthetic-operator`, `/Users/tp-synthetic-operator` |
+| machine id, boot id, journal directory id | 32 zeros |
+| GPU or MIG UUID | `GPU-00000000-0000-0000-0000-000000000001` (count up the last group) |
+| any other UUID | `00000000-0000-0000-0000-000000000001` |
+| cloud project in a resource path | `projects/REDACTED/` |
+| IPv4 address | `192.0.2.10`, or anything in `198.51.100.0/24` or `203.0.113.0/24` |
+| IPv6 address | `2001:db8::10` |
+| MAC address | `00:00:5e:00:53:01` |
+| email address | an address at `example.com`, `example.org` or `example.net` |
+| serial number or UDID | `REDACTED` |
+| journal field other than the service's own | drop the field |
+
+Loopback, `0.0.0.0`, the metadata server `169.254.169.254` and
+`metadata.google.internal` are not identifiers and stay as recorded, as
+do the product's per-invocation `cli-`, `tx-` and `deploy-` ids.
+Credentials and planning identifiers have no synthetic form: neither
+belongs in evidence, so remove them.
+
+### Scan before `git add`
+
+`tools/validation/check-evidence-publication.sh` is the check. List the
+run's own host name and FQDN, account name, cloud project id and number,
+instance id and zone in a literal file, one per line, kept **outside**
+the repository (the scanner refuses a literal file inside the checkout),
+then scan the bundle:
+
+```bash
+tools/validation/check-evidence-publication.sh \
+  --literals <literal file outside the repository> \
+  docs/validation/evidence/<version>/<row_id>
+```
+
+Exit 0 means publishable, 1 means findings, and 2 means the scan reached
+no verdict. Each finding names a file, a line and an identifier class,
+never the value it matched, and a path whose own name matched prints as
+`path#N` instead. Scan
+the sanitized copy and only then run `git add`: a finding after a commit
+means rewriting the branch. CI runs the same scanner with
+`--patterns-only` on every pull request, but it cannot know the
+run's own names — only the local `--literals` scan can.
+
+- Never commit terminal captures, shell history, or archives. The
+  scanner treats binary and non-UTF-8 files as findings because they
+  cannot be reviewed.
+- Derive `stages.tsv` and the report before editing any log. The Jetson
+  adapter reads stage times from log file modification times, so a
+  sanitized copy would restamp every stage.
+- Retain the raw, unsanitized run privately alongside the release
+  record — it is the artifact a later regression gets diffed against.
+  Never put it, or the literal file, inside the checkout.
 
 The full rules these follow are in `docs/validation/fixture-and-evidence-rules.md`.

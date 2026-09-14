@@ -31,7 +31,11 @@ cycle; none is speculative. Violations are correctness bugs, not style.
    and the fixture harness rejects live-looking GCP project numbers and
    device UUIDs outside the repository's explicit synthetic namespaces or
    legacy synthetic allowlist. Adding an exception is therefore a visible,
-   reviewable code change rather than an accidental paste.
+   reviewable code change rather than an accidental paste. Lifecycle
+   evidence is checked by `tools/validation/check-evidence-publication.sh`,
+   run with a private literal file before `git add` and with patterns
+   only in CI on every pull request; its synthetic values are listed in
+   `docs/validation/evidence/v0.2.1/README.md`.
 
 ## Asserting
 
