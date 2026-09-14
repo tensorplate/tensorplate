@@ -89,19 +89,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   remains `spec_authored`, and the release gate requires recorded evidence
   before it can qualify for release.
 
-- `build-release-artifacts.sh --snapshot --arch amd64` builds the x86_64
-  serving worker the way the release does, with no environment
-  workarounds. Its compiler, `-gdwarf-4` and backend selection come from
-  `tools/release/amd64-build-profile.sh`, which the release workflow's
-  amd64 job and the Ubuntu x86_64 CPU-only smoke also read. On amd64 the
+- `build-release-artifacts.sh --snapshot --arch amd64` configures the
+  x86_64 serving worker with the release's compiler, `-gdwarf-4` and
+  backend selection, without the TensorRT and DWARF environment
+  workarounds. They come from `tools/release/amd64-build-profile.sh`,
+  which the release workflow's amd64 job and the Ubuntu x86_64 CPU-only
+  smoke also read. vcpkg detection is unchanged, so `VCPKG_ROOT`,
+  `VCPKG_INSTALLATION_ROOT` or `TP_CMAKE_TOOLCHAIN_FILE` on the build
+  host still adds a toolchain file the release does not use. On amd64 the
   builder refuses `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`,
   `TP_ENABLE_LIBTORCH` and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` overrides, a
-  missing clang++, and a build directory configured with another
-  compiler, before anything is compiled. The arm64 build is unchanged.
+  missing clang++, and a build directory that recorded another compiler,
+  before anything is compiled. The arm64 build is unchanged.
   On every architecture `--manifest` and `--checksums` are optional,
   defaulting to `tensorplate-<tag>-artifacts.json` and `SHA256SUMS` in
-  the artifacts directory, and any other name or directory, which
-  `install.sh` could not read, is refused before the build.
+  the artifacts directory: the manifest name a URL install fetches, in
+  the directory `install.sh --local-artifacts` reads. Any other name or
+  directory is refused before the build.
 
 ### Fixed
 

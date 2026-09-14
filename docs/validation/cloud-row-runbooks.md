@@ -265,10 +265,12 @@ tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
   `tools/release/amd64-build-profile.sh`, the file the release job's
   amd64 build reads: clang, `-gdwarf-4`, TensorRT off with no SDK
   requirement, and the python_pytorch sidecar on. Nothing needs to be
-  set in the environment. `TP_ENABLE_TENSORRT`,
-  `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH` and
-  `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` are refused on amd64, and so is a
-  build directory already configured with another compiler: remove it
+  set in the environment, and `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`
+  and `TP_CMAKE_TOOLCHAIN_FILE` must be unset: with any of them the
+  builder adds a CMake toolchain file the release build does not use.
+  `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH`
+  and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` are refused on amd64, and so is
+  a build directory already configured with another compiler: remove it
   or pass another `--build-dir`.
 - The manifest and `SHA256SUMS` are written into the assets directory
   under the names `install.sh --local-artifacts` reads. Omit

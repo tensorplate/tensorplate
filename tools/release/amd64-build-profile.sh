@@ -6,7 +6,9 @@
 # Ubuntu x86_64 CPU-only smoke. A snapshot therefore takes its compiler,
 # debug format and backend selection from the same lines as the release.
 # test/release/test_build_configuration.py runs both configure commands
-# against a stub cmake and requires identical arguments.
+# against a stub cmake and requires identical arguments. The builder still
+# adds a vcpkg toolchain file when VCPKG_ROOT, VCPKG_INSTALLATION_ROOT or
+# TP_CMAKE_TOOLCHAIN_FILE is set, which the release job never does.
 #
 # TensorRT stays OFF. A hosted runner has no CUDA/TensorRT SDK, and
 # building the adapter without one produces a backend that registers,
@@ -25,9 +27,10 @@
 # through -DCMAKE_CXX_COMPILER. Changing that variable on an existing build
 # directory makes CMake delete its cache and re-run configure without the
 # other -D values of the same invocation, so a stale directory would come
-# back with TensorRT ON and no version suffix. CMake reads the environment
-# only when a build directory is first configured, which is why the
-# builder refuses a directory configured with another compiler.
+# back without -gdwarf-4, which dh_dwz then rejects, and without the
+# version suffix. CMake reads the environment only until a build directory
+# records a compiler, which is why the builder refuses a directory
+# configured with another compiler.
 
 # shellcheck shell=bash
 # shellcheck disable=SC2034

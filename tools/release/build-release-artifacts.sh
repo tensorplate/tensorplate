@@ -49,8 +49,10 @@ Options:
   --tag TAG              Git tag being published, for example v0.1.0.
   --artifacts-dir DIR    Output directory for .deb artifacts.
   --manifest FILE        Artifact manifest JSON path. Defaults to
-                         DIR/tensorplate-TAG-artifacts.json, the only name
-                         and place install.sh reads; any other is refused.
+                         DIR/tensorplate-TAG-artifacts.json: the name a URL
+                         install fetches, in the directory
+                         install.sh --local-artifacts reads. Any other is
+                         refused.
   --checksums FILE       SHA256SUMS output path. Defaults to DIR/SHA256SUMS;
                          any other is refused.
   --target-os VALUE      Manifest target OS label.
