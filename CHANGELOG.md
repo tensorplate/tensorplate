@@ -125,6 +125,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   config error left by any earlier run on the same Mac satisfied it
   even if the agent never re-read the broken config.
 
+- The lifecycle report converter reports `fail` when a harness stage the
+  runbook mapping does not name failed. It previously built the outcome
+  from mapped stages alone, so once the macOS mapping named all eight
+  canonical stages, a run whose last stage, the tap-restored check,
+  failed after rollback converted to a `pass` report the release gate
+  accepts.
+
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
   publication and build-only validation; final publication still requires

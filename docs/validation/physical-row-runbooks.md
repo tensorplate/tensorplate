@@ -62,13 +62,16 @@ the harness's clean-install stage *is* the canonical install stage. Get
 it wrong and the report lies in the gate's favour, which is the one
 direction that matters. Several harness stages may name the same
 canonical stage; the weakest of their results is the one reported.
+A harness stage the mapping does not name is evidence for no canonical
+stage, but if it did not pass, the outcome is `fail`.
 
 ### The Jetson harness does not cover all eight stages yet
 
-The Jetson runbook below produces an `incomplete` report today, and the
-release gate refuses that row. That is the accurate state, not a defect
-in the runbook. The macOS mapping names all eight stages, so its report
-is `pass` only when every mapped harness stage passes:
+The Jetson runbook below cannot produce better than an `incomplete`
+report today, and the release gate refuses that row. That is the
+accurate state, not a defect in the runbook. The macOS mapping names
+all eight stages, so a macOS report can be `pass`, but only when every
+stage in its `stages.tsv` passed, mapped or not:
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
@@ -224,6 +227,13 @@ packaged configuration.
      status-logs=status-logs rollback=rollback launchd-restart=restart \
      launchd-crash-loop=crash-loop offline-runtime=offline
    ```
+
+   The converter reads only what `stages.tsv` recorded. A harness that
+   exits non-zero without recording a failed stage, because it failed
+   while writing `summary.json` or the sanitized transcript or was
+   interrupted between two stages, can leave a log that converts to
+   `pass`. Never file a `pass` report from a run whose harness exited
+   non-zero: re-run it.
 
    The digest this run files is the source archive every candidate
    formula is pinned to. That channel publishes no binary — all six

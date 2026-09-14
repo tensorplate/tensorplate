@@ -768,8 +768,10 @@ write_sanitized_transcript
 print("macOS status-logs order, offsets, log paths and transcript: pass")
 
 # The macOS runbook mapping is a coverage claim: it must name all eight
-# canonical stages, and a run where every harness stage passes must
-# convert to a passing report.
+# canonical stages, a run where every harness stage passes must convert
+# to a passing report, and a run that fails in any stage must not. The
+# harness stops at its first failing stage, so each failing log below
+# ends there.
 schema = json.loads((repo_root / "config/schemas/lifecycle_report.json").read_text())
 canonical = schema["properties"]["stages"]["items"]["properties"]["stage"]["enum"]
 runbook = (repo_root / "docs/validation/physical-row-runbooks.md").read_text()
@@ -781,23 +783,32 @@ mappings = re.findall(r"(?<!\S)([a-z0-9-]+=[a-z0-9-]+)(?!\S)", blocks[0])
 targets = {mapping.split("=", 1)[1] for mapping in mappings}
 assert targets == set(canonical), (sorted(targets), canonical)
 harness_stages = re.findall(r"^run_stage ([a-z0-9-]+) ", source, re.M)
-with tempfile.TemporaryDirectory(prefix="tp-homebrew-report-") as directory:
-    root = pathlib.Path(directory)
-    rows = io.StringIO()
-    writer = csv.writer(rows, delimiter="\t", lineterminator="\n")
-    writer.writerow(["stage", "status", "started_at", "finished_at", "log"])
-    for name in harness_stages:
-        writer.writerow([name, "pass", "2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z",
-                         f"{name}.log"])
-    (root / "stages.tsv").write_text(rows.getvalue())
-    result = subprocess.run(
-        ["bash", str(repo_root / "tools/validation/lifecycle-report-from-stages.sh"),
-         str(root / "stages.tsv"), "macos26-m1pro-16gb", "0.2.1",
-         "macos-homebrew-lifecycle", str(root / "report.json"), *mappings],
-        capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    report = json.loads((root / "report.json").read_text())
-    assert report["outcome"] == "pass", report
+
+def convert(failing):
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-report-") as directory:
+        root = pathlib.Path(directory)
+        rows = io.StringIO()
+        writer = csv.writer(rows, delimiter="\t", lineterminator="\n")
+        writer.writerow(["stage", "status", "started_at", "finished_at", "log"])
+        for name in harness_stages:
+            status = "fail" if name == failing else "pass"
+            writer.writerow([name, status, "2026-01-01T00:00:00Z",
+                             "2026-01-01T00:00:01Z", f"{name}.log"])
+            if status == "fail":
+                break
+        (root / "stages.tsv").write_text(rows.getvalue())
+        result = subprocess.run(
+            ["bash", str(repo_root / "tools/validation/lifecycle-report-from-stages.sh"),
+             str(root / "stages.tsv"), "macos26-m1pro-16gb", "0.2.1",
+             "macos-homebrew-lifecycle", str(root / "report.json"), *mappings],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        return json.loads((root / "report.json").read_text())["outcome"]
+
+assert convert(None) == "pass"
+for failing in harness_stages:
+    outcome = convert(failing)
+    assert outcome != "pass", f"a run that failed in {failing} converts to {outcome}"
 print("macOS runbook mapping covers all eight stages: pass")
 PY
 
