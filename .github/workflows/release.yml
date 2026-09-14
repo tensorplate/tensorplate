@@ -151,26 +151,44 @@ jobs:
         run: python3 -m pip install --quiet -r tools/release/requirements.txt
 
       # Incomplete evidence is reported on every run and enforced only when
-      # publishing: `develop` may carry rows nobody has validated yet, a tag
-      # may not, and a build-only dispatch is how the pipeline itself gets
-      # exercised. A checker that could not run is never waived -- exit 2
-      # means the gate did not reach a verdict, and a gate with no verdict
-      # must not be mistaken for one that passed.
+      # publishing a final release. `develop` may carry rows nobody has
+      # validated yet, and a build-only dispatch is how the pipeline itself
+      # gets exercised.
+      #
+      # A release candidate is not gated either, because the evidence can
+      # only come from one: the harnesses validate published candidate
+      # artifacts, and evidence gathered on `vX.Y.Z-rc.N` is filed against
+      # the bare `X.Y.Z` it stands for. Enforcing on candidates made that
+      # circular -- no candidate could publish until the evidence existed,
+      # and the evidence could not exist until a candidate had published.
+      # The final tag is where the claim is made, so the final tag is where
+      # it is enforced.
+      #
+      # A checker that could not run is never waived: only exit 0 (complete)
+      # and exit 1 (incomplete) are verdicts. Exit 2 is an internal fault;
+      # launch failures or termination must also fail on every run.
       - name: Production rows carry the evidence they claim
         shell: bash
         env:
           PUBLISH: ${{ needs.meta.outputs.publish }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          set -uo pipefail
-          tools/release/check-evidence-bundles.sh --version "$VERSION"
-          status=$?
-          if [[ "$status" -eq 2 ]]; then
-            printf '::error::the evidence checker did not run; this is never waived\n'
-            exit 2
+          set -euo pipefail
+          # Actions enables errexit. Capture the expected incomplete verdict
+          # explicitly so it reaches the publishing policy below.
+          status=0
+          tools/release/check-evidence-bundles.sh --version "$VERSION" || status=$?
+          if [[ "$status" -ne 0 && "$status" -ne 1 ]]; then
+            printf '::error::the evidence checker did not reach a verdict (exit %s); this is never waived\n' "$status"
+            exit "$status"
           fi
           if [[ "$status" -ne 0 && "$PUBLISH" != "true" ]]; then
             printf '::warning::evidence incomplete; not blocking a build-only run\n'
+            exit 0
+          fi
+          if [[ "$status" -ne 0 && "$PRERELEASE" == "true" ]]; then
+            printf '::warning::evidence incomplete; not blocking a release candidate, whose artifacts are what the evidence is collected on\n'
             exit 0
           fi
           exit "$status"
