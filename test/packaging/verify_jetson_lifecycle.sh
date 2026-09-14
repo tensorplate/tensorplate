@@ -1045,6 +1045,10 @@ for injected_case in "install.sh=install.sh" "rm -rf /etc/tensorplate=clear inst
        stage_status "${evidence}/lifecycle-report.json" install)"
   check "  and the failed step is the one named" yes \
     "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/install.log" && echo yes || echo no)"
+  # The step's message is printed before the stage decides whether to
+  # stop, so only what ran afterwards shows the stage actually stopped.
+  check "  and nothing privileged ran after it" yes \
+    "$(tail -n 1 "${appliance}/sudo.log" | grep -Fq -- "$injected" && echo yes || echo no)"
 done
 
 # --- deploy-smoke.
@@ -1080,6 +1084,10 @@ for injected_case in "cp -R=copy the bundle" "chmod -R a+rX=make the bundle read
        stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
   check "  and the failed step is the one named" yes \
     "$(grep -Fq "step failed (exit 9): ${step_name}" "${evidence}/deploy-smoke.log" && echo yes || echo no)"
+  # The step's message is printed before the stage decides whether to
+  # stop, so only what ran afterwards shows the stage actually stopped.
+  check "  and nothing privileged ran after it" yes \
+    "$(tail -n 1 "${appliance}/sudo.log" | grep -Fq -- "$injected" && echo yes || echo no)"
 done
 
 # --- status-logs.
