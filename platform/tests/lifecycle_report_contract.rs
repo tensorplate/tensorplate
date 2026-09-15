@@ -221,7 +221,7 @@ fn a_run_that_records_a_digest_validates_and_carries_it() {
 
 #[test]
 fn a_converted_report_carries_the_digest_from_the_evidence_directory() {
-    // The converter is the producer both physical runbooks invoke, and
+    // The converter is the producer the macOS runbook invokes, and
     // it reads the digest from the evidence beside the stage log rather
     // than from the operator, because nothing on an installed system
     // reports which artifact it came from.
@@ -623,11 +623,13 @@ fn the_runbooks_map_only_stages_that_exist() {
     // runbook states the coverage gaps explicitly instead of filling
     // them with the nearest plausible stage.
     //
-    // Nine Jetson mappings and eight macOS mappings, one per canonical
-    // stage. A floor below that lets a deleted mapping pass unnoticed.
     let mappings = documented_mappings();
+    // Only the macOS runbook maps stages, and it documents eight. The
+    // Jetson harness writes its report natively, so its runbook section
+    // carries no mappings. A floor below the real count would let a
+    // mapping vanish from the runbook without this test noticing.
     assert!(
-        mappings.len() >= 17,
+        mappings.len() >= 8,
         "expected the runbooks to document mappings, found {}",
         mappings.len()
     );

@@ -40,8 +40,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   workflow runs its tests and scans `docs/validation/evidence` on every
   pull request and on pushes to main, develop and release branches. The
   evidence README now lists the self-describing synthetic value for each
-  identifier, and the runbooks require deriving Jetson stage times
-  before any log is edited.
+  identifier, and the runbooks require scanning sanitized evidence before
+  its first commit.
 
 - A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
   run by hand on a VM the operator starts themselves. It provisions no
@@ -71,6 +71,34 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   restoration retains the backup and fails the run.
   Its deploy-smoke bundle selects a device-neutral fixture profile and
   executes no accelerator kernel.
+
+- A native lifecycle validation harness for the Jetson Orin Nano row,
+  `tools/validation/jetson-lifecycle.sh`, which writes the canonical
+  lifecycle report itself rather than through the clean-room step
+  adapter and stage converter. That chain reported the weakest of the
+  mapped steps that were present, so a stage whose decisive step never
+  ran could read as a pass, and its status-logs mapping could never pass
+  on a packaged install. Five stages are exercised -- install,
+  deploy-smoke, status-logs, restart and crash-loop -- and upgrade,
+  rollback and offline are skipped with their reasons recorded as
+  follow-up work. The run installs a candidate downloaded by tag through
+  the release's own installer with signature verification, binds the tag
+  to the tested version and to the manifest's release tag, purges every
+  TensorPlate package except the apt channel bootstrap, and checks each
+  runtime package's installed version against its candidate package.
+  Before anything is purged it refuses an operator session outside the
+  `tensorplate` group and any assets, evidence or bundle directory that
+  the run itself would delete. Package-inventory query errors fail the
+  install stage before state is cleared rather than counting as an empty
+  inventory. The harness pins CLI calls to the installed agent's local
+  socket with a private temporary configuration and checks that inference
+  uses the active deployment endpoint, so saved operator profiles cannot
+  redirect validation to another appliance.
+  Deploy-smoke is a TensorRT identity engine round trip with no Python
+  backend installed; it makes no accuracy, throughput or compute claim.
+  The Jetson runbook now uses this harness, and its prerequisites no
+  longer claim the device carries no build toolchain. The clean-room
+  harness is unchanged and remains the release clean-room smoke.
 
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture

@@ -319,9 +319,10 @@ check "an evidence directory with no captured steps is a fault" "2" "$?"
 check "naming a step the harness never ran is a fault" "2" "$?"
 set -e
 
-# A failing step must survive the whole adapter -> converter chain. This
-# is the path the Jetson runbook documents, so a failure laundered here
-# would reach the gate as a pass.
+# A failing step must survive the whole adapter -> converter chain. The
+# Jetson runbook now uses the native harness instead, but the adapter is
+# still shipped, and a failure laundered here would reach the gate as a
+# pass for anyone who converts clean-room evidence with it.
 "$converter" "${ev}/stages.tsv" jetson-orin-nano-8gb-jp62 0.2.1 jetson-clean-room \
   "${ev}/lifecycle-report.json" \
   install=install deploy-trt-identity=deploy-smoke \
@@ -341,7 +342,7 @@ print("yes" if all(g["status"]=="skipped" and g.get("detail") for g in gaps) els
 
 # --- The converter reads the digest from the evidence, not the operator.
 #
-# This is the producer both physical runbooks invoke, and the digest is
+# This is the producer the macOS runbook invokes, and the digest is
 # the one value an operator could not re-derive after the run. It comes
 # from a file the harness wrote beside its stage log, in sha256sum's own
 # format.
