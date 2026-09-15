@@ -256,23 +256,33 @@ Delete the VM when the run is done.
 ## Producing the candidate artifact set
 
 No published release carries an amd64 runtime set yet, so a run today
-validates a snapshot built from source. `build-release-artifacts.sh
---snapshot` does that, but its defaults are the arm64 Jetson release's,
-and three of them differ from the amd64 release build. Building on the
-host itself, as the first real run did:
+validates a snapshot built from source. Build it on the host itself:
 
-- Install `shellcheck` first. The script validates the installer with it
-  and refuses to start without it.
-- Match the amd64 release's CMake configuration:
-  `TP_ENABLE_TENSORRT=OFF TP_REQUIRE_TENSORRT_SDK=OFF`. The default
-  requires the TensorRT SDK, which an x86_64 host does not have.
-- Pass `CFLAGS=-gdwarf-4 CXXFLAGS=-gdwarf-4`. The release sets this; a
-  current clang emits DWARF 5 by default, which `dh_dwz` rejects when it
-  reaches the serving worker.
-- The installer requires the manifest to be named
-  `tensorplate-*-artifacts.json`. Pass that name to `--manifest`, or
-  rename it and correct its line in `SHA256SUMS` — the digest of the
-  bytes does not change, only the file name column.
+```bash
+tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
+  --artifacts-dir <assets-dir>
+```
+
+- Install `shellcheck` and `clang` first. The script validates the
+  installer with shellcheck and configures the serving worker with
+  clang++, and refuses before compiling anything if either is missing.
+- The serving worker's CMake configuration comes from
+  `tools/release/amd64-build-profile.sh`, the file the release job's
+  amd64 build reads: clang, `-gdwarf-4`, TensorRT off with no SDK
+  requirement, and the python_pytorch sidecar on. Nothing needs to be
+  set in the environment, and `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`
+  and `TP_CMAKE_TOOLCHAIN_FILE` must be unset: with any of them the
+  builder adds a CMake toolchain file the release build does not use.
+  `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH`
+  and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` are refused on amd64, and so is
+  a build directory already configured with another compiler: remove it
+  or pass another `--build-dir`.
+- The manifest and `SHA256SUMS` are written into the assets directory
+  under the names `install.sh --local-artifacts` reads. Omit
+  `--manifest` and `--checksums`; any other path is refused.
+- The release job builds on Ubuntu 22.04 so its packages install on
+  both 22.04 and 24.04. A snapshot built on 24.04 takes 24.04's glibc as
+  its floor and installs on 24.04 only, which is enough for these rows.
 
 A candidate built on the validation host means that host carries a
 build toolchain, which a release install would not. Say so when filing
