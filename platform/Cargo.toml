@@ -19,6 +19,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tensorplate-protocol = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38.44", features = ["fs"] }
+
 [dev-dependencies]
 jsonschema = { workspace = true }
 tempfile = { workspace = true }

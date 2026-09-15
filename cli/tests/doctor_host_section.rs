@@ -53,6 +53,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
         machine_type_record: text("machine_type_record"),
+        boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -902,14 +903,14 @@ fn host_os_says_which_source_established_the_machine_type() {
 
     // The same instance with the metadata service unreachable and the
     // record the agent wrote while it was reachable.
-    let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&sources_of(&fixture(
-        "ubuntu2404-x86-l4-g2s8",
-    )))
-    .expect("the facts are readable")
-    .expect("the live fixture records")
-    .to_json()
-    .expect("serializes");
     let mut offline = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    // Synthetic boot identity supplements the recorded hardware facts.
+    offline.boot_id = Some("12345678-1234-4234-8234-123456789abc".to_string());
+    let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&offline)
+        .expect("the facts are readable")
+        .expect("the live fixture records")
+        .to_json()
+        .expect("serializes");
     offline.dmi_product_name = Some("Google Compute Engine\n".to_string());
     offline.gce_machine_type = None;
     offline.machine_type_record = Some(record);

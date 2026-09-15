@@ -189,6 +189,11 @@ impl SystemHostProbe {
             } else {
                 None
             },
+            boot_id: if dmi_product_name.as_deref().is_some_and(is_compute_engine) {
+                self.read("/proc/sys/kernel/random/boot_id")?
+            } else {
+                None
+            },
             dmi_product_name,
             gce_machine_type,
             machine_type_record,
@@ -350,45 +355,21 @@ impl SystemHostProbe {
         let body = record
             .to_json()
             .map_err(|err| failed(format!("cannot serialize the record: {err}")))?;
-        // Read the way detection reads it, so a link or an oversized file
-        // holding these bytes is replaced rather than left for detection to
-        // refuse.
-        if read_machine_type_record(&target).ok().flatten().as_deref() == Some(body.as_str()) {
+        // Pin the directory for the comparison, temporary creation, and rename.
+        // No component of an agent-writable path is followed as a symlink.
+        let directory = RecordDirectory::open(&target)
+            .map_err(|err| failed(format!("cannot open the record directory: {err}")))?;
+        if read_machine_type_record_in(&directory, &target)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(body.as_str())
+        {
             return Ok(RecordWrite::Unchanged);
         }
-        let temporary = target.with_extension("json.tmp");
-        let write = || -> std::io::Result<()> {
-            // `create_new` never follows a link and never inherits an existing
-            // file's permissions. Whatever already holds the temporary name --
-            // a leftover from an interrupted write, or a link planted there --
-            // is removed and the create tried once more, never opened.
-            let create = || {
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create_new(true);
-                #[cfg(unix)]
-                std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o640);
-                options.open(&temporary)
-            };
-            let mut file = match create() {
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                    std::fs::remove_file(&temporary)?;
-                    create()?
-                }
-                created => created?,
-            };
-            file.write_all(body.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &target)?;
-            // Best effort, as the agent's state store does: the rename
-            // survives power loss where the platform supports it.
-            if let Some(parent) = target.parent() {
-                if let Ok(directory) = std::fs::File::open(parent) {
-                    let _ = directory.sync_all();
-                }
-            }
-            Ok(())
-        };
-        write().map_err(|err| failed(format!("cannot write the machine-type record: {err}")))?;
+        directory
+            .replace(body.as_bytes())
+            .map_err(|err| failed(format!("cannot write the machine-type record: {err}")))?;
         Ok(RecordWrite::Written)
     }
 }
@@ -422,42 +403,193 @@ fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
 /// [`PlatformProbeError::IdentityUnestablished`]: there is something there,
 /// and it is not a record detection will use.
 ///
-/// The link check and the open are two steps. Swapping the file between them
-/// takes write access to the state directory, which only root and the agent's
-/// own account have.
+/// Each directory component is opened relative to its pinned predecessor,
+/// refusing symlinks. The final file is opened with `O_NOFOLLOW` and checked
+/// through its descriptor before any bytes are read. Replacing a pathname
+/// while an elevated doctor is recording can therefore never redirect reads.
 fn read_machine_type_record(path: &Path) -> Result<Option<String>, PlatformProbeError> {
-    let unreadable = |err: std::io::Error| PlatformProbeError::Unreadable {
+    match RecordDirectory::open(path) {
+        Ok(directory) => read_machine_type_record_in(&directory, path),
+        Err(err) => record_open_error(path, &err),
+    }
+}
+
+fn record_open_error(
+    path: &Path,
+    err: &std::io::Error,
+) -> Result<Option<String>, PlatformProbeError> {
+    if err.kind() == ErrorKind::NotFound {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    if [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+        .iter()
+        .any(|code| err.raw_os_error() == Some(code.raw_os_error()))
+    {
+        return Err(unusable_record(
+            path,
+            "is not a regular file or has a symlinked directory component",
+        ));
+    }
+    Err(PlatformProbeError::Unreadable {
         source_name: path.display().to_string(),
         detail: err.to_string(),
-    };
-    let unusable = |what: String| PlatformProbeError::IdentityUnestablished {
+    })
+}
+
+fn unusable_record(path: &Path, what: &str) -> PlatformProbeError {
+    PlatformProbeError::IdentityUnestablished {
         source_name: path.display().to_string(),
         detail: format!(
             "the machine-type record {what}; start tensorplate-agent once while the metadata \
              service is reachable to record it again"
         ),
+    }
+}
+
+fn read_machine_type_record_in(
+    directory: &RecordDirectory,
+    path: &Path,
+) -> Result<Option<String>, PlatformProbeError> {
+    let unreadable = |err: std::io::Error| PlatformProbeError::Unreadable {
+        source_name: path.display().to_string(),
+        detail: err.to_string(),
     };
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(unreadable(err)),
+    let file = match directory.read() {
+        Ok(file) => file,
+        Err(err) => return record_open_error(path, &err),
     };
+    let metadata = file.metadata().map_err(unreadable)?;
     if !metadata.file_type().is_file() {
-        return Err(unusable("is not a regular file".to_string()));
+        return Err(unusable_record(path, "is not a regular file"));
+    }
+    if metadata.len() > MAX_MACHINE_TYPE_RECORD {
+        return Err(unusable_record(
+            path,
+            &format!("is larger than {MAX_MACHINE_TYPE_RECORD} bytes"),
+        ));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take(MAX_MACHINE_TYPE_RECORD + 1)
-                .read_to_end(&mut bytes)
-        })
+    file.take(MAX_MACHINE_TYPE_RECORD + 1)
+        .read_to_end(&mut bytes)
         .map_err(unreadable)?;
     if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MACHINE_TYPE_RECORD) {
-        return Err(unusable(format!(
-            "is larger than {MAX_MACHINE_TYPE_RECORD} bytes"
-        )));
+        return Err(unusable_record(
+            path,
+            &format!("is larger than {MAX_MACHINE_TYPE_RECORD} bytes"),
+        ));
     }
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// A pinned parent directory and one final component. Path traversal happens
+/// exactly once; subsequent opens, unlinks, and renames use this descriptor.
+struct RecordDirectory {
+    #[cfg(unix)]
+    directory: std::fs::File,
+    #[cfg(unix)]
+    name: std::ffi::OsString,
+}
+
+#[cfg(unix)]
+impl RecordDirectory {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        use rustix::fs::{open, openat, Mode, OFlags};
+        use std::path::Component;
+
+        let invalid = || std::io::Error::new(ErrorKind::InvalidInput, "invalid record path");
+        let name = path.file_name().ok_or_else(invalid)?.to_os_string();
+        let parent = path.parent().ok_or_else(invalid)?;
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut directory = open(
+            if path.is_absolute() { "/" } else { "." },
+            flags,
+            Mode::empty(),
+        )?;
+        for component in parent.components() {
+            match component {
+                Component::Normal(name) => {
+                    directory = openat(&directory, name, flags, Mode::empty())?;
+                }
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir | Component::Prefix(_) => return Err(invalid()),
+            }
+        }
+        Ok(Self {
+            directory: directory.into(),
+            name,
+        })
+    }
+
+    fn read(&self) -> std::io::Result<std::fs::File> {
+        use rustix::fs::{openat, Mode, OFlags};
+
+        // NONBLOCK keeps a swapped FIFO from waiting for a writer. Its
+        // descriptor is rejected as nonregular without reading from it.
+        Ok(openat(
+            &self.directory,
+            &self.name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?
+        .into())
+    }
+
+    fn replace(&self, body: &[u8]) -> std::io::Result<()> {
+        use rustix::fs::{openat, renameat, unlinkat, AtFlags, Mode, OFlags};
+
+        let mut temporary = self.name.clone();
+        temporary.push(".tmp");
+        // Exclusive creation never opens an existing file or follows a link.
+        let create = || {
+            openat(
+                &self.directory,
+                &temporary,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o640),
+            )
+        };
+        let mut file: std::fs::File = match create() {
+            Err(rustix::io::Errno::EXIST) => {
+                unlinkat(&self.directory, &temporary, AtFlags::empty())?;
+                create()?
+            }
+            created => created?,
+        }
+        .into();
+        file.write_all(body)?;
+        file.sync_all()?;
+        renameat(&self.directory, &temporary, &self.directory, &self.name)?;
+        // Match the agent state store's best-effort directory durability.
+        let _ = self.directory.sync_all();
+        Ok(())
+    }
+}
+
+// GCE records are only used on Unix. Other platforms must fail closed rather
+// than silently use a pathname implementation with weaker link guarantees.
+#[cfg(not(unix))]
+impl RecordDirectory {
+    fn open(_path: &Path) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "machine-type record IO requires Unix",
+        ))
+    }
+
+    fn read(&self) -> std::io::Result<std::fs::File> {
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "machine-type record IO requires Unix",
+        ))
+    }
+
+    fn replace(&self, _body: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "machine-type record IO requires Unix",
+        ))
+    }
 }
 
 /// What a non-zero exit from a detection command means.
@@ -605,13 +737,16 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
 
     // Bounded read: the answer is a short resource name, and an unbounded
     // read from an unauthenticated endpoint is not something to offer.
-    let mut reader = stream.take(MAX_METADATA_RESPONSE);
+    // The extra byte distinguishes the cap from an orderly EOF. Treating
+    // `Take`'s synthetic EOF as a close could accept a truncated response.
+    let mut reader = stream.take(MAX_METADATA_RESPONSE + 1);
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 512];
     // Out of budget, EOF (or the size cap), or a read error all stop the
     // loop; anything already received still counts if it is a complete,
     // self-describing answer.
     let mut out_of_budget = false;
+    let mut reached_eof = false;
     loop {
         let Some(left) = remaining(deadline) else {
             out_of_budget = true;
@@ -619,13 +754,16 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
         };
         reader.get_mut().set_read_timeout(Some(left)).ok();
         match reader.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => {
+                reached_eof = true;
+                break;
+            }
             Ok(n) => {
                 buffer.extend_from_slice(&chunk[..n]);
                 // Stop as soon as the response is complete rather than
                 // waiting for the peer to close. Waiting for EOF would
                 // throw away a correct answer whenever the close lags.
-                if response_is_complete(&buffer) {
+                if buffer.len() as u64 > MAX_METADATA_RESPONSE || response_is_complete(&buffer) {
                     break;
                 }
             }
@@ -655,12 +793,21 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
             "metadata service sent an incomplete or unparseable response".to_string(),
         )
     };
-    let response = String::from_utf8_lossy(&buffer);
-    let Some((head, body)) = split_response(&response) else {
+    if buffer.len() as u64 > MAX_METADATA_RESPONSE {
+        return Err(incomplete());
+    }
+    let response = std::str::from_utf8(&buffer).map_err(|_| incomplete())?;
+    let Some((head, body)) = split_response(response) else {
         return Err(incomplete());
     };
     let status = head.lines().next().unwrap_or_default();
-    if status.split_whitespace().nth(1) != Some("200") {
+    let mut status_fields = status.split(' ');
+    let version = status_fields.next();
+    let code = status_fields.next();
+    if !matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
+        || code != Some("200")
+        || status.bytes().any(|byte| byte.is_ascii_control())
+    {
         // One journal line: whatever the peer put in its status line is
         // escaped rather than printed.
         return Err(MetadataFailure::Answered(format!(
@@ -668,13 +815,13 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
             status.trim().escape_debug()
         )));
     }
-    // A declared length that the body does not reach means a truncated
-    // answer. Accepting it would hand matching a half machine type, which
-    // silently makes a supported instance unsupported.
-    if let Some(declared) = content_length(head) {
-        if body.len() < declared {
-            return Err(incomplete());
-        }
+    // A length-framed body must match its one valid declared length. An
+    // unframed body is complete only at an orderly close, never merely
+    // because the deadline expired after a plausible resource name.
+    match content_length(head).map_err(|()| incomplete())? {
+        Some(declared) if body.len() == declared => {}
+        None if reached_eof => {}
+        Some(_) | None => return Err(incomplete()),
     }
     let body = body.trim();
     if body.is_empty() {
@@ -691,23 +838,55 @@ fn split_response(response: &str) -> Option<(&str, &str)> {
         .or_else(|| response.split_once("\n\n"))
 }
 
-fn content_length(head: &str) -> Option<usize> {
-    head.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.trim()
-            .eq_ignore_ascii_case("content-length")
-            .then(|| value.trim().parse().ok())?
-    })
+fn content_length(head: &str) -> Result<Option<usize>, ()> {
+    let mut declared = None;
+    for line in head.lines().skip(1) {
+        let (name, value) = line.split_once(':').ok_or(())?;
+        // No folded lines or whitespace before the colon: permissive
+        // parsing here can disagree with a peer about response framing.
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() && byte != b'\t')
+        {
+            return Err(());
+        }
+        // This HTTP/1.0 client does not decode transfer encodings. In
+        // particular, a simultaneous Content-Length must not hide one.
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(());
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let value = value.trim_matches([' ', '\t']);
+            if declared.is_some()
+                || value.is_empty()
+                || !value.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(());
+            }
+            let length = value.parse::<usize>().map_err(|_| ())?;
+            if length as u64 > MAX_METADATA_RESPONSE {
+                return Err(());
+            }
+            declared = Some(length);
+        }
+    }
+    Ok(declared)
 }
 
 /// Whether the bytes so far are a complete response, so reading can stop
 /// without waiting for the peer to close the socket.
 fn response_is_complete(buffer: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(buffer);
-    let Some((head, body)) = split_response(&text) else {
+    let Ok(text) = std::str::from_utf8(buffer) else {
         return false;
     };
-    content_length(head).is_some_and(|declared| body.len() >= declared)
+    let Some((head, body)) = split_response(text) else {
+        return false;
+    };
+    matches!(content_length(head), Ok(Some(declared)) if body.len() >= declared)
 }
 
 #[cfg(test)]
@@ -718,6 +897,7 @@ mod tests {
     /// Sources for a live Compute Engine answer on a small synthetic shape.
     fn live_gce_sources(machine_type: &str) -> HostSources {
         HostSources {
+            boot_id: Some("12345678-1234-4234-8234-123456789abc\n".to_string()),
             cpuinfo: Some(
                 "processor\t: 0\nvendor_id\t: GenuineIntel\nprocessor\t: 1\n".to_string(),
             ),
@@ -736,7 +916,11 @@ mod tests {
 
     /// A staged root with the state directory the installer creates.
     fn staged_state_root() -> tempfile::TempDir {
-        let root = tempfile::tempdir().expect("tempdir");
+        // macOS exposes its temporary directory through /var -> /private/var.
+        // Only the trusted test root is resolved; record path components are
+        // still opened one at a time without following links.
+        let temporary = std::env::temp_dir().canonicalize().expect("temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("tempdir");
         std::fs::create_dir_all(
             staged_record(&root)
                 .parent()
@@ -1088,6 +1272,119 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_record_under_any_symlinked_state_ancestor_is_refused() {
+        for ancestor in ["var/lib/tensorplate/state", "var/lib/tensorplate"] {
+            let root = staged_state_root();
+            let record = staged_record(&root);
+            let elsewhere = root.path().join("elsewhere");
+            let relative_record = record
+                .strip_prefix(root.path().join(ancestor))
+                .expect("record beneath the tested ancestor");
+            let outside_record = elsewhere.join(relative_record);
+            std::fs::create_dir_all(outside_record.parent().expect("parent"))
+                .expect("create outside directory");
+            std::fs::write(&outside_record, "outside fixture contents").expect("outside fixture");
+            std::fs::remove_dir_all(root.path().join(ancestor)).expect("remove original ancestor");
+            std::os::unix::fs::symlink(&elsewhere, root.path().join(ancestor)).expect("symlink");
+
+            assert!(
+                matches!(
+                    read_machine_type_record(&record),
+                    Err(PlatformProbeError::IdentityUnestablished { .. })
+                ),
+                "the reader must refuse symlinked {ancestor}"
+            );
+            assert!(
+                SystemHostProbe::with_root(root.path())
+                    .write_machine_type_record(&live_gce_sources("g2-standard-8"))
+                    .is_err(),
+                "the writer must refuse symlinked {ancestor}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&outside_record).expect("outside fixture"),
+                "outside fixture contents",
+                "neither operation touches the symlink destination"
+            );
+            assert!(!outside_record.with_extension("json.tmp").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_pinned_parent_does_not_redirect_record_io() {
+        let root = staged_state_root();
+        let record = staged_record(&root);
+        let state = record.parent().expect("state directory");
+        std::fs::write(&record, "original record").expect("original record");
+        let directory = RecordDirectory::open(&record).expect("pin the original directory");
+
+        let moved = root.path().join("original-state");
+        let elsewhere = root.path().join("replacement-state");
+        std::fs::create_dir(&elsewhere).expect("replacement directory");
+        let outside_record = elsewhere.join("machine-type.json");
+        std::fs::write(&outside_record, "outside fixture contents").expect("outside fixture");
+        std::fs::rename(state, &moved).expect("move the original directory");
+        std::os::unix::fs::symlink(&elsewhere, state).expect("replace the path with a link");
+
+        assert_eq!(
+            read_machine_type_record_in(&directory, &record)
+                .expect("read from the pinned directory"),
+            Some("original record".to_string())
+        );
+        directory
+            .replace(b"updated record")
+            .expect("write to the pinned directory");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("machine-type.json")).expect("original directory"),
+            "updated record"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_record).expect("outside fixture"),
+            "outside fixture contents"
+        );
+        assert!(!outside_record.with_extension("json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_an_open_record_does_not_change_the_read_descriptor() {
+        let root = staged_state_root();
+        let record = staged_record(&root);
+        let elsewhere = root.path().join("outside.json");
+        std::fs::write(&record, "original record").expect("original record");
+        std::fs::write(&elsewhere, "outside fixture contents").expect("outside fixture");
+        let directory = RecordDirectory::open(&record).expect("pin the directory");
+        let mut file = directory.read().expect("open the record atomically");
+
+        std::fs::remove_file(&record).expect("remove the original name");
+        std::os::unix::fs::symlink(&elsewhere, &record).expect("replace the name with a link");
+        assert!(file.metadata().expect("opened descriptor").is_file());
+        let mut body = String::new();
+        file.read_to_string(&mut body)
+            .expect("read the original descriptor");
+        assert_eq!(body, "original record");
+        assert!(matches!(
+            read_machine_type_record_in(&directory, &record),
+            Err(PlatformProbeError::IdentityUnestablished { .. })
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fifo_record_is_refused_without_waiting_for_a_writer() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
+
+        let root = staged_state_root();
+        let record = staged_record(&root);
+        mknodat(CWD, &record, FileType::Fifo, Mode::from_raw_mode(0o600), 0).expect("stage a FIFO");
+        assert!(matches!(
+            read_machine_type_record(&record),
+            Err(PlatformProbeError::IdentityUnestablished { .. })
+        ));
+    }
+
     #[test]
     fn an_oversized_record_is_refused_without_reading_it_all() {
         let root = staged_state_root();
@@ -1228,14 +1525,10 @@ mod tests {
 
     #[test]
     fn an_unreachable_metadata_service_yields_no_machine_type() {
-        // Port 9 discards; connecting must fail or time out rather than
-        // producing a value or hanging.
+        // Port zero cannot have a listener. Keep this bounded-connect
+        // check on loopback rather than contacting a real metadata route.
         let started = std::time::Instant::now();
-        let result = query_metadata(
-            "169.254.169.254:9",
-            METADATA_PATH,
-            Duration::from_millis(100),
-        );
+        let result = query_metadata("127.0.0.1:0", METADATA_PATH, Duration::from_millis(100));
         assert!(
             matches!(result, Err(MetadataFailure::Timeout)),
             "nothing answered: {result:?}"
@@ -1355,6 +1648,35 @@ mod tests {
                 30_000,
             ),
             (
+                "a plausible unframed body held open",
+                "HTTP/1.0 200 OK\r\n\r\nprojects/1/machineTypes/g2-standard-8".to_string(),
+                30_000,
+            ),
+            (
+                "an invalid length held open",
+                "HTTP/1.0 200 OK\r\nContent-Length: nope\r\n\r\nprojects/1/machineTypes/g2-standard-8"
+                    .to_string(),
+                30_000,
+            ),
+            (
+                "an invalid length followed by an orderly close",
+                "HTTP/1.0 200 OK\r\nContent-Length: nope\r\n\r\nprojects/1/machineTypes/g2-standard-8"
+                    .to_string(),
+                0,
+            ),
+            (
+                "non-HTTP status with a successful code and complete body",
+                "garbage 200\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-standard-8"
+                    .to_string(),
+                0,
+            ),
+            (
+                "an unsupported HTTP version",
+                "HTTP/2 200 OK\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-standard-8"
+                    .to_string(),
+                0,
+            ),
+            (
                 "another protocol's banner",
                 "SSH-2.0-OpenSSH_9.6\r\n".to_string(),
                 0,
@@ -1384,6 +1706,85 @@ mod tests {
                 other => panic!("{label}: the record must not outvote an answer: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ambiguous_or_unsupported_metadata_framing_is_never_an_answer() {
+        let body = "projects/1/machineTypes/g2-standard-8";
+        for headers in [
+            "Content-Length: 37\r\nContent-Length: 37",
+            "Content-Length: 37\r\nContent-Length: 99",
+            "Content-Length: 37, 37",
+            "Content-Length: +37",
+            "Content-Length: -1",
+            "Content-Length:",
+            "Content-Length: 99999999999999999999999999999999999999999",
+            "Content-Length: 8193",
+            "Content-Length: 36",
+            "Content-Length : 37",
+            " Content-Length: 37",
+            "Content-Length: 37\r\n folded header",
+            "Transfer-Encoding: chunked",
+            "Transfer-Encoding: identity",
+            "Content-Length: 37\r\nTransfer-Encoding: chunked",
+        ] {
+            let reply = format!("HTTP/1.0 200 OK\r\n{headers}\r\n\r\n{body}");
+            let addr = serve_once(reply, Duration::ZERO);
+            let root = staged_valid_record_root();
+            let result = SystemHostProbe::with_root(root.path()).machine_type_sources(GCE, || {
+                query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
+            });
+            assert!(
+                matches!(result, Err(PlatformProbeError::Unreadable { .. })),
+                "invalid framing must neither produce a live identity nor read the valid record: \
+                 {headers:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_orderly_close_completes_a_body_without_a_declared_length() {
+        for version in ["HTTP/1.0", "HTTP/1.1"] {
+            let addr = serve_once(
+                format!("{version} 200 OK\r\nMetadata-Flavor: Google\r\n\r\nprojects/1/machineTypes/g2-standard-8"),
+                Duration::ZERO,
+            );
+            let root = staged_valid_record_root();
+            let (live, recorded) = SystemHostProbe::with_root(root.path())
+                .machine_type_sources(GCE, || {
+                    query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
+                })
+                .expect("the orderly close completes the response");
+            assert_eq!(
+                live.as_deref(),
+                Some("projects/1/machineTypes/g2-standard-8")
+            );
+            assert!(recorded.is_none(), "the live answer takes precedence");
+        }
+    }
+
+    #[test]
+    fn the_response_size_cap_does_not_masquerade_as_an_orderly_close() {
+        let reply = format!("HTTP/1.0 200 OK\r\n\r\n{}", "x".repeat(8192));
+        let addr = serve_once(reply, Duration::ZERO);
+        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+        assert!(
+            matches!(result, Err(MetadataFailure::Answered(_))),
+            "the response exceeds the byte cap: {result:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_is_not_replaced_to_make_a_metadata_answer() {
+        let addr = serve_once(
+            b"HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n\xff",
+            Duration::ZERO,
+        );
+        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+        assert!(
+            matches!(result, Err(MetadataFailure::Answered(_))),
+            "invalid response bytes are rejected: {result:?}"
+        );
     }
 
     #[test]

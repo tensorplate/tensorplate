@@ -76,8 +76,9 @@ pub const STATE_DIR: &str = "/var/lib/tensorplate";
 pub const STATE_INNER_DIR: &str = "/var/lib/tensorplate/state";
 
 /// The Compute Engine machine type `tensorplate-agent` recorded from a live
-/// metadata answer, bound to the logical CPU count, `MemTotal` and NVIDIA
-/// display device ids it was recorded with.
+/// metadata answer, bound to the kernel boot ID, logical CPU count, `MemTotal`
+/// and NVIDIA display device ids it was recorded with. It is usable only in
+/// that boot; every OS reboot requires an online agent start to refresh it.
 ///
 /// Written by the agent on every start where the metadata service answered,
 /// never by the installer, and read by platform detection only when the

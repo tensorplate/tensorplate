@@ -219,9 +219,9 @@ const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reac
 
 /// What to do when a Compute Engine instance could not establish its machine
 /// type without the metadata service. Neither re-running as another user nor
-/// attaching output helps: the fix is one agent start with the service
-/// reachable, which records the machine type again.
-const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type; if a recorded fact changed, this instance's shape changed since it was recorded, and that start records the new one";
+/// attaching output helps: the fix is one agent start in the current boot
+/// with the service reachable, which records the machine type again.
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change";
 
 /// Detection state consumed by the pure host-section renderer.
 ///
@@ -351,7 +351,7 @@ pub fn render_host_section(
             Some(MachineTypeSource::GceMetadata) => os.push_str(" (from GCE metadata)"),
             Some(MachineTypeSource::RecordedFromMetadata) => os.push_str(
                 " (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; \
-                 CPU count, MemTotal and NVIDIA devices unchanged)",
+                 same kernel boot; CPU count, MemTotal and NVIDIA devices unchanged)",
             ),
             None => {}
         }

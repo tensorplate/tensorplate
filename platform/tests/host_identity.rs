@@ -17,7 +17,8 @@ use serde_json::Value;
 use tensorplate_platform::{
     identify, identify_accelerator, identify_jetson_accelerator, nvidia_pci_functions,
     AcceleratorSources, CpuArchitecture, DetectedPlatform, HostSources, MachineTypeRecord,
-    MachineTypeSource, PlatformProbeError, PlatformReason, PlatformRegistry, RowMatch,
+    MachineTypeSource, PlatformProbeError, PlatformReason, PlatformRegistry, RecordWrite, RowMatch,
+    SystemHostProbe,
 };
 
 fn fixture_dir() -> PathBuf {
@@ -62,6 +63,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
         machine_type_record: text("machine_type_record"),
+        boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -1003,7 +1005,8 @@ const L4_ROW: &str = "ubuntu2404-x86-l4-g2s8";
 /// out rather than built by the code under test: 8 `processor` entries,
 /// `MemTotal: 32860372 kB`, and one L4 display function.
 const L4_RECORD: &str = r#"{
-  "schema_version": 1,
+  "schema_version": 2,
+  "boot_id": "12345678-1234-4234-8234-123456789abc",
   "machine_type": "g2-standard-8",
   "logical_cpus": 8,
   "mem_total_bytes": 33649020928,
@@ -1018,7 +1021,11 @@ fn l4_live_sources() -> HostSources {
         .into_iter()
         .find(|(name, _)| name == L4_ROW)
         .expect("the recorded L4 fixture is committed");
-    sources_of(&fixture)
+    HostSources {
+        // Synthetic boot identity; the hardware facts remain recorded.
+        boot_id: Some("12345678-1234-4234-8234-123456789abc\n".to_string()),
+        ..sources_of(&fixture)
+    }
 }
 
 /// The L4 fixture as an offline probe gathers it: the firmware still says
@@ -1114,6 +1121,181 @@ fn an_offline_instance_with_a_matching_record_resolves_its_row() {
         RowMatch::Supported(row) => assert_eq!(row.row_id(), L4_ROW),
         other => panic!("expected the L4 row, got {other:?}"),
     }
+}
+
+#[test]
+fn a_copied_record_cannot_validate_an_equal_capacity_machine_after_a_new_boot() {
+    let recorded_on = l4_live_sources();
+    let record = MachineTypeRecord::for_live_sources(&recorded_on)
+        .expect("all recording facts are available")
+        .expect("the recorded fixture has live metadata")
+        .to_json()
+        .expect("serializes");
+    let mut new_boot = HostSources {
+        dmi_product_name: Some("Google Compute Engine\n".to_string()),
+        boot_id: Some("87654321-4321-4321-8321-cba987654321\n".to_string()),
+        machine_type_record: Some(record),
+        ..recorded_on.clone()
+    };
+    assert_eq!(new_boot.cpuinfo, recorded_on.cpuinfo);
+    assert_eq!(new_boot.proc_meminfo, recorded_on.proc_meminfo);
+    assert_eq!(new_boot.pci_devices, recorded_on.pci_devices);
+
+    // Reusing a disk can preserve these capacities while the machine type
+    // changes. A live custom type must remain outside the validated row;
+    // losing metadata must not let the previous boot's record promote it.
+    new_boot.gce_machine_type =
+        Some("projects/REDACTED/machineTypes/g2-custom-8-32768".to_string());
+    match committed_registry().resolve(&l4_detected(&new_boot)) {
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(row),
+        } => assert_eq!(row.row_id(), L4_ROW),
+        other => panic!("a live custom type is outside the validated row: {other:?}"),
+    }
+    new_boot.gce_machine_type = None;
+    let detail = unestablished_detail(&new_boot);
+    assert!(
+        detail.contains("kernel boot ID changed") && detail.contains("start tensorplate-agent"),
+        "an untouched record from another boot must fail closed: {detail}"
+    );
+
+    // An online start in the new boot restores a usable record for exactly
+    // the newly answered identity, including its unvalidated posture.
+    new_boot.gce_machine_type =
+        Some("projects/REDACTED/machineTypes/g2-custom-8-32768".to_string());
+    new_boot.machine_type_record = Some(
+        MachineTypeRecord::for_live_sources(&new_boot)
+            .expect("new boot facts are readable")
+            .expect("a live custom answer records")
+            .to_json()
+            .expect("serializes"),
+    );
+    new_boot.gce_machine_type = None;
+    let report = identify(&new_boot).expect("a refreshed record works in its boot");
+    assert_eq!(
+        report.exact.machine_type_source,
+        Some(MachineTypeSource::RecordedFromMetadata)
+    );
+    match committed_registry().resolve(&l4_detected(&new_boot)) {
+        RowMatch::OutsideValidatedEnvironment {
+            candidate: Some(row),
+        } => assert_eq!(row.row_id(), L4_ROW),
+        other => panic!("refreshing must preserve the custom type's posture: {other:?}"),
+    }
+}
+
+#[test]
+fn an_unavailable_boot_id_never_blocks_live_identity_or_permits_a_record() {
+    let root = tempfile::tempdir().expect("create staged state");
+    let record_path = root
+        .path()
+        .join("var/lib/tensorplate/state/machine-type.json");
+    std::fs::create_dir_all(record_path.parent().expect("state directory"))
+        .expect("create state directory");
+    std::fs::write(&record_path, L4_RECORD).expect("stage a previous record");
+    let probe =
+        SystemHostProbe::with_root(root.path().canonicalize().expect("canonical staged root"));
+    for boot_id in [
+        None,
+        Some(""),
+        Some("not-a-uuid"),
+        Some("00000000-0000-0000-0000-000000000000"),
+    ] {
+        let mut sources = HostSources {
+            dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            boot_id: boot_id.map(str::to_string),
+            machine_type_record: Some(L4_RECORD.to_string()),
+            ..l4_live_sources()
+        };
+        let live =
+            identify(&sources).expect("live metadata establishes identity without boot facts");
+        assert_eq!(live.identity.machine_type.as_deref(), Some("g2-standard-8"));
+        assert_eq!(
+            live.exact.machine_type_source,
+            Some(MachineTypeSource::GceMetadata)
+        );
+        match probe
+            .write_machine_type_record(&sources)
+            .expect("an unavailable fact is an outcome")
+        {
+            RecordWrite::FactsUnavailable(fact) => assert!(fact.contains("kernel boot ID")),
+            other => panic!("{boot_id:?}: must refuse to write: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&record_path).expect("read previous record"),
+            L4_RECORD
+        );
+        sources.gce_machine_type = None;
+        let detail = unestablished_detail(&sources);
+        assert!(
+            detail.contains("kernel boot ID") && detail.contains("unavailable"),
+            "{boot_id:?}: unavailable never counts as an offline match: {detail}"
+        );
+    }
+}
+
+#[test]
+fn legacy_or_invalid_boot_identity_records_are_unusable() {
+    let without_boot = L4_RECORD.replace(
+        "  \"boot_id\": \"12345678-1234-4234-8234-123456789abc\",\n",
+        "",
+    );
+    for record in [
+        without_boot.replace("\"schema_version\": 2", "\"schema_version\": 1"),
+        without_boot,
+    ] {
+        assert!(
+            MachineTypeRecord::parse(&record).is_err(),
+            "a missing boot binding is not migrated"
+        );
+        assert!(unestablished_detail(&l4_offline_sources(Some(&record)))
+            .contains("recorded machine type is unusable"));
+    }
+    for boot_id in [
+        "",
+        "00000000-0000-0000-0000-000000000000",
+        "12345678-1234-4234-8234-123456789ABC",
+        "12345678_1234-4234-8234-123456789abc",
+        "12345678-1234-4234-8234-123456789ab",
+        "12345678-1234-4234-8234-123456789abc0",
+        "12345678-1234-4234-8234-123456789abg",
+        "12345678-1234-4234-8234-123456789abc ",
+    ] {
+        let record = L4_RECORD.replace("12345678-1234-4234-8234-123456789abc", boot_id);
+        assert_eq!(
+            MachineTypeRecord::parse(&record).expect_err("invalid record boot identity"),
+            "the boot ID is not a canonical UUID",
+            "{boot_id:?}"
+        );
+        assert!(
+            unestablished_detail(&l4_offline_sources(Some(&record)))
+                .contains("recorded machine type is unusable"),
+            "{boot_id:?}"
+        );
+    }
+}
+
+#[test]
+fn staged_sources_never_borrow_the_running_hosts_boot_id() {
+    let root = tempfile::tempdir().expect("create staged host");
+    let dmi = root.path().join("sys/class/dmi/id/product_name");
+    std::fs::create_dir_all(dmi.parent().expect("DMI directory")).expect("create DMI directory");
+    std::fs::write(dmi, "Google Compute Engine\n").expect("stage GCE firmware");
+    let probe = SystemHostProbe::with_root(root.path());
+    assert_eq!(probe.sources().expect("read staged files").boot_id, None);
+
+    let boot = root.path().join("proc/sys/kernel/random/boot_id");
+    std::fs::create_dir_all(boot.parent().expect("boot ID directory"))
+        .expect("create proc directory");
+    std::fs::write(boot, "87654321-4321-4321-8321-cba987654321\n").expect("stage boot ID");
+    assert_eq!(
+        probe
+            .sources()
+            .expect("read staged boot ID")
+            .boot_id
+            .as_deref(),
+        Some("87654321-4321-4321-8321-cba987654321\n")
+    );
 }
 
 #[test]
@@ -1243,6 +1425,7 @@ fn memtotal_is_compared_exactly_across_the_two_recorded_l4_images() {
         dmi_product_name: Some("Google Compute Engine\n".to_string()),
         gce_machine_type: None,
         machine_type_record: Some(L4_RECORD.to_string()),
+        boot_id: l4_live_sources().boot_id,
         ..sources_of(&dlvm)
     };
     let detail = unestablished_detail(&on_dlvm);
@@ -1259,13 +1442,13 @@ fn a_record_this_release_cannot_use_is_refused_never_ignored() {
         (
             "an unknown field",
             L4_RECORD.replace(
-                "\"schema_version\": 1,",
-                "\"schema_version\": 1,\n  \"boot_id\": \"x\",",
+                "\"schema_version\": 2,",
+                "\"schema_version\": 2,\n  \"unexpected\": \"x\",",
             ),
         ),
         (
             "another schema version",
-            L4_RECORD.replace("\"schema_version\": 1", "\"schema_version\": 2"),
+            L4_RECORD.replace("\"schema_version\": 2", "\"schema_version\": 1"),
         ),
         (
             "a machine type no row could name",
@@ -1408,8 +1591,8 @@ fn nothing_from_a_record_reaches_an_error_as_more_than_one_line() {
         (
             "an unknown key",
             L4_RECORD.replace(
-                "\"schema_version\": 1,",
-                &format!("\"schema_version\": 1,\n  {escaped}: 1,"),
+                "\"schema_version\": 2,",
+                &format!("\"schema_version\": 2,\n  {escaped}: 1,"),
             ),
         ),
     ] {

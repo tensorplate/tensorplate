@@ -89,6 +89,10 @@ pub struct HostSources {
     /// `projects/1234/machineTypes/g2-standard-8`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gce_machine_type: Option<String>,
+    /// `/proc/sys/kernel/random/boot_id`, read only on Compute Engine.
+    /// Binds the offline record to this kernel boot, never a copied disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
     /// The machine-type record `tensorplate-agent` wrote from an earlier live
     /// metadata answer (see [`crate::machine_type_record`]).
     ///

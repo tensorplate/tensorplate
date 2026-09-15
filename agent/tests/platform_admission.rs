@@ -708,6 +708,7 @@ fn host_fixture_sources(name: &str) -> HostSources {
         dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
         machine_type_record: text("machine_type_record"),
+        boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -1092,6 +1093,8 @@ fn offline_l4_report(dmi_product_name: Option<&str>, record: Option<&str>) -> Pl
     sources.dmi_product_name = dmi_product_name.map(str::to_string);
     sources.gce_machine_type = None;
     sources.machine_type_record = record.map(str::to_string);
+    // Synthetic boot identity supplements the recorded hardware facts.
+    sources.boot_id = Some("12345678-1234-4234-8234-123456789abc".to_string());
     let mut report = identify_platform(&sources).expect("detects");
     let text = std::fs::read_to_string(
         repo_root().join("test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt"),
@@ -1111,7 +1114,9 @@ fn offline_l4_report(dmi_product_name: Option<&str>, record: Option<&str>) -> Pl
 #[test]
 fn an_offline_l4_with_a_matching_record_is_admitted_as_validated() {
     let registry = registry();
-    let live = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
+    let mut live = host_fixture_sources("ubuntu2404-x86-l4-g2s8");
+    // Synthetic boot identity supplements the recorded hardware facts.
+    live.boot_id = Some("12345678-1234-4234-8234-123456789abc".to_string());
     let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&live)
         .expect("the facts are readable")
         .expect("the live fixture records")

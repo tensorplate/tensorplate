@@ -600,6 +600,8 @@ mod tests {
             dmi_product_name: Some("Google Compute Engine\n".to_string()),
             gce_machine_type: text("gce_machine_type"),
             machine_type_record: None,
+            // Synthetic boot identity supplements the recorded hardware facts.
+            boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
             proc_meminfo: text("proc_meminfo"),
             pci_devices: text("pci_devices"),
         }
@@ -607,7 +609,8 @@ mod tests {
 
     #[test]
     fn a_start_with_a_live_answer_records_it_and_an_offline_start_uses_it() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let temporary = std::env::temp_dir().canonicalize().expect("temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("tempdir");
         let record = root
             .path()
             .join(MACHINE_TYPE_RECORD_PATH.trim_start_matches('/'));

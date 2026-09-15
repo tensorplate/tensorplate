@@ -10,13 +10,14 @@
 // prerequisites, so "undetected" would quietly become "admitted, unvalidated".
 //
 // So `tensorplate-agent` records what the metadata service answered, next to
-// the local facts it answered on: the logical CPU count, `MemTotal`, and the
-// NVIDIA display device ids on the PCI bus. When the service later cannot be
-// reached, detection uses the recorded machine type only while every one of
-// those facts is still exactly what it was. Anything else -- no record, a
-// record this release cannot read, a fact that changed or cannot be read --
-// fails detection with an error that names why. There is no path from here
-// to "no machine type".
+// the local facts it answered on: the kernel boot ID, logical CPU count,
+// `MemTotal`, and the NVIDIA display device ids on the PCI bus. When the
+// service later cannot be reached, detection uses the recorded machine type only while every one of
+// those facts is still exactly what it was. A record cannot survive a new
+// kernel boot: start the agent online after every reboot before going offline.
+// Anything else -- no record, a record this release cannot read, a fact that
+// changed or cannot be read -- fails detection with an error that names
+// why. There is no path from here to "no machine type".
 //
 // Everything in this module is pure. Reading and writing the file lives in
 // [`crate::probe`].
@@ -36,14 +37,14 @@ const CONTEXT: &str =
     "host reports as a Compute Engine instance and the metadata service could not be reached";
 
 /// The only record layout this release reads or writes.
-pub const MACHINE_TYPE_RECORD_SCHEMA_VERSION: u32 = 1;
+pub const MACHINE_TYPE_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// Where a detected machine type came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MachineTypeSource {
     /// A live answer from the GCE metadata service.
     GceMetadata,
-    /// A metadata answer `tensorplate-agent` recorded earlier on this host,
+    /// A metadata answer `tensorplate-agent` recorded earlier in this kernel boot,
     /// used because the service could not be reached and every local fact
     /// the record is bound to is unchanged.
     RecordedFromMetadata,
@@ -88,12 +89,14 @@ impl std::fmt::Display for RecordWrite {
 
 /// The local facts a recorded machine type is bound to.
 ///
-/// None of them derives a machine type, and nothing here maps facts to a
-/// shape. They only confirm that the machine the record was written on is
-/// still the machine reading it: a stopped instance can be given a different
-/// machine type, and a disk can be attached to a different instance.
+/// The boot ID restricts the record to one running kernel: a stopped GCE
+/// instance can change machine type, and a disk can move to another instance,
+/// but both start a new boot. Capacity equality alone cannot establish this.
+/// The other facts also refuse changes within that boot; none derives a shape.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalShapeFacts {
+    /// The kernel boot UUID from `/proc/sys/kernel/random/boot_id`.
+    pub boot_id: String,
     /// `processor` entries in `/proc/cpuinfo`.
     pub logical_cpus: u32,
     /// `MemTotal`, in bytes. Compared exactly: a tolerance would be a
@@ -112,6 +115,13 @@ impl LocalShapeFacts {
     /// Names the first fact that is not available. An unavailable fact is
     /// never treated as matching.
     pub fn from_sources(sources: &HostSources) -> Result<Self, &'static str> {
+        let boot_id = sources
+            .boot_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| is_boot_id(id))
+            .ok_or("the kernel boot ID (no canonical UUID in /proc/sys/kernel/random/boot_id)")?
+            .to_string();
         let logical_cpus = sources
             .cpuinfo
             .as_deref()
@@ -136,6 +146,7 @@ impl LocalShapeFacts {
             .ok_or("the NVIDIA display devices (the PCI bus was not enumerated)")?;
         nvidia_display_devices.sort();
         Ok(Self {
+            boot_id,
             logical_cpus,
             mem_total_bytes,
             nvidia_display_devices,
@@ -148,6 +159,8 @@ impl LocalShapeFacts {
 #[serde(deny_unknown_fields)]
 pub struct MachineTypeRecord {
     pub schema_version: u32,
+    /// The kernel boot in which the live metadata answer was obtained.
+    pub boot_id: String,
     /// The bare machine type, e.g. `g2-standard-8`. Never the project-scoped
     /// resource name the metadata service answers with.
     pub machine_type: String,
@@ -191,6 +204,9 @@ impl MachineTypeRecord {
                 record.schema_version
             ));
         }
+        if !is_boot_id(&record.boot_id) {
+            return Err("the boot ID is not a canonical UUID".to_string());
+        }
         if !is_canonical_identifier(&record.machine_type) {
             return Err("the machine type is not a canonical identifier".to_string());
         }
@@ -225,6 +241,7 @@ impl MachineTypeRecord {
         let facts = LocalShapeFacts::from_sources(sources)?;
         Ok(Some(Self {
             schema_version: MACHINE_TYPE_RECORD_SCHEMA_VERSION,
+            boot_id: facts.boot_id,
             machine_type,
             logical_cpus: facts.logical_cpus,
             mem_total_bytes: facts.mem_total_bytes,
@@ -241,10 +258,13 @@ impl MachineTypeRecord {
         serde_json::to_string_pretty(self).map(|json| json + "\n")
     }
 
-    /// The first bound fact that differs from `live`, described with both
-    /// values, or `None` when all of them match exactly.
+    /// The first bound fact that differs from `live`, or `None` when all match.
+    /// Hardware differences include both values; boot UUIDs are never echoed.
     #[must_use]
     pub fn first_difference(&self, live: &LocalShapeFacts) -> Option<String> {
+        if self.boot_id != live.boot_id {
+            return Some("the kernel boot ID changed; the record is valid only within the boot in which it was written".to_string());
+        }
         if self.logical_cpus != live.logical_cpus {
             return Some(format!(
                 "logical CPU count was {} when recorded and is {} now",
@@ -266,6 +286,19 @@ impl MachineTypeRecord {
         }
         None
     }
+}
+
+/// A lowercase UUID as Linux exposes it, excluding the all-zero sentinel.
+fn is_boot_id(id: &str) -> bool {
+    id.len() == 36
+        && id != "00000000-0000-0000-0000-000000000000"
+        && id.bytes().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
+            }
+        })
 }
 
 /// Whether `id` is `0x<vendor>:0x<device>` with four lowercase hex digits
@@ -391,7 +424,8 @@ mod tests {
     #[test]
     fn a_record_serializes_deterministically() {
         let record = MachineTypeRecord {
-            schema_version: 1,
+            schema_version: 2,
+            boot_id: "12345678-1234-4234-8234-123456789abc".to_string(),
             machine_type: "g2-standard-8".to_string(),
             logical_cpus: 8,
             mem_total_bytes: 33_649_020_928,
@@ -400,7 +434,7 @@ mod tests {
         let json = record.to_json().expect("serializes");
         assert_eq!(
             json,
-            "{\n  \"schema_version\": 1,\n  \"machine_type\": \"g2-standard-8\",\n  \
+            "{\n  \"schema_version\": 2,\n  \"boot_id\": \"12345678-1234-4234-8234-123456789abc\",\n  \"machine_type\": \"g2-standard-8\",\n  \
              \"logical_cpus\": 8,\n  \"mem_total_bytes\": 33649020928,\n  \
              \"nvidia_display_devices\": [\n    \"0x10de:0x27b8\"\n  ]\n}\n"
         );
