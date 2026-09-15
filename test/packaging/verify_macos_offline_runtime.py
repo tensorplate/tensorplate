@@ -230,6 +230,20 @@ def test_launchd_job():
         found = m.check_launchd_job(job, **dict(good, **override))
         assert found == [failure], (failure, found)
     assert m.check_launchd_job(dict(job, pid=None)) == ["job_running"]
+    startup = dict(program=good["program"], path=derived_path, arguments=expected, startup=True)
+    pending = dict(job, pid=None, runs=0)
+    assert m.check_launchd_job(pending, **startup) == []
+    assert m.check_launchd_job(job, **startup) == []
+    for changed, failure in (
+        (dict(pid=0, runs=0), "job_running"),
+        (dict(pid=None, runs=1), "job_running"),
+        (dict(pid=None, runs=None), "job_runs"),
+        (dict(runs=2), "job_runs"),
+        (dict(pid=None, runs=0, arguments=expected[3:]), "job_arguments"),
+        (dict(pid=None, runs=0, program=service), "job_program"),
+        (dict(pid=None, runs=0, path="/wrong.plist"), "job_path"),
+    ):
+        assert failure in m.check_launchd_job(dict(job, **changed), **startup), changed
     # launchd may print the loaded plist through a symlinked directory
     # (/var/folders is /private/var/folders); both spellings are one file.
     with tempfile.TemporaryDirectory(prefix="tp-offline-link-") as directory:
@@ -250,8 +264,24 @@ def test_launchd_job():
         (text.rstrip("}\n"), "not one job block"),
         (text.replace("\tpid = 4242\n", "\tpid = 4242\n\tprogram = /bin/sh\n"), "repeats"),
         (text.replace("\t\t/usr/bin/sandbox-exec", " /usr/bin/sandbox-exec"), "unexpected shape"),
+        (text.replace("\tpid = 4242\n", "\tpid = pending\n"), "invalid 'pid'"),
+        (text.replace("\truns = 1\n", "\truns = pending\n"), "invalid 'runs'"),
     ):
         refused(lambda: m.parse_launchd_job(broken), fragment)
+    with tempfile.TemporaryDirectory(prefix="tp-offline-startup-") as directory:
+        print_path = pathlib.Path(directory) / "launchctl.txt"
+        command = ["launchd-job", "--print", str(print_path), "--startup",
+                   "--program", good["program"], "--path", derived_path]
+        pending_text = text.replace("\tpid = 4242\n", "").replace("\truns = 1\n", "\truns = 0\n")
+        for document, status in (
+            (text, 0),
+            (pending_text, 75),
+            (text.replace("\tpid = 4242\n", ""), 1),
+            (pending_text.replace("\tprogram = /usr/bin/sandbox-exec", "\tprogram = /bin/sh"), 1),
+            (pending_text.replace("\truns = 0\n", "\truns = pending\n"), 1),
+        ):
+            print_path.write_text(document)
+            assert m.main(command) == status
     passed("launchctl print parsing and job checks")
 
 
@@ -1066,7 +1096,10 @@ FAILURE_MODES = {
     "deploy-phase-failed": ("the deploy under the offline profile did not activate offline-1", True),
     "probe-crashes": ("the network probe did not run under the offline profile", True),
     "mps-unavailable": ("the MPS probe failed under the offline profile", True),
-    "crashed-at-start": ("tensorplate-agent restarted during the offline stage", True),
+    "crashed-at-start": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "first-run-exited": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "pending-malformed-pid": ("tensorplate-agent is not running as the sandboxed launchd job", True),
+    "never-first-pid": ("tensorplate-agent did not start its first process after brew services run --file", True),
     "rebootstrap-during-doctor": ("tensorplate-agent restarted during the offline stage", True),
     "profile-changed": ("cannot write the offline-runtime evidence", True),
     "start-loads-formula-plist": ("tensorplate-agent is not back under its normal launchd job", False),
@@ -1087,6 +1120,9 @@ def check_failure(mode, world, message, restorable):
     assert "restore_tap" in world.cleanup_calls, (mode, world.cleanup_calls)
     if restorable:
         world.assert_normal_supervision()
+    if mode == "never-first-pid":
+        # Thirty bounded startup reads plus cleanup's one inspection.
+        assert world.state["startup_print_reads"][f"homebrew.mxcl.{AGENT}"] == 31, world.context()
     if mode == "start-fails":
         assert "error: normal launchd supervision is not restored; run: brew services start " \
                "tensorplate-observability && brew services start tensorplate-agent" in world.stderr, world.context()
@@ -1118,6 +1154,31 @@ UNSANDBOXED_CALLS = {
 
 def stage_cases():
     cases = {"clean run": lambda: check_clean_run(run_world(stage_script()))}
+    for services in ((AGENT,), (OBSERVABILITY,), (AGENT, OBSERVABILITY)):
+        def delayed(services=services):
+            modes = ",".join(f"delayed-first-pid-{service.rsplit('-', 1)[-1]}" for service in services)
+            world = run_world(stage_script(), mode=modes)
+            check_clean_run(world)
+            for service in services:
+                assert world.state["startup_print_reads"][f"homebrew.mxcl.{service}"] >= 3
+        cases[f"clean run with delayed first PID for {' and '.join(services)}"] = delayed
+    for fault in ("run-rewrites-arguments", "run-copies-plist", "run-sets-program"):
+        def wrong_pending(fault=fault):
+            mode = f"delayed-first-pid-agent,{fault}"
+            world = run_world(stage_script(), mode=mode)
+            check_failure(mode, world, "tensorplate-agent is not running as the sandboxed launchd job", True)
+            # One stage read, then cleanup's read before bootout: a bad
+            # definition must not become acceptable on a later poll.
+            assert world.state["startup_print_reads"][f"homebrew.mxcl.{AGENT}"] == 2, world.context()
+            assert not [call for call in world.calls if call["tool"] == "tensorplate"
+                        and call["args"][0] == "status"], world.context()
+        cases[f"pending first PID refuses {fault} immediately"] = wrong_pending
+    def startup_guard_removed():
+        world = run_world(stage_script(mutated(' --startup \\\n', ' \\\n')),
+                          mode="delayed-first-pid-agent")
+        check_failure("startup guard removed", world,
+                      "tensorplate-agent is not running as the sandboxed launchd job", True)
+    cases["guard: without startup classification a pending first PID fails"] = startup_guard_removed
     cases["clean run with a sandboxed sidecar slow to exit after the bootout"] = lambda: check_clean_run(
         run_world(stage_script(), mode="slow-exit-sidecar"))
     cases["clean run with errexit suspended by the caller"] = lambda: check_clean_run(run_world(

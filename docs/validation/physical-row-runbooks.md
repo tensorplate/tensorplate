@@ -63,15 +63,16 @@ it wrong and the report lies in the gate's favour, which is the one
 direction that matters. Several harness stages may name the same
 canonical stage; the weakest of their results is the one reported.
 A harness stage the mapping does not name is evidence for no canonical
-stage, but if it did not pass, the outcome is `fail`.
+stage. Its `fail` or invalid status makes the outcome `fail`; an unmapped
+`pass` or `skipped` status leaves the canonical stages' outcome unchanged.
 
 ### The Jetson harness does not cover all eight stages yet
 
 The Jetson runbook below cannot produce better than an `incomplete`
 report today, and the release gate refuses that row. That is the
 accurate state, not a defect in the runbook. The macOS mapping names
-all eight stages, so a macOS report can be `pass`, but only when every
-stage in its `stages.tsv` passed, mapped or not:
+all eight stages, so a macOS report can be `pass` when all eight passed
+and no unmapped stage failed or recorded an invalid status:
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
@@ -186,9 +187,23 @@ the device invalidates the glibc-floor comparison the run exists for.
    unmapped: the harness has no such steps, and naming one anyway would
    assert a stage that never ran.
 
+   Do both **before** sanitizing anything. The adapter stamps each
+   stage's start and finish from the modification times of its
+   `.stdout` and `.exit` files, so editing a log first silently restamps
+   its stage. Never re-derive from a sanitized copy.
+
 5. File the report and the recorded fixtures under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
-   **Sanitize first** — see that directory's README.
+   **Sanitize before the first commit** — see that directory's README —
+   then scan the sanitized copy with the device's host name, the account
+   name and any other name of this machine listed in a literal file kept
+   outside the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62
+   ```
 
 ## MacBook Pro M1 Pro
 
@@ -257,28 +272,55 @@ run the `launchctl bootout` command it prints;
    ready, that both launchd stderr logs gained output after launchd-start
    recorded their sizes, and that `tensorplate logs` reads the packaged
    structured event log and returns an observability event written
-   during this run. It does not query the agent component, because the
-   agent writes no structured events. `host-facts` stays unmapped: it
-   collects inventory before anything is installed and observes neither
-   status nor logs.
+   during this run. Before starting services, the harness snapshots file
+   identities and byte offsets for `events.ndjson` and its retained
+   generation, `events.1`. It reads only new bytes from these generations,
+   so rotation before the status check or between the CLI read and
+   verification can still prove the returned event belongs to this run.
+   The harness does not delete or truncate these logs. It does not query
+   the agent component, because the agent writes no structured events.
+   `host-facts` stays unmapped: it collects inventory before anything is
+   installed and observes neither status nor logs. The status-logs stage,
+   including its rotation checks, still requires a hardware run; the
+   historical evidence predates it.
 
    `offline-runtime` backs `offline`. Both launchd services, startup
    recovery, a fresh deploy, inference, doctor and the MPS probe run
-   under a `sandbox-exec` profile. The profile allows only loopback on
+   under a `sandbox-exec` profile. The harness reads each bootstrapped
+   job at most 30 times for its initial PID, waiting one second between
+   pending reads; both services must still finish on that PID after
+   exactly one launchd run. The
+   profile allows only loopback on
    the two serving ports, plus unix sockets other than mDNSResponder, so
    names do not resolve. A probe inside the sandbox must be refused every
    other destination, and a bind on any other port. This is not an IP
    firewall. `fe80::1`, reached
    through another interface on those two ports, is an accepted gap, and
    so are unix-socket and XPC brokers; `macos-homebrew-lifecycle.md`
-   lists them. `offline-profile` stays unmapped. It checks the profile
+   lists them. A wildcard listener on the serving ports is also allowed
+   by the profile but fails the stage's loopback-only socket check. The
+   full offline-runtime stage still requires an M1 Pro hardware run;
+   the historical record does not cover it. `offline-profile` stays
+   unmapped. It checks the profile
    against `sandbox-exec` during preflight, before anything is
    installed. The converter keeps each canonical stage's worst status,
    so mapping it to `offline` would let a `--preflight-only` run report
    offline as passed.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
-   **Sanitize first** — see that directory's README.
+   Convert first, so the report reflects the harness's own `stages.tsv`.
+   The converter's `detail` names harness stages and never quotes a log,
+   so the report needs no sanitizing; the logs do. **Sanitize before the
+   first commit** — see that directory's README — then scan the sanitized
+   copy with the Mac's computer name, local host name, account name and
+   any other name of this machine listed in a literal file kept outside
+   the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/macos26-m1pro-16gb
+   ```
 
 ## What a failed run is worth
 

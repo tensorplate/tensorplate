@@ -239,6 +239,25 @@ def fake_launchctl(args):
             print("Unexpected launchctl failure", file=sys.stderr)
             return 5
         document = launchctl_document(state, label)
+        if state["labels"][label]["arguments"][0] == SANDBOX_EXEC:
+            # bootstrap can return before launchd's first spawn. Keep the
+            # definition correct while its initial print lacks a PID, then
+            # expose the normal running job without a crash or restart.
+            reads = state.setdefault("startup_print_reads", {})
+            reads[label] = reads.get(label, 0) + 1
+            save_state(state)
+            delayed = f"delayed-first-pid-{label.rsplit('-', 1)[-1]}" in MODES and reads[label] <= 2
+            pending = delayed or "never-first-pid" in MODES
+            crashed = "first-run-exited" in MODES and reads[label] == 1
+            malformed = "pending-malformed-pid" in MODES and label == label_of(AGENT) and reads[label] == 1
+            if pending or crashed or malformed:
+                job = state["labels"][label]
+                document = document.replace("\tstate = running\n", "\tstate = waiting\n")
+                document = document.replace(f"\tpid = {job['pid']}\n", "")
+                if not crashed:
+                    document = document.replace(f"\truns = {job['runs']}\n", "\truns = 0\n")
+                if malformed:
+                    document = document.replace("\truns = 0\n", "\truns = 0\n\tpid = pending\n")
         if "print-unparsable" in MODES:
             # A format the parser does not know: no closing brace.
             document = document[:document.rindex("}")]

@@ -15,8 +15,9 @@
 # be the canonical stage it maps to. A canonical stage with no mapped
 # source is emitted as skipped with that stated, rather than omitted --
 # an absent stage and an unrun one must not look alike. A harness stage
-# the mapping does not name is evidence for no canonical stage, but if it
-# did not pass the outcome is fail: the run failed, whatever it failed in.
+# the mapping does not name is evidence for no canonical stage. Its fail
+# or invalid status makes the outcome fail; an unmapped pass or skipped
+# status leaves the canonical stages' outcome unchanged.
 #
 # Usage:
 #   lifecycle-report-from-stages.sh <stages.tsv> <row_id> <tested_version> \

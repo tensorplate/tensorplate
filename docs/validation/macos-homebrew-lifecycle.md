@@ -134,13 +134,22 @@ stderr logs, `agent.error.log` and `observability.error.log`, to have
 gained output after the launchd-start stage recorded their sizes. It then
 runs `tensorplate logs --component observability`, which must read the
 packaged `events.ndjson` and return an event the observability service
-wrote during this run. Neither launchd nor the formulae truncate these
-logs, so byte offsets separate this run's output from earlier runs'. The
-agent component is not queried because the agent writes no structured
+wrote during this run. The structured event log rotates under its retention
+policy. Before starting services, the harness snapshots file identities and
+byte offsets for both `events.ndjson` and its retained generation,
+`events.1`. Verification reads only bytes new to this run from the active
+and retained generations. An event can therefore still be verified when
+rotation happens before the status check or between the CLI read and
+verification, provided it remains in one of these generations. The harness
+does not delete or truncate logs to establish the boundary.
+
+The agent component is not queried because the agent writes no structured
 events. Run the harness with `TENSORPLATE_CLI_CONFIG` unset, since the
 launcher honours an existing value. The raw status and logs output stays
 in the local `status-logs.log`; `status-logs.json` carries only the
-deployment id, counts and pass results.
+deployment id, counts and pass results. The current status-logs stage,
+including rotation handling, has not yet been validated on hardware; the
+2026-08-17 record predates this stage.
 
 The offline-runtime stage runs the installed services and CLI with the
 network denied, without touching the Mac's interfaces or the operator
@@ -153,7 +162,10 @@ launchd jobs are stopped with `brew services stop --keep` and run again
 with `brew services run --file` from plists that differ from the
 formula's only by starting the program under `sandbox-exec`. launchd
 keeps supervising them, and the plists in `~/Library/LaunchAgents` stay
-the normal ones.
+the normal ones. Since bootstrapping a job does not wait for its process
+to start, the harness reads each job at most 30 times for its initial PID,
+waiting one second between pending reads, before checking sandbox state.
+A job that never starts fails the stage.
 
 Under that profile the agent must recover the deploy-smoke deployment and
 log exactly one admission decision since the services restarted, for
@@ -218,6 +230,11 @@ The profile is weaker than an IP firewall, and these gaps are accepted:
 
 `sandbox-exec` is deprecated. The offline-profile and in-stage probes fail
 the run if it stops enforcing the profile or disappears.
+
+The full offline-runtime stage, including launchd startup, restoration and
+the final unchanged-PID and one-run checks, still requires a new M1 Pro
+hardware run. The recorded profile probes and fixture tests do not supply
+that lifecycle evidence.
 
 ## Rollback and recovery
 

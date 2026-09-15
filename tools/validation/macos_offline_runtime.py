@@ -361,7 +361,11 @@ def parse_launchd_job(text):
 
     def number(name):
         value = fields.get(name)
-        return int(value) if value is not None and re.fullmatch(r"[0-9]+", value) else None
+        if value is None:
+            return None
+        if not re.fullmatch(r"[0-9]+", value):
+            raise CheckFailed(f"launchctl print has an invalid {name!r} field")
+        return int(value)
 
     program = fields.get("program")
     return {
@@ -392,7 +396,8 @@ def _same_file(first, second):
         os.path.realpath(first) == os.path.realpath(second)
 
 
-def check_launchd_job(job, program=None, path=None, arguments=None, runs=None, same_pid_as=None):
+def check_launchd_job(job, program=None, path=None, arguments=None, runs=None, same_pid_as=None,
+                      startup=False):
     """launchd's own view of a job. `brew services info` reports the same
     loaded file and pid, parsed from this output, so it adds nothing."""
     failures = []
@@ -402,12 +407,18 @@ def check_launchd_job(job, program=None, path=None, arguments=None, runs=None, s
         failures.append("job_path")
     if arguments is not None and job["arguments"] != arguments:
         failures.append("job_arguments")
-    if not job["pid"]:
+    # bootstrap loads the definition before launchd necessarily starts its
+    # first process. Only an absent PID with zero attempts is pending; a
+    # missing PID after a run is a stopped/crashed process, not startup.
+    pending = startup and job["pid"] is None and job["runs"] == 0
+    if not job["pid"] and not pending:
         failures.append("job_running")
     # KeepAlive would hide a crash behind a running job: a restart counts
     # a run, and a job booted out and loaded again starts over at one run
     # with a new pid.
     if runs is not None and job["runs"] != runs:
+        failures.append("job_runs")
+    if startup and not pending and job["runs"] != 1:
         failures.append("job_runs")
     if same_pid_as is not None and job["pid"] != same_pid_as:
         failures.append("job_pid_unchanged")
@@ -1209,7 +1220,7 @@ def main(argv=None):
     command("launchd-job", opt("--print", dest="print_file", required=True),
             opt("--field"), opt("--program"), opt("--path"),
             opt("--sandboxed-arguments-from"), opt("--profile"),
-            opt("--runs", type=int), opt("--same-pid-as"))
+            opt("--runs", type=int), opt("--same-pid-as"), opt("--startup", action="store_true"))
     command("sandbox-state", opt("--profile", required=True),
             opt("--expect", choices=("sandboxed", "unsandboxed"), required=True),
             opt("--job", action="append", default=[]),
@@ -1284,8 +1295,13 @@ def _run(args):
                 arguments = expected_sandboxed_arguments(plistlib.load(handle), args.profile)
         failures = check_launchd_job(
             job, program=args.program, path=args.path, arguments=arguments, runs=args.runs,
-            same_pid_as=_job_pid(args.same_pid_as) if args.same_pid_as else None)
+            same_pid_as=_job_pid(args.same_pid_as) if args.same_pid_as else None,
+            startup=args.startup)
         _emit(job, args.out, failures, f"launchd job {job['label']} checks")
+        if args.startup and job["pid"] is None:
+            # The shell retries only this result. Wrong definitions,
+            # malformed output and failed launches still return 1.
+            return 75
     elif name == "sandbox-state":
         required = [_job_pid(path) for path in args.job]
         required += _pids_file(args.pids_file) if args.pids_file else []

@@ -695,8 +695,8 @@ PY
 
 # status-logs: run the real stage body against a fake Homebrew prefix and
 # a fake CLI whose logs output is built from the event file the way the
-# real CLI builds it. Each log file holds an earlier run's output before
-# the offset launchd-start would have recorded and this run's after it.
+# real CLI builds it. Stderr offsets and event file identities/sizes are
+# captured before this run's output, including retained event generations.
 # Every case runs as a bare run_stage call and again with errexit
 # suspended, because this body must fail through its own checks.
 python3 - "$harness" "$repo_root" <<'PY'
@@ -773,6 +773,16 @@ if args == ["logs", "--component", "observability", "--tail", "100", "--output",
     if mode == "logs-exit-2":
         print("error: tensorplate logs: no log_source.path configured", file=sys.stderr)
         sys.exit(2)
+    if mode in ("events-rotate-after-cli", "events-active-absent-after-cli",
+                "logs-stale-after-rotation"):
+        # The CLI finished reading the active generation, but retention
+        # renames it before the harness opens either event file.
+        events.replace(events.with_suffix(".1"))
+        if mode != "events-active-absent-after-cli":
+            events.write_text("" if mode == "logs-stale-after-rotation" else json.dumps({
+                "schema_version": "0.1", "component": "observability", "event": "service.tick",
+                "level": "info", "monotonic_timestamp_ns": 3333,
+            }) + "\n")
     sys.exit(0)
 print(f"unexpected tensorplate invocation: {args}", file=sys.stderr)
 sys.exit(64)
@@ -784,9 +794,24 @@ def event(name, timestamp):
         "level": "info", "monotonic_timestamp_ns": timestamp,
     }) + "\n"
 
+def event_baseline(logs):
+    baseline = {}
+    for name in ("events.ndjson", "events.1"):
+        path = logs / name
+        if path.exists():
+            info = path.stat()
+            baseline[name] = {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size}
+    return baseline
+
 checks_failed = "status-logs checks failed: "
 cases = {
     "pass": None,
+    "events-rotate-at-limit": None,
+    "events-rotate-after-cli": None,
+    "events-active-absent-after-cli": None,
+    "events-multiple-rotations": None,
+    "events-missing-at-baseline": None,
+    "events-baseline-missing": "error: status-logs checks failed",
     "brew-prefix-fails": "error: brew --prefix failed",
     "status-fails": "error: tensorplate status did not answer",
     "record-fails": "error: could not record the status and logs output",
@@ -803,6 +828,8 @@ cases = {
     "logs-other-source": checks_failed + "logs_source_is_packaged_file",
     "logs-no-entries": checks_failed + "logs_include_current_run",
     "logs-stale-entries-only": checks_failed + "logs_include_current_run",
+    "logs-stale-retained-generation": checks_failed + "logs_include_current_run",
+    "logs-stale-after-rotation": checks_failed + "logs_include_current_run",
 }
 helpers = "\n".join(function(name) for name in ("die", "note", "pass", "run_stage"))
 helpers += "\n" + heredoc_function("verify_status_logs")
@@ -822,6 +849,11 @@ for mode, expected in cases.items():
             # first one and lets the later ones through as current-run.
             earlier_events = (event("service.startup", 1111) + event("service.tick", 1112)
                               + event("service.tick", 1113))
+            if mode == "events-rotate-at-limit":
+                # Retention rotates before a write that would exceed 1 MiB.
+                # The saved offset is therefore much larger than the new file.
+                earlier_events += " " * (1024 * 1024 - len(earlier_events) - 1) + "\n"
+                assert len(earlier_events) == 1024 * 1024
             assert len(event("service.startup", 1111)) > max(
                 len(earlier_agent), len(earlier_observability))
             (logs / "agent.error.log").write_text(earlier_agent + (
@@ -830,9 +862,41 @@ for mode, expected in cases.items():
             (logs / "observability.error.log").write_text(earlier_observability + (
                 "" if mode == "observability-log-stale-only"
                 else "tensorplate-observability interval=1000ms\n"))
-            (logs / "events.ndjson").write_text(earlier_events + (
-                "" if mode == "logs-stale-entries-only"
-                else "not a json line\n" + event("service.startup", 2222)))
+            events = logs / "events.ndjson"
+            retained = logs / "events.1"
+            if mode != "events-missing-at-baseline":
+                events.write_text(earlier_events)
+            if mode in ("logs-stale-retained-generation", "events-multiple-rotations"):
+                retained.write_text(earlier_events)
+            baseline = event_baseline(logs)
+            baseline_path = root / "work/events-log-baseline.json"
+            baseline_path.write_text(json.dumps(baseline))
+            if mode == "events-baseline-missing":
+                baseline_path.unlink()
+            fresh_event = event("service.startup", 2222)
+            expected_entries, expected_current = 4, 1
+            if mode == "events-rotate-at-limit":
+                events.replace(retained)
+                events.write_text(fresh_event)
+                expected_entries = 1
+            elif mode == "events-multiple-rotations":
+                # Hold baseline generations open so this synthetic sequence
+                # cannot reuse a freed inode and obscure the intended case.
+                with events.open("rb"), retained.open("rb"):
+                    events.replace(retained)
+                    events.write_text(fresh_event)
+                    events.replace(retained)
+                    events.write_text(event("service.tick", 3333))
+                expected_entries, expected_current = 1, 2
+            elif mode == "events-missing-at-baseline":
+                events.write_text(fresh_event)
+                expected_entries = 1
+            elif mode not in ("logs-stale-entries-only", "logs-stale-retained-generation",
+                              "logs-stale-after-rotation"):
+                with events.open("a") as handle:
+                    handle.write("not a json line\n" + fresh_event)
+            if mode == "events-rotate-after-cli":
+                expected_current = 2
             if mode == "agent-log-missing":
                 (logs / "agent.error.log").unlink()
             if mode == "observability-log-missing":
@@ -842,7 +906,6 @@ for mode, expected in cases.items():
 set -Eeuo pipefail
 agent_error_log_start={len(earlier_agent)}
 observability_error_log_start={len(earlier_observability)}
-events_log_start={len(earlier_events)}
 ''' + r'''
 evidence_dir="$TP_ROOT/evidence"
 work_dir="$TP_ROOT/work"
@@ -873,8 +936,8 @@ fi
                 summary = json.loads(summary_text)
                 assert "/" not in summary_text, summary_text
                 assert summary["deployment_id"] == "smoke-1", summary
-                assert summary["logs_entries_returned"] == 4, summary
-                assert summary["current_run_structured_events"] == 1, summary
+                assert summary["logs_entries_returned"] == expected_entries, summary
+                assert summary["current_run_structured_events"] == expected_current, summary
                 assert summary["agent_launchd_log_current_run_bytes"] == len(
                     "tensorplate-agent listening on agent.sock"), summary
                 assert summary["observability_launchd_log_current_run_bytes"] == len(
@@ -885,6 +948,8 @@ fi
                 assert result.returncode != 0, context
                 assert "status-logs\tpass\t" not in rows, context
                 assert expected in log.splitlines(), (expected, context)
+                if mode == "events-baseline-missing":
+                    assert "FileNotFoundError" in log and str(baseline_path) in log, context
     print(f"macOS status-logs: {mode}: pass")
 
 # Stage order: status-logs observes the deployment deploy-smoke made,
@@ -895,27 +960,26 @@ assert (call_line("run_stage deploy-smoke deploy_smoke")
         < call_line("run_stage status-logs verify_status_logs")
         < call_line("run_stage launchd-restart restart_services")), "status-logs is out of order"
 
-# launchd-start must record each log's size before either service starts,
-# or this run's startup output would sit before the offset and never be
-# seen. Run the real stage against a fake prefix whose services append to
-# their logs when started, with each log present at a distinct size or
-# absent, and require every offset to be that file's size before start.
+# launchd-start must capture stderr sizes and event identities/sizes before
+# either service starts. Fake services append output at start; each prior
+# log has a distinct size or is absent. Compare the real snapshot against
+# metadata observed before executing the stage, including retained events.
 start_services = function("start_services")
 start_script = "\n".join(function(name) for name in (
     "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
-    "start_services",
-)) + r'''
+)) + "\n" + heredoc_function("capture_events_baseline") + "\n" + start_services + r'''
 set -Eeuo pipefail
 evidence_dir="$TP_ROOT/evidence"
+work_dir="$TP_ROOT/work"
 stage_results="$evidence_dir/stages.tsv"
 agent_error_log_start=unset
 observability_error_log_start=unset
-events_log_start=unset
 logs="$TP_ROOT/prefix/var/log/tensorplate"
 brew() {
   case "$*" in
     --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
     "services start tensorplate-agent")
+      [[ -s "$work_dir/events-log-baseline.json" ]] || return 9
       printf 'tensorplate-agent listening\n' >>"$logs/agent.error.log" ;;
     "services start tensorplate-observability")
       printf 'tensorplate-observability started\n' >>"$logs/observability.error.log"
@@ -936,27 +1000,32 @@ launchctl() { printf 'state = running\n'; }
 sleep() { :; }
 tensorplate() { printf '{}\n'; }
 run_stage launchd-start start_services
-printf 'offsets %s %s %s\n' \
-  "$agent_error_log_start" "$observability_error_log_start" "$events_log_start"
+printf 'offsets %s %s\n' "$agent_error_log_start" "$observability_error_log_start"
 '''
-earlier_sizes = {"agent.error.log": 11, "observability.error.log": 23, "events.ndjson": 37}
+earlier_sizes = {"agent.error.log": 11, "observability.error.log": 23,
+                 "events.ndjson": 37, "events.1": 53}
 for absent in (None, *earlier_sizes):
     with tempfile.TemporaryDirectory(prefix="tp-homebrew-launchd-start-") as directory:
         root = pathlib.Path(directory)
         logs = root / "prefix/var/log/tensorplate"
         logs.mkdir(parents=True)
         (root / "evidence").mkdir()
+        (root / "work").mkdir()
         for name, size in earlier_sizes.items():
             if name != absent:
                 (logs / name).write_text("x" * (size - 1) + "\n")
+        expected_baseline = event_baseline(logs)
         (root / "probe.sh").write_text(start_script)
         result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True,
                                 text=True, env=dict(os.environ, TP_ROOT=directory))
         expected = "offsets " + " ".join(
-            str(0 if name == absent else size) for name, size in earlier_sizes.items())
+            str(0 if name == absent else earlier_sizes[name])
+            for name in ("agent.error.log", "observability.error.log"))
         context = (absent, expected, result.returncode, result.stdout, result.stderr)
         assert result.returncode == 0, context
         assert expected in result.stdout.splitlines(), context
+        actual_baseline = json.loads((root / "work/events-log-baseline.json").read_text())
+        assert actual_baseline == expected_baseline, (context, actual_baseline, expected_baseline)
 
 # The formulae decide where launchd writes each service's stderr and the
 # harness reads those paths; neither side can move without the other.
@@ -970,10 +1039,9 @@ assert '"file_path": "@HOMEBREW_PREFIX@/var/log/tensorplate/events.ndjson"' in (
 assert '"path": "@HOMEBREW_PREFIX@/var/log/tensorplate/events.ndjson"' in (
     repo_root / "packaging/homebrew/conf/cli.json.in").read_text()
 for path in ("var/log/tensorplate/agent.error.log",
-             "var/log/tensorplate/observability.error.log",
-             "var/log/tensorplate/events.ndjson"):
+             "var/log/tensorplate/observability.error.log"):
     assert path in start_services, f"launchd-start does not size {path}"
-for name in ("agent.error.log", "observability.error.log", "events.ndjson"):
+for name in ("agent.error.log", "observability.error.log"):
     assert f'since("{name}"' in source, f"status-logs does not read {name}"
 
 # The sanitized transcript carries only allowlisted stage results; without
@@ -1000,7 +1068,7 @@ write_sanitized_transcript
     transcript = json.loads((root / "sanitized-transcript.json").read_text())
     stage = transcript["stages"][0]
     assert stage["stage"] == "status-logs" and stage["summary"] == summary, transcript
-print("macOS status-logs order, offsets, log paths and transcript: pass")
+print("macOS status-logs order, offsets, event baselines, log paths and transcript: pass")
 
 # The macOS runbook mapping is a coverage claim: it must name all eight
 # canonical stages, a run where every harness stage passes must convert
