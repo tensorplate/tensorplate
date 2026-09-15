@@ -101,9 +101,15 @@ operator overrides (e.g. `RUST_LOG=info`). The leading `-` in
   agent ignores reload requests because every mutation is a deploy
   transaction. The unit exposes the action so future config-reload
   work has a stable surface.
-- Upgrading the agent package while the unit is active triggers a
-  restart on `configure`. Operator-visible side effect: the current
-  serving worker is stopped and re-warmed by the new agent process.
+- Upgrading the agent or observability package stops that unit: the
+  package's `prerm` stops it on `upgrade`, and nothing in the packages
+  starts it again, because the units are installed with
+  `dh_installsystemd --no-start`. The current serving worker stops with
+  the agent. `sudo systemctl enable --now tensorplate-agent
+  tensorplate-observability`, which the release `install.sh` runs after
+  installing, brings both back, and the new agent re-warms the active
+  deployment from durable state. See
+  [`lifecycle.md`](./lifecycle.md#upgrade).
 
 ### Debugging
 

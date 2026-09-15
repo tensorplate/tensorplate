@@ -74,28 +74,33 @@ mapping could report deploy-smoke as a pass without the inference step,
 and mapped status-logs to a `tensorplate logs` call that cannot succeed
 on a packaged install.
 
-### Neither harness covers all eight stages yet
+A harness stage the mapping does not name is evidence for no canonical
+stage. Its `fail` or invalid status makes the outcome `fail`; an unmapped
+`pass` or `skipped` status leaves the canonical stages' outcome unchanged.
 
-Both runbooks below produce an `incomplete` report today, and the
-release gate refuses both rows. That is the accurate state, not a
-defect in the runbook:
+### The Jetson harness does not cover all eight stages yet
+
+The Jetson runbook below cannot produce better than an `incomplete`
+report today, and the release gate refuses that row. That is the
+accurate state, not a defect in the runbook. The macOS mapping names
+all eight stages, so a macOS report can be `pass` when all eight passed
+and no unmapped stage failed or recorded an invalid status:
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
 | install | covered | covered |
 | upgrade | **not implemented** | covered |
 | deploy-smoke | covered | covered |
-| status-logs | covered | **not implemented** |
+| status-logs | covered | covered |
 | rollback | **not implemented** | covered |
 | restart | covered | covered |
 | crash-loop | covered | covered |
 | offline | **not implemented** | covered |
 
-Closing these gaps means adding the missing operations to the harnesses
-themselves, which is tracked as hardware work. Until then each gap is
-recorded as `skipped` with its reason — by the Jetson harness itself, and
-by the converter for macOS — so the gate reports what is missing rather
-than accepting a partial run.
+Closing these gaps means adding the missing operations to the Jetson
+harness itself. Until then it records each gap as `skipped` with its
+reason, so the gate reports what is missing rather than accepting a
+partial run.
 
 ## Jetson Orin Nano 8GB Super
 
@@ -238,10 +243,20 @@ Prerequisites:
    log to convert, and neither `tools/validation/jetson-stages-from-evidence.sh`
    nor the converter is part of this procedure.
 
+   The harness's CLI calls use a private temporary configuration targeting
+   the installed agent's local socket. An operator's saved profile or
+   `TENSORPLATE_CLI_CONFIG` cannot redirect them. Inference must use the
+   endpoint discovered through that agent, and its reported endpoint must
+   match the active deployment URL checked for health. The temporary
+   configuration is removed on exit.
+
    **install** purges every installed `tensorplate*` package except
    `tensorplate-apt-source` — the channel bootstrap, which depends on
    nothing in TensorPlate — and requires that none remain before it clears
-   `/etc`, `/var/lib`, `/var/log` and `/run/tensorplate`. It installs
+   `/etc/tensorplate`, `/var/lib/tensorplate`, `/var/log/tensorplate` and
+   `/run/tensorplate`. A package-inventory query error stops the stage
+   before state is cleared; only dpkg's explicit no-match result counts
+   as an empty inventory. It installs
    through the candidate's `install.sh` with signature verification and
    without the Python backend, requires each of the five runtime packages
    to be installed at the version its candidate `.deb` declares, and
@@ -275,7 +290,8 @@ Prerequisites:
    reasons in the report, so a run today is `incomplete` and the gate
    refuses the row. Upgrade and rollback against the v0.1.5 arm64
    baseline, and offline under per-unit network denial, are follow-up
-   harness work.
+   harness work. A hardware run of this native harness on the Jetson is
+   deferred to release validation; the fixture checks do not replace it.
 
    The digest this run files is the sha256 of the candidate's
    `SHA256SUMS`, taken in preflight once the asset set has verified and
@@ -287,8 +303,20 @@ Prerequisites:
 
 6. File the report, its stage logs and the recorded row facts under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
-   **Sanitize first** — see that directory's README. What the harness
-   writes:
+   **Sanitize before the first commit** — see that directory's README —
+   then scan the sanitized copy with the device's host name, the account
+   name and any other name of this machine listed in a literal file kept
+   outside the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62
+   ```
+
+   Keep the raw report and logs privately. The native harness records its
+   own stage times, so there is no adapter to re-run after sanitization.
+   What the harness writes:
 
    | File | Carries |
    | --- | --- |
@@ -304,7 +332,10 @@ Prerequisites:
 Prerequisites: Homebrew present, the tap reachable, and **no TensorPlate
 services running** from a previous run — `macos-homebrew-lifecycle.sh`
 restores a baseline on exit and a half-cleaned host makes its rollback
-stage meaningless.
+stage meaningless. `TENSORPLATE_CLI_CONFIG` must be unset in the shell
+that runs the harness: the Homebrew launcher honours a value that is
+already set, and the status-logs stage fails unless the CLI reads the
+packaged configuration.
 
 1. Confirm identity, as above. PASS: `platform_row` resolves
    `macos26-m1pro-16gb`, and `model_class_rows` reports `chunked_policy
@@ -330,9 +361,16 @@ stage meaningless.
      <evidence>/stages.tsv macos26-m1pro-16gb <tested_version> \
      macos-homebrew-lifecycle <evidence>/lifecycle-report.json \
      clean-install=install upgrade=upgrade deploy-smoke=deploy-smoke \
-     rollback=rollback launchd-restart=restart \
+     status-logs=status-logs rollback=rollback launchd-restart=restart \
      launchd-crash-loop=crash-loop offline-runtime=offline
    ```
+
+   The converter reads only what `stages.tsv` recorded. A harness that
+   exits non-zero without recording a failed stage, because it failed
+   while writing `summary.json` or the sanitized transcript or was
+   interrupted between two stages, can leave a log that converts to
+   `pass`. Never file a `pass` report from a run whose harness exited
+   non-zero: re-run it.
 
    The digest this run files is the source archive every candidate
    formula is pinned to. That channel publishes no binary — all six
@@ -345,13 +383,37 @@ stage meaningless.
    a preflight downloads nothing, and a digest filed for it would attest
    an install that never happened.
 
-   `status-logs` is deliberately unmapped. The harness's `host-facts`
-   stage collects inventory before anything is installed; it is not an
-   observation of status or log behaviour, and mapping it would claim a
-   stage that never ran.
+   The harness's `status-logs` stage runs after deploy-smoke. It asserts
+   that `tensorplate status` still reports the deploy-smoke deployment as
+   ready, that both launchd stderr logs gained output after launchd-start
+   recorded their sizes, and that `tensorplate logs` reads the packaged
+   structured event log and returns an observability event written
+   during this run. Before starting services, the harness snapshots file
+   identities and byte offsets for `events.ndjson` and its retained
+   generation, `events.1`. It reads only new bytes from these generations,
+   so rotation before the status check or between the CLI read and
+   verification can still prove the returned event belongs to this run.
+   The harness does not delete or truncate these logs. It does not query
+   the agent component, because the agent writes no structured events.
+   `host-facts` stays unmapped: it collects inventory before anything is
+   installed and observes neither status nor logs. The status-logs stage,
+   including its rotation checks, still requires a hardware run; the
+   historical evidence predates it.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
-   **Sanitize first** — see that directory's README.
+   Convert first, so the report reflects the harness's own `stages.tsv`.
+   The converter's `detail` names harness stages and never quotes a log,
+   so the report needs no sanitizing; the logs do. **Sanitize before the
+   first commit** — see that directory's README — then scan the sanitized
+   copy with the Mac's computer name, local host name, account name and
+   any other name of this machine listed in a literal file kept outside
+   the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/macos26-m1pro-16gb
+   ```
 
 ## What a failed run is worth
 

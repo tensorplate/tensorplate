@@ -92,6 +92,14 @@ The `x86_64` serving worker is built without the TensorRT adapter — a hosted
 runner has no CUDA/TensorRT SDK, and shipping the adapter without one
 produces a backend that registers and only fails at engine load. The
 `python_pytorch` sidecar path is unaffected and needs no vendor SDK.
+That configuration, with its compiler and DWARF version, lives in
+`tools/release/amd64-build-profile.sh`, which the release job and
+`build-release-artifacts.sh --arch amd64` both read.
+
+`--manifest` and `--checksums` may be omitted: they default to
+`tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS` inside
+`--artifacts-dir`, where `install.sh` reads them. Any other name or
+directory is refused before the build starts.
 
 For local diagnostics only, the equivalent steps are:
 

@@ -315,10 +315,36 @@ cat >"${stub_bin}/dpkg-query" <<'STUB'
 mode="${TP_FAKE_MODE:-ok}"
 case "$*" in
   *'binary:Package'*)
+    reads=$(cat "${TP_FAKE_PACKAGE_LIST_CALLS}" 2>/dev/null || echo 0)
+    reads=$((reads + 1))
+    printf '%s\n' "$reads" >"${TP_FAKE_PACKAGE_LIST_CALLS}"
+    case "$mode:$reads" in
+      dpkg-query-fails-before:1|dpkg-query-fails-after:2)
+        printf 'dpkg-query: error: cannot read package database\n' >&2
+        exit 2
+        ;;
+      dpkg-query-partial-before:1|dpkg-query-partial-after:2)
+        printf 'tensorplate-agent installed\n'
+        printf 'dpkg-query: no packages found matching tensorplate*\n' >&2
+        exit 1
+        ;;
+      dpkg-query-unexpected-error:1)
+        printf 'dpkg-query: unexpected query failure\n' >&2
+        exit 1
+        ;;
+      dpkg-query-malformed:*)
+        printf 'tensorplate-agent\n'
+        exit 0
+        ;;
+      dpkg-no-match:*)
+        printf 'dpkg-query: no packages found matching tensorplate*\n' >&2
+        exit 1
+        ;;
+    esac
     printf 'tensorplate-apt-source installed\n'
     printf 'tensorplate-backend-python-pytorch not-installed\n'
     case "$mode" in
-      installed-runtime)
+      installed-runtime|dpkg-query-fails-after|dpkg-query-partial-after)
         [ -f "${TP_FAKE_PURGE_MARKER}" ] && exit 0
         for pkg in tensorplate-agent tensorplate-serving tensorplate-observability \
                    tensorplate-cli tensorplate-common; do
@@ -560,6 +586,30 @@ STUB
 cat >"${stub_bin}/tensorplate" <<'STUB'
 #!/bin/sh
 # A stubbed appliance. TP_FAKE_MODE selects which way it misbehaves.
+# Inspect the effective explicit configuration before returning any fake
+# appliance response. Merely accepting --config would hide a pin that
+# still selects another agent or overrides inference with a serving URL.
+if [ "${1:-}" != --config ] || [ -z "${2:-}" ]; then
+  printf 'fixture CLI: an explicit pinned config is required\n' >&2
+  exit 9
+fi
+config="$2"
+shift 2
+python3 - "$config" "${1:-}" <<'PY' || exit 9
+import json, os, pathlib, sys
+
+path, command = pathlib.Path(sys.argv[1]), sys.argv[2]
+config = json.loads(path.read_text(encoding="utf-8"))
+assert config.get("schema_version") == "0.1", "unexpected CLI config schema"
+profile = config["profiles"][config["default_profile"]]
+assert profile.get("mode") == "local", "CLI profile does not target the local appliance"
+assert profile.get("socket_path") == os.environ["TP_FAKE_SOCKET"], "CLI socket is not the validated appliance"
+assert not profile.get("agent_url"), "CLI profile overrides the agent endpoint"
+assert not profile.get("serving_url"), "CLI profile overrides the discovered worker"
+assert path.resolve() != pathlib.Path(os.environ["TENSORPLATE_CLI_CONFIG"]).resolve(), "CLI retained inherited config"
+with open(os.environ["TP_FAKE_CLI_CALLS"], "a", encoding="utf-8") as log:
+    log.write(json.dumps({"command": command, "config": str(path), "socket": profile["socket_path"]}) + "\n")
+PY
 mode="${TP_FAKE_MODE:-ok}"
 phase=initial
 [ -f "${TP_FAKE_RESTART_MARKER}" ] && phase=restarted
@@ -699,8 +749,8 @@ JSON
     # Only once crash-loop has backed up the config, so every stage
     # before it passes and only the recovery answers wrongly.
     [ "$mode" = crashloop-recovery-garbled ] && [ -f "${TP_FAKE_BACKUP_PATH}" ] && garble=1
-    python3 - "$input" "$out" "$garble" <<'PY' || exit 1
-import base64, json, struct, sys
+    python3 - "$input" "$out" "$garble" "$mode" "$phase" <<'PY' || exit 1
+import base64, json, os, pathlib, struct, sys
 
 request = json.load(open(sys.argv[1], encoding="utf-8"))
 payload = request["inputs"][0]["payload_b64"]
@@ -717,7 +767,18 @@ response = {
     }],
 }
 json.dump(response, open(sys.argv[2], "w", encoding="utf-8"))
-print(json.dumps({"command": "infer", "payload": {"result": response}}))
+endpoint = "http://127.0.0.1:" + os.environ["TP_FAKE_SERVING_PORT"] + "/infer"
+source = "agent-discovered"
+mode, phase = sys.argv[4:]
+if mode == "infer-configured-endpoint":
+    source = "profile"
+if mode == "infer-wrong-endpoint" \
+        or (mode == "restart-infer-wrong-endpoint" and phase == "restarted") \
+        or (mode == "crashloop-infer-wrong-endpoint" and pathlib.Path(os.environ["TP_FAKE_BACKUP_PATH"]).exists()):
+    endpoint = "http://127.0.0.1:1/infer"
+print(json.dumps({"command": "infer", "payload": {
+    "endpoint": endpoint, "endpoint_source": source, "result": response,
+}}))
 PY
     ;;
   logs)
@@ -1016,6 +1077,12 @@ check "  and says so before anything is installed" yes "$(said 'could not comput
 # --- the stages, executed against a stubbed appliance.
 appliance="${td}/appliance"
 mkdir -p "${appliance}/run" "${appliance}/log" "${appliance}/scratch"
+# Every run inherits an unrelated appliance and serving endpoint. The
+# fixture CLI checks that the harness explicitly overrides both before
+# it supplies any healthy response; a bare call cannot silently pass.
+cat >"${appliance}/inherited-cli.json" <<'JSON'
+{"schema_version":"0.1","default_profile":"unrelated","profiles":{"unrelated":{"mode":"url","agent_url":"127.0.0.1:1","serving_url":"http://127.0.0.1:2/infer"}}}
+JSON
 
 # A serving /health endpoint, which the round-trip checker fetches.
 #
@@ -1097,12 +1164,14 @@ run_stages() {
   : >"${appliance}/infer.log"
   : >"${appliance}/deploy.log"
   : >"${appliance}/cxx.log"
+  : >"${appliance}/cli-calls.jsonl"
   : >"${appliance}/health-requests.log"
   rm -rf "${appliance}/staged-bundle" "${appliance}/scratch"
   mkdir -p "${appliance}/scratch"
   rm -f "${appliance}/restarted" "${appliance}/config-broken" "${appliance}/installed" \
     "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path" \
-    "${appliance}/pid" "${appliance}/started" "${appliance}/status-reads" "${appliance}/mainpid-reads"
+    "${appliance}/pid" "${appliance}/started" "${appliance}/status-reads" "${appliance}/mainpid-reads" \
+    "${appliance}/package-list-reads"
   # A case may have removed the control socket.
   if [[ ! -S "${appliance}/run/agent.sock" ]]; then
     python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
@@ -1115,6 +1184,9 @@ run_stages() {
   printf '{"fixture":"original agent config"}\n' >"${appliance}/agent-config"
   printf '%s\n' "$mode" >"${appliance}/mode"
   env PATH="${stub_bin}:${PATH}" \
+    TENSORPLATE_CLI_CONFIG="${appliance}/inherited-cli.json" \
+    TP_FAKE_CLI_CALLS="${appliance}/cli-calls.jsonl" \
+    TP_FAKE_PACKAGE_LIST_CALLS="${appliance}/package-list-reads" \
     TP_FAKE_GROUP=member \
     TP_FAKE_SOCKET="${appliance}/run/agent.sock" \
     TP_FAKE_START_MARKER="${appliance}/started" \
@@ -1193,6 +1265,24 @@ logged() {
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence" "")"
+check "  every CLI command ignores inherited agent and inference endpoints" yes \
+  "$(python3 - "${appliance}/cli-calls.jsonl" <<'PY'
+import json, sys
+
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+expected = ["doctor", "deploy", "infer", "status", "status", "logs",
+            "infer", "status", "infer", "status"]
+print("yes" if [call["command"] for call in calls] == expected else str(calls))
+PY
+)"
+check "  the private CLI config is removed after the run" yes \
+  "$(python3 - "${appliance}/cli-calls.jsonl" <<'PY'
+import json, pathlib, sys
+
+paths = {json.loads(line)["config"] for line in open(sys.argv[1], encoding="utf-8")}
+print("yes" if paths and all(not pathlib.Path(path).exists() for path in paths) else "no")
+PY
+)"
 for stage in install deploy-smoke status-logs restart crash-loop; do
   check "  ${stage} is recorded as a pass" "pass" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
@@ -1334,6 +1424,42 @@ check "  and the failed step is the one named" yes "$(logged "${evidence}/instal
 check "  and the stage stopped there rather than at the leftover check" no \
   "$(logged "${evidence}/install.log" 'remain after the purge')"
 
+# A failed database read is not an empty database, either before the
+# purge or while checking it afterward. The no-match control is the one
+# nonzero query result that means there are no packages to remove.
+evidence="${td}/stages-dpkg-no-match"
+check "a documented dpkg no-match result permits a clean install" 0 \
+  "$(run_stages dpkg-no-match "$evidence" "" --bundle-dir "${td}/bundle-good")"
+check "  and certifies the install stage" pass "$(stage_status "${evidence}/lifecycle-report.json" install)"
+check "  without invoking an empty purge" no \
+  "$(grep -Fq 'apt-get purge' "${appliance}/sudo.log" && echo yes || echo no)"
+for query_case in "dpkg-query-fails-before|2|cannot read package database|no" \
+                  "dpkg-query-fails-after|2|cannot read package database|yes" \
+                  "dpkg-query-partial-before|1|no packages found matching tensorplate*|no" \
+                  "dpkg-query-partial-after|1|no packages found matching tensorplate*|yes" \
+                  "dpkg-query-unexpected-error|1|unexpected query failure|no" \
+                  "dpkg-query-malformed|1|invalid dpkg-query package inventory record|no"; do
+  mode="${query_case%%|*}"
+  rest="${query_case#*|}"
+  expected_status="${rest%%|*}"
+  rest="${rest#*|}"
+  diagnostic="${rest%%|*}"
+  purged="${rest#*|}"
+  evidence="${td}/stages-${mode}"
+  check "${mode} preserves the package-query failure" "$expected_status" \
+    "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"
+  check "  and records a failed install" fail "$(stage_status "${evidence}/lifecycle-report.json" install)"
+  check "  and retains the query diagnostic" yes "$(logged "${evidence}/install.log" "$diagnostic")"
+  check "  and reaches the intended side of the purge" "$purged" \
+    "$(grep -Fq 'apt-get purge' "${appliance}/sudo.log" && echo yes || echo no)"
+  check "  and never removes the installed state" no \
+    "$(grep -Fq 'rm -rf /etc/tensorplate' "${appliance}/sudo.log" && echo yes || echo no)"
+  check "  and never invokes the installer" no \
+    "$(grep -Fq '/install.sh --local-artifacts' "${appliance}/sudo.log" && echo yes || echo no)"
+  check "  and attests no artifact digest" absent \
+    "$(report_field "${evidence}/lifecycle-report.json" subject artifact_digest)"
+done
+
 install_cases=()
 for id in platform_registry agent_reachable agent_socket serving_binary_installed path_layout config_files; do
   install_cases+=("doctor-warns-${id}|${id} is warning")
@@ -1419,6 +1545,8 @@ for variant_case in "wrong-backend|must declare backend_hint=tensorrt" \
 done
 for mode_case in "infer-garbled|1|value mismatch at 1" \
                  "infer-fails|11|step failed (exit 11): infer" \
+                 "infer-configured-endpoint|1|checks failed: inference_endpoint_source" \
+                 "infer-wrong-endpoint|1|checks failed: inference_endpoint" \
                  "deploy-fails|3|step failed (exit 3): deploy" \
                  "deploy-not-active|1|checks failed: deployment_phase" \
                  "deploy-other-id|1|checks failed: deployment_id" \
@@ -1510,6 +1638,7 @@ for mode_case in "restart-no-worker|checks failed: active_serving_url" \
                  "restart-unhealthy-health|checks failed: serving_health_state" \
                  "restart-wrong-health|checks failed: serving_health_deployment" \
                  "restart-infer-garbled|value mismatch at 1" \
+                 "restart-infer-wrong-endpoint|checks failed: inference_endpoint" \
                  "restart-agent-pid-unchanged|agent MainPID did not change" \
                  "restart-observability-pid-unchanged|observability MainPID did not change" \
                  "restart-agent-inactive|step failed (exit 1): services ready again" \
@@ -1573,7 +1702,8 @@ for mode_case in "crash-loop-keeps-restarting|the agent never settled" \
                  "crash-loop-never-fails|the agent never settled" \
                  "crash-loop-activating|the agent never settled" \
                  "crash-loop-stopped|checks failed: unit_failed" \
-                 "crashloop-recovery-garbled|value mismatch at 1"; do
+                 "crashloop-recovery-garbled|value mismatch at 1" \
+                 "crashloop-infer-wrong-endpoint|checks failed: inference_endpoint"; do
   mode="${mode_case%%|*}"
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence" "" --bundle-dir "${td}/bundle-good")"

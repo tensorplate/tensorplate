@@ -61,9 +61,9 @@
 #     --evidence-dir <new or empty dir> \
 #     --confirm RESET-TENSORPLATE
 
-# Stage steps that redirect output are handed to `bash -c` so the
-# redirection belongs to the command whose status is being captured,
-# rather than to `step` itself. Those bodies are single-quoted on
+# Stage steps redirect output inside capture_cli_json or `bash -c`, so
+# the redirection belongs to the command whose status is being captured,
+# rather than to `step` itself. The `bash -c` bodies are single-quoted on
 # purpose: the child shell expands the positional parameters.
 # shellcheck disable=SC2016
 
@@ -111,6 +111,11 @@ readonly CRASH_LOOP_POLLS=40
 CRASH_LOOP_BACKUP=""
 # Scratch directory holding a bundle this run built, removed on exit.
 BUNDLE_SCRATCH=""
+# Private CLI config pins every command to the installed local agent; an
+# operator profile must never redirect this run to another control plane
+# or override which worker receives the identity inference.
+CLI_SCRATCH=""
+CLI_CONFIG=""
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPO_ROOT
@@ -440,20 +445,77 @@ await_services_ready() {
 
 # --- install -----------------------------------------------------------
 
+prepare_cli_config() {
+  CLI_SCRATCH="$(mktemp -d)" || return
+  CLI_CONFIG="${CLI_SCRATCH}/cli.json"
+  python3 - "$CLI_CONFIG" "$AGENT_SOCKET_PATH" <<'PYCONFIG'
+import json, pathlib, sys
+
+path, socket = sys.argv[1:]
+pathlib.Path(path).write_text(json.dumps({
+    "schema_version": "0.1",
+    "default_profile": "local",
+    "profiles": {"local": {"mode": "local", "socket_path": socket}},
+}) + "\n", encoding="utf-8")
+PYCONFIG
+}
+
+remove_cli_scratch() {
+  [[ -n "$CLI_SCRATCH" ]] || return 0
+  rm -rf "$CLI_SCRATCH" || return
+  CLI_SCRATCH=""
+  CLI_CONFIG=""
+}
+
+run_cli() {
+  tensorplate --config "$CLI_CONFIG" "$@"
+}
+
+# Keep the redirection inside the command whose status step captures, so
+# failure to create an evidence file fails the stage as well.
+capture_cli_json() {
+  local output="$1"
+  shift
+  run_cli "$@" >"$output"
+}
+
 # Installed tensorplate* packages dpkg knows about, one `name status` per
-# line, leaving out the apt channel's bootstrap package.
+# line, leaving out the apt channel's bootstrap package. A failed query
+# cannot establish that nothing is installed: deleting conffiles after
+# such a query would strand them in dpkg's database. The documented
+# no-match exit is accepted only with no output and its exact diagnostic.
 installed_tensorplate_packages() {
-  local listing pkg status
-  listing="$(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' 2>/dev/null)" ||
-    listing=""
-  while read -r pkg status; do
-    if [[ -n "$pkg" && "$pkg" != "$APT_SOURCE_PACKAGE" && "$status" != "not-installed" ]]; then
-      printf '%s %s\n' "$pkg" "$status"
-    fi
-  done <<<"$listing"
+  python3 - "$APT_SOURCE_PACKAGE" <<'PYPACKAGES'
+import os, subprocess, sys
+
+query = subprocess.run(
+    ["dpkg-query", "-W", "-f=${binary:Package} ${db:Status-Status}\n", "tensorplate*"],
+    capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"},
+)
+if query.stderr:
+    sys.stderr.write(query.stderr)
+if query.returncode:
+    no_matches = (
+        query.returncode == 1
+        and not query.stdout
+        and query.stderr.rstrip("\n") == "dpkg-query: no packages found matching tensorplate*"
+    )
+    if no_matches:
+        raise SystemExit(0)
+    sys.stderr.write(f"could not determine installed TensorPlate packages: dpkg-query exited {query.returncode}\n")
+    raise SystemExit(query.returncode if query.returncode > 0 else 1)
+for line in query.stdout.splitlines():
+    fields = line.split()
+    if len(fields) != 2:
+        raise SystemExit(f"invalid dpkg-query package inventory record: {line!r}")
+    package, status = fields
+    if package != sys.argv[1] and status != "not-installed":
+        print(package, status)
+PYPACKAGES
 }
 
 stage_install() {
+  step "pin CLI commands to the local agent" prepare_cli_config || return
   note "clearing any previous TensorPlate install"
   sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
 
@@ -504,8 +566,8 @@ stage_install() {
   # so the report is read before the exit status decides the stage: the
   # log then names the failing findings rather than only the exit code.
   local doctor_status=0
-  step "doctor" bash -c \
-    'tensorplate doctor --output json >"$1"' _ "${EVIDENCE_DIR}/doctor.json" || doctor_status=$?
+  step "doctor" capture_cli_json "${EVIDENCE_DIR}/doctor.json" \
+    doctor --output json || doctor_status=$?
   check_doctor_green "${EVIDENCE_DIR}/doctor.json" || return
   ((doctor_status == 0)) || return "$doctor_status"
   pass "installed at the candidate's package versions, services ready, doctor green, ${ROW} resolved by platform_row"
@@ -615,26 +677,29 @@ PY
 # transaction assertions.
 check_trt_round_trip() {
   local status_output="$1" result_output="$2" deploy_output="${3:-}"
-  local work infer_output
+  local work infer_output infer_command
   work="$(mktemp -d)" || return
   infer_output="${work}/infer-response.json"
+  infer_command="${work}/infer-command.json"
 
   note "issuing the identity inference request"
   # The request the bundle ships, from the staged copy: the same
   # invocation the clean-room smoke has run on this device class.
-  step "infer" tensorplate infer --input "${BUNDLE_STAGING_DIR}/sample_infer.json" \
+  step "infer" capture_cli_json "$infer_command" infer \
+    --input "${BUNDLE_STAGING_DIR}/sample_infer.json" \
     --output-file "$infer_output" --output json || return
+  cat "$infer_command" || return
   step "the engine returned its input unchanged" \
     python3 "$IDENTITY_VERIFIER" "$infer_output" || return
-  step "status" bash -c \
-    'tensorplate status --output json >"$1"' _ "$status_output" || return
+  step "status" capture_cli_json "$status_output" status --output json || return
 
-  python3 - "$deploy_output" "$status_output" "$DEPLOYMENT_ID" >"$result_output" <<'PY' || return
+  python3 - "$deploy_output" "$status_output" "$DEPLOYMENT_ID" "$infer_command" >"$result_output" <<'PY' || return
 import json, sys, urllib.parse, urllib.request
 
-deploy_path, status_path, expected = sys.argv[1:]
+deploy_path, status_path, expected, infer_path = sys.argv[1:]
 deploy = json.load(open(deploy_path, encoding="utf-8"))["payload"] if deploy_path else None
 status = json.load(open(status_path, encoding="utf-8"))["payload"]
+inference = json.load(open(infer_path, encoding="utf-8"))["payload"]
 
 agent = status.get("agent") or {}
 active = agent.get("active") or {}
@@ -668,6 +733,10 @@ checks = {
     "active_deployment": active.get("deployment_id") == expected,
     "active_backend": active.get("backend") == "tensorrt",
     "active_serving_url": serving_url_valid,
+    # The verified tensor must come from the same active worker whose
+    # health is checked here, never a profile's serving_url override.
+    "inference_endpoint_source": inference.get("endpoint_source") == "agent-discovered",
+    "inference_endpoint": serving_url_valid and inference.get("endpoint") == serving_url,
     "serving_health_state": health.get("state") == "ready",
     "serving_health_deployment": health.get("active_model_id") == expected,
     "supervision_healthy_when_configured": supervision_healthy,
@@ -738,9 +807,8 @@ PY
   step "make the bundle readable" sudo chmod -R a+rX "$BUNDLE_STAGING_DIR" || return
 
   note "deploying"
-  step "deploy" bash -c \
-    'tensorplate deploy "$1" --deployment-id "$2" --output json >"$3"' \
-    _ "$BUNDLE_STAGING_DIR" "$DEPLOYMENT_ID" "$deploy_output" || return
+  step "deploy" capture_cli_json "$deploy_output" deploy \
+    "$BUNDLE_STAGING_DIR" --deployment-id "$DEPLOYMENT_ID" --output json || return
 
   step "active worker round trip" check_trt_round_trip \
     "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$deploy_output" || return
@@ -792,8 +860,7 @@ PY
 stage_status_logs() {
   local logs_status=0
   note "querying the control plane"
-  step "status" bash -c \
-    'tensorplate status --output json >"$1"' _ "${EVIDENCE_DIR}/status.json" || return
+  step "status" capture_cli_json "${EVIDENCE_DIR}/status.json" status --output json || return
   python3 - "${EVIDENCE_DIR}/status.json" "$DEPLOYMENT_ID" <<'PY' || return
 import json, sys
 
@@ -815,7 +882,7 @@ PY
   # to the journal. Its status is filed as evidence and the stage requires
   # the log path a packaged Linux install actually has.
   note "recording the operator-facing log command"
-  tensorplate logs --component agent --tail 100 \
+  run_cli logs --component agent --tail 100 \
     >"${EVIDENCE_DIR}/agent-cli.log" 2>&1 || logs_status=$?
   printf '%s\n' "$logs_status" >"${EVIDENCE_DIR}/logs-command.exit"
   if ((logs_status != 0)); then
@@ -904,6 +971,8 @@ finish_with_cleanup() {
   # its removal is reported without changing the run's status.
   remove_bundle_scratch ||
     printf 'warning: could not remove the scratch bundle at %s\n' "$BUNDLE_SCRATCH" >&2
+  remove_cli_scratch ||
+    printf 'warning: could not remove the private CLI config at %s\n' "$CLI_SCRATCH" >&2
   exit "$status"
 }
 

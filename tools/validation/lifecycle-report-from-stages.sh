@@ -3,7 +3,7 @@
 #
 # Derive the canonical lifecycle report from a harness's own stage log.
 #
-# The macOS harness records nineteen stages under its own names and the
+# The macOS harness records its stages under its own names and the
 # Jetson harness records none; both predate the shared report and both
 # run only on hardware. Rewriting their stage calls would mean editing,
 # untested, the code whose whole purpose is to be trustworthy on a
@@ -14,7 +14,10 @@
 # What the mapping asserts is real: a harness stage named here CLAIMS to
 # be the canonical stage it maps to. A canonical stage with no mapped
 # source is emitted as skipped with that stated, rather than omitted --
-# an absent stage and an unrun one must not look alike.
+# an absent stage and an unrun one must not look alike. A harness stage
+# the mapping does not name is evidence for no canonical stage. Its fail
+# or invalid status makes the outcome fail; an unmapped pass or skipped
+# status leaves the canonical stages' outcome unchanged.
 #
 # Usage:
 #   lifecycle-report-from-stages.sh <stages.tsv> <row_id> <tested_version> \
@@ -73,8 +76,17 @@ with open(stages_tsv, encoding="utf-8") as handle:
             continue
         rows.append(dict(zip(header, line.rstrip("\n").split("\t"))))
 
-# A harness stage may map to a canonical one; the rest are its own
-# business and are not evidence for this contract.
+# A harness stage may map to a canonical one; the rest are not evidence
+# for any canonical stage. Their failures still count: a harness that
+# failed in a stage nobody mapped -- the macOS harness's tap-restored
+# check runs after its last mapped stage -- did not pass, and a report
+# built only from the mapped rows would say it did.
+unmapped_failures = [
+    row.get("stage", "")
+    for row in rows
+    if row.get("stage", "") not in mapping
+    and row.get("status", "fail") not in ("pass", "skipped")
+]
 # Weakest-result ordering. fail dominates skipped dominates pass, so a
 # canonical stage covered by several harness stages reports the worst of
 # them regardless of the order they appear in the log. The previous rule
@@ -127,7 +139,13 @@ finished = max((s["finished_at"] for s in stages if s.get("finished_at")), defau
 # pass requires all eight present and passing; "nothing failed" is not the
 # same claim, and reporting it as pass let two passes and six skips look
 # like a validated row.
-if any(s["status"] == "fail" for s in stages):
+if unmapped_failures:
+    print(
+        "lifecycle-report: outcome is fail: unmapped harness stages did not "
+        f"pass: {', '.join(unmapped_failures)}",
+        file=sys.stderr,
+    )
+if any(s["status"] == "fail" for s in stages) or unmapped_failures:
     outcome = "fail"
 elif all(s["status"] == "pass" for s in stages) and len(stages) == len(CANONICAL):
     outcome = "pass"

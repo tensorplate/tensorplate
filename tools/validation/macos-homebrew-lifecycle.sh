@@ -152,6 +152,7 @@ active_stage_log=""
 active_stage_started=""
 lifecycle_marker=""
 agent_error_log_start=0
+observability_error_log_start=0
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -248,6 +249,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A stage's pass row is written as soon as its body returns, so what
+# stops a failing body is errexit, and errexit is only active inside the
+# body because every call below is a bare top-level statement. Calling
+# run_stage as an `if`, `while` or `until` condition, after `!`, or on the
+# left of `||` or `&&` suspends errexit for the whole body, and a failed
+# command would then record pass; so does `set +e`, which only cleanup
+# uses. For the same reason a body must not end an assertion with a
+# `[[ ]]`, `(( ))` or `!` command: macOS /bin/bash is 3.2, which does not
+# apply errexit to `[[ ]]` or `(( ))`, and no bash applies it to `!`, so
+# each one needs an explicit `|| die`.
+# test/packaging/verify_macos_homebrew_lifecycle.sh lints the harness for
+# these forms; it accepts a run_stage call only as a bare statement.
 run_stage() {
   active_stage="$1"
   shift
@@ -528,13 +541,20 @@ verify_packaged_closure() {
     formula_is_installed "$formula_name" ||
       die "formula is not installed: ${formula_name}"
   done
-  [[ "$(command -v tensorplate)" == "${prefix}/bin/tensorplate" ]]
-  [[ -x "$(brew --prefix tensorplate-agent)/bin/tensorplate-agent" ]]
-  [[ -x "$(brew --prefix tensorplate-serving)/libexec/tensorplate-serving" ]]
-  [[ -x "$(brew --prefix tensorplate-observability)/bin/tensorplate-observability" ]]
-  [[ -x "$(brew --prefix tensorplate-backend-python-pytorch)/bin/tensorplate-backend-python-pytorch" ]]
-  [[ -f "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" ]]
-  [[ -f "${prefix}/share/tensorplate/backends/python_pytorch/backend.json" ]]
+  [[ "$(command -v tensorplate)" == "${prefix}/bin/tensorplate" ]] ||
+    die "tensorplate on PATH is not the Homebrew launcher at ${prefix}/bin/tensorplate"
+  [[ -x "$(brew --prefix tensorplate-agent)/bin/tensorplate-agent" ]] ||
+    die "tensorplate-agent binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-serving)/libexec/tensorplate-serving" ]] ||
+    die "tensorplate-serving binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-observability)/bin/tensorplate-observability" ]] ||
+    die "tensorplate-observability binary is missing or not executable"
+  [[ -x "$(brew --prefix tensorplate-backend-python-pytorch)/bin/tensorplate-backend-python-pytorch" ]] ||
+    die "tensorplate-backend-python-pytorch binary is missing or not executable"
+  [[ -f "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" ]] ||
+    die "installed platform registry is missing the macos26-m1pro-16gb row"
+  [[ -f "${prefix}/share/tensorplate/backends/python_pytorch/backend.json" ]] ||
+    die "installed python_pytorch backend descriptor is missing"
 
   for directory in \
     "${prefix}/etc/tensorplate" \
@@ -546,9 +566,12 @@ verify_packaged_closure() {
   done
   [[ "$(stat -f '%Lp' "${prefix}/var/run/tensorplate")" == "700" ]] ||
     die "unexpected mode for ${prefix}/var/run/tensorplate"
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/agent.json")" == "640" ]]
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/observability.json")" == "640" ]]
-  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]]
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/agent.json")" == "640" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/agent.json"
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/observability.json")" == "640" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/observability.json"
+  [[ "$(stat -f '%Lp' "${prefix}/etc/tensorplate/cli.json")" == "644" ]] ||
+    die "unexpected mode for ${prefix}/etc/tensorplate/cli.json"
 }
 
 verify_m1_exact_row() {
@@ -580,7 +603,7 @@ exact_row = "macos26-m1pro-16gb"
 family_row = "macos26-apple-m-series-preview"
 matches = re.findall(
     r"platform admission: row=(\S+) reason=(\S+) "
-    r"max_resident_model_memory=(\d+)",
+    r".*?max_resident_model_memory=(\d+)",
     agent_log,
 )
 if not matches:
@@ -613,6 +636,27 @@ print(json.dumps({
 PY
 }
 
+capture_events_baseline() {
+  # Retention rotates events.ndjson to events.1 and preserves both across
+  # installs. Save both identities so renaming an old file cannot make its
+  # earlier events look like output from this run.
+  python3 - "$1" >"$2" <<'PY' || die "cannot record the event log baseline"
+import json
+import pathlib
+import sys
+
+log_dir = pathlib.Path(sys.argv[1])
+baseline = {}
+for name in ("events.ndjson", "events.1"):
+    try:
+        info = (log_dir / name).stat()
+    except FileNotFoundError:
+        continue
+    baseline[name] = {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size}
+print(json.dumps(baseline, sort_keys=True))
+PY
+}
+
 start_services() {
   agent_error_log="$(brew --prefix)/var/log/tensorplate/agent.error.log"
   if [[ -f "$agent_error_log" ]]; then
@@ -620,12 +664,21 @@ start_services() {
   else
     agent_error_log_start=0
   fi
+  observability_error_log="$(brew --prefix)/var/log/tensorplate/observability.error.log"
+  if [[ -f "$observability_error_log" ]]; then
+    observability_error_log_start="$(stat -f '%z' "$observability_error_log")"
+  else
+    observability_error_log_start=0
+  fi
+  events_log_dir="$(brew --prefix)/var/log/tensorplate" || die "brew --prefix failed"
+  capture_events_baseline "$events_log_dir" "${work_dir}/events-log-baseline.json"
   brew services start tensorplate-agent
   brew services start tensorplate-observability
   wait_for_service tensorplate-agent
   wait_for_service tensorplate-observability
   wait_for_agent_ready
-  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "600" ]]
+  [[ "$(stat -f '%Lp' "$(brew --prefix)/var/run/tensorplate/agent.sock")" == "600" ]] ||
+    die "agent socket is not mode 0600"
   if brew services list | awk '$1 == "tensorplate-serving" {found = 1} END {exit !found}'; then
     die "tensorplate-serving unexpectedly exposes a Homebrew service"
   fi
@@ -664,7 +717,6 @@ deploy_smoke() {
     --deployment-id "$smoke_deployment_id" \
     --output json >"$deploy_output"
   tensorplate status --output json >"$status_output"
-  tensorplate logs --component agent --tail 100
   cd - >/dev/null
   python3 - "$deploy_output" "$status_output" "${evidence_dir}/deploy-input.json" \
     "$smoke_deployment_id" \
@@ -741,6 +793,132 @@ print(json.dumps({
 PY
 }
 
+# Status still reports the deploy-smoke deployment; both launchd stderr
+# logs gained output after launchd-start recorded their sizes; and
+# `tensorplate logs` reads the packaged structured event log and returns
+# an event this run's observability service wrote. The agent component
+# is not queried: the agent writes no structured events, so that filter
+# returns nothing on every install. Every command here checks its own
+# status rather than relying on errexit.
+verify_status_logs() {
+  log_dir="$(brew --prefix)/var/log/tensorplate" || die "brew --prefix failed"
+  status_logs_status="${work_dir}/status-logs-status.json"
+  status_logs_cli="${work_dir}/status-logs-cli.json"
+  tensorplate status --output json >"$status_logs_status" ||
+    die "tensorplate status did not answer"
+  tensorplate logs --component observability --tail 100 --output json \
+    >"$status_logs_cli" ||
+    die "tensorplate logs failed on the Homebrew install"
+  # The raw documents go to this stage's local log only; status-logs.json
+  # carries path-free results.
+  cat "$status_logs_status" "$status_logs_cli" ||
+    die "could not record the status and logs output"
+  # Read both retained generations after the CLI. Its returned event may
+  # have moved to events.1 since it opened events.ndjson.
+  python3 - "$status_logs_status" "$status_logs_cli" "$log_dir" \
+    "$smoke_deployment_id" "$agent_error_log_start" \
+    "$observability_error_log_start" "${work_dir}/events-log-baseline.json" \
+    >"${evidence_dir}/status-logs.json" <<'PY' || die "status-logs checks failed"
+import json
+import os
+import pathlib
+import sys
+
+(status_path, cli_path, log_dir, expected_deployment,
+ agent_start, observability_start, events_baseline_path) = sys.argv[1:]
+log_dir = pathlib.Path(log_dir)
+
+def since(name, offset):
+    # launchd's stderr logs append across runs. Event retention below has
+    # its own generation-aware reader because it rotates at 1 MiB.
+    try:
+        with open(log_dir / name, "rb") as handle:
+            handle.seek(int(offset))
+            return handle.read()
+    except OSError as error:
+        raise SystemExit(f"cannot read {name}: {error.strerror}")
+
+def event_chunks():
+    with open(events_baseline_path, encoding="utf-8") as handle:
+        baseline = json.load(handle)
+    offsets = {(item["device"], item["inode"]): item["size"] for item in baseline.values()}
+    seen = set()
+    # Open current first: if it rotates during verification, the open
+    # descriptor still refers to that generation. The retained path also
+    # covers rotation between the CLI read and this function.
+    for name in ("events.ndjson", "events.1"):
+        try:
+            with open(log_dir / name, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                offset = offsets.get(identity, 0)
+                if info.st_size < offset:
+                    raise SystemExit(f"{name} shrank without rotation; cannot identify current-run events")
+                handle.seek(offset)
+                yield handle.read()
+        except FileNotFoundError:
+            # Either file may be absent, including the brief rename/create
+            # interval. Membership below still requires a current-run event.
+            continue
+        except OSError as error:
+            raise SystemExit(f"cannot read {name}: {error.strerror}")
+
+status_document = json.load(open(status_path, encoding="utf-8"))
+status = status_document.get("payload") or {}
+active = (status.get("agent") or {}).get("active") or {}
+logs_document = json.load(open(cli_path, encoding="utf-8"))
+logs = logs_document.get("payload") or {}
+entries = logs.get("entries") or []
+agent_output = since("agent.error.log", agent_start).strip()
+observability_output = since("observability.error.log", observability_start).strip()
+current_events = []
+for chunk in event_chunks():
+    for line in chunk.decode("utf-8", "replace").splitlines():
+        # Skipped like the CLI skips them: a torn or non-JSON line is not an event.
+        try:
+            current_events.append(json.loads(line))
+        except ValueError:
+            pass
+
+checks = {
+    "status_command": status_document.get("command") == "status",
+    "status_severity": status.get("severity") == "ready",
+    "status_active_deployment": active.get("deployment_id") == expected_deployment,
+    "agent_log_current_run_output": bool(agent_output),
+    "observability_log_current_run_output": bool(observability_output),
+    "logs_command": logs_document.get("command") == "logs",
+    "logs_source_is_packaged_file": (
+        logs.get("kind") == "file"
+        and logs.get("source") == str(log_dir / "events.ndjson")
+    ),
+    "logs_include_current_run": bool(entries) and entries[-1] in current_events,
+}
+failed = [name for name, passed in checks.items() if not passed]
+if "logs_source_is_packaged_file" in failed:
+    print(
+        "tensorplate logs did not read the packaged events.ndjson; a "
+        "TENSORPLATE_CLI_CONFIG set in this shell overrides the packaged cli.json",
+        file=sys.stderr,
+    )
+if failed:
+    raise SystemExit("status-logs checks failed: " + ", ".join(failed))
+print(json.dumps({
+    "deployment_id": expected_deployment,
+    "status_severity": "ready",
+    "status_reports_deployment": True,
+    "agent_launchd_log_current_run_bytes": len(agent_output),
+    "observability_launchd_log_current_run_bytes": len(observability_output),
+    "logs_command": "pass",
+    "logs_source": "packaged events.ndjson",
+    "logs_entries_returned": len(entries),
+    "current_run_structured_events": len(current_events),
+}, indent=2, sort_keys=True))
+PY
+}
+
 restart_services() {
   before_agent="$(
     launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent" |
@@ -763,15 +941,24 @@ restart_services() {
     launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
-  [[ -n "$before_agent" && -n "$after_agent" && "$before_agent" != "$after_agent" ]]
+  [[ -n "$before_agent" && -n "$after_agent" && "$before_agent" != "$after_agent" ]] ||
+    die "agent PID did not change across restart: ${before_agent:-none} -> ${after_agent:-none}"
   [[ -n "$before_observability" && -n "$after_observability" &&
-    "$before_observability" != "$after_observability" ]]
+    "$before_observability" != "$after_observability" ]] ||
+    die "observability PID did not change across restart: ${before_observability:-none} -> ${after_observability:-none}"
   printf 'agent %s -> %s\nobservability %s -> %s\n' \
     "$before_agent" "$after_agent" "$before_observability" "$after_observability"
 }
 
 exercise_crash_loop() {
   agent_config="$(brew --prefix)/etc/tensorplate/agent.json"
+  # launchd appends to this log and nothing truncates it, so config errors
+  # from earlier runs are still in it. Only output written after the
+  # config is broken shows the agent failing on this run's config.
+  crash_loop_agent_log="$(brew --prefix)/var/log/tensorplate/agent.error.log" ||
+    die "brew --prefix failed"
+  crash_loop_agent_log_start="$(stat -f '%z' "$crash_loop_agent_log")" ||
+    die "cannot size the agent launchd error log before breaking the config"
   agent_config_backup="${work_dir}/agent.json"
   cp "$agent_config" "$agent_config_backup"
   printf '{ invalid json\n' >"$agent_config"
@@ -779,7 +966,11 @@ exercise_crash_loop() {
   brew services restart tensorplate-agent >/dev/null 2>&1 || true
   sleep 12
   launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
-  grep -q "config" "$(brew --prefix)/var/log/tensorplate/agent.error.log"
+  tail -c "+$((crash_loop_agent_log_start + 1))" "$crash_loop_agent_log" \
+    >"${work_dir}/agent-error-crash-loop.log" ||
+    die "cannot read the agent launchd error log after breaking the config"
+  grep -q "config" "${work_dir}/agent-error-crash-loop.log" ||
+    die "agent logged no config error after its config was broken"
   cp "$agent_config_backup" "$agent_config"
   chmod 0640 "$agent_config"
   agent_config_backup=""
@@ -814,9 +1005,12 @@ uninstall_candidate() {
       die "formula remains installed after uninstall: ${formula_name}"
     fi
   done
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]]
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]]
-  [[ ! -e "$(brew --prefix)/bin/tensorplate" ]]
+  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]] ||
+    die "tensorplate-agent LaunchAgent plist remains after uninstall"
+  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]] ||
+    die "tensorplate-observability LaunchAgent plist remains after uninstall"
+  [[ ! -e "$(brew --prefix)/bin/tensorplate" ]] ||
+    die "tensorplate launcher remains after uninstall"
 }
 
 install_baseline() {
@@ -853,8 +1047,10 @@ rollback_to_baseline() {
   printf 'preserve-across-formula-rollback\n' >"$lifecycle_marker"
   remove_candidate_graph
   install_baseline
-  [[ "$(cat "$lifecycle_marker")" == "preserve-across-formula-rollback" ]]
-  [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]]
+  [[ "$(cat "$lifecycle_marker")" == "preserve-across-formula-rollback" ]] ||
+    die "lifecycle state marker did not survive the rollback"
+  [[ "$(linked_formula_version tensorplate)" == "$baseline_version" ]] ||
+    die "rollback did not link the baseline tensorplate ${baseline_version}"
   rm -f "$lifecycle_marker"
   lifecycle_marker=""
 }
@@ -911,6 +1107,7 @@ details = {
     },
     "mps-capability": load_json("mps-capability.log"),
     "deploy-smoke": load_json("deploy-result.json"),
+    "status-logs": load_json("status-logs.json"),
     "launchd-restart": {"agent": "restarted", "observability": "restarted"},
     "launchd-crash-loop": {"agent_recovered": True},
     "offline-runtime": {"network_denied_doctor": "pass", "network_denied_mps": "pass"},
@@ -990,6 +1187,7 @@ run_stage launchd-start start_services
 run_stage m1-exact-row verify_m1_exact_row
 run_stage mps-capability probe_mps
 run_stage deploy-smoke deploy_smoke
+run_stage status-logs verify_status_logs
 run_stage launchd-restart restart_services
 run_stage launchd-crash-loop exercise_crash_loop
 run_stage offline-runtime verify_offline_runtime
