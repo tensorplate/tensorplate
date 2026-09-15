@@ -50,7 +50,10 @@ fn sources_of(fixture: &Value) -> HostSources {
         sw_vers_build_version: text("sw_vers_build_version"),
         cpu_brand: text("cpu_brand"),
         hw_memsize: text("hw_memsize"),
+        dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
+        machine_type_record: text("machine_type_record"),
+        boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
     }
@@ -866,6 +869,140 @@ fn undetectable_host_identity_never_fails_doctor() {
             "{id:?} must be emitted exactly once"
         );
     }
+}
+
+#[test]
+fn host_os_says_which_source_established_the_machine_type() {
+    let registry = registry();
+    let host_os = |report: &PlatformReport| {
+        let section = render_host_section(HostSectionDetection::Complete(report), Ok(&registry));
+        let row = section
+            .iter()
+            .find(|f| f.id == FindingId::PlatformRow)
+            .expect("platform_row");
+        assert_eq!(row.status, FindingStatus::Pass, "{}", render(&section));
+        assert!(
+            row.message.contains("ubuntu2404-x86-l4-g2s8"),
+            "{}",
+            row.message
+        );
+        section
+            .iter()
+            .find(|f| f.id == FindingId::HostOs)
+            .expect("host_os")
+            .message
+            .clone()
+    };
+
+    let live = report_for("ubuntu2404-x86-l4-g2s8", Some("ubuntu2404-x86-l4-g2s8"));
+    let message = host_os(&live);
+    assert!(
+        message.contains(" on g2-standard-8 (from GCE metadata)"),
+        "{message}"
+    );
+
+    // The same instance with the metadata service unreachable and the
+    // record the agent wrote while it was reachable.
+    let mut offline = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    // Synthetic boot identity supplements the recorded hardware facts.
+    offline.boot_id = Some("12345678-1234-4234-8234-123456789abc".to_string());
+    let record = tensorplate_platform::MachineTypeRecord::for_live_sources(&offline)
+        .expect("the facts are readable")
+        .expect("the live fixture records")
+        .to_json()
+        .expect("serializes");
+    offline.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    offline.gce_machine_type = None;
+    offline.machine_type_record = Some(record);
+    let mut report = identify_platform(&offline).expect("a matching record detects");
+    report.accelerator.clone_from(&live.accelerator);
+    let message = host_os(&report);
+    assert!(
+        message.contains(" on g2-standard-8 (recorded from GCE metadata by tensorplate-agent;"),
+        "{message}"
+    );
+    assert!(!message.contains("(from GCE metadata)"), "{message}");
+}
+
+#[test]
+fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
+    // An offline instance with no recorded machine type. Doctor must not
+    // guess a shape, must not fail, and must not send the operator to
+    // re-run as root -- the fix is one agent start with metadata reachable.
+    let mut offline = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    offline.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    offline.gce_machine_type = None;
+    let err = identify_platform(&offline).expect_err("no machine type can be established");
+    assert!(
+        matches!(err, PlatformProbeError::IdentityUnestablished { .. }),
+        "{err:?}"
+    );
+
+    let registry = registry();
+    let section = render_host_section(HostSectionDetection::HostProbeFailed(&err), Ok(&registry));
+    assert!(
+        section.iter().all(|f| f.status != FindingStatus::Fail),
+        "{}",
+        render(&section)
+    );
+    let facts = section
+        .iter()
+        .find(|f| f.id == FindingId::HostFacts)
+        .expect("host_facts");
+    assert_eq!(facts.status, FindingStatus::Warning);
+    assert!(
+        facts.message.contains("no machine type has been recorded"),
+        "{}",
+        facts.message
+    );
+    let hint = facts.hint.as_deref().expect("a hint");
+    assert!(
+        hint.contains("start tensorplate-agent once while the metadata service is reachable"),
+        "the hint names the fix: {hint}"
+    );
+    assert!(
+        !hint.contains("re-run as a user"),
+        "nothing here is a permission problem: {hint}"
+    );
+    let row = section
+        .iter()
+        .find(|f| f.id == FindingId::PlatformRow)
+        .expect("platform_row");
+    assert_eq!(row.status, FindingStatus::Skipped);
+}
+
+#[test]
+fn an_unreadable_machine_type_record_points_at_the_tensorplate_group() {
+    // Offline, as an operator outside the group that owns the state
+    // directory. The record is fine; this user cannot read it.
+    let registry = registry();
+    let hint_for = |source_name: &str| {
+        let err = PlatformProbeError::Unreadable {
+            source_name: source_name.to_string(),
+            detail: "Permission denied (os error 13)".to_string(),
+        };
+        let section =
+            render_host_section(HostSectionDetection::HostProbeFailed(&err), Ok(&registry));
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::HostFacts)
+            .expect("host_facts");
+        assert_eq!(facts.status, FindingStatus::Warning);
+        facts.hint.clone().expect("a hint")
+    };
+
+    let hint = hint_for("/var/lib/tensorplate/state/machine-type.json");
+    assert!(
+        hint.contains("member of the `tensorplate` group"),
+        "names the fix: {hint}"
+    );
+    assert!(!hint.contains("/etc and /proc"), "{hint}");
+
+    let hint = hint_for("/etc/os-release");
+    assert!(
+        hint.contains("/etc and /proc") && !hint.contains("tensorplate` group"),
+        "every other unreadable source keeps its hint: {hint}"
+    );
 }
 
 #[test]

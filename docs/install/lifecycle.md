@@ -147,7 +147,14 @@ reactivates the prior state with zero data migration.
 In addition to everything `remove` does, purge runs the postrm in
 `purge` mode and clears:
 
-- `/var/lib/tensorplate/state/`
+- `/var/lib/tensorplate/state/`, including the Compute Engine machine
+  type the agent recorded. Until the agent next starts with the GCE
+  metadata service reachable, a reinstalled instance cannot establish
+  its machine type offline. The record is also bound to the current Linux
+  kernel boot ID: restarting the agent offline in that boot is supported,
+  but every OS reboot requires an online agent start to refresh the record.
+  Copying a boot disk to another instance does not carry its cached identity
+  into the new boot. Offline cold boot remains outside this feature.
 - `/var/lib/tensorplate/bundles/`
 - `/var/lib/tensorplate/worker-configs/`
 - `/var/log/tensorplate/`

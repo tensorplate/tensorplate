@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stderr, clippy::print_stdout)]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,8 +39,8 @@ use tensorplate_agent::{
     worker,
 };
 use tensorplate_platform::{
-    AdmissionPosture, NvidiaSmiProbe, PlatformProbeError, PlatformRegistry, PlatformReport,
-    SystemHostProbe,
+    identify_platform, AdmissionPosture, HostSources, MachineTypeSource, NvidiaSmiProbe,
+    PlatformProbeError, PlatformRegistry, PlatformReport, RecordWrite, SystemHostProbe,
 };
 use tensorplate_protocol::install_paths;
 
@@ -224,7 +225,7 @@ fn evaluate_platform_admission(
         Ok((report, observed, None)) => {
             PlatformAdmission::evaluate(registry, &report, &observed, operator_posture)
         }
-        Err(err) => PlatformAdmission::detection_failed(err.to_string()),
+        Err(err) => detection_failed(&err, &mut std::io::stderr()),
     };
     admission.apply_memory_limit(config);
     // The posture is reported with its provenance, not just its value. An
@@ -331,7 +332,9 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
 /// detection failure.
 fn observe_platform(
 ) -> Result<(PlatformReport, ObservedStack, Option<PlatformProbeError>), PlatformProbeError> {
-    let mut report = SystemHostProbe::new().detect_platform()?;
+    let probe = SystemHostProbe::new();
+    let sources = probe.sources()?;
+    let mut report = identify_and_record(&probe, &sources, &mut std::io::stderr())?;
     let mut accelerator_probe_error = None;
     if report.accelerator.is_none() {
         match NvidiaSmiProbe::new().detect() {
@@ -349,6 +352,61 @@ fn observe_platform(
         installed_packages: installed_packages(),
     };
     Ok((report, observed, accelerator_probe_error))
+}
+
+/// Identify the platform from `sources`, refresh the machine-type record,
+/// and say both on `log` as the `platform identity:` line.
+///
+/// The record is refreshed on every start where the metadata service
+/// answered, and never from a machine type that was itself read from the
+/// record. A failed write is reported, not fatal: this start has its
+/// identity.
+fn identify_and_record(
+    probe: &SystemHostProbe,
+    sources: &HostSources,
+    log: &mut impl Write,
+) -> Result<PlatformReport, PlatformProbeError> {
+    let report = identify_platform(sources)?;
+    let record = probe.write_machine_type_record(sources);
+    // The journal is where this goes; a start does not fail over a log line.
+    let _ = writeln!(
+        log,
+        "{}",
+        platform_identity_line(
+            report.host.identity.machine_type.as_deref(),
+            report.host.exact.machine_type_source,
+            &record,
+        )
+    );
+    Ok(report)
+}
+
+/// A detection failure's admission, said on `log` first. The admission line
+/// carries no detail for an undetected host, so this is where an offline
+/// refusal says why.
+fn detection_failed(err: &PlatformProbeError, log: &mut impl Write) -> PlatformAdmission {
+    let _ = writeln!(log, "platform detection failed: {err}");
+    PlatformAdmission::detection_failed(err.to_string())
+}
+
+/// The `platform identity:` start-up line: the machine type, where it came
+/// from, and what recording it did. The only place outside doctor that says
+/// whether an instance's shape came from the metadata service or from the
+/// record, so the offline lifecycle stage can require the right one.
+fn platform_identity_line(
+    machine_type: Option<&str>,
+    source: Option<MachineTypeSource>,
+    record: &Result<RecordWrite, PlatformProbeError>,
+) -> String {
+    let record = match record {
+        Ok(write) => write.to_string(),
+        Err(err) => format!("failed ({err})"),
+    };
+    format!(
+        "platform identity: machine_type={} source={} record={record}",
+        machine_type.unwrap_or("none"),
+        source.map_or("none", MachineTypeSource::as_str)
+    )
 }
 
 fn load_runtime_config(
@@ -500,8 +558,186 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{parse_dpkg_packages, parse_homebrew_packages};
+    use super::{
+        detection_failed, identify_and_record, parse_dpkg_packages, parse_homebrew_packages,
+        platform_identity_line,
+    };
+    use tensorplate_agent::error::AgentError;
+    use tensorplate_platform::{
+        HostSources, MachineTypeSource, PlatformProbeError, RecordWrite, SystemHostProbe,
+    };
+    use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+
+    /// The recorded g2-standard-8 L4 host, as a start with the metadata
+    /// service reachable gathers it.
+    fn l4_live_sources() -> HostSources {
+        let body = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/platform/host_identity/ubuntu2404-x86-l4-g2s8.json"),
+        )
+        .expect("the recorded L4 fixture is committed");
+        let fixture: serde_json::Value = serde_json::from_str(&body).expect("fixture parses");
+        let text = |key: &str| {
+            fixture["sources"]
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        HostSources {
+            uname_machine: text("uname_machine"),
+            os_release: text("os_release"),
+            cpuinfo: text("cpuinfo"),
+            nv_tegra_release: text("nv_tegra_release"),
+            nvidia_jetpack_version: text("nvidia_jetpack_version"),
+            device_tree_model: text("device_tree_model"),
+            sw_vers_product_name: text("sw_vers_product_name"),
+            sw_vers_product_version: text("sw_vers_product_version"),
+            sw_vers_build_version: text("sw_vers_build_version"),
+            cpu_brand: text("cpu_brand"),
+            hw_memsize: text("hw_memsize"),
+            dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            gce_machine_type: text("gce_machine_type"),
+            machine_type_record: None,
+            // Synthetic boot identity supplements the recorded hardware facts.
+            boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
+            proc_meminfo: text("proc_meminfo"),
+            pci_devices: text("pci_devices"),
+        }
+    }
+
+    #[test]
+    fn a_start_with_a_live_answer_records_it_and_an_offline_start_uses_it() {
+        let temporary = std::env::temp_dir().canonicalize().expect("temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("tempdir");
+        let record = root
+            .path()
+            .join(MACHINE_TYPE_RECORD_PATH.trim_start_matches('/'));
+        std::fs::create_dir_all(record.parent().expect("parent")).expect("stage state/");
+        let probe = SystemHostProbe::with_root(root.path());
+        let live = l4_live_sources();
+
+        let mut log = Vec::new();
+        let report = identify_and_record(&probe, &live, &mut log).expect("detects");
+        assert_eq!(
+            report.host.identity.machine_type.as_deref(),
+            Some("g2-standard-8")
+        );
+        assert_eq!(
+            String::from_utf8(log).expect("utf-8"),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=written\n"
+        );
+        let written = std::fs::read(&record).expect("the start recorded the machine type");
+
+        let mut log = Vec::new();
+        identify_and_record(&probe, &live, &mut log).expect("detects");
+        assert_eq!(
+            String::from_utf8(log).expect("utf-8"),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged\n"
+        );
+
+        let offline = HostSources {
+            gce_machine_type: None,
+            machine_type_record: Some(String::from_utf8(written.clone()).expect("utf-8")),
+            ..live
+        };
+        let mut log = Vec::new();
+        let report = identify_and_record(&probe, &offline, &mut log).expect("detects offline");
+        assert_eq!(
+            report.host.identity.machine_type.as_deref(),
+            Some("g2-standard-8")
+        );
+        assert_eq!(
+            String::from_utf8(log).expect("utf-8"),
+            "platform identity: machine_type=g2-standard-8 source=recorded_gce_metadata \
+             record=not_applicable\n"
+        );
+        assert_eq!(
+            std::fs::read(&record).expect("still there"),
+            written,
+            "an offline start never rewrites the record"
+        );
+    }
+
+    #[test]
+    fn a_detection_failure_is_said_on_its_own_line_and_refuses_deploys() {
+        let err = PlatformProbeError::IdentityUnestablished {
+            source_name: MACHINE_TYPE_RECORD_PATH.to_string(),
+            detail: "no machine type has been recorded on this host".to_string(),
+        };
+        let mut log = Vec::new();
+        let admission = detection_failed(&err, &mut log);
+        assert_eq!(
+            String::from_utf8(log).expect("utf-8"),
+            format!("platform detection failed: {err}\n")
+        );
+        match admission.ensure_supported() {
+            Err(AgentError::PlatformNotAdmissible { detail, .. }) => {
+                assert!(
+                    detail.contains("no machine type has been recorded"),
+                    "{detail}"
+                );
+            }
+            other => panic!("a detection failure must refuse deploys, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_identity_line_names_the_machine_type_its_source_and_the_record_write() {
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::GceMetadata),
+                &Ok(RecordWrite::Written)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=written"
+        );
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::GceMetadata),
+                &Ok(RecordWrite::Unchanged)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged"
+        );
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::RecordedFromMetadata),
+                &Ok(RecordWrite::NotApplicable)
+            ),
+            "platform identity: machine_type=g2-standard-8 source=recorded_gce_metadata \
+             record=not_applicable"
+        );
+        assert_eq!(
+            platform_identity_line(None, None, &Ok(RecordWrite::NotApplicable)),
+            "platform identity: machine_type=none source=none record=not_applicable"
+        );
+        assert_eq!(
+            platform_identity_line(
+                Some("g2-standard-8"),
+                Some(MachineTypeSource::GceMetadata),
+                &Ok(RecordWrite::FactsUnavailable("MemTotal"))
+            ),
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata \
+             record=not_recorded (unavailable: MemTotal)"
+        );
+        let failed = platform_identity_line(
+            Some("g2-standard-8"),
+            Some(MachineTypeSource::GceMetadata),
+            &Err(PlatformProbeError::Unreadable {
+                source_name: "/var/lib/tensorplate/state/machine-type.json".to_string(),
+                detail: "permission denied".to_string(),
+            }),
+        );
+        assert!(
+            failed.starts_with(
+                "platform identity: machine_type=g2-standard-8 source=gce_metadata record=failed ("
+            ) && failed.contains("permission denied"),
+            "{failed}"
+        );
+    }
 
     #[test]
     fn homebrew_inventory_uses_formula_names() {
