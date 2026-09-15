@@ -55,6 +55,7 @@ access is a site policy and is left to the operator.
 | `/etc/tensorplate/serving_worker.json` | `root:tensorplate` | `0640` | yes | Serving worker config (schema: `config/schemas/serving_worker.json`). |
 | `/etc/tensorplate/cli.json` | `root:tensorplate` | `0644` | yes | CLI default profile (schema: `config/schemas/cli.json`). Readable by all operators. |
 | `/run/tensorplate/agent.sock` | `tensorplate:tensorplate` | `0660` | n/a (socket) | Agent control Unix domain socket. Group membership grants CLI access. |
+| `/var/lib/tensorplate/state/machine-type.json` | `tensorplate:tensorplate` | `0640` | no | Compute Engine only. Written by `tensorplate-agent`, never by the installer, on every start where the GCE metadata service answered: the machine type, with the kernel boot ID, logical CPU count, `MemTotal` and NVIDIA display device ids it was answered on. Platform detection (agent and `doctor`) reads it only when the metadata service cannot be reached, and uses it only in the same kernel boot while all hardware facts still match exactly. The file survives reboot, but an online agent start must refresh it after each reboot; `doctor` must run as root or as a member of the `tensorplate` group to read it. Removed by purge with the rest of `state/`. |
 | `/usr/share/tensorplate/backends/python_pytorch/backend.json` | `root:tensorplate` | `0644` | no | Python/PyTorch backend descriptor. Read by `tensorplate doctor`. |
 
 ## macOS Homebrew layout

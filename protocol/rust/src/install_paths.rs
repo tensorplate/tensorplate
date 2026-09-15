@@ -18,6 +18,8 @@
 //
 //   /var/lib/tensorplate/              durable state root  tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/state/        desired-state etc.  tensorplate:tensorplate 0750
+//   /var/lib/tensorplate/state/machine-type.json            tensorplate:tensorplate 0640
+//                                      (agent-written, Compute Engine only)
 //   /var/lib/tensorplate/bundles/staging                   tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/bundles/active                    tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/bundles/previous                  tensorplate:tensorplate 0750
@@ -72,6 +74,17 @@ pub const STATE_DIR: &str = "/var/lib/tensorplate";
 
 /// Desired-state and transaction journals.
 pub const STATE_INNER_DIR: &str = "/var/lib/tensorplate/state";
+
+/// The Compute Engine machine type `tensorplate-agent` recorded from a live
+/// metadata answer, bound to the kernel boot ID, logical CPU count, `MemTotal`
+/// and NVIDIA display device ids it was recorded with. It is usable only in
+/// that boot; every OS reboot requires an online agent start to refresh it.
+///
+/// Written by the agent on every start where the metadata service answered,
+/// never by the installer, and read by platform detection only when the
+/// metadata service cannot be reached. Lives under [`STATE_INNER_DIR`] so
+/// purge removes it along with the rest of the agent's state.
+pub const MACHINE_TYPE_RECORD_PATH: &str = "/var/lib/tensorplate/state/machine-type.json";
 
 /// Bundle staging root. Each verified bundle lands at
 /// `<BUNDLE_STAGING_DIR>/<deployment_id>/`.
@@ -321,6 +334,17 @@ mod tests {
                 "{p} should live under {STATE_DIR}"
             );
         }
+    }
+
+    #[test]
+    fn the_machine_type_record_is_agent_state_that_purge_removes() {
+        // Purge clears the state directory, not the state root. A record
+        // left behind would outlive the install that wrote it and describe
+        // a machine the next install never observed.
+        assert_eq!(
+            Path::new(MACHINE_TYPE_RECORD_PATH).parent(),
+            Some(Path::new(STATE_INNER_DIR))
+        );
     }
 
     #[test]

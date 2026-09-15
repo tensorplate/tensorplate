@@ -90,6 +90,17 @@ pub enum PlatformProbeError {
     /// registry can report it as unsupported rather than undetectable.
     #[error("uninterpretable platform detail from `{source_name}`: {detail}")]
     Unrecognized { source_name: String, detail: String },
+
+    /// Every source was readable, but together they do not establish an
+    /// identity a row can be matched against, and reporting a partial one
+    /// would be admitted as something it is not.
+    ///
+    /// Today this is a Compute Engine instance whose metadata service could
+    /// not be reached and whose recorded machine type is missing, unusable,
+    /// or bound to local facts that have changed. Reporting that instance
+    /// with no machine type would admit it as an unvalidated shape.
+    #[error("platform identity could not be established from `{source_name}`: {detail}")]
+    IdentityUnestablished { source_name: String, detail: String },
 }
 
 impl From<PlatformProbeError> for ProtocolError {
@@ -97,8 +108,11 @@ impl From<PlatformProbeError> for ProtocolError {
         let code = match value {
             // Readable, but not something this release can interpret.
             PlatformProbeError::Unrecognized { .. } => ErrorCode::Unsupported,
-            // The runtime could not determine what it is running on.
-            PlatformProbeError::Unreadable { .. } => ErrorCode::Internal,
+            // The runtime could not determine what it is running on, either
+            // because a source was unreadable or because the readable ones do
+            // not establish an identity without guessing.
+            PlatformProbeError::Unreadable { .. }
+            | PlatformProbeError::IdentityUnestablished { .. } => ErrorCode::Internal,
         };
         ProtocolError::new(code, "platform detection failed").with_context(value.to_string())
     }

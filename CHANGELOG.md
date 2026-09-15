@@ -123,6 +123,48 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   one. Rows with different counts can coexist and match their respective
   homogeneous device sets.
 
+- Platform detection on a Compute Engine instance no longer needs the
+  GCE metadata service at every start. On each start where the service
+  answers, `tensorplate-agent` records the machine type in
+  `/var/lib/tensorplate/state/machine-type.json` (`0640`, removed by
+  purge), together with the kernel boot ID, logical CPU count, `MemTotal`
+  and NVIDIA display device ids it was answered on. When the service cannot be
+  reached (the connection or the request fails, or nothing at all comes
+  back within the budget), detection in the agent and in `doctor` uses
+  that record, but only in the same kernel boot while all hardware facts
+  still match exactly. Every OS reboot requires one online agent start;
+  offline cold boot is not supported. Schema version 2 requires the boot ID
+  and refuses older records until an online start refreshes them. If
+  there is no record, the record is not a regular file, is oversized or
+  unusable, or a fact changed, detection fails with an error naming the
+  reason. It never reports the instance without a machine type, because
+  the shape-scoped cloud rows would then admit it as unvalidated. A
+  service that sends anything else still fails detection and the record
+  never overrides it: an error status, a closed or reset connection, an
+  incomplete or unparseable response, or a 200 whose body is not
+  `projects/<project>/machineTypes/<machine-type>`. Such an answer is
+  never recorded. Response framing must be valid and complete: a timeout
+  cannot terminate a body without Content-Length, and malformed lengths,
+  duplicate lengths, transfer encoding, and non-HTTP status lines are refused.
+  Record I/O pins parent directories and opens without following symlinks,
+  so an agent-owned path cannot redirect an elevated doctor capture.
+  The record lives in a directory only root and the
+  `tensorplate` group can read, so offline `doctor` run by anyone else
+  reports it as unreadable, with a hint to re-run as root or as a group
+  member. The agent logs `platform identity: machine_type=...
+  source=gce_metadata|recorded_gce_metadata|none
+  record=written|unchanged|not_applicable|not_recorded (...)|failed (...)`
+  on every start, and a failed detection as
+  `platform detection failed: ...`. `doctor` shows the source after the
+  machine type in `host_os`. `doctor --record` captures a missing record
+  or a readable regular record within the size limit whose JSON or facts
+  cannot establish identity, with a note. Unreadable, oversized, non-regular,
+  and symlinked record paths still stop recording before fixture creation.
+  The cloud lifecycle harness still skips its offline stage; that stage is follow-up work.
+  The tests use the recorded L4 `g2-standard-8` host fixture and
+  synthetic cases. The H100 row has no recorded host fixture yet, so it
+  is not exercised with recorded facts.
+
 ### Changed
 
 - The macOS Homebrew lifecycle harness's offline stage now runs the
