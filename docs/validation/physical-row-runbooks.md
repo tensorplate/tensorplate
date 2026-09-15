@@ -62,26 +62,31 @@ the harness's clean-install stage *is* the canonical install stage. Get
 it wrong and the report lies in the gate's favour, which is the one
 direction that matters. Several harness stages may name the same
 canonical stage; the weakest of their results is the one reported.
+A harness stage the mapping does not name is evidence for no canonical
+stage. Its `fail` or invalid status makes the outcome `fail`; an unmapped
+`pass` or `skipped` status leaves the canonical stages' outcome unchanged.
 
-### Neither harness covers all eight stages yet
+### The Jetson harness does not cover all eight stages yet
 
-Both runbooks below produce an `incomplete` report today, and the
-release gate refuses both rows. That is the accurate state, not a
-defect in the runbook:
+The Jetson runbook below cannot produce better than an `incomplete`
+report today, and the release gate refuses that row. That is the
+accurate state, not a defect in the runbook. The macOS mapping names
+all eight stages, so a macOS report can be `pass` when all eight passed
+and no unmapped stage failed or recorded an invalid status:
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
 | install | covered | covered |
 | upgrade | **not implemented** | covered |
 | deploy-smoke | covered | covered |
-| status-logs | covered | **not implemented** |
+| status-logs | covered | covered |
 | rollback | **not implemented** | covered |
 | restart | covered | covered |
 | crash-loop | **not implemented** | covered |
 | offline | **not implemented** | covered |
 
-Closing these gaps means adding the missing operations to the harnesses
-themselves, which is tracked as hardware work. Until then the converter
+Closing these gaps means adding the missing operations to the Jetson
+harness itself, which is tracked as hardware work. Until then the converter
 emits each gap as `skipped` with the reason, so the gate reports what is
 missing rather than accepting a partial run.
 
@@ -205,7 +210,10 @@ the device invalidates the glibc-floor comparison the run exists for.
 Prerequisites: Homebrew present, the tap reachable, and **no TensorPlate
 services running** from a previous run — `macos-homebrew-lifecycle.sh`
 restores a baseline on exit and a half-cleaned host makes its rollback
-stage meaningless.
+stage meaningless. `TENSORPLATE_CLI_CONFIG` must be unset in the shell
+that runs the harness: the Homebrew launcher honours a value that is
+already set, and the status-logs stage fails unless the CLI reads the
+packaged configuration.
 
 1. Confirm identity, as above. PASS: `platform_row` resolves
    `macos26-m1pro-16gb`, and `model_class_rows` reports `chunked_policy
@@ -231,9 +239,16 @@ stage meaningless.
      <evidence>/stages.tsv macos26-m1pro-16gb <tested_version> \
      macos-homebrew-lifecycle <evidence>/lifecycle-report.json \
      clean-install=install upgrade=upgrade deploy-smoke=deploy-smoke \
-     rollback=rollback launchd-restart=restart \
+     status-logs=status-logs rollback=rollback launchd-restart=restart \
      launchd-crash-loop=crash-loop offline-runtime=offline
    ```
+
+   The converter reads only what `stages.tsv` recorded. A harness that
+   exits non-zero without recording a failed stage, because it failed
+   while writing `summary.json` or the sanitized transcript or was
+   interrupted between two stages, can leave a log that converts to
+   `pass`. Never file a `pass` report from a run whose harness exited
+   non-zero: re-run it.
 
    The digest this run files is the source archive every candidate
    formula is pinned to. That channel publishes no binary — all six
@@ -246,10 +261,22 @@ stage meaningless.
    a preflight downloads nothing, and a digest filed for it would attest
    an install that never happened.
 
-   `status-logs` is deliberately unmapped. The harness's `host-facts`
-   stage collects inventory before anything is installed; it is not an
-   observation of status or log behaviour, and mapping it would claim a
-   stage that never ran.
+   The harness's `status-logs` stage runs after deploy-smoke. It asserts
+   that `tensorplate status` still reports the deploy-smoke deployment as
+   ready, that both launchd stderr logs gained output after launchd-start
+   recorded their sizes, and that `tensorplate logs` reads the packaged
+   structured event log and returns an observability event written
+   during this run. Before starting services, the harness snapshots file
+   identities and byte offsets for `events.ndjson` and its retained
+   generation, `events.1`. It reads only new bytes from these generations,
+   so rotation before the status check or between the CLI read and
+   verification can still prove the returned event belongs to this run.
+   The harness does not delete or truncate these logs. It does not query
+   the agent component, because the agent writes no structured events.
+   `host-facts` stays unmapped: it collects inventory before anything is
+   installed and observes neither status nor logs. The status-logs stage,
+   including its rotation checks, still requires a hardware run; the
+   historical evidence predates it.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
    Convert first, so the report reflects the harness's own `stages.tsv`.

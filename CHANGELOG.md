@@ -8,6 +8,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The macOS Homebrew lifecycle harness has a status-logs stage, so the
+  M1 Pro runbook maps all eight canonical lifecycle stages. After deploy
+  smoke it requires `tensorplate status` to still report the deployment
+  as ready, both launchd stderr logs to have gained output since the
+  services started, and `tensorplate logs` to read the packaged structured
+  event log and return an observability event from the current run. The
+  deploy-smoke stage no longer runs `tensorplate logs --component agent`,
+  which returned no entries because the agent writes no structured events.
 - Lifecycle evidence is scanned for identifiers before it can be
   published. `tools/validation/check-evidence-publication.sh` fails
   closed on host names in journal, `hostnamectl` and `uname` output,
@@ -135,6 +143,47 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   directory is refused before the build.
 
 ### Fixed
+
+- The macOS status-logs check follows event retention across
+  `events.ndjson` and `events.1`. File identities and byte offsets taken
+  before service startup distinguish current-run output after rotation,
+  including rotation between the CLI read and verification. A returned
+  event that remains in either generation can still pass the check;
+  the harness does not delete or truncate logs.
+
+- The macOS Homebrew lifecycle harness enforces sixteen assertions that
+  macOS `/bin/bash` 3.2 silently skipped: bash 3.2 does not apply errexit
+  to a failing `[[ ]]` statement, so the launcher, binary and descriptor
+  presence checks, config file modes, the `0600` agent socket, PID changes
+  across a launchd restart, LaunchAgent removal on uninstall, and the
+  rollback state marker could all fail and still record a passing stage.
+  Each now fails its stage with a message naming the check. The
+  packaging verifier rejects an assertion that ends in `[[ ]]`, `(( ))`
+  or `!` without an explicit check, `set +e` outside the exit cleanup,
+  and any `run_stage` call that is not a top-level statement, and shows
+  that a failing stage body records no pass.
+
+- The macOS Homebrew lifecycle harness's M1 exact-row stage parses the
+  agent's platform admission line again. The line gained `posture` and
+  `evidence` fields between the reason and the memory ceiling, and the
+  stage's pattern stopped matching it, so the stage would have failed on
+  any current agent with "no platform admission decision". The packaging
+  verifier renders the line from the agent's own format string and
+  requires the harness pattern to recover the row, reason and ceiling.
+
+- The macOS Homebrew lifecycle harness's launchd crash-loop stage
+  requires a config error written after it broke the agent config. It
+  previously searched the whole append-only `agent.error.log`, so a
+  config error left by any earlier run on the same Mac satisfied it
+  even if the agent never re-read the broken config.
+
+- The lifecycle report converter reports `fail` when a harness stage the
+  runbook mapping does not name failed or recorded an invalid status.
+  Unmapped skipped stages do not fail the report. It previously built the
+  outcome from mapped stages alone, so once the macOS mapping named all eight
+  canonical stages, a run whose last stage, the tap-restored check,
+  failed after rollback converted to a `pass` report the release gate
+  accepts.
 
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate
