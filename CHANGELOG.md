@@ -167,6 +167,40 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The macOS Homebrew lifecycle harness's offline stage now runs the
+  installed services with the network denied, not just doctor and an MPS
+  check. Both launchd services run under a `sandbox-exec` profile that
+  allows only loopback on the worker's serving and candidate ports and
+  unix sockets other than mDNSResponder, loaded from derived plists so
+  launchd still supervises them. Under that profile the agent must
+  recover the deploy-smoke deployment on the exact M1 Pro row with
+  validated evidence, and a fresh deploy, inference, doctor with its
+  agent probe and the MPS probe must pass. A probe inside the sandbox
+  must be refused every other destination, including other hosts on the
+  serving ports and loopback on other ports, and binds on other ports,
+  with `EPERM`, while the same operations outside it are not refused.
+  Every process in the service trees must read back as sandboxed with
+  the network denied; every internet socket a TensorPlate process holds,
+  other than one never bound, must be on loopback; and neither service
+  may restart during the stage. The stage then puts both services back
+  under their normal launchd jobs and checks that nothing sandboxed
+  remains. Accepted gaps, documented in the runbook: `fe80::1` through
+  another interface on the two serving ports, a wildcard listener on
+  those ports (which the loopback-only socket check refuses), and brokers
+  reachable over unix sockets or XPC. A new `offline-profile` preflight
+  stage checks the profile semantics against `sandbox-exec` before any
+  Homebrew change and is not mapped to a canonical stage.
+
+- The macOS Homebrew lifecycle harness restores normal launchd
+  supervision and the agent config on every exit, ignoring INT, TERM and
+  HUP only while it does. INT, TERM and HUP now exit with 130, 143 and
+  129, so an interrupted stage records a fail row where TERM and HUP used
+  to leave none. Cleanup's output goes to `cleanup.log` in the evidence
+  directory rather than the failed stage's log, with its messages copied
+  to the terminal, so a closed terminal or a stopped `| tee` no longer
+  stops the restore. A cleanup that cannot copy the agent config back
+  keeps the copy and fails the run.
+
 - The single-GPU H100 row (`ubuntu2404-x86-h100-80g-a3hg1`) is now a
   Production row, and the RTX PRO 6000 Blackwell Server Edition row
   (`ubuntu2404-x86-rtxpro6000se-g4s48`) is now Preview. The Production
@@ -199,6 +233,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   directory is refused before the build.
 
 ### Fixed
+
+- NVIDIA probe tests use immutable executable fixtures with isolated
+  temporary output paths, avoiding intermittent Linux `Text file busy`
+  failures when parallel tests launch a freshly written executable.
+
+- The macOS offline-runtime stage waits for launchd to assign each
+  sandboxed service its initial PID after Homebrew bootstraps the job.
+  It reads each job at most 30 times, waiting one second between pending
+  reads, so a slow first spawn can complete without failing immediately
+  and a job that never starts still fails the stage.
+  Both services must still finish on that initial PID after exactly one
+  launchd run; a restart during the stage remains a failure.
 
 - The package lifecycle and services documentation no longer claims dpkg
   restarts the services on upgrade. The package scripts stop both units

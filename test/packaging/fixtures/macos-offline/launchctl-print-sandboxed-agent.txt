@@ -1,0 +1,53 @@
+gui/501/homebrew.mxcl.tensorplate-agent = {
+	active count = 1
+	path = /private/var/folders/xx/T/tmp.synthetic/offline-denial/homebrew.mxcl.tensorplate-agent.plist
+	type = LaunchAgent
+	state = running
+
+	program = /usr/bin/sandbox-exec
+	arguments = {
+		/usr/bin/sandbox-exec
+		-f
+		/private/var/folders/xx/T/tmp.synthetic/offline-denial/network-denied.sb
+		/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent
+		--config
+		/opt/homebrew/etc/tensorplate/agent.json
+	}
+
+	working directory = /opt/homebrew/var/tensorplate
+
+	stdout path = /opt/homebrew/var/log/tensorplate/agent.log
+	stderr path = /opt/homebrew/var/log/tensorplate/agent.error.log
+	environment = {
+		PATH => /opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin
+		TP_PLATFORM_REGISTRY_DIR => /opt/homebrew/share/tensorplate/platform
+		XPC_SERVICE_NAME => homebrew.mxcl.tensorplate-agent
+	}
+
+	domain = gui/501 [100000]
+	minimum runtime = 5
+	exit timeout = 5
+	runs = 1
+	pid = 4242
+	immediate reason = speculative
+	forks = 2
+	execs = 1
+	last exit code = (never exited)
+
+	resource coalition = {
+		ID = 1234
+		type = resource
+		state = active
+		pid = 1
+		name = homebrew.mxcl.tensorplate-agent
+	}
+
+	endpoints = {
+		"com.example.synthetic" = {
+			port = 0x0
+			active = 0
+		}
+	}
+
+	properties = runatload | inferred program | managed LWCR | has LWCR
+}
