@@ -33,8 +33,8 @@ readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  build-release-artifacts.sh --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR --manifest FILE --checksums FILE [options]
-  build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR --manifest FILE --checksums FILE [options]
+  build-release-artifacts.sh --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR [options]
+  build-release-artifacts.sh --snapshot --branch develop --artifacts-dir DIR [options]
 
 Options:
   --version VERSION      Canonical release version, for example 0.1.0. Always
@@ -48,10 +48,20 @@ Options:
                          from the candidate.
   --tag TAG              Git tag being published, for example v0.1.0.
   --artifacts-dir DIR    Output directory for .deb artifacts.
-  --manifest FILE        Artifact manifest JSON path.
-  --checksums FILE       SHA256SUMS output path.
+  --manifest FILE        Artifact manifest JSON path. Defaults to
+                         DIR/tensorplate-TAG-artifacts.json: the name a URL
+                         install fetches, in the directory
+                         install.sh --local-artifacts reads. Any other is
+                         refused.
+  --checksums FILE       SHA256SUMS output path. Defaults to DIR/SHA256SUMS;
+                         any other is refused.
   --target-os VALUE      Manifest target OS label.
   --arch ARCH            Manifest target architecture. Defaults to arm64.
+                         amd64 configures the serving worker from
+                         tools/release/amd64-build-profile.sh, as the release
+                         workflow does, and refuses TP_ENABLE_TENSORRT,
+                         TP_REQUIRE_TENSORRT_SDK, TP_ENABLE_LIBTORCH and
+                         TP_ENABLE_PYTHON_PYTORCH_SIDECAR overrides.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
   --snapshot             Build unreleased local-source snapshot artifacts.
   --branch BRANCH        Branch/provenance label for snapshot manifests.
@@ -107,8 +117,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$ARTIFACTS_DIR" ]] || die "--artifacts-dir is required"
-[[ -n "$MANIFEST" ]] || die "--manifest is required"
-[[ -n "$CHECKSUMS" ]] || die "--checksums is required"
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" ||
   die "not inside a git repository"
@@ -291,6 +299,77 @@ if [[ "$TARGET_ARCH" != "$host_arch" ]]; then
   fi
 fi
 
+# The checks from here to the changelog staging refuse, before anything is
+# compiled, a build that would otherwise fail or produce an uninstallable
+# set only after cargo and the C++ build had run.
+
+# install.sh --local-artifacts reads exactly one tensorplate-*-artifacts.json
+# and SHA256SUMS from the artifacts directory itself, and a URL install
+# fetches tensorplate-${TAG}-artifacts.json by that name. A manifest written
+# anywhere else produces a set nothing can install.
+MANIFEST="${MANIFEST:-${ARTIFACTS_DIR%/}/tensorplate-${TAG}-artifacts.json}"
+CHECKSUMS="${CHECKSUMS:-${ARTIFACTS_DIR%/}/SHA256SUMS}"
+
+# Directories are compared physically, so a symlink or `..` spelling of the
+# artifacts directory is accepted. CDPATH is cleared because with it set
+# `cd` prints the directory it changed to, and the substitution would
+# return that path twice.
+physical_dir() {
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+artifacts_dir_physical="$(mkdir -p -- "$ARTIFACTS_DIR" && physical_dir "$ARTIFACTS_DIR")" ||
+  die "cannot create --artifacts-dir $ARTIFACTS_DIR"
+
+require_in_artifacts_dir() {
+  local flag="$1" path="$2" name="$3" parent=""
+  parent="$(physical_dir "$(dirname -- "$path")")" || parent=""
+  if [[ "${path##*/}" != "$name" || "$parent" != "$artifacts_dir_physical" ]]; then
+    die "$flag must be ${ARTIFACTS_DIR%/}/${name}, the file install.sh reads; omit $flag to use it"
+  fi
+}
+require_in_artifacts_dir --manifest "$MANIFEST" "tensorplate-${TAG}-artifacts.json"
+require_in_artifacts_dir --checksums "$CHECKSUMS" SHA256SUMS
+
+if [[ -z "$BUILD_DIR" ]]; then
+  if ((SNAPSHOT)); then
+    BUILD_DIR="build/snapshot-${TARGET_ARCH}"
+  else
+    BUILD_DIR="build/release"
+  fi
+fi
+
+# The amd64 serving worker is configured from the profile the release
+# workflow's amd64 job reads, so a snapshot is built the way the release is.
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  # Checked first: under errexit, bash 3.2 exits on a failed `.` before
+  # any `|| die` could name the file.
+  if [[ ! -r tools/release/amd64-build-profile.sh ]]; then
+    die "cannot read tools/release/amd64-build-profile.sh"
+  fi
+  # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+  . tools/release/amd64-build-profile.sh
+  for override in TP_ENABLE_TENSORRT TP_REQUIRE_TENSORRT_SDK TP_ENABLE_LIBTORCH TP_ENABLE_PYTHON_PYTORCH_SIDECAR; do
+    if [[ -n "${!override:-}" ]]; then
+      die "$override is set; an $SECONDARY_ARCH build takes it from tools/release/amd64-build-profile.sh, as the release does. Unset it"
+    fi
+  done
+  if ! command -v "$TP_AMD64_CXX" >/dev/null 2>&1; then
+    die "$TP_AMD64_CXX is required for an $SECONDARY_ARCH build (tools/release/amd64-build-profile.sh); install it first"
+  fi
+  # CMake reads CXX only until a build directory records a compiler, so a
+  # directory configured with another compiler would silently keep it. A
+  # cache with no compiler recorded, left by a configure that stopped before
+  # compiler detection (no Ninja, say), still takes CXX from the environment.
+  if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+    cached_cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")" ||
+      cached_cxx=""
+    if [[ -n "$cached_cxx" && "${cached_cxx##*/}" != "${TP_AMD64_CXX##*/}" ]]; then
+      die "$BUILD_DIR was configured with C++ compiler '${cached_cxx}', not $TP_AMD64_CXX; remove $BUILD_DIR or pass another --build-dir"
+    fi
+  fi
+fi
+
 if ((SNAPSHOT)); then
   write_staged_changelog UNRELEASED
 elif [[ "$DEB_VERSION" == *"~"* ]]; then
@@ -366,13 +445,6 @@ if ((CROSS_BUILD)); then
 fi
 
 note "configuring C++ release build"
-if [[ -z "$BUILD_DIR" ]]; then
-  if ((SNAPSHOT)); then
-    BUILD_DIR="build/snapshot-${TARGET_ARCH}"
-  else
-    BUILD_DIR="build/release"
-  fi
-fi
 # Everything after the tilde is the prerelease identity: `dev.DATE.SHA`
 # for a snapshot, `rc.N` for a candidate, absent for a final release. The
 # runtime reports it, so `tensorplate --version` distinguishes a candidate
@@ -386,11 +458,17 @@ cmake_args=(
   -DTP_BUILD_TESTS=OFF
   -DTP_BUILD_EXAMPLES=OFF
   -DTP_ENABLE_SANITIZERS=OFF
-  -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
-  -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
-  -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
-  -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
 )
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  cmake_args+=("${TP_AMD64_CMAKE_ARGS[@]}")
+else
+  cmake_args+=(
+    -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
+    -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
+    -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
+    -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
+  )
+fi
 
 vcpkg_toolchain=""
 if [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
@@ -418,7 +496,12 @@ elif [[ -n "$vcpkg_toolchain" ]]; then
   cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}")
 fi
 
-cmake "${cmake_args[@]}"
+if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
+  CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake "${cmake_args[@]}" ||
+    die "C++ configure failed"
+else
+  cmake "${cmake_args[@]}"
+fi
 
 note "building serving worker"
 cmake --build "$BUILD_DIR" --target tp_serving_worker --parallel
