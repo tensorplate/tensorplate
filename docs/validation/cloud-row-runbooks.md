@@ -227,24 +227,29 @@ File the report and its stage logs under
 `docs/validation/evidence/<version>/<row_id>/`. **Sanitize first** — see
 the [release evidence rules](evidence/v0.2.1/README.md).
 
-The first L4 run's logs were scanned for instance names, project ids,
-instance ids, internal addresses, account names and GPU UUIDs. The
-current harness captures raw JSON journal records through `sudo`, up to
-100 entries per service from its current invocation. These richer
-captures require a fresh sanitization pass; the earlier scan does not
-cover them.
+Sanitize a copy on your workstation, then scan it with the VM's name and
+FQDN, the account name, the project id and number, the instance id and
+the zone listed in a literal file kept outside the repository:
+
+```bash
+tools/validation/check-evidence-publication.sh \
+  --literals <literal file outside the repository> \
+  docs/validation/evidence/<version>/<row_id>
+```
+
+File only on exit 0. Findings name a file, a line and a class, never the
+value; the README lists the synthetic value each class accepts. What a
+run's files are known to carry:
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
-| `install.log` | may include the operator's account name in the assets path the installer echoes |
-| `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or journal records it quotes |
-| `doctor.json`, `status.json`, `deploy-result.json` and the rest | no identifiers were found in the earlier run; scan every current output as well |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | JSON journal records with host metadata (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) beside the service's messages; keep only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` |
+| `install.log` | short-format journal lines prefixed with the host name, and the operator's account name in the assets path the installer echoes |
+| `packages.txt` | package descriptions carrying planning identifiers, which do not belong in evidence |
+| `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and copies whatever that tail quotes |
 
-So the report itself is not automatically clean: check every `detail`
-before filing a run that did not pass. Put the assets directory
-somewhere without an account name in its path to keep it out of
-`install.log`.
+Put the assets directory somewhere without an account name in its path
+to keep it out of `install.log`.
 
 Delete the VM when the run is done.
 
