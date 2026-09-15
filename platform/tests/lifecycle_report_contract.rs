@@ -436,6 +436,48 @@ fn a_failed_harness_stage_survives_conversion() {
     assert_eq!(smoke["status"], "fail");
 }
 
+#[test]
+fn a_failed_unmapped_harness_stage_fails_the_report() {
+    // An unmapped stage is evidence for no canonical stage, but a run
+    // that failed in one did not pass. With every canonical stage mapped
+    // and passing, a failure after the last mapped stage -- where the
+    // macOS harness checks that its tap was restored -- is the only
+    // thing that says so.
+    let maps = &[
+        "clean-install=install",
+        "upgrade=upgrade",
+        "deploy-smoke=deploy-smoke",
+        "status-logs=status-logs",
+        "rollback=rollback",
+        "launchd-restart=restart",
+        "launchd-crash-loop=crash-loop",
+        "offline-runtime=offline",
+    ];
+    let mapped: Vec<(&str, &str)> = maps
+        .iter()
+        .map(|m| (m.split_once('=').expect("mapping").0, "pass"))
+        .collect();
+    let (control, _a) = convert(&mapped, maps);
+    assert_eq!(control["outcome"], "pass", "the control run must pass");
+
+    let mut skipped = mapped.clone();
+    skipped.push(("host-facts", "skipped"));
+    let (unmapped_skip, _b) = convert(&skipped, maps);
+    assert_eq!(
+        unmapped_skip["outcome"], "pass",
+        "an unmapped stage that was skipped is not a failure"
+    );
+
+    let mut failed = mapped;
+    failed.push(("tap-restored", "fail"));
+    let (doc, _c) = convert(&failed, maps);
+    assert!(
+        validation_errors(&compiled_schema(), &doc).is_empty(),
+        "the report must still validate"
+    );
+    assert_eq!(doc["outcome"], "fail");
+}
+
 /// The canonical stage list as one of the shell tools declares it.
 ///
 /// Each tool spells the list out for itself, because a shell script that
@@ -580,9 +622,12 @@ fn the_runbooks_map_only_stages_that_exist() {
     // behaviour. That one stays a human judgement, which is why the
     // runbook states the coverage gaps explicitly instead of filling
     // them with the nearest plausible stage.
+    //
+    // Nine Jetson mappings and eight macOS mappings, one per canonical
+    // stage. A floor below that lets a deleted mapping pass unnoticed.
     let mappings = documented_mappings();
     assert!(
-        mappings.len() >= 10,
+        mappings.len() >= 17,
         "expected the runbooks to document mappings, found {}",
         mappings.len()
     );

@@ -44,11 +44,19 @@ harness skips both stages and names the option in the skip reason.
 
 A local build or a snapshot is never a baseline. Preflight refuses a
 baseline whose manifest records a local source snapshot or an unreleased
-build, and the harness installs the baseline with its signature verified
-even when the candidate is run with `--allow-unsigned`. A manifest's
-provenance label alone does not show a release was published — every
-non-snapshot build carries the same label — but the installer's
-signature check against the release workflow's identity does.
+build. It also checks the tag's public GitHub Release without credentials,
+refuses a draft or unpublished release, and matches the local `SHA256SUMS`
+to the checksum asset downloaded from that release. An unavailable release
+or a failed request refuses the run before any installation or removal;
+retry preflight once access is restored. This check also runs with
+`--preflight-only` and needs access to GitHub's API and release assets.
+
+The harness installs the baseline with its signature verified even when
+the candidate is run with `--allow-unsigned`. Signing and publication are
+separate checks: the release workflow can produce a valid signature before
+it publishes a release, so a local signature bundle alone is insufficient.
+The verified public checksum digest stays bound to the baseline assets
+when the harness records evidence and later installs them.
 
 ## What a passing run does and does not prove
 
@@ -247,8 +255,9 @@ describe a run of this harness as GPU validation.
    own directory: `install.sh`, its one `tensorplate-*-artifacts.json`,
    `SHA256SUMS`, and every other file `SHA256SUMS` lists, not only the
    amd64 packages, because the harness checks the whole list. The
-   installer fetches the signature bundle when it is absent, so the VM
-   needs network access to the release. The harness hashes this
+   preflight must reach GitHub's public API and checksum asset even when
+   the directory contains a signature bundle. The installer also fetches
+   the signature bundle when it is absent. The harness hashes this
    `SHA256SUMS` into `baseline-digest.txt`, refuses to install either set
    if its `SHA256SUMS` has changed since then, and refuses a baseline
    whose runtime packages are not all older than the candidate's.
@@ -298,51 +307,67 @@ File the report and its stage logs under
 `docs/validation/evidence/<version>/<row_id>/`. **Sanitize first** — see
 the [release evidence rules](evidence/v0.2.1/README.md).
 
-The first L4 run's logs were scanned for instance names, project ids,
-instance ids, internal addresses, account names and GPU UUIDs. The
-current harness captures raw JSON journal records through `sudo`, up to
-100 entries per service from its current invocation. These richer
-captures require a fresh sanitization pass; the earlier scan does not
-cover them.
+Sanitize a copy on your workstation, then scan it with the VM's name and
+FQDN, the account name, the project id and number, the instance id and
+the zone listed in a literal file kept outside the repository:
+
+```bash
+tools/validation/check-evidence-publication.sh \
+  --literals <literal file outside the repository> \
+  docs/validation/evidence/<version>/<row_id>
+```
+
+File only on exit 0. Findings name a file, a line and a class, never the
+value; the README lists the synthetic value each class accepts. What a
+run's files are known to carry:
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal metadata and service messages in JSON records; inspect every field, including host identifiers, before publishing |
-| `install.log`, `upgrade.log`, `rollback.log` | may include the operator's account name in the assets paths the installers echo; `upgrade.log` and `rollback.log` carry both the candidate's and the baseline's |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | JSON journal records with host metadata (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) beside the service's messages; keep only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` |
+| `install.log`, `upgrade.log`, `rollback.log` | short-format journal lines prefixed with the host name, and the operator's account name in the assets paths the installers echo; inspect both sets' paths in upgrade and rollback logs |
+| `packages.txt` | package descriptions carrying planning identifiers, which do not belong in evidence |
 | `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json` | the file lists and digests of both sets, and which release tags and package versions the upgrade moved between |
 | `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt` | the TensorPlate packages dpkg listed at each step |
 | `doctor-baseline.json`, `doctor-after-rollback.json` and their `.exit` files, `doctor-after-upgrade.json` | doctor on the baseline, filed; doctor after the upgrade, asserted |
 | `upgrade-baseline-deploy.json`, `status-after-upgrade.json`, `upgrade-result.json`, `status-after-rollback.json`, `rollback-result.json` | the live results on the baseline, after the upgrade and after the rollback |
-| `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or journal records it quotes |
-| `doctor.json`, `status.json`, `deploy-result.json` and the rest | no identifiers were found in the earlier run; scan every current output as well |
+| `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and copies whatever that tail quotes |
 
-So the report itself is not automatically clean: check every `detail`
-before filing a run that did not pass. Put both assets directories
-somewhere without an account name in their paths to keep it out of the
-stage logs.
+Check every file and report `detail` before filing. Put both assets
+directories somewhere without an account name in their paths to keep it
+out of the stage logs.
 
 Delete the VM when the run is done.
 
 ## Producing the candidate artifact set
 
 No published release carries an amd64 runtime set yet, so a run today
-validates a snapshot built from source. `build-release-artifacts.sh
---snapshot` does that, but its defaults are the arm64 Jetson release's,
-and three of them differ from the amd64 release build. Building on the
-host itself, as the first real run did:
+validates a snapshot built from source. Build it on the host itself:
 
-- Install `shellcheck` first. The script validates the installer with it
-  and refuses to start without it.
-- Match the amd64 release's CMake configuration:
-  `TP_ENABLE_TENSORRT=OFF TP_REQUIRE_TENSORRT_SDK=OFF`. The default
-  requires the TensorRT SDK, which an x86_64 host does not have.
-- Pass `CFLAGS=-gdwarf-4 CXXFLAGS=-gdwarf-4`. The release sets this; a
-  current clang emits DWARF 5 by default, which `dh_dwz` rejects when it
-  reaches the serving worker.
-- The installer requires the manifest to be named
-  `tensorplate-*-artifacts.json`. Pass that name to `--manifest`, or
-  rename it and correct its line in `SHA256SUMS` — the digest of the
-  bytes does not change, only the file name column.
+```bash
+tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
+  --artifacts-dir <assets-dir>
+```
+
+- Install `shellcheck` and `clang` first. The script validates the
+  installer with shellcheck and configures the serving worker with
+  clang++, and refuses before compiling anything if either is missing.
+- The serving worker's CMake configuration comes from
+  `tools/release/amd64-build-profile.sh`, the file the release job's
+  amd64 build reads: clang, `-gdwarf-4`, TensorRT off with no SDK
+  requirement, and the python_pytorch sidecar on. Nothing needs to be
+  set in the environment, and `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`
+  and `TP_CMAKE_TOOLCHAIN_FILE` must be unset: with any of them the
+  builder adds a CMake toolchain file the release build does not use.
+  `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH`
+  and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` are refused on amd64, and so is
+  a build directory already configured with another compiler: remove it
+  or pass another `--build-dir`.
+- The manifest and `SHA256SUMS` are written into the assets directory
+  under the names `install.sh --local-artifacts` reads. Omit
+  `--manifest` and `--checksums`; any other path is refused.
+- The release job builds on Ubuntu 22.04 so its packages install on
+  both 22.04 and 24.04. A snapshot built on 24.04 takes 24.04's glibc as
+  its floor and installs on 24.04 only, which is enough for these rows.
 
 A candidate built on the validation host means that host carries a
 build toolchain, which a release install would not. Say so when filing

@@ -162,6 +162,8 @@ Options:
                          it they are skipped. Every runtime package must be
                          older than the candidate's. Always installed with
                          its signature verified, even with --allow-unsigned.
+                         Preflight needs public GitHub API and release-asset
+                         access, even when the signature bundle is local.
                          The run then ends with the baseline installed.
   --tested-version X.Y.Z The release this run authorizes. Bare version, never
                          a candidate spelling. Required.
@@ -308,10 +310,10 @@ MSG
 # {"from": {"release_tag", "packages"}, "to": {...}}, where packages maps
 # each runtime package install.sh installs to its Debian version.
 UPGRADE_PATH=""
-# The baseline is installed only with its signature verified. install.sh's
-# cosign check against the release workflow's tag identity is what shows
-# the set was published; a manifest's provenance label does not, since
-# every non-snapshot build carries the same one.
+# Publication and signature verification establish different things. The
+# public release's checksum digest is captured during preflight; install.sh
+# later verifies that the release workflow signed those checksums.
+BASELINE_PUBLISHED_DIGEST=""
 readonly BASELINE_ALLOW_UNSIGNED=0
 
 read_upgrade_path() {
@@ -372,8 +374,8 @@ def read_set(label, directory):
 baseline_release, baseline = read_set("baseline", sys.argv[1])
 candidate_release, candidate = read_set("candidate", sys.argv[2])
 
-# An early refusal only, and closed: anything but a set the release build
-# labelled as released is refused here rather than failing cosign later.
+# Refuse a snapshot before the separate public-release and signature checks.
+# Non-snapshot manifest labels alone do not establish publication.
 if baseline_release.get("unreleased") is not False \
         or baseline_release.get("provenance") != "github-release":
     raise SystemExit(
@@ -410,6 +412,16 @@ preflight_upgrade_path() {
   [[ -f "${BASELINE_DIR}/SHA256SUMS" ]] || die "missing ${BASELINE_DIR}/SHA256SUMS"
   UPGRADE_PATH="$(read_upgrade_path)" ||
     die "the baseline and candidate sets do not form an upgrade path"
+  local baseline_tag publication_helper
+  baseline_tag="$(python3 -c 'import json, sys; tag = json.loads(sys.argv[1])["from"]["release_tag"]; assert isinstance(tag, str), "baseline release tag is missing"; print(tag)' "$UPGRADE_PATH")" ||
+    die "the baseline manifest must name its release tag"
+  publication_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-baseline-publication.py" ||
+    die "cannot locate the baseline publication checker"
+  BASELINE_PUBLISHED_DIGEST="$(python3 "$publication_helper" \
+    --assets-dir "$BASELINE_DIR" --release-tag "$baseline_tag")" ||
+    die "the baseline is not a matching publicly available release"
+  [[ "$BASELINE_PUBLISHED_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
+    die "the baseline publication checker did not return a checksum digest"
   pass "upgrade path: every runtime package in the baseline set is older than the candidate's"
 }
 
@@ -469,6 +481,8 @@ record_baseline_assets() {
   BASELINE_DIGEST="$( cd "$BASELINE_DIR" && sha256sum SHA256SUMS | awk '{print $1}' )"
   [[ "$BASELINE_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
     die "could not compute a digest for ${BASELINE_DIR}/SHA256SUMS"
+  [[ "$BASELINE_DIGEST" == "$BASELINE_PUBLISHED_DIGEST" ]] ||
+    die "baseline SHA256SUMS changed after its public release was verified"
   printf '%s  SHA256SUMS\n' "$BASELINE_DIGEST" >"${EVIDENCE_DIR}/baseline-digest.txt" ||
     die "could not record the baseline digest"
   pass "baseline artifact set verified: ${BASELINE_DIGEST}"

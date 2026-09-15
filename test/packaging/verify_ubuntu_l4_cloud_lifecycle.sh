@@ -28,6 +28,7 @@ else
   printf 'verify_ubuntu_l4_cloud_lifecycle: shellcheck not found; skipping shellcheck\n'
 fi
 "$harness" --help >/dev/null
+python3 "${repo_root}/test/validation/baseline_publication_test.py"
 
 td="$(mktemp -d)"
 trap 'rm -rf "$td"' EXIT
@@ -140,6 +141,57 @@ fi
 # --- eligibility, executed.
 stub_bin="${td}/bin"
 mkdir -p "$stub_bin"
+# The publication helper is tested above with mocked HTTP. All harness
+# probes route that helper alone to a local response fixture; every other
+# Python invocation still uses the real interpreter. There is no product
+# environment switch that can bypass the public-release check.
+export TP_FAKE_REAL_PYTHON
+TP_FAKE_REAL_PYTHON="$(command -v python3)"
+export TP_FAKE_PUBLICATION_HELPER="${repo_root}/tools/validation/check-baseline-publication.py"
+export TP_FAKE_PUBLICATION_STUB="${td}/publication.py"
+export TP_FAKE_PUBLICATION_LOG="${td}/publication.log"
+cat >"${stub_bin}/python3" <<'STUB'
+#!/bin/sh
+case "${1:-}" in
+  "$TP_FAKE_PUBLICATION_HELPER")
+    shift
+    exec "$TP_FAKE_REAL_PYTHON" "$TP_FAKE_PUBLICATION_STUB" "$@"
+    ;;
+  */check-baseline-publication.py)
+    echo 'unexpected publication helper path in fixture' >&2
+    exit 9
+    ;;
+esac
+exec "$TP_FAKE_REAL_PYTHON" "$@"
+STUB
+chmod +x "${stub_bin}/python3"
+cat >"$TP_FAKE_PUBLICATION_STUB" <<'PY'
+import argparse, hashlib, json, os, pathlib, sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--assets-dir", required=True)
+parser.add_argument("--release-tag", required=True)
+args = parser.parse_args()
+assets = pathlib.Path(args.assets_dir)
+manifest, = assets.glob("tensorplate-*-artifacts.json")
+assert args.release_tag == json.loads(manifest.read_text())["release"]["tag"]
+with open(os.environ["TP_FAKE_PUBLICATION_LOG"], "a") as log:
+    log.write(args.release_tag + " " + str(assets) + "\n")
+mode = os.environ.get("TP_FAKE_MODE", "ok")
+if mode in ("baseline-publication-draft", "baseline-publication-network-failure",
+            "baseline-publication-checksum-mismatch"):
+    print("baseline publication: synthetic refusal: " + mode, file=sys.stderr)
+    sys.exit(1)
+checksums = assets / "SHA256SUMS"
+digest = hashlib.sha256(checksums.read_bytes()).hexdigest()
+if mode == "baseline-publication-set-changed":
+    # The public check succeeded, but the local set changes before the
+    # harness records its baseline digest. The digest it returned must
+    # remain binding rather than being replaced by a fresh local hash.
+    with checksums.open("a") as output:
+        output.write("\n")
+print(digest)
+PY
 # Unconditionally, not only where the real tool is absent. On a Linux
 # runner the real systemctl and dpkg exist, and a probe that let them
 # through would query the actual host for services it never installed --
@@ -667,6 +719,7 @@ check "  because it would be a downgrade" yes \
 # validated one, and it is invisible to any amount of reading.
 appliance="${td}/appliance"
 mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log" "${appliance}/scratch"
+cp "${stub_bin}/python3" "${appliance}/bin/python3"
 real_mktemp="$(command -v mktemp)"
 
 # An explicit template keeps every harness scratch directory inside the
@@ -1099,6 +1152,7 @@ run_harness() {
   : >"${appliance}/health-requests.log"
   : >"${appliance}/deploy-versions.log"
   : >"${appliance}/infer-versions.log"
+  : >"$TP_FAKE_PUBLICATION_LOG"
   rm -f "${appliance}/restarted" "${appliance}/config-broken" \
     "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path" \
     "${appliance}/dpkg-db.json"
@@ -1537,6 +1591,8 @@ print("yes" if open(sys.argv[1],"rb").read() == (sys.argv[2] + "\n\n").encode() 
     "${appliance}/cli.json" "$packaged_cli_config")"
 check "  doctor on the baseline is filed" "0 0" \
   "$(cat "${evidence}/doctor-baseline.exit") $(cat "${evidence}/doctor-after-rollback.exit")"
+check "  publication checked the baseline's exact tag and artifact directory" \
+  "v0.2.1-rc.1 ${evidence}.sets/set-rc1" "$(cat "$TP_FAKE_PUBLICATION_LOG")"
 
 # The baseline's doctor is evidence, not a gate: a defect the candidate
 # fixed must not fail the candidate's run.
@@ -1566,6 +1622,32 @@ check "  the candidate is installed twice, unsigned each time" "2 2" \
 check "  and upgrade-path.json says which side was unsigned" "False True" \
   "$(python3 -c 'import json,sys;p=json.load(open(sys.argv[1]));print(p["from"]["allow_unsigned"],p["to"]["allow_unsigned"])' \
     "${evidence}/upgrade-path.json")"
+
+for mode in baseline-publication-draft baseline-publication-network-failure \
+            baseline-publication-checksum-mismatch; do
+  for unsigned in no yes; do
+    unsigned_flag=""
+    if [[ "$unsigned" == yes ]]; then unsigned_flag=--allow-unsigned; fi
+    evidence="${td}/stages-${mode}-${unsigned}"
+    check "${mode} refuses the run (unsigned candidate: ${unsigned})" 1 \
+      "$(run_upgrade_stages "$mode" "$evidence" "" set-rc1 ${unsigned_flag:+"$unsigned_flag"} 2>/dev/null)"
+    check "  before any privileged command" 0 \
+      "$(wc -l <"${appliance}/sudo.log" | tr -d ' ')"
+    check "  before a lifecycle report is written" no \
+      "$([[ -e "${evidence}/lifecycle-report.json" ]] && echo yes || echo no)"
+    check "  and preserves the publication refusal diagnostic" yes \
+      "$(grep -Fq "baseline publication: synthetic refusal: ${mode}" "${evidence}.err" && echo yes || echo no)"
+  done
+done
+
+evidence="${td}/stages-baseline-publication-set-changed"
+check "a baseline changed after its publication check refuses the run" 1 \
+  "$(run_upgrade_stages baseline-publication-set-changed "$evidence" "" set-rc1 2>/dev/null)"
+check "  before any privileged command" 0 \
+  "$(wc -l <"${appliance}/sudo.log" | tr -d ' ')"
+check "  and identifies the changed public-release digest" yes \
+  "$(grep -Fq 'baseline SHA256SUMS changed after its public release was verified' \
+    "${evidence}.err" && echo yes || echo no)"
 
 evidence="${td}/stages-upgrade-tampered"
 check "a baseline that fails its checksums refuses the run" 1 \
