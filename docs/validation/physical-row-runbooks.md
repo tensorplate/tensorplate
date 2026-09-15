@@ -187,9 +187,23 @@ the device invalidates the glibc-floor comparison the run exists for.
    unmapped: the harness has no such steps, and naming one anyway would
    assert a stage that never ran.
 
+   Do both **before** sanitizing anything. The adapter stamps each
+   stage's start and finish from the modification times of its
+   `.stdout` and `.exit` files, so editing a log first silently restamps
+   its stage. Never re-derive from a sanitized copy.
+
 5. File the report and the recorded fixtures under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
-   **Sanitize first** — see that directory's README.
+   **Sanitize before the first commit** — see that directory's README —
+   then scan the sanitized copy with the device's host name, the account
+   name and any other name of this machine listed in a literal file kept
+   outside the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62
+   ```
 
 ## MacBook Pro M1 Pro
 
@@ -265,7 +279,19 @@ packaged configuration.
    historical evidence predates it.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
-   **Sanitize first** — see that directory's README.
+   Convert first, so the report reflects the harness's own `stages.tsv`.
+   The converter's `detail` names harness stages and never quotes a log,
+   so the report needs no sanitizing; the logs do. **Sanitize before the
+   first commit** — see that directory's README — then scan the sanitized
+   copy with the Mac's computer name, local host name, account name and
+   any other name of this machine listed in a literal file kept outside
+   the repository, and file only on exit 0:
+
+   ```bash
+   tools/validation/check-evidence-publication.sh \
+     --literals <literal file outside the repository> \
+     docs/validation/evidence/<version>/macos26-m1pro-16gb
+   ```
 
 ## What a failed run is worth
 
