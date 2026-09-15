@@ -97,7 +97,8 @@ it gives the host normal `apt upgrade` behavior afterwards.
 v0.1.1 was installed with `install.sh` from GitHub Release assets, before
 the APT channel existed. The upgrade to v0.1.2 is the bootstrap plus the
 same two commands — package names are identical, so APT upgrades the
-installed set in place:
+installed set in place — and then starting the services the upgrade
+stopped:
 
 ```bash
 # 1. One-time bootstrap (from the v0.1.2 GitHub Release assets):
@@ -106,6 +107,10 @@ sudo dpkg -i tensorplate-apt-source_0.1.2-1_all.deb
 # 2. The standard runtime install, which now performs the upgrade:
 sudo apt update
 sudo apt install tensorplate
+
+# 3. The upgrade stops both services and nothing in the packages starts
+#    them again, so bring them back:
+sudo systemctl enable --now tensorplate-agent tensorplate-observability
 ```
 
 Expectations (per the [package lifecycle contract](./lifecycle.md)):
@@ -115,7 +120,8 @@ Expectations (per the [package lifecycle contract](./lifecycle.md)):
   now on.
 - Operator configuration under `/etc/tensorplate/`, desired state,
   bundles, and logs are preserved exactly as on any package upgrade.
-- After the upgrade, `tensorplate doctor` must report green and
+- After the upgrade and the `systemctl enable --now` in step 3,
+  `tensorplate doctor` must report green and
   `tensorplate version` must report the new version.
 - Subsequent releases arrive through normal `apt update` /
   `apt upgrade` — the bootstrap step never repeats.

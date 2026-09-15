@@ -8,13 +8,62 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The macOS Homebrew lifecycle harness has a status-logs stage, so the
+  M1 Pro runbook maps all eight canonical lifecycle stages. After deploy
+  smoke it requires `tensorplate status` to still report the deployment
+  as ready, both launchd stderr logs to have gained output since the
+  services started, and `tensorplate logs` to read the packaged structured
+  event log and return an observability event from the current run. The
+  deploy-smoke stage no longer runs `tensorplate logs --component agent`,
+  which returned no entries because the agent writes no structured events.
+- Lifecycle evidence is scanned for identifiers before it can be
+  published. `tools/validation/check-evidence-publication.sh` fails
+  closed on host names in journal, `hostnamectl` and `uname` output,
+  machine and boot ids, home paths, device and other UUIDs, IP and MAC
+  addresses, email addresses, cloud project paths, `.internal` and
+  `.local` names, serials, credentials, planning identifiers, journal
+  fields beyond a service's own, and symlinks, archives or other files
+  that are not text. It reads raw lines, lines with terminal styling and
+  backslash escapes taken out, and the strings and journalctl byte-array
+  values of every JSON object or array in a file, including
+  concatenated pretty-printed records and records quoted after other
+  text. Repeated JSON members and decoded field/value associations are
+  retained for inspection, and complete relative paths are checked before
+  they can appear in diagnostics. Authorization headers and journal text
+  metadata are checked too; four-part versions are exempt only in
+  recognized package forms. Long physical log lines use bounded JSON
+  decode work.
+  Operators add their own host, account, project and instance names
+  from a literal file kept outside the repository. Findings name a file,
+  a line and a class but never the matched value. Exit 0 is publishable,
+  1 is findings and 2 is no verdict. A new "evidence publication scan"
+  workflow runs its tests and scans `docs/validation/evidence` on every
+  pull request and on pushes to main, develop and release branches. The
+  evidence README now lists the self-describing synthetic value for each
+  identifier, and the runbooks require deriving Jetson stage times
+  before any log is edited.
+
 - A lifecycle validation harness for the Ubuntu 24.04 x86_64 cloud rows,
   run by hand on a VM the operator starts themselves. It provisions no
-  cloud resources. Five canonical stages are exercised -- install,
-  deploy-smoke, status-logs, restart and crash-loop -- and three
-  are skipped with their reasons recorded: upgrade and rollback have no
-  published amd64 predecessor to move between, and offline is deferred
+  cloud resources. Five canonical stages are always exercised -- install,
+  deploy-smoke, status-logs, restart and crash-loop. Upgrade and rollback
+  run after them when a published, signed predecessor release is supplied
+  with `--baseline-assets-dir`, and are skipped with a reason naming that
+  option otherwise. Offline stays skipped with its reason recorded, deferred
   until cloud platform detection can work without GCE metadata access.
+  Upgrade runs the candidate's installer over a baseline install that is
+  serving a deployment, and requires the exact candidate package set,
+  services restarted by the installer alone, an operator conffile edit
+  kept, doctor green and the deployment re-warmed. Rollback follows the
+  documented procedure: state set aside as `state.bak`, every TensorPlate
+  package except `tensorplate-apt-source` removed, and the baseline
+  installed fresh with the edit kept, the set-aside state not loaded, and
+  a working deploy. The baseline is always installed with its signature
+  verified, its digest is filed separately, and the report's artifact
+  digest stays the candidate's. Preflight checks the baseline tag's public
+  GitHub Release and matches the local checksum manifest to its published
+  asset before any installation or removal. Drafts, unpublished tags and
+  mismatched assets are refused even with `--allow-unsigned`.
   Crash-loop breaks the agent's config and requires systemd to retry and
   then give up on the agent, and the deployment to recover once the
   config is restored.
@@ -122,7 +171,77 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   remains `spec_authored`, and the release gate requires recorded evidence
   before it can qualify for release.
 
+- `build-release-artifacts.sh --snapshot --arch amd64` configures the
+  x86_64 serving worker with the release's compiler, `-gdwarf-4` and
+  backend selection, without the TensorRT and DWARF environment
+  workarounds. They come from `tools/release/amd64-build-profile.sh`,
+  which the release workflow's amd64 job and the Ubuntu x86_64 CPU-only
+  smoke also read. vcpkg detection is unchanged, so `VCPKG_ROOT`,
+  `VCPKG_INSTALLATION_ROOT` or `TP_CMAKE_TOOLCHAIN_FILE` on the build
+  host still adds a toolchain file the release does not use. On amd64 the
+  builder refuses `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`,
+  `TP_ENABLE_LIBTORCH` and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` overrides, a
+  missing clang++, and a build directory that recorded another compiler,
+  before anything is compiled. The arm64 build is unchanged.
+  On every architecture `--manifest` and `--checksums` are optional,
+  defaulting to `tensorplate-<tag>-artifacts.json` and `SHA256SUMS` in
+  the artifacts directory: the manifest name a URL install fetches, in
+  the directory `install.sh --local-artifacts` reads. Any other name or
+  directory is refused before the build.
+
 ### Fixed
+
+- The package lifecycle and services documentation no longer claims dpkg
+  restarts the services on upgrade. The package scripts stop both units
+  and nothing in the packages starts them; `systemctl enable --now`, which
+  the release installer runs, brings them back, and the v0.1.1 to v0.1.2
+  APT upgrade steps now include it before doctor must be green. The
+  rollback procedure, in the lifecycle and post-release documentation,
+  removes every installed TensorPlate package except
+  `tensorplate-apt-source`, including `tensorplate-common` and
+  `tensorplate-backend-python-pytorch`, since a newer package left behind
+  makes the older install a downgrade that `apt-get -y` refuses.
+
+- The macOS status-logs check follows event retention across
+  `events.ndjson` and `events.1`. File identities and byte offsets taken
+  before service startup distinguish current-run output after rotation,
+  including rotation between the CLI read and verification. A returned
+  event that remains in either generation can still pass the check;
+  the harness does not delete or truncate logs.
+
+- The macOS Homebrew lifecycle harness enforces sixteen assertions that
+  macOS `/bin/bash` 3.2 silently skipped: bash 3.2 does not apply errexit
+  to a failing `[[ ]]` statement, so the launcher, binary and descriptor
+  presence checks, config file modes, the `0600` agent socket, PID changes
+  across a launchd restart, LaunchAgent removal on uninstall, and the
+  rollback state marker could all fail and still record a passing stage.
+  Each now fails its stage with a message naming the check. The
+  packaging verifier rejects an assertion that ends in `[[ ]]`, `(( ))`
+  or `!` without an explicit check, `set +e` outside the exit cleanup,
+  and any `run_stage` call that is not a top-level statement, and shows
+  that a failing stage body records no pass.
+
+- The macOS Homebrew lifecycle harness's M1 exact-row stage parses the
+  agent's platform admission line again. The line gained `posture` and
+  `evidence` fields between the reason and the memory ceiling, and the
+  stage's pattern stopped matching it, so the stage would have failed on
+  any current agent with "no platform admission decision". The packaging
+  verifier renders the line from the agent's own format string and
+  requires the harness pattern to recover the row, reason and ceiling.
+
+- The macOS Homebrew lifecycle harness's launchd crash-loop stage
+  requires a config error written after it broke the agent config. It
+  previously searched the whole append-only `agent.error.log`, so a
+  config error left by any earlier run on the same Mac satisfied it
+  even if the agent never re-read the broken config.
+
+- The lifecycle report converter reports `fail` when a harness stage the
+  runbook mapping does not name failed or recorded an invalid status.
+  Unmapped skipped stages do not fail the report. It previously built the
+  outcome from mapped stages alone, so once the macOS mapping named all eight
+  canonical stages, a run whose last stage, the tap-restored check,
+  failed after rollback converted to a `pass` report the release gate
+  accepts.
 
 - The release evidence gate captures checker exit codes under GitHub
   Actions' `bash -e` shell. Incomplete evidence permits candidate

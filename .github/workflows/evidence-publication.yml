@@ -1,0 +1,57 @@
+name: Evidence publication
+
+# Committed lifecycle evidence is published in a public repository, so
+# every change is scanned for host, account, cloud, device and network
+# identifiers before it can merge. The release evidence gate cannot do
+# this: it runs only on final tags, long after a commit is public.
+#
+# Deliberately not path-filtered. An evidence-only pull request touches
+# nothing but docs/, which no other workflow's filter includes, and a
+# scanner change must be tested by the same job that runs it.
+#
+# This pass is patterns only. The operator's own host, account, project
+# and instance names live in a private literal file that never reaches
+# CI, so filing evidence still means running the scanner locally with
+# --literals first (docs/validation/evidence/v0.2.1/README.md).
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-publication-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: evidence publication scan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Shellcheck the scanner and its test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --version
+            shellcheck tools/validation/check-evidence-publication.sh \
+              test/validation/evidence_publication_test.sh
+          else
+            echo '::warning::shellcheck is not installed on this runner; lint skipped'
+          fi
+
+      - name: Scanner tests
+        shell: bash
+        run: test/validation/evidence_publication_test.sh
+
+      - name: Scan committed evidence
+        shell: bash
+        run: tools/validation/check-evidence-publication.sh --patterns-only docs/validation/evidence
