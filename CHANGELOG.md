@@ -100,6 +100,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The macOS status-logs check follows event retention across
+  `events.ndjson` and `events.1`. File identities and byte offsets taken
+  before service startup distinguish current-run output after rotation,
+  including rotation between the CLI read and verification. A returned
+  event that remains in either generation can still pass the check;
+  the harness does not delete or truncate logs.
+
 - The macOS Homebrew lifecycle harness enforces sixteen assertions that
   macOS `/bin/bash` 3.2 silently skipped: bash 3.2 does not apply errexit
   to a failing `[[ ]]` statement, so the launcher, binary and descriptor
@@ -127,8 +134,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   even if the agent never re-read the broken config.
 
 - The lifecycle report converter reports `fail` when a harness stage the
-  runbook mapping does not name failed. It previously built the outcome
-  from mapped stages alone, so once the macOS mapping named all eight
+  runbook mapping does not name failed or recorded an invalid status.
+  Unmapped skipped stages do not fail the report. It previously built the
+  outcome from mapped stages alone, so once the macOS mapping named all eight
   canonical stages, a run whose last stage, the tap-restored check,
   failed after rollback converted to a `pass` report the release gate
   accepts.

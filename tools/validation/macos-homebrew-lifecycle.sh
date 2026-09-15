@@ -153,7 +153,6 @@ active_stage_started=""
 lifecycle_marker=""
 agent_error_log_start=0
 observability_error_log_start=0
-events_log_start=0
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -637,6 +636,27 @@ print(json.dumps({
 PY
 }
 
+capture_events_baseline() {
+  # Retention rotates events.ndjson to events.1 and preserves both across
+  # installs. Save both identities so renaming an old file cannot make its
+  # earlier events look like output from this run.
+  python3 - "$1" >"$2" <<'PY' || die "cannot record the event log baseline"
+import json
+import pathlib
+import sys
+
+log_dir = pathlib.Path(sys.argv[1])
+baseline = {}
+for name in ("events.ndjson", "events.1"):
+    try:
+        info = (log_dir / name).stat()
+    except FileNotFoundError:
+        continue
+    baseline[name] = {"device": info.st_dev, "inode": info.st_ino, "size": info.st_size}
+print(json.dumps(baseline, sort_keys=True))
+PY
+}
+
 start_services() {
   agent_error_log="$(brew --prefix)/var/log/tensorplate/agent.error.log"
   if [[ -f "$agent_error_log" ]]; then
@@ -650,12 +670,8 @@ start_services() {
   else
     observability_error_log_start=0
   fi
-  events_log="$(brew --prefix)/var/log/tensorplate/events.ndjson"
-  if [[ -f "$events_log" ]]; then
-    events_log_start="$(stat -f '%z' "$events_log")"
-  else
-    events_log_start=0
-  fi
+  events_log_dir="$(brew --prefix)/var/log/tensorplate" || die "brew --prefix failed"
+  capture_events_baseline "$events_log_dir" "${work_dir}/events-log-baseline.json"
   brew services start tensorplate-agent
   brew services start tensorplate-observability
   wait_for_service tensorplate-agent
@@ -797,29 +813,58 @@ verify_status_logs() {
   # carries path-free results.
   cat "$status_logs_status" "$status_logs_cli" ||
     die "could not record the status and logs output"
-  # The log files are read after the CLI ran, so the current-run event
-  # slice holds every event the CLI could have returned.
+  # Read both retained generations after the CLI. Its returned event may
+  # have moved to events.1 since it opened events.ndjson.
   python3 - "$status_logs_status" "$status_logs_cli" "$log_dir" \
     "$smoke_deployment_id" "$agent_error_log_start" \
-    "$observability_error_log_start" "$events_log_start" \
+    "$observability_error_log_start" "${work_dir}/events-log-baseline.json" \
     >"${evidence_dir}/status-logs.json" <<'PY' || die "status-logs checks failed"
 import json
+import os
 import pathlib
 import sys
 
 (status_path, cli_path, log_dir, expected_deployment,
- agent_start, observability_start, events_start) = sys.argv[1:]
+ agent_start, observability_start, events_baseline_path) = sys.argv[1:]
 log_dir = pathlib.Path(log_dir)
 
 def since(name, offset):
-    # Bytes appended after launchd-start recorded the file's size. A file
-    # that shrank or rotated since then yields nothing, which fails closed.
+    # launchd's stderr logs append across runs. Event retention below has
+    # its own generation-aware reader because it rotates at 1 MiB.
     try:
         with open(log_dir / name, "rb") as handle:
             handle.seek(int(offset))
             return handle.read()
     except OSError as error:
         raise SystemExit(f"cannot read {name}: {error.strerror}")
+
+def event_chunks():
+    with open(events_baseline_path, encoding="utf-8") as handle:
+        baseline = json.load(handle)
+    offsets = {(item["device"], item["inode"]): item["size"] for item in baseline.values()}
+    seen = set()
+    # Open current first: if it rotates during verification, the open
+    # descriptor still refers to that generation. The retained path also
+    # covers rotation between the CLI read and this function.
+    for name in ("events.ndjson", "events.1"):
+        try:
+            with open(log_dir / name, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                identity = (info.st_dev, info.st_ino)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                offset = offsets.get(identity, 0)
+                if info.st_size < offset:
+                    raise SystemExit(f"{name} shrank without rotation; cannot identify current-run events")
+                handle.seek(offset)
+                yield handle.read()
+        except FileNotFoundError:
+            # Either file may be absent, including the brief rename/create
+            # interval. Membership below still requires a current-run event.
+            continue
+        except OSError as error:
+            raise SystemExit(f"cannot read {name}: {error.strerror}")
 
 status_document = json.load(open(status_path, encoding="utf-8"))
 status = status_document.get("payload") or {}
@@ -830,12 +875,13 @@ entries = logs.get("entries") or []
 agent_output = since("agent.error.log", agent_start).strip()
 observability_output = since("observability.error.log", observability_start).strip()
 current_events = []
-for line in since("events.ndjson", events_start).decode("utf-8", "replace").splitlines():
-    # Skipped like the CLI skips them: a torn or non-JSON line is not an event.
-    try:
-        current_events.append(json.loads(line))
-    except ValueError:
-        pass
+for chunk in event_chunks():
+    for line in chunk.decode("utf-8", "replace").splitlines():
+        # Skipped like the CLI skips them: a torn or non-JSON line is not an event.
+        try:
+            current_events.append(json.loads(line))
+        except ValueError:
+            pass
 
 checks = {
     "status_command": status_document.get("command") == "status",

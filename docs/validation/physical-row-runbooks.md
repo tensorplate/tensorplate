@@ -63,15 +63,16 @@ it wrong and the report lies in the gate's favour, which is the one
 direction that matters. Several harness stages may name the same
 canonical stage; the weakest of their results is the one reported.
 A harness stage the mapping does not name is evidence for no canonical
-stage, but if it did not pass, the outcome is `fail`.
+stage. Its `fail` or invalid status makes the outcome `fail`; an unmapped
+`pass` or `skipped` status leaves the canonical stages' outcome unchanged.
 
 ### The Jetson harness does not cover all eight stages yet
 
 The Jetson runbook below cannot produce better than an `incomplete`
 report today, and the release gate refuses that row. That is the
 accurate state, not a defect in the runbook. The macOS mapping names
-all eight stages, so a macOS report can be `pass`, but only when every
-stage in its `stages.tsv` passed, mapped or not:
+all eight stages, so a macOS report can be `pass` when all eight passed
+and no unmapped stage failed or recorded an invalid status:
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
@@ -251,10 +252,17 @@ packaged configuration.
    ready, that both launchd stderr logs gained output after launchd-start
    recorded their sizes, and that `tensorplate logs` reads the packaged
    structured event log and returns an observability event written
-   during this run. It does not query the agent component, because the
-   agent writes no structured events. `host-facts` stays unmapped: it
-   collects inventory before anything is installed and observes neither
-   status nor logs.
+   during this run. Before starting services, the harness snapshots file
+   identities and byte offsets for `events.ndjson` and its retained
+   generation, `events.1`. It reads only new bytes from these generations,
+   so rotation before the status check or between the CLI read and
+   verification can still prove the returned event belongs to this run.
+   The harness does not delete or truncate these logs. It does not query
+   the agent component, because the agent writes no structured events.
+   `host-facts` stays unmapped: it collects inventory before anything is
+   installed and observes neither status nor logs. The status-logs stage,
+   including its rotation checks, still requires a hardware run; the
+   historical evidence predates it.
 
 4. File under `docs/validation/evidence/<version>/macos26-m1pro-16gb/`.
    **Sanitize first** — see that directory's README.
