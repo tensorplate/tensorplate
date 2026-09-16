@@ -195,6 +195,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The Ubuntu x86_64 cloud lifecycle harness projects its journal captures
+  where it takes them. `journalctl --output=json` is read into a scratch
+  directory, and only `MESSAGE`,
+  `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`,
+  `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` are written to
+  `agent-journal.txt`, `observability-journal.txt` and
+  `crash-loop-journal.txt`. The host metadata systemd attaches to every
+  entry -- `_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR`, `_CMDLINE`
+  and the rest -- is never recorded, so a real run's journal evidence
+  passes the publication scanner with nothing edited by hand and the
+  projected capture is the record that is retained. The scratch directory
+  is removed whatever the verdict on the capture was, and a line that is
+  not a JSON record, including journalctl's own `-- No entries --`, is
+  refused rather than copied through. The unit and invocation assertions
+  the status-logs and crash-loop stages make are unchanged and now read
+  the projected records. `packages.txt` is recorded with the same
+  `dpkg-query` the harness already used elsewhere instead of `dpkg -l`,
+  which dropped the package descriptions and the planning identifiers
+  they quote. The harness's own verifier checks that all three captures
+  carry the allowed fields and no others, that they still carry the
+  fields the assertions read, that no raw capture is left in the
+  harness's scratch space, and that a stubbed run's evidence passes
+  `tools/validation/check-evidence-publication.sh --patterns-only`.
+
 - The macOS Homebrew lifecycle harness's offline stage now runs the
   installed services with the network denied, not just doctor and an MPS
   check. Both launchd services run under a `sandbox-exec` profile that
