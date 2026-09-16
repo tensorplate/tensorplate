@@ -165,7 +165,8 @@ Commands:
   version             Print CLI and protocol versions.
 
 Global flags:
-  --config <path>           CLI config file (default: $TENSORPLATE_CLI_CONFIG or none).
+  --config <path>           CLI config file. Without it: $TENSORPLATE_CLI_CONFIG,
+                            then /etc/tensorplate/cli.json, then built-in defaults.
   --profile <name>          Named profile from the CLI config.
   --agent-url <host:port>   Override profile and target a loopback agent URL.
   --device <name>           Route the command to an enrolled registry device over SSH.
@@ -1282,5 +1283,19 @@ mod tests {
             panic!("expected Device::Sync(Some)");
         };
         assert_eq!(name, "orin");
+    }
+
+    /// `--help` is the only place an operator learns that the CLI reads a
+    /// config no command line mentions. Asserting on the constant also
+    /// keeps the help text from drifting away from the path the loader
+    /// actually opens.
+    #[test]
+    fn the_help_text_names_every_config_discovery_step() {
+        let usage = usage_text();
+        assert!(usage.contains("$TENSORPLATE_CLI_CONFIG"), "{usage}");
+        assert!(
+            usage.contains(crate::config::SYSTEM_CLI_CONFIG_PATH),
+            "help must name the packaged config the loader reads: {usage}"
+        );
     }
 }
