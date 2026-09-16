@@ -49,12 +49,19 @@ import subprocess
 import sys
 import urllib.parse
 
+# Prefix for the unit directories, overridable only so the stage can be
+# driven against a stubbed appliance in CI. A harness whose assertions
+# only ever run on a machine CI cannot reach is a harness whose assertions
+# nobody has seen fire. It moves the directories and nothing else: the
+# rendered text, the rule and every check are the same either way.
+UNIT_ROOT = os.environ.get("TP_OFFLINE_UNIT_ROOT", "")
+
 # Runtime only. A drop-in under /etc would outlive the run, and outlive a
 # reboot, on a host the operator did not agree to leave denied.
-RUNTIME_UNIT_DIR = "/run/systemd/system"
+RUNTIME_UNIT_DIR = UNIT_ROOT + "/run/systemd/system"
 DROP_IN_NAME = "10-tensorplate-validation-offline.conf"
 # Never written by this module; named so a check can refuse a path there.
-PERSISTENT_UNIT_DIR = "/etc/systemd/system"
+PERSISTENT_UNIT_DIR = UNIT_ROOT + "/etc/systemd/system"
 
 # The two host addresses, as prefixes that match exactly one address each.
 #
