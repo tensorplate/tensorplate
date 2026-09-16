@@ -121,8 +121,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the way `tools/validation/check-baseline-publication.py` does for the
   Ubuntu cloud rows would make this preflight depend on reaching GitHub
   from the device and is left as follow-up work. Upgrade clears the
-  candidate, installs the baseline, deploys
-  and round-trips the identity engine on it, applies an operator conffile
+  candidate, installs the baseline, deploys and round-trips the identity
+  engine on it, applies an operator conffile
   edit, then installs the candidate over the running baseline and
   requires the candidate's package versions, new service main pids, the
   operator's edited conffile, a green doctor resolving this row, and the
