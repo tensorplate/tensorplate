@@ -741,6 +741,17 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
     );
 }
 
+/// `available_backends` from the config dh-exec installs as
+/// `/etc/tensorplate/agent.json` on amd64, so the test below describes
+/// the hosts the packages produce rather than a list written down twice.
+fn shipped_amd64_backends() -> Vec<String> {
+    let path = repo_root().join("packaging/conf/agent.amd64.json");
+    let raw = std::fs::read_to_string(&path).expect("the amd64 agent config is committed");
+    tensorplate_agent::config::AgentConfig::parse_json(&raw)
+        .expect("the amd64 agent config validates")
+        .available_backends
+}
+
 #[test]
 fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     // Issue #204 was a false published claim about every x86_64 GPU row,
@@ -771,9 +782,9 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     // about this host being short of something.
     installed_packages.insert("tensorplate-serving".to_string());
 
-    let deploy_tensorrt = |available: &[&str], deployment: &str| -> AgentError {
+    let deploy_tensorrt = |available: Vec<String>, deployment: &str| -> AgentError {
         let mut config = harness.config.clone();
-        config.available_backends = available.iter().map(|b| (*b).to_string()).collect();
+        config.available_backends = available;
         let config = config.validate().expect("the edited backend list stays valid");
         let coordinator = Arc::new(
             Coordinator::new(config, harness.store.clone(), harness.worker.clone())
@@ -794,8 +805,15 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     };
 
     // The shipped conffile: refused before the row is consulted, so the
-    // row's claim was never the operative gate here.
-    match deploy_tensorrt(&["python_pytorch"], "stock-conffile") {
+    // row's claim was never the operative gate here. The backend list is
+    // read from the file dh-exec installs rather than restated, so this
+    // stays a statement about what amd64 hosts actually run.
+    let shipped = shipped_amd64_backends();
+    assert!(
+        !shipped.contains(&"tensorrt".to_string()),
+        "the amd64 build has no TensorRT adapter; its config must not advertise one: {shipped:?}"
+    );
+    match deploy_tensorrt(shipped.clone(), "stock-conffile") {
         AgentError::UnsupportedBackend(backend) => assert_eq!(backend, "tensorrt"),
         other => panic!(
             "the shipped amd64 backend list must refuse at compatibility evaluation, got {other:?}"
@@ -803,7 +821,8 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     }
 
     // The edited conffile: the row is the gate, and it now refuses.
-    match deploy_tensorrt(&["python_pytorch", "tensorrt"], "edited-conffile") {
+    let edited = shipped.into_iter().chain(["tensorrt".to_string()]).collect();
+    match deploy_tensorrt(edited, "edited-conffile") {
         AgentError::PlatformNotAdmissible { reason, detail } => {
             assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
             assert!(
