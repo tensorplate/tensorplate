@@ -217,10 +217,15 @@ Prerequisites:
      --work-dir /var/tmp/tensorplate-v0.1.5
    ```
 
-   Any strictly older published tag is accepted, with a release candidate
-   sorting below the release it leads to. Preflight refuses a baseline
-   that is the same age or newer, one whose manifest names another tag,
-   and one whose manifest records it as an unreleased local snapshot.
+   `v0.1.5` is the only baseline the harness accepts for this row: the
+   report's subject names the candidate alone, so nothing a gate reads
+   could tell a run against an earlier candidate of the same release, or
+   against another predecessor, from the path this row validates. The
+   tag is still required to sort strictly below the candidate's, with a
+   release candidate sorting below the release it leads to. Preflight
+   refuses any other baseline tag, a candidate that is not newer than
+   `v0.1.5`, a baseline whose manifest names another tag, and one whose
+   manifest records it as an unreleased local snapshot.
    It also refuses one whose runtime packages are not each strictly older
    than the candidate's: the tag is release metadata, and what `apt`
    orders is the Debian version each `.deb` carries, so an older tag over
@@ -244,7 +249,20 @@ Prerequisites:
    follow-up work.)
 
    The baseline is always installed with its signature verified; there is
-   no option to skip that for either set.
+   no option to skip that for either set. Both releases' `install.sh` also
+   read `TP_INSTALL_*` variables, and some of them turn verification off
+   (`TP_INSTALL_ALLOW_UNSIGNED`, `TP_INSTALL_SKIP_SELF_CHECK`) or point it
+   elsewhere (`TP_INSTALL_COSIGN`, `TP_INSTALL_REPO`), so preflight
+   refuses a run whose environment sets any `TP_INSTALL_*` variable, by
+   name. The upgrade's and the rollback's three installs additionally run
+   the installer behind a prefix that drops every `TP_INSTALL_*` variable
+   the sudo policy or PAM still hands over, and each must print the
+   installer's `SHA256SUMS signature verified: signed by
+   tensorplate/tensorplate release workflow` line, which is filed in
+   `install-baseline.txt`, `install-upgrade.txt` and
+   `install-rollback.txt`. The install stage keeps its own `install.sh`
+   call unchanged, so its candidate install is covered by the preflight
+   refusal alone.
 
 4. Check eligibility first. This builds the bundle in a temporary
    directory it removes, installs nothing and writes no evidence:
@@ -266,9 +284,11 @@ Prerequisites:
    one artifact manifest, whose manifest's `release.tag` is not the tag
    given, or whose files fail `SHA256SUMS`; an assets, evidence, baseline
    or bundle directory under a directory the run deletes; one baseline
-   option without the other; a baseline whose tag or whose runtime
-   package versions are not strictly older than the candidate's, or whose
-   manifest records it as an unreleased snapshot; a session outside the
+   option without the other; a baseline tag other than `v0.1.5`; a
+   baseline whose tag or whose runtime package versions are not strictly
+   older than the candidate's, whose `.deb` files `dpkg-deb` cannot read,
+   or whose manifest records it as an unreleased snapshot; a
+   `TP_INSTALL_*` variable in the environment; a session outside the
    `tensorplate` group once that group exists; and a device that cannot
    build the bundle. The manifest binding matters because the installer accepts
    a signature from any release tag, so a signed set is not thereby the
@@ -351,27 +371,37 @@ Prerequisites:
    or `enable` of its own around either install: the installer enables
    and starts both units, and doing it here would hide an installer that
    no longer does. It does stop them — before clearing the candidate, and
-   again in the rollback — and always both together, because the
-   observability unit shares the agent's `RuntimeDirectory`.
+   again in the rollback — and always both together: the `v0.1.5`
+   observability unit shares the agent's `RuntimeDirectory`, so stopping
+   the agent alone strands it. The candidate's unit no longer shares it,
+   and stopping the pair together is right whichever set is installed.
+   Each of the three installs in this pair must be followed by both
+   units active and the agent socket present.
 
    **rollback** follows [the documented procedure](../install/lifecycle.md):
    it requires the candidate to be serving `<deployment-id>-baseline`,
    refuses to start if `/var/lib/tensorplate/state.bak` already exists,
    stops both services, moves `/var/lib/tensorplate/state` aside to
-   `state.bak`, and `apt remove`s every installed `tensorplate*` package
-   except `tensorplate-apt-source` — including `tensorplate-common`,
-   without which the older set would be a downgrade that `apt-get -y`
-   refuses. It then reads dpkg's own listing back, unfiltered, into
-   `packages-after-remove.txt` and requires each of the four packages
-   that ship a file under `/etc` — agent, serving, observability, cli —
-   to be in dpkg's `config-files` state: a package the listing does not
-   name, or names as `not-installed`, was purged and its conffiles are
-   gone. `tensorplate-common` is exempt because it installs nothing under
-   `/etc`, so dpkg legitimately drops it to `not-installed`; what it may
-   not be is `installed`. The same listing is what shows
-   `tensorplate-apt-source` came through the removal still installed,
-   rather than that inference being drawn from the words the harness
-   passed to `apt-get`. It then installs the baseline
+   `state.bak`, files dpkg's unfiltered listing in
+   `packages-before-remove.txt`, and `apt remove`s every installed
+   `tensorplate*` package except `tensorplate-apt-source` — including
+   `tensorplate-common`, without which the older set would be a
+   downgrade that `apt-get -y` refuses. It then reads dpkg's own listing
+   back, unfiltered, into `packages-after-remove.txt` and requires each
+   of the four packages that ship a file under `/etc` — agent, serving,
+   observability, cli — to be in dpkg's `config-files` state: a package
+   the listing does not name, or names as `not-installed`, was purged and
+   its conffiles are gone. `tensorplate-common` is exempt because it
+   installs nothing under `/etc`, so dpkg legitimately drops it to
+   `not-installed`. Every other `tensorplate*` package must be
+   `not-installed` or `config-files`; `installed`, `half-configured`,
+   `unpacked` and the like are packages the removal left behind.
+   `tensorplate-apt-source` must be exactly as the first listing found
+   it: `install.sh` never installs it, so a device set up by the steps
+   above has none and must still have none, and a lab image that reaches
+   the channel through it must still have it installed. The two listings
+   show that, rather than the words the harness passed to `apt-get`.
+   It then installs the baseline
    fresh through its own `install.sh` and requires the baseline versions,
    the operator's edit, and the set-aside `state.bak/state.json` to be
    intact. The older agent must report **no** active or previous
@@ -385,20 +415,37 @@ Prerequisites:
    critical finding, and the baseline predates `platform_row`; asserting
    more would let a finding the candidate fixed fail the candidate's run.
 
-   Two windows in this pair leave the device with its TensorPlate
-   packages taken away and nothing installed over them: the upgrade's,
-   between clearing the candidate and installing the baseline, and the
-   rollback's, between the removal and the same install. A run that ends
-   in either — a failure, or an interrupt — says so on stderr and names
-   the command to recover with; it reinstalls nothing by itself. What it
-   says is what it read: **no TensorPlate installed** only when the
-   package listing was read and named nothing, the packages by name when
-   some are still installed (installing the baseline over a newer package
-   is the downgrade `apt-get -y` refuses), and that the listing was not
-   read when the removal itself failed. The upgrade's window is the worse
-   one: its clearing step deletes `/etc/tensorplate` and
-   `/var/lib/tensorplate` along with the packages, while the rollback's
-   has already set durable state aside at `state.bak`.
+   Three windows in this pair can leave the device serving nothing: the
+   upgrade's, from clearing the candidate until the baseline install
+   succeeds; the rollback's, from stopping the candidate's services until
+   the removal starts, with the candidate still installed; and the
+   rollback's again, from the removal until the baseline install
+   succeeds. A run that ends in any of them — a failure, or an interrupt —
+   files `stranded-device.txt` beside the stage logs, prints the same text
+   on stderr, and names the command to recover with; it reinstalls
+   nothing by itself. It is written first to the evidence directory, so it
+   survives a terminal that has gone away, and a terminal that has gone
+   away does not stop the lifecycle report from being written.
+
+   What it says is what dpkg reports when it is written, not what an
+   earlier listing said: `install.sh` can fail after installing every
+   package, when the services do not come up or doctor reports a critical
+   finding. It names the packages dpkg lists as present, says **no
+   TensorPlate installed** only when that listing names none, and says
+   the listing could not be read when it could not, with the query to run.
+   It says whether the baseline installer was started, and where its
+   output is; when it was not and packages are still present, installing
+   the baseline over them is the downgrade `apt-get -y` refuses, and the
+   report says to remove them first. It says `/etc/tensorplate`
+   conffiles are kept only when the removal's listing was read and showed
+   them kept, and names the packages whose conffiles were lost otherwise.
+   It says where durable state is: the upgrade's clearing step deletes
+   `/etc/tensorplate` and `/var/lib/tensorplate` along with the packages —
+   the report says whether it got that far — while the rollback sets
+   durable state aside at `state.bak` first. When the rollback stopped
+   before removing anything, it gives the commands that return to the
+   candidate instead: moving `state.bak` back, when it was moved, and
+   starting both services.
 
    Re-running the harness also recovers the device, because its install
    stage purges and installs the candidate from scratch — but that same
@@ -447,10 +494,10 @@ Prerequisites:
    | File | Carries |
    | --- | --- |
    | `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal records in JSON, including host metadata fields such as the host name and the machine and boot ids; inspect every field before publishing |
-   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log`, `upgrade.log`, `rollback.log` | everything the stage's commands printed. `install.log`, `upgrade.log` and `rollback.log` carry the assets path the installer echoes — for both sets — which names an account if the assets were under a home directory. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
+   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log`, `upgrade.log`, `rollback.log`, `install-baseline.txt`, `install-upgrade.txt`, `install-rollback.txt`, `stranded-device.txt` | everything the stage's commands printed, and each upgrade and rollback install's own output. These carry the assets path the installer echoes — for both sets — which names an account if the assets were under a home directory, and `stranded-device.txt` names the baseline assets path in its recovery command. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
    | `host-facts.txt` | kernel release, OS name, the first line of `/etc/nv_tegra_release`, the systemd version and the power mode; no host name or serial is read, but check the release line |
    | `doctor.json`, `doctor-baseline.json`, `doctor-after-upgrade.json`, `doctor-after-rollback.json` | host OS and accelerator facts, for both the candidate and the baseline |
-   | `packages.txt`, `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt`, `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `upgrade-*.json`, `rollback-*.json`, `agent-cli.log` | package versions and states, file names, release tags and digests, the deployment ids and loopback serving URLs; scan them as well |
+   | `packages.txt`, `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-before-remove.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt`, `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `upgrade-*.json`, `rollback-*.json`, `agent-cli.log` | package versions and states, file names, release tags and digests, the deployment ids and loopback serving URLs; scan them as well |
    | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or records it quotes |
 
 ## MacBook Pro M1 Pro
