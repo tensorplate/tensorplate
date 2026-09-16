@@ -1117,10 +1117,14 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
 ///
 /// `libcuda` is the driver's own user-mode library: the driver package
 /// ships it, the CUDA toolkit does not, and a host can have it with no
-/// toolkit anywhere. `/proc/driver/nvidia/version` is the same file
-/// `packaging/scripts/install.sh` reads for its x86_64 hardware check,
-/// so doctor and the installer agree on what "driver present" means on
-/// that architecture.
+/// toolkit anywhere. `/proc/driver/nvidia/version` is the file
+/// `packaging/scripts/install.sh` reads *by default* for its x86_64
+/// hardware check. The two checks are not equivalent and must not be
+/// described as one: the installer tests that file for readability,
+/// honours a `TP_INSTALL_NVIDIA_VERSION` override, and falls back to a
+/// successful `nvidia-smi` driver query, none of which this list does.
+/// So the installer can report a driver doctor does not find here --
+/// in practice `libcuda.so.1` below usually closes that gap.
 const NVIDIA_DRIVER_PATHS: &[&str] = &[
     "/proc/driver/nvidia/version",
     "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
@@ -1223,16 +1227,58 @@ fn probe_cuda_artifacts(opts: &InstallProbeOptions) -> CudaArtifacts {
     }
 }
 
+/// Which CUDA-consuming components are actually installed here.
+///
+/// The verdict below is about what the *installed* software needs, and
+/// software that is not installed needs nothing. `--cli-only` is a
+/// documented install mode (`docs/install/external-install.md`) that
+/// brings no serving worker, and the python_pytorch sidecar is an
+/// opt-in package, so neither may be assumed present. Without this,
+/// doctor states requirements of components that are not on the
+/// machine — an install hint for a worker that was never installed, or
+/// an `ok` justified by a sidecar the same report lists as `missing`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct InstalledCudaConsumers {
+    serving_worker: bool,
+    python_pytorch_backend: bool,
+}
+
+fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaConsumers {
+    InstalledCudaConsumers {
+        serving_worker: prefixed(opts, SERVING_BINARY_PATH).is_file(),
+        // Resolved the same way `python_pytorch_backend` resolves it, so
+        // the two findings cannot disagree about the same descriptor.
+        python_pytorch_backend: python_backend_descriptor_path(opts)
+            .is_ok_and(|descriptor| descriptor.exists()),
+    }
+}
+
+/// The hint every no-driver verdict carries: doctor reads paths, and the
+/// question "does this host have an accelerator at all" belongs to the
+/// findings that answer it.
+const NO_DRIVER_HINT: &str =
+    "`accelerator_facts` and `platform_row` report whether this host has an accelerator at all";
+
 /// Report the CUDA runtime state of this host against what the
 /// installed build needs from it.
 ///
-/// Three facts are kept apart because they fail apart: whether the
-/// NVIDIA driver is installed, whether a system CUDA toolkit is, and
-/// whether the installed serving build needs the second one. A host
+/// Four facts are kept apart because they fail apart: whether the NVIDIA
+/// driver is installed, whether a system CUDA toolkit is, whether the
+/// installed serving build needs the second one, and whether the
+/// components that would consume either are installed at all. A host
 /// with a driver and no toolkit is a defect under a TensorRT-linked
 /// build and entirely normal under the amd64 build, and one message
 /// cannot be true of both.
-fn cuda_runtime_finding(need: ServingCudaNeed, found: &CudaArtifacts) -> Finding {
+///
+/// The driver governs the status on its own, independently of the
+/// toolkit: `libcuda` comes from the driver package and every CUDA
+/// consumer loads through it, so an unrelated system toolkit on a
+/// driverless host must not turn a defect into an `ok`.
+fn cuda_runtime_finding(
+    need: ServingCudaNeed,
+    installed: InstalledCudaConsumers,
+    found: &CudaArtifacts,
+) -> Finding {
     let driver = match &found.driver {
         Some(path) => format!("NVIDIA driver present (`{path}`)"),
         None => "no NVIDIA driver at the known paths".to_string(),
@@ -1241,52 +1287,85 @@ fn cuda_runtime_finding(need: ServingCudaNeed, found: &CudaArtifacts) -> Finding
         Some(path) => format!("system CUDA toolkit at `{path}`"),
         None => "no system CUDA toolkit at the known paths".to_string(),
     };
-    match (need, found.toolkit.is_some(), found.driver.is_some()) {
-        (ServingCudaNeed::NoCudaPath, _, _) => Finding::skipped(
+    let no_driver = "with no driver, no installed component can reach an NVIDIA accelerator";
+    match need {
+        ServingCudaNeed::NoCudaPath => Finding::skipped(
             FindingId::CudaRuntime,
             Severity::Info,
             "skipped: the serving build shipped for this platform has no CUDA path, so no CUDA runtime is required",
             None,
         ),
-        (ServingCudaNeed::TensorrtLinked, true, _) => Finding::ok(
+        _ if !installed.serving_worker => Finding::skipped(
             FindingId::CudaRuntime,
             Severity::Info,
-            format!("{driver}; {toolkit}; this build's serving worker links its TensorRT adapter against that runtime"),
-            None,
-        ),
-        (ServingCudaNeed::TensorrtLinked, false, _) => Finding::warn(
-            FindingId::CudaRuntime,
-            Severity::Warning,
-            format!("{driver}; {toolkit}; this build's serving worker carries the TensorRT adapter, which cannot load without the CUDA runtime"),
+            format!("skipped: no serving worker at `{SERVING_BINARY_PATH}`, so nothing installed here consumes a CUDA runtime"),
             Some(
-                "install the JetPack CUDA runtime so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present"
+                "`serving_binary_installed` reports whether the serving package is installed"
                     .into(),
             ),
         ),
-        (ServingCudaNeed::SidecarRuntime, true, _) => Finding::ok(
-            FindingId::CudaRuntime,
-            Severity::Info,
-            format!("{driver}; {toolkit}; this build's serving worker carries no TensorRT adapter, so nothing installed requires it"),
-            None,
-        ),
-        (ServingCudaNeed::SidecarRuntime, false, true) => Finding::ok(
-            FindingId::CudaRuntime,
-            Severity::Info,
-            format!("{driver}; {toolkit}; this build's serving worker carries no TensorRT adapter and the python_pytorch sidecar's CUDA build of PyTorch ships its own CUDA runtime in the wheel, so no system toolkit is required here"),
-            Some(
-                "paths only: whether that PyTorch can reach the accelerator is not established here — see `python_pytorch_runtime` and `accelerator_facts`"
-                    .into(),
-            ),
-        ),
-        (ServingCudaNeed::SidecarRuntime, false, false) => Finding::missing(
-            FindingId::CudaRuntime,
-            Severity::Info,
-            format!("{driver}; {toolkit}; this build's serving worker carries no TensorRT adapter, so no system toolkit is required — but with no driver, no installed component can reach an NVIDIA accelerator"),
-            Some(
-                "`accelerator_facts` and `platform_row` report whether this host has an accelerator at all"
-                    .into(),
-            ),
-        ),
+        ServingCudaNeed::TensorrtLinked => {
+            let adapter = if found.toolkit.is_some() {
+                "this build's serving worker links its TensorRT adapter against that runtime"
+            } else {
+                "this build's serving worker carries the TensorRT adapter, which cannot load without the CUDA runtime"
+            };
+            match (found.driver.is_some(), found.toolkit.is_some()) {
+                (true, true) => Finding::ok(
+                    FindingId::CudaRuntime,
+                    Severity::Info,
+                    format!("{driver}; {toolkit}; {adapter}"),
+                    None,
+                ),
+                (true, false) => Finding::warn(
+                    FindingId::CudaRuntime,
+                    Severity::Warning,
+                    format!("{driver}; {toolkit}; {adapter}"),
+                    Some(
+                        "install the JetPack CUDA runtime so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present"
+                            .into(),
+                    ),
+                ),
+                (false, _) => Finding::warn(
+                    FindingId::CudaRuntime,
+                    Severity::Warning,
+                    format!("{driver}; {toolkit}; {adapter}, and {no_driver}"),
+                    Some(NO_DRIVER_HINT.into()),
+                ),
+            }
+        }
+        ServingCudaNeed::SidecarRuntime => {
+            let toolkit_need = if found.toolkit.is_some() {
+                "this build's serving worker carries no TensorRT adapter, so nothing installed requires that toolkit"
+            } else {
+                "this build's serving worker carries no TensorRT adapter, so no system toolkit is required here"
+            };
+            if found.driver.is_none() {
+                return Finding::missing(
+                    FindingId::CudaRuntime,
+                    Severity::Info,
+                    format!("{driver}; {toolkit}; {toolkit_need} — but {no_driver}"),
+                    Some(NO_DRIVER_HINT.into()),
+                );
+            }
+            // The accelerator path of this build is the sidecar, so the
+            // sentence about the sidecar's wheel is only a statement
+            // about this host when the sidecar is on it.
+            let sidecar = if installed.python_pytorch_backend {
+                "the installed python_pytorch sidecar reaches the accelerator, and a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+            } else {
+                "no python_pytorch sidecar is installed (see `python_pytorch_backend`); if one is installed, a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+            };
+            Finding::ok(
+                FindingId::CudaRuntime,
+                Severity::Info,
+                format!("{driver}; {toolkit}; {toolkit_need} — {sidecar}"),
+                Some(
+                    "paths only: whether that PyTorch can reach the accelerator is not established here — see `python_pytorch_runtime` and `accelerator_facts`"
+                        .into(),
+                ),
+            )
+        }
     }
 }
 
@@ -1296,7 +1375,11 @@ fn probe_optional_runtimes(opts: &InstallProbeOptions) -> Vec<Finding> {
     // binaries and never import the sidecar's PyTorch: a positive
     // result means "the file is on disk", not "this runtime works".
     // Real validation belongs to release validation.
-    let cuda = cuda_runtime_finding(installed_serving_cuda_need(), &probe_cuda_artifacts(opts));
+    let cuda = cuda_runtime_finding(
+        installed_serving_cuda_need(),
+        probe_installed_cuda_consumers(opts),
+        &probe_cuda_artifacts(opts),
+    );
     let tensorrt = any_runtime_artifact_exists(
         opts,
         &[
@@ -1832,18 +1915,43 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         fs::write(&p, b"").unwrap();
     }
 
-    fn cuda_finding(td: &Path, need: ServingCudaNeed) -> Finding {
-        let opts = InstallProbeOptions {
+    fn cuda_opts(td: &Path) -> InstallProbeOptions {
+        InstallProbeOptions {
             prefix: Some(td.to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
-        };
-        cuda_runtime_finding(need, &probe_cuda_artifacts(&opts))
+        }
+    }
+
+    /// The finding on a host that has the serving worker installed.
+    /// Every case below is about such a host; the gate that skips the
+    /// finding when the worker is absent has its own tests.
+    fn cuda_finding(td: &Path, need: ServingCudaNeed) -> Finding {
+        stage_serving_binary(td);
+        let opts = cuda_opts(td);
+        cuda_runtime_finding(
+            need,
+            probe_installed_cuda_consumers(&opts),
+            &probe_cuda_artifacts(&opts),
+        )
+    }
+
+    /// The staging prefix is a test fixture, not a fact about the host.
+    /// Jetson evidence copies these messages verbatim, so a leaked local
+    /// path would be published into a validation record.
+    fn assert_no_staging_prefix(td: &Path, cuda: &Finding) {
+        let prefix = td.display().to_string();
+        assert!(
+            !cuda.message.contains(&prefix),
+            "the finding must report the contract path, not the staging prefix: {}",
+            cuda.message
+        );
     }
 
     #[test]
     fn jetpack_cuda_runtime_layout_is_detected() {
         let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so");
         stage_file(
             td.path(),
             "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
@@ -1858,6 +1966,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the finding must name the artifact it found: {}",
             cuda.message
         );
+        assert_no_staging_prefix(td.path(), &cuda);
     }
 
     #[test]
@@ -1878,6 +1987,53 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             cuda.message
         );
         assert!(cuda.hint.is_some(), "a warning must say what to install");
+    }
+
+    #[test]
+    fn a_tensorrt_linked_build_with_a_toolkit_and_no_driver_is_a_warning() {
+        // `libcuda` comes from the driver package: a TensorRT adapter
+        // linked against the CUDA runtime still cannot load without it,
+        // so the toolkit alone must not produce an `ok`.
+        let td = TempDir::new().unwrap();
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert_eq!(cuda.severity_label(), "warning");
+        assert!(
+            cuda.message
+                .contains("no installed component can reach an NVIDIA accelerator"),
+            "the absent driver must stay in the message: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn a_system_cuda_toolkit_does_not_stand_in_for_an_absent_driver() {
+        // A system CUDA toolkit is an unrelated package. Installing one
+        // on a driverless host changes nothing about whether anything
+        // can reach the accelerator, so it must not upgrade the verdict.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/local/cuda/version.json");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_eq!(cuda.status_label(), "missing");
+        assert!(
+            cuda.message.contains("no NVIDIA driver"),
+            "the absent driver is the fact that matters here: {}",
+            cuda.message
+        );
+        assert!(
+            cuda.message
+                .contains("no installed component can reach an NVIDIA accelerator"),
+            "the toolkit must not delete the sentence about the driver: {}",
+            cuda.message
+        );
     }
 
     #[test]
@@ -1912,6 +2068,64 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
+    fn the_amd64_message_does_not_claim_a_sidecar_that_is_not_installed() {
+        // A clean amd64 install carries no python_pytorch sidecar, so
+        // justifying `ok` with that sidecar's wheel would describe a
+        // component the same report lists as `missing`.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+
+        let without = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+        assert_eq!(without.status_label(), "ok");
+        assert!(
+            without
+                .message
+                .contains("no python_pytorch sidecar is installed"),
+            "the absent sidecar must be named as absent: {}",
+            without.message
+        );
+
+        stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+        let with = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+        assert_eq!(with.status_label(), "ok");
+        assert!(
+            with.message
+                .contains("the installed python_pytorch sidecar reaches the accelerator"),
+            "an installed sidecar must be named as installed: {}",
+            with.message
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_serving_worker_skips_the_cuda_finding() {
+        // `--cli-only` is a documented install mode that brings no
+        // serving worker. Telling that host to install the JetPack CUDA
+        // runtime states a requirement of software that is not here.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so");
+        let opts = cuda_opts(td.path());
+
+        let cuda = cuda_runtime_finding(
+            ServingCudaNeed::TensorrtLinked,
+            probe_installed_cuda_consumers(&opts),
+            &probe_cuda_artifacts(&opts),
+        );
+
+        assert_eq!(cuda.status_label(), "skipped");
+        assert_eq!(cuda.severity_label(), "info");
+        assert!(
+            !cuda.message.contains("JetPack"),
+            "no worker is installed that could need JetPack: {}",
+            cuda.message
+        );
+        assert!(
+            cuda.message.contains(SERVING_BINARY_PATH),
+            "the skip must say which component is absent: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
     fn a_host_with_neither_driver_nor_toolkit_says_the_driver_is_absent() {
         let td = TempDir::new().unwrap();
 
@@ -1932,6 +2146,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         // toolkit's development package. A host with only the runtime
         // package has the CUDA runtime and none of those names.
         let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
         stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.12");
 
         let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
@@ -1943,17 +2158,123 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the versioned library found must be named: {}",
             cuda.message
         );
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn the_versioned_library_scan_reports_the_lowest_soname() {
+        // `read_dir` order is unspecified, so the scan sorts. Pin which
+        // name wins: one host must report the same path on every run, or
+        // the evidence a validation run files differs from the last for
+        // no reason.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        for name in ["libcudart.so.12", "libcudart.so.11.0", "libcudart.so.9"] {
+            stage_file(td.path(), &format!("/usr/lib/x86_64-linux-gnu/{name}"));
+        }
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "ok");
+        assert!(
+            cuda.message
+                .contains("/usr/lib/x86_64-linux-gnu/libcudart.so.11.0"),
+            "the lexicographically first soname must win: {}",
+            cuda.message
+        );
     }
 
     #[test]
     fn an_unversioned_libcudart_name_alone_is_not_a_toolkit_match() {
         // `libcudart.so.` with nothing after it is not a library.
         let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
         stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.");
 
-        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
 
-        assert_eq!(cuda.status_label(), "missing");
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no system CUDA toolkit"),
+            "a bare soname prefix is not a toolkit: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn every_driver_path_in_the_contract_list_is_detected_and_named() {
+        // Each entry is a contract path an operator or a validation
+        // record can be pointed at. Staging them one at a time pins the
+        // whole list: a dropped or misspelled entry stops being found.
+        for path in NVIDIA_DRIVER_PATHS {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), path);
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+            assert_eq!(
+                cuda.status_label(),
+                "ok",
+                "{path} was not read as an NVIDIA driver: {}",
+                cuda.message
+            );
+            assert!(
+                cuda.message
+                    .contains(&format!("NVIDIA driver present (`{path}`)")),
+                "the finding must name the driver path it found: {}",
+                cuda.message
+            );
+            assert_no_staging_prefix(td.path(), &cuda);
+        }
+    }
+
+    #[test]
+    fn every_toolkit_path_in_the_contract_list_is_detected_and_named() {
+        for path in CUDA_TOOLKIT_PATHS {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), "/proc/driver/nvidia/version");
+            stage_file(td.path(), path);
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+            assert_eq!(
+                cuda.status_label(),
+                "ok",
+                "{path} was not read as a system CUDA toolkit: {}",
+                cuda.message
+            );
+            assert!(
+                cuda.message
+                    .contains(&format!("system CUDA toolkit at `{path}`")),
+                "the finding must name the toolkit path it found: {}",
+                cuda.message
+            );
+            assert_no_staging_prefix(td.path(), &cuda);
+        }
+    }
+
+    #[test]
+    fn every_versioned_library_directory_in_the_contract_list_is_scanned() {
+        for dir in CUDA_TOOLKIT_LIB_DIRS {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), "/proc/driver/nvidia/version");
+            stage_file(td.path(), &format!("{dir}/libcudart.so.12"));
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+            assert_eq!(
+                cuda.status_label(),
+                "ok",
+                "{dir} was not scanned for a versioned CUDA runtime: {}",
+                cuda.message
+            );
+            assert!(
+                cuda.message.contains(&format!("{dir}/libcudart.so.12")),
+                "the finding must name the library it found: {}",
+                cuda.message
+            );
+            assert_no_staging_prefix(td.path(), &cuda);
+        }
     }
 
     #[test]
@@ -1973,40 +2294,131 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     fn the_cuda_finding_never_fails_doctor() {
         // doctor's exit code counts `fail`. A host prerequisite is a
         // reportable state, not an install fault, on every combination.
-        let td = TempDir::new().unwrap();
         for need in [
             ServingCudaNeed::TensorrtLinked,
             ServingCudaNeed::SidecarRuntime,
             ServingCudaNeed::NoCudaPath,
         ] {
-            for artifacts in [
-                CudaArtifacts::default(),
-                CudaArtifacts {
-                    driver: Some("/proc/driver/nvidia/version".into()),
-                    toolkit: None,
+            for installed in [
+                InstalledCudaConsumers::default(),
+                InstalledCudaConsumers {
+                    serving_worker: true,
+                    python_pytorch_backend: false,
                 },
-                CudaArtifacts {
-                    driver: None,
-                    toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
-                },
-                CudaArtifacts {
-                    driver: Some("/proc/driver/nvidia/version".into()),
-                    toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
+                InstalledCudaConsumers {
+                    serving_worker: true,
+                    python_pytorch_backend: true,
                 },
             ] {
-                let finding = cuda_runtime_finding(need, &artifacts);
-                assert_ne!(
-                    finding.status_label(),
-                    "fail",
-                    "{need:?} with {artifacts:?} failed doctor"
-                );
-                assert_ne!(finding.severity_label(), "critical");
+                for artifacts in [
+                    CudaArtifacts::default(),
+                    CudaArtifacts {
+                        driver: Some("/proc/driver/nvidia/version".into()),
+                        toolkit: None,
+                    },
+                    CudaArtifacts {
+                        driver: None,
+                        toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
+                    },
+                    CudaArtifacts {
+                        driver: Some("/proc/driver/nvidia/version".into()),
+                        toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
+                    },
+                ] {
+                    let finding = cuda_runtime_finding(need, installed, &artifacts);
+                    assert_ne!(
+                        finding.status_label(),
+                        "fail",
+                        "{need:?} with {installed:?} and {artifacts:?} failed doctor"
+                    );
+                    assert_ne!(finding.severity_label(), "critical");
+                }
             }
         }
-        // The prefix-driven path is the one production uses.
+    }
+
+    #[test]
+    fn a_driverless_host_is_never_ok_when_a_cuda_consumer_is_installed() {
+        // The one verdict the fix must never produce: a host nothing
+        // installed can reach an accelerator from, reported as fine.
+        for need in [
+            ServingCudaNeed::TensorrtLinked,
+            ServingCudaNeed::SidecarRuntime,
+        ] {
+            for toolkit in [None, Some("/usr/local/cuda/lib64/libcudart.so".to_string())] {
+                let finding = cuda_runtime_finding(
+                    need,
+                    InstalledCudaConsumers {
+                        serving_worker: true,
+                        python_pytorch_backend: true,
+                    },
+                    &CudaArtifacts {
+                        driver: None,
+                        toolkit: toolkit.clone(),
+                    },
+                );
+                assert_ne!(
+                    finding.status_label(),
+                    "ok",
+                    "{need:?} with no driver and toolkit {toolkit:?} was called ok: {}",
+                    finding.message
+                );
+                assert!(
+                    finding
+                        .message
+                        .contains("no installed component can reach an NVIDIA accelerator"),
+                    "{need:?} with no driver must say so: {}",
+                    finding.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_installed_build_decides_what_the_cuda_finding_asks_for() {
+        // Stated per target rather than derived from the function, so
+        // the mapping is pinned instead of tracked.
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert_eq!(
-            cuda_finding(td.path(), installed_serving_cuda_need()).id,
-            FindingId::CudaRuntime
+            installed_serving_cuda_need(),
+            ServingCudaNeed::TensorrtLinked
         );
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(
+            installed_serving_cuda_need(),
+            ServingCudaNeed::SidecarRuntime
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(installed_serving_cuda_need(), ServingCudaNeed::NoCudaPath);
+    }
+
+    #[test]
+    fn probe_optional_runtimes_takes_the_verdict_against_the_installed_build() {
+        // The production seam. The staged host -- serving worker
+        // installed, NVIDIA driver present, no system CUDA toolkit --
+        // answers with a different status under each `ServingCudaNeed`,
+        // so this status is only reachable by reading the build. A
+        // constant substituted for `installed_serving_cuda_need()` fails
+        // here on every target it does not happen to equal.
+        let td = TempDir::new().unwrap();
+        stage_serving_binary(td.path());
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        let opts = cuda_opts(td.path());
+
+        let findings = probe_optional_runtimes(&opts);
+        let cuda = findings
+            .iter()
+            .find(|f| f.id == FindingId::CudaRuntime)
+            .expect("probe_optional_runtimes must report cuda_runtime");
+
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let expected = "warning";
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let expected = "ok";
+        #[cfg(not(target_os = "linux"))]
+        let expected = "skipped";
+
+        assert_eq!(cuda.status_label(), expected, "{}", cuda.message);
+        assert_no_staging_prefix(td.path(), cuda);
     }
 }

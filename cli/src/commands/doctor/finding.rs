@@ -6,6 +6,16 @@
 // validation harness scripts assert on these strings. New checks may
 // be added; existing IDs must not be repurposed, renamed, or have
 // their severity semantics changed.
+//
+// One recorded exception: `cuda_runtime`'s severity range widened when
+// the finding was made build-aware (#205). It reported only `ok` and
+// `missing`, always at `Severity::Info`; it now also reports `warning`
+// (a TensorRT-linked build with no CUDA runtime for its adapter to
+// load) and `skipped` (a build or an install with no CUDA consumer).
+// The id, what it means and its never-`fail` guarantee are unchanged,
+// and no harness asserts on its status — `jetson-lifecycle.sh` records
+// it and the x86_64 ok-lists exclude it. Widening an existing id this
+// way needs that trace first; it is not licence to do it again.
 
 use serde::Serialize;
 
@@ -37,7 +47,10 @@ pub enum FindingId {
     /// installed serving build needs. Reports the NVIDIA driver and a
     /// system CUDA toolkit as separate facts, because they are
     /// installed by different packages and a build that carries no
-    /// TensorRT adapter needs only the first.
+    /// TensorRT adapter needs only the first. `skipped` where nothing
+    /// installed consumes CUDA, `warning` where a TensorRT-linked
+    /// worker has no runtime to load; never `fail`. See the exception
+    /// recorded in the module header above.
     CudaRuntime,
     Ros2HealthStub,
     ObservabilitySnapshot,
