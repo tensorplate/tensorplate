@@ -149,13 +149,38 @@ enforcement comes from a probe:
   denial is what made that service unreachable;
 - the **probe** then runs denied, and every one of the same operations —
   the metadata service, the resolver stub on TCP and UDP, another
-  loopback address, a routed IPv4 and IPv6 destination, and the same send
-  from a child process — must be refused with `EPERM`;
+  loopback address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`
+  documentation addresses, and the same send from a child process — must
+  be refused with `EPERM` or `EACCES`;
 - the agent socket, the serving port on `127.0.0.1` and both loopback
   host addresses must still work under the denial.
 
+The control also decides what each operation can prove. On Linux the
+cgroup egress filter runs *after* the route lookup, so an operation the
+host has no route for answers the same way with and without the drop-in —
+and the default Compute Engine VPC is IPv4-only, so the IPv6
+documentation address answers `ENETUNREACH` either way there. Such an
+operation is listed in the certificate under
+`classification.operations_this_host_cannot_send`, and the only thing
+required of the probe is that the denial did not make it start working.
+Everything else has to be refused.
+
+Configuration is not the running service, either. `systemctl show`
+answers with the unit's *loaded* configuration, which counts a drop-in
+from `daemon-reload` onwards whether or not anything restarted under it —
+and stops counting a removed one the same way. So each readback also
+compares the unit's invocation id against the one it carried before the
+policy changed, on the way in and on the way out, and a restart that
+never replaced the running instance fails the stage.
+
 Filed as `offline-control.json`, `offline-probe.json`,
-`offline-denial.json`, `offline-restored.json` and `offline-runtime.json`.
+`offline-classification.json`, `offline-denial.json`,
+`offline-restored.json` and `offline-runtime.json`.
+`offline-runtime.json` states nothing it did not read back: its
+enforcement verdict comes from classifying the probe and control it
+carries, its four CLI verdicts from the result files those checks filed
+only after passing, its allow list from what systemd reported, and its
+persistent-drop-in count from the filesystem.
 
 **Identity, and what it costs.** `tensorplate-agent` writes a
 machine-type record to `/var/lib/tensorplate/state/machine-type.json` on

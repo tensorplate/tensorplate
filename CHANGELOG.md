@@ -86,12 +86,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Enforcement is established by a probe run under the denial against a
   control run first with nothing denied: the control must not be refused,
   and the GCE metadata service must answer it outright, since the stage's
-  claim is that the denial is what made that service unreachable. Reading
-  the properties back is not enough on its own -- `IPAddressDeny=` is
-  silently inert where the BPF filter cannot be installed, and
+  claim is that the denial is what made that service unreachable. The
+  control also decides what each operation can prove: one the host could
+  not perform with nothing denied cannot be refused by the denial either,
+  so it is named in the result as an operation this host cannot send
+  rather than reported as a denial that failed to bite. That is the case
+  for every global IPv6 destination on an IPv4-only VM, which is the
+  Compute Engine default: the cgroup egress filter runs after the route
+  lookup, so the answer is `ENETUNREACH` with and without the drop-in.
+  Reading the properties back is not enough on its own -- `IPAddressDeny=`
+  is silently inert where the BPF filter cannot be installed, and
   `systemctl show` answers for a dead or nonexistent unit with empty
   values, so every readback requires a loaded, active unit with an
-  invocation id first.
+  invocation id first. `systemctl show` also answers with the unit's
+  *loaded* configuration, which counts a drop-in from `daemon-reload`
+  onwards whether or not anything restarted under it, so each readback
+  compares the invocation id against the one the unit carried before the
+  policy changed -- on the way in and on the way out.
+  `offline-runtime.json` derives every verdict it states: the enforcement
+  verdict by classifying the same probe and control the document carries,
+  each CLI verdict from the result file that check filed only after it
+  passed, the allow list from what systemd reported, and the
+  persistent-drop-in count from the filesystem.
   Doctor must still resolve the row with nothing failing, and the
   identity must come from the boot-bound machine-type record rather than
   from a live metadata answer: the agent's
@@ -102,9 +118,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   detection works. The stage runs before upgrade, whose clean baseline
   install deletes the record; install and upgrade stay online.
   The mechanism lives in `tools/validation/linux_offline_runtime.py`,
-  named for the mechanism rather than the row so the Jetson harness can
-  adopt it unchanged, with its own tests in
-  `test/packaging/verify_linux_offline_runtime.py`.
+  named for the mechanism rather than the row, with its own tests in
+  `test/packaging/verify_linux_offline_runtime.py`. The drop-in, the
+  policy readback, the probe and the classification carry no row in them;
+  what is row-specific is supplied as options, so another systemd harness
+  adopts the file unchanged rather than editing it. A row with no
+  metadata service passes `--metadata-address none` and
+  `--metadata-operation absent`, which then requires that operation to be
+  absent from both documents rather than letting a missing one read as
+  one that passed; a row whose agent and doctor say something else passes
+  its own expected tokens. Every default is the Compute Engine row's.
 
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
@@ -222,7 +245,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   or a readable regular record within the size limit whose JSON or facts
   cannot establish identity, with a note. Unreadable, oversized, non-regular,
   and symlinked record paths still stop recording before fixture creation.
-  The cloud lifecycle harness still skips its offline stage; that stage is follow-up work.
+  The cloud lifecycle harness's offline stage rests on this record; see
+  the entry above for what it establishes and what the boot binding costs.
   The tests use the recorded L4 `g2-standard-8` host fixture and
   synthetic cases. The H100 row has no recorded host fixture yet, so it
   is not exercised with recorded facts.
