@@ -242,6 +242,19 @@ def version_key(version):
     return (int(major), int(minor), int(patch), 0 if rc else 1, int(rc or 0), int(revision))
 
 def dpkg(args):
+    if args and args[0] == "-l":
+        # `dpkg -l` prints each package's description, and the packaging
+        # descriptions quote planning identifiers, which have no place in
+        # published evidence. Nothing in the harness calls this today;
+        # it is here so that a harness that went back to `dpkg -l` is
+        # caught by the publication scan rather than passing quietly. The
+        # identifier is built rather than written out: one belongs only
+        # in the changelog.
+        planning = "V%03d-E%02d-F%02d" % (21, 5, 1)
+        print("||/ Name              Version   Architecture Description")
+        print("+++-=================-=========-============-=====================")
+        print(f"ii  tensorplate-agent 0.2.1-1   amd64        agent ({planning})")
+        return 0
     if not args or args[0] != "--compare-versions":
         return 0
     if len(args) != 4:
@@ -1381,6 +1394,25 @@ scratch_holding_host_metadata() {
 }
 check "  and no raw capture is left in the harness's scratch space" 0 \
   "$(scratch_holding_host_metadata)"
+
+# --- the producer's output passes the publication scanner.
+#
+# Projecting the captures is worth doing only if what the harness
+# produces is publishable, and that is a property of the evidence
+# directory rather than of the journal files alone. This is the command
+# the runbook gives the operator, without the private literal file CI
+# cannot have: it closes the chain from the harness that writes evidence
+# to the scanner that admits it. A stub run's paths are mktemp paths, so
+# a runner whose TMPDIR sat under a home directory would report
+# home-path findings here.
+publication_scan="${td}/publication-scan.out"
+scan_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" \
+  --patterns-only "$ok_evidence" >"$publication_scan" 2>&1 || scan_status=$?
+check "  and the run's own evidence passes the publication scanner" 0 "$scan_status"
+if ((scan_status != 0)); then
+  sed 's/^/       /' "$publication_scan" >&2
+fi
 
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "${ok_evidence}/lifecycle-report.json" <<'PY'

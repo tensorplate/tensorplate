@@ -601,7 +601,11 @@ stage_install() {
   step "enable ${OBSERVABILITY_UNIT}" sudo systemctl enable --now "$OBSERVABILITY_UNIT" || return
   step "services ready" await_services_ready || return
 
-  dpkg -l 'tensorplate*' >"${EVIDENCE_DIR}/packages.txt" 2>&1 || true
+  # The same query as tensorplate_packages, and for the same reason it
+  # is a query rather than `dpkg -l`: the listing carries the package
+  # names, states and versions, and not the descriptions, which quote
+  # planning identifiers that do not belong in published evidence.
+  tensorplate_packages >"${EVIDENCE_DIR}/packages.txt" || true
   step "doctor" bash -c \
     'tensorplate doctor --output json >"$1"' _ "${EVIDENCE_DIR}/doctor.json" || return
   check_doctor_green "${EVIDENCE_DIR}/doctor.json" || return
