@@ -101,48 +101,60 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   harness is unchanged and remains the release clean-room smoke.
 
 - The Jetson lifecycle harness has upgrade and rollback stages, run with
-  `--baseline-tag` and `--baseline-assets-dir` against the last published
-  arm64 runtime set (v0.1.5) and skipped with that reason when no
-  baseline is given (V021-E05-F01-T02). The baseline is always installed
-  through its own installer with its signature verified; there is no
-  option to skip that for either set, and preflight refuses a baseline
-  whose tag is not strictly older than the candidate's, whose runtime
-  packages are not each strictly older than the candidate set's by
-  `dpkg --compare-versions`, whose manifest names another tag, or whose
-  manifest records it as an unreleased local snapshot. The package
+  `--baseline-tag` and `--baseline-assets-dir` against the last
+  published arm64 runtime set (v0.1.5) and skipped with that reason when
+  no baseline is given (V021-E05-F01-T02). The baseline is always
+  installed through its own installer with its signature verified; there
+  is no option to skip that for either set, and preflight refuses a
+  baseline whose tag is not strictly older than the candidate's, whose
+  runtime packages are not each strictly older than the candidate set's
+  by `dpkg --compare-versions`, whose manifest names another tag, or
+  whose manifest records it as an unreleased local snapshot. The package
   comparison is what makes the path installable: the tag is release
   metadata, and an older tag over newer `.deb` versions would leave the
   upgrade stage's candidate install a downgrade that the `apt-get -y`
   inside `install.sh` refuses, on a device the run has already rebuilt
-  twice. `upgrade-path.json` records the versions compared, so the
-  evidence says why the path was admitted. The snapshot check reads
-  fields the set's own manifest declares and is a snapshot filter rather
-  than a proof of publication; binding a baseline to its public release
-  the way `tools/validation/check-baseline-publication.py` does for the
-  Ubuntu cloud rows would make this preflight depend on reaching GitHub
-  from the device and is left as follow-up work. Upgrade clears the
+  twice. The versions compared are read from each `.deb`'s own control
+  field with `dpkg-deb` rather than from the manifest, whose `version`
+  the release driver parses out of the file name and never reads from
+  the package. `upgrade-path.json` records them, so the evidence says
+  why the path was admitted. The snapshot check reads fields the set's
+  own manifest declares and is a snapshot filter rather than a proof of
+  publication; binding a baseline to its public release the way
+  `tools/validation/check-baseline-publication.py` does for the Ubuntu
+  cloud rows would make this preflight depend on reaching GitHub from
+  the device and is left as follow-up work. Upgrade clears the
   candidate, installs the baseline, deploys and round-trips the identity
-  engine on it, applies an operator conffile
-  edit, then installs the candidate over the running baseline and
-  requires the candidate's package versions, new service main pids, the
-  operator's edited conffile, a green doctor resolving this row, and the
-  baseline's deployment still serving with no deploy of the harness's
-  own. Rollback follows the documented procedure: it refuses to replace
-  an existing `state.bak`, stops both services, moves durable state
-  aside, removes every installed `tensorplate*` package except the apt
-  channel bootstrap -- `tensorplate-common` included, without which the
-  older set would be a downgrade `apt-get -y` refuses -- and requires
-  each removed package to be left holding its conffiles rather than
-  purged. It then installs the baseline fresh and requires the baseline
-  versions, the operator's edit and the set-aside state to be intact, the
-  older agent to report no active or previous deployment, and a fresh
-  deployment to serve. Doctor on the baseline is recorded, not asserted.
-  A run that ends between the removal and the baseline install reports
-  that the device carries no TensorPlate and names the command to recover
-  with, rather than reinstalling anything by itself. The report still
-  attests the candidate's `SHA256SUMS` digest; the baseline's is filed
-  separately with the upgrade path. `docs/install/lifecycle.md` no longer
-  says only the cloud harness runs the full rollback procedure.
+  engine on it, applies an operator conffile edit, then installs the
+  candidate over the running baseline and requires the candidate's
+  package versions, new service main pids, the operator's edited
+  conffile, a green doctor resolving this row, and the baseline's
+  deployment still serving with no deploy of the harness's own. Every
+  install in the run goes through one helper, which refuses a set whose
+  `SHA256SUMS` no longer hashes to the digest preflight recorded.
+  Rollback follows the documented procedure: it refuses to replace an
+  existing `state.bak`, stops both services, moves durable state aside,
+  removes every installed `tensorplate*` package except the apt channel
+  bootstrap -- `tensorplate-common` included, without which the older
+  set would be a downgrade `apt-get -y` refuses -- and then reads dpkg's
+  own listing back unfiltered. Each of the four packages that ship a
+  file under `/etc` must be in `config-files` state, so a package the
+  listing leaves out or reports `not-installed` is caught as purged
+  rather than passing unnoticed; `tensorplate-common` ships nothing
+  there and is exempt from that, and the same listing is what shows the
+  apt channel bootstrap survived. It then installs the baseline fresh
+  and requires the baseline versions, the operator's edit and the
+  set-aside state to be intact, the older agent to report no active or
+  previous deployment, and a fresh deployment to serve. Doctor on the
+  baseline is recorded, not asserted. A run that ends with the packages
+  taken away and no set installed over them -- the upgrade's window as
+  well as the rollback's -- reports what the package listing said rather
+  than asserting the device is bare, names the command to recover with,
+  and says that re-running the harness deletes `/etc/tensorplate` and
+  `/var/lib/tensorplate` first, `state.bak` included. The report attests
+  the candidate's `SHA256SUMS` digest; the baseline's is filed
+  separately with the upgrade path. `docs/install/lifecycle.md` no
+  longer says only the cloud harness runs the full rollback procedure.
 
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture

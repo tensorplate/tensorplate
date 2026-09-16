@@ -226,7 +226,12 @@ Prerequisites:
    orders is the Debian version each `.deb` carries, so an older tag over
    newer packages would make the upgrade stage's candidate install a
    downgrade that `apt-get -y` refuses — after the device had already
-   been rebuilt twice. The comparison is recorded in `upgrade-path.json`.
+   been rebuilt twice. The versions compared are read from each `.deb`'s
+   own control field with `dpkg-deb`, not from the manifest: the release
+   driver parses the manifest's `version` out of the file name and never
+   reads the package, so a set whose two disagree would be ordered on a
+   string `apt` does not use. The comparison is recorded in
+   `upgrade-path.json`.
 
    The snapshot check reads fields the set's own manifest declares, so it
    keeps a locally built set out of the run but is not by itself a proof
@@ -342,10 +347,12 @@ Prerequisites:
    with new main pids, the operator's edited conffile to survive, doctor
    to be green and to resolve this row, and the baseline's deployment to
    be serving — with no deploy of the harness's own, so what answers is
-   state the candidate re-warmed. The harness runs no `systemctl` command
-   of its own around either install: the installer enables and starts
-   both units, and doing it here would hide an installer that no longer
-   does.
+   state the candidate re-warmed. The harness issues no `systemctl start`
+   or `enable` of its own around either install: the installer enables
+   and starts both units, and doing it here would hide an installer that
+   no longer does. It does stop them — before clearing the candidate, and
+   again in the rollback — and always both together, because the
+   observability unit shares the agent's `RuntimeDirectory`.
 
    **rollback** follows [the documented procedure](../install/lifecycle.md):
    it requires the candidate to be serving `<deployment-id>-baseline`,
@@ -354,8 +361,17 @@ Prerequisites:
    `state.bak`, and `apt remove`s every installed `tensorplate*` package
    except `tensorplate-apt-source` — including `tensorplate-common`,
    without which the older set would be a downgrade that `apt-get -y`
-   refuses. It requires every removed package to be left in dpkg's
-   `config-files` state rather than purged, then installs the baseline
+   refuses. It then reads dpkg's own listing back, unfiltered, into
+   `packages-after-remove.txt` and requires each of the four packages
+   that ship a file under `/etc` — agent, serving, observability, cli —
+   to be in dpkg's `config-files` state: a package the listing does not
+   name, or names as `not-installed`, was purged and its conffiles are
+   gone. `tensorplate-common` is exempt because it installs nothing under
+   `/etc`, so dpkg legitimately drops it to `not-installed`; what it may
+   not be is `installed`. The same listing is what shows
+   `tensorplate-apt-source` came through the removal still installed,
+   rather than that inference being drawn from the words the harness
+   passed to `apt-get`. It then installs the baseline
    fresh through its own `install.sh` and requires the baseline versions,
    the operator's edit, and the set-aside `state.bak/state.json` to be
    intact. The older agent must report **no** active or previous
@@ -369,12 +385,26 @@ Prerequisites:
    critical finding, and the baseline predates `platform_row`; asserting
    more would let a finding the candidate fixed fail the candidate's run.
 
-   If the run ends between the removal and the baseline install — a
-   failure, or an interrupt — the device is left with **no TensorPlate
-   installed**. The harness says so on stderr and names the command to
-   recover with; it reinstalls nothing by itself. Re-running the harness
-   also recovers the device, because its install stage purges and
-   installs the candidate from scratch.
+   Two windows in this pair leave the device with its TensorPlate
+   packages taken away and nothing installed over them: the upgrade's,
+   between clearing the candidate and installing the baseline, and the
+   rollback's, between the removal and the same install. A run that ends
+   in either — a failure, or an interrupt — says so on stderr and names
+   the command to recover with; it reinstalls nothing by itself. What it
+   says is what it read: **no TensorPlate installed** only when the
+   package listing was read and named nothing, the packages by name when
+   some are still installed (installing the baseline over a newer package
+   is the downgrade `apt-get -y` refuses), and that the listing was not
+   read when the removal itself failed. The upgrade's window is the worse
+   one: its clearing step deletes `/etc/tensorplate` and
+   `/var/lib/tensorplate` along with the packages, while the rollback's
+   has already set durable state aside at `state.bak`.
+
+   Re-running the harness also recovers the device, because its install
+   stage purges and installs the candidate from scratch — but that same
+   stage deletes `/etc/tensorplate` and `/var/lib/tensorplate`, including
+   a `state.bak` the message above just pointed at. Copy anything worth
+   keeping elsewhere before re-running.
 
    **offline** is skipped with its reason in the report, so a run today
    is `incomplete` and the gate refuses the row. Offline under per-unit
@@ -392,10 +422,10 @@ Prerequisites:
    The baseline is verified the same way, but its digest is filed on its
    own in `baseline-digest.txt` and in `upgrade-path.json`: the report
    attests one artifact set, and that set is the candidate.
-   `upgrade-path.json` also carries the runtime package versions each set
-   declared, which is what preflight compared to admit the path, so the
-   evidence says why the two sets form an upgrade rather than only which
-   tags were named.
+   `upgrade-path.json` also carries the runtime package versions each
+   set's `.deb` files carry, which is what preflight compared to admit
+   the path, so the evidence says why the two sets form an upgrade rather
+   than only which tags were named.
 
 6. File the report, its stage logs and the recorded row facts under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.

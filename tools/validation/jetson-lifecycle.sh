@@ -99,6 +99,18 @@ readonly OBSERVABILITY_UNIT="tensorplate-observability"
 # and is what a lab image uses to reach the channel, so the run leaves it
 # installed. Every other tensorplate* package is purged.
 readonly APT_SOURCE_PACKAGE="tensorplate-apt-source"
+# The runtime packages that ship a file under /etc, which dh marks as a
+# conffile: agent.json, serving_worker.json, observability.json and
+# cli.json (packaging/debian/tensorplate-*.install). These are the
+# packages an `apt remove` must leave in dpkg's config-files state, and
+# the ones whose conffiles a purge would take with them.
+#
+# tensorplate-common is deliberately absent: it installs nothing under
+# /etc, so dpkg has no conffiles to keep for it and a removal drops it
+# straight to not-installed. Requiring config-files of it would fail
+# every correct rollback on a real device.
+CONFFILE_PACKAGES=(tensorplate-agent tensorplate-serving
+                   tensorplate-observability tensorplate-cli)
 readonly DEB_ARCH="arm64"
 # Overridable so the stage bodies can be driven against a stubbed
 # appliance in CI. A validation harness whose stages only ever run on a
@@ -142,11 +154,26 @@ readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
 # can supply the file.
 OPERATOR_CONFIG="${TP_JETSON_OPERATOR_CONFIG:-/etc/tensorplate/cli.json}"
 OPERATOR_CONFIG_SHA256=""
-# Set once the rollback has removed the candidate's packages and cleared
-# once the baseline is installed again. While it is set, the device has no
-# TensorPlate installed, and an interrupted run says so rather than
+# The two windows in which a run can end with this device's TensorPlate
+# packages taken away and no set installed over them: the upgrade's,
+# between clearing the candidate and installing the baseline, and the
+# rollback's, between the removal and the same install. Set on entering
+# one and cleared once that baseline install returns. While it names a
+# window, an interrupted run says what the device carries rather than
 # leaving the operator to discover it.
-ROLLBACK_PACKAGES_REMOVED=0
+#
+# The two windows leave different devices behind, which is why the name
+# is recorded rather than a flag: the upgrade's clear_install DELETES
+# durable state along with the packages, while the rollback sets it aside
+# under state.bak first.
+STRANDED_WINDOW=""
+# What dpkg reported once the packages were taken away: empty when
+# nothing was left installed, `unknown` when the run never got to read
+# the listing, and otherwise the names still installed. Saying "nothing
+# is installed" on the strength of a command that was issued rather than
+# a listing that was read is how an operator is handed a recovery
+# command that apt refuses.
+STRANDED_PACKAGES_LEFT=unknown
 # Scratch directory holding a bundle this run built, removed on exit.
 BUNDLE_SCRATCH=""
 # Private CLI config pins every command to the installed local agent; an
@@ -368,13 +395,22 @@ PY
 # package this row installs is strictly older in the baseline set.
 #
 # Tag order does not establish this. The tag is release metadata; what
-# apt orders is the Debian version each .deb carries, and the two live in
-# different fields of the manifest. A baseline whose tag is older but
-# whose packages are not makes the candidate install in the upgrade stage
-# a downgrade, which the `apt-get -y` inside install.sh refuses without
-# --allow-downgrades -- the same hazard the rollback avoids by removing
-# tensorplate-common, met in the other direction and only after the
-# device has already been rebuilt twice.
+# apt orders is the Debian version each .deb carries. A baseline whose
+# tag is older but whose packages are not makes the candidate install in
+# the upgrade stage a downgrade, which the `apt-get -y` inside install.sh
+# refuses without --allow-downgrades -- the same hazard the rollback
+# avoids by removing tensorplate-common, met in the other direction and
+# only after the device has already been rebuilt twice.
+#
+# The versions compared are read from each .deb's own control field with
+# dpkg-deb, not from the manifest. The manifest's `version` is parsed out
+# of the file name by the release driver (tools/release/tensorplate-release.sh)
+# and never read from the package, so a .deb whose control Version says
+# something else -- an epoch, which a file name cannot carry, or a
+# hand-assembled directory -- would be ordered on a string apt does not
+# use. check_installed_versions already reads the control field after
+# each install; reading it here moves that truth to preflight, before
+# the device has been rebuilt at all.
 #
 # Only the five packages install.sh selects for this row are compared:
 # the run passes neither --with-python-backend nor --cli-only, so the
@@ -418,11 +454,28 @@ def read_set(label, directory):
                 f"the {label} set must list exactly one {package} package for "
                 f"{deb_arch} or all; found {len(matches)}"
             )
-        version = matches[0].get("version")
-        if not isinstance(version, str) or not DEBIAN_VERSION.fullmatch(version):
+        # The manifest has to declare a version for every package it
+        # publishes; a set that does not is malformed whatever the .deb
+        # says, and dpkg --compare-versions would read a missing one as
+        # older than anything.
+        declared = matches[0].get("version")
+        if not isinstance(declared, str) or not DEBIAN_VERSION.fullmatch(declared):
             raise SystemExit(
-                f"the {label} set lists {package} at version {version!r}, "
+                f"the {label} set lists {package} at version {declared!r}, "
                 "which is not a Debian version"
+            )
+        # What apt will order on. dpkg-deb is a required command, checked
+        # in preflight before this runs.
+        read = subprocess.run(
+            ["dpkg-deb", "-f", str(pathlib.Path(directory) / matches[0]["file"]), "Version"],
+            capture_output=True, text=True,
+        )
+        version = read.stdout.strip()
+        if read.returncode != 0 or not DEBIAN_VERSION.fullmatch(version):
+            raise SystemExit(
+                f"the {label} set's {matches[0]['file']} does not carry a readable "
+                f"Debian Version in its control file: dpkg-deb exited {read.returncode} "
+                f"and reported {version!r}"
             )
         packages[package] = version
     return manifest.get("release") or {}, packages
@@ -744,13 +797,21 @@ capture_cli_json() {
   run_cli "$@" >"$output"
 }
 
-# Installed tensorplate* packages dpkg knows about, one `name status` per
-# line, leaving out the apt channel's bootstrap package. A failed query
-# cannot establish that nothing is installed: deleting conffiles after
-# such a query would strand them in dpkg's database. The documented
-# no-match exit is accepted only with no output and its exact diagnostic.
+# Every tensorplate* package dpkg knows about, one `name status` per
+# line. A failed query cannot establish that nothing is installed:
+# deleting conffiles after such a query would strand them in dpkg's
+# database. The documented no-match exit is accepted only with no output
+# and its exact diagnostic.
+#
+# With no argument the apt channel's bootstrap package and every
+# `not-installed` row are left out, which is what the purge and the
+# removal need: a name apt-get was never given aborts the whole
+# operation, leaving every package installed. `all` keeps every row,
+# which is what the rollback's evidence needs -- in the filtered listing
+# a package dpkg purged and one it merely no longer names are the same
+# absence, and those are not the same outcome.
 installed_tensorplate_packages() {
-  python3 - "$APT_SOURCE_PACKAGE" <<'PYPACKAGES'
+  python3 - "$APT_SOURCE_PACKAGE" "${1:-installed-only}" <<'PYPACKAGES'
 import os, subprocess, sys
 
 query = subprocess.run(
@@ -774,7 +835,7 @@ for line in query.stdout.splitlines():
     if len(fields) != 2:
         raise SystemExit(f"invalid dpkg-query package inventory record: {line!r}")
     package, status = fields
-    if package != sys.argv[1] and status != "not-installed":
+    if sys.argv[2] == "all" or (package != sys.argv[1] and status != "not-installed"):
         print(package, status)
 PYPACKAGES
 }
@@ -819,9 +880,16 @@ clear_install() {
     return 1
   fi
   step "clear installed state" sudo rm -rf "${CLEARED_STATE_DIRS[@]}" || return
+  # Read and completed, not assumed: only now may a report from this
+  # window say the device carries no TensorPlate and that the state
+  # directories went with the packages. The listing above is what
+  # establishes the first and the step above the second.
+  STRANDED_PACKAGES_LEFT=""
 }
 
-# Install one artifact set through its own shipped installer.
+# Install one artifact set through its own shipped installer. Every
+# install this run performs goes through here, so what is true of one is
+# true of all four.
 #
 # No --allow-unsigned, for either set: install.sh verifies the SHA256SUMS
 # signature with the cosign bundle that was downloaded with it. No
@@ -847,11 +915,8 @@ stage_install() {
   step "pin CLI commands to the local agent" prepare_cli_config || return
   clear_install || return
 
-  # No --allow-unsigned: install.sh verifies the SHA256SUMS signature
-  # with the cosign bundle that was downloaded with the set. No
-  # --with-python-backend: this row's smoke is the TensorRT engine.
   note "installing the candidate through the shipped installer"
-  step "install.sh" sudo bash "${ASSETS_DIR}/install.sh" --local-artifacts "$ASSETS_DIR" --yes || return
+  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" || return
 
   note "enabling the services"
   step "enable ${AGENT_UNIT}" sudo systemctl enable --now "$AGENT_UNIT" || return
@@ -1468,15 +1533,25 @@ stage_upgrade() {
   # An upgrade has to start from a device carrying the baseline and
   # nothing else. The candidate installed above is cleared for the same
   # reason the run cleared whatever preceded it.
+  #
+  # From here until the baseline install returns this device carries no
+  # TensorPlate, and clear_install has DELETED its conffiles and durable
+  # state rather than setting them aside. That is a worse place to be
+  # left than the rollback's window, so it is reported the same way.
+  STRANDED_WINDOW=upgrade
+  STRANDED_PACKAGES_LEFT=unknown
   clear_install || return
   note "installing the ${BASELINE_TAG} baseline through its own installer"
   install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
-  # No systemctl call of the harness's own around either install here:
-  # the release installer enables and starts both units itself, and
-  # bringing them up here would hide an installer that no longer does.
-  # Both units are always handled together, never one alone: the
-  # baseline's observability unit shares the agent's RuntimeDirectory,
-  # so stopping one of them alone strands the other.
+  STRANDED_WINDOW=""
+  # No systemctl start or enable of the harness's own around either
+  # install here: the release installer enables and starts both units
+  # itself, and bringing them up here would hide an installer that no
+  # longer does. Stopping them is another matter -- clear_install above
+  # does, and so does the rollback -- and the pair is always stopped
+  # together, never one alone: the baseline's observability unit shares
+  # the agent's RuntimeDirectory, so stopping one of them alone strands
+  # the other.
   step "baseline services ready" await_services_ready || return
   step "baseline versions" \
     check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-baseline.txt" || return
@@ -1533,49 +1608,128 @@ stage_upgrade() {
   pass "upgraded in place with new pids; operator edit kept; doctor green and ${ROW} resolved; the baseline's deployment answered on the candidate"
 }
 
-# Removal leaves each package holding only its conffiles, never purged.
-# The dpkg status is what distinguishes the two: the packaged conffile
-# bytes are identical in both sets, so comparing the files could not.
-# A package the listing does not name at all was purged, not removed,
-# and its conffiles are gone.
+# Removal leaves each conffile-owning package holding only its conffiles,
+# never purged. The dpkg status is what distinguishes the two: the
+# packaged conffile bytes are identical in both sets, so comparing the
+# files could not. A package the listing does not name at all was purged,
+# not removed, and its conffiles are gone -- so the check is against the
+# packages that must be there, not against the rows that happen to
+# appear. A purge that swallowed tensorplate-observability's
+# /etc/tensorplate/observability.json is exactly the operator-config loss
+# this stage exists to rule out, and it shows up as an absence.
+#
+# The listing is the unfiltered one, so the apt channel's bootstrap
+# package is recorded here too: leaving it installed is part of the
+# procedure being validated, and reading the words the harness passed to
+# apt-get would not show that the device ended up that way.
+#
+# Also records what is still installed, so a report from this window
+# describes the device rather than the command that was issued.
 check_removed() {
-  local listing
-  listing="$(installed_tensorplate_packages)" || return
+  local listing left="" pkg status
+  listing="$(installed_tensorplate_packages all)" || return
   printf '%s\n' "$listing" >"${EVIDENCE_DIR}/packages-after-remove.txt" || return
-  python3 - "${EVIDENCE_DIR}/packages-after-remove.txt" <<'PY' || return
+  while read -r pkg status; do
+    if [[ -n "$pkg" && "$status" == installed && "$pkg" != "$APT_SOURCE_PACKAGE" ]]; then
+      left="${left:+${left} }${pkg}"
+    fi
+  done <<<"$listing"
+  STRANDED_PACKAGES_LEFT="$left"
+  python3 - "${EVIDENCE_DIR}/packages-after-remove.txt" "$APT_SOURCE_PACKAGE" \
+    "${CONFFILE_PACKAGES[@]}" <<'PY' || return
 import sys
 
-problems = []
-agent = "absent"
-for line in open(sys.argv[1], encoding="utf-8"):
+path, apt_source = sys.argv[1:3]
+expected = sys.argv[3:]
+status = {}
+for line in open(path, encoding="utf-8"):
     fields = line.split()
-    if len(fields) != 2:
+    if len(fields) == 2:
+        status[fields[0]] = fields[1]
+
+problems = []
+for package in expected:
+    found = status.get(package, "absent")
+    if found == "config-files":
         continue
-    if fields[0] == "tensorplate-agent":
-        agent = fields[1]
-    if fields[1] != "config-files":
-        problems.append(f"{fields[0]} is still {fields[1]}")
-if agent != "config-files":
-    problems.append(f"tensorplate-agent is {agent}, not config-files: its conffiles were not kept")
+    if found == "installed":
+        problems.append(f"{package} is still {found}")
+    else:
+        problems.append(f"{package} is {found}, not config-files: its conffiles were not kept")
+# Every other tensorplate* package has to be gone from dpkg's installed
+# set. tensorplate-common ships nothing under /etc, so dpkg may report it
+# either config-files or not-installed; what it may not be is installed,
+# which would make the baseline install a downgrade apt-get -y refuses.
+for package in sorted(status):
+    if package in expected or package == apt_source:
+        continue
+    if status[package] == "installed":
+        problems.append(f"{package} is still installed")
+if status.get(apt_source) != "installed":
+    problems.append(
+        f"{apt_source} is {status.get(apt_source, 'absent')}, not installed: the removal "
+        "must leave the apt channel's bootstrap package alone"
+    )
 if problems:
     raise SystemExit("the removal did not leave only conffiles: " + "; ".join(problems))
-print("every TensorPlate package is removed with its conffiles kept")
+print(f"every removed package kept its conffiles and {apt_source} is still installed")
 PY
 }
 
-# Printed when the run ends between the removal and the baseline install,
-# including from a signal. Nothing is reinstalled automatically: the
-# operator decides which set this device should carry, and a harness that
-# quietly reinstalled would hide that it had left the device bare.
+# Printed when the run ends in either window where this device's packages
+# have been taken away and no set has been installed over them, including
+# from a signal.
+#
+# It says what was read, not what was attempted. A removal that left a
+# package behind is not a device with nothing installed, and the recovery
+# command below is then the very downgrade `apt-get -y` refuses without
+# --allow-downgrades; a removal whose outcome was never read is not
+# either. Nothing is reinstalled automatically: the operator decides
+# which set this device should carry, and a harness that quietly
+# reinstalled would hide that it had left the device bare.
 report_stranded_device() {
-  ((ROLLBACK_PACKAGES_REMOVED)) || return 0
-  printf 'the rollback removed every TensorPlate package and the %s install did not complete.\n' \
-    "$BASELINE_TAG" >&2
-  printf 'this device has NO TensorPlate installed. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
-    "$STATE_ASIDE_DIR" >&2
+  [[ -n "$STRANDED_WINDOW" ]] || return 0
+  # What the device carries. Only the empty value means the listing was
+  # read and named nothing: `unknown` is a run that never got that far,
+  # and anything else is what it found still installed.
+  case "$STRANDED_WINDOW:$STRANDED_PACKAGES_LEFT" in
+    upgrade:)
+      printf 'the upgrade cleared the candidate and the %s install did not complete.\n' \
+        "$BASELINE_TAG" >&2
+      printf 'this device has NO TensorPlate installed, and the clearing step deleted %s with the packages, durable state included.\n' \
+        "${CLEARED_STATE_DIRS[*]}" >&2
+      ;;
+    upgrade:*)
+      printf 'the upgrade was clearing the candidate when it stopped, and the %s install did not complete.\n' \
+        "$BASELINE_TAG" >&2
+      printf 'what this device still carries was NOT read, and the clearing step deletes %s. List the packages with:\n  dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\\n'"'"' '"'"'tensorplate*'"'"'\n' \
+        "${CLEARED_STATE_DIRS[*]}" >&2
+      ;;
+    *:)
+      printf 'the rollback removed the candidate and the %s install did not complete.\n' \
+        "$BASELINE_TAG" >&2
+      printf 'this device has NO TensorPlate installed. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
+        "$STATE_ASIDE_DIR" >&2
+      ;;
+    *:unknown)
+      printf 'the rollback was removing the candidate when it stopped, and the %s install did not complete.\n' \
+        "$BASELINE_TAG" >&2
+      printf 'what this device still carries was NOT read. /etc/tensorplate conffiles are kept and durable state is at %s. List the packages with:\n  dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\\n'"'"' '"'"'tensorplate*'"'"'\n' \
+        "$STATE_ASIDE_DIR" >&2
+      ;;
+    *)
+      printf 'the rollback removed the candidate and the %s install did not complete.\n' \
+        "$BASELINE_TAG" >&2
+      printf 'these TensorPlate packages are STILL INSTALLED: %s. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
+        "$STRANDED_PACKAGES_LEFT" "$STATE_ASIDE_DIR" >&2
+      printf 'the %s install was not attempted: while a newer package is installed it is a downgrade apt-get refuses. Remove them first.\n' \
+        "$BASELINE_TAG" >&2
+      ;;
+  esac
   printf 'recover it by hand with:\n  sudo bash %s/install.sh --local-artifacts %s --yes\n' \
     "$BASELINE_DIR" "$BASELINE_DIR" >&2
-  printf 'or re-run this harness, whose install stage purges and installs the candidate from scratch.\n' >&2
+  printf 'or re-run this harness, which installs the candidate from scratch -- but its install stage deletes %s first, including any %s. Copy anything you want to keep elsewhere before re-running.\n' \
+    "${CLEARED_STATE_DIRS[*]}" "$STATE_ASIDE_DIR" >&2
 }
 
 stage_rollback() {
@@ -1623,16 +1777,20 @@ PY
   done <<<"$listing"
   if ((${#remove[@]} > 0)); then
     # Set before the command runs: a removal that fails part way through
-    # leaves the device just as bare as one that completes.
-    ROLLBACK_PACKAGES_REMOVED=1
+    # leaves the device in this window just as a completed one does, and
+    # what it left behind is then unread rather than nothing.
+    STRANDED_WINDOW=rollback
+    STRANDED_PACKAGES_LEFT=unknown
     step "remove ${remove[*]}" \
       sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "${remove[@]}" || return
   fi
+  # Reads the listing, so from here the report names what is left rather
+  # than asserting the device is bare.
   check_removed || return
 
   note "installing the baseline fresh through its own installer"
   install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
-  ROLLBACK_PACKAGES_REMOVED=0
+  STRANDED_WINDOW=""
   step "services ready after the rollback" await_services_ready || return
   step "baseline versions" \
     check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-after-rollback.txt" || return
