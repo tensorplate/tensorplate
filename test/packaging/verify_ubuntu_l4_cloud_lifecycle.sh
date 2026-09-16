@@ -933,8 +933,20 @@ fi
 [ -n "${TP_FAKE_SHA256SUM}" ] || exit 127
 exec "${TP_FAKE_SHA256SUM}" "$@"
 STUB
+# journalctl, emitting what systemd actually attaches to an entry.
+#
+# The host fields are the point: _HOSTNAME, _MACHINE_ID, _BOOT_ID,
+# __CURSOR, _CMDLINE and the rest describe the machine, and the harness
+# must project them out before the capture reaches the evidence
+# directory. A stub that emitted only the fields the assertions read
+# could not tell a projection from its absence. The values are fictional
+# -- no real host is named here -- because it is the field names the
+# publication scanner refuses.
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
+# The metadata every record carries, whatever the mode.
+host_fields='"_HOSTNAME":"fixture-appliance","_MACHINE_ID":"3b7c1f92a4d64e1fa0c25db7e83f1c40","_BOOT_ID":"9d41e0c7b26f4a8e97c3d5120fa6be83","_TRANSPORT":"stdout","_CMDLINE":"/usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json","__MONOTONIC_TIMESTAMP":"84210000000"'
+cursor_field='"__CURSOR":"s=8f3c2d1e;i=4a1;b=9d41e0c7b26f4a8e97c3d5120fa6be83;m=139f2a;t=6591c0;x=51d2"'
 invocation=""
 json=0
 since=""
@@ -952,9 +964,16 @@ done
 if [ -n "$since" ]; then
   message='config error: agent.json is not valid JSON'
   [ "${TP_FAKE_MODE:-ok}" = crash-loop-other-error ] && message='state store error: permission denied'
-  for _ in 1 2 3 4 5; do
-    printf '{"_SYSTEMD_UNIT":"tensorplate-agent.service","MESSAGE":"%s"}\n' "$message"
+  for attempt in 1 2 3 4 5; do
+    printf '{%s,%s,"_SYSTEMD_UNIT":"tensorplate-agent.service","_SYSTEMD_INVOCATION_ID":"11111111111111111111111111111111","_PID":"%s","PRIORITY":"3","SYSLOG_IDENTIFIER":"tensorplate-agent","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
+      "$host_fields" "$cursor_field" "$((4000 + attempt))" "$message"
+    # systemd's own record of the restart, which carries UNIT rather
+    # than _SYSTEMD_UNIT.
+    printf '{%s,%s,"_SYSTEMD_UNIT":"init.scope","UNIT":"tensorplate-agent.service","_PID":"1","PRIORITY":"4","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"tensorplate-agent.service: Scheduled restart job, restart counter is at %s.","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
+      "$host_fields" "$cursor_field" "$attempt"
   done
+  printf '{%s,%s,"_SYSTEMD_UNIT":"init.scope","UNIT":"tensorplate-agent.service","_PID":"1","PRIORITY":"3","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"tensorplate-agent.service: Start request repeated too quickly.","__REALTIME_TIMESTAMP":"1789300000000002"}\n' \
+    "$host_fields" "$cursor_field"
   exit 0
 fi
 case "$invocation" in
@@ -972,8 +991,8 @@ case "${TP_FAKE_MODE:-ok}:$unit" in
 esac
 message='fixture service started'
 [ "${TP_FAKE_MODE:-ok}" = journal-empty-message ] && message=''
-printf '{"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
-  "$invocation" "$unit" "$message"
+printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
+  "$host_fields" "$cursor_field" "$invocation" "$unit" "${unit%.service}" "$message"
 STUB
 cat >"${appliance}/bin/tensorplate" <<'STUB'
 #!/bin/sh
@@ -1304,6 +1323,64 @@ for invocation in 11111111111111111111111111111111 22222222222222222222222222222
   check "  journal capture selects current invocation ${invocation}" yes \
     "$(grep -F "journalctl" "${appliance}/sudo.log" | grep -Fq "_SYSTEMD_INVOCATION_ID=${invocation}" && echo yes || echo no)"
 done
+
+# --- the journal captures are projected where they are captured.
+#
+# The stub journalctl emits the metadata systemd attaches to every real
+# record. What reaches the evidence directory must carry only the fields
+# the stage assertions read -- the set the publication scanner accepts --
+# and must still carry them, or the projection has taken out what the
+# assertions depend on. The expected record counts are the stub's own, so
+# a projection that dropped records would fail here too.
+#
+# Prints `<records> <keys outside the allowlist> <required keys missing
+# from some record>`.
+journal_projection() {
+  local file="$1"
+  shift
+  python3 - "$file" "$@" <<'PY'
+import json, sys
+
+ALLOWED = {"MESSAGE", "PRIORITY", "SYSLOG_IDENTIFIER", "UNIT", "_PID",
+           "_SYSTEMD_UNIT", "_SYSTEMD_INVOCATION_ID", "__REALTIME_TIMESTAMP"}
+
+path = sys.argv[1]
+required = set(sys.argv[2:])
+extra, missing, records = set(), set(), 0
+for line in open(path, encoding="utf-8"):
+    if not line.strip():
+        continue
+    entry = json.loads(line)
+    records += 1
+    extra |= set(entry) - ALLOWED
+    missing |= required - set(entry)
+print(records, ",".join(sorted(extra)) or "none", ",".join(sorted(missing)) or "none")
+PY
+}
+for journal in agent observability; do
+  check "  the ${journal} journal is projected to the service's own fields" "1 none none" \
+    "$(journal_projection "${ok_evidence}/${journal}-journal.txt" \
+       MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+done
+# systemd's own restart records name the unit in UNIT and have no
+# invocation id, so only MESSAGE and _SYSTEMD_UNIT are required of every
+# record here.
+check "  the crash-loop journal is projected to the service's own fields" "11 none none" \
+  "$(journal_projection "${ok_evidence}/crash-loop-journal.txt" MESSAGE _SYSTEMD_UNIT)"
+# A projection that ran but left the raw capture behind would publish
+# nothing, and would still leave host metadata on the machine for the
+# next thing that collects logs.
+scratch_holding_host_metadata() {
+  local count=0 file
+  while IFS= read -r file; do
+    if grep -qF '_HOSTNAME' "$file"; then
+      count=$((count + 1))
+    fi
+  done < <(find "${appliance}/scratch" -type f)
+  printf '%s' "$count"
+}
+check "  and no raw capture is left in the harness's scratch space" 0 \
+  "$(scratch_holding_host_metadata)"
 
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "${ok_evidence}/lifecycle-report.json" <<'PY'

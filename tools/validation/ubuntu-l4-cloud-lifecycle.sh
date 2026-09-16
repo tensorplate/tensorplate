@@ -831,8 +831,71 @@ stage_deploy_smoke() {
 
 # --- status-logs -------------------------------------------------------
 
+# Project a journal capture to the fields that describe the service.
+#
+# systemd attaches trusted metadata to every entry -- _HOSTNAME,
+# _MACHINE_ID, _BOOT_ID, __CURSOR, _CMDLINE and more -- which describes
+# the machine the run happened on rather than the service under test.
+# Evidence is committed to a public repository, so the projected record
+# is what is written to the evidence directory and the raw capture never
+# leaves the scratch directory it was read from: there is no unprojected
+# copy to sanitize by hand, or to forget to.
+#
+# The kept set is what this harness's own assertions read, and it is the
+# set tools/validation/check-evidence-publication.sh accepts.
+#
+# The label names the capture in any diagnostic. The scratch path is
+# never printed: stage logs are filed as evidence too.
+project_journal_records() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+
+KEEP = frozenset((
+    "MESSAGE",
+    "PRIORITY",
+    "SYSLOG_IDENTIFIER",
+    "UNIT",
+    "_PID",
+    "_SYSTEMD_UNIT",
+    "_SYSTEMD_INVOCATION_ID",
+    "__REALTIME_TIMESTAMP",
+))
+
+label, raw, projected = sys.argv[1:]
+with open(raw, encoding="utf-8") as source, \
+        open(projected, "w", encoding="utf-8") as destination:
+    for number, line in enumerate(source, 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            entry = None
+        # journalctl's own diagnostics ("-- No entries --") and anything
+        # else that is not a record are refused rather than copied
+        # through: whatever cannot be projected cannot be published.
+        if not isinstance(entry, dict):
+            raise SystemExit(f"{label}: journal line {number} is not a JSON record")
+        # A value is copied as it stands, including the integer array
+        # journalctl uses for a message that is not UTF-8 text.
+        destination.write(
+            json.dumps({k: v for k, v in entry.items() if k in KEEP}) + "\n")
+PY
+}
+
 capture_current_journal() {
-  local unit="$1" output="$2" invocation
+  local unit="$1" output="$2" work status=0 cleanup_status=0
+  work="$(mktemp -d)" || return
+  record_current_journal "$unit" "$output" "${work}/journal.json" || status=$?
+  # The raw capture does not outlive the projection, whatever the
+  # verdict on it was.
+  rm -rf "$work" || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+record_current_journal() {
+  local unit="$1" output="$2" raw="$3" invocation
   invocation="$(systemctl show -p InvocationID --value "$unit")" || return
   [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] ||
     { printf 'no current invocation ID for %s\n' "$unit" >&2; return 1; }
@@ -840,7 +903,8 @@ capture_current_journal() {
   # socket: membership in tensorplate does not grant journal access.
   step "capture the ${unit} journal" bash -c \
     'sudo journalctl -u "$1" "_SYSTEMD_INVOCATION_ID=$2" -n 100 --no-pager --output=json >"$3"' \
-    _ "$unit" "$invocation" "$output" || return
+    _ "$unit" "$invocation" "$raw" || return
+  project_journal_records "$unit" "$raw" "$output" || return
   python3 - "$output" "${unit%.service}.service" "$invocation" <<'PY' || return
 import json, sys
 
@@ -910,7 +974,8 @@ PY
   # JSON distinguishes actual messages from journalctl diagnostics such
   # as "-- No entries --". Restrict both captures to the current service
   # invocations so old logs cannot certify a silent or inaccessible run.
-  # Raw journal metadata must still be sanitized before publication.
+  # Both are projected to the service's own fields before they are
+  # written, so no host metadata is ever recorded.
   capture_current_journal "$AGENT_UNIT" "${EVIDENCE_DIR}/agent-journal.txt" || return
   capture_current_journal "$OBSERVABILITY_UNIT" "${EVIDENCE_DIR}/observability-journal.txt" || return
   [[ -d "$LOG_DIR" ]] ||
@@ -1001,7 +1066,19 @@ install_cleanup_traps() {
 # failures have to be the agent refusing that config, not something else
 # failing at the same time.
 observe_crash_loop() {
-  local since="$1"
+  local since="$1" work status=0 cleanup_status=0
+  work="$(mktemp -d)" || return
+  observe_crash_loop_into "$since" "${work}/journal.json" || status=$?
+  # As in capture_current_journal: the raw capture is removed whatever
+  # the verdict was, and the verdict is what this returns. stage_crash_loop
+  # restores the agent config on both paths.
+  rm -rf "$work" || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+observe_crash_loop_into() {
+  local since="$1" raw="$2"
   local state="" restarts="" last_restarts="" settled=0 attempt result
 
   note "breaking the agent config so every start fails"
@@ -1035,9 +1112,10 @@ observe_crash_loop() {
 
   step "capture the crash-loop journal" bash -c \
     'sudo journalctl -u "$1" --since "@$2" --no-pager --output=json >"$3"' \
-    _ "$AGENT_UNIT" "$since" "${EVIDENCE_DIR}/crash-loop-journal.txt" || return
+    _ "$AGENT_UNIT" "$since" "$raw" || return
+  project_journal_records "crash-loop" "$raw" "${EVIDENCE_DIR}/crash-loop-journal.txt" || return
   python3 - "${EVIDENCE_DIR}/crash-loop-journal.txt" "${AGENT_UNIT}.service" \
-    "$state" "$restarts" "$result" >"${EVIDENCE_DIR}/crash-loop-result.json" <<'PY'
+    "$state" "$restarts" "$result" >"${EVIDENCE_DIR}/crash-loop-result.json" <<'PY' || return
 import json, sys
 
 path, unit, state, restarts, result = sys.argv[1:]
