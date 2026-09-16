@@ -168,17 +168,6 @@ pub enum ConfigSource {
     SystemUnreadable(PathBuf),
 }
 
-impl ConfigSource {
-    /// The file the config was read from, if it came from a file.
-    #[must_use]
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            Self::Explicit(p) | Self::Environment(p) | Self::System(p) => Some(p),
-            Self::BuiltIn | Self::SystemUnreadable(_) => None,
-        }
-    }
-}
-
 /// A validated config plus how it was found. `warning` carries an
 /// operator-facing note about a config that was found but not used; the
 /// binary prints it to stderr so a config with no effect never stays
