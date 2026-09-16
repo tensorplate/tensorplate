@@ -142,10 +142,25 @@ stage = "".join(
         r"^(?:stage_offline|stage_offline_in|offline_cli_under_denial)\(\) \{\n.*?^\}\n",
         body, re.M | re.S))
 assert stage, "the offline stage functions are missing"
-for call in re.findall(r"^\s*(?:step\s+\"[^\"]*\"\s+)?(\S+(?:\s+\S+)*?)\s*tensorplate\s", stage, re.M):
-    assert "run_denied" in call, \
-        f"an offline-stage CLI call is not run in a denied transient unit: {call!r} tensorplate"
-assert stage.count("tensorplate ") >= 4, \
+# One LOGICAL line at a time -- backslash continuations joined, whole-line
+# comments dropped -- and the CLI's own prefix on that line. Matched over
+# the raw text, `\s` spans newlines, so each "call" ran from the end of
+# the previous match and a nearby comment mentioning run_denied satisfied
+# the assertion for a call that had none.
+logical = re.sub(r"\\\n\s*", " ", stage)
+calls = 0
+for line in logical.splitlines():
+    line = line.strip()
+    if line.startswith("#"):
+        continue
+    found = re.search(r"(?<![\w.-])tensorplate\s", line)
+    if not found:
+        continue
+    calls += 1
+    prefix = line[: found.start()]
+    assert "run_denied" in prefix, \
+        f"an offline-stage CLI call is not run in a denied transient unit: {line!r}"
+assert calls >= 4, \
     "the offline stage no longer runs status, doctor, a deploy and an inference"
 
 # The control runs before the denial is applied. Reversed, EPERM under
@@ -153,6 +168,26 @@ assert stage.count("tensorplate ") >= 4, \
 control = stage.index("control probe")
 deny = stage.index("offline_deny ||")
 assert control < deny, "the offline stage denies the network before running its control"
+
+# The control's allowed loopback port comes from a status taken after the
+# last thing that respawned the worker. status.json is the status-logs
+# capture, three stages and two respawns earlier; crash-loop is the stage
+# immediately before this one and files its recovery status.
+port_source = re.search(r'serving-port\s+--status "\$\{EVIDENCE_DIR\}/(\S+?)"', logical)
+assert port_source, "the offline stage does not take its control port from a status capture"
+assert port_source.group(1) == "status-after-crash-loop.json", (
+    f"the offline control's loopback port comes from {port_source.group(1)}, "
+    "which predates the restart and crash-loop stages' worker respawns")
+
+# The agent journal is captured before the stage's own CLI calls. The
+# capture is a bounded tail of the invocation's records and the identity
+# line is written once at start, so a deploy, two status calls, an
+# inference and a probe in between can push it out of the window.
+capture = stage.index("capture_current_journal")
+cli_calls = stage.index('offline_cli_under_denial "$work" || return')
+assert capture < cli_calls, (
+    "the offline stage captures the agent journal after its CLI calls, so the "
+    "start-up identity line can fall outside the tail it reads")
 print("offline stage: shared module, runtime drop-ins only, every CLI call denied, control first")
 PY
 
@@ -680,6 +715,26 @@ check "a candidate version spelling is refused" "1" \
 check "  and so is the tilde spelling" "1" \
   "$(preflight "${ok_args[@]}" "${td}/evidence-tilde" '0.2.1~rc.1' --confirm RESET-TENSORPLATE)"
 
+# The offline stage deploys as <id>-offline, which the CLI validates as
+# one filesystem path segment. Refused in preflight rather than five
+# stages in, where the deploy would fail on a CLI validation error and
+# read as a failure of the denial.
+long_id="$(python3 -c 'print("d" * 121)')"
+check "a deployment id whose offline form passes the 128-byte limit is refused" "1" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-longid" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id "$long_id")"
+check "  and names the id the offline stage would have deployed" yes \
+  "$(grep -Fq "deploys as ${long_id}-offline" "${td}/preflight.err" && echo yes || echo no)"
+check "  while the longest one that fits is accepted" "0" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-fitting-id" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id "${long_id%d}")"
+check "a deployment id outside the CLI's charset is refused" "1" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-badid" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id 'cloud lifecycle/smoke')"
+check "  and names the charset" yes \
+  "$(grep -Fq "letters, digits, dot, dash or underscore" "${td}/preflight.err" \
+     && echo yes || echo no)"
+
 mkdir -p "${td}/evidence-dirty"
 : >"${td}/evidence-dirty/lifecycle-report.json"
 check "a non-empty evidence directory is refused" "1" \
@@ -957,6 +1012,66 @@ if [ "$1" = systemd-run ]; then
   export TP_FAKE_DENIED TP_FAKE_ALLOW
   exec "$@"
 fi
+# systemd's loaded configuration and its start generations, which are not
+# the same thing and are the reason the harness compares invocation ids.
+#
+# `systemctl show` answers with what the last `daemon-reload` read, so a
+# drop-in that was installed and reloaded but never restarted under reads
+# back exactly like an enforced one. Only a start replaces the running
+# instance and gives it a new invocation id. Modelling both here is what
+# lets the deny-side restart, the restore-side restart and the reload
+# each fail a named check when they are removed.
+offline_unit_conf() {
+  printf '%s/run/systemd/system/%s.service.d/10-tensorplate-validation-offline.conf' \
+    "${TP_OFFLINE_UNIT_ROOT}" "$1"
+}
+case "$*" in
+  *"systemctl daemon-reload"*)
+    mkdir -p "${TP_OFFLINE_UNIT_ROOT}/generation" || exit 9
+    for unit in tensorplate-agent tensorplate-observability; do
+      conf="$(offline_unit_conf "$unit")"
+      loaded="${TP_OFFLINE_UNIT_ROOT}/generation/${unit}.loaded"
+      if [ -f "$conf" ]; then
+        cp "$conf" "$loaded" || exit 9
+      else
+        rm -f "$loaded" || exit 9
+      fi
+    done
+    ;;
+esac
+case "$*" in
+  *"systemctl enable --now "*|*"systemctl restart "*|*"systemctl start "*)
+    mkdir -p "${TP_OFFLINE_UNIT_ROOT}/generation" || exit 9
+    for word in "$@"; do
+      case "$word" in
+        tensorplate-agent|tensorplate-observability) ;;
+        *) continue ;;
+      esac
+      conf="$(offline_unit_conf "$word")"
+      record="${TP_OFFLINE_UNIT_ROOT}/generation/${word}"
+      generation=$(sed -n 1p "$record" 2>/dev/null)
+      state=$(sed -n 2p "$record" 2>/dev/null)
+      [ -n "$generation" ] || generation=0
+      skip=0
+      case "${TP_FAKE_MODE:-ok}" in
+        # A restart systemd reported and that did not replace the running
+        # instance: the loaded policy still reads back as denied, and the
+        # services are still the ones that started without it.
+        offline-deny-restart-ignored) [ -f "$conf" ] && skip=1 ;;
+        # The mirror of it on the way out: the drop-in is gone and the
+        # loaded policy is empty, but the denied instances are still the
+        # ones running.
+        offline-restore-restart-ignored)
+          [ -f "$conf" ] || { [ "$state" = denied ] && skip=1; } ;;
+      esac
+      if [ "$skip" -eq 0 ]; then
+        generation=$((generation + 1))
+        if [ -f "$conf" ]; then state=denied; else state=open; fi
+        printf '%s\n%s\n' "$generation" "$state" >"$record" || exit 9
+      fi
+    done
+    ;;
+esac
 # The agent writes its boot-bound machine-type record on every start where
 # the metadata service answered. An online start does; a start under the
 # denial drop-in does not, which is what makes the offline stage's
@@ -978,10 +1093,34 @@ esac
 # planting it again after the offline stage's cleanup would fail that
 # cleanup whatever the stage's own refusal did, and the leftover check
 # would pass for a reason that has nothing to do with it.
+#
+# One mode per unit, and one that plants a dangling symlink rather than a
+# file: the refusal is a `step` per unit, and a mode that only ever
+# planted one leftover would let the other half be deleted with nothing
+# failing.
 case "$*" in
   *"systemctl enable --now tensorplate-agent"*)
-    if [ "${TP_FAKE_MODE:-ok}" = offline-leftover-drop-in ]; then
-      leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
+    case "${TP_FAKE_MODE:-ok}" in
+      offline-leftover-drop-in)
+        leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
+        mkdir -p "$leftover" || exit 9
+        : >"${leftover}/10-tensorplate-validation-offline.conf" || exit 9
+        ;;
+      # A dangling symlink is still a file at that path, and `install -D`
+      # would write through it to wherever it points.
+      offline-leftover-dangling-symlink)
+        leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
+        mkdir -p "$leftover" || exit 9
+        ln -s "${TP_OFFLINE_UNIT_ROOT}/nowhere" \
+          "${leftover}/10-tensorplate-validation-offline.conf" || exit 9
+        ;;
+    esac
+    ;;
+esac
+case "$*" in
+  *"systemctl enable --now tensorplate-observability"*)
+    if [ "${TP_FAKE_MODE:-ok}" = offline-leftover-drop-in-observability ]; then
+      leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-observability.service.d"
       mkdir -p "$leftover" || exit 9
       : >"${leftover}/10-tensorplate-validation-offline.conf" || exit 9
     fi
@@ -1011,6 +1150,12 @@ case "$*" in
       offline-localhost-shorthand)
         sed -e 's|^IPAddressAllow=127.0.0.1/32$|IPAddressAllow=localhost|' \
             -e '/^IPAddressAllow=::1\/128$/d' "$src" >"$dst" || exit 9
+        ;;
+      # A directive systemd would act on that the address-policy readback
+      # cannot see: the effective IPAddressDeny and IPAddressAllow are
+      # unchanged, so only the on-disk lint can refuse this.
+      offline-drop-in-extra-directive)
+        printf 'ExecStartPre=/bin/true\n' >>"$dst" || exit 9
         ;;
       # Written under /etc as well, which no exit path removes.
       offline-persistent-drop-in)
@@ -1166,7 +1311,12 @@ case "$1" in
         for word in "$@"; do
           case "$word" in tensorplate-*) unit="$word" ;; esac
         done
-        conf="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/${unit}.service.d/10-tensorplate-validation-offline.conf"
+        # What the last daemon-reload read, not the file on disk and not
+        # what any running instance was started under: that is what
+        # `systemctl show` answers with, and the whole reason the harness
+        # also compares the invocation id.
+        conf="${TP_OFFLINE_UNIT_ROOT}/generation/${unit}.loaded"
+        generation=$(sed -n 1p "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" 2>/dev/null)
         case "${TP_FAKE_MODE:-ok}" in
           offline-unit-dead)
             # A unit systemd does not have. Every property comes back
@@ -1176,11 +1326,18 @@ case "$1" in
             exit 0
             ;;
         esac
+        if [ -z "$generation" ]; then
+          # A unit systemd has but has never started: there is no
+          # instance and so no invocation id to report for one.
+          printf 'LoadState=loaded\nActiveState=inactive\nInvocationID=\nIPAddressDeny=\nIPAddressAllow=\n'
+          exit 0
+        fi
         printf 'LoadState=loaded\nActiveState=active\n'
         case "$unit" in
-          tensorplate-agent) printf 'InvocationID=11111111111111111111111111111111\n' ;;
-          *) printf 'InvocationID=22222222222222222222222222222222\n' ;;
+          tensorplate-agent) prefix=1111111111111111111111111111 ;;
+          *) prefix=2222222222222222222222222222 ;;
         esac
+        printf 'InvocationID=%s%04x\n' "$prefix" "$generation"
         if [ -f "$conf" ] && [ "${TP_FAKE_MODE:-ok}" != offline-denial-inert ]; then
           printf 'IPAddressDeny=0.0.0.0/0 ::/0\n'
           printf 'IPAddressAllow='
@@ -1223,10 +1380,17 @@ case "$1" in
         ;;
       *InvocationID*)
         case "$*" in
-          *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
-          *tensorplate-observability*) printf '22222222222222222222222222222222\n' ;;
+          *tensorplate-agent*) unit=tensorplate-agent; prefix=1111111111111111111111111111 ;;
+          *tensorplate-observability*)
+            unit=tensorplate-observability; prefix=2222222222222222222222222222 ;;
           *) exit 9 ;;
         esac
+        generation=$(sed -n 1p "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" 2>/dev/null)
+        if [ -z "$generation" ]; then
+          printf '\n'
+        else
+          printf '%s%04x\n' "$prefix" "$generation"
+        fi
         ;;
       *MainPID*)
         # A service the upgrade never restarted keeps the pid it had.
@@ -1339,9 +1503,12 @@ if [ -n "$since" ]; then
   fi
   exit 0
 fi
+# The invocation id carries the unit in its prefix and that unit's start
+# generation in its last four digits, so a restart asks for a different
+# invocation than the one before it.
 case "$invocation" in
-  11111111111111111111111111111111) unit=tensorplate-agent.service ;;
-  22222222222222222222222222222222) unit=tensorplate-observability.service ;;
+  1111111111111111111111111111????) unit=tensorplate-agent.service ;;
+  2222222222222222222222222222????) unit=tensorplate-observability.service ;;
   *) exit 9 ;;
 esac
 case "${TP_FAKE_MODE:-ok}:$unit" in
@@ -1358,11 +1525,16 @@ fields="$(service_fields "${unit%.service}")" || exit
 printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
   "$host_fields" "$fields" "$invocation" "$unit" "${unit%.service}" "$message"
 
-# The agent's platform identity line, emitted once the denial drop-in
-# exists: from then on the agent starts with the metadata service
-# unreachable and resolves its shape from the boot-bound record.
-agent_conf="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf"
-if [ "$unit" = tensorplate-agent.service ] && [ -f "$agent_conf" ]; then
+# The agent's platform identity line, emitted only by a start that
+# happened under the denial drop-in: such a start finds the metadata
+# service unreachable and resolves its shape from the boot-bound record.
+#
+# Keyed on the start generation, not on the drop-in file existing. A
+# stage that installed the drop-in and never restarted the agent is a
+# stage whose agent never queried metadata under it, so it gets no
+# identity line at all.
+agent_state="$(sed -n 2p "${TP_OFFLINE_UNIT_ROOT}/generation/tensorplate-agent" 2>/dev/null)"
+if [ "$unit" = tensorplate-agent.service ] && [ "$agent_state" = denied ]; then
   identity='machine_type=g2-standard-8 source=recorded_gce_metadata record=not_applicable'
   repeat=1
   case "${TP_FAKE_MODE:-ok}" in
@@ -1773,8 +1945,37 @@ check "  a fresh deployment was made while denied" "cloud-lifecycle-smoke-offlin
   "$(python3 -c 'import json,sys
 print(json.load(open(sys.argv[1]))["payload"]["deployment_id"])' \
     "${ok_evidence}/offline-deploy.json")"
-check "  and the offline evidence names no host address the scanner refuses" yes \
-  "$([[ -f "${ok_evidence}/offline-runtime.json" ]] && echo yes || echo no)"
+check "  the certificate's verdicts are the ones its own documents carry" \
+  "True pass pass pass pass" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+cli=r["cli_under_denial"]
+print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"], cli["infer"])' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  and it records both services replaced under the denial and again without it" \
+  "tensorplate-agent.service tensorplate-observability.service | tensorplate-agent.service tensorplate-observability.service" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+print(" ".join(r["units_restarted_under_the_denial"]), "|",
+      " ".join(r["restore"]["units_restarted_without_the_denial"]))' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  and names the operations the denial actually refused" 7 \
+  "$(python3 -c 'import json,sys
+print(len(json.load(open(sys.argv[1]))["classification"]["operations_refused_under_the_denial"]))' \
+    "${ok_evidence}/offline-runtime.json")"
+# The claim this check's name makes, run against the file rather than
+# asserted of it: the scanner is what admits published evidence, and an
+# existence test would pass for a document naming an internal address.
+offline_certificate_scan="${td}/offline-certificate-scan.out"
+offline_certificate_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" --patterns-only \
+  "${ok_evidence}/offline-runtime.json" >"$offline_certificate_scan" 2>&1 \
+  || offline_certificate_status=$?
+check "  and the offline evidence names no host address the scanner refuses" 0 \
+  "$offline_certificate_status"
+if ((offline_certificate_status != 0)); then
+  sed 's/^/       /' "$offline_certificate_scan" >&2
+fi
 
 # Every way the offline stage could certify a host it did not deny, an
 # identity it did not establish, or a host it did not put back. Each mode
@@ -1782,9 +1983,12 @@ check "  and the offline evidence names no host address the scanner refuses" yes
 # with the appliance denied cannot reach anything, including whatever the
 # operator would use to recover it.
 offline_drop_ins_left() {
-  local unit count=0
+  local unit path count=0
   for unit in tensorplate-agent tensorplate-observability; do
-    [[ -e "$(offline_drop_in "$unit")" ]] && count=$((count + 1))
+    path="$(offline_drop_in "$unit")"
+    # -L too: a dangling symlink at that path is a file the run left
+    # behind, and -e alone reports it as gone.
+    [[ -e "$path" || -L "$path" ]] && count=$((count + 1))
   done
   printf '%s' "$count"
 }
@@ -1795,7 +1999,8 @@ for mode in offline-no-machine-type-record offline-denial-inert offline-localhos
             offline-doctor-live-metadata offline-doctor-failing offline-doctor-row-warning \
             offline-identity-live-metadata offline-identity-rewrites-record \
             offline-identity-undetected offline-identity-twice \
-            offline-persistent-drop-in; do
+            offline-persistent-drop-in offline-drop-in-extra-directive \
+            offline-deny-restart-ignored offline-restore-restart-ignored; do
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
   check "  crash-loop passed before it" pass \
@@ -1829,12 +2034,21 @@ done
 
 # A drop-in left by an earlier run means this run never applied the
 # denial it would certify, so it is refused before anything is installed.
-leftover_evidence="${td}/stages-offline-leftover"
-check "a leftover denial drop-in refuses the offline stage" fail \
-  "$(run_stages offline-leftover-drop-in "$leftover_evidence" >/dev/null; \
-     stage_status "${leftover_evidence}/lifecycle-report.json" offline)"
-check "  and the leftover is not removed by a run that refused it" 1 \
-  "$(offline_drop_ins_left)"
+#
+# One case per unit, because the refusal is one `step` per unit: a suite
+# that only ever planted the agent's leftover would let the observability
+# half be deleted with nothing failing. The dangling symlink is the third
+# case: `-e` alone is false for one, and `install -D` would then write
+# through it to wherever it points.
+for leftover_mode in offline-leftover-drop-in offline-leftover-drop-in-observability \
+                     offline-leftover-dangling-symlink; do
+  leftover_evidence="${td}/stages-${leftover_mode}"
+  check "${leftover_mode} refuses the offline stage" fail \
+    "$(run_stages "$leftover_mode" "$leftover_evidence" >/dev/null; \
+       stage_status "${leftover_evidence}/lifecycle-report.json" offline)"
+  check "  and the leftover is not removed by a run that refused it" 1 \
+    "$(offline_drop_ins_left)"
+done
 
 # Signals during the stage take the same cleanup path as a failure.
 for signal_case in int:130 term:143 hup:129; do
@@ -1871,10 +2085,23 @@ for phase in initial restarted; do
   check "  ${phase} worker answers its health endpoint" yes \
     "$(grep -Fxq "$phase /health" "${appliance}/health-requests.log" && echo yes || echo no)"
 done
-for invocation in 11111111111111111111111111111111 22222222222222222222222222222222; do
-  check "  journal capture selects current invocation ${invocation}" yes \
-    "$(grep -F "journalctl" "${appliance}/sudo.log" | grep -Fq "_SYSTEMD_INVOCATION_ID=${invocation}" && echo yes || echo no)"
+# Each unit's invocation id carries that unit in its prefix and its start
+# generation in the last four digits, so a capture names one start rather
+# than the unit.
+for prefix in 1111111111111111111111111111 2222222222222222222222222222; do
+  check "  journal capture selects a current invocation of ${prefix}" yes \
+    "$(grep -F "journalctl" "${appliance}/sudo.log" \
+       | grep -Eq "_SYSTEMD_INVOCATION_ID=${prefix}[0-9a-f]{4}" && echo yes || echo no)"
 done
+# And selects the start that was current each time, not one id for the
+# whole run: the agent is restarted between the status-logs capture and
+# the offline one, so the two name different starts.
+check "  and each capture names the start that was current then" yes \
+  "$(grep -F "journalctl" "${appliance}/sudo.log" \
+     | sed -n 's/.*_SYSTEMD_INVOCATION_ID=1111111111111111111111111111\([0-9a-f]\{4\}\).*/\1/p' \
+     | python3 -c 'import sys
+starts = [int(value, 16) for value in sys.stdin.read().split()]
+print("yes" if len(starts) >= 2 and starts[-1] > starts[0] else f"no: {starts}")')"
 
 # --- the kept journal fields are one decision recorded in three files.
 #
