@@ -906,10 +906,7 @@ not-a-json-line
         .unwrap();
         assert!(err.is_empty(), "{:?}", String::from_utf8_lossy(&err));
         let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
-        assert!(parsed["payload"]["entries"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(parsed["payload"]["entries"].as_array().unwrap().is_empty());
     }
 
     /// The note must not fire on a read that returned something, or every
