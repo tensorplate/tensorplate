@@ -426,36 +426,34 @@ fn an_x86_gpu_row_refuses_tensorrt_even_with_the_serving_package_installed() {
         match check_backend_packages(row, "tensorrt", &installed) {
             Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
                 assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
-                assert!(
-                    detail.contains("tensorrt") && detail.contains(row_id),
-                    "the rejection must name the path and the row: {detail}"
-                );
-                // And it must not read as a packaging omission an operator
-                // could fix by installing something. What the refusal can
-                // substantiate is the architecture, the paths the row does
-                // declare, and that this branch never consulted the
-                // installed set at all.
-                assert!(
-                    detail.contains("x86_64") && detail.contains("python_pytorch"),
-                    "the rejection must name the architecture and the paths the row does \
-                     declare, so it is not read as a missing install: {detail}"
-                );
-                assert!(
-                    detail.contains("not the installed package set"),
-                    "the rejection must say the row's declaration decided this, or an \
-                     operator reads it as something to install: {detail}"
-                );
-                // What it must not do is describe the installed build. That
-                // the amd64 build compiles no TensorRT adapter is true, and
-                // is why the row is right to be silent, but the row does
-                // not record it and the agent cannot read it (issue #205).
-                // Asserting it here would be issue #204's own mistake --
-                // an unbacked claim about a build -- restated in the
-                // refusal that reports it.
-                assert!(
-                    !detail.contains("build"),
-                    "the refusal must claim nothing about what the installed build \
-                     contains: {detail}"
+                // The whole sentence, not a list of fragments it has to
+                // contain. What it must say is fixed: the row, the path,
+                // the architecture, the paths the row does declare, and
+                // that admission read those declarations rather than the
+                // installed set -- without which an operator reads the
+                // refusal as a packaging omission they can fix by
+                // installing something.
+                //
+                // What it must not say is anything about the installed
+                // build. That the amd64 build compiles no TensorRT adapter
+                // is true, and is why the row is right to be silent, but
+                // the row does not record it and the agent cannot read it
+                // (issue #205); asserting it here would restate issue
+                // #204's own mistake -- an unbacked claim about a build --
+                // in the refusal that reports it. Banning the word "build"
+                // rejected one wording of that claim and nothing else, and
+                // would have failed on a future row id or backend path
+                // that happened to contain the word. An equality holds the
+                // refusal to exactly what it can substantiate, however the
+                // addition is phrased.
+                assert_eq!(
+                    detail,
+                    format!(
+                        "row `{row_id}` declares no package set for backend path \
+                         `tensorrt` on x86_64; it declares python_pytorch. Admission \
+                         reads the row's declarations, not the installed package set, \
+                         so installing a package does not add this path."
+                    )
                 );
             }
             other => panic!("`{row_id}` must not admit tensorrt, got {other:?}"),
