@@ -431,14 +431,31 @@ fn an_x86_gpu_row_refuses_tensorrt_even_with_the_serving_package_installed() {
                     "the rejection must name the path and the row: {detail}"
                 );
                 // And it must not read as a packaging omission an operator
-                // could fix by installing something: no amd64 package
-                // carries a TensorRT adapter, because the build has none.
-                // Saying which architecture this is, and what the row does
-                // declare, is what the refusal can substantiate.
+                // could fix by installing something. What the refusal can
+                // substantiate is the architecture, the paths the row does
+                // declare, and that this branch never consulted the
+                // installed set at all.
                 assert!(
                     detail.contains("x86_64") && detail.contains("python_pytorch"),
                     "the rejection must name the architecture and the paths the row does \
                      declare, so it is not read as a missing install: {detail}"
+                );
+                assert!(
+                    detail.contains("not the installed package set"),
+                    "the rejection must say the row's declaration decided this, or an \
+                     operator reads it as something to install: {detail}"
+                );
+                // What it must not do is describe the installed build. That
+                // the amd64 build compiles no TensorRT adapter is true, and
+                // is why the row is right to be silent, but the row does
+                // not record it and the agent cannot read it (issue #205).
+                // Asserting it here would be issue #204's own mistake --
+                // an unbacked claim about a build -- restated in the
+                // refusal that reports it.
+                assert!(
+                    !detail.contains("build"),
+                    "the refusal must claim nothing about what the installed build \
+                     contains: {detail}"
                 );
             }
             other => panic!("`{row_id}` must not admit tensorrt, got {other:?}"),

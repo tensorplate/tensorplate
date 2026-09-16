@@ -21,7 +21,7 @@ an engineer who greps another are looking at the same fact.
 | `unsupported_cpu_arch` | The CPU architecture is not one this release builds for. |
 | `unsupported_cpu_vendor` | The architecture is built for, but no row covers this vendor. Distinct from the arch reason: the two send an operator to different answers. |
 | `mig_mode_enabled` | At least one reported accelerator is partitioned. After every device row has been parsed, this is checked before device count and SKU, regardless of which device reports MIG enabled. |
-| `missing_backend_package` | A package the matched row requires is not installed — including a backend whose descriptor is absent. |
+| `missing_backend_package` | A package the matched row requires for the backend path a bundle names is not installed — including a backend whose descriptor is absent — **or** the row declares no package set for that path at all. The two are not the same next step; see below. |
 | `missing_driver_runtime` | A required driver or compute runtime is absent or version-mismatched, **or** the PCI bus reports an accelerator that no driver could identify. |
 | `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
 | `telemetry_degraded` | In a supplied collector snapshot, a telemetry source expected on the matched row fails or omits its result. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source degrades status and is recorded without blocking. A signal the row declares `not_applicable` was never asked for and cannot produce this. Live non-memory collectors remain part of hardware validation; their absence from the ordinary startup path is not synthesized as either success or failure. |
@@ -31,10 +31,24 @@ an engineer who greps another are looking at the same fact.
 ## Boundaries that are easy to blur
 
 **A missing package is not a dead runtime.** `missing_backend_package`
-means install something; `accelerator_runtime_unavailable` means the thing
+is about a package; `accelerator_runtime_unavailable` means the thing
 is installed and cannot run. Collapsing them tells an operator whose
 PyTorch cannot reach its accelerator to reinstall a package they already
 have. The classification is one function so both sides cannot drift.
+
+**One reason, two next steps.** `missing_backend_package` covers a
+declared package set that is not installed — install it — and a backend
+path the row declares no package set for, where there is nothing to
+install: admission reads the row's declarations and never looks at the
+installed set, so no package changes that answer. The value stays one
+because the deploy is refused for one kind of cause, a backend path this
+row does not serve; the detail line is what separates them, and it names
+the architecture and the paths the row does declare in the second case.
+It claims nothing about which backends the installed build compiled in:
+the x86_64 rows declare no `tensorrt` path because the amd64 serving
+build has no such adapter (issue #204), but the row records a package
+set, not a build, and nothing at runtime reads the installed build's
+compiled backends (issue #205).
 
 **A driverless accelerator is not an absent one.** A GPU host whose driver
 is broken reports no accelerator and would otherwise resolve to a CPU-only

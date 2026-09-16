@@ -628,8 +628,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   an operator had edited that dpkg conffile to advertise `tensorrt` — and
   there the row found `tensorplate-serving` installed and admitted a bundle
   the worker can only refuse at engine lookup. That host is now refused with
-  `MissingBackendPackage` naming the undeclared path, the architecture, and
-  the paths the row does declare. The `arm64` Jetson rows keep `tensorrt`:
+  `MissingBackendPackage` naming the undeclared path, the architecture, the
+  paths the row does declare, and that admission read those declarations
+  rather than the installed package set — so an operator does not read the
+  refusal as something to install. It asserts nothing about which backends
+  the installed build compiled in: that is true of `tensorrt` here and is
+  why the row is right to be silent, but a row records a package set, not a
+  build, and a row withholding a path its build does contain is allowed.
+  `docs/platform/support-reasons.md` now separates the two next steps
+  `missing_backend_package` covers. The `arm64` Jetson rows keep `tensorrt`:
   that build compiles the adapter. `doctor` output is unchanged — it never
   reported a row's declared backend paths, and it still reports no
   installed build's compiled backends, which is part of why the claim went
