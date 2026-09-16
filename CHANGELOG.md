@@ -106,9 +106,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   baseline is given (V021-E05-F01-T02). The baseline is always installed
   through its own installer with its signature verified; there is no
   option to skip that for either set, and preflight refuses a baseline
-  that is not strictly older than the candidate, whose manifest names
-  another tag, or whose manifest records it as an unreleased local
-  snapshot. Upgrade clears the candidate, installs the baseline, deploys
+  whose tag is not strictly older than the candidate's, whose runtime
+  packages are not each strictly older than the candidate set's by
+  `dpkg --compare-versions`, whose manifest names another tag, or whose
+  manifest records it as an unreleased local snapshot. The package
+  comparison is what makes the path installable: the tag is release
+  metadata, and an older tag over newer `.deb` versions would leave the
+  upgrade stage's candidate install a downgrade that the `apt-get -y`
+  inside `install.sh` refuses, on a device the run has already rebuilt
+  twice. `upgrade-path.json` records the versions compared, so the
+  evidence says why the path was admitted. The snapshot check reads
+  fields the set's own manifest declares and is a snapshot filter rather
+  than a proof of publication; binding a baseline to its public release
+  the way `tools/validation/check-baseline-publication.py` does for the
+  Ubuntu cloud rows would make this preflight depend on reaching GitHub
+  from the device and is left as follow-up work. Upgrade clears the
+  candidate, installs the baseline, deploys
   and round-trips the identity engine on it, applies an operator conffile
   edit, then installs the candidate over the running baseline and
   requires the candidate's package versions, new service main pids, the

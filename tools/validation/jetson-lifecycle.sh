@@ -212,7 +212,9 @@ Options:
                               Required.
   --baseline-tag TAG          Release tag of the published predecessor set to
                               upgrade from and roll back to, such as v0.1.5.
-                              Must be strictly older than --candidate-tag.
+                              Must be strictly older than --candidate-tag, and
+                              its set's runtime packages strictly older than
+                              the candidate set's, package by package.
   --baseline-assets-dir DIR   The downloaded baseline set, laid out like
                               --candidate-assets-dir. With --baseline-tag,
                               runs the upgrade and rollback stages; without
@@ -307,6 +309,11 @@ CHECKSUM_OUTPUT=""
 # path the run moved along.
 BASELINE_DIGEST=""
 BASELINE_CHECKSUM_OUTPUT=""
+# The upgrade path preflight admitted, as
+# {"from": {"release_tag", "packages"}, "to": {...}}, where packages maps
+# each runtime package this row installs to the Debian version its set
+# declares. write_upgrade_path merges the digests in and files it.
+UPGRADE_PATH=""
 
 # A set's SHA256SUMS verification output, and the digest of the file
 # itself. Kept as two calls rather than one that prints both, so a
@@ -321,10 +328,19 @@ assets_digest() {
 
 # install.sh accepts any release tag's signature, so a signed set is not
 # thereby the set for this tag. The manifest's release.tag is what binds
-# the directory to the tag the operator named. A baseline is additionally
-# required to be a published release rather than a local snapshot: the
-# row's stated baseline is the last published arm64 runtime set, and a
-# locally built set would move the run to artifacts nobody can fetch.
+# the directory to the tag the operator named.
+#
+# A baseline is additionally refused when its own manifest records it as
+# an unreleased local snapshot, which keeps a set somebody built out of
+# the run. That is a snapshot filter and not a proof of publication: the
+# fields it reads are written into the very directory under test. What
+# establishes publication on this row is where the set came from --
+# jetson-clean-room.sh download fetches it unauthenticated from the
+# public release URL, which a draft's assets are not reachable at. The
+# stronger binding is tools/validation/check-baseline-publication.py,
+# which the Ubuntu cloud harness calls; adopting it here would make this
+# preflight depend on reaching GitHub from the device, and is left as
+# follow-up work rather than decided in passing.
 check_assets_manifest() {
   local dir="$1" tag="$2" published="$3"
   python3 - "$dir" "$tag" "$published" <<'PY'
@@ -345,6 +361,93 @@ if published and (release.get("unreleased") is not False
         f"{manifests[0].name} is not a published release: it records "
         f"unreleased={release.get('unreleased')!r} provenance={release.get('provenance')!r}"
     )
+PY
+}
+
+# The upgrade path the two sets describe, refused unless every runtime
+# package this row installs is strictly older in the baseline set.
+#
+# Tag order does not establish this. The tag is release metadata; what
+# apt orders is the Debian version each .deb carries, and the two live in
+# different fields of the manifest. A baseline whose tag is older but
+# whose packages are not makes the candidate install in the upgrade stage
+# a downgrade, which the `apt-get -y` inside install.sh refuses without
+# --allow-downgrades -- the same hazard the rollback avoids by removing
+# tensorplate-common, met in the other direction and only after the
+# device has already been rebuilt twice.
+#
+# Only the five packages install.sh selects for this row are compared:
+# the run passes neither --with-python-backend nor --cli-only, so the
+# backend package is never installed here, and tensorplate-apt-source is
+# left alone throughout.
+read_upgrade_path() {
+  python3 - "$BASELINE_DIR" "$ASSETS_DIR" "$DEB_ARCH" <<'PY'
+import json, pathlib, re, subprocess, sys
+
+RUNTIME = ("tensorplate-common", "tensorplate-agent", "tensorplate-serving",
+           "tensorplate-observability", "tensorplate-cli")
+# The shape of a Debian version: an optional epoch, then an upstream
+# version starting with a digit. dpkg --compare-versions cannot be the
+# check: it treats an empty version as older than any other, and only
+# warns about some malformed ones before comparing them anyway.
+DEBIAN_VERSION = re.compile(r"(?:[0-9]+:)?[0-9][A-Za-z0-9.+~-]*")
+
+deb_arch = sys.argv[3]
+
+def read_set(label, directory):
+    manifests = sorted(pathlib.Path(directory).glob("tensorplate-*-artifacts.json"))
+    if len(manifests) != 1:
+        raise SystemExit(
+            f"the {label} set needs exactly one tensorplate-*-artifacts.json; "
+            f"found {len(manifests)}"
+        )
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    packages = {}
+    for package in RUNTIME:
+        # The same selection install.sh makes: this package's .deb for
+        # the host architecture or for all architectures.
+        matches = [
+            artifact for artifact in manifest.get("artifacts", [])
+            if isinstance(artifact, dict)
+            and artifact.get("package") == package
+            and str(artifact.get("file", "")).endswith(".deb")
+            and artifact.get("architecture") in (deb_arch, "all")
+        ]
+        if len(matches) != 1:
+            raise SystemExit(
+                f"the {label} set must list exactly one {package} package for "
+                f"{deb_arch} or all; found {len(matches)}"
+            )
+        version = matches[0].get("version")
+        if not isinstance(version, str) or not DEBIAN_VERSION.fullmatch(version):
+            raise SystemExit(
+                f"the {label} set lists {package} at version {version!r}, "
+                "which is not a Debian version"
+            )
+        packages[package] = version
+    return manifest.get("release") or {}, packages
+
+baseline_release, baseline = read_set("baseline", sys.argv[1])
+candidate_release, candidate = read_set("candidate", sys.argv[2])
+
+# Strictly older, package by package. This also refuses the same set
+# passed twice. dpkg exits 2 on a version it rejects outright, which is
+# refused the same way.
+for package in RUNTIME:
+    older = subprocess.run(
+        ["dpkg", "--compare-versions", baseline[package], "lt", candidate[package]],
+        stdout=subprocess.DEVNULL,
+    )
+    if older.returncode != 0:
+        raise SystemExit(
+            f"{package}: the baseline's {baseline[package]} is not older than "
+            f"the candidate's {candidate[package]}"
+        )
+
+print(json.dumps({
+    "from": {"release_tag": baseline_release.get("tag"), "packages": baseline},
+    "to": {"release_tag": candidate_release.get("tag"), "packages": candidate},
+}, sort_keys=True))
 PY
 }
 
@@ -390,12 +493,17 @@ PY
   check_assets_manifest "$BASELINE_DIR" "$BASELINE_TAG" 1 ||
     die "the baseline assets are not the published ${BASELINE_TAG} release set"
 
+  # After the tags, so a pair the operator named the wrong way round is
+  # refused by the option they got wrong rather than by the packages.
+  UPGRADE_PATH="$(read_upgrade_path)" ||
+    die "the baseline and candidate sets do not form an upgrade path"
+
   BASELINE_CHECKSUM_OUTPUT="$(assets_checksum_output "$BASELINE_DIR")" ||
     { printf '%s\n' "$BASELINE_CHECKSUM_OUTPUT" >&2; die "the baseline artifact set failed verification"; }
   BASELINE_DIGEST="$(assets_digest "$BASELINE_DIR")"
   [[ "$BASELINE_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
     die "could not compute a digest for ${BASELINE_DIR}/SHA256SUMS"
-  pass "baseline ${BASELINE_TAG} is a published set older than ${CANDIDATE_TAG}, verified"
+  pass "baseline ${BASELINE_TAG} is not a snapshot and is older than ${CANDIDATE_TAG} by tag and by every runtime package version, verified"
 }
 
 # Everything that must be true before the run starts.
@@ -432,6 +540,11 @@ preflight() {
   require_command sha256sum
   require_command dpkg-query
   require_command dpkg-deb
+  # Compares the two sets' package versions when a baseline is given.
+  # Required unconditionally: every host carrying dpkg-query has it, and
+  # a run that discovered it missing only once a baseline was named would
+  # refuse later than it can.
+  require_command dpkg
 
   # Every CLI call the harness makes as the operator goes through the
   # agent's group-only control socket. The group exists only once a
@@ -1326,21 +1439,24 @@ record_baseline_doctor() {
   note "doctor on the baseline exited ${status}; filed as evidence, not asserted"
 }
 
-# The two sets this run moves between, named by tag and by the digest of
-# the file whose signature each installer verified. Neither side is ever
+# The two sets this run moves between: the path preflight admitted, with
+# the digest of the file whose signature each installer verified merged
+# in. It carries the package versions preflight compared rather than a
+# restatement of the options, so the evidence says why the path was
+# admitted and not only which tags were named. Neither side is ever
 # installed unsigned, and the report's own subject.artifact_digest stays
 # the candidate's: this file is what says where the candidate was reached
 # from and returned to.
 write_upgrade_path() {
-  python3 - "$BASELINE_TAG" "$BASELINE_DIGEST" "$CANDIDATE_TAG" "$ARTIFACT_DIGEST" \
+  python3 - "$UPGRADE_PATH" "$BASELINE_DIGEST" "$ARTIFACT_DIGEST" \
     >"${EVIDENCE_DIR}/upgrade-path.json" <<'PY'
 import json, sys
 
-from_tag, from_digest, to_tag, to_digest = sys.argv[1:]
-print(json.dumps({
-    "from": {"release_tag": from_tag, "sha256sums_sha256": from_digest, "allow_unsigned": False},
-    "to": {"release_tag": to_tag, "sha256sums_sha256": to_digest, "allow_unsigned": False},
-}, indent=2, sort_keys=True))
+path, from_digest, to_digest = sys.argv[1:]
+path = json.loads(path)
+path["from"].update({"sha256sums_sha256": from_digest, "allow_unsigned": False})
+path["to"].update({"sha256sums_sha256": to_digest, "allow_unsigned": False})
+print(json.dumps(path, indent=2, sort_keys=True))
 PY
 }
 

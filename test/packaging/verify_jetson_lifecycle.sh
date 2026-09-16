@@ -227,12 +227,22 @@ for package, arch, deb_version in (
     (directory / name).write_text(
         f"Package: {package}\nVersion: {deb_version}\nArchitecture: {arch}\n", encoding="utf-8"
     )
-    artifacts.append({"file": name, "package": package, "architecture": arch})
+    entry = {"file": name, "package": package, "architecture": arch,
+             # The release manifest records each package's Debian version
+             # beside its file; the upgrade path is compared on these.
+             "version": deb_version}
+    # A manifest that names the file but not the version it carries. The
+    # comparison alone would admit it, so only the harness's own shape
+    # check refuses it.
+    if variant == "no-package-version" and package == "tensorplate-agent" and arch == "arm64":
+        del entry["version"]
+    artifacts.append(entry)
 if variant == "duplicate-cli":
     # A manifest naming the CLI twice for this architecture, which leaves
     # no single package to compare the installed version against.
     artifacts.append({"file": f"tensorplate-cli_{version}_arm64.deb",
-                      "package": "tensorplate-cli", "architecture": "arm64"})
+                      "package": "tensorplate-cli", "architecture": "arm64",
+                      "version": version})
 manifest = {"release": release, "artifacts": artifacts}
 (directory / f"tensorplate-{tag}-artifacts.json").write_text(
     json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -549,9 +559,47 @@ esac
 sed -n 's/^Version: //p' "$2"
 STUB
 
+# dpkg, which the harness uses only to compare the two sets' package
+# versions. It has to compare them for real: the upgrade path is admitted
+# or refused on that answer, and the `exit 0` stub this replaced admitted
+# every pair, so no ordering case could have failed.
+#
+# It knows the two version shapes release builds produce and treats an
+# empty version as older than any other, as dpkg does -- so a manifest
+# with no version is admitted by the comparison alone, and only the
+# harness's own shape check refuses it. Any other shape exits 2, where
+# dpkg would reject some and only warn about others; the harness refuses
+# those before comparing as well.
 cat >"${stub_bin}/dpkg" <<'STUB'
-#!/bin/sh
-exit 0
+#!/usr/bin/env python3
+import re, sys
+
+VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:~rc\.(\d+))?-(\d+)")
+
+def version_key(version):
+    if version == "":
+        return ()
+    match = VERSION.fullmatch(version)
+    if not match:
+        return None
+    major, minor, patch, rc, revision = match.groups()
+    # A candidate sorts before its release, as Debian's tilde does.
+    return (int(major), int(minor), int(patch), 0 if rc else 1, int(rc or 0), int(revision))
+
+args = sys.argv[1:]
+if not args or args[0] != "--compare-versions":
+    sys.exit(0)
+if len(args) != 4:
+    sys.exit(2)
+left, op, right = version_key(args[1]), args[2], version_key(args[3])
+if left is None or right is None:
+    print(f"dpkg: error: version has bad syntax: {args[1]!r} {args[3]!r}", file=sys.stderr)
+    sys.exit(2)
+results = {"lt": left < right, "le": left <= right, "eq": left == right,
+           "ne": left != right, "ge": left >= right, "gt": left > right}
+if op not in results:
+    sys.exit(2)
+sys.exit(0 if results[op] else 1)
 STUB
 
 # The group database and this session's groups. The tensorplate group
@@ -1262,7 +1310,7 @@ check "  and names what it found" yes "$(said 'host reports ID=debian VERSION_ID
 # Every command preflight requires is refused by name when it is absent,
 # before any host fact is read. The PATH holds only the other required
 # commands and dirname, which locating the repository needs.
-required_commands=(sudo systemctl journalctl python3 sha256sum dpkg-query dpkg-deb)
+required_commands=(sudo systemctl journalctl python3 sha256sum dpkg-query dpkg-deb dpkg)
 for missing in "${required_commands[@]}"; do
   restricted="${td}/path-without-${missing}"
   mkdir -p "$restricted"
@@ -2109,6 +2157,26 @@ check "  and the digests it names are each set's own" "${baseline_digest} ${cand
 p=json.load(open(sys.argv[1]))
 print(p["from"]["sha256sums_sha256"], p["to"]["sha256sums_sha256"])' \
     "${baseline_evidence}/upgrade-path.json")"
+# The path filed is the one preflight compared, so the evidence says why
+# it was admitted rather than restating the options the operator typed.
+check "  and it records the package versions preflight compared" \
+  "${baseline_version} ${candidate_version}" \
+  "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+found=[]
+for side in ("from", "to"):
+    versions=sorted(set(p[side]["packages"].values()))
+    assert len(versions) == 1, p[side]["packages"]
+    found.append(versions[0])
+print(" ".join(found))' \
+    "${baseline_evidence}/upgrade-path.json")"
+check "  for every runtime package this row installs" \
+  "tensorplate-agent tensorplate-cli tensorplate-common tensorplate-observability tensorplate-serving" \
+  "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+assert p["from"]["packages"].keys() == p["to"]["packages"].keys(), p
+print(" ".join(sorted(p["from"]["packages"])))' \
+    "${baseline_evidence}/upgrade-path.json")"
 
 # candidate, then baseline, then candidate over it, then baseline again.
 check "  the run installs candidate, baseline, candidate, baseline" \
@@ -2221,6 +2289,40 @@ make_assets "${td}/baseline-rc1" v0.2.1-rc.1 '0.2.1~rc.1-1'
 check "an earlier release candidate is an acceptable baseline" "0" \
   "$(baseline_preflight "${td}/evidence-order-rc1" --baseline-tag v0.2.1-rc.1 \
      --baseline-assets-dir "${td}/baseline-rc1")"
+
+# An older tag does not make an installable upgrade path. What apt orders
+# is the Debian version each .deb carries, which lives in another field
+# of the same manifest: a baseline whose packages are not older makes the
+# upgrade stage's candidate install a downgrade apt-get -y refuses, on a
+# device the run has already rebuilt twice.
+make_assets "${td}/baseline-newer-debs" v0.1.4 9.9.9-1
+check "a baseline whose tag is older but whose packages are not is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-newer-debs" --baseline-tag v0.1.4 \
+     --baseline-assets-dir "${td}/baseline-newer-debs")"
+check "  and names the package and both versions" yes \
+  "$(said "tensorplate-common: the baseline's 9.9.9-1 is not older than the candidate's ${candidate_version}")"
+check "  and says the two sets form no upgrade path" yes \
+  "$(said 'the baseline and candidate sets do not form an upgrade path')"
+check "  before anything privileged ran" "" "$(cat "${td}/preflight-sudo.log")"
+
+# dpkg --compare-versions reads an empty version as older than any other,
+# so a manifest that names no version for a package would be admitted by
+# the comparison alone.
+make_assets "${td}/baseline-no-version" v0.1.5 "$baseline_version" no-package-version
+check "a baseline manifest with no version for a package is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-no-version" --baseline-tag v0.1.5 \
+     --baseline-assets-dir "${td}/baseline-no-version")"
+check "  and names the package and what it found" yes \
+  "$(said 'the baseline set lists tensorplate-agent at version None, which is not a Debian version')"
+
+# Strictly older, so an older tag over the candidate's own package
+# versions -- a set retagged rather than rebuilt -- is refused too.
+make_assets "${td}/baseline-same-debs" v0.1.5 "$candidate_version"
+check "a baseline carrying the candidate's own package versions is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-same-debs" --baseline-tag v0.1.5 \
+     --baseline-assets-dir "${td}/baseline-same-debs")"
+check "  and says the versions are not older" yes \
+  "$(said "the baseline's ${candidate_version} is not older than the candidate's ${candidate_version}")"
 check "a baseline tag that is not a release tag is refused" "1" \
   "$(baseline_preflight "${td}/evidence-baseline-bad-tag" --baseline-tag 0.1.5 \
      --baseline-assets-dir "$baseline")"

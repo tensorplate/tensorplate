@@ -220,10 +220,26 @@ Prerequisites:
    Any strictly older published tag is accepted, with a release candidate
    sorting below the release it leads to. Preflight refuses a baseline
    that is the same age or newer, one whose manifest names another tag,
-   and one whose manifest records it as an unreleased local snapshot
-   rather than a published release. The baseline is always installed with
-   its signature verified; there is no option to skip that for either
-   set.
+   and one whose manifest records it as an unreleased local snapshot.
+   It also refuses one whose runtime packages are not each strictly older
+   than the candidate's: the tag is release metadata, and what `apt`
+   orders is the Debian version each `.deb` carries, so an older tag over
+   newer packages would make the upgrade stage's candidate install a
+   downgrade that `apt-get -y` refuses — after the device had already
+   been rebuilt twice. The comparison is recorded in `upgrade-path.json`.
+
+   The snapshot check reads fields the set's own manifest declares, so it
+   keeps a locally built set out of the run but is not by itself a proof
+   of publication. What establishes that here is downloading the set with
+   `jetson-clean-room.sh download`, which fetches it unauthenticated from
+   the public release URL that a draft's assets are not reachable at.
+   (`tools/validation/check-baseline-publication.py`, which the Ubuntu
+   cloud harness calls, binds the two directly; adopting it on this row
+   would make preflight depend on reaching GitHub from the device and is
+   follow-up work.)
+
+   The baseline is always installed with its signature verified; there is
+   no option to skip that for either set.
 
 4. Check eligibility first. This builds the bundle in a temporary
    directory it removes, installs nothing and writes no evidence:
@@ -245,8 +261,9 @@ Prerequisites:
    one artifact manifest, whose manifest's `release.tag` is not the tag
    given, or whose files fail `SHA256SUMS`; an assets, evidence, baseline
    or bundle directory under a directory the run deletes; one baseline
-   option without the other; a baseline that is not strictly older than
-   the candidate or is not a published release; a session outside the
+   option without the other; a baseline whose tag or whose runtime
+   package versions are not strictly older than the candidate's, or whose
+   manifest records it as an unreleased snapshot; a session outside the
    `tensorplate` group once that group exists; and a device that cannot
    build the bundle. The manifest binding matters because the installer accepts
    a signature from any release tag, so a signed set is not thereby the
@@ -375,6 +392,10 @@ Prerequisites:
    The baseline is verified the same way, but its digest is filed on its
    own in `baseline-digest.txt` and in `upgrade-path.json`: the report
    attests one artifact set, and that set is the candidate.
+   `upgrade-path.json` also carries the runtime package versions each set
+   declared, which is what preflight compared to admit the path, so the
+   evidence says why the two sets form an upgrade rather than only which
+   tags were named.
 
 6. File the report, its stage logs and the recorded row facts under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
