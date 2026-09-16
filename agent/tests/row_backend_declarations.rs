@@ -11,10 +11,16 @@
 // `TP_ENABLE_TENSORRT=OFF` (`tools/release/amd64-build-profile.sh`) and has
 // no TensorRT adapter compiled in. The platform rows are the other answer,
 // and until issue #204 the x86_64 GPU rows still named a `tensorrt` package
-// set satisfied by `tensorplate-serving`. Deploy admission
-// (`check_backend_packages`) reads only the row, so it found that package
-// installed and admitted a TensorRT bundle the worker can only refuse at
-// engine lookup.
+// set satisfied by `tensorplate-serving`.
+//
+// The two are gates in series. The config is read first, so on a stock
+// install a TensorRT bundle was already refused at compatibility
+// evaluation; the row mattered where that conffile does not, because
+// `/etc/tensorplate/agent.json` is a dpkg conffile an operator can edit.
+// There deploy admission (`check_backend_packages`) reads only the row, so
+// it found the package installed and admitted a bundle the worker can only
+// refuse at engine lookup. `agent/tests/platform_admission.rs` pins that
+// ordering; what the row said was wrong either way.
 //
 // This test is that missing comparison. It derives the shipped config from
 // the row's own package channel and CPU architecture, and fails closed: a
@@ -116,12 +122,14 @@ fn no_row_declares_a_backend_the_shipped_build_does_not_contain() {
     );
 }
 
-/// The guard above is not vacuous: the registry really does hold apt rows
-/// on both architectures, so both shipped configs are exercised. A
-/// registry that loaded no rows, or a mapping that stopped covering one
-/// architecture, would otherwise pass by checking nothing.
+/// The guard above is not vacuous: the registry really does hold rows on
+/// every channel and architecture the mapping names, so every shipped
+/// config is exercised. A registry that loaded no rows, or a mapping that
+/// stopped covering one of them, would otherwise pass by checking nothing.
+/// Each config the mapping names is asserted, so none can quietly fall out
+/// of the guard while the others keep it green.
 #[test]
-fn both_shipped_agent_configs_are_exercised_by_committed_rows() {
+fn every_shipped_agent_config_is_exercised_by_committed_rows() {
     let registry = committed_registry();
     let mut exercised = BTreeSet::new();
     for row in registry.rows() {
@@ -138,6 +146,10 @@ fn both_shipped_agent_configs_are_exercised_by_committed_rows() {
     assert!(
         exercised.contains("packaging/conf/agent.json"),
         "committed arm64 apt rows must be checked against the default config: {exercised:?}"
+    );
+    assert!(
+        exercised.contains("packaging/homebrew/conf/agent.json.in"),
+        "committed Homebrew rows must be checked against the macOS template: {exercised:?}"
     );
 }
 
@@ -243,5 +255,28 @@ fn the_amd64_agent_config_is_the_one_the_packaging_installs() {
     assert!(
         repo_path("packaging/conf/agent.amd64.json").exists(),
         "the amd64 agent config must exist"
+    );
+}
+
+/// The macOS arm of the mapping is derived from packaging too, rather
+/// than being the one entry taken on trust. A template swapped for one of
+/// the apt configs would otherwise check the Homebrew rows against a file
+/// no Mac ever reads — and `packaging/conf/agent.json` advertises
+/// `tensorrt`, so that swap would silently retire this guard on macOS.
+#[test]
+fn the_homebrew_agent_config_is_the_one_the_formula_installs() {
+    let formula = repo_path("packaging/homebrew/Formula/tensorplate-agent.rb");
+    let raw = std::fs::read_to_string(formula).expect("the formula is committed");
+    assert!(
+        raw.contains("packaging/homebrew/conf/agent.json.in"),
+        "the Homebrew agent config path this test derives must be the one the formula reads:\n{raw}"
+    );
+    assert!(
+        raw.contains(r#"install config => "agent.json""#),
+        "and the formula must install it as the agent config:\n{raw}"
+    );
+    assert!(
+        repo_path("packaging/homebrew/conf/agent.json.in").exists(),
+        "the Homebrew agent config template must exist"
     );
 }
