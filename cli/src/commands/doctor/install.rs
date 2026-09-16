@@ -1388,6 +1388,11 @@ fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaCo
 const NO_DRIVER_HINT: &str =
     "`accelerator_facts` and `platform_row` report whether this host has an accelerator at all";
 
+/// The hint a Jetson whose serving worker has no CUDA runtime to load
+/// its TensorRT adapter against carries. Phrased for the worker, which
+/// is what is installed on that host.
+const WORKER_JETPACK_CUDA_HINT: &str = "install the JetPack CUDA runtime so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present";
+
 /// The hint a Jetson carrying the sidecar and no JetPack CUDA runtime
 /// carries. Phrased for the sidecar, not for the serving worker: on
 /// this host the worker is not installed, and the requirement comes
@@ -1528,10 +1533,7 @@ fn cuda_runtime_finding(
                     FindingId::CudaRuntime,
                     Severity::Warning,
                     format!("{driver}; {toolkit}; {adapter}"),
-                    Some(
-                        "install the JetPack CUDA runtime so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present"
-                            .into(),
-                    ),
+                    Some(WORKER_JETPACK_CUDA_HINT.into()),
                 ),
                 (false, _) => Finding::warn(
                     FindingId::CudaRuntime,
@@ -2223,7 +2225,11 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the driver's own library is not a CUDA toolkit: {}",
             cuda.message
         );
-        assert!(cuda.hint.is_some(), "a warning must say what to install");
+        assert_eq!(
+            cuda.hint.as_deref(),
+            Some(WORKER_JETPACK_CUDA_HINT),
+            "a warning must say what to install"
+        );
     }
 
     #[test]
@@ -2712,6 +2718,12 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             PATHS_ONLY_HINT.contains("paths only")
                 && PATHS_ONLY_HINT.contains("`python_pytorch_runtime`"),
             "{PATHS_ONLY_HINT}"
+        );
+        assert!(
+            WORKER_JETPACK_CUDA_HINT.contains("install the JetPack CUDA runtime")
+                && WORKER_JETPACK_CUDA_HINT
+                    .contains("/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so"),
+            "{WORKER_JETPACK_CUDA_HINT}"
         );
         assert!(
             JETSON_SIDECAR_CUDA_HINT.contains("docs/install/python-pytorch-backend.md")
