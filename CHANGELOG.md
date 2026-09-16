@@ -72,6 +72,40 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Its deploy-smoke bundle selects a device-neutral fixture profile and
   executes no accelerator kernel.
 
+- The Ubuntu x86_64 cloud rows now run the offline stage, so a run with
+  `--baseline-assets-dir` exercises all eight canonical lifecycle stages.
+  Both services, and each of `status`, `doctor`, a fresh deploy and an
+  inference, run under a per-unit denial that allows only `127.0.0.1/32`
+  and `::1/128` -- deliberately not systemd's `localhost` shorthand,
+  which expands to `127.0.0.0/8` and would admit the systemd-resolved
+  stub at `127.0.0.53` and the DNS namespace behind it. Each CLI call
+  runs in its own denied transient unit. The denial is a runtime drop-in
+  under `/run/systemd/system`, never `/etc`, and is removed on every exit
+  path including `SIGINT`, `SIGTERM` and `SIGHUP`, with the removal read
+  back from systemd rather than assumed.
+  Enforcement is established by a probe run under the denial against a
+  control run first with nothing denied: the control must not be refused,
+  and the GCE metadata service must answer it outright, since the stage's
+  claim is that the denial is what made that service unreachable. Reading
+  the properties back is not enough on its own -- `IPAddressDeny=` is
+  silently inert where the BPF filter cannot be installed, and
+  `systemctl show` answers for a dead or nonexistent unit with empty
+  values, so every readback requires a loaded, active unit with an
+  invocation id first.
+  Doctor must still resolve the row with nothing failing, and the
+  identity must come from the boot-bound machine-type record rather than
+  from a live metadata answer: the agent's
+  `source=recorded_gce_metadata record=not_applicable` line and doctor's
+  `host_os` finding. Because that record is bound to the kernel boot,
+  offline cold boot is not supported, and the runbook says so: after a
+  reboot the agent must start once with metadata reachable before offline
+  detection works. The stage runs before upgrade, whose clean baseline
+  install deletes the record; install and upgrade stay online.
+  The mechanism lives in `tools/validation/linux_offline_runtime.py`,
+  named for the mechanism rather than the row so the Jetson harness can
+  adopt it unchanged, with its own tests in
+  `test/packaging/verify_linux_offline_runtime.py`.
+
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
   lifecycle report itself rather than through the clean-room step

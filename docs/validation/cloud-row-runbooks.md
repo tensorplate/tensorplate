@@ -22,8 +22,9 @@ directory along with the stage logs it cites and an
 `artifact-digest.txt` naming the candidate artifact set that was
 installed.
 
-**A run today reports `incomplete`, and the release gate refuses the
-row.** That is the accurate state rather than a defect:
+**A run without `--baseline-assets-dir` reports `incomplete`, and the
+release gate refuses the row.** That is the accurate state rather than a
+defect:
 
 | Canonical stage | Cloud rows |
 | --- | --- |
@@ -34,7 +35,7 @@ row.** That is the accurate state rather than a defect:
 | rollback | covered with `--baseline-assets-dir`; **skipped** without it |
 | restart | covered |
 | crash-loop | covered |
-| offline | **skipped** — GCE platform detection requires live metadata |
+| offline | covered |
 
 Upgrade and rollback need a baseline: a published, signed release whose
 amd64 runtime set is older than the candidate's. `v0.1.x` published only
@@ -107,9 +108,92 @@ shell exit. If restoration fails, the run fails and retains the backup,
 with its path reported for manual recovery. Uncatchable termination such
 as `SIGKILL` cannot run cleanup.
 
-**upgrade and rollback** run after crash-loop, so the five stages above
-are always about a clean candidate install. A failed upgrade ends the
-run there, and the report has no rollback record.
+**offline** runs after crash-loop and before upgrade. It denies both
+services, and every TensorPlate CLI call it makes, all IP traffic except
+the two loopback host addresses, and then requires the appliance to keep
+working.
+
+The denial is `IPAddressDeny=any` with `IPAddressAllow=127.0.0.1/32` and
+`IPAddressAllow=::1/128`. It is deliberately **not** systemd's
+`localhost` shorthand: that expands to `127.0.0.0/8`, which admits the
+systemd-resolved stub at `127.0.0.53` and the whole DNS namespace behind
+it. The probe connects to `127.0.0.53` on both protocols and requires it
+to be refused, so a stage that went back to the shorthand fails rather
+than passing with DNS still reachable.
+
+Both services get the denial as a **runtime** drop-in under
+`/run/systemd/system/<unit>.service.d/`. Nothing is written under
+`/etc/systemd/system`: a persistent drop-in would outlive the run and the
+host's next reboot. The drop-ins are removed on every exit path,
+including `SIGINT`, `SIGTERM`, `SIGHUP` and a failed stage, and the
+removal is read back from systemd rather than assumed. If the removal
+itself fails, the run fails and says so. Uncatchable termination such as
+`SIGKILL` cannot run cleanup; a reboot clears `/run` in that case.
+
+Each of `status`, `doctor`, a fresh `deploy` of the smoke bundle under a
+new deployment id, and `infer` runs inside its own denied transient unit
+(`systemd-run --pipe --wait --collect`), as the operator with their own
+groups. The stage never makes an undenied CLI call.
+
+Configuring a denial is not enforcing one. `IPAddressDeny=` is silently
+inert wherever systemd cannot install its BPF filter, and `systemctl
+show` answers for a dead or nonexistent unit with **empty** property
+values — which a readback that only looked for unexpected allow entries
+would read as a denied unit. So the readback requires each unit to be
+loaded, active and carrying an invocation id first, and the verdict on
+enforcement comes from a probe:
+
+- the **control** runs first, in a transient unit with no address policy,
+  and must not be refused; the GCE metadata service at `169.254.169.254`
+  must answer it outright, since the stage's whole claim is that the
+  denial is what made that service unreachable;
+- the **probe** then runs denied, and every one of the same operations —
+  the metadata service, the resolver stub on TCP and UDP, another
+  loopback address, a routed IPv4 and IPv6 destination, and the same send
+  from a child process — must be refused with `EPERM`;
+- the agent socket, the serving port on `127.0.0.1` and both loopback
+  host addresses must still work under the denial.
+
+Filed as `offline-control.json`, `offline-probe.json`,
+`offline-denial.json`, `offline-restored.json` and `offline-runtime.json`.
+
+**Identity, and what it costs.** `tensorplate-agent` writes a
+machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
+every start where the GCE metadata service answered. The record is bound
+to the kernel boot id, the logical CPU count, `MemTotal` and the NVIDIA
+display PCI ids, and offline detection uses it only while the metadata
+query fails as unreachable **and** every one of those facts still
+matches. The stage requires the record to exist before it denies
+anything, and then requires the identity to have come from it: the
+agent's `platform identity: ... source=recorded_gce_metadata
+record=not_applicable` line in its own journal, and doctor's `host_os`
+finding saying the machine type was recorded rather than read live.
+Doctor must still resolve the row with nothing failing.
+
+**Because the record is bound to the boot, offline cold boot is not
+supported.** After a reboot the agent must start once with the metadata
+service reachable before offline detection works at all; a host that
+comes up with the network already denied has no record for that boot and
+fails detection rather than silently reporting no machine type. This
+stage does not claim otherwise, and the runbook's procedure is to run it
+on a host that has been online since its last boot.
+
+**install and upgrade stay online.** Both run the shipped installer the
+way an operator does, and denying them would validate a procedure nobody
+follows.
+
+**offline runs before upgrade, and has to.** Upgrade's clean baseline
+install deletes `/var/lib/tensorplate`, taking the machine-type record
+with it, and the baseline release never wrote one. An offline stage after
+upgrade would fail for want of evidence the stage ordering destroyed.
+
+The report still reports `incomplete` without `--baseline-assets-dir`,
+because upgrade and rollback are skipped. With a baseline, all eight
+canonical stages run.
+
+**upgrade and rollback** run after offline, so the six stages above are
+always about a clean candidate install. A failed upgrade ends the run
+there, and the report has no rollback record.
 
 **upgrade** purges the candidate, installs the baseline through the
 baseline's own `install.sh`, and deploys the smoke bundle on it. The
@@ -154,19 +238,6 @@ to start if `state.bak` exists when it begins, so the move can never
 nest state inside, or replace, a directory it did not create.
 
 A run with a baseline ends with the baseline installed.
-
-**offline is deferred.** On GCE, both the agent's platform detection and
-`tensorplate doctor` query `169.254.169.254` for the machine type. Removing
-network access makes that source unreadable, so doctor cannot resolve
-the row. Offline validation requires product support for trustworthy
-identity detection without network access; exempting metadata or treating
-an undetected row as a pass would not establish that behavior.
-
-The harness records this dependency as the offline skip reason. It does
-not install network drop-ins or produce offline pass artifacts. The
-report remains `incomplete`, and cannot satisfy the release lifecycle
-evidence gate, until offline and the other skipped stages are implemented
-and validated.
 
 The first reported L4 hardware run passed install, deploy-smoke,
 status-logs and restart using the earlier assertions. The stronger
@@ -261,12 +332,21 @@ describe a run of this harness as GPU validation.
    `python_pytorch_runtime` is ok without it. Verify
    `/usr/bin/python3 -c 'import torch'` before starting.
 
-5. **A verified candidate artifact set** copied onto the VM: `install.sh`,
+5. **`systemd-run` available, and the host online since its last boot.**
+   The offline stage runs every CLI call inside a transient unit, so
+   preflight refuses a host without `systemd-run`. It also needs the
+   agent to have started at least once this boot with the GCE metadata
+   service reachable, which the install stage provides: the machine-type
+   record it writes is bound to the boot id, so a VM rebooted into a
+   denied network has nothing to resolve its row from. Do not reboot the
+   VM between the install stage and the offline stage.
+
+6. **A verified candidate artifact set** copied onto the VM: `install.sh`,
    the artifact manifest, `SHA256SUMS`, and the amd64 `.deb` packages.
    The harness re-verifies the set against `SHA256SUMS` before it
    installs anything, and hashes that file as the run's artifact digest.
 
-6. **For upgrade and rollback, the baseline release's assets** in their
+7. **For upgrade and rollback, the baseline release's assets** in their
    own directory: `install.sh`, its one `tensorplate-*-artifacts.json`,
    `SHA256SUMS`, and every other file `SHA256SUMS` lists, not only the
    amd64 packages, because the harness checks the whole list. The
