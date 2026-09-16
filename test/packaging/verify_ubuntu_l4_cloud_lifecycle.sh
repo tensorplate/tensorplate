@@ -2383,7 +2383,14 @@ PY
 # baseline, so the scan of the run without one says nothing about them.
 check_publishable "  and the run's own evidence passes the publication scanner" \
   "${td}/upgrade-publication-scan.out" "$evidence"
-check "  and keeps the run incomplete" incomplete \
+# With a baseline every canonical stage runs, so nothing is skipped and
+# the run is no longer incomplete. This is the only configuration in
+# which the harness can produce a complete report.
+check "  and all eight canonical stages ran" 8 \
+  "$(python3 -c 'import json,sys
+stages=json.load(open(sys.argv[1]))["stages"]
+print(sum(1 for s in stages if s["status"] == "pass"))' "$report")"
+check "  so the run is complete" pass \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' "$report")"
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "$report" <<'PY'
@@ -2420,13 +2427,16 @@ print(f"{side(path['from'])} -> {side(path['to'])}")
 PY
 )"
 # Which agent version answered each deploy and each inference, in order:
-# deploy-smoke, restart and crash-loop on the candidate; a deploy on the
-# baseline; the baseline's deployment answering on the upgraded candidate
-# without a deploy; and a fresh deploy on the rolled-back baseline.
-check "  deploys ran on candidate, baseline, rolled-back baseline" \
-  "0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1" "$(one_line "${appliance}/deploy-versions.log")"
+# deploy-smoke, restart and crash-loop on the candidate; the offline
+# stage's own fresh deploy and inference, still on the candidate and made
+# with the network denied; a deploy on the baseline; the baseline's
+# deployment answering on the upgraded candidate without a deploy; and a
+# fresh deploy on the rolled-back baseline.
+check "  deploys ran on candidate, candidate under denial, baseline, rolled-back baseline" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1" \
+  "$(one_line "${appliance}/deploy-versions.log")"
 check "  inferences ran on each install in turn" \
-  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
   "$(one_line "${appliance}/infer-versions.log")"
 # Empty when the line is missing, which every check below treats as a
 # failure; `|| true` keeps a missing line from ending the suite early.
