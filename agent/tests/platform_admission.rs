@@ -785,7 +785,9 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     let deploy_tensorrt = |available: Vec<String>, deployment: &str| -> AgentError {
         let mut config = harness.config.clone();
         config.available_backends = available;
-        let config = config.validate().expect("the edited backend list stays valid");
+        let config = config
+            .validate()
+            .expect("the edited backend list stays valid");
         let coordinator = Arc::new(
             Coordinator::new(config, harness.store.clone(), harness.worker.clone())
                 .with_platform_admission(admission.clone())
@@ -821,7 +823,10 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
     }
 
     // The edited conffile: the row is the gate, and it now refuses.
-    let edited = shipped.into_iter().chain(["tensorrt".to_string()]).collect();
+    let edited = shipped
+        .into_iter()
+        .chain(["tensorrt".to_string()])
+        .collect();
     match deploy_tensorrt(edited, "edited-conffile") {
         AgentError::PlatformNotAdmissible { reason, detail } => {
             assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
@@ -830,7 +835,9 @@ fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
                 "the row refusal must name the path and the row: {detail}"
             );
         }
-        other => panic!("an advertised but undeclared backend must be refused by the row, got {other:?}"),
+        other => {
+            panic!("an advertised but undeclared backend must be refused by the row, got {other:?}")
+        }
     }
 }
 
