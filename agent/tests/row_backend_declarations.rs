@@ -364,30 +364,54 @@ fn no_x86_row_declares_tensorrt() {
 ///
 /// Turning either of these builds on is a legitimate change. It is not a
 /// change that can be made alone, and this is where that is said.
+///
+/// The flag is read as a value, not as a spelling. `TP_ENABLE_TENSORRT` is
+/// a CMake cache variable, so a second `-D` for it wins over the first,
+/// and a whole-file substring search for the `OFF` spelling is satisfied
+/// by a comment that mentions it. Either shape turns the adapter on while
+/// leaving this test green, which is the same class of gap as a row that
+/// declares a backend nothing backs.
 #[test]
 fn the_builds_behind_the_python_pytorch_only_configs_compile_no_tensorrt() {
-    for (build, config) in [
+    for (build, channel, arch) in [
         (
             "tools/release/amd64-build-profile.sh",
-            "packaging/conf/agent.amd64.json",
+            PackageChannel::Apt,
+            CpuArchitecture::X86_64,
         ),
         (
             "packaging/homebrew/Formula/tensorplate-serving.rb",
-            "packaging/homebrew/conf/agent.json.in",
+            PackageChannel::Homebrew,
+            CpuArchitecture::Arm64,
         ),
     ] {
+        // The config side is the same derivation the row guard uses, so a
+        // packaging change that points this architecture at another config
+        // is compared against that build here too.
+        let config = shipped_agent_config(channel, arch).unwrap_or_else(|| {
+            panic!("{build} builds the worker for hosts the packaging ships no agent config for")
+        });
         let path = repo_path(build);
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let code: Vec<&str> = raw.lines().map(without_comment).collect();
         assert!(
-            raw.contains("-DTP_ENABLE_TENSORRT=OFF"),
+            code.iter()
+                .any(|line| line.contains("-DTP_ENABLE_TENSORRT=OFF")),
             "{build} builds the serving worker for a platform whose agent config \
              ({config}) advertises no `tensorrt`, and whose rows therefore declare no \
              `tensorrt` package set. If it now compiles the adapter, both are what have \
              to change with it"
         );
         assert!(
-            !available_backends(config).contains("tensorrt"),
+            !code
+                .iter()
+                .any(|line| line.contains("-DTP_ENABLE_TENSORRT=ON")),
+            "{build} configures the TensorRT adapter on while {config} advertises none; \
+             a later -D for the same cache variable is the value CMake takes"
+        );
+        assert!(
+            !available_backends(&config).contains("tensorrt"),
             "{config} advertises `tensorrt` while {build} compiles no adapter"
         );
     }
