@@ -273,24 +273,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   under — `libcuda` is the driver's own library and no longer counts as a
   toolkit, and a versioned `libcudart.so.<soname>` does count, so a host
   carrying only the CUDA runtime package is no longer told it carries
-  nothing. Each list falls back to a scan of its own library
-  directories for a versioned soname, so a driver is still found where
-  the exact names are absent: `/proc/driver/nvidia/version` comes from
-  `nvidia.ko`, which L4T does not load, and a Jetson shipping
-  `libcuda.so.1.1` without a `libcuda.so.1` would otherwise have read as
-  driverless and been warned about a device that is fine. On x86_64 the
-  rule runs the other way: `/proc/driver/nvidia/version` is what
-  establishes a loaded driver, and the driver's user-mode
-  `libcuda.so.1` is not accepted in its place — that package installs
-  with no working kernel module, which is the inference
-  `packaging/scripts/install.sh` already refuses in a comment. Found
-  alone, it is reported as its own state, naming the library and the
-  absent kernel interface, with the verdict a driverless host gets and a
-  hint pointing at the module, `nvidia-smi`, a pending reboot and Secure
-  Boot. The verdict is
-  taken against the installed build, read from the CLI's own build
-  target because the CLI and the worker ship in one
-  per-architecture artifact set: the arm64 worker links the TensorRT
+  nothing. Each list falls back to a scan of its own library directories
+  for a versioned soname, so a driver is still found where the exact
+  names are absent: `/proc/driver/nvidia/version` comes from `nvidia.ko`,
+  which L4T does not load, and a Jetson shipping `libcuda.so.1.1` without
+  a `libcuda.so.1` would otherwise have read as driverless and been
+  warned about a device that is fine. On x86_64 the rule runs the other
+  way: `/proc/driver/nvidia/version` is what establishes a loaded driver,
+  and the driver's user-mode `libcuda.so.1` is not accepted in its place
+  — that package installs with no working kernel module, which is the
+  inference `packaging/scripts/install.sh` already refuses in a comment.
+  Found alone, the library is reported as its own state, naming it and
+  the absent kernel interface, with the verdict a driverless host gets
+  and a hint pointing at the module, `nvidia-smi`, a pending reboot and
+  Secure Boot. The verdict is taken against the installed build, read
+  from the CLI's own build target because the CLI and the worker ship in
+  one per-architecture artifact set: the arm64 worker links the TensorRT
   adapter, so no toolkit there is a `warning` with an install hint, while
   the amd64 worker has no such adapter and its python_pytorch sidecar
   brings its own CUDA runtime in the PyTorch wheel, so no system toolkit
@@ -299,25 +297,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   so a host with no driver is never `ok` however many toolkit files it
   carries — `missing` on amd64 and `warning` on the TensorRT-linked
   build, each naming the absent driver. The message states only what is
-  installed here: the python_pytorch sidecar is named as present or
-  absent rather than assumed, and where neither the serving worker nor
-  that sidecar is installed — a `--cli-only` install — the finding is
-  `skipped`, because nothing on the host consumes a CUDA runtime. The
-  sidecar's package only `Recommends` the serving one, so it can be
-  installed alone; it is then the host's only CUDA consumer, and the
-  absent worker's TensorRT adapter is not asked for on its behalf. What
-  its own wheel needs is asked for instead, which is an architecture
-  question rather than a build one: the x86_64 PyPI CUDA wheel carries
-  its runtime libraries, so driver and no toolkit is `ok`, while
-  NVIDIA's aarch64 wheel links the JetPack CUDA runtime — the Jetson
-  install guide has the operator `apt install` it and says `import
-  torch` fails on a missing CUDA shared library without it — so on the
-  arm64 artifact set the same host is a `warning` pointing at that apt
-  list. A platform whose build has no CUDA path at all is `skipped` too. The
-  finding still never fails `doctor`, so no install and no lifecycle
-  harness changes outcome. `cuda_runtime` is the one finding id whose
-  severity range has widened since v0.1.0; the exception is recorded
-  against the contract note in `cli/src/commands/doctor/finding.rs`.
+  installed here: wherever the verdict rests on the python_pytorch
+  sidecar it names that sidecar as present or absent rather than assuming
+  it, and where neither the serving worker nor that sidecar is installed
+  — a `--cli-only` install — the finding is `skipped`, because nothing on
+  the host consumes a CUDA runtime. The sidecar's package only
+  `Recommends` the serving one, so it can be installed alone; it is then
+  the host's only CUDA consumer, and the absent worker's TensorRT adapter
+  is not asked for on its behalf. What its own wheel needs is asked for
+  instead, which is an architecture question rather than a build one: the
+  x86_64 PyPI CUDA wheel carries its runtime libraries, so driver and no
+  toolkit is `ok`, while NVIDIA's aarch64 wheel links the JetPack CUDA
+  runtime — the Jetson install guide has the operator `apt install` it
+  and says `import torch` fails on a missing CUDA shared library without
+  it — so on the arm64 artifact set the same host is a `warning` pointing
+  at that apt list. A platform whose build has no CUDA path at all is
+  `skipped` too. The finding still never fails `doctor`, so no install
+  and no lifecycle harness changes outcome. `cuda_runtime` is the one
+  finding id whose severity range has widened since v0.1.0; the exception
+  is recorded against the contract note in
+  `cli/src/commands/doctor/finding.rs`.
 
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
