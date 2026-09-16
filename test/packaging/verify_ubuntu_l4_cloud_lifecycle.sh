@@ -1505,14 +1505,38 @@ check "  and no raw capture is left in the harness's scratch space" 0 \
 # to the scanner that admits it. A stub run's paths are mktemp paths, so
 # a runner whose TMPDIR sat under a home directory would report
 # home-path findings here.
-publication_scan="${td}/publication-scan.out"
-scan_status=0
-"${repo_root}/tools/validation/check-evidence-publication.sh" \
-  --patterns-only "$ok_evidence" >"$publication_scan" 2>&1 || scan_status=$?
-check "  and the run's own evidence passes the publication scanner" 0 "$scan_status"
-if ((scan_status != 0)); then
-  sed 's/^/       /' "$publication_scan" >&2
-fi
+#
+# Prints the scanner's exit status; its output is kept at the second
+# argument.
+publication_scan() {
+  local output="$1" status=0
+  shift
+  "${repo_root}/tools/validation/check-evidence-publication.sh" \
+    --patterns-only "$@" >"$output" 2>&1 || status=$?
+  printf '%s' "$status"
+}
+# Checks that the scanner admits every directory given, and shows what
+# it found when it does not: the evidence is gone with the temp dir by
+# the time anyone reads a CI log. A finding names a file relative to its
+# directory, so with several directories the refused ones are named too.
+check_publishable() {
+  local what="$1" output="$2" status dir
+  shift 2
+  status="$(publication_scan "$output" "$@")"
+  check "$what" 0 "$status"
+  if [[ "$status" != 0 ]]; then
+    sed 's/^/       /' "$output"
+    if (($# > 1)); then
+      for dir in "$@"; do
+        if [[ "$(publication_scan "${output}.one" "$dir")" != 0 ]]; then
+          printf '       in %s\n' "${dir##*/}"
+        fi
+      done
+    fi
+  fi
+}
+check_publishable "  and the run's own evidence passes the publication scanner" \
+  "${td}/publication-scan.out" "$ok_evidence"
 
 # --- and the scanner refuses a capture that was not projected.
 #
@@ -1553,11 +1577,8 @@ rm -rf "$unprojected"
 cp -R "$ok_evidence" "$unprojected"
 cp "$raw_capture" "${unprojected}/agent-journal.txt"
 unprojected_scan="${td}/unprojected-scan.out"
-unprojected_status=0
-"${repo_root}/tools/validation/check-evidence-publication.sh" \
-  --patterns-only "$unprojected" >"$unprojected_scan" 2>&1 || unprojected_status=$?
 check "  and the same evidence with one capture unprojected is refused" 1 \
-  "$unprojected_status"
+  "$(publication_scan "$unprojected_scan" "$unprojected")"
 # Refused for that file and for its journal fields, not for something
 # the copy happened to disturb.
 check "  named by file and class, and by nothing else" "agent-journal.txt journal-field" \
@@ -1869,6 +1890,11 @@ else:
     print("yes")
 PY
 )"
+# The upgrade and rollback files -- both sets' listings, their logs, the
+# upgrade path, doctor on the baseline -- exist only on a run with a
+# baseline, so the scan of the run without one says nothing about them.
+check_publishable "  and the run's own evidence passes the publication scanner" \
+  "${td}/upgrade-publication-scan.out" "$evidence"
 check "  and keeps the run incomplete" incomplete \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' "$report")"
 check "  and the report is schema-valid" "yes" \
@@ -2118,6 +2144,24 @@ done
 
 check "no destructive command reached the host" "yes" \
   "$([[ -f "${appliance}/sudo.log" ]] && echo yes || echo no)"
+
+# --- across every stubbed run.
+#
+# A failed run's evidence is filed too, and its report copies the tail of
+# the failing stage's log. Every run above that wrote a report, passing
+# or not, must have written evidence the scanner admits, and none may
+# have left a raw capture behind.
+check "no stubbed run left a raw capture in the harness's scratch space" 0 \
+  "$(scratch_holding_host_metadata)"
+# Every run's evidence directory is named stages-*. A pattern that
+# matched nothing would reach the scanner as a literal path, which it
+# refuses without a verdict.
+run_evidence=()
+for run_report in "${td}"/stages-*/lifecycle-report.json; do
+  run_evidence+=("$(dirname "$run_report")")
+done
+check_publishable "every stubbed run's evidence passes the publication scanner" \
+  "${td}/all-runs-publication-scan.out" "${run_evidence[@]}"
 
 printf '\n%s\n' "$([[ "$failures" -eq 0 ]] && echo "verify_ubuntu_l4_cloud_lifecycle: ok" || echo "${failures} check(s) failed")"
 exit "$failures"
