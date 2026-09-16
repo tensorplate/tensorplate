@@ -100,6 +100,37 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   longer claim the device carries no build toolchain. The clean-room
   harness is unchanged and remains the release clean-room smoke.
 
+- The Jetson lifecycle harness has upgrade and rollback stages, run with
+  `--baseline-tag` and `--baseline-assets-dir` against the last published
+  arm64 runtime set (v0.1.5) and skipped with that reason when no
+  baseline is given (V021-E05-F01-T02). The baseline is always installed
+  through its own installer with its signature verified; there is no
+  option to skip that for either set, and preflight refuses a baseline
+  that is not strictly older than the candidate, whose manifest names
+  another tag, or whose manifest records it as an unreleased local
+  snapshot. Upgrade clears the candidate, installs the baseline, deploys
+  and round-trips the identity engine on it, applies an operator conffile
+  edit, then installs the candidate over the running baseline and
+  requires the candidate's package versions, new service main pids, the
+  operator's edited conffile, a green doctor resolving this row, and the
+  baseline's deployment still serving with no deploy of the harness's
+  own. Rollback follows the documented procedure: it refuses to replace
+  an existing `state.bak`, stops both services, moves durable state
+  aside, removes every installed `tensorplate*` package except the apt
+  channel bootstrap -- `tensorplate-common` included, without which the
+  older set would be a downgrade `apt-get -y` refuses -- and requires
+  each removed package to be left holding its conffiles rather than
+  purged. It then installs the baseline fresh and requires the baseline
+  versions, the operator's edit and the set-aside state to be intact, the
+  older agent to report no active or previous deployment, and a fresh
+  deployment to serve. Doctor on the baseline is recorded, not asserted.
+  A run that ends between the removal and the baseline install reports
+  that the device carries no TensorPlate and names the command to recover
+  with, rather than reinstalling anything by itself. The report still
+  attests the candidate's `SHA256SUMS` digest; the baseline's is filed
+  separately with the upgrade path. `docs/install/lifecycle.md` no longer
+  says only the cloud harness runs the full rollback procedure.
+
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
   is validated against its own platform: an x86_64 host is no longer

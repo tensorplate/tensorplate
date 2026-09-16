@@ -89,18 +89,19 @@ and no unmapped stage failed or recorded an invalid status:
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
 | install | covered | covered |
-| upgrade | **not implemented** | covered |
+| upgrade | covered with a baseline set | covered |
 | deploy-smoke | covered | covered |
 | status-logs | covered | covered |
-| rollback | **not implemented** | covered |
+| rollback | covered with a baseline set | covered |
 | restart | covered | covered |
 | crash-loop | covered | covered |
 | offline | **not implemented** | covered |
 
-Closing these gaps means adding the missing operations to the Jetson
-harness itself. Until then it records each gap as `skipped` with its
-reason, so the gate reports what is missing rather than accepting a
-partial run.
+Upgrade and rollback run only when the baseline options are given; a run
+without them skips both with that reason. Closing the remaining gap
+means adding offline to the Jetson harness itself. Until then it records
+it as `skipped` with its reason, so the gate reports what is missing
+rather than accepting a partial run.
 
 ## Jetson Orin Nano 8GB Super
 
@@ -144,7 +145,10 @@ Prerequisites:
   including the bundle the clean-room smoke leaves under
   `/var/lib/tensorplate/validation`.
 - Network access for the installer, which runs `apt-get update` and
-  verifies the release signature with cosign.
+  verifies the release signature with cosign. A run with a baseline set
+  installs four times — candidate, baseline, candidate, baseline — so
+  the device needs the apt mirror and the cosign bootstrap to stay
+  reachable throughout, and the run takes correspondingly longer.
 - A checkout of this repository on the device at the revision under
   test: the harness, the bundle generator and the response verifier run
   from it.
@@ -203,6 +207,24 @@ Prerequisites:
    waits on that evidence and is created as a draft whose assets are not
    reachable at the public tag URL.
 
+   Download the **baseline** the same way. It is `v0.1.5`, the last
+   published arm64 runtime set, and the upgrade and rollback stages are
+   skipped without it:
+
+   ```bash
+   tools/validation/jetson-clean-room.sh download \
+     --version v0.1.5 \
+     --work-dir /var/tmp/tensorplate-v0.1.5
+   ```
+
+   Any strictly older published tag is accepted, with a release candidate
+   sorting below the release it leads to. Preflight refuses a baseline
+   that is the same age or newer, one whose manifest names another tag,
+   and one whose manifest records it as an unreleased local snapshot
+   rather than a published release. The baseline is always installed with
+   its signature verified; there is no option to skip that for either
+   set.
+
 4. Check eligibility first. This builds the bundle in a temporary
    directory it removes, installs nothing and writes no evidence:
 
@@ -210,6 +232,8 @@ Prerequisites:
    tools/validation/jetson-lifecycle.sh \
      --candidate-tag <asset_tag> \
      --candidate-assets-dir /var/tmp/tensorplate-<asset_tag>/assets \
+     --baseline-tag v0.1.5 \
+     --baseline-assets-dir /var/tmp/tensorplate-v0.1.5/assets \
      --tested-version <tested_version> \
      --evidence-dir <evidence> \
      --preflight-only --confirm RESET-TENSORPLATE
@@ -219,21 +243,27 @@ Prerequisites:
    R36; a `--tested-version` that is not a bare `X.Y.Z`; a tag whose
    `X.Y.Z` is not the tested version; an assets directory without exactly
    one artifact manifest, whose manifest's `release.tag` is not the tag
-   given, or whose files fail `SHA256SUMS`; an assets, evidence or bundle
-   directory under a directory the run deletes; a session outside the
+   given, or whose files fail `SHA256SUMS`; an assets, evidence, baseline
+   or bundle directory under a directory the run deletes; one baseline
+   option without the other; a baseline that is not strictly older than
+   the candidate or is not a published release; a session outside the
    `tensorplate` group once that group exists; and a device that cannot
    build the bundle. The manifest binding matters because the installer accepts
    a signature from any release tag, so a signed set is not thereby the
    set for the tag you named.
 
 5. Run the lifecycle harness. It refuses to start without the
-   confirmation token, because it purges TensorPlate packages and state,
-   and it leaves the candidate installed:
+   confirmation token, because it purges TensorPlate packages and state.
+   **With the baseline options it leaves the baseline installed, not the
+   candidate**, because rollback is the last stage; reinstall the
+   candidate afterwards if the device should carry it:
 
    ```bash
    tools/validation/jetson-lifecycle.sh \
      --candidate-tag <asset_tag> \
      --candidate-assets-dir /var/tmp/tensorplate-<asset_tag>/assets \
+     --baseline-tag v0.1.5 \
+     --baseline-assets-dir /var/tmp/tensorplate-v0.1.5/assets \
      --tested-version <tested_version> \
      --evidence-dir <evidence> \
      --confirm RESET-TENSORPLATE
@@ -286,12 +316,54 @@ Prerequisites:
    interruption. `tensorplate logs` is recorded, not required, for the
    reason given there.
 
-   **upgrade**, **rollback** and **offline** are skipped with their
-   reasons in the report, so a run today is `incomplete` and the gate
-   refuses the row. Upgrade and rollback against the v0.1.5 arm64
-   baseline, and offline under per-unit network denial, are follow-up
-   harness work. A hardware run of this native harness on the Jetson is
-   deferred to release validation; the fixture checks do not replace it.
+   **upgrade** clears the candidate, installs the baseline through the
+   baseline's own `install.sh`, deploys `<deployment-id>-baseline` on it
+   and round-trips the identity engine, appends a newline to
+   `/etc/tensorplate/cli.json` as an operator edit, then installs the
+   candidate over the running baseline. It requires every runtime package
+   to be at the candidate `.deb`'s version, both services to come back
+   with new main pids, the operator's edited conffile to survive, doctor
+   to be green and to resolve this row, and the baseline's deployment to
+   be serving — with no deploy of the harness's own, so what answers is
+   state the candidate re-warmed. The harness runs no `systemctl` command
+   of its own around either install: the installer enables and starts
+   both units, and doing it here would hide an installer that no longer
+   does.
+
+   **rollback** follows [the documented procedure](../install/lifecycle.md):
+   it requires the candidate to be serving `<deployment-id>-baseline`,
+   refuses to start if `/var/lib/tensorplate/state.bak` already exists,
+   stops both services, moves `/var/lib/tensorplate/state` aside to
+   `state.bak`, and `apt remove`s every installed `tensorplate*` package
+   except `tensorplate-apt-source` — including `tensorplate-common`,
+   without which the older set would be a downgrade that `apt-get -y`
+   refuses. It requires every removed package to be left in dpkg's
+   `config-files` state rather than purged, then installs the baseline
+   fresh through its own `install.sh` and requires the baseline versions,
+   the operator's edit, and the set-aside `state.bak/state.json` to be
+   intact. The older agent must report **no** active or previous
+   deployment: the state was set aside on purpose, and what to restore
+   from it is the operator's decision. A fresh `<deployment-id>-rollback`
+   deploy and identity round trip is what shows the baseline serves.
+
+   Doctor on the baseline is recorded, not asserted, in
+   `doctor-baseline.json` and `doctor-after-rollback.json` with their exit
+   statuses beside them. The baseline's own `install.sh` already refuses a
+   critical finding, and the baseline predates `platform_row`; asserting
+   more would let a finding the candidate fixed fail the candidate's run.
+
+   If the run ends between the removal and the baseline install — a
+   failure, or an interrupt — the device is left with **no TensorPlate
+   installed**. The harness says so on stderr and names the command to
+   recover with; it reinstalls nothing by itself. Re-running the harness
+   also recovers the device, because its install stage purges and
+   installs the candidate from scratch.
+
+   **offline** is skipped with its reason in the report, so a run today
+   is `incomplete` and the gate refuses the row. Offline under per-unit
+   network denial is follow-up harness work. A hardware run of this
+   native harness on the Jetson is deferred to release validation; the
+   fixture checks do not replace it.
 
    The digest this run files is the sha256 of the candidate's
    `SHA256SUMS`, taken in preflight once the asset set has verified and
@@ -300,6 +372,9 @@ Prerequisites:
    packages are checked against its lines. It identifies the release build
    under test rather than the local package selection, and covers the
    whole published asset set, including files this row never installs.
+   The baseline is verified the same way, but its digest is filed on its
+   own in `baseline-digest.txt` and in `upgrade-path.json`: the report
+   attests one artifact set, and that set is the candidate.
 
 6. File the report, its stage logs and the recorded row facts under
    `docs/validation/evidence/<version>/jetson-orin-nano-8gb-jp62/`.
@@ -321,10 +396,10 @@ Prerequisites:
    | File | Carries |
    | --- | --- |
    | `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal records in JSON, including host metadata fields such as the host name and the machine and boot ids; inspect every field before publishing |
-   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log` | everything the stage's commands printed. `install.log` carries the assets path the installer echoes, which names an account if the assets were under a home directory. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
+   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log`, `upgrade.log`, `rollback.log` | everything the stage's commands printed. `install.log`, `upgrade.log` and `rollback.log` carry the assets path the installer echoes — for both sets — which names an account if the assets were under a home directory. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
    | `host-facts.txt` | kernel release, OS name, the first line of `/etc/nv_tegra_release`, the systemd version and the power mode; no host name or serial is read, but check the release line |
-   | `doctor.json` | host OS and accelerator facts |
-   | `packages.txt`, `checksums.txt`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `agent-cli.log` | package versions, file names, the deployment id and loopback serving URLs; scan them as well |
+   | `doctor.json`, `doctor-baseline.json`, `doctor-after-upgrade.json`, `doctor-after-rollback.json` | host OS and accelerator facts, for both the candidate and the baseline |
+   | `packages.txt`, `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt`, `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `upgrade-*.json`, `rollback-*.json`, `agent-cli.log` | package versions and states, file names, release tags and digests, the deployment ids and loopback serving URLs; scan them as well |
    | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or records it quotes |
 
 ## MacBook Pro M1 Pro
