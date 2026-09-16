@@ -46,7 +46,9 @@ use std::io::Write;
 
 pub use args::{GlobalArgs, OutputMode, ParsedArgs, Subcommand};
 pub use client::{AgentClient, MockAgentClient, NetAgentClient, ServingClient};
-pub use config::{CliConfig, OutputDefaults, ProfileMode, ProfileSpec};
+pub use config::{
+    CliConfig, ConfigSource, OutputDefaults, ProfileMode, ProfileSpec, ResolvedCliConfig,
+};
 pub use error::{CliError, CliResult, ExitCode};
 pub use output::Renderer;
 pub use profile::ResolvedProfile;

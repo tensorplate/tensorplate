@@ -96,14 +96,19 @@ fn drive<O: Write, E: Write>(
         ParseOutcome::Run(parsed) => parsed,
     };
     let command = command_label(&parsed.subcommand);
-    let cfg =
-        CliConfig::load_or_default(parsed.global.config_path.as_deref()).map_err(|error| {
-            DriveError {
-                error,
-                output_mode: fallback_mode,
-                command,
-            }
+    let resolved =
+        CliConfig::resolve(parsed.global.config_path.as_deref()).map_err(|error| DriveError {
+            error,
+            output_mode: fallback_mode,
+            command,
         })?;
+    // A packaged config that exists but could not be read leaves the CLI
+    // on defaults that disagree with the install. Say so on stderr; stdout
+    // stays a clean JSON envelope for `--output json` callers.
+    if let Some(warning) = resolved.warning.as_deref() {
+        let _ = writeln!(stderr, "{warning}");
+    }
+    let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
