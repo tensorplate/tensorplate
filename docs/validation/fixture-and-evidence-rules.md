@@ -38,8 +38,8 @@ cycle; none is speculative. Violations are correctness bugs, not style.
    `docs/validation/evidence/v0.2.1/README.md`. Where a harness can
    record only what belongs in evidence, it does so instead of leaving an
    editing job behind: the Ubuntu cloud harness projects each journal
-   capture to the service's own fields as it takes it, and what it
-   retains privately is that projected capture.
+   capture to the service's own fields as it takes it, so the projected
+   capture is the record and no raw copy of it is kept.
 
 ## Asserting
 

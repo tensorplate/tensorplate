@@ -1353,7 +1353,9 @@ import re, sys
 def field_set(path, name):
     """The double-quoted strings in the collection `name` is assigned."""
     body = open(path, encoding="utf-8").read()
-    start = body.index("\n" + name + " = ")
+    start = body.find("\n" + name + " = ")
+    if start < 0:
+        return None
     depth = 0
     for index in range(start, len(body)):
         character = body[index]
@@ -1362,17 +1364,24 @@ def field_set(path, name):
         elif character in ")}]":
             depth -= 1
             if depth == 0:
-                return frozenset(re.findall(r'"([^"]*)"', body[start:index]))
-    raise SystemExit(f"{path}: {name} is never closed")
+                return frozenset(re.findall(r'"([^"]*)"', body[start:index])) or None
+    return None
 
 harness, scanner, verifier = sys.argv[1:]
-projected = field_set(harness, "KEEP")
-admitted = field_set(scanner, "JOURNAL_KEYS")
-asserted = field_set(verifier, "ALLOWED")
-if not projected:
-    raise SystemExit("the harness projects to an empty field set")
-print("yes" if projected == admitted == asserted else
-      f"harness {sorted(projected)} scanner {sorted(admitted)} verifier {sorted(asserted)}")
+# A renamed or emptied collection reads as no field set at all, which is
+# a drift this has to report rather than silently compare nothing.
+sets = {
+    "harness": field_set(harness, "KEEP"),
+    "scanner": field_set(scanner, "JOURNAL_KEYS"),
+    "verifier": field_set(verifier, "ALLOWED"),
+}
+unread = sorted(where for where, fields in sets.items() if fields is None)
+if unread:
+    print("no field set read from: " + ", ".join(unread))
+elif len(set(sets.values())) != 1:
+    print(" ".join(f"{where} {sorted(fields)}" for where, fields in sets.items()))
+else:
+    print("yes")
 PY
 )"
 
@@ -1722,15 +1731,21 @@ check "  the install listed the installed packages, without descriptions" yes \
   "$(python3 - "${evidence}/packages.txt" <<'PY'
 import sys
 
-names = []
+names, problem = [], ""
 for line in open(sys.argv[1], encoding="utf-8"):
     if not line.strip():
         continue
     fields = line.split()
     if len(fields) != 3:
-        raise SystemExit(f"{len(fields)} fields, not 3: {line.rstrip()}")
+        problem = f"{len(fields)} fields, not 3: {line.rstrip()}"
+        break
     names.append(fields[0])
-print("yes" if "tensorplate-agent" in names and len(names) > 1 else f"listed {names}")
+if problem:
+    print(problem)
+elif "tensorplate-agent" not in names or len(names) < 2:
+    print(f"listed {names}")
+else:
+    print("yes")
 PY
 )"
 check "  and keeps the run incomplete" incomplete \

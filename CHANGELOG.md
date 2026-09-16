@@ -197,27 +197,38 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - The Ubuntu x86_64 cloud lifecycle harness projects its journal captures
   where it takes them. `journalctl --output=json` is read into a scratch
-  directory, and only `MESSAGE`,
-  `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`,
-  `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` are written to
-  `agent-journal.txt`, `observability-journal.txt` and
-  `crash-loop-journal.txt`. The host metadata systemd attaches to every
-  entry -- `_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR`, `_CMDLINE`
-  and the rest -- is never recorded, so a real run's journal evidence
-  passes the publication scanner with nothing edited by hand and the
-  projected capture is the record that is retained. The scratch directory
-  is removed whatever the verdict on the capture was, and a line that is
-  not a JSON record, including journalctl's own `-- No entries --`, is
+  directory, and only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`,
+  `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and
+  `__REALTIME_TIMESTAMP` are written to `agent-journal.txt`,
+  `observability-journal.txt` and `crash-loop-journal.txt`. The host
+  metadata systemd attaches to every entry -- `_HOSTNAME`, `_MACHINE_ID`,
+  `_BOOT_ID`, `__CURSOR`, `_CMDLINE` and the rest -- is never recorded,
+  so a real run's journal evidence passes the publication scanner with
+  nothing edited by hand, and the projected capture is the record that is
+  retained: there is no raw copy of it anywhere. The scratch directory is
+  removed whatever the verdict on the capture was, and a line that is not
+  a JSON record, including journalctl's own `-- No entries --`, is
   refused rather than copied through. The unit and invocation assertions
   the status-logs and crash-loop stages make are unchanged and now read
   the projected records. `packages.txt` is recorded with the same
-  `dpkg-query` the harness already used elsewhere instead of `dpkg -l`,
-  which dropped the package descriptions and the planning identifiers
-  they quote. The harness's own verifier checks that all three captures
-  carry the allowed fields and no others, that they still carry the
-  fields the assertions read, that no raw capture is left in the
-  harness's scratch space, and that a stubbed run's evidence passes
-  `tools/validation/check-evidence-publication.sh --patterns-only`.
+  `dpkg-query` the harness already used elsewhere rather than with
+  `dpkg -l`, whose output carries each package's description and the
+  planning identifiers those quote; the listing recorded in its place is
+  asserted to be the query's three fields a line.
+
+  The harness's own verifier checks that all three captures carry the
+  allowed fields and no others, that they still carry the fields the
+  stage assertions read, that a run which fails after the capture still
+  files a projected one, and that no raw capture is left in the harness's
+  scratch space. It then runs
+  `tools/validation/check-evidence-publication.sh --patterns-only` over a
+  stubbed run's evidence twice: once as the harness produced it, which
+  must pass, and once with a single capture replaced by the unprojected
+  output it was projected from, which must be refused for that file's
+  journal fields and nothing else. A passing scan on its own would
+  certify a harness that had stopped projecting. The field set the
+  harness keeps, the verifier asserts and the scanner admits is compared
+  across all three files, so no two of them can drift together.
 
 - The macOS Homebrew lifecycle harness's offline stage now runs the
   installed services with the network denied, not just doctor and an MPS
