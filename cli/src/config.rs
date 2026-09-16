@@ -337,7 +337,7 @@ impl CliConfig {
                 path.display()
             ))
         })?;
-        Self::parse_json(&body)
+        Self::parse_json(&body).map_err(|e| name_config_file(path, e))
     }
 
     /// Resolve the config for this invocation, in precedence order:
@@ -396,13 +396,7 @@ impl CliConfig {
             // defaults here would point every command at a socket the
             // operator never configured and say nothing about it.
             Ok(body) => Ok(ResolvedCliConfig {
-                config: Self::parse_json(&body).map_err(|e| match e {
-                    CliError::Config(message) => CliError::Config(format!(
-                        "packaged cli config `{}`: {message}",
-                        system_path.display()
-                    )),
-                    other => other,
-                })?,
+                config: Self::parse_json(&body).map_err(|e| name_config_file(system_path, e))?,
                 source: ConfigSource::System(system_path.to_path_buf()),
                 warning: None,
             }),
@@ -441,6 +435,19 @@ Join the `{}` group (or re-run as root) to use the packaged profile, or pass --c
         self.profiles.get(name).ok_or_else(|| {
             CliError::Config(format!("profile `{name}` is not declared in cli config"))
         })
+    }
+}
+
+/// Name the file a config error came from. Parsing and validation work on
+/// a document, not a path, so without this the operator is told a config is
+/// wrong without being told which one — and with discovery reaching a file
+/// they never named, that is no longer answerable from the command line.
+fn name_config_file(path: &Path, error: CliError) -> CliError {
+    match error {
+        CliError::Config(message) => {
+            CliError::Config(format!("{message}; from `{}`", path.display()))
+        }
+        other => other,
     }
 }
 
@@ -679,6 +686,31 @@ mod tests {
         write_config(&system, "/run/system.sock");
         let resolved = CliConfig::resolve_from(None, Some(OsString::from("")), &system).unwrap();
         assert_eq!(socket_of(&resolved), PathBuf::from("/run/system.sock"));
+    }
+
+    /// Discovery can land on a file the operator never named, so a config
+    /// error that does not say which file it came from is unanswerable.
+    #[test]
+    fn a_config_error_names_the_file_it_came_from() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("cli.json");
+        std::fs::write(&path, r#"{"schema_version":"99.99"}"#).unwrap();
+        let CliError::Config(message) = CliConfig::load(&path).unwrap_err() else {
+            panic!("expected a config error");
+        };
+        assert!(
+            message.contains(&path.display().to_string()),
+            "a validation failure must name the file: {message}"
+        );
+
+        std::fs::write(&path, "{not json").unwrap();
+        let CliError::Config(message) = CliConfig::load(&path).unwrap_err() else {
+            panic!("expected a config error");
+        };
+        assert!(
+            message.contains(&path.display().to_string()),
+            "a parse failure must name the file: {message}"
+        );
     }
 
     #[test]
