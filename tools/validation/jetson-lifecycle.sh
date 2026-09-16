@@ -37,6 +37,25 @@
 #                 given up on by systemd rather than restarted forever, and
 #                 recovers its deployment once the config is restored
 #
+# With --baseline-tag and --baseline-assets-dir, two more stages run after
+# crash-loop. The baseline is the last published arm64 runtime set, always
+# installed through its own installer with its signature verified.
+#
+#   upgrade       over a fresh baseline install serving a deployment, the
+#                 candidate's installer upgrades every package in place:
+#                 both services come back under new pids, an operator's
+#                 conffile edit survives, doctor is green, and the
+#                 baseline's deployment re-warms from durable state with
+#                 no deploy call of the harness's own
+#   rollback      the documented procedure -- stop, set durable state
+#                 aside, remove every TensorPlate package except the apt
+#                 channel's bootstrap, install the baseline fresh --
+#                 returns exactly the baseline set, keeps the operator
+#                 edit and the set-aside state, leaves the older agent
+#                 with no deployment to misread, and serves a fresh one
+#
+# A run with a baseline leaves the BASELINE installed when it finishes.
+#
 # WHAT IT DOES NOT PROVE
 #   The deploy-smoke bundle is a TensorRT identity engine, built on the
 #   device by tools/validation/create_trt_identity_bundle.sh unless a
@@ -47,16 +66,19 @@
 #   compute_claim "none". The Python/PyTorch backend is not installed and
 #   is not exercised on this row by this harness.
 #
-# Three stages are skipped, each with its reason recorded in the report
-# rather than omitted. Upgrade and rollback against the v0.1.5 arm64
-# baseline, and offline under per-unit network denial, are follow-up
-# harness work. No network policy is changed and no offline, upgrade or
-# rollback behaviour is certified by this harness.
+# Offline under per-unit network denial is skipped, with its reason
+# recorded in the report rather than omitted. It is follow-up harness
+# work, and it belongs between crash-loop and upgrade when it lands: it
+# is about the candidate install every stage above exercises, and the
+# stages below replace that install with the baseline. No network policy
+# is changed and no offline behaviour is certified by this harness.
+# Without a baseline set, upgrade and rollback are skipped as well.
 #
 # Usage:
 #   tools/validation/jetson-lifecycle.sh \
 #     --candidate-tag <vX.Y.Z-rc.N> \
 #     --candidate-assets-dir <downloaded assets> \
+#     [--baseline-tag <vX.Y.Z> --baseline-assets-dir <downloaded assets>] \
 #     --tested-version <X.Y.Z> \
 #     --evidence-dir <new or empty dir> \
 #     --confirm RESET-TENSORPLATE
@@ -109,6 +131,22 @@ readonly CRASH_LOOP_POLLS=40
 # Registered after the backup succeeds and before the config is changed.
 # Kept until restoration and service recovery succeed, including on EXIT.
 CRASH_LOOP_BACKUP=""
+# The documented rollback sets durable state aside under this name
+# (docs/install/lifecycle.md) rather than carrying it back.
+readonly STATE_DIR="/var/lib/tensorplate/state"
+readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
+# The conffile an operator edits before the upgrade, and whose bytes both
+# directions must keep. Every CLI call this run makes is pinned to its own
+# private config, so nothing here reads this file and the edit cannot
+# change the behaviour under test. Overridable only so a stubbed appliance
+# can supply the file.
+OPERATOR_CONFIG="${TP_JETSON_OPERATOR_CONFIG:-/etc/tensorplate/cli.json}"
+OPERATOR_CONFIG_SHA256=""
+# Set once the rollback has removed the candidate's packages and cleared
+# once the baseline is installed again. While it is set, the device has no
+# TensorPlate installed, and an interrupted run says so rather than
+# leaving the operator to discover it.
+ROLLBACK_PACKAGES_REMOVED=0
 # Scratch directory holding a bundle this run built, removed on exit.
 BUNDLE_SCRATCH=""
 # Private CLI config pins every command to the installed local agent; an
@@ -125,10 +163,23 @@ readonly IDENTITY_VERIFIER="${REPO_ROOT}/tools/validation/verify_trt_identity_re
 ROW="$DEFAULT_ROW"
 CANDIDATE_TAG=""
 ASSETS_DIR=""
+# Either baseline option asks for the upgrade and rollback stages, so a
+# half-specified baseline is refused rather than read as a run without
+# one: a typo in one option would otherwise silently skip both stages.
+BASELINE_REQUESTED=0
+BASELINE_TAG=""
+BASELINE_DIR=""
 BUNDLE_DIR=""
 EVIDENCE_DIR=""
 TESTED_VERSION=""
 DEPLOYMENT_ID="jetson-lifecycle-smoke"
+# Distinct ids, so the evidence says which install created the deployment
+# a stage found active. The id the candidate reports after the upgrade
+# can only have been written by the baseline, and the one the baseline
+# reports after the rollback can only be the fresh deploy that followed
+# it. Derived from --deployment-id in main.
+BASELINE_DEPLOYMENT_ID=""
+ROLLBACK_DEPLOYMENT_ID=""
 CONFIRM_VALUE=""
 PREFLIGHT_ONLY=0
 
@@ -159,6 +210,15 @@ Options:
                               one artifact manifest naming TAG, SHA256SUMS and
                               its cosign bundle, and the .deb packages.
                               Required.
+  --baseline-tag TAG          Release tag of the published predecessor set to
+                              upgrade from and roll back to, such as v0.1.5.
+                              Must be strictly older than --candidate-tag.
+  --baseline-assets-dir DIR   The downloaded baseline set, laid out like
+                              --candidate-assets-dir. With --baseline-tag,
+                              runs the upgrade and rollback stages; without
+                              either, both are skipped. Always installed with
+                              its signature verified. The run then ends with
+                              the BASELINE installed.
   --tested-version X.Y.Z      The release this run authorizes. Bare version,
                               never a candidate spelling. Required.
   --evidence-dir DIR          Where the report and stage logs are written. Must
@@ -212,6 +272,8 @@ parse_args() {
     case "$1" in
       --candidate-tag) CANDIDATE_TAG="${2:-}"; shift 2 ;;
       --candidate-assets-dir) ASSETS_DIR="${2:-}"; shift 2 ;;
+      --baseline-tag) BASELINE_REQUESTED=1; BASELINE_TAG="${2:-}"; shift 2 ;;
+      --baseline-assets-dir) BASELINE_REQUESTED=1; BASELINE_DIR="${2:-}"; shift 2 ;;
       --tested-version) TESTED_VERSION="${2:-}"; shift 2 ;;
       --evidence-dir) EVIDENCE_DIR="${2:-}"; shift 2 ;;
       --row) ROW="${2:-}"; shift 2 ;;
@@ -238,6 +300,103 @@ parse_args() {
 # the install stage passes, that writes the run's own.
 ARTIFACT_DIGEST=""
 CHECKSUM_OUTPUT=""
+# The baseline set is verified the same way, before anything is
+# installed. Its digest is not what the report is about -- the report
+# attests the candidate -- so it is filed on its own, in
+# baseline-digest.txt beside the stage logs, together with the upgrade
+# path the run moved along.
+BASELINE_DIGEST=""
+BASELINE_CHECKSUM_OUTPUT=""
+
+# A set's SHA256SUMS verification output, and the digest of the file
+# itself. Kept as two calls rather than one that prints both, so a
+# caller reads exactly what it asked for.
+assets_checksum_output() {
+  ( cd "$1" && sha256sum -c SHA256SUMS 2>&1 )
+}
+
+assets_digest() {
+  ( cd "$1" && sha256sum SHA256SUMS | awk '{print $1}' )
+}
+
+# install.sh accepts any release tag's signature, so a signed set is not
+# thereby the set for this tag. The manifest's release.tag is what binds
+# the directory to the tag the operator named. A baseline is additionally
+# required to be a published release rather than a local snapshot: the
+# row's stated baseline is the last published arm64 runtime set, and a
+# locally built set would move the run to artifacts nobody can fetch.
+check_assets_manifest() {
+  local dir="$1" tag="$2" published="$3"
+  python3 - "$dir" "$tag" "$published" <<'PY'
+import json, pathlib, sys
+
+assets, tag, published = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "1"
+manifests = sorted(assets.glob("tensorplate-*-artifacts.json"))
+if len(manifests) != 1:
+    raise SystemExit(
+        f"expected exactly one tensorplate-*-artifacts.json in the assets directory; found {len(manifests)}"
+    )
+release = json.loads(manifests[0].read_text(encoding="utf-8")).get("release") or {}
+if release.get("tag") != tag:
+    raise SystemExit(f"{manifests[0].name} names release tag {release.get('tag')!r}, not {tag!r}")
+if published and (release.get("unreleased") is not False
+                  or release.get("provenance") != "github-release"):
+    raise SystemExit(
+        f"{manifests[0].name} is not a published release: it records "
+        f"unreleased={release.get('unreleased')!r} provenance={release.get('provenance')!r}"
+    )
+PY
+}
+
+# Everything about the baseline that must be true before the run starts.
+# Checked in preflight for the same reason the candidate is: the upgrade
+# and rollback stages run after the candidate install has already
+# replaced the device, and a baseline found wanting there would leave the
+# device mid-procedure over an input that was wrong from the start.
+preflight_baseline() {
+  [[ -n "$BASELINE_TAG" ]] ||
+    die "--baseline-assets-dir needs --baseline-tag naming the release it holds"
+  [[ -n "$BASELINE_DIR" ]] ||
+    die "--baseline-tag needs --baseline-assets-dir holding that release's set"
+  [[ -d "$BASELINE_DIR" ]] || die "--baseline-assets-dir must name a directory"
+  [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
+    die "--baseline-tag must be a release tag, vX.Y.Z or vX.Y.Z-rc.N"
+
+  # Strictly older, with a release candidate sorting below the release it
+  # leads to. The tags are what the operator names, what the manifests
+  # bind each directory to, and what the runbook records; the installed
+  # package versions are asserted separately against each set's own .deb
+  # files once that set is installed.
+  python3 - "$BASELINE_TAG" "$CANDIDATE_TAG" <<'PY' || die "the baseline is not older than the candidate"
+import re, sys
+
+def sort_key(tag):
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-rc\.([1-9]\d*))?", tag)
+    if match is None:
+        raise SystemExit(f"{tag} is not a release tag")
+    major, minor, patch, candidate = match.groups()
+    return (int(major), int(minor), int(patch), 0 if candidate else 1, int(candidate or 0))
+
+baseline, candidate = sys.argv[1:]
+if not sort_key(baseline) < sort_key(candidate):
+    raise SystemExit(
+        f"the baseline {baseline} must be strictly older than the candidate {candidate}; "
+        "rolling back to the same or a newer set proves nothing about either"
+    )
+PY
+
+  [[ -f "${BASELINE_DIR}/install.sh" ]] || die "missing ${BASELINE_DIR}/install.sh"
+  [[ -f "${BASELINE_DIR}/SHA256SUMS" ]] || die "missing ${BASELINE_DIR}/SHA256SUMS"
+  check_assets_manifest "$BASELINE_DIR" "$BASELINE_TAG" 1 ||
+    die "the baseline assets are not the published ${BASELINE_TAG} release set"
+
+  BASELINE_CHECKSUM_OUTPUT="$(assets_checksum_output "$BASELINE_DIR")" ||
+    { printf '%s\n' "$BASELINE_CHECKSUM_OUTPUT" >&2; die "the baseline artifact set failed verification"; }
+  BASELINE_DIGEST="$(assets_digest "$BASELINE_DIR")"
+  [[ "$BASELINE_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
+    die "could not compute a digest for ${BASELINE_DIR}/SHA256SUMS"
+  pass "baseline ${BASELINE_TAG} is a published set older than ${CANDIDATE_TAG}, verified"
+}
 
 # Everything that must be true before the run starts.
 #
@@ -305,26 +464,12 @@ preflight() {
   [[ -f "${ASSETS_DIR}/install.sh" ]] || die "missing ${ASSETS_DIR}/install.sh"
   [[ -f "${ASSETS_DIR}/SHA256SUMS" ]] || die "missing ${ASSETS_DIR}/SHA256SUMS"
 
-  # install.sh accepts any release tag's signature, so a signed set is not
-  # thereby the set for this tag. The manifest's release.tag is what binds
-  # the directory to the tag the operator named.
-  python3 - "$ASSETS_DIR" "$CANDIDATE_TAG" <<'PY' || die "the candidate assets are not the ${CANDIDATE_TAG} release set"
-import json, pathlib, sys
+  check_assets_manifest "$ASSETS_DIR" "$CANDIDATE_TAG" 0 ||
+    die "the candidate assets are not the ${CANDIDATE_TAG} release set"
 
-assets, tag = pathlib.Path(sys.argv[1]), sys.argv[2]
-manifests = sorted(assets.glob("tensorplate-*-artifacts.json"))
-if len(manifests) != 1:
-    raise SystemExit(
-        f"expected exactly one tensorplate-*-artifacts.json in the assets directory; found {len(manifests)}"
-    )
-release = json.loads(manifests[0].read_text(encoding="utf-8")).get("release") or {}
-if release.get("tag") != tag:
-    raise SystemExit(f"{manifests[0].name} names release tag {release.get('tag')!r}, not {tag!r}")
-PY
-
-  CHECKSUM_OUTPUT="$(cd "$ASSETS_DIR" && sha256sum -c SHA256SUMS 2>&1)" ||
+  CHECKSUM_OUTPUT="$(assets_checksum_output "$ASSETS_DIR")" ||
     { printf '%s\n' "$CHECKSUM_OUTPUT" >&2; die "the candidate artifact set failed verification"; }
-  ARTIFACT_DIGEST="$(cd "$ASSETS_DIR" && sha256sum SHA256SUMS | awk '{print $1}')"
+  ARTIFACT_DIGEST="$(assets_digest "$ASSETS_DIR")"
   [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] ||
     die "could not compute a digest for ${ASSETS_DIR}/SHA256SUMS"
 
@@ -335,6 +480,7 @@ PY
   # reasonably pass.
   python3 - "${CLEARED_STATE_DIRS[@]}" "$BUNDLE_STAGING_DIR" -- \
     --candidate-assets-dir "$ASSETS_DIR" --evidence-dir "$EVIDENCE_DIR" \
+    ${BASELINE_DIR:+--baseline-assets-dir "$BASELINE_DIR"} \
     ${BUNDLE_DIR:+--bundle-dir "$BUNDLE_DIR"} <<'PY' || die "an input lies in a directory this run deletes"
 import os, sys
 
@@ -354,6 +500,12 @@ PY
   if [[ -n "$BUNDLE_DIR" ]]; then
     [[ -f "${BUNDLE_DIR}/manifest.json" && -f "${BUNDLE_DIR}/sample_infer.json" ]] ||
       die "--bundle-dir must contain manifest.json and sample_infer.json"
+  fi
+
+  # After the location check above, so a baseline in a directory this run
+  # deletes is refused for where it is before it is read.
+  if ((BASELINE_REQUESTED)); then
+    preflight_baseline
   fi
   pass "host is eligible: Ubuntu ${os_version} on ${HOST_ARCH}, L4T R36, ${CANDIDATE_TAG} assets verified"
 }
@@ -514,8 +666,13 @@ for line in query.stdout.splitlines():
 PYPACKAGES
 }
 
-stage_install() {
-  step "pin CLI commands to the local agent" prepare_cli_config || return
+# Remove every trace of a previous install: packages, conffiles and state.
+#
+# Called by the install stage, and again by the upgrade stage before the
+# baseline is installed fresh: an upgrade has to start from a device that
+# carries the baseline and nothing else, or what the candidate's installer
+# is asked to upgrade is not the baseline.
+clear_install() {
   note "clearing any previous TensorPlate install"
   sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
 
@@ -549,6 +706,33 @@ stage_install() {
     return 1
   fi
   step "clear installed state" sudo rm -rf "${CLEARED_STATE_DIRS[@]}" || return
+}
+
+# Install one artifact set through its own shipped installer.
+#
+# No --allow-unsigned, for either set: install.sh verifies the SHA256SUMS
+# signature with the cosign bundle that was downloaded with it. No
+# --with-python-backend: this row's smoke is the TensorRT engine.
+#
+# A run with a baseline installs from the same directories again, minutes
+# apart, so the digest recorded in preflight is compared again here and a
+# set whose SHA256SUMS has changed since is refused rather than installed
+# under the identity the earlier verification gave it.
+install_set() {
+  local dir="$1" expected_digest="$2" digest
+  # An unreadable file reads as an empty digest, which never matches.
+  digest="$(assets_digest "$dir")" || digest=""
+  if [[ "$digest" != "$expected_digest" ]]; then
+    printf '%s/SHA256SUMS changed after it was verified: recorded %s, now %s\n' \
+      "$dir" "$expected_digest" "${digest:-unreadable}" >&2
+    return 1
+  fi
+  step "install.sh" sudo bash "${dir}/install.sh" --local-artifacts "$dir" --yes || return
+}
+
+stage_install() {
+  step "pin CLI commands to the local agent" prepare_cli_config || return
+  clear_install || return
 
   # No --allow-unsigned: install.sh verifies the SHA256SUMS signature
   # with the cosign bundle that was downloaded with the set. No
@@ -561,7 +745,8 @@ stage_install() {
   step "enable ${OBSERVABILITY_UNIT}" sudo systemctl enable --now "$OBSERVABILITY_UNIT" || return
   step "services ready" await_services_ready || return
 
-  step "installed versions" check_installed_versions "${EVIDENCE_DIR}/packages.txt" || return
+  step "installed versions" \
+    check_installed_versions "$ASSETS_DIR" "${EVIDENCE_DIR}/packages.txt" || return
   # Doctor writes its report and then exits non-zero when anything fails,
   # so the report is read before the exit status decides the stage: the
   # log then names the failing findings rather than only the exit code.
@@ -573,12 +758,21 @@ stage_install() {
   pass "installed at the candidate's package versions, services ready, doctor green, ${ROW} resolved by platform_row"
 }
 
-# Every runtime package is installed at exactly the version its candidate
-# .deb declares. A service answering doctor does not show that: an
-# install.sh that left an older package in place, or a set whose packages
-# were not the ones selected, would otherwise pass.
+# Every runtime package is installed at exactly the version the .deb in
+# the given set declares. A service answering doctor does not show that:
+# an install.sh that left an older package in place, or a set whose
+# packages were not the ones selected, would otherwise pass. After an
+# upgrade or a rollback it is also what shows the device carries one set
+# and not a mixture of both.
+#
+# Only these five are compared, because only these five are ever
+# installed on this row: the run passes neither --with-python-backend nor
+# --cli-only, so the Python backend package is never installed and cannot
+# survive at the other set's version, and tensorplate-apt-source is left
+# alone deliberately. The rollback's own check_removed is what shows
+# nothing else is left installed.
 check_installed_versions() {
-  python3 - "$ASSETS_DIR" "$DEB_ARCH" >"$1" <<'PY'
+  python3 - "$1" "$DEB_ARCH" >"$2" <<'PY'
 import json, pathlib, subprocess, sys
 
 assets, deb_arch = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -621,7 +815,7 @@ for package in packages:
         continue
     print(f"{package} {expected.stdout.strip()} {debs[0]}")
 if problems:
-    raise SystemExit("installed package versions do not match the candidate set: " + "; ".join(problems))
+    raise SystemExit("installed package versions do not match the set: " + "; ".join(problems))
 PY
 }
 
@@ -676,7 +870,7 @@ PY
 # worker failure. The optional deploy response adds the initial
 # transaction assertions.
 check_trt_round_trip() {
-  local status_output="$1" result_output="$2" deploy_output="${3:-}"
+  local status_output="$1" result_output="$2" expected_id="$3" deploy_output="${4:-}"
   local work infer_output infer_command
   work="$(mktemp -d)" || return
   infer_output="${work}/infer-response.json"
@@ -693,7 +887,7 @@ check_trt_round_trip() {
     python3 "$IDENTITY_VERIFIER" "$infer_output" || return
   step "status" capture_cli_json "$status_output" status --output json || return
 
-  python3 - "$deploy_output" "$status_output" "$DEPLOYMENT_ID" "$infer_command" >"$result_output" <<'PY' || return
+  python3 - "$deploy_output" "$status_output" "$expected_id" "$infer_command" >"$result_output" <<'PY' || return
 import json, sys, urllib.parse, urllib.request
 
 deploy_path, status_path, expected, infer_path = sys.argv[1:]
@@ -811,7 +1005,7 @@ PY
     "$BUNDLE_STAGING_DIR" --deployment-id "$DEPLOYMENT_ID" --output json || return
 
   step "active worker round trip" check_trt_round_trip \
-    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$deploy_output" || return
+    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$DEPLOYMENT_ID" "$deploy_output" || return
   step "remove deployment scratch files" rm -rf "$work" || return
   pass "TensorRT bundle admitted, worker ready, identity inference round-tripped"
 }
@@ -922,7 +1116,8 @@ stage_restart() {
   # Service readiness above therefore permits the same bounded live
   # worker checks used after deploy, without submitting another deploy.
   step "recovered worker round trip" check_trt_round_trip \
-    "${EVIDENCE_DIR}/status-after-restart.json" "${EVIDENCE_DIR}/restart-result.json" || return
+    "${EVIDENCE_DIR}/status-after-restart.json" "${EVIDENCE_DIR}/restart-result.json" \
+    "$DEPLOYMENT_ID" || return
   pass "services restarted with new pids; recovered deployment answered health and identity inference"
 }
 
@@ -960,6 +1155,9 @@ finish_with_cleanup() {
   trap '' INT TERM HUP
   # Do not make restoration depend on opening another evidence file.
   cleanup_crash_loop || cleanup_status=$?
+  # Says so rather than fixing it: a device left without packages is a
+  # decision for the operator, not something to undo behind them.
+  report_stranded_device
   if ((status == 0)); then
     status="$cleanup_status"
     if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
@@ -1079,14 +1277,284 @@ stage_crash_loop() {
   ((cleanup_status == 0)) || return "$cleanup_status"
 
   step "recovered worker round trip" check_trt_round_trip \
-    "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" || return
+    "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" \
+    "$DEPLOYMENT_ID" || return
   pass "agent retried and given up on under a broken config; recovered deployment answered once restored"
+}
+
+# --- upgrade and rollback ----------------------------------------------
+
+deploy_bundle() {
+  local output="$1" id="$2"
+  note "deploying ${id} from the staged bundle"
+  step "deploy ${id}" capture_cli_json "$output" deploy \
+    "$BUNDLE_STAGING_DIR" --deployment-id "$id" --output json || return
+}
+
+unit_pids() {
+  local agent observability
+  agent="$(systemctl show -p MainPID --value "$AGENT_UNIT")" || return
+  observability="$(systemctl show -p MainPID --value "$OBSERVABILITY_UNIT")" || return
+  printf '%s %s\n' "$agent" "$observability"
+}
+
+operator_config_sha256() {
+  python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$OPERATOR_CONFIG"
+}
+
+check_operator_config_kept() {
+  local what="$1" now
+  now="$(operator_config_sha256)" || return
+  if [[ "$now" != "$OPERATOR_CONFIG_SHA256" ]]; then
+    printf '%s did not keep the operator-edited %s: sha256 was %s, now %s\n' \
+      "$what" "$OPERATOR_CONFIG" "$OPERATOR_CONFIG_SHA256" "$now" >&2
+    return 1
+  fi
+}
+
+# Doctor on the baseline is filed, not asserted. The baseline's own
+# install.sh already refuses a critical finding, and the baseline deploy
+# and inference below are what show it is a working place to move from or
+# return to. Asserting more would let a finding the candidate added, or
+# one the candidate fixed, decide the candidate's own run. The baseline
+# predates platform_row, so check_doctor_green does not apply to it.
+record_baseline_doctor() {
+  local output="$1" status=0
+  run_cli doctor --output json >"$output" || status=$?
+  printf '%s\n' "$status" >"${output%.json}.exit" || return
+  note "doctor on the baseline exited ${status}; filed as evidence, not asserted"
+}
+
+# The two sets this run moves between, named by tag and by the digest of
+# the file whose signature each installer verified. Neither side is ever
+# installed unsigned, and the report's own subject.artifact_digest stays
+# the candidate's: this file is what says where the candidate was reached
+# from and returned to.
+write_upgrade_path() {
+  python3 - "$BASELINE_TAG" "$BASELINE_DIGEST" "$CANDIDATE_TAG" "$ARTIFACT_DIGEST" \
+    >"${EVIDENCE_DIR}/upgrade-path.json" <<'PY'
+import json, sys
+
+from_tag, from_digest, to_tag, to_digest = sys.argv[1:]
+print(json.dumps({
+    "from": {"release_tag": from_tag, "sha256sums_sha256": from_digest, "allow_unsigned": False},
+    "to": {"release_tag": to_tag, "sha256sums_sha256": to_digest, "allow_unsigned": False},
+}, indent=2, sort_keys=True))
+PY
+}
+
+stage_upgrade() {
+  local before after doctor_status=0
+  # First, so a failed attempt still says what it tried to move between.
+  step "record the upgrade path" write_upgrade_path || return
+
+  # An upgrade has to start from a device carrying the baseline and
+  # nothing else. The candidate installed above is cleared for the same
+  # reason the run cleared whatever preceded it.
+  clear_install || return
+  note "installing the ${BASELINE_TAG} baseline through its own installer"
+  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
+  # No systemctl call of the harness's own around either install here:
+  # the release installer enables and starts both units itself, and
+  # bringing them up here would hide an installer that no longer does.
+  # Both units are always handled together, never one alone: the
+  # baseline's observability unit shares the agent's RuntimeDirectory,
+  # so stopping one of them alone strands the other.
+  step "baseline services ready" await_services_ready || return
+  step "baseline versions" \
+    check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-baseline.txt" || return
+  record_baseline_doctor "${EVIDENCE_DIR}/doctor-baseline.json" || return
+
+  # The baseline starts with no deployment -- its state directory was
+  # cleared with the rest of the install -- so the deployment the upgrade
+  # has to carry across is one the baseline itself created and served.
+  deploy_bundle "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" "$BASELINE_DEPLOYMENT_ID" || return
+  step "baseline worker round trip" check_trt_round_trip \
+    "${EVIDENCE_DIR}/status-baseline.json" "${EVIDENCE_DIR}/upgrade-baseline-result.json" \
+    "$BASELINE_DEPLOYMENT_ID" "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" || return
+
+  # A trailing newline keeps the file valid JSON and its mode unchanged,
+  # and makes it differ from the packaged conffile, which is what puts
+  # dpkg's conffile handling under --force-confold on the path. Nothing
+  # in this run reads it: every CLI call is pinned to a private config.
+  #
+  # What this establishes is that neither installer replaces an edited
+  # conffile. It is not a test of dpkg's conflict prompt: the packaged
+  # bytes of this file are the same in both sets, which is the case dpkg
+  # resolves by keeping the operator's copy without asking.
+  note "editing ${OPERATOR_CONFIG} as an operator would"
+  step "operator edit" sudo bash -c 'printf "\n" >>"$1"' _ "$OPERATOR_CONFIG" || return
+  OPERATOR_CONFIG_SHA256="$(operator_config_sha256)" || return
+
+  before="$(unit_pids)" || return
+  note "upgrading to ${CANDIDATE_TAG} over the running baseline"
+  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" || return
+  step "services ready after the upgrade" await_services_ready || return
+  step "candidate versions" \
+    check_installed_versions "$ASSETS_DIR" "${EVIDENCE_DIR}/packages-after-upgrade.txt" || return
+  after="$(unit_pids)" || return
+  if [[ "${after% *}" == "${before% *}" ]]; then
+    printf 'agent MainPID %s did not change across the upgrade\n' "${after% *}" >&2
+    return 1
+  fi
+  if [[ "${after#* }" == "${before#* }" ]]; then
+    printf 'observability MainPID %s did not change across the upgrade\n' "${after#* }" >&2
+    return 1
+  fi
+  check_operator_config_kept "the upgrade" || return
+
+  step "doctor after the upgrade" capture_cli_json "${EVIDENCE_DIR}/doctor-after-upgrade.json" \
+    doctor --output json || doctor_status=$?
+  check_doctor_green "${EVIDENCE_DIR}/doctor-after-upgrade.json" || return
+  ((doctor_status == 0)) || return "$doctor_status"
+
+  # No deploy: the candidate has to have re-warmed the deployment the
+  # baseline wrote to durable state, and to serve it.
+  step "surviving deployment round trip" check_trt_round_trip \
+    "${EVIDENCE_DIR}/status-after-upgrade.json" "${EVIDENCE_DIR}/upgrade-result.json" \
+    "$BASELINE_DEPLOYMENT_ID" || return
+  pass "upgraded in place with new pids; operator edit kept; doctor green and ${ROW} resolved; the baseline's deployment answered on the candidate"
+}
+
+# Removal leaves each package holding only its conffiles, never purged.
+# The dpkg status is what distinguishes the two: the packaged conffile
+# bytes are identical in both sets, so comparing the files could not.
+# A package the listing does not name at all was purged, not removed,
+# and its conffiles are gone.
+check_removed() {
+  local listing
+  listing="$(installed_tensorplate_packages)" || return
+  printf '%s\n' "$listing" >"${EVIDENCE_DIR}/packages-after-remove.txt" || return
+  python3 - "${EVIDENCE_DIR}/packages-after-remove.txt" <<'PY' || return
+import sys
+
+problems = []
+agent = "absent"
+for line in open(sys.argv[1], encoding="utf-8"):
+    fields = line.split()
+    if len(fields) != 2:
+        continue
+    if fields[0] == "tensorplate-agent":
+        agent = fields[1]
+    if fields[1] != "config-files":
+        problems.append(f"{fields[0]} is still {fields[1]}")
+if agent != "config-files":
+    problems.append(f"tensorplate-agent is {agent}, not config-files: its conffiles were not kept")
+if problems:
+    raise SystemExit("the removal did not leave only conffiles: " + "; ".join(problems))
+print("every TensorPlate package is removed with its conffiles kept")
+PY
+}
+
+# Printed when the run ends between the removal and the baseline install,
+# including from a signal. Nothing is reinstalled automatically: the
+# operator decides which set this device should carry, and a harness that
+# quietly reinstalled would hide that it had left the device bare.
+report_stranded_device() {
+  ((ROLLBACK_PACKAGES_REMOVED)) || return 0
+  printf 'the rollback removed every TensorPlate package and the %s install did not complete.\n' \
+    "$BASELINE_TAG" >&2
+  printf 'this device has NO TensorPlate installed. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
+    "$STATE_ASIDE_DIR" >&2
+  printf 'recover it by hand with:\n  sudo bash %s/install.sh --local-artifacts %s --yes\n' \
+    "$BASELINE_DIR" "$BASELINE_DIR" >&2
+  printf 'or re-run this harness, whose install stage purges and installs the candidate from scratch.\n' >&2
+}
+
+stage_rollback() {
+  local remove=() listing pkg status
+  # What the upgrade left: the candidate serving the deployment the
+  # baseline created. Read before anything is stopped, so a device that
+  # is not in that state is refused rather than half rolled back.
+  step "status before the rollback" capture_cli_json \
+    "${EVIDENCE_DIR}/status-before-rollback.json" status --output json || return
+  python3 - "${EVIDENCE_DIR}/status-before-rollback.json" "$BASELINE_DEPLOYMENT_ID" <<'PY' || return
+import json, sys
+
+path, expected = sys.argv[1:]
+active = ((json.load(open(path, encoding="utf-8"))["payload"].get("agent") or {}).get("active")) or {}
+assert active.get("deployment_id") == expected, \
+    f"the rollback must start from {expected}, which the upgrade left active; status reports {active.get('deployment_id')}"
+print(f"rolling back from the candidate serving {expected}")
+PY
+
+  # Checked before anything changes. A state.bak from before the run is
+  # already gone -- install and upgrade delete /var/lib/tensorplate while
+  # clearing the device -- so this does not keep an earlier copy. It
+  # makes sure the move below lands on a name nothing else holds, refused
+  # by name before the services are stopped, rather than leaving mv -T to
+  # replace an empty directory or refuse a full one halfway through.
+  step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
+
+  note "rolling back to ${BASELINE_TAG} by the documented procedure"
+  step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+
+  # Every installed TensorPlate package, not a fixed list, and including
+  # tensorplate-common: every runtime package Pre-Depends on common at
+  # exactly its own version, so a common left at the candidate's version
+  # turns the baseline install into a downgrade, which the apt-get -y
+  # inside install.sh refuses without --allow-downgrades. The apt
+  # channel's bootstrap package is excluded, as everywhere else in this
+  # run, and a package already reduced to its conffiles has nothing left
+  # to remove.
+  listing="$(installed_tensorplate_packages)" || return
+  while read -r pkg status; do
+    if [[ -n "$pkg" && "$status" != "config-files" ]]; then
+      remove+=("$pkg")
+    fi
+  done <<<"$listing"
+  if ((${#remove[@]} > 0)); then
+    # Set before the command runs: a removal that fails part way through
+    # leaves the device just as bare as one that completes.
+    ROLLBACK_PACKAGES_REMOVED=1
+    step "remove ${remove[*]}" \
+      sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "${remove[@]}" || return
+  fi
+  check_removed || return
+
+  note "installing the baseline fresh through its own installer"
+  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
+  ROLLBACK_PACKAGES_REMOVED=0
+  step "services ready after the rollback" await_services_ready || return
+  step "baseline versions" \
+    check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-after-rollback.txt" || return
+  check_operator_config_kept "the rollback" || return
+  step "the set-aside state is preserved" sudo test -f "${STATE_ASIDE_DIR}/state.json" || return
+  record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
+
+  # The older agent must not have loaded the newer agent's state: it
+  # answers, and has nothing active or previous. This is the documented
+  # procedure's outcome, not a defect -- the state was set aside on
+  # purpose, and what the operator restores from it is their decision.
+  step "status after the rollback" capture_cli_json \
+    "${EVIDENCE_DIR}/status-after-rollback.json" status --output json || return
+  python3 - "${EVIDENCE_DIR}/status-after-rollback.json" <<'PY' || return
+import json, sys
+
+agent = json.load(open(sys.argv[1], encoding="utf-8"))["payload"].get("agent") or {}
+assert agent.get("available") is True, f"the agent is not available after the rollback: {agent}"
+for key in ("active", "previous_active"):
+    assert key in agent, f"status after the rollback does not report {key}"
+    assert agent[key] is None, \
+        f"the rolled-back agent reports {key} {agent[key]}; it loaded state that was set aside"
+print("the rolled-back agent answers with no active or previous deployment")
+PY
+
+  deploy_bundle "${EVIDENCE_DIR}/rollback-deploy.json" "$ROLLBACK_DEPLOYMENT_ID" || return
+  step "rolled-back worker round trip" check_trt_round_trip \
+    "${EVIDENCE_DIR}/status-after-redeploy.json" "${EVIDENCE_DIR}/rollback-result.json" \
+    "$ROLLBACK_DEPLOYMENT_ID" "${EVIDENCE_DIR}/rollback-deploy.json" || return
+  pass "rolled back to ${BASELINE_TAG}; operator edit kept; state set aside and not loaded; a fresh deployment answered"
 }
 
 # --- run ---------------------------------------------------------------
 
 main() {
   parse_args "$@"
+  BASELINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}-baseline"
+  ROLLBACK_DEPLOYMENT_ID="${DEPLOYMENT_ID}-rollback"
   preflight
   prepare_bundle
   if ((PREFLIGHT_ONLY)); then
@@ -1101,8 +1569,18 @@ main() {
   EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd)"
   ASSETS_DIR="$(cd "$ASSETS_DIR" && pwd)"
   BUNDLE_DIR="$(cd "$BUNDLE_DIR" && pwd)"
+  if ((BASELINE_REQUESTED)); then
+    BASELINE_DIR="$(cd "$BASELINE_DIR" && pwd)"
+  fi
 
   printf '%s\n' "$CHECKSUM_OUTPUT" >"${EVIDENCE_DIR}/checksums.txt"
+  if ((BASELINE_REQUESTED)); then
+    printf '%s\n' "$BASELINE_CHECKSUM_OUTPUT" >"${EVIDENCE_DIR}/baseline-checksums.txt"
+    # The report attests the candidate, so the baseline's digest is filed
+    # here rather than through lifecycle_artifact_digest, which takes the
+    # one value a run is about.
+    printf '%s  SHA256SUMS\n' "$BASELINE_DIGEST" >"${EVIDENCE_DIR}/baseline-digest.txt"
+  fi
   record_host_facts || die "could not record host facts"
 
   # shellcheck source=tools/validation/lifecycle-stages.sh disable=SC1091
@@ -1121,16 +1599,34 @@ main() {
   lifecycle_stage status-logs stage_status_logs
   lifecycle_stage restart stage_restart
   lifecycle_stage crash-loop stage_crash_loop
+  # Offline belongs here, between crash-loop and upgrade: it is about the
+  # candidate install every stage above exercises, and the stages below
+  # replace that install with the baseline. Keep it in this position when
+  # it lands.
   lifecycle_skip offline \
     "not implemented yet: offline under per-unit network denial allowing only 127.0.0.1/32 and ::1/128, with a probe proving enforcement and every CLI call run under denial, is follow-up harness work"
-  lifecycle_skip upgrade \
-    "not implemented yet: upgrading from the v0.1.5 arm64 baseline to the candidate through install.sh, with the deployment re-warmed, is follow-up harness work"
-  lifecycle_skip rollback \
-    "not implemented yet: removing the candidate and reinstalling the v0.1.5 arm64 baseline through its own install.sh, then redeploying, is follow-up harness work"
+
+  # After crash-loop, so every stage above is about a clean candidate
+  # install and no crash-loop restore can still be pending once packages
+  # start being removed. A failure here exits with the stages above
+  # already recorded.
+  if ((BASELINE_REQUESTED)); then
+    lifecycle_stage upgrade stage_upgrade
+    lifecycle_stage rollback stage_rollback
+  else
+    lifecycle_skip upgrade \
+      "no baseline artifact set was supplied with --baseline-tag and --baseline-assets-dir; upgrade needs the published predecessor runtime set to move from"
+    lifecycle_skip rollback \
+      "no baseline artifact set was supplied with --baseline-tag and --baseline-assets-dir; rollback needs the published predecessor runtime set to return to"
+  fi
 
   lifecycle_finish
   printf 'evidence: %s\n' "$EVIDENCE_DIR"
-  pass "lifecycle run complete; five stages exercised, three skipped with reasons"
+  if ((BASELINE_REQUESTED)); then
+    pass "lifecycle run complete; seven stages exercised, offline skipped with its reason; ${BASELINE_TAG} is left installed"
+  else
+    pass "lifecycle run complete; five stages exercised, three skipped with reasons"
+  fi
 }
 
 main "$@"

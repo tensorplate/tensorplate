@@ -48,25 +48,56 @@ canonical = schema["properties"]["stages"]["items"]["properties"]["stage"]["enum
 
 run = re.findall(r"^\s*lifecycle_stage\s+([a-z-]+)\s", body, re.M)
 skipped = re.findall(r"^\s*lifecycle_skip\s+([a-z-]+)\s", body, re.M)
-named = run + skipped
-assert sorted(named) == sorted(canonical), (
-    f"harness covers {sorted(named)}, the schema names {sorted(canonical)}"
+assert set(run) | set(skipped) == set(canonical), (
+    f"harness covers {sorted(set(run) | set(skipped))}, the schema names {sorted(canonical)}"
 )
-assert len(set(named)) == len(named), f"a stage is named twice: {named}"
+assert len(set(run)) == len(run), f"a stage is run twice: {run}"
+assert len(set(skipped)) == len(skipped), f"a stage is skipped twice: {skipped}"
 assert set(run) == {"install", "deploy-smoke", "status-logs", "restart",
-                    "crash-loop"}, sorted(run)
+                    "crash-loop", "upgrade", "rollback"}, sorted(run)
+# upgrade and rollback are run or skipped depending on whether a baseline
+# set was supplied, so each appears once in each list. offline is the one
+# stage this harness cannot run at all.
 assert set(skipped) == {"upgrade", "rollback", "offline"}, sorted(skipped)
+assert set(run) & set(skipped) == {"upgrade", "rollback"}, sorted(set(run) & set(skipped))
 
-# Every skip states a reason, and the reason names the work that closes
-# it. An unexplained skip is indistinguishable from a stage nobody
-# thought about.
+# Every skip states a reason: an unexplained skip is indistinguishable
+# from a stage nobody thought about. offline names the work that closes
+# it; the conditional pair names the options that run them instead.
+reasons = {}
 for stage in skipped:
     match = re.search(
         r"lifecycle_skip\s+" + re.escape(stage) + r"\s*\\\n\s*\"([^\"]+)\"", body
     )
     assert match, f"{stage} is skipped without a quoted reason"
+    reasons[stage] = match.group(1)
     assert len(match.group(1)) > 40, f"{stage}'s skip reason is too thin: {match.group(1)}"
-    assert "follow-up" in match.group(1), f"{stage}'s skip reason names no follow-up work"
+assert "follow-up" in reasons["offline"], "offline's skip reason names no follow-up work"
+for stage in ("upgrade", "rollback"):
+    for option in ("--baseline-tag", "--baseline-assets-dir"):
+        assert option in reasons[stage], \
+            f"{stage}'s skip reason does not name {option}, which runs it"
+
+# Order. offline is about the candidate install the stages above
+# exercise, and upgrade replaces that install with the baseline, so
+# offline has to stay ahead of it. Rollback returns from what upgrade
+# left, so it follows.
+positions = {
+    "offline": re.search(r"^\s*lifecycle_skip\s+offline\s", body, re.M),
+    "upgrade": re.search(r"^\s*lifecycle_stage\s+upgrade\s", body, re.M),
+    "rollback": re.search(r"^\s*lifecycle_stage\s+rollback\s", body, re.M),
+}
+assert all(positions.values()), positions
+assert positions["offline"].start() < positions["upgrade"].start() < positions["rollback"].start(), \
+    "the stages must run in the order offline, upgrade, rollback"
+
+# Neither set is ever installed without its signature verified, so the
+# installer's opt-out must not appear in anything the harness runs. The
+# comments that say so are not what would install one.
+code = [line for line in body.splitlines() if not line.lstrip().startswith("#")]
+offenders = [line.strip() for line in code if "--allow-unsigned" in line]
+assert not offenders, \
+    f"the harness can pass --allow-unsigned; both sets are always signature-verified: {offenders}"
 
 # The digest must be recorded after the install stage passed, so it
 # attests an install that happened. Matched as a call rather than as a
@@ -77,6 +108,12 @@ assert install_call, "the harness does not run an install stage"
 assert digest_call, "the harness never records an artifact digest"
 assert digest_call.start() > install_call.start(), \
     "the artifact digest is recorded before the install stage"
+# One digest, and it is the candidate's. The baseline's is filed beside
+# the stage logs instead, because the report attests one artifact set.
+assert len(re.findall(r"^\s*lifecycle_artifact_digest\s", body, re.M)) == 1, \
+    "the harness records more than one artifact digest"
+assert re.search(r"^\s*lifecycle_artifact_digest\s+\"\$ARTIFACT_DIGEST\"", body, re.M), \
+    "the recorded artifact digest is not the candidate's"
 
 # lifecycle_begin clears the digest sidecar so a retry cannot inherit a
 # previous attempt's digest; a harness that wrote it first would delete
@@ -85,7 +122,7 @@ begin_call = re.search(r"^\s*lifecycle_begin\s", body, re.M)
 assert begin_call, "the harness never calls lifecycle_begin"
 assert "artifact-digest.txt" not in body[: begin_call.start()], \
     "the harness writes the digest sidecar before lifecycle_begin, which clears it"
-print("stage coverage: 5 run, 3 skipped with follow-up reasons, digest recorded after install")
+print("stage coverage: 7 run with a baseline, offline always skipped, digest recorded after install")
 PY
 
 # --- the bundle must be staged somewhere the sandboxed agent can see.
@@ -165,6 +202,14 @@ make_assets() {
 import json, pathlib, sys
 
 directory, tag, version, variant = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+# What tensorplate-release.sh records for a set built from a tag and
+# published as a GitHub release, which is what a baseline must be.
+release = {"tag": tag, "version": version,
+           "unreleased": False, "provenance": "github-release"}
+if variant == "snapshot":
+    release["unreleased"] = True
+if variant == "local-provenance":
+    release["provenance"] = "local-source-snapshot"
 artifacts = []
 for package, arch, deb_version in (
     ("tensorplate-common", "all", version),
@@ -188,8 +233,8 @@ if variant == "duplicate-cli":
     # no single package to compare the installed version against.
     artifacts.append({"file": f"tensorplate-cli_{version}_arm64.deb",
                       "package": "tensorplate-cli", "architecture": "arm64"})
-manifest ={"release": {"tag": tag, "version": version}, "artifacts": artifacts}
-(directory / "tensorplate-v0.2.1-rc.2-artifacts.json").write_text(
+manifest = {"release": release, "artifacts": artifacts}
+(directory / f"tensorplate-{tag}-artifacts.json").write_text(
     json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
 )
 PY
@@ -206,6 +251,13 @@ candidate_version='0.2.1~rc.2-1'
 assets="${td}/assets"
 make_assets "$assets" v0.2.1-rc.2 "$candidate_version"
 candidate_digest="$(sha256_of "${assets}/SHA256SUMS")"
+
+# The published predecessor set the upgrade moves from and the rollback
+# returns to: the last published arm64 runtime release.
+baseline_version='0.1.5-1'
+baseline="${td}/baseline"
+make_assets "$baseline" v0.1.5 "$baseline_version"
+baseline_digest="$(sha256_of "${baseline}/SHA256SUMS")"
 
 # --- stubs, placed unconditionally.
 #
@@ -244,8 +296,59 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
     *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
   esac
 fi
+# The operator's conffile edit, applied to the fixture copy and nowhere
+# else.
+if [ "$1" = bash ] && [ "$2" = -c ] && [ "$3" = 'printf "\n" >>"$1"' ]; then
+  [ "$5" = "${TP_FAKE_OPERATOR_CONFIG}" ] || exit 9
+  printf '\n' >>"$5"
+  exit
+fi
 case "$*" in
-  *"apt-get purge"*) : >"${TP_FAKE_PURGE_MARKER}" ;;
+  *"apt-get purge"*)
+    : >"${TP_FAKE_PURGE_MARKER}"
+    rm -f "${TP_FAKE_PKG_STATE}" "${TP_FAKE_INSTALLED_VERSION}" "${TP_FAKE_PHASE}"
+    ;;
+  # `remove`, not `purge`: the packages keep their conffiles, which is
+  # the state the rollback asserts. A mode can emulate a remove that
+  # took the conffiles with it, or that left a package behind.
+  *"apt-get remove"*)
+    printf 'removed\n' >"${TP_FAKE_PHASE}"
+    rm -f "${TP_FAKE_INSTALLED_VERSION}"
+    printf 'config-files\n' >"${TP_FAKE_PKG_STATE}"
+    ;;
+  "rm -rf /etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate")
+    rm -rf "${TP_FAKE_VARLIB}"
+    rm -f "${TP_FAKE_OPERATOR_CONFIG}" "${TP_FAKE_ACTIVE_ID}"
+    ;;
+  "test ! -e /var/lib/tensorplate/state.bak")
+    [ ! -e "${TP_FAKE_VARLIB}/state.bak" ]
+    exit
+    ;;
+  "test -f /var/lib/tensorplate/state.bak/state.json")
+    [ -f "${TP_FAKE_VARLIB}/state.bak/state.json" ]
+    exit
+    ;;
+  "mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak")
+    # GNU mv -T: never moves into the target, replaces only an empty one.
+    [ -d "${TP_FAKE_VARLIB}/state" ] || exit 1
+    if [ -e "${TP_FAKE_VARLIB}/state.bak" ]; then
+      rmdir "${TP_FAKE_VARLIB}/state.bak" 2>/dev/null || {
+        echo "mv: cannot overwrite '/var/lib/tensorplate/state.bak': Directory not empty" >&2
+        exit 1
+      }
+    fi
+    case "${TP_FAKE_MODE:-ok}" in
+      # State the older agent can still read, and state that is gone
+      # rather than set aside.
+      rollback-keeps-state) cp -R "${TP_FAKE_VARLIB}/state" "${TP_FAKE_VARLIB}/state.bak" ;;
+      rollback-state-not-preserved) rm -rf "${TP_FAKE_VARLIB}/state" ;;
+      *)
+        mv "${TP_FAKE_VARLIB}/state" "${TP_FAKE_VARLIB}/state.bak"
+        rm -f "${TP_FAKE_ACTIVE_ID}"
+        ;;
+    esac
+    exit
+    ;;
   *"systemctl restart"*)
     : >"${TP_FAKE_RESTART_MARKER}"
     if [ "${TP_FAKE_MODE:-ok}" = restart-socket-missing ]; then
@@ -254,9 +357,51 @@ case "$*" in
     ;;
   *"systemctl start"*) : >"${TP_FAKE_START_MARKER}" ;;
   "bash "*"/install.sh --local-artifacts "*)
-    : >"${TP_FAKE_INSTALLED_MARKER}"
+    # Which set was installed, and what that makes of the run so far:
+    # a baseline over a removal is a rollback, a candidate over a
+    # baseline is an upgrade.
+    previous="$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)"
+    if [ "$4" = "${TP_FAKE_BASELINE_ASSETS:-}" ]; then
+      installed_version="${TP_FAKE_BASELINE_VERSION}"
+      if [ "$previous" = removed ]; then phase=rolled-back; else phase=baseline; fi
+    else
+      installed_version="${TP_FAKE_CANDIDATE_VERSION}"
+      if [ "$previous" = baseline ]; then phase=upgraded; else phase=candidate; fi
+    fi
+    # An installer that refuses the device it is handed, before anything
+    # is installed: the rollback's is what leaves a device with no
+    # TensorPlate at all.
+    if [ "${TP_FAKE_MODE:-ok}" = "install-fails-${phase}" ]; then
+      echo "E: fixture installer refused this host" >&2
+      exit 1
+    fi
+    printf '%s\n' "$phase" >"${TP_FAKE_PHASE}"
+    printf '%s\n' "$installed_version" >"${TP_FAKE_INSTALLED_VERSION}"
+    printf 'installed\n' >"${TP_FAKE_PKG_STATE}"
+    # install-paths.sh lays out the state directory at configure time;
+    # the agent writes state.json into it when something is deployed.
+    mkdir -p "${TP_FAKE_VARLIB}/state"
+    # A conffile is written only where none exists, as --force-confold
+    # keeps an operator's copy. The reset modes model a package that
+    # replaces it anyway, in one direction or the other.
+    if [ ! -f "${TP_FAKE_OPERATOR_CONFIG}" ] ||
+       { [ "${TP_FAKE_MODE:-ok}" = upgrade-resets-conffile ] && [ "$phase" = upgraded ]; } ||
+       { [ "${TP_FAKE_MODE:-ok}" = rollback-resets-conffile ] && [ "$phase" = rolled-back ]; }; then
+      printf '{"fixture":"packaged cli config"}\n' >"${TP_FAKE_OPERATOR_CONFIG}"
+    fi
     if [ "${TP_FAKE_MODE:-ok}" = install-socket-missing ]; then
       rm -f "${TP_FAKE_SOCKET}"
+    fi
+    # An upgrade whose agent comes up without the deployment the
+    # baseline recorded, which is the whole point of the stage.
+    if [ "${TP_FAKE_MODE:-ok}" = upgrade-loses-deployment ] && [ "$phase" = upgraded ]; then
+      rm -f "${TP_FAKE_ACTIVE_ID}"
+    fi
+    # A run has deleted /var/lib/tensorplate by now, so this plants the
+    # directory where only the rollback's own refusal can catch it.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-state-aside-exists ] && [ "$phase" = upgraded ]; then
+      mkdir -p "${TP_FAKE_VARLIB}/state.bak"
+      printf '{"fixture":"an earlier rollback"}\n' >"${TP_FAKE_VARLIB}/state.bak/state.json"
     fi
     ;;
   "rm -rf ${TP_FAKE_STAGING}") rm -rf "${TP_FAKE_STAGING}" ;;
@@ -343,27 +488,52 @@ case "$*" in
     esac
     printf 'tensorplate-apt-source installed\n'
     printf 'tensorplate-backend-python-pytorch not-installed\n'
+    if [ "$mode" = purge-leaves-packages ]; then
+      printf 'tensorplate-common config-files\n'
+      exit 0
+    fi
+    # What the last privileged package operation left: installed after an
+    # install.sh, config-files after an apt-get remove, and nothing at all
+    # after a purge.
+    state=""
+    [ -f "${TP_FAKE_PKG_STATE}" ] && state="$(cat "${TP_FAKE_PKG_STATE}")"
     case "$mode" in
       installed-runtime|dpkg-query-fails-after|dpkg-query-partial-after)
-        [ -f "${TP_FAKE_PURGE_MARKER}" ] && exit 0
-        for pkg in tensorplate-agent tensorplate-serving tensorplate-observability \
-                   tensorplate-cli tensorplate-common; do
-          printf '%s installed\n' "$pkg"
-        done
+        [ -f "${TP_FAKE_PURGE_MARKER}" ] || state=installed
         ;;
-      purge-leaves-packages) printf 'tensorplate-common config-files\n' ;;
     esac
+    [ -n "$state" ] || exit 0
+    for pkg in tensorplate-agent tensorplate-serving tensorplate-observability \
+               tensorplate-cli tensorplate-common; do
+      pkg_state="$state"
+      if [ "$state" = config-files ]; then
+        case "$mode:$pkg" in
+          # A removal that did not remove, and one that purged the
+          # conffiles instead of keeping them.
+          rollback-leaves-package:tensorplate-cli) pkg_state=installed ;;
+          rollback-purges-conffiles:tensorplate-agent) pkg_state=not-installed ;;
+        esac
+      fi
+      [ "$pkg_state" = not-installed ] || printf '%s %s\n' "$pkg" "$pkg_state"
+    done
     exit 0
     ;;
 esac
 pkg=""
 for arg in "$@"; do pkg="$arg"; done
-if [ ! -f "${TP_FAKE_INSTALLED_MARKER}" ] || [ "$mode:$pkg" = "package-missing:tensorplate-serving" ]; then
+version=""
+[ -f "${TP_FAKE_INSTALLED_VERSION}" ] && version="$(cat "${TP_FAKE_INSTALLED_VERSION}")"
+if [ -z "$version" ] || [ "$mode:$pkg" = "package-missing:tensorplate-serving" ]; then
   printf 'dpkg-query: no packages found matching %s\n' "$pkg" >&2
   exit 1
 fi
-version="${TP_FAKE_CANDIDATE_VERSION}"
 [ "$mode:$pkg" = "stale-version:tensorplate-agent" ] && version='0.2.1~rc.1-1'
+# One package left behind at the other set's version, in each direction.
+phase="$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)"
+case "$mode:$phase:$pkg" in
+  upgrade-keeps-baseline-version:upgraded:tensorplate-serving) version="${TP_FAKE_BASELINE_VERSION}" ;;
+  rollback-keeps-candidate-version:rolled-back:tensorplate-cli) version="${TP_FAKE_CANDIDATE_VERSION}" ;;
+esac
 printf 'installed %s' "$version"
 STUB
 
@@ -519,6 +689,18 @@ case "$1" in
             exit 0
             ;;
         esac
+        # A service the upgrade did not actually replace: the same pid
+        # both sides of the installer run.
+        phase="$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)"
+        case "${TP_FAKE_MODE:-ok}:$phase:$*" in
+          upgrade-agent-pid-unchanged:baseline:*tensorplate-agent*|\
+          upgrade-agent-pid-unchanged:upgraded:*tensorplate-agent*|\
+          upgrade-observability-pid-unchanged:baseline:*tensorplate-observability*|\
+          upgrade-observability-pid-unchanged:upgraded:*tensorplate-observability*)
+            printf '100\n'
+            exit 0
+            ;;
+        esac
         count=$(cat "${TP_FAKE_PID_FILE}" 2>/dev/null || echo 100)
         count=$((count + 1))
         printf '%s\n' "$count" >"${TP_FAKE_PID_FILE}"
@@ -618,11 +800,13 @@ shift
 out=""
 input=""
 bundle=""
+deployment_id=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output-file) out="$2"; shift 2 ;;
     --input) input="$2"; shift 2 ;;
-    --deployment-id|--output|--component|--tail) shift 2 ;;
+    --deployment-id) deployment_id="$2"; shift 2 ;;
+    --output|--component|--tail) shift 2 ;;
     *) bundle="$1"; shift ;;
   esac
 done
@@ -638,6 +822,11 @@ case "$command" in
     warned=""
     case "$mode" in
       doctor-failing) failing=1 ;;
+      # A candidate that is only unhealthy once it has been upgraded onto
+      # the baseline, so the install stage passes and the upgrade fails.
+      upgrade-doctor-failing)
+        [ "$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)" = upgraded ] && failing=1
+        ;;
       wrong-row) row_status=warning ;;
       other-row) row=jetson-orin-nx-16gb-jp62 ;;
       profile-other-row) profile_row=jetson-orin-nx-16gb-jp62 ;;
@@ -674,13 +863,19 @@ JSON
     fi
     ;;
   deploy)
-    printf '%s\n' "$bundle" >>"${TP_FAKE_DEPLOY_LOG}"
+    printf '%s %s\n' "$deployment_id" "$bundle" >>"${TP_FAKE_DEPLOY_LOG}"
     if [ "$mode" = deploy-fails ]; then
       printf 'error: the agent rejected the deployment\n' >&2
       exit 3
     fi
+    # A deployment the agent accepted is the one status reports and the
+    # one it writes to durable state, so a later stage reading it back is
+    # reading what an earlier install actually deployed.
+    printf '%s\n' "$deployment_id" >"${TP_FAKE_ACTIVE_ID}"
+    mkdir -p "${TP_FAKE_VARLIB}/state"
+    printf '{"fixture":"durable state"}\n' >"${TP_FAKE_VARLIB}/state/state.json"
     deploy_phase=active
-    deployed="${TP_FAKE_DEPLOYMENT_ID}"
+    deployed="$deployment_id"
     [ "$mode" = deploy-not-active ] && deploy_phase=rolled_back
     [ "$mode" = deploy-other-id ] && deployed=a-different-deployment
     printf '{"command":"deploy","payload":{"phase":"%s","deployment_id":"%s"}}\n' \
@@ -696,10 +891,24 @@ JSON
     command_name=status
     severity=ready
     agent_state=ready
-    active_id="${TP_FAKE_DEPLOYMENT_ID}"
+    # What the agent has, rather than what the fixture wishes it had: an
+    # agent whose state was set aside reports no deployment at all.
+    active_id=""
+    [ -f "${TP_FAKE_ACTIVE_ID}" ] && active_id="$(cat "${TP_FAKE_ACTIVE_ID}")"
+    previous_active=null
+    available=true
     backend=tensorrt
     supervision=""
     serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
+    case "$mode" in
+      rollback-agent-unavailable)
+        [ "$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)" = rolled-back ] && available=false
+        ;;
+      rollback-previous-active)
+        [ "$(cat "${TP_FAKE_PHASE}" 2>/dev/null || echo none)" = rolled-back ] &&
+          previous_active='{"deployment_id":"an-earlier-deployment"}'
+        ;;
+    esac
     case "$mode" in
       status-fails)
         printf 'error: agent unreachable\n' >&2
@@ -717,6 +926,12 @@ JSON
       url-wrong-path) serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/predict\"" ;;
     esac
     [ "$mode:$phase" = restart-no-worker:restarted ] && serving_url=null
+    # The seventh read is the rollback's precondition: the candidate
+    # serving what the baseline deployed. A device that is not in that
+    # state must be refused there, before anything is stopped.
+    if [ "$reads" -eq 7 ] && [ "$mode" = rollback-other-active ]; then
+      active_id=a-different-deployment
+    fi
     if [ "$reads" -eq 2 ]; then
       case "$mode" in
         statuslogs-status-fails)
@@ -728,8 +943,18 @@ JSON
         statuslogs-wrong-command) command_name=doctor ;;
       esac
     fi
-    printf '{"command":"%s","payload":{"severity":"%s","agent":{"agent_state":"%s","active":{"deployment_id":"%s","backend":"%s","serving_url":%s}%s}}}\n' \
-      "$command_name" "$severity" "$agent_state" "$active_id" "$backend" "$serving_url" "$supervision"
+    if [ -z "$active_id" ]; then
+      active=null
+    else
+      active="{\"deployment_id\":\"${active_id}\",\"backend\":\"${backend}\",\"serving_url\":${serving_url}}"
+    fi
+    if [ "$available" = false ]; then
+      printf '{"command":"%s","payload":{"severity":"%s","agent":{"available":false}}}\n' \
+        "$command_name" "$severity"
+      exit 0
+    fi
+    printf '{"command":"%s","payload":{"severity":"%s","agent":{"available":true,"agent_state":"%s","active":%s,"previous_active":%s%s}}}\n' \
+      "$command_name" "$severity" "$agent_state" "$active" "$previous_active" "$supervision"
     ;;
   infer)
     printf '%s %s\n' "$phase" "$input" >>"${TP_FAKE_INFER_LOG}"
@@ -1103,7 +1328,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with (directory / "health-requests.log").open("a") as log:
             log.write(f"{phase} {self.path}\n")
         state = "failed" if restarted and mode == "restart-unhealthy-health" else "ready"
-        deployment = (directory / "deployment-id").read_text().strip()
+        # The worker serves whatever the agent last deployed, so the
+        # health endpoint answers about that and not about a fixture
+        # constant: after an upgrade or a rollback it is a different id.
+        active = directory / "active-id"
+        deployment = active.read_text().strip() if active.exists() else ""
         if (restarted and mode == "restart-wrong-health") or mode == "health-wrong-deployment":
             deployment = "a-different-deployment"
         body = json.dumps({"state": state, "active_model_id": deployment}).encode()
@@ -1126,7 +1355,6 @@ server.serve_forever()
 PY
 health_pid=$!
 deployment_id="jetson-lifecycle-smoke"
-printf '%s\n' "$deployment_id" >"${appliance}/deployment-id"
 for _ in $(seq 1 50); do
   [[ -s "${appliance}/health.port" ]] && break
   sleep 0.1
@@ -1166,12 +1394,13 @@ run_stages() {
   : >"${appliance}/cxx.log"
   : >"${appliance}/cli-calls.jsonl"
   : >"${appliance}/health-requests.log"
-  rm -rf "${appliance}/staged-bundle" "${appliance}/scratch"
+  rm -rf "${appliance}/staged-bundle" "${appliance}/scratch" "${appliance}/varlib"
   mkdir -p "${appliance}/scratch"
-  rm -f "${appliance}/restarted" "${appliance}/config-broken" "${appliance}/installed" \
+  rm -f "${appliance}/restarted" "${appliance}/config-broken" "${appliance}/installed-version" \
     "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path" \
     "${appliance}/pid" "${appliance}/started" "${appliance}/status-reads" "${appliance}/mainpid-reads" \
-    "${appliance}/package-list-reads"
+    "${appliance}/package-list-reads" "${appliance}/phase" "${appliance}/package-state" \
+    "${appliance}/active-id" "${appliance}/cli.json"
   # A case may have removed the control socket.
   if [[ ! -S "${appliance}/run/agent.sock" ]]; then
     python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' \
@@ -1197,7 +1426,15 @@ run_stages() {
     TP_FAKE_MKTEMP="$real_mktemp" \
     TP_FAKE_SUDO_FAIL="$sudo_fail" \
     TP_FAKE_PURGE_MARKER="${evidence}.purged" \
-    TP_FAKE_INSTALLED_MARKER="${appliance}/installed" \
+    TP_FAKE_INSTALLED_VERSION="${appliance}/installed-version" \
+    TP_FAKE_PKG_STATE="${appliance}/package-state" \
+    TP_FAKE_PHASE="${appliance}/phase" \
+    TP_FAKE_VARLIB="${appliance}/varlib" \
+    TP_FAKE_ACTIVE_ID="${appliance}/active-id" \
+    TP_FAKE_OPERATOR_CONFIG="${appliance}/cli.json" \
+    TP_JETSON_OPERATOR_CONFIG="${appliance}/cli.json" \
+    TP_FAKE_BASELINE_ASSETS="$baseline" \
+    TP_FAKE_BASELINE_VERSION="$baseline_version" \
     TP_FAKE_CANDIDATE_VERSION="$candidate_version" \
     TP_FAKE_STAGING="${appliance}/staged-bundle" \
     TP_FAKE_CXX_LOG="${appliance}/cxx.log" \
@@ -1216,7 +1453,6 @@ run_stages() {
     TP_FAKE_INFER_LOG="${appliance}/infer.log" \
     TP_FAKE_DEPLOY_LOG="${appliance}/deploy.log" \
     TP_FAKE_PID_FILE="${appliance}/pid" \
-    TP_FAKE_DEPLOYMENT_ID="$deployment_id" \
     TP_FAKE_SERVING_PORT="$serving_port" \
     TP_FAKE_CONFIG_BROKEN="${appliance}/config-broken" \
     TP_FAKE_AGENT_CONFIG="${appliance}/agent-config" \
@@ -1291,17 +1527,20 @@ for stage in upgrade rollback offline; do
 done
 check "  the skipped stages keep the run incomplete" incomplete \
   "$(report_field "${ok_evidence}/lifecycle-report.json" outcome)"
-check "  every skip names its follow-up work" yes \
+check "  every skip says what would run it" yes \
   "$(python3 - "${ok_evidence}/lifecycle-report.json" <<'PY'
 import json, sys
 
 stages = {s["stage"]: s for s in json.load(open(sys.argv[1]))["stages"]}
-wanted = {"offline": "127.0.0.1/32", "upgrade": "v0.1.5", "rollback": "v0.1.5"}
+# offline names the work that closes it; the two that a baseline would
+# have run name the options that run them.
+wanted = {"offline": ["follow-up", "127.0.0.1/32"],
+          "upgrade": ["--baseline-tag", "--baseline-assets-dir"],
+          "rollback": ["--baseline-tag", "--baseline-assets-dir"]}
 print("yes" if all(
     stages[name]["status"] == "skipped"
-    and "follow-up" in stages[name].get("detail", "")
-    and marker in stages[name].get("detail", "")
-    for name, marker in wanted.items()
+    and all(marker in stages[name].get("detail", "") for marker in markers)
+    for name, markers in wanted.items()
 ) else "no")
 PY
 )"
@@ -1331,8 +1570,8 @@ check "  the installed versions are filed per package" 5 \
   "$(grep -c "~rc.2-1 " "${ok_evidence}/packages.txt" || true)"
 check "  and never the other architecture's build" no \
   "$(grep -Fq amd64 "${ok_evidence}/packages.txt" && echo yes || echo no)"
-check "  the deploy names the staged bundle" "${appliance}/staged-bundle" \
-  "$(cat "${appliance}/deploy.log")"
+check "  the deploy names the smoke id and the staged bundle" \
+  "${deployment_id} ${appliance}/staged-bundle" "$(cat "${appliance}/deploy.log")"
 check "  the recorded result is the TensorRT identity round trip" "tensorrt tensorrt_identity" \
   "$(python3 -c 'import json,sys
 r=json.load(open(sys.argv[1]));print(r["backend"], r["inference_round_trip"])' "${ok_evidence}/deploy-result.json")"
@@ -1809,6 +2048,314 @@ check "a persistent config restore failure refuses the run" 9 \
 check "  and preserves the backup for manual recovery" yes "$(backup_retained)"
 check "  the report does not certify the failed recovery" fail \
   "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+
+# --- upgrade and rollback.
+#
+# Two more installs and a removal, so the fixture dpkg database, the
+# conffile and the durable state all move with them: the assertions are
+# about what the device carries after each step, not about which commands
+# were logged.
+run_baseline_stages() {
+  local mode="$1" evidence="$2" sudo_fail="${3:-}"
+  shift 3
+  run_stages "$mode" "$evidence" "$sudo_fail" --bundle-dir "${td}/bundle-good" \
+    --baseline-tag v0.1.5 --baseline-assets-dir "$baseline" "$@"
+}
+# The assets directory of each install.sh call, in order, and the sudo
+# log line number of the Nth of them.
+install_order() {
+  grep -F '/install.sh --local-artifacts ' "${appliance}/sudo.log" | awk '{print $4}' | tr '\n' ' '
+}
+install_line() {
+  grep -nF '/install.sh --local-artifacts ' "${appliance}/sudo.log" | sed -n "${1}p" | cut -d: -f1
+}
+# The packaged conffile plus the operator's appended newline: the
+# content unchanged, and one more line than the package ships.
+operator_config_edited() {
+  if [[ ! -f "${appliance}/cli.json" ]]; then
+    echo missing
+  elif [[ "$(cat "${appliance}/cli.json")" == '{"fixture":"packaged cli config"}' &&
+          "$(wc -l <"${appliance}/cli.json")" -eq 2 ]]; then
+    echo yes
+  else
+    echo no
+  fi
+}
+
+baseline_evidence="${td}/stages-baseline"
+check "a run with a baseline completes" "0" "$(run_baseline_stages ok "$baseline_evidence" "")"
+for stage in install deploy-smoke status-logs restart crash-loop upgrade rollback; do
+  check "  ${stage} is recorded as a pass" "pass" \
+    "$(stage_status "${baseline_evidence}/lifecycle-report.json" "$stage")"
+done
+check "  offline is the only skipped stage" skipped \
+  "$(stage_status "${baseline_evidence}/lifecycle-report.json" offline)"
+check "  and keeps the run incomplete" incomplete \
+  "$(report_field "${baseline_evidence}/lifecycle-report.json" outcome)"
+check "  the report still attests the candidate, not the baseline" "$candidate_digest" \
+  "$(report_field "${baseline_evidence}/lifecycle-report.json" subject artifact_digest)"
+check "  and the baseline digest is filed on its own" "${baseline_digest}  SHA256SUMS" \
+  "$(cat "${baseline_evidence}/baseline-digest.txt")"
+check "  the baseline checksum verification is filed" yes \
+  "$(grep -Fq 'install.sh: OK' "${baseline_evidence}/baseline-checksums.txt" && echo yes || echo no)"
+check "  the upgrade path names both tags and neither is unsigned" \
+  "v0.1.5 False v0.2.1-rc.2 False" \
+  "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+print(p["from"]["release_tag"], p["from"]["allow_unsigned"], p["to"]["release_tag"], p["to"]["allow_unsigned"])' \
+    "${baseline_evidence}/upgrade-path.json")"
+check "  and the digests it names are each set's own" "${baseline_digest} ${candidate_digest}" \
+  "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+print(p["from"]["sha256sums_sha256"], p["to"]["sha256sums_sha256"])' \
+    "${baseline_evidence}/upgrade-path.json")"
+
+# candidate, then baseline, then candidate over it, then baseline again.
+check "  the run installs candidate, baseline, candidate, baseline" \
+  "${assets} ${baseline} ${assets} ${baseline} " "$(install_order)"
+check "  the upgrade purges the candidate before installing the baseline" yes \
+  "$(purge="$(sudo_line 'apt-get purge')"; first="$(install_line 1)"; second="$(install_line 2)"
+     [[ -n "$purge" && -n "$first" && -n "$second" && "$first" -lt "$purge" && "$purge" -lt "$second" ]] \
+       && echo yes || echo no)"
+check "  and the rollback removes rather than purges" 1 \
+  "$(grep -c 'apt-get purge' "${appliance}/sudo.log" || true)"
+check "  the removal falls between the upgrade and the last install" yes \
+  "$(remove="$(sudo_line 'apt-get remove')"; third="$(install_line 3)"; fourth="$(install_line 4)"
+     [[ -n "$remove" && -n "$third" && -n "$fourth" && "$third" -lt "$remove" && "$remove" -lt "$fourth" ]] \
+       && echo yes || echo no)"
+remove_line="$(grep -F 'apt-get remove' "${appliance}/sudo.log" || true)"
+check "  the removal names tensorplate-common" yes \
+  "$(printf '%s\n' "$remove_line" | tr ' ' '\n' | grep -qx 'tensorplate-common' && echo yes || echo no)"
+check "  and leaves the apt channel's bootstrap package installed" no \
+  "$(printf '%s\n' "$remove_line" | tr ' ' '\n' | grep -qx 'tensorplate-apt-source' && echo yes || echo no)"
+check "  the state is set aside under the documented name" yes \
+  "$(grep -Fxq 'mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak' "${appliance}/sudo.log" \
+     && echo yes || echo no)"
+check "  and the set-aside state survived the rollback" yes \
+  "$([[ -f "${appliance}/varlib/state.bak/state.json" ]] && echo yes || echo no)"
+check "  the operator's conffile edit survived both directions" yes "$(operator_config_edited)"
+check "  the baseline versions are filed per package" 5 \
+  "$(grep -c "${baseline_version} " "${baseline_evidence}/packages-baseline.txt" || true)"
+check "  the candidate versions are filed after the upgrade" 5 \
+  "$(grep -c "${candidate_version} " "${baseline_evidence}/packages-after-upgrade.txt" || true)"
+check "  the baseline versions are filed after the rollback" 5 \
+  "$(grep -c "${baseline_version} " "${baseline_evidence}/packages-after-rollback.txt" || true)"
+check "  every removed package kept its conffiles" 5 \
+  "$(grep -c ' config-files' "${baseline_evidence}/packages-after-remove.txt" || true)"
+check "  the baseline doctor is filed rather than asserted" "0 0" \
+  "$(cat "${baseline_evidence}/doctor-baseline.exit" "${baseline_evidence}/doctor-after-rollback.exit" | tr '\n' ' ' | sed 's/ $//')"
+check "  each install served a deployment under its own id" \
+  "jetson-lifecycle-smoke jetson-lifecycle-smoke-baseline jetson-lifecycle-smoke-rollback" \
+  "$(awk '{print $1}' "${appliance}/deploy.log" | tr '\n' ' ' | sed 's/ $//')"
+check "  the candidate re-warmed the baseline's deployment without a deploy of its own" \
+  jetson-lifecycle-smoke-baseline \
+  "$(report_field "${baseline_evidence}/upgrade-result.json" deployment_id)"
+check "  and answered its identity request" tensorrt_identity \
+  "$(report_field "${baseline_evidence}/upgrade-result.json" inference_round_trip)"
+check "  the rolled-back agent reported no deployment before the redeploy" None \
+  "$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["payload"]["agent"]["active"])' \
+    "${baseline_evidence}/status-after-rollback.json")"
+check "  and the fresh deployment answered on the baseline" jetson-lifecycle-smoke-rollback \
+  "$(report_field "${baseline_evidence}/rollback-result.json" deployment_id)"
+check "  no run left the device without TensorPlate" no \
+  "$(grep -Fq 'this device has NO TensorPlate installed' "${baseline_evidence}.err" && echo yes || echo no)"
+check "  and the report is schema-valid" "yes" \
+  "$(python3 - "$schema" "${baseline_evidence}/lifecycle-report.json" <<'PY'
+import json, sys
+try:
+    import jsonschema
+except ImportError:
+    print("yes")
+    sys.exit(0)
+errors = list(jsonschema.Draft7Validator(json.load(open(sys.argv[1]))).iter_errors(
+    json.load(open(sys.argv[2]))))
+print("yes" if not errors else f"no: {errors[0].message}")
+PY
+)"
+
+# --- the baseline's own eligibility.
+baseline_preflight() {
+  local evidence="$1"
+  shift
+  preflight aarch64 "$jammy" "$r36" "$evidence" 0.2.1 v0.2.1-rc.2 "$assets" \
+    --bundle-dir "${td}/bundle-good" "${confirm[@]}" "$@"
+}
+check "a baseline older than the candidate passes preflight" "0" \
+  "$(baseline_preflight "${td}/evidence-baseline-ok" --baseline-tag v0.1.5 --baseline-assets-dir "$baseline")"
+check "--baseline-assets-dir without --baseline-tag is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-no-tag" --baseline-assets-dir "$baseline")"
+check "  and names the missing --baseline-tag" yes "$(said 'needs --baseline-tag')"
+check "--baseline-tag without --baseline-assets-dir is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-no-dir" --baseline-tag v0.1.5)"
+check "  and names the missing --baseline-assets-dir" yes "$(said 'needs --baseline-assets-dir')"
+check "a baseline directory that does not exist is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-absent" --baseline-tag v0.1.5 \
+     --baseline-assets-dir "${td}/absent-baseline")"
+check "  and says the directory is missing" yes \
+  "$(said '--baseline-assets-dir must name a directory')"
+check "a baseline whose manifest names another tag is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-other-tag" --baseline-tag v0.1.4 \
+     --baseline-assets-dir "$baseline")"
+check "  and names the tag the manifest carries" yes "$(said "names release tag 'v0.1.5'")"
+check "a baseline under a directory this run deletes is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-deleted" --baseline-tag v0.1.5 \
+     --baseline-assets-dir /var/lib/tensorplate/baseline)"
+check "  and says the run deletes the baseline directory" yes \
+  "$(said '--baseline-assets-dir /var/lib/tensorplate/baseline is under')"
+
+# Strictly older, with a candidate sorting below the release it leads to.
+for order_case in "v0.2.1-rc.2|1|must be strictly older" \
+                  "v0.2.1|1|must be strictly older" \
+                  "v0.3.0|1|must be strictly older" \
+                  "v0.2.2-rc.1|1|must be strictly older"; do
+  order_tag="${order_case%%|*}"
+  rest="${order_case#*|}"
+  make_assets "${td}/baseline-${order_tag}" "$order_tag" 0.9.9-1
+  check "a baseline tagged ${order_tag} is refused against v0.2.1-rc.2" "${rest%%|*}" \
+    "$(baseline_preflight "${td}/evidence-order-${order_tag}" --baseline-tag "$order_tag" \
+       --baseline-assets-dir "${td}/baseline-${order_tag}")"
+  check "  and says why" yes "$(said "${rest#*|}")"
+done
+make_assets "${td}/baseline-rc1" v0.2.1-rc.1 '0.2.1~rc.1-1'
+check "an earlier release candidate is an acceptable baseline" "0" \
+  "$(baseline_preflight "${td}/evidence-order-rc1" --baseline-tag v0.2.1-rc.1 \
+     --baseline-assets-dir "${td}/baseline-rc1")"
+check "a baseline tag that is not a release tag is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-bad-tag" --baseline-tag 0.1.5 \
+     --baseline-assets-dir "$baseline")"
+check "  and names the accepted spellings" yes "$(said '--baseline-tag must be a release tag')"
+
+# A baseline is the published predecessor, not a set somebody built.
+for published_case in "snapshot|unreleased=True" "local-provenance|provenance='local-source-snapshot'"; do
+  variant="${published_case%%|*}"
+  make_assets "${td}/baseline-${variant}" v0.1.5 "$baseline_version" "$variant"
+  check "a ${variant} baseline is refused" "1" \
+    "$(baseline_preflight "${td}/evidence-baseline-${variant}" --baseline-tag v0.1.5 \
+       --baseline-assets-dir "${td}/baseline-${variant}")"
+  check "  and says it is not a published release" yes "$(said "${published_case#*|}")"
+done
+
+cp -R "$baseline" "${td}/baseline-tampered"
+printf 'tampered\n' >>"${td}/baseline-tampered/install.sh"
+check "a baseline that fails its checksums is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-baseline-checksums" --baseline-tag v0.1.5 \
+     --baseline-assets-dir "${td}/baseline-tampered")"
+check "  and says the set failed verification" yes \
+  "$(said 'the baseline artifact set failed verification')"
+check "  before anything privileged ran" "" "$(cat "${td}/preflight-sudo.log")"
+
+# --- upgrade regressions.
+for mode_case in "upgrade-keeps-baseline-version|installed package versions do not match the set" \
+                 "upgrade-agent-pid-unchanged|agent MainPID 100 did not change across the upgrade" \
+                 "upgrade-observability-pid-unchanged|observability MainPID 100 did not change across the upgrade" \
+                 "upgrade-resets-conffile|the upgrade did not keep the operator-edited" \
+                 "upgrade-doctor-failing|doctor reports 1 failing finding(s)" \
+                 "upgrade-loses-deployment|checks failed: active_deployment" \
+                 "install-fails-baseline|step failed (exit 1): install.sh" \
+                 "install-fails-upgraded|step failed (exit 1): install.sh"; do
+  mode="${mode_case%%|*}"
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails the run" 1 "$(run_baseline_stages "$mode" "$evidence" "")"
+  check "  crash-loop passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and upgrade is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" upgrade)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/upgrade.log" "${mode_case#*|}")"
+  check "  and the rollback never runs on a device the upgrade left broken" absent \
+    "$(stage_status "${evidence}/lifecycle-report.json" rollback)"
+  check "  and nothing was removed" no \
+    "$(grep -Fq 'apt-get remove' "${appliance}/sudo.log" && echo yes || echo no)"
+  if [[ "$mode" == upgrade-loses-deployment ]]; then
+    check "  and no deploy of the harness's own hid the loss" \
+      "jetson-lifecycle-smoke jetson-lifecycle-smoke-baseline" \
+      "$(awk '{print $1}' "${appliance}/deploy.log" | tr '\n' ' ' | sed 's/ $//')"
+  fi
+  # An installer whose failure is not checked leaves the stage running
+  # against a device that has nothing installed, where a later check
+  # fails for a reason that is not the one that happened.
+  if [[ "$mode" == install-fails-baseline ]]; then
+    check "  and the stage stopped rather than checking versions" no \
+      "$([[ -e "${evidence}/packages-baseline.txt" ]] && echo yes || echo no)"
+  fi
+done
+for injected_case in "install.sh --local-artifacts ${baseline}=install.sh" \
+                     ">>=operator edit"; do
+  injected="${injected_case%%=*}"
+  step_name="${injected_case#*=}"
+  evidence="${td}/stages-upgrade-sudo-${step_name// /-}"
+  check "a failing '${step_name}' during the upgrade is recorded as a failed upgrade" fail \
+    "$(run_baseline_stages ok "$evidence" "$injected" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" upgrade)"
+  check "  and the failed step is the one named" yes \
+    "$(logged "${evidence}/upgrade.log" "step failed (exit 9): ${step_name}")"
+done
+
+# --- rollback regressions.
+for mode_case in "rollback-other-active|the rollback must start from jetson-lifecycle-smoke-baseline" \
+                 "rollback-state-aside-exists|step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/state.bak" \
+                 "rollback-leaves-package|the removal did not leave only conffiles: tensorplate-cli is still installed" \
+                 "rollback-purges-conffiles|tensorplate-agent is absent, not config-files" \
+                 "rollback-keeps-candidate-version|installed package versions do not match the set" \
+                 "rollback-resets-conffile|the rollback did not keep the operator-edited" \
+                 "rollback-state-not-preserved|step failed (exit 1): the set-aside state is preserved" \
+                 "rollback-keeps-state|it loaded state that was set aside" \
+                 "rollback-agent-unavailable|the agent is not available after the rollback" \
+                 "rollback-previous-active|reports previous_active" \
+                 "install-fails-rolled-back|step failed (exit 1): install.sh"; do
+  mode="${mode_case%%|*}"
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails the run" 1 "$(run_baseline_stages "$mode" "$evidence" "")"
+  check "  upgrade passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" upgrade)"
+  check "  and rollback is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" rollback)"
+  check "  for the reason the case provokes" yes "$(logged "${evidence}/rollback.log" "${mode_case#*|}")"
+done
+# A precondition is only a precondition if it is checked before the
+# device is touched.
+for mode in rollback-other-active rollback-state-aside-exists; do
+  check "${mode} stops before the services are stopped" no \
+    "$(grep -Fq 'systemctl stop tensorplate-agent tensorplate-observability' \
+       "${td}/stages-${mode}.err" && echo yes || echo no)"
+  check "  and before anything is removed" no \
+    "$(grep -Fq 'apt-get remove' "${td}/stages-${mode}/rollback.log" && echo yes || echo no)"
+done
+evidence="${td}/stages-rollback-leaves-package-alone"
+check "a removal that leaves a package fails before the baseline is installed over it" fail \
+  "$(run_baseline_stages rollback-leaves-package "$evidence" "" >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" rollback)"
+check "  and the last install was still the candidate's" "$assets" \
+  "$(grep -F '/install.sh --local-artifacts ' "${appliance}/sudo.log" | tail -n1 | awk '{print $4}')"
+
+# A device whose packages are gone and whose baseline did not install is
+# left bare. The harness says so and reinstalls nothing by itself.
+stranded="${td}/stages-stranded"
+check "a failed baseline install fails the rollback" fail \
+  "$(run_baseline_stages install-fails-rolled-back "$stranded" "" >/dev/null; \
+     stage_status "${stranded}/lifecycle-report.json" rollback)"
+check "  and reports the stranded device" yes \
+  "$(grep -Fq 'this device has NO TensorPlate installed' "${stranded}.err" && echo yes || echo no)"
+check "  and names the set-aside state" yes \
+  "$(grep -Fq '/var/lib/tensorplate/state.bak' "${stranded}.err" && echo yes || echo no)"
+check "  and hands the operator the command rather than attempting it" 4 \
+  "$(grep -cF '/install.sh --local-artifacts ' "${appliance}/sudo.log" || true)"
+
+for injected_case in "systemctl stop tensorplate-agent tensorplate-observability=stop the services" \
+                     "mv -T=set durable state aside" \
+                     "apt-get remove=remove tensorplate-"; do
+  injected="${injected_case%%=*}"
+  step_name="${injected_case#*=}"
+  evidence="${td}/stages-rollback-sudo-${step_name// /-}"
+  check "a failing '${step_name}' during the rollback is recorded as a failed rollback" fail \
+    "$(run_baseline_stages ok "$evidence" "$injected" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" rollback)"
+  check "  and the failed step is the one named" yes \
+    "$(logged "${evidence}/rollback.log" "step failed (exit 9): ${step_name}")"
+done
+check "a removal that fails leaves the device where the operator can see it" yes \
+  "$(grep -Fq 'this device has NO TensorPlate installed' \
+     "${td}/stages-rollback-sudo-remove-tensorplate-.err" && echo yes || echo no)"
 
 printf '\n%s\n' "$([[ "$failures" -eq 0 ]] && echo "verify_jetson_lifecycle: ok" || echo "${failures} check(s) failed")"
 exit "$failures"
