@@ -101,8 +101,13 @@ serve, and both follow from that build. `packaging/conf/agent.amd64.json`,
 which dh-exec installs as `/etc/tensorplate/agent.json` on amd64, lists
 `python_pytorch` alone; the `x86_64` platform support rows under
 `config/platform/rows/` declare a package set for that path and no other.
-Deploy admission reads the row, so a row naming a path the build does not
-contain would admit a bundle the worker can only refuse at engine lookup.
+The two are gates in series, not one gate stated twice. The config is read
+first: a bundle naming a backend it does not list is refused at
+compatibility evaluation with `UnavailableBackend`, before the row is
+consulted. `/etc/tensorplate/agent.json` is a dpkg conffile, so an operator
+can edit it; the row is the gate that remains when they do, and a row
+naming a path the build does not contain would there admit a bundle the
+worker can only refuse at engine lookup.
 `agent/tests/row_backend_declarations.rs` holds the two in agreement: a row
 may not declare a backend path the agent config shipped for its package
 channel and CPU architecture omits. The `arm64` rows keep `tensorrt`,

@@ -618,13 +618,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `TP_ENABLE_TENSORRT=OFF`, so the shipped binary contains no TensorRT
   adapter and `packaging/conf/agent.amd64.json` advertises only
   `python_pytorch`; the rows nonetheless named a `tensorrt` path satisfied
-  by the `tensorplate-serving` package. Deploy admission reads the row, so
-  on an L4, H100, A100 or RTX PRO 6000 host it found that package installed
-  and admitted a TensorRT bundle the worker can only refuse at engine
-  lookup. Such a deploy is now refused with `MissingBackendPackage` naming
-  the undeclared path. The `arm64` Jetson rows keep `tensorrt`: that build
-  compiles the adapter. `doctor` output is unchanged — it never reported a
-  row's declared backend paths, which is part of why the claim went
+  by the `tensorplate-serving` package. That was a false published claim
+  about every L4, H100, A100 and RTX PRO 6000 row first, and a live
+  admission hole second. On a stock install the hole was not reachable:
+  the shipped `/etc/tensorplate/agent.json` lists `python_pytorch` alone,
+  and a TensorRT bundle is refused a step earlier, at compatibility
+  evaluation, with `UnavailableBackend`. Deploy admission consults the row
+  only after that check passes, so the row was the last gate exactly where
+  an operator had edited that dpkg conffile to advertise `tensorrt` — and
+  there the row found `tensorplate-serving` installed and admitted a bundle
+  the worker can only refuse at engine lookup. That host is now refused with
+  `MissingBackendPackage` naming the undeclared path, the architecture, and
+  the paths the row does declare. The `arm64` Jetson rows keep `tensorrt`:
+  that build compiles the adapter. `doctor` output is unchanged — it never
+  reported a row's declared backend paths, and it still reports no
+  installed build's compiled backends, which is part of why the claim went
   unnoticed.
 
 - A support row may no longer declare a backend path that the agent config
