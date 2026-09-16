@@ -10,16 +10,28 @@ denied unit, classifies every result against an undenied control, and
 checks that the row was resolved from the boot-bound machine-type record
 rather than from a metadata service the denial made unreachable.
 
-It is named for the mechanism, not for a row: the drop-in, the probe and
-the classification are the same on a Compute Engine VM and on a Jetson,
-and tools/validation/jetson-lifecycle.sh defers its offline stage with
-exactly this bar.
+It is named for the mechanism, not for a row. The drop-in, the policy
+readback, the probe and the classification carry no row in them. What is
+row-specific is supplied as options, so another systemd harness adopts
+this file unchanged rather than editing it:
+
+  * `probe` and `control` take `--metadata-address`, and `none` omits
+    that operation on a host that has no metadata service;
+  * `classify` takes `--metadata-operation absent`, which then requires
+    the operation to be absent from both documents rather than letting a
+    missing operation read as one that passed;
+  * `doctor-check` and `identity-check` take the tokens the row expects
+    its agent and its doctor to say.
+
+Every default is the Compute Engine row's, because that is the row this
+release validates; tools/validation/jetson-lifecycle.sh defers its
+offline stage with exactly this bar and supplies its own.
 
 Every subcommand prints its JSON result, writes it to --out when given,
 and exits non-zero naming the checks that failed. Results written to the
 evidence directory carry no host addresses, unit paths or process ids.
 
-Three fail-open shapes this closes, because each of them turns a stage
+Four fail-open shapes this closes, because each of them turns a stage
 that proves nothing into a stage that passes:
 
   * `systemctl show` answers for a unit that does not exist, is not
@@ -27,6 +39,11 @@ that proves nothing into a stage that passes:
     readback that only looks for unexpected entries therefore passes for
     a unit nobody denied. Every readback here requires the unit to be
     loaded, active and carrying an invocation id first.
+  * `systemctl show` answers with the unit's LOADED configuration, which
+    counts a drop-in from `daemon-reload` onwards whether or not anything
+    restarted under it. So the readback also compares the invocation id
+    against the one from before, and a policy that never reached a
+    running instance fails.
   * `IPAddressDeny=` is silently inert where systemd cannot install its
     BPF filter. Reading the property back proves the configuration, never
     the enforcement, so the probe is what decides -- and a probe that
@@ -99,9 +116,11 @@ DENIAL_PROPERTIES = ("IPAddressDeny=any",) + tuple(
 
 # The GCE metadata service. The offline claim is about this address being
 # unreachable, so the control has to reach it: EPERM under denial means
-# nothing unless the same operation succeeded moments earlier.
+# nothing unless the same operation succeeded moments earlier. A row with
+# no metadata service passes --metadata-address none and omits it.
 METADATA_ADDRESS = "169.254.169.254"
 METADATA_PORT = 80
+METADATA_OPERATION = "tcp_gce_metadata"
 
 # A policy refusal, as against a routing or listener outcome. The BPF
 # filter answers the sending syscall with EPERM; EACCES is accepted
@@ -109,11 +128,25 @@ METADATA_PORT = 80
 # either.
 REFUSED = ("EPERM", "EACCES")
 
+# Outcomes that mean the send never reached the address filter at all.
+#
+# On Linux the cgroup egress filter runs after the route lookup, so a
+# destination the host has no route for answers the same way with and
+# without the drop-in. An IPv4-only VM -- the default Compute Engine VPC
+# is IPv4-only -- answers every global IPv6 destination this way. Such an
+# operation discriminates nothing on that host: it is named in the result
+# rather than counted as a refusal or as a failure to refuse, and all
+# that can be required of the probe is that the denial did not make it
+# start working. Refusals are tested first, so an EPERM is never read as
+# one of these.
+UNROUTABLE = ("ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "EAFNOSUPPORT",
+              "EADDRNOTAVAIL", "EPFNOSUPPORT")
+
 CONNECT_TIMEOUT_SECONDS = 5
 
 # Operations the denial must refuse, and the undenied control must not.
 DENIED_NAMES = (
-    "tcp_gce_metadata",
+    METADATA_OPERATION,
     "tcp_resolver_stub",
     "udp_resolver_stub",
     "udp_loopback_alias",
@@ -141,6 +174,8 @@ LIVE_SOURCE = "gce_metadata"
 # A record written during the offline stage would mean the agent reached
 # the metadata service, or recorded the record from itself.
 RECORD_NOT_APPLICABLE = "not_applicable"
+# What the agent logs where it established no machine type at all.
+NO_SOURCE = "none"
 
 # cli/src/commands/doctor/mod.rs renders one of these into host_os.
 DOCTOR_RECORDED_PHRASE = "recorded from GCE metadata by tensorplate-agent"
@@ -200,9 +235,13 @@ def lint_drop_in(text):
     return sorted(set(failures))
 
 
-def check_drop_in(unit, text):
-    """The bytes read back from the installed drop-in, and where it sits."""
-    path = drop_in_path(unit)
+def check_drop_in(unit, text, path):
+    """The bytes read back from the installed drop-in, and where it sits.
+
+    `path` is where the caller installed the file, not where this module
+    would have put it: a check against a path this function computed
+    itself could never fail, and the thing worth refusing is a stage that
+    installed the denial somewhere else."""
     failures = list(lint_drop_in(text))
     if text != DROP_IN_TEXT:
         failures.append("drop_in_bytes_match_the_rendered_text")
@@ -210,6 +249,8 @@ def check_drop_in(unit, text):
         failures.append("drop_in_is_a_runtime_unit_file")
     if path.startswith(PERSISTENT_UNIT_DIR):
         failures.append("drop_in_is_not_persistent")
+    if path != drop_in_path(unit):
+        failures.append("drop_in_is_the_path_for_this_unit")
     return ({"unit": unit_service_name(unit), "runtime_drop_in": DROP_IN_NAME,
              "allowed_prefixes": list(ALLOWED_PREFIXES)}, sorted(set(failures)))
 
@@ -259,12 +300,28 @@ def _unit_is_live(show, failures):
         failures.append("unit_has_an_invocation")
 
 
-def check_denial(unit, text):
+def _unit_was_replaced(show, previous, failures, name):
+    """The running instance is not the one from before this policy change.
+
+    `systemctl show` answers with the unit's LOADED configuration: a
+    drop-in counts from `daemon-reload` onwards, whether or not anything
+    restarted under it, and a removed drop-in stops counting the same
+    way. The invocation id is the only property that says which instance
+    is running, so a stage whose restart never happened -- or never took
+    -- is caught here rather than certified from configuration."""
+    if previous is None:
+        return
+    if show.get("InvocationID") == previous:
+        failures.append(name)
+
+
+def check_denial(unit, text, previous=None):
     """The unit is running, denies every address, and allows exactly the
     two host addresses -- not a prefix that also covers the resolver."""
     show = parse_show(text)
     failures = []
     _unit_is_live(show, failures)
+    _unit_was_replaced(show, previous, failures, "restarted_under_the_denial")
     deny = prefixes(show.get("IPAddressDeny") or "")
     allow = prefixes(show.get("IPAddressAllow") or "")
     if [str(item) for item in deny] != list(DENY_ANY_PREFIXES):
@@ -283,11 +340,12 @@ def check_denial(unit, text):
              "allowed_prefixes": [str(item) for item in allow]}, sorted(set(failures)))
 
 
-def check_no_denial(unit, text):
+def check_no_denial(unit, text, previous=None):
     """After cleanup: the unit is running again and carries no policy."""
     show = parse_show(text)
     failures = []
     _unit_is_live(show, failures)
+    _unit_was_replaced(show, previous, failures, "restarted_without_the_denial")
     if (show.get("IPAddressDeny") or "").strip():
         failures.append("deny_list_is_empty_again")
     if (show.get("IPAddressAllow") or "").strip():
@@ -295,26 +353,41 @@ def check_no_denial(unit, text):
     return ({"unit": unit_service_name(unit), "denied": False}, sorted(set(failures)))
 
 
-def check_policy(expect, shows, absent=()):
+def check_policy(expect, shows, absent=(), previous=()):
     """Both services' effective policy in one answer, plus the drop-in
     paths that must be gone.
 
-    `shows` is (unit, `systemctl show` output) and `absent` is drop-in
-    paths. A path that still exists, or that names anything but a runtime
-    unit file, is a host this run changed and did not change back. The
-    persistent drop-in is checked on every call, not only after cleanup:
-    nothing here may ever write under /etc/systemd/system."""
+    `shows` is (unit, `systemctl show` output), `previous` is (unit, the
+    invocation id that unit carried before this policy change) and
+    `absent` is drop-in paths. A path that still exists, or that names
+    anything but a runtime unit file, is a host this run changed and did
+    not change back. The persistent drop-in is checked on every call, not
+    only after cleanup: nothing here may ever write under
+    /etc/systemd/system."""
     check = check_denial if expect == "denied" else check_no_denial
-    units, failures = [], []
+    was = {}
+    for unit, value in previous:
+        was[unit_service_name(unit)] = value
+    units, failures, observed = [], [], []
+    persistent_found = 0
     for unit, text in shows:
-        result, unit_failures = check(unit, text)
+        result, unit_failures = check(unit, text, was.get(unit_service_name(unit)))
         units.append(result["unit"])
+        if "allowed_prefixes" in result:
+            observed.append(result["allowed_prefixes"])
         failures += ["{}:{}".format(result["unit"], name) for name in unit_failures]
         persistent = os.path.join(PERSISTENT_UNIT_DIR, result["unit"] + ".d", DROP_IN_NAME)
         if os.path.lexists(persistent):
+            persistent_found += 1
             failures.append("{}:no_persistent_drop_in".format(result["unit"]))
     if not units:
         failures.append("units_read")
+    # A unit named in `previous` that was not read back would leave its
+    # restart unchecked, which is the shape this whole comparison exists
+    # to refuse.
+    for name in was:
+        if name not in units:
+            failures.append("{}:read_back".format(name))
     removed = 0
     for path in absent:
         name = os.path.basename(os.path.dirname(path))
@@ -324,7 +397,16 @@ def check_policy(expect, shows, absent=()):
             failures.append("drop_in_removed:" + name)
         else:
             removed += 1
-    result = {"units": units, "denied": expect == "denied"}
+    result = {"units": units, "denied": expect == "denied",
+              "persistent_drop_ins_found": persistent_found}
+    if expect == "denied":
+        if any(item != observed[0] for item in observed[1:]):
+            failures.append("both_units_allow_the_same_addresses")
+        # What systemd reported, not what this module asked for: the
+        # evidence document states the policy the host was under.
+        result["allowed_prefixes"] = observed[0] if observed else []
+    if was:
+        result["units_restarted"] = sorted(was)
     if absent:
         result["drop_ins_removed"] = removed
     return result, sorted(set(failures))
@@ -337,6 +419,18 @@ def _show_pair(text):
             "expected <unit>=<path>, found {!r}".format(text))
     unit, path = text.split("=", 1)
     return unit, path
+
+
+def _was_pair(text):
+    """`<unit>=<invocation>`, as --was takes it."""
+    if "=" not in text:
+        raise argparse.ArgumentTypeError(
+            "expected <unit>=<invocation>, found {!r}".format(text))
+    unit, invocation = text.split("=", 1)
+    if not re.fullmatch(r"[0-9a-f]{32}", invocation):
+        raise argparse.ArgumentTypeError(
+            "not an invocation id: {!r}".format(invocation))
+    return unit, invocation
 
 
 # --- the network probe --------------------------------------------------
@@ -398,9 +492,13 @@ def attempt(operation):
     return outcome if isinstance(outcome, str) else "ok"
 
 
-def denied_operations():
-    return [
-        ("tcp_gce_metadata", lambda: tcp_connect(METADATA_ADDRESS, METADATA_PORT)),
+def denied_operations(metadata_address=METADATA_ADDRESS):
+    operations = []
+    if metadata_address:
+        operations.append(
+            (METADATA_OPERATION,
+             lambda: tcp_connect(metadata_address, METADATA_PORT)))
+    operations += [
         ("tcp_resolver_stub", lambda: tcp_connect(RESOLVER_STUB, 53)),
         ("udp_resolver_stub", lambda: udp_send(RESOLVER_STUB, 53)),
         ("udp_loopback_alias", lambda: udp_send("127.0.0.2", 9)),
@@ -408,6 +506,7 @@ def denied_operations():
         ("udp_documentation_v6", lambda: udp_send("2001:db8::1", 9, socket.AF_INET6)),
         ("udp_test_net_v4_from_child", child_udp_send),
     ]
+    return operations
 
 
 def allowed_operations(agent_socket, serving_port):
@@ -419,27 +518,43 @@ def allowed_operations(agent_socket, serving_port):
     ]
 
 
-def run_probe(agent_socket, serving_port):
+def run_probe(agent_socket, serving_port, metadata_address=METADATA_ADDRESS):
     return {
-        "denied": dict((name, attempt(operation)) for name, operation in denied_operations()),
+        "denied": dict((name, attempt(operation))
+                       for name, operation in denied_operations(metadata_address)),
         "allowed": dict((name, attempt(operation))
                         for name, operation in allowed_operations(agent_socket, serving_port)),
     }
 
 
-def classify(probe, control):
+def classify(probe, control, metadata="required"):
     """The probe proves the denial only against a control that was not
     refused. Both halves are required: a control refused by something else
     on the host makes the probe's EPERM unattributable, and a probe that
-    was not refused means the denial did nothing."""
+    was not refused means the denial did nothing.
+
+    The control also decides which operations can prove anything here. An
+    operation the host could not perform with nothing denied cannot be
+    refused by the denial either; it is named in the result rather than
+    reported as a denial that failed to bite."""
     failures = []
     control_denied = control.get("denied") if isinstance(control.get("denied"), dict) else {}
     control_allowed = control.get("allowed") if isinstance(control.get("allowed"), dict) else {}
     probe_denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
     probe_allowed = probe.get("allowed") if isinstance(probe.get("allowed"), dict) else {}
-    for name in DENIED_NAMES:
+    names = list(DENIED_NAMES)
+    if metadata == "absent":
+        names.remove(METADATA_OPERATION)
+        # Absent because the row has no metadata service, not absent
+        # because a probe dropped it: an operation that quietly vanished
+        # from a document must never read as one that passed.
+        if METADATA_OPERATION in control_denied or METADATA_OPERATION in probe_denied:
+            failures.append("metadata_operation_not_probed")
+    refused_names, unroutable_names = [], []
+    for name in names:
         outcome = control_denied.get(name)
-        if name == "tcp_gce_metadata":
+        probed = probe_denied.get(name)
+        if name == METADATA_OPERATION:
             # The one control that must succeed outright rather than merely
             # not be refused: the stage's whole claim is that this service
             # was reachable and the denial is what made it unreachable.
@@ -447,14 +562,29 @@ def classify(probe, control):
                 failures.append("control_metadata_service_reachable")
         elif outcome is None or outcome in REFUSED:
             failures.append("control_not_refused:" + name)
-        if probe_denied.get(name) not in REFUSED:
+        elif outcome in UNROUTABLE:
+            unroutable_names.append(name)
+            # Nothing here to refuse, so the only thing to require is
+            # that the denial did not make it start working.
+            if probed != outcome:
+                failures.append("probe_matches_the_unroutable_control:" + name)
+            continue
+        if probed in REFUSED:
+            refused_names.append(name)
+        else:
             failures.append("refused:" + name)
     for name in ALLOWED_NAMES:
         if control_allowed.get(name) != "ok":
             failures.append("control_allowed:" + name)
         if probe_allowed.get(name) != "ok":
             failures.append("allowed:" + name)
-    return sorted(set(failures))
+    result = {
+        "ip_traffic_denied_except_the_two_host_addresses": True,
+        "metadata_operation": metadata,
+        "operations_refused_under_the_denial": sorted(refused_names),
+        "operations_this_host_cannot_send": sorted(unroutable_names),
+    }
+    return result, sorted(set(failures))
 
 
 # --- what the appliance answered while denied ---------------------------
@@ -536,9 +666,15 @@ def infer_check(request, response):
             sorted(name for name, passed in checks.items() if not passed))
 
 
-def doctor_check(document, status, exact_row):
+def doctor_check(document, status, exact_row,
+                 host_os_phrase=DOCTOR_RECORDED_PHRASE,
+                 forbidden_host_os_phrase=DOCTOR_LIVE_PHRASE):
     """Doctor resolves the row with nothing failing, and says the machine
-    type came from the record rather than from the metadata service."""
+    type came from where the row expects it to under a denial.
+
+    The two phrases are the row's, not this module's: the defaults are
+    the Compute Engine ones, and an empty forbidden phrase forbids
+    nothing."""
     payload = _payload(document)
     findings = dict((item.get("id"), item) for item in payload.get("findings") or []
                     if isinstance(item, dict))
@@ -558,19 +694,25 @@ def doctor_check(document, status, exact_row):
     if exact_row not in (row.get("message") or ""):
         failures.append("platform_row_exact")
     host_os = (findings.get("host_os") or {}).get("message") or ""
-    if DOCTOR_RECORDED_PHRASE not in host_os:
+    if host_os_phrase not in host_os:
         failures.append("host_os_machine_type_from_the_record")
-    if DOCTOR_LIVE_PHRASE in host_os:
+    if forbidden_host_os_phrase and forbidden_host_os_phrase in host_os:
         failures.append("host_os_machine_type_not_from_live_metadata")
     return ({"doctor": "pass", "platform_row": exact_row,
              "machine_type_source": "recorded"}, sorted(set(failures)))
 
 
-def identity_check(journal_text):
+def identity_check(journal_text, expect_source=RECORDED_SOURCE,
+                   expect_record=RECORD_NOT_APPLICABLE, forbid_source=LIVE_SOURCE):
     """The agent's own account of where this start's machine type came from.
 
     Exactly one line, from this invocation: a second means the agent
-    restarted, and the earlier line might have been the online one."""
+    restarted, and the earlier line might have been the online one.
+
+    The expected tokens are the row's. They default to the Compute Engine
+    ones; a row that expects no machine type at all passes
+    `--expect-source none`, and a detected machine type is then not
+    required either."""
     lines = []
     for number, line in enumerate(journal_text.splitlines(), 1):
         if not line.strip():
@@ -587,14 +729,15 @@ def identity_check(journal_text):
     checks = {
         "identity_logged_once": len(lines) == 1,
         "identity_line_parsed": match is not None,
-        "machine_type_detected": machine_type not in (None, "none"),
-        "machine_type_from_the_record": source == RECORDED_SOURCE,
+        "machine_type_from_the_record": source == expect_source,
         # A live answer would mean the denial let the metadata query
         # through, whatever the probe said.
-        "metadata_service_was_not_reached": source != LIVE_SOURCE,
+        "metadata_service_was_not_reached": not forbid_source or source != forbid_source,
         # Nothing was recorded, because there was no live answer to record.
-        "record_not_rewritten_while_denied": record == RECORD_NOT_APPLICABLE,
+        "record_not_rewritten_while_denied": record == expect_record,
     }
+    if expect_source != NO_SOURCE:
+        checks["machine_type_detected"] = machine_type not in (None, NO_SOURCE)
     return ({"machine_type_source": source, "record": record},
             sorted(name for name, passed in checks.items() if not passed))
 
@@ -603,7 +746,15 @@ def identity_check(journal_text):
 
 
 def evidence(directory, deployment):
-    """The sanitized offline-runtime.json, built from the stage's results.
+    """The sanitized offline-runtime.json, derived from the stage's results.
+
+    Every verdict here is read back from a document the stage filed, and
+    `_emit` writes a document only after its own checks passed -- so a
+    document that is present is a check that passed, and one that is
+    missing refuses this command rather than being restated as a pass.
+    The enforcement verdict is re-derived by classifying the same probe
+    and control the certificate carries: a certificate that asserts what
+    its own evidence contradicts is worse than no certificate at all.
 
     Carries outcome names and prefixes, never a host address the scanner
     would refuse, a unit path, or a process id."""
@@ -612,28 +763,83 @@ def evidence(directory, deployment):
         with open(os.path.join(directory, name), encoding="utf-8") as handle:
             return json.load(handle)
 
+    def verdict(name, key):
+        document = load(name)
+        if document.get(key) != "pass":
+            raise CheckFailed("{} does not record a pass".format(name))
+        return "pass"
+
     units = load("offline-denial.json")
     restored = load("offline-restored.json")
+    control = load("offline-control.json")
+    probe = load("offline-probe.json")
+    filed = load("offline-classification.json")
+    if units.get("denied") is not True:
+        raise CheckFailed("offline-denial.json does not record a denied appliance")
+    if restored.get("denied") is not False:
+        raise CheckFailed("offline-restored.json does not record a restored appliance")
+    # Every unit the stage denied had its running instance replaced under
+    # the denial, and replaced again without it. A readback that compared
+    # no invocation certifies the unit's loaded configuration and nothing
+    # about the service that was running, so it is refused here rather
+    # than published as a denial that took effect.
+    for document, name in ((units, "offline-denial.json"),
+                           (restored, "offline-restored.json")):
+        restarted = document.get("units_restarted") or []
+        if sorted(restarted) != sorted(document.get("units") or []):
+            raise CheckFailed(
+                "{} does not record every unit's instance as replaced: "
+                "read back {}, restart-checked {}".format(
+                    name, document.get("units"), restarted))
+    classification, failures = classify(
+        probe, control, filed.get("metadata_operation", "required"))
+    if failures:
+        raise CheckFailed(
+            "the filed probe and control do not classify as an enforced denial: "
+            + ", ".join(failures))
+    allow = units.get("allowed_prefixes") or []
+    if not allow:
+        raise CheckFailed(
+            "offline-denial.json carries no allow list read back from systemd")
+    resolver = ipaddress.ip_address(RESOLVER_STUB)
+    try:
+        resolver_allowed = any(resolver in ipaddress.ip_network(prefix, strict=False)
+                               for prefix in allow)
+    except ValueError as error:
+        raise CheckFailed("the allow list read back from systemd is unparseable: "
+                          "{}".format(error))
+    if resolver_allowed:
+        raise CheckFailed(
+            "the allow list read back from systemd admits " + RESOLVER_STUB)
     return {
         "mechanism": {
             "per_unit_drop_in": DROP_IN_NAME,
             "drop_in_scope": "runtime",
             "deny": "any",
-            "allow": list(ALLOWED_PREFIXES),
-            "localhost_shorthand_used": False,
+            "allow": allow,
+            "resolver_stub_allowed": resolver_allowed,
         },
         "units_denied": units["units"],
+        "units_restarted_under_the_denial": units.get("units_restarted") or [],
         "transient_unit_properties": list(DENIAL_PROPERTIES),
-        "control": load("offline-control.json"),
-        "probe": load("offline-probe.json"),
-        "enforced": True,
+        "control": control,
+        "probe": probe,
+        "classification": classification,
+        "enforced": classification["ip_traffic_denied_except_the_two_host_addresses"],
         "identity": load("offline-identity.json"),
         "deployment_id": deployment,
-        "cli_under_denial": {"status": "pass", "doctor": "pass",
-                             "deploy": "pass", "infer": "pass"},
+        "cli_under_denial": {
+            "status": verdict("offline-status-check.json", "status"),
+            "doctor": verdict("offline-doctor-check.json", "doctor"),
+            "deploy": verdict("offline-deploy-check.json", "deploy"),
+            "infer": verdict("offline-infer-check.json", "infer"),
+        },
         "restore": {"drop_ins_removed": restored["drop_ins_removed"],
                     "units_undenied": restored["units"],
-                    "persistent_unit_files_written": 0},
+                    "units_restarted_without_the_denial":
+                        restored.get("units_restarted") or [],
+                    "persistent_unit_files_written":
+                        restored["persistent_drop_ins_found"]},
     }
 
 
@@ -668,6 +874,11 @@ def _emit(result, out, failures=(), what="checks"):
             handle.write(text + "\n")
 
 
+def _metadata_address(value):
+    """`none` names a row with no metadata service; anything else is one."""
+    return "" if value == "none" else value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -682,6 +893,12 @@ def main(argv=None):
     def opt(*flags, **kwargs):
         return flags, kwargs
 
+    probe_options = (
+        opt("--agent-socket", required=True),
+        opt("--serving-port", type=int, required=True),
+        opt("--metadata-address", type=_metadata_address, default=METADATA_ADDRESS),
+    )
+
     commands.add_parser("drop-in-text")
     commands.add_parser("transient-properties")
     commands.add_parser("child-udp")
@@ -690,20 +907,25 @@ def main(argv=None):
             opt("--print", dest="print_file", required=True))
     command("check-policy", opt("--expect", choices=("denied", "none"), required=True),
             opt("--show", type=_show_pair, action="append", default=[], required=True),
+            opt("--was", type=_was_pair, action="append", default=[]),
             opt("--absent", action="append", default=[]))
     command("serving-port", opt("--status", required=True))
-    command("probe", opt("--agent-socket", required=True),
-            opt("--serving-port", type=int, required=True))
-    command("control", opt("--agent-socket", required=True),
-            opt("--serving-port", type=int, required=True))
-    command("classify", opt("--probe", required=True), opt("--control", required=True))
+    command("probe", *probe_options)
+    command("control", *probe_options)
+    command("classify", opt("--probe", required=True), opt("--control", required=True),
+            opt("--metadata-operation", choices=("required", "absent"), default="required"))
     command("status-check", opt("--status", required=True), opt("--deployment", required=True))
     command("deploy-check", opt("--deploy", required=True), opt("--deployment", required=True))
     command("infer-request", opt("--request-id", required=True))
     command("infer-check", opt("--request", required=True), opt("--response", required=True))
     command("doctor-check", opt("--doctor", required=True),
-            opt("--status", type=int, required=True), opt("--exact-row", required=True))
-    command("identity-check", opt("--agent-journal", required=True))
+            opt("--status", type=int, required=True), opt("--exact-row", required=True),
+            opt("--host-os-phrase", default=DOCTOR_RECORDED_PHRASE),
+            opt("--forbid-host-os-phrase", default=DOCTOR_LIVE_PHRASE))
+    command("identity-check", opt("--agent-journal", required=True),
+            opt("--expect-source", default=RECORDED_SOURCE),
+            opt("--expect-record", default=RECORD_NOT_APPLICABLE),
+            opt("--forbid-source", default=LIVE_SOURCE))
     command("evidence", opt("--dir", required=True), opt("--deployment", required=True))
 
     args = parser.parse_args(argv)
@@ -726,11 +948,12 @@ def _run(args):
         for value in DENIAL_PROPERTIES:
             print("--property=" + value)
     elif name == "check-drop-in":
-        result, failures = check_drop_in(args.unit, _read(args.print_file))
+        result, failures = check_drop_in(
+            args.unit, _read(args.print_file), args.print_file)
         _emit(result, args.out, failures, "drop-in checks for " + args.unit)
     elif name == "check-policy":
         shows = [(unit, _read(path)) for unit, path in args.show]
-        result, failures = check_policy(args.expect, shows, args.absent)
+        result, failures = check_policy(args.expect, shows, args.absent, args.was)
         _emit(result, args.out, failures,
               "{} address-policy readback checks".format(args.expect))
     elif name == "serving-port":
@@ -739,11 +962,11 @@ def _run(args):
             raise CheckFailed("status reports no serving URL on the allowed loopback address")
         print(port)
     elif name in ("probe", "control"):
-        _emit(run_probe(args.agent_socket, args.serving_port), args.out)
+        _emit(run_probe(args.agent_socket, args.serving_port, args.metadata_address), args.out)
     elif name == "classify":
-        failures = classify(_load_json(args.probe), _load_json(args.control))
-        _emit({"ip_traffic_denied_except_the_two_host_addresses": True}, args.out, failures,
-              "offline denial enforcement checks")
+        result, failures = classify(_load_json(args.probe), _load_json(args.control),
+                                    args.metadata_operation)
+        _emit(result, args.out, failures, "offline denial enforcement checks")
     elif name == "status-check":
         result, failures, _ = status_check(_load_json(args.status), args.deployment)
         _emit(result, args.out, failures, "status checks")
@@ -756,10 +979,12 @@ def _run(args):
         result, failures = infer_check(_load_json(args.request), _load_json(args.response))
         _emit(result, args.out, failures, "inference checks")
     elif name == "doctor-check":
-        result, failures = doctor_check(_load_json(args.doctor), args.status, args.exact_row)
+        result, failures = doctor_check(_load_json(args.doctor), args.status, args.exact_row,
+                                        args.host_os_phrase, args.forbid_host_os_phrase)
         _emit(result, args.out, failures, "doctor checks")
     elif name == "identity-check":
-        result, failures = identity_check(_read(args.agent_journal))
+        result, failures = identity_check(_read(args.agent_journal), args.expect_source,
+                                          args.expect_record, args.forbid_source)
         _emit(result, args.out, failures, "platform identity checks")
     elif name == "evidence":
         _emit(evidence(args.dir, args.deployment), args.out)
