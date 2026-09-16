@@ -974,11 +974,30 @@ STUB
 # scanner refuses here is the field name, so the values are the
 # synthetic ones from docs/validation/evidence/v0.2.1/README.md rather
 # than anything that could be read as a machine's own.
+#
+# The field set is the one journald attaches to a service's stdout and
+# to systemd's own records, not a sample of it: a projection that
+# dropped the host fields it knew about, rather than keeping only the
+# service's own, would pass a stub that emitted only those and then
+# write evidence the scanner refuses on the first real host. For the
+# same reason every service record also carries a field no list could
+# name in advance, because its name is new on every run of this file.
+TP_FAKE_JOURNAL_FIELD="TP_FIXTURE_$(python3 -c 'import secrets; print(secrets.token_hex(4).upper())')"
+export TP_FAKE_JOURNAL_FIELD
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
-# The metadata every record carries, whatever the mode.
-host_fields='"_HOSTNAME":"tp-synthetic-host","_MACHINE_ID":"00000000000000000000000000000000","_BOOT_ID":"00000000000000000000000000000000","_TRANSPORT":"stdout","_CMDLINE":"/usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json","__MONOTONIC_TIMESTAMP":"84210000000"'
-cursor_field='"__CURSOR":"s=00000000;i=4a1;b=00000000000000000000000000000000;m=139f2a;t=6591c0;x=51d2"'
+zero=00000000000000000000000000000000
+cursor="s=00000000;i=4a1;b=${zero};m=139f2a;t=6591c0;x=51d2"
+# What every record carries, whoever wrote it.
+host_fields="\"_HOSTNAME\":\"tp-synthetic-host\",\"_MACHINE_ID\":\"${zero}\",\"_BOOT_ID\":\"${zero}\",\"__CURSOR\":\"${cursor}\",\"__MONOTONIC_TIMESTAMP\":\"84210000000\",\"__SEQNUM\":\"1185\",\"__SEQNUM_ID\":\"${zero}\""
+# What journald's stream transport adds to a line a service printed.
+service_fields() {
+  printf '"_TRANSPORT":"stdout","_STREAM_ID":"%s","_UID":"998","_GID":"998","_COMM":"%s","_EXE":"/usr/bin/%s","_CMDLINE":"/usr/bin/%s --config /etc/tensorplate/%s.json","_CAP_EFFECTIVE":"0","_SYSTEMD_CGROUP":"/system.slice/%s.service","_SYSTEMD_SLICE":"system.slice","SYSLOG_FACILITY":"3","%s":"fixture"' \
+    "$zero" "$1" "$1" "$1" "${1#tensorplate-}" "$1" "${TP_FAKE_JOURNAL_FIELD:?}"
+}
+# What systemd adds to its own records about a unit.
+manager_fields="\"_TRANSPORT\":\"journal\",\"_UID\":\"0\",\"_GID\":\"0\",\"_COMM\":\"systemd\",\"_EXE\":\"/usr/lib/systemd/systemd\",\"_CMDLINE\":\"/sbin/init\",\"_CAP_EFFECTIVE\":\"1ffffffffff\",\"_SYSTEMD_CGROUP\":\"/init.scope\",\"_SYSTEMD_SLICE\":\"-.slice\",\"SYSLOG_FACILITY\":\"3\",\"CODE_FILE\":\"src/core/unit.c\",\"CODE_LINE\":\"2210\",\"CODE_FUNC\":\"unit_log_failure\",\"MESSAGE_ID\":\"${zero}\",\"INVOCATION_ID\":\"${zero}\",\"_SOURCE_REALTIME_TIMESTAMP\":\"1789300000000001\""
+agent_fields="$(service_fields tensorplate-agent)" || exit
 invocation=""
 json=0
 since=""
@@ -998,14 +1017,19 @@ if [ -n "$since" ]; then
   [ "${TP_FAKE_MODE:-ok}" = crash-loop-other-error ] && message='state store error: permission denied'
   for attempt in 1 2 3 4 5; do
     printf '{%s,%s,"_SYSTEMD_UNIT":"tensorplate-agent.service","_SYSTEMD_INVOCATION_ID":"11111111111111111111111111111111","_PID":"%s","PRIORITY":"3","SYSLOG_IDENTIFIER":"tensorplate-agent","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
-      "$host_fields" "$cursor_field" "$((4000 + attempt))" "$message"
+      "$host_fields" "$agent_fields" "$((4000 + attempt))" "$message"
     # systemd's own record of the restart, which carries UNIT rather
     # than _SYSTEMD_UNIT.
     printf '{%s,%s,"_SYSTEMD_UNIT":"init.scope","UNIT":"tensorplate-agent.service","_PID":"1","PRIORITY":"4","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"tensorplate-agent.service: Scheduled restart job, restart counter is at %s.","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
-      "$host_fields" "$cursor_field" "$attempt"
+      "$host_fields" "$manager_fields" "$attempt"
   done
   printf '{%s,%s,"_SYSTEMD_UNIT":"init.scope","UNIT":"tensorplate-agent.service","_PID":"1","PRIORITY":"3","SYSLOG_IDENTIFIER":"systemd","MESSAGE":"tensorplate-agent.service: Start request repeated too quickly.","__REALTIME_TIMESTAMP":"1789300000000002"}\n' \
-    "$host_fields" "$cursor_field"
+    "$host_fields" "$manager_fields"
+  # What `journalctl --show-cursor` prints after the records: a line that
+  # is not a record, after records that are.
+  if [ "${TP_FAKE_MODE:-ok}" = crash-loop-trailing-line ]; then
+    printf '%s\n' "-- cursor: ${cursor}"
+  fi
   exit 0
 fi
 case "$invocation" in
@@ -1023,8 +1047,12 @@ case "${TP_FAKE_MODE:-ok}:$unit" in
 esac
 message='fixture service started'
 [ "${TP_FAKE_MODE:-ok}" = journal-empty-message ] && message=''
+fields="$(service_fields "${unit%.service}")" || exit
 printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
-  "$host_fields" "$cursor_field" "$invocation" "$unit" "${unit%.service}" "$message"
+  "$host_fields" "$fields" "$invocation" "$unit" "${unit%.service}" "$message"
+if [ "${TP_FAKE_MODE:-ok}:$unit" = journal-trailing-line:tensorplate-agent.service ]; then
+  printf '%s\n' "-- cursor: ${cursor}"
+fi
 STUB
 cat >"${appliance}/bin/tensorplate" <<'STUB'
 #!/bin/sh
@@ -1292,6 +1320,9 @@ report=json.load(open(sys.argv[1]))
 print(next((s["status"] for s in report["stages"] if s["stage"]==sys.argv[2]), "absent"))' \
     "$1" "$2"
 }
+stage_log_says() {
+  grep -Fq -- "$2" "$1" && echo yes || echo no
+}
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence")"
@@ -1449,7 +1480,9 @@ check "  the crash-loop journal is projected to the service's own fields" "11 no
   "$(journal_projection "${ok_evidence}/crash-loop-journal.txt" MESSAGE _SYSTEMD_UNIT)"
 # A projection that ran but left the raw capture behind would publish
 # nothing, and would still leave host metadata on the machine for the
-# next thing that collects logs.
+# next thing that collects logs. The scratch space is shared by every
+# run in this file, so the count is cumulative: the first run that
+# leaves a capture behind fails its own check, and every later one.
 scratch_holding_host_metadata() {
   local count=0 file
   while IFS= read -r file; do
@@ -1495,13 +1528,25 @@ fi
 # what the scanner has to refuse here is the field name alone -- exactly
 # what the projection takes out, and the only difference between the two
 # directories.
+#
+# Both unprojected captures are checked for the whole field set the stub
+# emits, so a stub trimmed back to the handful of host fields a denylist
+# would name fails here rather than quietly admitting one. The field
+# named per run sorts between SYSLOG_FACILITY and the underscored names.
 raw_capture="${td}/raw-agent-journal.txt"
 TP_FAKE_MODE=ok "${appliance}/bin/journalctl" -u tensorplate-agent.service \
   _SYSTEMD_INVOCATION_ID=11111111111111111111111111111111 \
   -n 100 --no-pager --output=json >"$raw_capture"
+service_extra="SYSLOG_FACILITY,${TP_FAKE_JOURNAL_FIELD},_BOOT_ID,_CAP_EFFECTIVE,_CMDLINE,_COMM,_EXE,_GID,_HOSTNAME,_MACHINE_ID,_STREAM_ID,_SYSTEMD_CGROUP,_SYSTEMD_SLICE,_TRANSPORT,_UID,__CURSOR,__MONOTONIC_TIMESTAMP,__SEQNUM,__SEQNUM_ID"
 check "  the unprojected capture carries the fields the projection removes" \
-  "1 _BOOT_ID,_CMDLINE,_HOSTNAME,_MACHINE_ID,_TRANSPORT,__CURSOR,__MONOTONIC_TIMESTAMP none" \
+  "1 ${service_extra} none" \
   "$(journal_projection "$raw_capture" MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+raw_crash_loop="${td}/raw-crash-loop-journal.txt"
+TP_FAKE_MODE=ok "${appliance}/bin/journalctl" -u tensorplate-agent --since @0 \
+  --no-pager --output=json >"$raw_crash_loop"
+check "  and so does the unprojected crash-loop capture, systemd's records included" \
+  "11 CODE_FILE,CODE_FUNC,CODE_LINE,INVOCATION_ID,MESSAGE_ID,SYSLOG_FACILITY,${TP_FAKE_JOURNAL_FIELD},_BOOT_ID,_CAP_EFFECTIVE,_CMDLINE,_COMM,_EXE,_GID,_HOSTNAME,_MACHINE_ID,_SOURCE_REALTIME_TIMESTAMP,_STREAM_ID,_SYSTEMD_CGROUP,_SYSTEMD_SLICE,_TRANSPORT,_UID,__CURSOR,__MONOTONIC_TIMESTAMP,__SEQNUM,__SEQNUM_ID none" \
+  "$(journal_projection "$raw_crash_loop" MESSAGE _SYSTEMD_UNIT)"
 
 unprojected="${td}/evidence-unprojected"
 rm -rf "$unprojected"
@@ -1622,7 +1667,7 @@ for mode in restart-no-worker restart-unhealthy-health restart-wrong-health rest
 done
 
 for mode in journal-command-fails journal-empty-agent journal-no-entries journal-empty-observability \
-            journal-stale-invocation journal-wrong-unit journal-empty-message; do
+            journal-stale-invocation journal-wrong-unit journal-empty-message journal-trailing-line; do
   evidence="${td}/stages-${mode}"
   expected_status=1
   if [[ "$mode" == journal-command-fails ]]; then expected_status=9; fi
@@ -1631,6 +1676,33 @@ for mode in journal-command-fails journal-empty-agent journal-no-entries journal
     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
   check "  invalid journal evidence fails status-logs" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
+  # Whatever the verdict on the capture, its raw copy is gone. Most of
+  # these captures carry host fields, so a harness that skipped the
+  # removal on a failing capture fails here.
+  check "  and no raw capture is left in the harness's scratch space" 0 \
+    "$(scratch_holding_host_metadata)"
+  # A line that is not a record is refused by the projection, and the
+  # projection is the only thing that reads the raw capture: the stage's
+  # own parser sees only what was projected. So each refusal is checked
+  # by its message. On its own, `-- No entries --` would also fail the
+  # parser's empty-capture check; a line after a valid record would not.
+  case "$mode" in
+    journal-no-entries)
+      check "  because the projection refused the diagnostic line" yes \
+        "$(stage_log_says "${evidence}/status-logs.log" \
+           "tensorplate-agent: journal line 1 is not a JSON record")"
+      ;;
+    journal-trailing-line)
+      check "  because the projection refused the line after the record" yes \
+        "$(stage_log_says "${evidence}/status-logs.log" \
+           "tensorplate-agent: journal line 2 is not a JSON record")"
+      # The record before the refused line was filed, and filed
+      # projected: a refusal does not copy the raw capture through.
+      check "  and what was filed before the refusal is projected" "1 none none" \
+        "$(journal_projection "${evidence}/agent-journal.txt" \
+           MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+      ;;
+  esac
 done
 
 # A signal after journalctl has written the raw capture, and before the
@@ -1667,7 +1739,7 @@ check "  and the recovered worker answered" yes \
   "$([[ -s "${td}/stages-ok-again/crash-loop-recovery.json" ]] && echo yes || echo no)"
 check "  and the original config bytes were restored" yes "$(config_restored)"
 for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-error \
-            crash-loop-never-fails crash-loop-stopped; do
+            crash-loop-never-fails crash-loop-stopped crash-loop-trailing-line; do
   evidence="${td}/stages-${mode}"
   check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
   check "  restart passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" restart)"
@@ -1675,6 +1747,18 @@ for mode in crash-loop-keeps-restarting crash-loop-not-retried crash-loop-other-
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  and the agent config was restored anyway" yes \
     "$(config_restored)"
+  check "  and no raw capture is left in the harness's scratch space" 0 \
+    "$(scratch_holding_host_metadata)"
+  # Five config errors were captured, which is all the stage's own
+  # checks ask for; only the projection's refusal of the line after them
+  # fails this run.
+  if [[ "$mode" == crash-loop-trailing-line ]]; then
+    check "  because the projection refused the line after the records" yes \
+      "$(stage_log_says "${evidence}/crash-loop.log" \
+         "crash-loop: journal line 12 is not a JSON record")"
+    check "  and what was filed before the refusal is projected" "11 none none" \
+      "$(journal_projection "${evidence}/crash-loop-journal.txt" MESSAGE _SYSTEMD_UNIT)"
+  fi
 done
 
 evidence="${td}/stages-corrupt-fails"
@@ -1746,9 +1830,6 @@ sha256_of() {
 }
 one_line() {
   tr '\n' ' ' <"$1" | sed 's/ $//'
-}
-stage_log_says() {
-  grep -Fq -- "$2" "$1" && echo yes || echo no
 }
 
 evidence="${td}/stages-upgrade-ok"
