@@ -746,7 +746,7 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
 /// the hosts the packages produce rather than a list written down twice.
 fn shipped_amd64_backends() -> Vec<String> {
     let path = repo_root().join("packaging/conf/agent.amd64.json");
-    let raw = std::fs::read_to_string(&path).expect("the amd64 agent config is committed");
+    let raw = std::fs::read_to_string(path).expect("the amd64 agent config is committed");
     tensorplate_agent::config::AgentConfig::parse_json(&raw)
         .expect("the amd64 agent config validates")
         .available_backends
