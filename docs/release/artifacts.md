@@ -110,8 +110,12 @@ naming a path the build does not contain would there admit a bundle the
 worker can only refuse at engine lookup.
 `agent/tests/row_backend_declarations.rs` holds the two in agreement: a row
 may not declare a backend path the agent config shipped for its package
-channel and CPU architecture omits. The `arm64` rows keep `tensorrt`,
-because the Jetson build compiles the adapter and its config advertises it.
+channel and CPU architecture omits. The Jetson `arm64` apt rows keep
+`tensorrt`, because that build compiles the adapter and the config it
+installs advertises it. The macOS rows are `arm64` too and do not: the
+Homebrew serving formula configures `TP_ENABLE_TENSORRT=OFF` as well, so
+architecture alone does not say which build a host runs — the package
+channel is the other half of the mapping.
 
 `--manifest` and `--checksums` may be omitted: they default to
 `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS` inside
