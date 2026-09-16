@@ -1338,6 +1338,44 @@ for invocation in 11111111111111111111111111111111 22222222222222222222222222222
     "$(grep -F "journalctl" "${appliance}/sudo.log" | grep -Fq "_SYSTEMD_INVOCATION_ID=${invocation}" && echo yes || echo no)"
 done
 
+# --- the kept journal fields are one decision recorded in three files.
+#
+# The harness projects to a field set, this verifier asserts that set,
+# and the publication scanner admits it. Any two of the three agreeing
+# proves nothing about the third: a set widened in the harness and in
+# this file together would still produce evidence the scanner refuses,
+# and a set widened in the harness alone would be asserted by a stale
+# expectation here. Compare all three before using any of them.
+check "  the harness, this verifier and the scanner keep the same fields" yes \
+  "$(python3 - "$harness" "${repo_root}/tools/validation/check-evidence-publication.sh" "$0" <<'PY'
+import re, sys
+
+def field_set(path, name):
+    """The double-quoted strings in the collection `name` is assigned."""
+    body = open(path, encoding="utf-8").read()
+    start = body.index("\n" + name + " = ")
+    depth = 0
+    for index in range(start, len(body)):
+        character = body[index]
+        if character in "({[":
+            depth += 1
+        elif character in ")}]":
+            depth -= 1
+            if depth == 0:
+                return frozenset(re.findall(r'"([^"]*)"', body[start:index]))
+    raise SystemExit(f"{path}: {name} is never closed")
+
+harness, scanner, verifier = sys.argv[1:]
+projected = field_set(harness, "KEEP")
+admitted = field_set(scanner, "JOURNAL_KEYS")
+asserted = field_set(verifier, "ALLOWED")
+if not projected:
+    raise SystemExit("the harness projects to an empty field set")
+print("yes" if projected == admitted == asserted else
+      f"harness {sorted(projected)} scanner {sorted(admitted)} verifier {sorted(asserted)}")
+PY
+)"
+
 # --- the journal captures are projected where they are captured.
 #
 # The stub journalctl emits the metadata systemd attaches to every real
@@ -1414,6 +1452,54 @@ check "  and the run's own evidence passes the publication scanner" 0 "$scan_sta
 if ((scan_status != 0)); then
   sed 's/^/       /' "$publication_scan" >&2
 fi
+
+# --- and the scanner refuses a capture that was not projected.
+#
+# A passing scan says the evidence is publishable. On its own it says
+# nothing about the projection: it would pass just as well if the
+# scanner did not object to host metadata in the first place, and then
+# the check above would certify a harness that had stopped projecting.
+# So drive the other side with the same scanner over the same evidence
+# directory, one journal file replaced by the stub journalctl's own
+# unprojected output.
+#
+# The stub's host values are the synthetic ones the README names, so
+# what the scanner has to refuse here is the field name alone -- exactly
+# what the projection takes out, and the only difference between the two
+# directories.
+raw_capture="${td}/raw-agent-journal.txt"
+TP_FAKE_MODE=ok "${appliance}/bin/journalctl" -u tensorplate-agent.service \
+  _SYSTEMD_INVOCATION_ID=11111111111111111111111111111111 \
+  -n 100 --no-pager --output=json >"$raw_capture"
+check "  the unprojected capture carries the fields the projection removes" \
+  "1 _BOOT_ID,_CMDLINE,_HOSTNAME,_MACHINE_ID,_TRANSPORT,__CURSOR,__MONOTONIC_TIMESTAMP none" \
+  "$(journal_projection "$raw_capture" MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+
+unprojected="${td}/evidence-unprojected"
+rm -rf "$unprojected"
+cp -R "$ok_evidence" "$unprojected"
+cp "$raw_capture" "${unprojected}/agent-journal.txt"
+unprojected_scan="${td}/unprojected-scan.out"
+unprojected_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" \
+  --patterns-only "$unprojected" >"$unprojected_scan" 2>&1 || unprojected_status=$?
+check "  and the same evidence with one capture unprojected is refused" 1 \
+  "$unprojected_status"
+# Refused for that file and for its journal fields, not for something
+# the copy happened to disturb.
+check "  named by file and class, and by nothing else" "agent-journal.txt journal-field" \
+  "$(python3 - "$unprojected_scan" <<'PY'
+import re, sys
+
+refs, classes = set(), set()
+for line in open(sys.argv[1], encoding="utf-8"):
+    match = re.match(r"^(\S+):\d+: (.+) \(\d+ chars\)$", line.rstrip("\n"))
+    if match:
+        refs.add(match.group(1))
+        classes.add(match.group(2))
+print(",".join(sorted(refs)) or "none", ",".join(sorted(classes)) or "none")
+PY
+)"
 
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "${ok_evidence}/lifecycle-report.json" <<'PY'
@@ -1498,6 +1584,13 @@ for mode in restart-no-worker restart-unhealthy-health restart-wrong-health rest
     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)"
   check "  the restarted worker failure is recorded against restart" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" restart)"
+  # status-logs captured the journals, then the run failed. A harness
+  # that projected its evidence at the end of a successful run instead of
+  # at each capture would leave this one raw, which is the case the
+  # projection exists for: an aborted run's evidence is still filed.
+  check "  the journal captured before the failure is projected too" "1 none none" \
+    "$(journal_projection "${evidence}/agent-journal.txt" \
+       MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
 done
 
 for mode in journal-command-fails journal-empty-agent journal-no-entries journal-empty-observability \
@@ -1616,6 +1709,30 @@ for stage in install deploy-smoke status-logs restart crash-loop upgrade rollbac
   check "  ${stage} is recorded as a pass" pass "$(stage_status "$report" "$stage")"
 done
 check "  offline is still skipped" skipped "$(stage_status "$report" offline)"
+# The install stage's listing is the dpkg-query shape -- `<name> <status>
+# <version>` and nothing else -- which is the reason it is that query:
+# `dpkg -l` adds each package's description, and the packaging
+# descriptions quote planning identifiers, which belong in the changelog
+# and not in published evidence. Asserted on a run that installs a
+# release-shaped set, because the minimal fixture set installs no
+# packages at all. The fake dpkg's `-l` output carries such an
+# identifier, so a harness that went back to it also fails the
+# publication scan above.
+check "  the install listed the installed packages, without descriptions" yes \
+  "$(python3 - "${evidence}/packages.txt" <<'PY'
+import sys
+
+names = []
+for line in open(sys.argv[1], encoding="utf-8"):
+    if not line.strip():
+        continue
+    fields = line.split()
+    if len(fields) != 3:
+        raise SystemExit(f"{len(fields)} fields, not 3: {line.rstrip()}")
+    names.append(fields[0])
+print("yes" if "tensorplate-agent" in names and len(names) > 1 else f"listed {names}")
+PY
+)"
 check "  and keeps the run incomplete" incomplete \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' "$report")"
 check "  and the report is schema-valid" "yes" \
