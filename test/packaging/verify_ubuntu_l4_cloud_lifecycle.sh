@@ -952,14 +952,15 @@ STUB
 # __CURSOR, _CMDLINE and the rest describe the machine, and the harness
 # must project them out before the capture reaches the evidence
 # directory. A stub that emitted only the fields the assertions read
-# could not tell a projection from its absence. The values are fictional
-# -- no real host is named here -- because it is the field names the
-# publication scanner refuses.
+# could not tell a projection from its absence. What the publication
+# scanner refuses here is the field name, so the values are the
+# synthetic ones from docs/validation/evidence/v0.2.1/README.md rather
+# than anything that could be read as a machine's own.
 cat >"${appliance}/bin/journalctl" <<'STUB'
 #!/bin/sh
 # The metadata every record carries, whatever the mode.
-host_fields='"_HOSTNAME":"fixture-appliance","_MACHINE_ID":"3b7c1f92a4d64e1fa0c25db7e83f1c40","_BOOT_ID":"9d41e0c7b26f4a8e97c3d5120fa6be83","_TRANSPORT":"stdout","_CMDLINE":"/usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json","__MONOTONIC_TIMESTAMP":"84210000000"'
-cursor_field='"__CURSOR":"s=8f3c2d1e;i=4a1;b=9d41e0c7b26f4a8e97c3d5120fa6be83;m=139f2a;t=6591c0;x=51d2"'
+host_fields='"_HOSTNAME":"tp-synthetic-host","_MACHINE_ID":"00000000000000000000000000000000","_BOOT_ID":"00000000000000000000000000000000","_TRANSPORT":"stdout","_CMDLINE":"/usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json","__MONOTONIC_TIMESTAMP":"84210000000"'
+cursor_field='"__CURSOR":"s=00000000;i=4a1;b=00000000000000000000000000000000;m=139f2a;t=6591c0;x=51d2"'
 invocation=""
 json=0
 since=""
