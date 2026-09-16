@@ -359,8 +359,17 @@ impl CliConfig {
         Self::resolve_from(
             explicit,
             std::env::var_os(CLI_CONFIG_ENV),
-            Path::new(SYSTEM_CLI_CONFIG_PATH),
+            Self::system_config_path(),
         )
+    }
+
+    /// The packaged conffile [`Self::resolve`] reads when nothing else is
+    /// set. Named rather than inlined so the wiring itself — which file the
+    /// installed binary looks for — is a value a test can assert on. Issue
+    /// #203 was exactly this wiring being wrong with every unit test green.
+    #[must_use]
+    pub fn system_config_path() -> &'static Path {
+        Path::new(SYSTEM_CLI_CONFIG_PATH)
     }
 
     /// [`Self::resolve`] with the environment and the system config path
@@ -775,5 +784,17 @@ mod tests {
             tensorplate_protocol::install_paths::CLI_CONFIG_PATH
         );
         assert!(Path::new(SYSTEM_CLI_CONFIG_PATH).is_absolute());
+    }
+
+    /// The wiring `resolve()` hands to `resolve_from`. Every other test in
+    /// this module supplies its own path, so without this one the installed
+    /// binary can look for the wrong file — the #203 defect — with the whole
+    /// suite green.
+    #[test]
+    fn resolve_reads_the_installed_conffile_path() {
+        assert_eq!(
+            CliConfig::system_config_path(),
+            Path::new(tensorplate_protocol::install_paths::CLI_CONFIG_PATH)
+        );
     }
 }

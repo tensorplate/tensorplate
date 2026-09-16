@@ -121,6 +121,46 @@ fn the_debian_package_installs_the_config_where_discovery_reads_it() {
     );
 }
 
+/// `resolve()` reads the environment with `var_os`, not `var`. The
+/// difference only shows on a path that is not valid UTF-8: `var` would
+/// discard it and fall through to the packaged conffile, so a config the
+/// operator named would silently stop being used. Driven through the
+/// binary because that wiring lives in `resolve()`, which the unit tests
+/// cannot reach.
+#[test]
+#[cfg(unix)]
+fn a_non_utf8_environment_config_is_used_not_discarded() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::Command;
+
+    let td = tempfile::tempdir().expect("tempdir");
+    let dir = td
+        .path()
+        .to_str()
+        .expect("tempdir path is utf-8")
+        .to_string();
+    let mut raw = dir.clone().into_bytes();
+    raw.extend_from_slice(b"/\xffcli.json");
+    let named = OsString::from_vec(raw);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_tensorplate"))
+        .env("TENSORPLATE_CLI_CONFIG", &named)
+        .args(["logs", "--tail", "1"])
+        .output()
+        .expect("run tensorplate");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a config named in the environment must be read, not skipped: {stderr}"
+    );
+    assert!(
+        stderr.contains("failed to read cli config") && stderr.contains(&dir),
+        "the error must name the file the environment pointed at: {stderr}"
+    );
+}
+
 #[test]
 fn homebrew_cli_config_uses_the_agent_socket_and_structured_log() {
     let p = homebrew_cli_config_path();
