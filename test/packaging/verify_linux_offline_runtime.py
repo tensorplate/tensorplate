@@ -6,7 +6,8 @@ Run by verify_linux_offline_runtime.sh. The module is the mechanism both
 systemd lifecycle harnesses use for their offline stage, so what it
 refuses is what those stages refuse. Everything here is synthetic: no
 unit file is written outside a temporary directory, no systemd command is
-run, and no socket is opened.
+run, no socket is opened, no process is moved between control groups, and
+no credential of the process running the tests is changed.
 
 The harness end of the same mechanism -- the stage body, its cleanup and
 its signal handling -- is exercised against the stubbed appliance in
@@ -151,6 +152,33 @@ def test_check_denial():
     assert ipaddress.ip_address(m.RESOLVER_STUB) in ipaddress.ip_network("127.0.0.0/8")
     assert ipaddress.ip_address(m.RESOLVER_STUB) not in ipaddress.ip_network("127.0.0.1/32")
 
+    # systemd prints both lists from a hash set whose order changes with
+    # each PID 1 start (src/core/dbus-cgroup.c, SET_FOREACH). The same
+    # policy in the other order is the same policy, and is filed in one
+    # canonical order so the evidence does not depend on the boot.
+    for deny, allow in (("::/0 0.0.0.0/0", "127.0.0.1/32 ::1/128"),
+                        ("0.0.0.0/0 ::/0", "::1/128 127.0.0.1/32"),
+                        ("::/0 0.0.0.0/0", "::1/128 127.0.0.1/32")):
+        result, failures = m.check_denial("tensorplate-agent", show(deny=deny, allow=allow))
+        assert failures == [], (deny, allow, failures)
+        assert result["allowed_prefixes"] == ["127.0.0.1/32", "::1/128"], result
+    # The canonical order is the order the constants are written in, which
+    # is what lets a readback compare equal to them.
+    assert [str(p) for p in m.prefixes(" ".join(m.ALLOWED_PREFIXES))] == \
+        list(m.ALLOWED_PREFIXES)
+    assert [str(p) for p in m.prefixes(" ".join(m.DENY_ANY_PREFIXES))] == \
+        list(m.DENY_ANY_PREFIXES)
+    # Order-insensitive is not count-insensitive: a repeated entry is not
+    # the two-entry set.
+    for text, expected in (
+        (show(deny="0.0.0.0/0 ::/0 0.0.0.0/0"), "denies_every_address"),
+        (show(allow="::1/128 127.0.0.1/32 ::1/128"), "allows_exactly_the_two_host_addresses"),
+    ):
+        failures = m.check_denial("tensorplate-agent", text)[1]
+        assert expected in failures, (expected, failures)
+    # An unparseable entry sorts last and is still named.
+    assert m.prefixes("zz ::1/128 127.0.0.1/32")[-1] == "zz"
+
     refused(lambda: m.parse_show("LoadState=loaded\nLoadState=masked\n"),
             "printed LoadState twice")
     refused(lambda: m.parse_show("Warning: unit not found\n"), "not a property")
@@ -200,6 +228,14 @@ def test_check_policy():
     mixed = [("tensorplate-agent", show()),
              ("tensorplate-observability", show(allow="127.0.0.1/32"))]
     assert "both_units_allow_the_same_addresses" in m.check_policy("denied", mixed)[1]
+    # Two units printing the same set in different orders allow the same
+    # addresses.
+    reordered = [("tensorplate-agent", show()),
+                 ("tensorplate-observability",
+                  show(deny="::/0 0.0.0.0/0", allow="::1/128 127.0.0.1/32"))]
+    result, failures = m.check_policy("denied", reordered)
+    assert failures == [], failures
+    assert result["allowed_prefixes"] == ["127.0.0.1/32", "::1/128"], result
 
     # The invocation comparison, over both units at once. A unit named in
     # `previous` whose policy was never read back leaves the claim
@@ -273,24 +309,52 @@ def test_check_policy():
 # --- classification -----------------------------------------------------
 
 
-def outcomes(denied, allowed):
-    return {"denied": dict.fromkeys(m.DENIED_NAMES, denied),
-            "allowed": dict.fromkeys(m.ALLOWED_NAMES, allowed)}
+def outcomes(denied, allowed, scope="transient"):
+    denied_names, allowed_names = m.SCOPES[scope]
+    return {"denied": dict.fromkeys(denied_names, denied),
+            "allowed": dict.fromkeys(allowed_names, allowed)}
 
 
-def verdict(probe, control, metadata="required"):
-    return m.classify(probe, control, metadata)[1]
+def kernel_probe(scope="transient", refusal="EPERM", silence="timeout"):
+    """What a Linux kernel answers under the denial: every datagram
+    refused outright, every TCP connect left waiting for a SYN the filter
+    dropped (net/ipv4/tcp_output.c, tcp_connect, reports only
+    -ECONNREFUSED)."""
+    probe = outcomes(refusal, "ok", scope)
+    for name in m.TCP_OPERATIONS:
+        if name in probe["denied"]:
+            probe["denied"][name] = silence
+    return probe
+
+
+def verdict(probe, control, metadata="required", scope="transient"):
+    return m.classify(probe, control, metadata, scope)[1]
+
+
+UDP_DENIED = sorted(name for name in m.DENIED_NAMES if name not in m.TCP_OPERATIONS)
 
 
 def test_classify():
     control = outcomes("ok", "ok")
-    probe = outcomes("EPERM", "ok")
+    probe = kernel_probe()
     result, failures = m.classify(probe, control)
     assert failures == [], failures
-    assert result["operations_refused_under_the_denial"] == sorted(m.DENIED_NAMES), result
+    assert result["operations_refused_under_the_denial"] == UDP_DENIED, result
+    assert result["operations_silenced_under_the_denial"] == sorted(m.TCP_OPERATIONS), result
     assert result["operations_this_host_cannot_send"] == [], result
+    assert result["scope"] == "transient", result
+    # The metadata address is refused outright, as a datagram, whatever
+    # its TCP connect could show.
+    assert m.METADATA_UDP_OPERATION in result["operations_refused_under_the_denial"]
     # EACCES is the same class of answer; no routing failure produces it.
-    assert verdict(outcomes("EACCES", "ok"), control) == []
+    assert verdict(kernel_probe(refusal="EACCES"), control) == []
+    # ETIMEDOUT is what a connect that outlived the kernel's own retries
+    # would say; it is the same silence.
+    assert verdict(kernel_probe(silence="ETIMEDOUT"), control) == []
+    # A refused connect, where some kernel reports one, is a refusal.
+    result, failures = m.classify(outcomes("EPERM", "ok"), control)
+    assert failures == [] and result["operations_silenced_under_the_denial"] == [], \
+        (result, failures)
 
     # A denial that did nothing. `IPAddressDeny=` is silently inert where
     # systemd cannot install its filter, so this is the outcome the
@@ -298,20 +362,48 @@ def test_classify():
     assert verdict(outcomes("ok", "ok"), control) == \
         sorted(f"refused:{name}" for name in m.DENIED_NAMES)
     # A routing failure is not a refusal.
-    assert "refused:tcp_gce_metadata" in verdict(outcomes("ENETUNREACH", "ok"), control)
+    assert "refused:udp_gce_metadata" in verdict(outcomes("ENETUNREACH", "ok"), control)
+    # Nor is a datagram that timed out: only a TCP connect can be silenced.
+    assert "refused:udp_resolver_stub" in verdict(kernel_probe(refusal="timeout"), control)
+    # A connect answered under the denial -- accepted, or reset by a host
+    # with no listener -- means packets flowed.
+    for leaked in ("ok", "ECONNREFUSED"):
+        leaking = kernel_probe()
+        leaking["denied"]["tcp_resolver_stub"] = leaked
+        assert verdict(leaking, control) == ["refused:tcp_resolver_stub"], leaked
+
+    # A TCP timeout is attributable only against a control whose same
+    # connect was answered. One that timed out with nothing denied says
+    # nothing about the denial. A resolver stub with no TCP listener
+    # answers with a reset, which is an answer.
+    slow = outcomes("ok", "ok")
+    slow["denied"]["tcp_resolver_stub"] = "timeout"
+    assert verdict(kernel_probe(), slow) == ["control_answered:tcp_resolver_stub"]
+    reset = outcomes("ok", "ok")
+    reset["denied"]["tcp_resolver_stub"] = "ECONNREFUSED"
+    assert verdict(kernel_probe(), reset) == []
 
     # A control refused by something else on the host -- an application
-    # firewall, a missing route -- makes the probe's EPERM unattributable.
+    # firewall, a missing route -- makes the probe's refusal unattributable.
     refused_control = outcomes("EPERM", "ok")
     failures = verdict(probe, refused_control)
-    assert "control_metadata_service_reachable" in failures
+    assert "control_metadata_service_reachable:tcp_gce_metadata" in failures
+    assert "control_metadata_service_reachable:udp_gce_metadata" in failures
     assert "control_not_refused:udp_test_net_v4" in failures
-    # The metadata control must answer outright, not merely not be
-    # refused: the stage's claim is that the denial is what made it
-    # unreachable.
+    # The metadata controls must answer outright, not merely not be
+    # refused: the stage's claim is that the denial is what made the
+    # service unreachable.
     unreachable = outcomes("ok", "ok")
-    unreachable["denied"]["tcp_gce_metadata"] = "EHOSTUNREACH"
-    assert verdict(probe, unreachable) == ["control_metadata_service_reachable"]
+    unreachable["denied"][m.METADATA_UDP_OPERATION] = "EHOSTUNREACH"
+    assert verdict(probe, unreachable) == [
+        "control_metadata_service_reachable:" + m.METADATA_UDP_OPERATION]
+    # The connect that never reached the service cannot be silenced by the
+    # denial either, and both are said.
+    unreachable = outcomes("ok", "ok")
+    unreachable["denied"][m.METADATA_OPERATION] = "EHOSTUNREACH"
+    assert verdict(probe, unreachable) == [
+        "control_answered:" + m.METADATA_OPERATION,
+        "control_metadata_service_reachable:" + m.METADATA_OPERATION]
 
     # An operation the host cannot perform with nothing denied. On Linux
     # the cgroup egress filter runs after the route lookup, so an
@@ -321,7 +413,7 @@ def test_classify():
     # and blaming the denial for it would fail the stage on a stock VM.
     ipv4_only_control = outcomes("ok", "ok")
     ipv4_only_control["denied"]["udp_documentation_v6"] = "ENETUNREACH"
-    ipv4_only_probe = outcomes("EPERM", "ok")
+    ipv4_only_probe = kernel_probe()
     ipv4_only_probe["denied"]["udp_documentation_v6"] = "ENETUNREACH"
     result, failures = m.classify(ipv4_only_probe, ipv4_only_control)
     assert failures == [], failures
@@ -336,26 +428,50 @@ def test_classify():
     # Every other operation still has to be refused.
     assert "refused:udp_test_net_v4" in verdict(
         outcomes("ok", "ok"), ipv4_only_control)
+    # Loopback is routable on every host, and these are the operations
+    # that show the `localhost` shorthand was not used: an unroutable
+    # control there is a broken host, never an excuse.
+    for name in m.ALWAYS_ROUTABLE:
+        broken = outcomes("ok", "ok")
+        broken["denied"][name] = "ENETUNREACH"
+        assert "control_routable:" + name in verdict(kernel_probe(), broken), name
 
     # A row with no metadata service drives the same mechanism with the
-    # operation omitted -- and omitted on purpose, not merely missing.
+    # operations omitted -- and omitted on purpose, not merely missing.
     jetson_control = outcomes("ok", "ok")
-    jetson_probe = outcomes("EPERM", "ok")
-    del jetson_control["denied"]["tcp_gce_metadata"]
-    del jetson_probe["denied"]["tcp_gce_metadata"]
+    jetson_probe = kernel_probe()
+    for name in m.METADATA_OPERATIONS:
+        del jetson_control["denied"][name]
+        del jetson_probe["denied"][name]
     assert verdict(jetson_probe, jetson_control, "absent") == []
-    assert verdict(probe, control, "absent") == ["metadata_operation_not_probed"]
-    assert "control_metadata_service_reachable" in verdict(jetson_probe, jetson_control)
+    assert verdict(probe, control, "absent") == [
+        "metadata_operation_not_probed:" + name for name in m.METADATA_OPERATIONS]
+    only_udp = json.loads(json.dumps(jetson_probe))
+    only_udp["denied"][m.METADATA_UDP_OPERATION] = "EPERM"
+    assert verdict(only_udp, jetson_control, "absent") == [
+        "metadata_operation_not_probed:" + m.METADATA_UDP_OPERATION]
+    assert "control_metadata_service_reachable:tcp_gce_metadata" in \
+        verdict(jetson_probe, jetson_control)
+    # The case a review found certified: no metadata operation, and every
+    # other control unroutable. Nothing was refused, so nothing is
+    # certified.
+    nothing_routes = {"denied": {name: "ENETUNREACH" for name in m.DENIED_NAMES
+                                 if name not in m.METADATA_OPERATIONS},
+                      "allowed": dict.fromkeys(m.ALLOWED_NAMES, "ok")}
+    failures = verdict(json.loads(json.dumps(nothing_routes)), nothing_routes, "absent")
+    assert failures == sorted("control_routable:" + name for name in m.ALWAYS_ROUTABLE) + \
+        sorted("refused:" + name for name in m.ALWAYS_ROUTABLE), failures
 
     # Loopback and the agent socket have to keep working.
-    blocked = outcomes("EPERM", "EPERM")
+    blocked = kernel_probe()
+    blocked["allowed"] = dict.fromkeys(m.ALLOWED_NAMES, "EPERM")
     assert verdict(blocked, control) == \
         sorted(f"allowed:{name}" for name in m.ALLOWED_NAMES)
     assert "control_allowed:unix_agent_socket" in verdict(probe, outcomes("ok", "EPERM"))
 
     # A probe that did not report an operation is a failure, never a skip:
     # a probe whose failure is swallowed certifies nothing.
-    missing = outcomes("EPERM", "ok")
+    missing = kernel_probe()
     del missing["denied"]["udp_resolver_stub"]
     del missing["allowed"]["tcp_loopback_serving_port"]
     failures = verdict(missing, control)
@@ -363,6 +479,26 @@ def test_classify():
     assert "allowed:tcp_loopback_serving_port" in failures
     assert verdict({}, {}) != []
     assert verdict({"denied": "not a mapping"}, control) != []
+
+    # Inside a service's control group: the datagrams only, with the
+    # same rules.
+    unit_control = outcomes("ok", "ok", "unit")
+    unit_probe = kernel_probe("unit")
+    result, failures = m.classify(unit_probe, unit_control, scope="unit")
+    assert failures == [], failures
+    assert result["scope"] == "unit"
+    assert result["operations_refused_under_the_denial"] == sorted(m.UNIT_DENIED_NAMES)
+    assert not any(name.startswith(("tcp_", "unix_")) for name in
+                   m.UNIT_DENIED_NAMES + m.UNIT_ALLOWED_NAMES)
+    assert m.METADATA_UDP_OPERATION in m.UNIT_DENIED_NAMES
+    # A service whose filter never attached: configured, restarted, and
+    # sending freely.
+    assert verdict(outcomes("ok", "ok", "unit"), unit_control, scope="unit") == \
+        sorted(f"refused:{name}" for name in m.UNIT_DENIED_NAMES)
+    # The transient scope's operations are not required of a unit probe,
+    # and a transient probe cannot stand in for a unit's.
+    assert verdict(probe, control, scope="unit") == []
+    assert "refused:tcp_gce_metadata" in verdict(unit_probe, control)
     passed("classification needs an unrefused control and a refused probe")
 
 
@@ -390,22 +526,164 @@ def test_probe_outcomes():
     # A row with no metadata service probes everything else.
     without = [name for name, _ in m.denied_operations("")]
     assert without == [name for name in m.DENIED_NAMES
-                       if name != m.METADATA_OPERATION], without
+                       if name not in m.METADATA_OPERATIONS], without
     allowed = [name for name, _ in m.allowed_operations("/run/agent.sock", 18080)]
     assert allowed == list(m.ALLOWED_NAMES), allowed
     # The resolver stub is probed on both protocols, because that address
     # is exactly what the `localhost` shorthand would have admitted.
     assert m.RESOLVER_STUB == "127.0.0.53"
     assert "udp_test_net_v4_from_child" in m.DENIED_NAMES
+    assert set(m.TCP_OPERATIONS) == {name for name in m.DENIED_NAMES
+                                     if name.startswith("tcp_")}
+
+    # The probe run inside a service's control group sends the datagrams
+    # and nothing else, and says which operations it ran by name.
+    sent = []
+    saved = m.udp_send, m.tcp_connect, m.unix_connect, m.child_udp_send
+    try:
+        m.udp_send = lambda host, port, family=None: sent.append(host)
+        m.tcp_connect = m.unix_connect = None  # called, they would raise
+        m.child_udp_send = lambda: "EPERM"
+        document = m.run_unit_probe()
+    finally:
+        m.udp_send, m.tcp_connect, m.unix_connect, m.child_udp_send = saved
+    assert sorted(document["denied"]) == sorted(m.UNIT_DENIED_NAMES), document
+    assert sorted(document["allowed"]) == sorted(m.UNIT_ALLOWED_NAMES), document
+    assert m.METADATA_ADDRESS in sent and m.RESOLVER_STUB in sent, sent
 
     # A child that never ran sent nothing, so its silence is not EPERM.
     saved = sys.executable
     try:
         sys.executable = "/nonexistent/python3"
         assert m.child_udp_send().startswith("child_not_run_")
+        # Nor is a child that printed EPERM and then failed: its exit
+        # status is the outcome, not whatever it said on the way out.
+        with tempfile.TemporaryDirectory() as work:
+            lying = pathlib.Path(work) / "python3"
+            lying.write_text("#!/bin/sh\necho EPERM\nexit 3\n")
+            lying.chmod(0o755)
+            sys.executable = str(lying)
+            assert m.child_udp_send() == "child_exit_3", m.child_udp_send()
     finally:
         sys.executable = saved
     passed("probe outcomes are named, including a child that never ran")
+
+
+class FakeCredentials:
+    """os, as far as drop_privileges uses it, for a process that is root
+    until told otherwise. The real calls would change the credentials of
+    the process running these tests."""
+
+    def __init__(self, euid=0, ignore_setuid=False):
+        self.uid = self.euid = euid
+        self.gid = self.egid = 0
+        self.groups = [0, 4]
+        self.ignore_setuid = ignore_setuid
+        self.calls = []
+
+    def geteuid(self):
+        return self.euid
+
+    def getuid(self):
+        return self.uid
+
+    def getgid(self):
+        return self.gid
+
+    def getegid(self):
+        return self.egid
+
+    def setgroups(self, groups):
+        self.calls.append("setgroups")
+        self.groups = list(groups)
+
+    def setgid(self, gid):
+        self.calls.append("setgid")
+        self.gid = self.egid = gid
+
+    def setuid(self, uid):
+        self.calls.append("setuid")
+        if not self.ignore_setuid:
+            self.uid = self.euid = uid
+
+
+def test_unit_probe_mechanics():
+    agent = "/system.slice/tensorplate-agent.service"
+    with tempfile.TemporaryDirectory() as root:
+        root = pathlib.Path(root)
+        group = root / "cgroup" / agent.lstrip("/")
+        group.mkdir(parents=True)
+        (group / "cgroup.procs").write_text("")
+        saved = m.CGROUP_ROOT, m.PROC_SELF_CGROUP, m.MOUNT_TABLE
+        try:
+            m.CGROUP_ROOT = str(root / "cgroup")
+            # Only a path that ends in exactly this unit, with nothing
+            # that could climb out of it, is a place this process may be
+            # moved to. The empty value is systemd's answer for a unit
+            # with no running instance.
+            assert m.control_group_path("tensorplate-agent", agent) == str(group)
+            for unit, bad in (
+                ("tensorplate-agent", ""),
+                ("tensorplate-agent", "system.slice/tensorplate-agent.service"),
+                ("tensorplate-agent", "/system.slice/../tensorplate-agent.service"),
+                ("tensorplate-agent", "/system.slice/./tensorplate-agent.service"),
+                ("tensorplate-agent", "/system.slice//tensorplate-agent.service"),
+                ("tensorplate-agent", "/system.slice/tensorplate-agent.service/"),
+                ("tensorplate-agent", "/system.slice/tensorplate-observability.service"),
+                ("tensorplate-agent", "/"),
+            ):
+                refused(lambda: m.control_group_path(unit, bad), "is not the control group")
+
+            # Joining writes this pid, and is read back from the unified
+            # line of /proc/self/cgroup.
+            proc = root / "cgroup-self"
+            m.PROC_SELF_CGROUP = str(proc)
+            proc.write_text("0::" + agent + "\n")
+            m.join_control_group(agent, str(group))
+            assert (group / "cgroup.procs").read_text() == f"{os.getpid()}\n"
+            # A write the kernel took and a process that is somewhere else.
+            for elsewhere in ("0::/user.slice/session-1.scope\n",
+                              "12:pids:" + agent + "\n", ""):
+                proc.write_text(elsewhere)
+                refused(lambda: m.join_control_group(agent, str(group)),
+                        "did not join")
+            refused(lambda: m.join_control_group(agent, str(root / "absent")),
+                    "cannot join")
+
+            # The mount point comes from the mount table when nothing
+            # overrides it, and no unified hierarchy is a refusal.
+            m.CGROUP_ROOT = ""
+            table = root / "mountinfo"
+            m.MOUNT_TABLE = str(table)
+            table.write_text(
+                "22 1 0:21 / /proc rw,nosuid shared:12 - proc proc rw\n"
+                "30 25 0:26 / /sys/fs/cgroup rw,nosuid shared:9 - cgroup2 cgroup2 "
+                "rw,nsdelegate\n")
+            assert m.cgroup2_mount() == "/sys/fs/cgroup"
+            table.write_text("22 1 0:21 / /proc rw,nosuid shared:12 - proc proc rw\n"
+                             "31 25 0:27 / /sys/fs/cgroup/cpu rw - cgroup cgroup rw,cpu\n")
+            refused(m.cgroup2_mount, "no cgroup2 hierarchy")
+            m.MOUNT_TABLE = str(root / "absent-mountinfo")
+            refused(m.cgroup2_mount, "cannot read the mount table")
+        finally:
+            m.CGROUP_ROOT, m.PROC_SELF_CGROUP, m.MOUNT_TABLE = saved
+
+    # Probing does not need root and is not left running as it.
+    ops = FakeCredentials()
+    m.drop_privileges(1000, 1000, ops)
+    assert (ops.uid, ops.euid, ops.gid, ops.egid, ops.groups) == (1000, 1000, 1000, 1000, [])
+    # Supplementary groups first, then the group, then the user: after
+    # setuid nothing else can be dropped.
+    assert ops.calls == ["setgroups", "setgid", "setuid"], ops.calls
+    refused(lambda: m.drop_privileges(0, 1000, FakeCredentials()), "refusing to probe as root")
+    refused(lambda: m.drop_privileges(1000, 0, FakeCredentials()), "refusing to probe as root")
+    refused(lambda: m.drop_privileges(1000, 1000, FakeCredentials(euid=1000)), "needs root")
+    refused(lambda: m.drop_privileges(1000, 1000, FakeCredentials(ignore_setuid=True)),
+            "did not drop")
+
+    assert m.unit_evidence_name("probe", "tensorplate-agent") == \
+        "offline-unit-probe-tensorplate-agent.service.json"
+    passed("a unit probe joins only that unit's control group, then drops root")
 
 
 # --- what the appliance answered ----------------------------------------
@@ -429,7 +707,12 @@ def doctor_document(**overrides):
 
 
 def test_doctor_check():
-    assert m.doctor_check(doctor_document(), 0, ROW)[1] == []
+    result, failures = m.doctor_check(doctor_document(), 0, ROW)
+    assert failures == [], failures
+    # What was required and what was forbidden, as the row supplied them.
+    assert result == {"doctor": "pass", "platform_row": ROW,
+                      "host_os_phrase_required": m.DOCTOR_RECORDED_PHRASE,
+                      "host_os_phrase_forbidden": m.DOCTOR_LIVE_PHRASE}, result
     for kwargs, status, expected in (
         ({}, 10, "doctor_exit_status"),
         ({"failing": 2}, 0, "doctor_no_failing_findings"),
@@ -456,10 +739,21 @@ def test_doctor_check():
     jetson = doctor_document(messages={
         "host_os": "ubuntu 22.04 on NVIDIA Jetson Orin Nano",
         "platform_row": "resolves to support row `jetson-orin-nano-8gb`"})
-    assert m.doctor_check(jetson, 0, "jetson-orin-nano-8gb",
-                          "NVIDIA Jetson Orin Nano", "")[1] == []
+    result, failures = m.doctor_check(jetson, 0, "jetson-orin-nano-8gb",
+                                      "NVIDIA Jetson Orin Nano", "")
+    assert failures == [], failures
+    assert result["host_os_phrase_required"] == "NVIDIA Jetson Orin Nano", result
+    assert result["host_os_phrase_forbidden"] is None, result
     assert "host_os_machine_type_from_the_record" in m.doctor_check(
         jetson, 0, "jetson-orin-nano-8gb")[1]
+    # A row that requires no phrase at all is filed as having checked
+    # none, never as a machine type recorded from anywhere.
+    result, failures = m.doctor_check(jetson, 0, "jetson-orin-nano-8gb", "", "")
+    assert failures == [], failures
+    assert result == {"doctor": "pass", "platform_row": "jetson-orin-nano-8gb",
+                      "host_os_phrase_required": None,
+                      "host_os_phrase_forbidden": None}, result
+    assert "recorded" not in json.dumps(result)
     passed("doctor must resolve the row from the recorded machine type")
 
 
@@ -520,10 +814,24 @@ def test_cli_documents():
     off_host["payload"]["agent"]["active"]["serving_url"] = "http://10.0.0.5:18080/infer"
     assert "serving_url_on_the_allowed_loopback_address" in m.status_check(off_host, "d-offline")[1]
     assert "active_deployment" in m.status_check(status, "other")[1]
+    # Each field on its own, so no one of them can be dropped behind the
+    # others: the document has to be a status, and a ready one.
+    for path, value, expected in (
+        (("command",), "doctor", "status_command"),
+        (("payload", "severity"), "degraded", "status_severity_ready"),
+        (("payload", "agent", "agent_state"), "starting", "agent_state_ready"),
+    ):
+        changed = json.loads(json.dumps(status))
+        target = changed
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        assert m.status_check(changed, "d-offline")[1] == [expected], (path, value)
 
     deploy = {"command": "deploy", "payload": {"phase": "active", "deployment_id": "d-offline"}}
     assert m.deploy_check(deploy, "d-offline")[1] == []
     assert "deployment_id" in m.deploy_check(deploy, "d")[1]
+    assert m.deploy_check(dict(deploy, command="status"), "d-offline")[1] == ["deploy_command"]
     assert "deployment_phase_active" in m.deploy_check(
         {"command": "deploy", "payload": {"phase": "failed", "deployment_id": "d-offline"}},
         "d-offline")[1]
@@ -595,28 +903,78 @@ def test_command_line():
             "severity": "ready", "agent": {"agent_state": "ready", "active": {
                 "deployment_id": "d", "serving_url": "http://127.0.0.1:18080/infer"}}}}))
         assert run("serving-port", "--status", str(status)).stdout.strip() == "18080"
+        # A port that exists but is not on the allowed loopback address is
+        # not a port the probe may be pointed at.
+        status.write_text(json.dumps({"command": "status", "payload": {
+            "severity": "ready", "agent": {"agent_state": "ready", "active": {
+                "deployment_id": "d", "serving_url": "http://10.0.0.5:18080/infer"}}}}))
+        result = run("serving-port", "--status", str(status))
+        assert result.returncode == 1 and "loopback" in result.stderr, (result.stdout,
+                                                                         result.stderr)
+        assert result.stdout.strip() == "", result.stdout
         status.write_text(json.dumps({"command": "status", "payload": {}}))
         result = run("serving-port", "--status", str(status))
         assert result.returncode == 1 and "loopback" in result.stderr, result.stderr
         result = run("serving-port", "--status", str(work / "absent.json"))
         assert result.returncode == 1 and "cannot read" in result.stderr, result.stderr
+
+        # The evidence names the harness files the unit probes under.
+        result = run("unit-evidence-name", "--kind", "control", "--unit", "tensorplate-agent")
+        assert result.stdout.strip() == m.unit_evidence_name("control", "tensorplate-agent")
+
+        # classify takes the scope; a unit's datagram-only documents pass
+        # as a unit and fail as a transient probe.
+        (work / "unit-probe.json").write_text(json.dumps(kernel_probe("unit")))
+        (work / "unit-control.json").write_text(json.dumps(outcomes("ok", "ok", "unit")))
+        classify = ["classify", "--probe", str(work / "unit-probe.json"),
+                    "--control", str(work / "unit-control.json")]
+        result = run(*classify, "--scope", "unit", "--out", str(work / "unit-class.json"))
+        assert result.returncode == 0, result.stderr
+        assert json.loads((work / "unit-class.json").read_text())["scope"] == "unit"
+        result = run(*classify)
+        assert result.returncode == 1 and "refused:tcp_gce_metadata" in result.stderr, \
+            result.stderr
+
+        # A unit probe refuses a control group that is not the unit's
+        # before it moves anything: the process is never written into it.
+        elsewhere = work / "cgroup" / "system.slice" / "sshd.service"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "cgroup.procs").write_text("")
+        result = run("probe-unit", "--unit", "tensorplate-agent",
+                     "--control-group", "/system.slice/sshd.service",
+                     "--uid", "1000", "--gid", "1000",
+                     env=dict(os.environ, TP_OFFLINE_CGROUP_ROOT=str(work / "cgroup")))
+        assert result.returncode == 1 and "is not the control group" in result.stderr, \
+            result.stderr
+        assert (elsewhere / "cgroup.procs").read_text() == ""
     passed("subcommands report failure through their exit status")
 
 
 UNITS = ["tensorplate-agent.service", "tensorplate-observability.service"]
 
 
-def evidence_directory(work, **overrides):
-    """A stage's filed results, as the harness writes them."""
+def denial_document(**changes):
+    document = {"units": UNITS, "denied": True, "persistent_drop_ins_found": 0,
+                "allowed_prefixes": list(m.ALLOWED_PREFIXES), "units_restarted": UNITS}
+    document.update(changes)
+    return document
+
+
+def restored_document(**changes):
+    document = {"units": UNITS, "denied": False, "drop_ins_removed": 2,
+                "persistent_drop_ins_found": 0, "units_restarted": UNITS}
+    document.update(changes)
+    return document
+
+
+def evidence_directory(work, drop=(), **overrides):
+    """A stage's filed results, as the harness writes them. `drop` names
+    keys to delete from a document: `(file, key)`."""
     documents = {
-        "offline-denial.json": {
-            "units": UNITS, "denied": True, "persistent_drop_ins_found": 0,
-            "allowed_prefixes": list(m.ALLOWED_PREFIXES), "units_restarted": UNITS},
-        "offline-restored.json": {
-            "units": UNITS, "denied": False, "drop_ins_removed": 2,
-            "persistent_drop_ins_found": 0, "units_restarted": UNITS},
+        "offline-denial.json": denial_document(),
+        "offline-restored.json": restored_document(),
         "offline-control.json": outcomes("ok", "ok"),
-        "offline-probe.json": outcomes("EPERM", "ok"),
+        "offline-probe.json": kernel_probe(),
         "offline-classification.json": {"metadata_operation": "required"},
         "offline-identity.json": {"machine_type_source": "recorded_gce_metadata",
                                   "record": "not_applicable"},
@@ -625,7 +983,12 @@ def evidence_directory(work, **overrides):
         "offline-deploy-check.json": {"deploy": "pass"},
         "offline-infer-check.json": {"infer": "pass"},
     }
+    for unit in UNITS:
+        documents[m.unit_evidence_name("control", unit)] = outcomes("ok", "ok", "unit")
+        documents[m.unit_evidence_name("probe", unit)] = kernel_probe("unit")
     documents.update(overrides)
+    for name, key in drop:
+        del documents[name][key]
     for name, document in documents.items():
         (work / name).write_text(json.dumps(document))
     return str(work)
@@ -645,75 +1008,146 @@ def test_evidence():
     assert result["enforced"] is True
     assert result["cli_under_denial"] == {"status": "pass", "doctor": "pass",
                                           "deploy": "pass", "infer": "pass"}
-    assert result["classification"]["operations_refused_under_the_denial"] == \
-        sorted(m.DENIED_NAMES)
+    assert result["classification"]["operations_refused_under_the_denial"] == UDP_DENIED
+    assert result["classification"]["operations_silenced_under_the_denial"] == \
+        sorted(m.TCP_OPERATIONS)
+    # Both services were probed from inside their own control groups.
+    per_unit = result["units_probed_in_their_own_control_group"]
+    assert sorted(per_unit) == UNITS, per_unit
+    for unit in UNITS:
+        # The documents the verdict was derived from, as filed.
+        assert per_unit[unit]["probe"] == kernel_probe("unit"), per_unit[unit]
+        assert per_unit[unit]["control"] == outcomes("ok", "ok", "unit"), per_unit[unit]
+        assert per_unit[unit]["classification"]["scope"] == "unit"
+        assert per_unit[unit]["classification"]["operations_refused_under_the_denial"] == \
+            sorted(m.UNIT_DENIED_NAMES)
     assert result["restore"]["drop_ins_removed"] == 2
     assert result["restore"]["persistent_unit_files_written"] == 0
     assert result["restore"]["units_restarted_without_the_denial"] == UNITS
     # Nothing in the evidence carries a path off the host or a process id.
     text = json.dumps(result)
-    for forbidden in ("/run/systemd", "/etc/systemd", "pid"):
+    for forbidden in ("/run/systemd", "/etc/systemd", "pid", "system.slice", "cgroup/"):
         assert forbidden not in text, forbidden
 
+    unit = UNITS[1]
     # Every verdict is derived, so a directory whose own documents
-    # contradict the certificate is refused rather than certified. Each
-    # of these produced `"enforced": true` while the claim was a literal.
-    for overrides, fragment in (
+    # contradict the certificate is refused rather than certified.
+    for overrides, drop, fragment in (
         # Nothing was denied, and the control was refused: the exact
         # input `classify` rejects.
         ({"offline-probe.json": outcomes("ok", "ok"),
-          "offline-control.json": outcomes("EPERM", "ok")}, "do not classify"),
+          "offline-control.json": outcomes("EPERM", "ok")}, (), "do not classify"),
+        # One service whose own filter never attached, while the
+        # transient unit's did.
+        ({m.unit_evidence_name("probe", unit): outcomes("ok", "ok", "unit")}, (),
+         "do not classify"),
+        # A service probed against the transient control instead of its
+        # own, or not probed at all.
+        ({}, (), None),
         # The readback saw the shorthand's expansion, which admits the
         # resolver stub and the DNS namespace behind it.
-        ({"offline-denial.json": {"units": UNITS, "denied": True,
-                                  "persistent_drop_ins_found": 0,
-                                  "allowed_prefixes": ["127.0.0.0/8", "::1/128"],
-                                  "units_restarted": UNITS}}, "admits 127.0.0.53"),
+        ({"offline-denial.json": denial_document(
+            allowed_prefixes=["127.0.0.0/8", "::1/128"])}, (), "admits 127.0.0.53"),
+        # Not the resolver, and still not the two host addresses.
+        ({"offline-denial.json": denial_document(allowed_prefixes=["127.0.0.1/32"])}, (),
+         "is not exactly"),
+        ({"offline-denial.json": denial_document(
+            allowed_prefixes=["127.0.0.1/32", "::1/128", "169.254.169.254/32"])}, (),
+         "is not exactly"),
+        ({"offline-denial.json": denial_document(allowed_prefixes=[])}, (),
+         "carries no allow list"),
+        ({"offline-denial.json": denial_document(allowed_prefixes=["not-a-prefix"])}, (),
+         "unparseable"),
+        ({"offline-denial.json": denial_document(allowed_prefixes=[2130706433])}, (),
+         "unparseable"),
         # A readback that compared no invocation certifies the unit's
-        # loaded configuration and nothing about the running service.
-        ({"offline-denial.json": {"units": UNITS, "denied": True,
-                                  "persistent_drop_ins_found": 0,
-                                  "allowed_prefixes": list(m.ALLOWED_PREFIXES)}},
-         "instance as replaced"),
-        # A persistent drop-in outlives the run.
-        ({"offline-restored.json": {"units": UNITS, "denied": False,
-                                    "drop_ins_removed": 2, "units_restarted": UNITS,
-                                    "persistent_drop_ins_found": 1}}, "/etc/systemd"),
+        # loaded configuration and nothing about the running service --
+        # on either side of the stage.
+        ({}, (("offline-denial.json", "units_restarted"),), "instance as replaced"),
+        ({}, (("offline-restored.json", "units_restarted"),), "instance as replaced"),
+        # Documents that say something other than what their names claim.
+        ({"offline-denial.json": denial_document(denied=False)}, (),
+         "does not record a denied appliance"),
+        ({}, (("offline-denial.json", "denied"),), "does not record a denied appliance"),
+        ({"offline-restored.json": restored_document(denied=True)}, (),
+         "does not record a restored appliance"),
+        ({}, (("offline-restored.json", "denied"),), "does not record a restored appliance"),
+        # A restore of other units than the ones denied, or of none.
+        ({"offline-restored.json": restored_document(
+            units=UNITS[:1], units_restarted=UNITS[:1])}, (), "not the units denied"),
+        ({"offline-denial.json": denial_document(units=[], units_restarted=[]),
+          "offline-restored.json": restored_document(units=[], units_restarted=[])}, (),
+         "not the units denied"),
+        ({}, (("offline-denial.json", "units"),), "records no units"),
+        # A persistent drop-in outlives the run, whichever side found it.
+        ({"offline-restored.json": restored_document(persistent_drop_ins_found=1)}, (),
+         "persistent drop-in"),
+        ({"offline-denial.json": denial_document(persistent_drop_ins_found=2)}, (),
+         "persistent drop-in"),
+        ({}, (("offline-restored.json", "persistent_drop_ins_found"),),
+         "records no persistent_drop_ins_found"),
+        # A restore that read back fewer removals than there were drop-ins,
+        # or never counted them.
+        ({"offline-restored.json": restored_document(drop_ins_removed=0)}, (),
+         "0 drop-in(s) as removed for 2"),
+        ({"offline-restored.json": restored_document(drop_ins_removed=1)}, (),
+         "1 drop-in(s) as removed for 2"),
+        ({}, (("offline-restored.json", "drop_ins_removed"),),
+         "records no drop_ins_removed"),
+        # Not JSON objects at all.
+        ({"offline-restored.json": ["not", "an", "object"]}, (), "is not a JSON object"),
     ):
         with tempfile.TemporaryDirectory() as work:
-            directory = evidence_directory(pathlib.Path(work), **overrides)
-            if fragment == "/etc/systemd":
-                # This one is a value, not a refusal: it is filed so the
-                # certificate cannot silently say zero.
-                assert m.evidence(directory, "d-offline")[
-                    "restore"]["persistent_unit_files_written"] == 1
+            directory = evidence_directory(pathlib.Path(work), drop, **overrides)
+            if fragment is None:
+                # The in-unit documents are required, not optional.
+                for kind in ("control", "probe"):
+                    os.unlink(os.path.join(directory, m.unit_evidence_name(kind, unit)))
+                    refused(lambda: m.evidence(directory, "d-offline"), "cannot read")
+                    (pathlib.Path(directory) / m.unit_evidence_name(kind, unit)).write_text(
+                        json.dumps(kernel_probe("unit") if kind == "probe"
+                                   else outcomes("ok", "ok", "unit")))
                 continue
             refused(lambda: m.evidence(directory, "d-offline"), fragment)
 
     # A check that never passed filed no document, so its absence refuses
     # the certificate rather than being restated as a pass.
     for missing in ("offline-doctor-check.json", "offline-classification.json",
-                    "offline-infer-check.json"):
+                    "offline-infer-check.json", "offline-identity.json"):
         with tempfile.TemporaryDirectory() as work:
             directory = evidence_directory(pathlib.Path(work))
             os.unlink(os.path.join(directory, missing))
-            try:
-                m.evidence(directory, "d-offline")
-            except (OSError, m.CheckFailed):
-                continue
-            raise AssertionError(f"evidence certified a directory without {missing}")
+            refused(lambda: m.evidence(directory, "d-offline"), "cannot read " + missing)
     # A filed document that records something other than a pass.
     with tempfile.TemporaryDirectory() as work:
         directory = evidence_directory(pathlib.Path(work),
                                        **{"offline-deploy-check.json": {"deploy": "fail"}})
         refused(lambda: m.evidence(directory, "d-offline"), "does not record a pass")
+    # A row with no metadata service files `absent`, and its documents are
+    # classified that way on both scopes.
+    with tempfile.TemporaryDirectory() as work:
+        without = {}
+        for name, document in (("offline-control.json", outcomes("ok", "ok")),
+                               ("offline-probe.json", kernel_probe())):
+            for key in m.METADATA_OPERATIONS:
+                del document["denied"][key]
+            without[name] = document
+        for unit_name in UNITS:
+            for kind, document in (("control", outcomes("ok", "ok", "unit")),
+                                   ("probe", kernel_probe("unit"))):
+                del document["denied"][m.METADATA_UDP_OPERATION]
+                without[m.unit_evidence_name(kind, unit_name)] = document
+        without["offline-classification.json"] = {"metadata_operation": "absent"}
+        directory = evidence_directory(pathlib.Path(work), **without)
+        assert m.evidence(directory, "d")["classification"]["metadata_operation"] == "absent"
     passed("evidence is derived from the filed results, not restated")
 
 
 def main():
     for test in (test_drop_in, test_check_denial, test_check_no_denial, test_check_policy,
-                 test_classify, test_probe_outcomes, test_doctor_check, test_identity_check,
-                 test_cli_documents, test_command_line, test_evidence):
+                 test_classify, test_probe_outcomes, test_unit_probe_mechanics,
+                 test_doctor_check, test_identity_check, test_cli_documents,
+                 test_command_line, test_evidence):
         test()
     print("linux offline runtime: all checks pass")
     return 0

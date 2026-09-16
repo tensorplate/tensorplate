@@ -6,20 +6,22 @@ The offline stage denies both TensorPlate services, and every CLI call it
 makes, all IP traffic but the two loopback host addresses, then requires
 the appliance to keep working. This module renders the per-unit denial,
 reads the denial back from systemd, probes the network from inside a
-denied unit, classifies every result against an undenied control, and
-checks that the row was resolved from the boot-bound machine-type record
-rather than from a metadata service the denial made unreachable.
+denied transient unit and from inside each denied service's own control
+group, classifies every result against an undenied control, and checks
+that the row was resolved from the boot-bound machine-type record rather
+than from a metadata service the denial made unreachable.
 
 It is named for the mechanism, not for a row. The drop-in, the policy
-readback, the probe and the classification carry no row in them. What is
-row-specific is supplied as options, so another systemd harness adopts
-this file unchanged rather than editing it:
+readback, the probes and the classification carry no row in them. What
+is row-specific is supplied as options, so another systemd harness
+adopts this file unchanged rather than editing it:
 
-  * `probe` and `control` take `--metadata-address`, and `none` omits
-    that operation on a host that has no metadata service;
+  * `probe`, `control`, `probe-unit` and `control-unit` take
+    `--metadata-address`, and `none` omits the metadata operations on a
+    host that has no metadata service;
   * `classify` takes `--metadata-operation absent`, which then requires
-    the operation to be absent from both documents rather than letting a
-    missing operation read as one that passed;
+    those operations to be absent from both documents rather than letting
+    a missing operation read as one that passed;
   * `doctor-check` and `identity-check` take the tokens the row expects
     its agent and its doctor to say.
 
@@ -31,7 +33,7 @@ Every subcommand prints its JSON result, writes it to --out when given,
 and exits non-zero naming the checks that failed. Results written to the
 evidence directory carry no host addresses, unit paths or process ids.
 
-Four fail-open shapes this closes, because each of them turns a stage
+The fail-open shapes this closes, because each of them turns a stage
 that proves nothing into a stage that passes:
 
   * `systemctl show` answers for a unit that does not exist, is not
@@ -45,9 +47,19 @@ that proves nothing into a stage that passes:
     against the one from before, and a policy that never reached a
     running instance fails.
   * `IPAddressDeny=` is silently inert where systemd cannot install its
-    BPF filter. Reading the property back proves the configuration, never
-    the enforcement, so the probe is what decides -- and a probe that
-    could not run is a failure, never a skip.
+    BPF filter, and systemd installs it per unit on a best-effort basis
+    (src/core/cgroup.c, cgroup_apply_firewall, ignores the result).
+    Reading the property back proves the configuration, never the
+    enforcement, and a transient unit that was filtered says nothing
+    about a service whose own attach failed. So the probe runs in a
+    transient unit AND inside each service's control group, each against
+    its own control -- and a probe that could not run is a failure,
+    never a skip.
+  * systemd prints `IPAddressDeny=` and `IPAddressAllow=` from a hash set
+    (src/core/dbus-cgroup.c walks it with SET_FOREACH), whose order
+    changes with each PID 1 start. The readback compares the prefixes
+    as sets and files them in one canonical order, so a correct denial
+    is not refused on a boot that happens to print them the other way.
   * A drop-in left behind leaves the host denied after the run. The
     removal is asserted the same way it was applied: the file is gone and
     the effective properties are empty again.
@@ -72,6 +84,13 @@ import urllib.parse
 # nobody has seen fire. It moves the directories and nothing else: the
 # rendered text, the rule and every check are the same either way.
 UNIT_ROOT = os.environ.get("TP_OFFLINE_UNIT_ROOT", "")
+# Where the unified cgroup hierarchy is mounted, overridable for the same
+# reason and nothing else. Unset, it is read from the mount table.
+CGROUP_ROOT = os.environ.get("TP_OFFLINE_CGROUP_ROOT", "")
+MOUNT_TABLE = "/proc/self/mountinfo"
+# The unified-hierarchy line of this file names the control group the
+# process is in, which is how joining one is read back.
+PROC_SELF_CGROUP = "/proc/self/cgroup"
 
 # Runtime only. A drop-in under /etc would outlive the run, and outlive a
 # reboot, on a host the operator did not agree to leave denied.
@@ -115,18 +134,42 @@ DENIAL_PROPERTIES = ("IPAddressDeny=any",) + tuple(
 )
 
 # The GCE metadata service. The offline claim is about this address being
-# unreachable, so the control has to reach it: EPERM under denial means
-# nothing unless the same operation succeeded moments earlier. A row with
-# no metadata service passes --metadata-address none and omits it.
+# unreachable, so the control has to reach it: a refusal under denial
+# means nothing unless the same operation succeeded moments earlier. A row
+# with no metadata service passes --metadata-address none and omits both
+# operations.
 METADATA_ADDRESS = "169.254.169.254"
 METADATA_PORT = 80
 METADATA_OPERATION = "tcp_gce_metadata"
+# The same address as a datagram, which is where the refusal is
+# attributable: see REFUSED and SILENCED below.
+METADATA_UDP_OPERATION = "udp_gce_metadata"
+METADATA_OPERATIONS = (METADATA_OPERATION, METADATA_UDP_OPERATION)
+# A datagram port nothing needs to listen on; the send is the operation.
+DISCARD_PORT = 9
 
-# A policy refusal, as against a routing or listener outcome. The BPF
-# filter answers the sending syscall with EPERM; EACCES is accepted
-# because it is the same class of answer and no routing failure produces
-# either.
+# A policy refusal, as against a routing or listener outcome.
+#
+# systemd's filter is a cgroup_skb egress program, and a packet it drops
+# comes back from the IP output path as -EPERM (kernel/bpf/cgroup.c,
+# bpf_prog_run_array_cg; net/ipv4/ip_output.c, ip_finish_output). A UDP
+# sendto() returns that to the caller synchronously, so a datagram is
+# where the refusal is attributable. EACCES is accepted because it is the
+# same class of answer and no routing failure produces either.
 REFUSED = ("EPERM", "EACCES")
+
+# What a TCP connect reports when the filter drops its SYN: nothing.
+#
+# tcp_connect() (net/ipv4/tcp_output.c) returns a transmit error only
+# when it is -ECONNREFUSED; for any other it leaves the SYN on the
+# retransmit queue and connect() in progress, so the caller waits out its
+# own timeout. Such an outcome is attributable to the denial only against
+# a control whose same connect was ANSWERED within that timeout -- one
+# that timed out too says nothing -- and it is filed apart from the
+# synchronous refusals, as what it is.
+SILENCED = ("timeout", "ETIMEDOUT")
+ANSWERED = ("ok", "ECONNREFUSED")
+TCP_OPERATIONS = (METADATA_OPERATION, "tcp_resolver_stub")
 
 # Outcomes that mean the send never reached the address filter at all.
 #
@@ -141,12 +184,20 @@ REFUSED = ("EPERM", "EACCES")
 # one of these.
 UNROUTABLE = ("ENETUNREACH", "EHOSTUNREACH", "ENETDOWN", "EAFNOSUPPORT",
               "EADDRNOTAVAIL", "EPFNOSUPPORT")
+# Loopback destinations every Linux host routes. An unroutable control for
+# one of these is a broken host rather than a limit of it, and these are
+# the operations that prove the `localhost` shorthand was not used, so
+# they are never excused as operations this host cannot send.
+ALWAYS_ROUTABLE = ("tcp_resolver_stub", "udp_resolver_stub", "udp_loopback_alias")
 
-CONNECT_TIMEOUT_SECONDS = 5
+# Long enough for a loopback listener or the metadata service to answer
+# the control; the denied connects wait out all of it, twice.
+CONNECT_TIMEOUT_SECONDS = 3
 
 # Operations the denial must refuse, and the undenied control must not.
 DENIED_NAMES = (
     METADATA_OPERATION,
+    METADATA_UDP_OPERATION,
     "tcp_resolver_stub",
     "udp_resolver_stub",
     "udp_loopback_alias",
@@ -161,6 +212,15 @@ ALLOWED_NAMES = (
     "udp_loopback_allowed_v4",
     "udp_loopback_allowed_v6",
 )
+# What runs inside a service's own control group: the datagrams only.
+# Each is refused synchronously, so the probe takes no timeout per unit,
+# and none of them needs the agent socket or a serving port.
+UNIT_DENIED_NAMES = tuple(name for name in DENIED_NAMES if name.startswith("udp_"))
+UNIT_ALLOWED_NAMES = tuple(name for name in ALLOWED_NAMES if name.startswith("udp_"))
+SCOPES = {
+    "transient": (DENIED_NAMES, ALLOWED_NAMES),
+    "unit": (UNIT_DENIED_NAMES, UNIT_ALLOWED_NAMES),
+}
 
 # The agent start-up line that says where the machine type came from.
 IDENTITY_LINE = re.compile(
@@ -277,15 +337,27 @@ def parse_show(text):
 
 
 def prefixes(value):
-    """The prefix list systemd prints, as networks. An unparseable entry is
-    kept as its text so a check names it rather than dropping it."""
+    """The prefix list systemd prints, as networks, in one canonical order.
+
+    systemd prints these from a hash set whose order changes with each
+    PID 1 start, so the order carries nothing and is not kept: IPv4
+    before IPv6, then by address, then by length. An unparseable entry is
+    kept as its text, after every network, so a check names it rather
+    than dropping it. A repeated entry is kept too, so a list that is
+    longer than the set it should be does not compare equal to it."""
     items = []
     for token in value.split():
         try:
             items.append(ipaddress.ip_network(token, strict=False))
         except ValueError:
             items.append(token)
-    return items
+    return sorted(items, key=_prefix_order)
+
+
+def _prefix_order(item):
+    if isinstance(item, str):
+        return (2, 0, 0, item)
+    return (0 if item.version == 4 else 1, int(item.network_address), item.prefixlen, "")
 
 
 def _unit_is_live(show, failures):
@@ -317,7 +389,10 @@ def _unit_was_replaced(show, previous, failures, name):
 
 def check_denial(unit, text, previous=None):
     """The unit is running, denies every address, and allows exactly the
-    two host addresses -- not a prefix that also covers the resolver."""
+    two host addresses -- not a prefix that also covers the resolver.
+
+    Both lists are compared in canonical order, which DENY_ANY_PREFIXES
+    and ALLOWED_PREFIXES are already written in."""
     show = parse_show(text)
     failures = []
     _unit_is_live(show, failures)
@@ -495,15 +570,19 @@ def attempt(operation):
 def denied_operations(metadata_address=METADATA_ADDRESS):
     operations = []
     if metadata_address:
-        operations.append(
+        operations += [
             (METADATA_OPERATION,
-             lambda: tcp_connect(metadata_address, METADATA_PORT)))
+             lambda: tcp_connect(metadata_address, METADATA_PORT)),
+            (METADATA_UDP_OPERATION,
+             lambda: udp_send(metadata_address, DISCARD_PORT)),
+        ]
     operations += [
         ("tcp_resolver_stub", lambda: tcp_connect(RESOLVER_STUB, 53)),
         ("udp_resolver_stub", lambda: udp_send(RESOLVER_STUB, 53)),
-        ("udp_loopback_alias", lambda: udp_send("127.0.0.2", 9)),
-        ("udp_test_net_v4", lambda: udp_send("192.0.2.1", 9)),
-        ("udp_documentation_v6", lambda: udp_send("2001:db8::1", 9, socket.AF_INET6)),
+        ("udp_loopback_alias", lambda: udp_send("127.0.0.2", DISCARD_PORT)),
+        ("udp_test_net_v4", lambda: udp_send("192.0.2.1", DISCARD_PORT)),
+        ("udp_documentation_v6",
+         lambda: udp_send("2001:db8::1", DISCARD_PORT, socket.AF_INET6)),
         ("udp_test_net_v4_from_child", child_udp_send),
     ]
     return operations
@@ -513,8 +592,8 @@ def allowed_operations(agent_socket, serving_port):
     return [
         ("unix_agent_socket", lambda: unix_connect(agent_socket)),
         ("tcp_loopback_serving_port", lambda: tcp_connect("127.0.0.1", serving_port)),
-        ("udp_loopback_allowed_v4", lambda: udp_send("127.0.0.1", 9)),
-        ("udp_loopback_allowed_v6", lambda: udp_send("::1", 9, socket.AF_INET6)),
+        ("udp_loopback_allowed_v4", lambda: udp_send("127.0.0.1", DISCARD_PORT)),
+        ("udp_loopback_allowed_v6", lambda: udp_send("::1", DISCARD_PORT, socket.AF_INET6)),
     ]
 
 
@@ -527,61 +606,179 @@ def run_probe(agent_socket, serving_port, metadata_address=METADATA_ADDRESS):
     }
 
 
-def classify(probe, control, metadata="required"):
+def run_unit_probe(metadata_address=METADATA_ADDRESS):
+    """The datagram operations, from whatever control group this process
+    is in by now. No agent socket and no serving port: see
+    UNIT_DENIED_NAMES."""
+    return {
+        "denied": dict((name, attempt(operation))
+                       for name, operation in denied_operations(metadata_address)
+                       if name in UNIT_DENIED_NAMES),
+        "allowed": dict((name, attempt(operation))
+                        for name, operation in allowed_operations("", 0)
+                        if name in UNIT_ALLOWED_NAMES),
+    }
+
+
+# --- probing from inside a service's control group -----------------------
+
+
+def cgroup2_mount():
+    """Where the unified hierarchy is mounted: systemd attaches its address
+    filter there, whatever else the host mounts."""
+    if CGROUP_ROOT:
+        return CGROUP_ROOT
+    try:
+        with open(MOUNT_TABLE, encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if "-" not in fields:
+                    continue
+                separator = fields.index("-")
+                if len(fields) > separator + 1 and fields[separator + 1] == "cgroup2":
+                    return fields[4]
+    except OSError as error:
+        raise CheckFailed("cannot read the mount table: {}".format(error.strerror))
+    raise CheckFailed("no cgroup2 hierarchy is mounted, so no service can carry "
+                      "systemd's address filter")
+
+
+def control_group_path(unit, control_group):
+    """The directory of `unit`'s own control group, from the ControlGroup
+    systemd reported for it.
+
+    Refused unless it is an absolute path with no empty, `.` or `..`
+    component that ends in exactly this unit: the process is about to be
+    moved there, and a path that named any other group would probe --
+    and alter -- a unit this stage did not deny. An empty value is what
+    systemd reports for a unit with no running instance."""
+    name = unit_service_name(unit)
+    parts = control_group.split("/")
+    if (not control_group.startswith("/")
+            or any(part in ("", ".", "..") for part in parts[1:])
+            or parts[-1] != name):
+        raise CheckFailed(
+            "{} is not the control group of a running {}".format(
+                control_group or "an empty ControlGroup", name))
+    return os.path.join(cgroup2_mount(), control_group.lstrip("/"))
+
+
+def join_control_group(control_group, path):
+    """Move this process into `path`, then read the move back.
+
+    A socket is charged to the control group of the process that created
+    it, at creation, so everything this process sends from here on passes
+    the filter attached to that group -- which is the point. Refused
+    rather than assumed: a write that the kernel took and a process that
+    is somewhere else would probe the wrong filter."""
+    try:
+        with open(os.path.join(path, "cgroup.procs"), "w", encoding="ascii") as handle:
+            handle.write("{}\n".format(os.getpid()))
+        with open(PROC_SELF_CGROUP, encoding="utf-8") as handle:
+            current = [line.rstrip("\n")[3:] for line in handle if line.startswith("0::")]
+    except OSError as error:
+        raise CheckFailed("cannot join the control group {}: {}".format(
+            control_group, error.strerror or error))
+    if current != [control_group]:
+        raise CheckFailed("this process did not join {}: it is in {}".format(
+            control_group, current or "no unified control group"))
+
+
+def drop_privileges(uid, gid, ops=os):
+    """Joining a service's control group takes root; probing does not, and
+    the probe is not left running as root. `ops` is the os module except
+    in the tests, which must never change the credentials of the process
+    running them."""
+    if uid == 0 or gid == 0:
+        raise CheckFailed("refusing to probe as root: pass the operator's uid and gid")
+    if ops.geteuid() != 0:
+        raise CheckFailed("joining a service's control group needs root; run this under sudo")
+    ops.setgroups([])
+    ops.setgid(gid)
+    ops.setuid(uid)
+    if (ops.getuid(), ops.geteuid(), ops.getgid(), ops.getegid()) != (uid, uid, gid, gid):
+        raise CheckFailed("the probe did not drop to uid {} gid {}".format(uid, gid))
+
+
+def classify(probe, control, metadata="required", scope="transient"):
     """The probe proves the denial only against a control that was not
     refused. Both halves are required: a control refused by something else
-    on the host makes the probe's EPERM unattributable, and a probe that
+    on the host makes the probe's refusal unattributable, and a probe that
     was not refused means the denial did nothing.
 
     The control also decides which operations can prove anything here. An
     operation the host could not perform with nothing denied cannot be
     refused by the denial either; it is named in the result rather than
-    reported as a denial that failed to bite."""
+    reported as a denial that failed to bite -- except for a loopback
+    destination, which every host can send to.
+
+    A datagram has to be refused outright (REFUSED). A TCP connect cannot
+    be: the kernel reports nothing for a dropped SYN, so it is accepted as
+    silenced (SILENCED) only where its control was answered, and filed
+    apart from the refusals.
+
+    `scope` names the operation set: `transient` for the probe in a
+    denied transient unit, `unit` for the datagram subset run inside a
+    service's own control group."""
     failures = []
+    denied_names, allowed_names = SCOPES[scope]
     control_denied = control.get("denied") if isinstance(control.get("denied"), dict) else {}
     control_allowed = control.get("allowed") if isinstance(control.get("allowed"), dict) else {}
     probe_denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
     probe_allowed = probe.get("allowed") if isinstance(probe.get("allowed"), dict) else {}
-    names = list(DENIED_NAMES)
+    names = list(denied_names)
     if metadata == "absent":
-        names.remove(METADATA_OPERATION)
+        names = [name for name in names if name not in METADATA_OPERATIONS]
         # Absent because the row has no metadata service, not absent
         # because a probe dropped it: an operation that quietly vanished
         # from a document must never read as one that passed.
-        if METADATA_OPERATION in control_denied or METADATA_OPERATION in probe_denied:
-            failures.append("metadata_operation_not_probed")
-    refused_names, unroutable_names = [], []
+        for name in METADATA_OPERATIONS:
+            if name in control_denied or name in probe_denied:
+                failures.append("metadata_operation_not_probed:" + name)
+    refused_names, silenced_names, unroutable_names = [], [], []
     for name in names:
         outcome = control_denied.get(name)
         probed = probe_denied.get(name)
-        if name == METADATA_OPERATION:
-            # The one control that must succeed outright rather than merely
+        if name in METADATA_OPERATIONS:
+            # The controls that must succeed outright rather than merely
             # not be refused: the stage's whole claim is that this service
             # was reachable and the denial is what made it unreachable.
             if outcome != "ok":
-                failures.append("control_metadata_service_reachable")
+                failures.append("control_metadata_service_reachable:" + name)
         elif outcome is None or outcome in REFUSED:
             failures.append("control_not_refused:" + name)
         elif outcome in UNROUTABLE:
-            unroutable_names.append(name)
-            # Nothing here to refuse, so the only thing to require is
-            # that the denial did not make it start working.
-            if probed != outcome:
-                failures.append("probe_matches_the_unroutable_control:" + name)
-            continue
+            if name in ALWAYS_ROUTABLE:
+                failures.append("control_routable:" + name)
+            else:
+                unroutable_names.append(name)
+                # Nothing here to refuse, so the only thing to require is
+                # that the denial did not make it start working.
+                if probed != outcome:
+                    failures.append("probe_matches_the_unroutable_control:" + name)
+                continue
         if probed in REFUSED:
             refused_names.append(name)
+        elif name in TCP_OPERATIONS and probed in SILENCED:
+            if outcome in ANSWERED:
+                silenced_names.append(name)
+            else:
+                # Timed out with nothing denied as well, so the timeout
+                # under the denial is attributable to nothing.
+                failures.append("control_answered:" + name)
         else:
             failures.append("refused:" + name)
-    for name in ALLOWED_NAMES:
+    for name in allowed_names:
         if control_allowed.get(name) != "ok":
             failures.append("control_allowed:" + name)
         if probe_allowed.get(name) != "ok":
             failures.append("allowed:" + name)
     result = {
         "ip_traffic_denied_except_the_two_host_addresses": True,
+        "scope": scope,
         "metadata_operation": metadata,
         "operations_refused_under_the_denial": sorted(refused_names),
+        "operations_silenced_under_the_denial": sorted(silenced_names),
         "operations_this_host_cannot_send": sorted(unroutable_names),
     }
     return result, sorted(set(failures))
@@ -674,7 +871,9 @@ def doctor_check(document, status, exact_row,
 
     The two phrases are the row's, not this module's: the defaults are
     the Compute Engine ones, and an empty forbidden phrase forbids
-    nothing."""
+    nothing. The result files the phrase that was required, and no
+    phrase at all where none was: it states what was checked, never a
+    machine-type source this call did not establish."""
     payload = _payload(document)
     findings = dict((item.get("id"), item) for item in payload.get("findings") or []
                     if isinstance(item, dict))
@@ -699,7 +898,9 @@ def doctor_check(document, status, exact_row,
     if forbidden_host_os_phrase and forbidden_host_os_phrase in host_os:
         failures.append("host_os_machine_type_not_from_live_metadata")
     return ({"doctor": "pass", "platform_row": exact_row,
-             "machine_type_source": "recorded"}, sorted(set(failures)))
+             "host_os_phrase_required": host_os_phrase or None,
+             "host_os_phrase_forbidden": forbidden_host_os_phrase or None},
+            sorted(set(failures)))
 
 
 def identity_check(journal_text, expect_source=RECORDED_SOURCE,
@@ -760,8 +961,19 @@ def evidence(directory, deployment):
     would refuse, a unit path, or a process id."""
 
     def load(name):
-        with open(os.path.join(directory, name), encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                document = json.load(handle)
+        except (OSError, ValueError) as error:
+            raise CheckFailed("cannot read {}: {}".format(name, error))
+        if not isinstance(document, dict):
+            raise CheckFailed("{} is not a JSON object".format(name))
+        return document
+
+    def field(document, name, key):
+        if key not in document:
+            raise CheckFailed("{} records no {}".format(name, key))
+        return document[key]
 
     def verdict(name, key):
         document = load(name)
@@ -769,15 +981,28 @@ def evidence(directory, deployment):
             raise CheckFailed("{} does not record a pass".format(name))
         return "pass"
 
+    def classified(probe_name, control_name, metadata, scope):
+        classification, failures = classify(
+            load(probe_name), load(control_name), metadata, scope)
+        if failures:
+            raise CheckFailed(
+                "{} and {} do not classify as an enforced denial: {}".format(
+                    probe_name, control_name, ", ".join(failures)))
+        return classification
+
     units = load("offline-denial.json")
     restored = load("offline-restored.json")
-    control = load("offline-control.json")
-    probe = load("offline-probe.json")
     filed = load("offline-classification.json")
     if units.get("denied") is not True:
         raise CheckFailed("offline-denial.json does not record a denied appliance")
     if restored.get("denied") is not False:
         raise CheckFailed("offline-restored.json does not record a restored appliance")
+    denied_units = field(units, "offline-denial.json", "units")
+    restored_units = field(restored, "offline-restored.json", "units")
+    if not denied_units or sorted(restored_units) != sorted(denied_units):
+        raise CheckFailed(
+            "offline-restored.json restores {}, not the units denied: {}".format(
+                restored_units, denied_units))
     # Every unit the stage denied had its running instance replaced under
     # the denial, and replaced again without it. A readback that compared
     # no invocation certifies the unit's loaded configuration and nothing
@@ -786,23 +1011,47 @@ def evidence(directory, deployment):
     for document, name in ((units, "offline-denial.json"),
                            (restored, "offline-restored.json")):
         restarted = document.get("units_restarted") or []
-        if sorted(restarted) != sorted(document.get("units") or []):
+        if sorted(restarted) != sorted(document["units"]):
             raise CheckFailed(
                 "{} does not record every unit's instance as replaced: "
                 "read back {}, restart-checked {}".format(
-                    name, document.get("units"), restarted))
-    classification, failures = classify(
-        probe, control, filed.get("metadata_operation", "required"))
-    if failures:
+                    name, document["units"], restarted))
+        # A unit file under /etc outlives the run and the next reboot,
+        # whichever side of the stage found it.
+        if field(document, name, "persistent_drop_ins_found") != 0:
+            raise CheckFailed(
+                "{} found a persistent drop-in under /etc/systemd/system".format(name))
+    # One runtime drop-in per denied unit, each read back as gone.
+    removed = field(restored, "offline-restored.json", "drop_ins_removed")
+    if removed != len(denied_units):
         raise CheckFailed(
-            "the filed probe and control do not classify as an enforced denial: "
-            + ", ".join(failures))
+            "offline-restored.json read back {} drop-in(s) as removed for {} "
+            "denied unit(s)".format(removed, len(denied_units)))
+
+    metadata = filed.get("metadata_operation", "required")
+    classification = classified(
+        "offline-probe.json", "offline-control.json", metadata, "transient")
+    # And inside each service's own control group, because systemd attaches
+    # the filter to each unit on a best-effort basis and the transient
+    # unit's filter says nothing about theirs.
+    per_unit = {}
+    for unit in denied_units:
+        per_unit[unit] = {
+            "control": load(unit_evidence_name("control", unit)),
+            "probe": load(unit_evidence_name("probe", unit)),
+            "classification": classified(
+                unit_evidence_name("probe", unit),
+                unit_evidence_name("control", unit), metadata, "unit"),
+        }
+
     allow = units.get("allowed_prefixes") or []
     if not allow:
         raise CheckFailed(
             "offline-denial.json carries no allow list read back from systemd")
     resolver = ipaddress.ip_address(RESOLVER_STUB)
     try:
+        if not isinstance(allow, list) or not all(isinstance(item, str) for item in allow):
+            raise ValueError("{!r} is not a list of prefixes".format(allow))
         resolver_allowed = any(resolver in ipaddress.ip_network(prefix, strict=False)
                                for prefix in allow)
     except ValueError as error:
@@ -811,6 +1060,10 @@ def evidence(directory, deployment):
     if resolver_allowed:
         raise CheckFailed(
             "the allow list read back from systemd admits " + RESOLVER_STUB)
+    if [str(item) for item in prefixes(" ".join(allow))] != list(ALLOWED_PREFIXES):
+        raise CheckFailed(
+            "the allow list read back from systemd is not exactly {}: {}".format(
+                " and ".join(ALLOWED_PREFIXES), allow))
     return {
         "mechanism": {
             "per_unit_drop_in": DROP_IN_NAME,
@@ -819,13 +1072,17 @@ def evidence(directory, deployment):
             "allow": allow,
             "resolver_stub_allowed": resolver_allowed,
         },
-        "units_denied": units["units"],
-        "units_restarted_under_the_denial": units.get("units_restarted") or [],
+        "units_denied": denied_units,
+        "units_restarted_under_the_denial": units["units_restarted"],
         "transient_unit_properties": list(DENIAL_PROPERTIES),
-        "control": control,
-        "probe": probe,
+        "control": load("offline-control.json"),
+        "probe": load("offline-probe.json"),
         "classification": classification,
-        "enforced": classification["ip_traffic_denied_except_the_two_host_addresses"],
+        "units_probed_in_their_own_control_group": per_unit,
+        "enforced": all(
+            item["ip_traffic_denied_except_the_two_host_addresses"]
+            for item in [classification]
+            + [entry["classification"] for entry in per_unit.values()]),
         "identity": load("offline-identity.json"),
         "deployment_id": deployment,
         "cli_under_denial": {
@@ -834,13 +1091,18 @@ def evidence(directory, deployment):
             "deploy": verdict("offline-deploy-check.json", "deploy"),
             "infer": verdict("offline-infer-check.json", "infer"),
         },
-        "restore": {"drop_ins_removed": restored["drop_ins_removed"],
-                    "units_undenied": restored["units"],
-                    "units_restarted_without_the_denial":
-                        restored.get("units_restarted") or [],
+        "restore": {"drop_ins_removed": removed,
+                    "units_undenied": restored_units,
+                    "units_restarted_without_the_denial": restored["units_restarted"],
                     "persistent_unit_files_written":
                         restored["persistent_drop_ins_found"]},
     }
+
+
+def unit_evidence_name(kind, unit):
+    """`offline-unit-<kind>-<unit>.service.json`, for the probe and control
+    run inside that unit's control group."""
+    return "offline-unit-{}-{}.json".format(kind, unit_service_name(unit))
 
 
 # --- command line -------------------------------------------------------
@@ -898,11 +1160,22 @@ def main(argv=None):
         opt("--serving-port", type=int, required=True),
         opt("--metadata-address", type=_metadata_address, default=METADATA_ADDRESS),
     )
+    unit_probe_options = (
+        opt("--unit", required=True),
+        opt("--control-group", required=True),
+        opt("--uid", type=int, required=True),
+        opt("--gid", type=int, required=True),
+        opt("--metadata-address", type=_metadata_address, default=METADATA_ADDRESS),
+    )
 
     commands.add_parser("drop-in-text")
     commands.add_parser("transient-properties")
     commands.add_parser("child-udp")
     commands.add_parser("drop-in-path").add_argument("--unit", required=True)
+    evidence_name = commands.add_parser("unit-evidence-name")
+    evidence_name.add_argument("--kind", choices=("control", "probe", "classification"),
+                               required=True)
+    evidence_name.add_argument("--unit", required=True)
     command("check-drop-in", opt("--unit", required=True),
             opt("--print", dest="print_file", required=True))
     command("check-policy", opt("--expect", choices=("denied", "none"), required=True),
@@ -912,8 +1185,11 @@ def main(argv=None):
     command("serving-port", opt("--status", required=True))
     command("probe", *probe_options)
     command("control", *probe_options)
+    command("probe-unit", *unit_probe_options)
+    command("control-unit", *unit_probe_options)
     command("classify", opt("--probe", required=True), opt("--control", required=True),
-            opt("--metadata-operation", choices=("required", "absent"), default="required"))
+            opt("--metadata-operation", choices=("required", "absent"), default="required"),
+            opt("--scope", choices=sorted(SCOPES), default="transient"))
     command("status-check", opt("--status", required=True), opt("--deployment", required=True))
     command("deploy-check", opt("--deploy", required=True), opt("--deployment", required=True))
     command("infer-request", opt("--request-id", required=True))
@@ -961,11 +1237,22 @@ def _run(args):
         if port is None or "serving_url_on_the_allowed_loopback_address" in failures:
             raise CheckFailed("status reports no serving URL on the allowed loopback address")
         print(port)
+    elif name == "unit-evidence-name":
+        print(unit_evidence_name(args.kind, args.unit))
     elif name in ("probe", "control"):
         _emit(run_probe(args.agent_socket, args.serving_port, args.metadata_address), args.out)
+    elif name in ("probe-unit", "control-unit"):
+        # Validated before anything moves: the path is where this process
+        # is about to be written.
+        path = control_group_path(args.unit, args.control_group)
+        join_control_group(args.control_group, path)
+        drop_privileges(args.uid, args.gid)
+        document = run_unit_probe(args.metadata_address)
+        document["unit"] = unit_service_name(args.unit)
+        _emit(document, args.out)
     elif name == "classify":
         result, failures = classify(_load_json(args.probe), _load_json(args.control),
-                                    args.metadata_operation)
+                                    args.metadata_operation, args.scope)
         _emit(result, args.out, failures, "offline denial enforcement checks")
     elif name == "status-check":
         result, failures, _ = status_check(_load_json(args.status), args.deployment)

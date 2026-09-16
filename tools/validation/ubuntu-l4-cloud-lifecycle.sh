@@ -35,7 +35,9 @@
 #                 record, not from metadata -- and a fresh deploy and an
 #                 inference still answer. The denial is a runtime drop-in
 #                 removed on every exit path, and its enforcement is
-#                 proved by a probe whose control ran unrefused first
+#                 proved by probes -- in a denied transient unit and
+#                 inside each service's own control group -- each against
+#                 a control that ran unrefused first
 #
 # With --baseline-assets-dir, two more stages run after offline. The
 # baseline is a published, signed predecessor set, always installed with
@@ -284,6 +286,16 @@ preflight() {
   # produce that stage at all.
   require_command systemd-run
   [[ -f "$OFFLINE_HELPER" ]] || die "missing ${OFFLINE_HELPER}"
+  # A denial drop-in an earlier run left behind -- one that was killed, or
+  # whose cleanup failed -- would deny both services through install and
+  # every stage before offline, all of which have to run online, and the
+  # run would fail there for a reason that names neither. Refused here,
+  # before anything is installed, as well as by the offline stage itself.
+  local unit
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    offline_drop_in_absent "$unit" ||
+      die "cannot start with a network denial from an earlier validation run in place, or without confirming there is none; nothing was changed"
+  done
   # The offline stage deploys under ${DEPLOYMENT_ID}${OFFLINE_DEPLOYMENT_SUFFIX},
   # which the CLI validates as one filesystem path segment. Refused here
   # rather than five stages in, where the deploy would fail as a CLI
@@ -656,14 +668,28 @@ stage_install() {
 
 # Doctor has nothing failing and resolves this row by live detection.
 check_doctor_green() {
-  python3 - "$1" "$ROW" <<'PY'
+  python3 - "$1" "$ROW" "$HARNESS_DIR" <<'PY'
 import json, sys
 
-path, expected_row = sys.argv[1:]
+path, expected_row, harness_dir = sys.argv[1:]
+sys.path.insert(0, harness_dir)
+from linux_offline_runtime import DOCTOR_LIVE_PHRASE
+
 payload = json.load(open(path, encoding="utf-8"))["payload"]
 by_id = {f["id"]: f for f in payload["findings"]}
 
 assert payload["failing"] == 0, f"doctor reports {payload['failing']} failing finding(s)"
+
+# Install and upgrade run online, so doctor has to have read the machine
+# type from the metadata service itself. Doctor renders exactly one
+# source (cli/src/commands/doctor/mod.rs), so requiring the live one
+# refuses the recorded one and no source at all alike. The recorded shape
+# is what the offline stage requires; here it would mean the service did
+# not answer a host that was meant to be online, and the online stages
+# would be certifying the offline path by accident.
+host_os = by_id["host_os"]["message"]
+assert DOCTOR_LIVE_PHRASE in host_os, \
+    f"host_os does not show live detection from GCE metadata: {host_os}"
 
 # platform_row is the finding that resolves host identity AND accelerator
 # to one row; platform_profile answers from host identity alone and is
@@ -1279,6 +1305,12 @@ stage_crash_loop() {
 # refused; the GCE metadata service must answer it outright, since the
 # whole claim is that the denial is what made that service unreachable.
 #
+# systemd attaches the filter to each unit on a best-effort basis, so a
+# filtered transient unit says nothing about a service whose own attach
+# failed. The same datagrams are therefore also sent from inside each
+# service's control group, with a control taken there before the denial
+# and a probe after it.
+#
 # IDENTITY. The agent records the metadata service's answer bound to this
 # kernel boot, the logical CPU count, MemTotal and the NVIDIA display PCI
 # ids. Offline detection uses that record only while the metadata query
@@ -1297,14 +1329,21 @@ stage_crash_loop() {
 # denied call is the same call this operator makes online.
 OPERATOR_USER=""
 OPERATOR_GROUPS=""
+# The ids the in-service probes drop to once they have joined a service's
+# control group, which takes root.
+OPERATOR_UID=""
+OPERATOR_GID=""
 # A deployment made while denied, distinct from the one the agent
 # re-warms, so the stage proves admission with no network rather than
 # recovery of something admitted with one.
 OFFLINE_DEPLOYMENT_ID=""
-# Units whose runtime drop-in exists on this host right now. Registered
-# before the first one is installed, and cleared only once every one has
-# been removed and both services are back without a policy.
+# Units whose runtime drop-in may exist on this host right now, and the
+# path of each, index for index. Registered before the file is installed,
+# so cleanup never has to compute a path it could fail to compute, and
+# cleared only once every one has been removed and both services are back
+# without a policy.
 OFFLINE_DENIAL_UNITS=()
+OFFLINE_DENIAL_PATHS=()
 # `--was <unit>=<invocation>` for each service, captured before the
 # drop-ins are installed. The denial readback compares them, because
 # `systemctl show` reports the drop-in from `daemon-reload` onwards
@@ -1358,7 +1397,7 @@ offline_drop_in_path() {
 
 # A drop-in from an earlier run means this run never applied the denial it
 # would certify. Refused before anything is installed, as rollback refuses
-# a pre-existing state.bak.
+# a pre-existing state.bak -- by preflight, and again by the stage.
 offline_drop_in_absent() {
   local path
   path="$(offline_drop_in_path "$1")" || return
@@ -1367,8 +1406,8 @@ offline_drop_in_absent() {
   # the runtime unit tree this stage confines itself to. The module's own
   # removal check uses os.path.lexists for the same reason.
   if [[ -e "$path" || -L "$path" ]]; then
-    printf 'a validation denial drop-in for %s is already installed at %s; remove it before running the offline stage\n' \
-      "$1" "$path" >&2
+    printf 'a validation denial drop-in for %s is already installed at %s; remove it with: sudo rm -f %s && sudo systemctl daemon-reload && sudo systemctl restart %s\n' \
+      "$1" "$path" "$path" "$1" >&2
     return 1
   fi
 }
@@ -1430,6 +1469,7 @@ offline_deny_from() {
     # between creating it and recording it would leave the host denied
     # with nothing to remove it.
     OFFLINE_DENIAL_UNITS+=("$unit")
+    OFFLINE_DENIAL_PATHS+=("$path")
     step "install the ${unit} denial drop-in" \
       sudo install -D -m 0644 "${work}/drop-in.conf" "$path" || return
     step "the installed ${unit} drop-in is the rendered runtime one" \
@@ -1447,35 +1487,97 @@ offline_deny_from() {
 # Safe to retry after a partial failure, and called from both the stage
 # and the exit and signal handlers, so an interrupted stage still leaves
 # the host's network policy as it found it.
+#
+# Best-effort on every step: nothing that fails for one unit stops the
+# other unit's drop-in being removed, and nothing that fails before the
+# reload stops the reload, the restart or the readback. A cleanup that
+# stopped at its first failure would leave the rest of the host denied,
+# and the retry from the exit handler would stop at the same place. The
+# first failure is what this returns; the readback decides the rest.
 cleanup_offline_denial() {
   if ((${#OFFLINE_DENIAL_UNITS[@]} == 0)); then
     return 0
   fi
-  local unit path invocation absent=() was=()
+  local index unit path invocation status=0 step_status absent=() was=()
   note "removing the offline denial drop-ins"
-  for unit in "${OFFLINE_DENIAL_UNITS[@]}"; do
-    path="$(offline_drop_in_path "$unit")" || return
+  for index in "${!OFFLINE_DENIAL_UNITS[@]}"; do
+    unit="${OFFLINE_DENIAL_UNITS[$index]}"
+    path="${OFFLINE_DENIAL_PATHS[$index]}"
     absent+=(--absent "$path")
-    step "remove the ${unit} drop-in" sudo rm -f "$path" || return
+    step_status=0
+    step "remove the ${unit} drop-in" sudo rm -f "$path" || step_status=$?
+    if ((step_status != 0 && status == 0)); then status="$step_status"; fi
     # An empty drop-in directory vanishes with /run, but leaving one is
     # still a change to the host. It fails when another drop-in is there,
     # which is not this run's to remove.
     sudo rmdir "$(dirname "$path")" >/dev/null 2>&1 || true
+  done
+  for unit in "${OFFLINE_DENIAL_UNITS[@]}"; do
     # Captured before the restart, for the same reason the denial side
     # captures before the install: removing the file and reloading empty
     # the unit's loaded policy, and only a new instance is a service that
-    # is no longer denied.
-    invocation="$(unit_invocation "$unit")" || return
-    was+=(--was "${unit}=${invocation}")
+    # is no longer denied. A unit whose invocation cannot be read is
+    # restarted and read back all the same, and fails the cleanup here
+    # rather than being certified without the comparison.
+    step_status=0
+    invocation="$(unit_invocation "$unit")" || step_status=$?
+    if ((step_status == 0)); then
+      was+=(--was "${unit}=${invocation}")
+    elif ((status == 0)); then
+      status="$step_status"
+    fi
   done
-  step "reload systemd" sudo systemctl daemon-reload || return
+  step_status=0
+  step "reload systemd" sudo systemctl daemon-reload || step_status=$?
+  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
+  step_status=0
   step "restart both services without denial" \
-    sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
-  step "services ready again" await_services_ready || return
+    sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || step_status=$?
+  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
+  step_status=0
+  step "services ready again" await_services_ready || step_status=$?
+  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
+  step_status=0
   offline_check_policy none "${EVIDENCE_DIR}/offline-restored.json" \
-    "${absent[@]}" ${was[@]+"${was[@]}"} || return
+    "${absent[@]}" ${was[@]+"${was[@]}"} || step_status=$?
+  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
+  if ((status != 0)); then
+    printf 'the offline network denial may still be in place; remove it with: sudo rm -f %s && sudo systemctl daemon-reload && sudo systemctl restart %s %s\n' \
+      "${OFFLINE_DENIAL_PATHS[*]}" "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >&2
+    return "$status"
+  fi
   OFFLINE_DENIAL_UNITS=()
+  OFFLINE_DENIAL_PATHS=()
   OFFLINE_DENIAL_WAS=()
+}
+
+# The datagram probe, run from inside a service's own control group.
+#
+# Joining the group takes root. The module refuses any control group that
+# is not exactly this unit's, reads the move back, and drops to the
+# operator's ids before it sends anything or writes its result. `kind` is
+# `control` before the denial and `probe` under it.
+offline_unit_probe() {
+  local kind="$1" unit="$2" group name
+  group="$(systemctl show -p ControlGroup --value "$unit")" || return
+  name="$(offline_helper unit-evidence-name --kind "$kind" --unit "$unit")" || return
+  step "${kind} inside the ${unit} control group" \
+    sudo python3 "$OFFLINE_HELPER" "${kind}-unit" \
+    --unit "$unit" --control-group "$group" \
+    --uid "$OPERATOR_UID" --gid "$OPERATOR_GID" \
+    --out "${EVIDENCE_DIR}/${name}" || return
+}
+
+# Classify a service's own probe against its own control, and file it.
+offline_unit_classify() {
+  local unit="$1" probe control classification
+  probe="$(offline_helper unit-evidence-name --kind probe --unit "$unit")" || return
+  control="$(offline_helper unit-evidence-name --kind control --unit "$unit")" || return
+  classification="$(offline_helper unit-evidence-name --kind classification --unit "$unit")" || return
+  step "the denial is enforced inside the ${unit} control group" \
+    offline_helper classify --scope unit \
+    --probe "${EVIDENCE_DIR}/${probe}" --control "${EVIDENCE_DIR}/${control}" \
+    --out "${EVIDENCE_DIR}/${classification}" || return
 }
 
 # Every TensorPlate CLI call this stage makes, each one inside its own
@@ -1560,13 +1662,15 @@ stage_offline() {
   step "file the offline evidence" offline_helper evidence \
     --dir "$EVIDENCE_DIR" --deployment "$OFFLINE_DEPLOYMENT_ID" \
     --out "${EVIDENCE_DIR}/offline-runtime.json" || return
-  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed against an unrefused control; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
+  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit and inside each service's control group, each against an unrefused control; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
 }
 
 stage_offline_in() {
   local work="$1" serving_port unit
   OPERATOR_USER="$(id -un)" || return
   OPERATOR_GROUPS="$(id -Gn)" || return
+  OPERATOR_UID="$(id -u)" || return
+  OPERATOR_GID="$(id -g)" || return
   OFFLINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}${OFFLINE_DEPLOYMENT_SUFFIX}"
 
   # Offline detection has nothing to fall back on without this file, and
@@ -1581,9 +1685,10 @@ stage_offline_in() {
       offline_drop_in_absent "$unit" || return
   done
 
-  # The control, before anything is denied. EPERM under the denial proves
-  # nothing unless these same operations were not refused a moment
-  # earlier, and unless the metadata service answered one of them.
+  # The control, before anything is denied. A refused datagram or a
+  # silent connect under the denial proves nothing unless these same
+  # operations were not refused a moment earlier, and unless the metadata
+  # service answered them.
   #
   # The allowed loopback port is the one the worker is serving on now.
   # status-logs filed status.json three stages ago, and the restart and
@@ -1595,10 +1700,23 @@ stage_offline_in() {
   step "control probe" run_allowed python3 "$OFFLINE_HELPER" control \
     --agent-socket "$AGENT_SOCKET_PATH" --serving-port "$serving_port" \
     --out "${EVIDENCE_DIR}/offline-control.json" || return
+  # And from inside each service's control group, as each service's own
+  # control: the group the services run in now, with nothing attached.
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    offline_unit_probe control "$unit" || return
+  done
 
   offline_deny || return
   offline_check_policy denied "${EVIDENCE_DIR}/offline-denial.json" \
     ${OFFLINE_DENIAL_WAS[@]+"${OFFLINE_DENIAL_WAS[@]}"} || return
+
+  # The readback above proved both services were replaced under the
+  # denial, so the control groups probed now are the new instances'.
+  note "probing the network from inside each denied service's control group"
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    offline_unit_probe probe "$unit" || return
+    offline_unit_classify "$unit" || return
+  done
 
   # The agent's own account of this start, from this invocation only: a
   # second identity line would mean it restarted and the earlier line
