@@ -66,7 +66,15 @@ pub fn run<W: Write, E: Write>(
         .tail
         .unwrap_or(config.log_source.tail_default)
         .min(MAX_TAIL);
-    let entries = read_bounded(&source, args, tail)?;
+    let (entries, malformed) = read_bounded(&source, args, tail)?;
+    if malformed > 0 {
+        let _ = renderer.info(
+            stderr,
+            &format!(
+                "logs: skipped {malformed} malformed entries (bounded mode tolerates malformed lines)"
+            ),
+        );
+    }
     if entries.is_empty() {
         // The other way this command can say nothing at all. The source
         // opened, so there is no error to raise, and an empty list reads
@@ -74,11 +82,12 @@ pub fn run<W: Write, E: Write>(
         // component never writes NDJSON in the first place. Name where
         // its output is. Human output only: a JSON caller already has
         // `entries: []` in the envelope, and stderr is its error channel.
-        let _ = renderer.info(stderr, &empty_read_note(&source, args.component.as_deref()));
+        let _ = renderer.info(stderr, &empty_read_note(&source, args, malformed));
     }
     let payload = json!({
         "source": source.display_path(),
         "kind": source.kind_label(),
+        "malformed": malformed,
         "entries": entries,
     });
     let human = render_human(&source, &entries);
@@ -208,23 +217,77 @@ fn no_source_hint(_component: Option<&str>) -> String {
 
 /// Note for a read that opened its source and matched no entries.
 ///
-/// In v0.1 the only NDJSON writer is the observability service's own
+/// Two halves, and the second one is a claim about the install that the
+/// command has to have established before making it.
+///
+/// The first half always prints: which source was read, and every filter
+/// that was applied. An empty result under `--level fatal` or `--since` is
+/// explained by the filter, not by the install.
+///
+/// The second half says where the component's output actually is. In this
+/// release the only NDJSON writer is the observability service's own
 /// retention sink: the event listener transport is `in_process`
 /// (`unix_socket` is reserved and rejected), and the agent and the serving
 /// worker are separate processes, so nothing they emit can reach it. A
-/// `--component agent` filter therefore matches nothing however long the
-/// file is, which an empty `entries` list alone does not say.
-fn empty_read_note(source: &LogSource, component: Option<&str>) -> String {
-    let scope = match component {
+/// `--component agent` read therefore matches nothing however long the
+/// file is, which an empty `entries` list alone does not say. That holds
+/// only when nothing else can explain the empty result: see
+/// [`install_explains_the_empty_read`].
+fn empty_read_note(source: &LogSource, args: &LogsArgs, malformed: u64) -> String {
+    let scope = match args.component.as_deref() {
         Some(name) => format!(" for component `{name}`"),
         None => String::new(),
     };
-    format!(
-        "logs: read 0 entries from `{}`{scope}. In v0.1 only the observability service \
-         writes NDJSON events; {}.",
+    let mut note = format!(
+        "logs: read 0 entries from `{}`{scope}{}.",
         source.display_path(),
-        plain_text_log_hint(component),
-    )
+        applied_filters(args),
+    );
+    if install_explains_the_empty_read(args, malformed) {
+        note.push_str(&format!(
+            " Only the observability service writes NDJSON events in this release; {}.",
+            plain_text_log_hint(args.component.as_deref()),
+        ));
+    }
+    note
+}
+
+/// Whether "this component writes no NDJSON here" is the only explanation
+/// left for an empty read.
+///
+/// It is not, when the operator named the source themselves (nothing about
+/// the install explains a path they chose — the same reasoning
+/// [`resolve_source`] applies to a `--source` that is missing), when a
+/// filter other than `--component` could have excluded every entry, when
+/// every line was malformed, or when the component asked for is the one
+/// service that does write NDJSON.
+fn install_explains_the_empty_read(args: &LogsArgs, malformed: u64) -> bool {
+    args.source_override.is_none()
+        && args.level.is_none()
+        && args.since_ms.is_none()
+        && args.correlation_id.is_none()
+        && malformed == 0
+        && matches!(args.component.as_deref(), Some(name) if name != "observability")
+}
+
+/// The filters that were applied, for the neutral half of the note. The
+/// component is already named in the note's scope clause.
+fn applied_filters(args: &LogsArgs) -> String {
+    let mut applied = Vec::new();
+    if let Some(level) = args.level.as_deref() {
+        applied.push(format!("level={level}"));
+    }
+    if let Some(since) = args.since_ms {
+        applied.push(format!("since_ms={since}"));
+    }
+    if let Some(corr) = args.correlation_id.as_deref() {
+        applied.push(format!("correlation_id={corr}"));
+    }
+    if applied.is_empty() {
+        String::new()
+    } else {
+        format!(" (filters: {})", applied.join(", "))
+    }
 }
 
 /// Where a component's own, non-NDJSON output goes on this platform.
@@ -282,7 +345,15 @@ fn classify_meta(path: PathBuf, meta: &std::fs::Metadata) -> CliResult<LogSource
     }
 }
 
-fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<Vec<Value>> {
+/// Read up to `tail` matching entries, plus the number of lines that were
+/// not JSON at all.
+///
+/// The malformed count is returned rather than printed: printing it here
+/// wrote a bare line to the process's real stderr, which bypassed the
+/// renderer (so it appeared in `--output json` runs, breaking the
+/// single-envelope rule callers parse stderr under) and bypassed the
+/// injected writer the tests inspect, so no test could observe it.
+fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<(Vec<Value>, u64)> {
     let files = collect_files(source);
     let mut entries = Vec::<Value>::with_capacity(tail as usize);
     let mut malformed = 0u64;
@@ -316,12 +387,7 @@ fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<Vec
         let skip = entries.len() - tail as usize;
         entries.drain(..skip);
     }
-    if malformed > 0 {
-        eprintln!(
-            "tensorplate logs: skipped {malformed} malformed entries (bounded mode tolerates malformed lines)"
-        );
-    }
-    Ok(entries)
+    Ok((entries, malformed))
 }
 
 fn collect_files(source: &LogSource) -> Vec<PathBuf> {
@@ -928,6 +994,149 @@ not-a-json-line
             &mut err,
         )
         .unwrap();
-        assert!(err.is_empty(), "{:?}", String::from_utf8_lossy(&err));
+        let note = String::from_utf8_lossy(&err).to_string();
+        assert!(!note.contains("read 0 entries"), "{note}");
+    }
+
+    /// The malformed-line count used to go straight to the process's own
+    /// stderr, which no writer the caller passed could see and no renderer
+    /// mode could suppress. It is a renderer note like every other one now:
+    /// on the injected writer in human mode, in the payload in JSON mode,
+    /// and never a bare line ahead of the JSON envelope.
+    #[test]
+    fn the_malformed_line_count_is_a_renderer_note_not_a_bare_stderr_write() {
+        let td = tempfile::tempdir().unwrap();
+        let (cfg, _) = make_cfg(&td);
+        let args = default_args();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let human = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            human.contains("skipped 1 malformed entries"),
+            "the count must reach the caller's stderr: {human}"
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Json),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            err.is_empty(),
+            "JSON mode keeps stderr the envelope alone: {:?}",
+            String::from_utf8_lossy(&err)
+        );
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(
+            parsed["payload"]["malformed"], 1,
+            "a JSON caller keeps the count it can no longer read on stderr"
+        );
+    }
+
+    /// The directional half of the note claims the component writes no
+    /// NDJSON here. A `--level` or `--since` that excluded every entry is
+    /// a different cause, and the file the operator named themselves says
+    /// nothing about the install.
+    #[test]
+    fn an_empty_read_a_filter_explains_makes_no_claim_about_the_install() {
+        let td = tempfile::tempdir().unwrap();
+        let (cfg, _) = make_cfg(&td);
+
+        let mut args = default_args();
+        args.component = Some("agent".into());
+        args.level = Some("fatal".into());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let filtered = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            filtered.contains("read 0 entries") && filtered.contains("level=fatal"),
+            "the note must name the filter that was applied: {filtered}"
+        );
+        assert!(
+            !filtered.contains("writes NDJSON events in this release"),
+            "a level filter, not the install, explains this empty read: {filtered}"
+        );
+
+        let empty = td.path().join("chosen.ndjson");
+        std::fs::write(&empty, "").unwrap();
+        let mut args = default_args();
+        args.component = Some("agent".into());
+        args.source_override = Some(empty);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let chosen = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            chosen.contains("read 0 entries") && chosen.contains("chosen.ndjson"),
+            "the note must name the source that was read: {chosen}"
+        );
+        assert!(
+            !chosen.contains("writes NDJSON events in this release"),
+            "nothing about the install explains a path the operator chose: {chosen}"
+        );
+    }
+
+    /// The one component that does write NDJSON gets no directional half
+    /// either: an empty read there means it was quiet, not that its output
+    /// is somewhere else.
+    #[test]
+    fn an_empty_observability_read_is_not_sent_to_another_file() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(&path, "").unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path);
+        let mut args = default_args();
+        args.component = Some("observability".into());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let note = String::from_utf8_lossy(&err).to_string();
+        assert!(note.contains("read 0 entries"), "{note}");
+        assert!(
+            !note.contains("writes NDJSON events in this release"),
+            "observability is the writer; its empty read needs no redirection: {note}"
+        );
     }
 }
