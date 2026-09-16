@@ -123,9 +123,18 @@ done
 [[ ! -e "$evidence_dir" || -z "$(find "$evidence_dir" -mindepth 1 -print -quit)" ]] ||
   die "--evidence-dir must be new or empty"
 
-for tool in brew git python3 stat sw_vers system_profiler launchctl sandbox-exec; do
+for tool in brew git python3 stat sw_vers system_profiler launchctl sandbox-exec lsof pgrep ps; do
   command -v "$tool" >/dev/null 2>&1 || die "required command not found: $tool"
 done
+# The offline stages keep their profile, probe and classification in a
+# module beside this script, so they can be tested without a Mac.
+offline_helper_path="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/macos_offline_runtime.py" ||
+  die "cannot locate the harness directory"
+[[ -f "$offline_helper_path" ]] || die "offline-runtime helper not found: ${offline_helper_path}"
+# The interpreter itself rather than a version-manager shim, because the
+# network probe runs it under the offline profile.
+python_bin="$(python3 -c 'import sys; print(sys.executable)')" ||
+  die "cannot resolve the python3 interpreter"
 
 for formula_name in "${FORMULAE[@]}"; do
   [[ -f "${formula_dir}/${formula_name}.rb" ]] ||
@@ -137,6 +146,7 @@ evidence_dir="$(cd "$evidence_dir" && pwd)"
 work_dir="$(mktemp -d)"
 stage_results="${evidence_dir}/stages.tsv"
 smoke_deployment_id="wave-2b-macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
+offline_deployment_id="macos-offline-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
 printf 'stage\tstatus\tstarted_at\tfinished_at\tlog\n' >"$stage_results"
 
 tap_repo=""
@@ -145,6 +155,8 @@ tap_staged=0
 baseline_version=""
 candidate_version=""
 candidate_active=0
+# The installed agent config and the crash-loop stage's copy of it.
+agent_config=""
 agent_config_backup=""
 trust_added=()
 active_stage=""
@@ -153,6 +165,16 @@ active_stage_started=""
 lifecycle_marker=""
 agent_error_log_start=0
 observability_error_log_start=0
+# Set just before the offline stage stops the normal launchd jobs and
+# cleared once they run again, so cleanup restarts them only when this
+# run is what stopped them.
+offline_services_stopped=0
+denial_dir=""
+offline_profile=""
+
+offline_helper() {
+  python3 "$offline_helper_path" "$@"
+}
 
 restore_tap() {
   [[ "$tap_staged" == "1" ]] || return 0
@@ -170,11 +192,24 @@ stop_candidate_services() {
   brew services stop tensorplate-observability >/dev/null 2>&1 || true
 }
 
+# Cleanup calls this more than once. The backup is forgotten only once it
+# is back in place, so a failed copy is retried and cleanup keeps the file.
 restore_agent_config() {
   [[ -n "$agent_config_backup" && -f "$agent_config_backup" ]] || return 0
-  cp "$agent_config_backup" "$(brew --prefix)/etc/tensorplate/agent.json"
-  chmod 0640 "$(brew --prefix)/etc/tensorplate/agent.json"
+  { cp "$agent_config_backup" "$agent_config" && chmod 0640 "$agent_config"; } || return 1
   agent_config_backup=""
+}
+
+# A message for the operator: into cleanup.log, or the stage log in a
+# stage, and onto the terminal saved at startup. An external printf
+# writes the terminal copy. A builtin write that fails, because the
+# terminal hung up or its pipe reader is gone, stays in bash 3.2's output
+# buffer and lands in the next command substitution's output, and a
+# closed pipe would kill the harness with SIGPIPE; the external printf
+# only fails itself.
+tell_operator() {
+  printf '%s\n' "$*" >&2
+  /usr/bin/printf '%s\n' "$*" >&4 2>/dev/null || true
 }
 
 restore_formula_trust() {
@@ -218,21 +253,91 @@ restore_baseline() {
   fi
 }
 
+# Boot out one service's launchd job if, and only if, it was loaded to run
+# under sandbox-exec: a normal job is left alone. Called from cleanup, so
+# it returns a status instead of calling die.
+purge_offline_job() {
+  purge_target="gui/$(id -u)/homebrew.mxcl.$1"
+  purge_status=0
+  purge_print="$(launchctl print "$purge_target" 2>/dev/null)" || purge_status=$?
+  # launchctl print exits 113 for a label that is not loaded.
+  [[ "$purge_status" -ne 113 ]] || return 0
+  if [[ "$purge_status" -ne 0 ]]; then
+    tell_operator "error: launchctl print ${purge_target} failed with status ${purge_status}"
+    return 1
+  fi
+  if ! purge_sandboxed="$(printf '%s\n' "$purge_print" |
+    offline_helper launchd-job --print - --field runs_sandbox_exec)"; then
+    tell_operator "error: cannot tell whether ${purge_target} runs under sandbox-exec; inspect it with: launchctl print ${purge_target}"
+    return 1
+  fi
+  [[ "$purge_sandboxed" == "yes" ]] || return 0
+  # Whether the bootout took effect is read back below, not trusted.
+  launchctl bootout "$purge_target" >/dev/null 2>&1 || true
+  for ((purge_attempt = 1; purge_attempt <= 30; purge_attempt += 1)); do
+    purge_status=0
+    launchctl print "$purge_target" >/dev/null 2>&1 || purge_status=$?
+    [[ "$purge_status" -ne 113 ]] || return 0
+    sleep 1
+  done
+  tell_operator "error: the sandboxed launchd job ${purge_target} is still loaded; remove it with: launchctl bootout ${purge_target}"
+  return 1
+}
+
+# Put both services back under their normal launchd jobs. The offline
+# stage calls this on success and cleanup calls it on every other exit,
+# including INT, TERM and HUP. Safe to repeat: a job is booted out only
+# while it runs sandbox-exec, and the normal jobs are started only while
+# offline_services_stopped says this run stopped them. Never calls die.
+restore_offline_supervision() {
+  restore_status=0
+  purge_offline_job tensorplate-agent || restore_status=1
+  purge_offline_job tensorplate-observability || restore_status=1
+  [[ "$restore_status" -eq 0 ]] || return 1
+  [[ "$offline_services_stopped" == "1" ]] || return 0
+  brew services start tensorplate-observability || restore_status=1
+  brew services start tensorplate-agent || restore_status=1
+  wait_for_service tensorplate-observability || restore_status=1
+  wait_for_service tensorplate-agent || restore_status=1
+  if [[ "$restore_status" -ne 0 ]]; then
+    tell_operator 'error: normal launchd supervision is not restored; run: brew services start tensorplate-observability && brew services start tensorplate-agent'
+    return 1
+  fi
+  offline_services_stopped=0
+}
+
 cleanup() {
   status=$?
+  # A second INT, TERM or HUP must not interrupt the fail row or the
+  # restore of launchd supervision and the agent config; the handlers
+  # come back before the Homebrew restore, which an operator may need to
+  # interrupt.
+  trap '' INT TERM HUP
   set +e
+  # Everything cleanup and its commands print goes to cleanup.log, not
+  # to the failed stage's log that run_stage may still have open, nor to
+  # the terminal: after a hangup, or with a `| tee` reader gone, writing
+  # there fails, and Homebrew exits non-zero on a failed write after it
+  # has already done the work. tell_operator copies the messages to the
+  # terminal.
+  exec 1>>"${evidence_dir}/cleanup.log" 2>&1
   if [[ "$status" -ne 0 && -n "$active_stage" ]]; then
     finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '%s\tfail\t%s\t%s\t%s\n' \
       "$active_stage" "$active_stage_started" "$finished_at" \
       "$(basename "$active_stage_log")" >>"$stage_results"
-    tail -n 40 "$active_stage_log" >&2 || true
-    printf 'error: stage %s failed with exit %s\n' "$active_stage" "$status" >&2
+    tail -n 40 "$active_stage_log" >&4 2>/dev/null
+    tell_operator "error: stage ${active_stage} failed with exit ${status}"
   fi
+  restore_agent_config
+  restore_offline_supervision || { [[ "$status" -ne 0 ]] || status=1; }
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
   if [[ -n "$tap_repo" && -d "$tap_repo" && -n "$baseline_version" ]]; then
     current_version="$(linked_formula_version tensorplate)"
     if [[ "$candidate_active" == "1" || "$current_version" != "$baseline_version" ]]; then
-      note "restoring baseline tensorplate ${baseline_version}"
+      tell_operator "==> restoring baseline tensorplate ${baseline_version}"
       restore_baseline
     else
       restore_agent_config
@@ -244,9 +349,24 @@ cleanup() {
   fi
   [[ -z "$lifecycle_marker" ]] || rm -f "$lifecycle_marker"
   restore_formula_trust
-  rm -rf "$work_dir"
+  if [[ -n "$agent_config_backup" && -f "$agent_config_backup" ]]; then
+    # Every restore attempt failed: keep the work directory, which holds
+    # the only copy of the agent config, and fail the run.
+    [[ "$status" -ne 0 ]] || status=1
+    tell_operator "error: the agent config was not restored; copy ${agent_config_backup} to etc/tensorplate/agent.json under the Homebrew prefix"
+  else
+    rm -rf "$work_dir"
+  fi
+  [[ "$status" -eq 0 ]] || tell_operator "cleanup output: ${evidence_dir}/cleanup.log"
   exit "$status"
 }
+# The terminal, kept for tell_operator: a stage's output goes to its log.
+exec 4>&2
+# Without these, bash runs the EXIT trap with status 0 after TERM or HUP,
+# and the interrupted stage would record no fail row.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 trap cleanup EXIT
 
 # A stage's pass row is written as soon as its body returns, so what
@@ -687,11 +807,13 @@ start_services() {
   launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
 }
 
+# Any arguments are a command prefix the probe runs under; the offline
+# stage passes run_denied.
 probe_mps() {
   pytorch_python="$(brew --prefix pytorch)/libexec/bin/python"
   backend_libexec="$(brew --prefix tensorplate-backend-python-pytorch)/libexec"
   [[ -x "$pytorch_python" ]] || die "PyTorch formula interpreter is missing"
-  PYTHONPATH="$backend_libexec" "$pytorch_python" - <<'PY'
+  "$@" /usr/bin/env PYTHONPATH="$backend_libexec" "$pytorch_python" - <<'PY'
 import json
 import platform
 import torch
@@ -980,22 +1102,284 @@ exercise_crash_loop() {
   tensorplate status --output json
 }
 
-verify_offline_runtime() {
-  profile='(version 1)(allow default)(deny network*)'
-  sandbox-exec -p "$profile" tensorplate doctor --skip-agent --output json
-  sandbox-exec -p "$profile" \
-    "$(brew --prefix pytorch)/libexec/bin/python" - <<'PY'
-import json
-import torch
-
-result = {
-    "mps_built": torch.backends.mps.is_built(),
-    "mps_available": torch.backends.mps.is_available(),
+# Every command the offline stage runs against the denied services goes
+# through here, so the CLI, the probe and the MPS check run under the
+# same profile file as the launchd jobs.
+run_denied() {
+  sandbox-exec -f "$offline_profile" "$@"
 }
-if not all(result.values()):
-    raise SystemExit(json.dumps(result, sort_keys=True))
-print(json.dumps(result, sort_keys=True))
-PY
+
+# Stop the normal launchd jobs and run each service from a plist that
+# differs from the formula's only in running ProgramArguments under
+# sandbox-exec. `brew services run --file` bootstraps that file without
+# copying it into ~/Library/LaunchAgents, so launchd keeps KeepAlive, the
+# throttle and the formula environment, and a logout or reboot loads the
+# normal job again.
+enter_offline_denial() {
+  offline_services_stopped=1
+  for service_name in tensorplate-agent tensorplate-observability; do
+    brew services stop --keep "$service_name" ||
+      die "brew services stop --keep ${service_name} failed"
+    if launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" >/dev/null 2>&1; then
+      die "${service_name} is still loaded after brew services stop --keep"
+    fi
+  done
+  # `brew services run` does nothing while a job holds a pid, and a
+  # leftover worker would hold a serving port.
+  offline_helper quiesced --profile "$offline_profile" ||
+    die "a TensorPlate process or serving-port listener outlived the stopped services"
+  for service_name in tensorplate-observability tensorplate-agent; do
+    formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    offline_helper derive-plist \
+      --formula-plist "${formula_prefix}/homebrew.mxcl.${service_name}.plist" \
+      --label "homebrew.mxcl.${service_name}" \
+      --program "${formula_prefix}/bin/${service_name}" \
+      --profile "$offline_profile" \
+      --plist-out "${denial_dir}/homebrew.mxcl.${service_name}.plist" ||
+      die "cannot derive the sandboxed ${service_name} launchd plist"
+    brew services run "$service_name" --file="${denial_dir}/homebrew.mxcl.${service_name}.plist" ||
+      die "brew services run --file failed for ${service_name}"
+  done
+}
+
+# Startup recovery of the deploy-smoke deployment, answered over the
+# agent socket from inside the sandbox.
+wait_for_denied_status() {
+  for ((attempt = 1; attempt <= 120; attempt += 1)); do
+    if run_denied tensorplate status --output json \
+      >"${denial_dir}/status-recovered.json" 2>"${denial_dir}/status-recovered.err" &&
+      offline_helper status-check --status "${denial_dir}/status-recovered.json" \
+        --deployment "$smoke_deployment_id" --profile "$offline_profile" >/dev/null 2>&1; then
+      cat "${denial_dir}/status-recovered.json" || die "cannot record the recovered status"
+      return 0
+    fi
+    sleep 1
+  done
+  # Record the last answer and the checks it failed before giving up.
+  cat "${denial_dir}/status-recovered.json" "${denial_dir}/status-recovered.err" || true
+  offline_helper status-check --status "${denial_dir}/status-recovered.json" \
+    --deployment "$smoke_deployment_id" --profile "$offline_profile" || true
+  die "the agent did not recover the deploy-smoke deployment under the offline profile"
+}
+
+# After restore_offline_supervision: both services run their normal
+# jobs from the formula plists, and no sandboxed TensorPlate process is
+# left behind.
+verify_normal_supervision() {
+  for service_name in tensorplate-agent tensorplate-observability; do
+    formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    launch_agent="${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist"
+    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+      >"${denial_dir}/${service_name#tensorplate-}-restored.txt" ||
+      die "${service_name} is not loaded after the offline stage"
+    offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-restored.txt" \
+      --program "${formula_prefix}/bin/${service_name}" --path "$launch_agent" \
+      --out "${denial_dir}/${service_name#tensorplate-}-restored.json" ||
+      die "${service_name} is not back under its normal launchd job"
+    cmp "$launch_agent" "${formula_prefix}/homebrew.mxcl.${service_name}.plist" ||
+      die "the ${service_name} LaunchAgents plist differs from the formula plist"
+  done
+  wait_for_agent_ready || die "the agent did not answer outside the sandbox after the offline stage"
+  offline_helper sandbox-state --profile "$offline_profile" --expect unsandboxed \
+    --job "${denial_dir}/agent-restored.json" --job "${denial_dir}/observability-restored.json" \
+    --all-tensorplate-processes --out "${denial_dir}/restored-sandbox.json" ||
+    die "a sandboxed TensorPlate process remains after the offline stage"
+}
+
+# offline-runtime: both launchd services, startup recovery, a fresh
+# deploy, inference, doctor and the MPS probe all run under one
+# sandbox-exec profile (macos_offline_runtime.py PROFILE_TEMPLATE) that
+# denies every network operation except loopback on the two serving
+# ports and unix sockets other than mDNSResponder. A probe inside the
+# sandbox must be refused every other destination, and binds on other
+# ports, with EPERM, where an unsandboxed control running the same
+# operations is not; sandbox_check must read every process in the
+# service trees as sandboxed with the network denied; and every
+# internet socket a TensorPlate process holds, other than one never bound,
+# must be on loopback.
+#
+# Accepted residual gaps: SBPL `localhost` matches every address
+# configured on the host whatever the interface, so fe80::1 (on lo0)
+# reached through another interface is allowed on the two serving ports;
+# a wildcard listener on those ports would accept LAN peers, which the
+# listener assertion refuses; and unix-socket or XPC brokers stay
+# reachable.
+#
+# Every command checks its own status: errexit alone does not stop a
+# failed assignment inside a helper, and a failing check must leave the
+# stage through die so cleanup restores normal supervision.
+verify_offline_runtime() {
+  prefix="$(brew --prefix)" || die "brew --prefix failed"
+  uid="$(id -u)" || die "id -u failed"
+  denial_dir="${work_dir}/offline-denial"
+  offline_profile="${denial_dir}/network-denied.sb"
+  log_dir="${prefix}/var/log/tensorplate"
+  [[ -z "$agent_config_backup" ]] ||
+    die "the agent config is still replaced by the crash-loop stage"
+  mkdir -p "$denial_dir" || die "cannot create the offline-runtime work directory"
+
+  for service_name in tensorplate-agent tensorplate-observability; do
+    formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+      >"${denial_dir}/${service_name#tensorplate-}-before.txt" ||
+      die "${service_name} is not loaded before the offline stage"
+    offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-before.txt" \
+      --program "${formula_prefix}/bin/${service_name}" \
+      --path "${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist" ||
+      die "${service_name} is not running under its normal launchd job before the offline stage"
+  done
+
+  offline_helper render-profile --agent-config "${prefix}/etc/tensorplate/agent.json" \
+    --profile "$offline_profile" --out "${denial_dir}/profile.json" ||
+    die "cannot render the offline profile from the installed agent config"
+  offline_ports="$(offline_helper profile-ports --profile "$offline_profile")" ||
+    die "cannot read the serving ports from the offline profile"
+  offline_helper control --ports "$offline_ports" --out "${denial_dir}/control.json" ||
+    die "the unsandboxed network control failed"
+  agent_log_offset="$(offline_helper log-size --log "${log_dir}/agent.error.log")" ||
+    die "cannot size the agent launchd error log"
+  observability_log_offset="$(offline_helper log-size --log "${log_dir}/observability.error.log")" ||
+    die "cannot size the observability launchd error log"
+
+  enter_offline_denial
+
+  for service_name in tensorplate-agent tensorplate-observability; do
+    short_name="${service_name#tensorplate-}"
+    formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    # Homebrew's run returns after bootstrap loads the definition; the
+    # first process can still be pending. Retry only a valid definition
+    # with no PID and zero runs, never a wrong definition or a crash.
+    for ((launch_attempt = 1; launch_attempt <= 30; launch_attempt += 1)); do
+      launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+        >"${denial_dir}/${short_name}-denied.txt" ||
+        die "${service_name} is not loaded after brew services run --file"
+      cat "${denial_dir}/${short_name}-denied.txt" || die "cannot record the sandboxed ${service_name} job"
+      # Build the expected arguments from the formula and literal prefix,
+      # so a derivation that dropped sandbox-exec cannot match itself.
+      launch_status=0
+      offline_helper launchd-job --print "${denial_dir}/${short_name}-denied.txt" \
+        --program /usr/bin/sandbox-exec \
+        --path "${denial_dir}/homebrew.mxcl.${service_name}.plist" \
+        --sandboxed-arguments-from "${formula_prefix}/homebrew.mxcl.${service_name}.plist" \
+        --profile "$offline_profile" --startup \
+        --out "${denial_dir}/${short_name}-denied.json" || launch_status=$?
+      case "$launch_status" in
+        0) break ;;
+        75)
+          [[ "$launch_attempt" -lt 30 ]] ||
+            die "${service_name} did not start its first process after brew services run --file"
+          sleep 1
+          ;;
+        *) die "${service_name} is not running as the sandboxed launchd job" ;;
+      esac
+    done
+  done
+  offline_helper sandbox-state --profile "$offline_profile" --expect sandboxed \
+    --job "${denial_dir}/agent-denied.json" --job "${denial_dir}/observability-denied.json" \
+    --out "${denial_dir}/services-sandbox.json" ||
+    die "a launchd service does not read back as sandboxed with the network denied"
+
+  wait_for_denied_status
+  offline_helper admission-check \
+    --agent-log "${log_dir}/agent.error.log" --agent-offset "$agent_log_offset" \
+    --observability-log "${log_dir}/observability.error.log" \
+    --observability-offset "$observability_log_offset" \
+    --exact-row "${prefix}/share/tensorplate/platform/rows/macos26-m1pro-16gb.json" \
+    --out "${denial_dir}/admission.json" ||
+    die "the sandboxed services did not start once on the exact row with validated evidence"
+
+  cp -R "$bundle_dir" "${denial_dir}/deploy-bundle" || die "cannot copy the deploy bundle"
+  deploy_status=0
+  # Run from the work directory so nothing resolves from a source checkout.
+  (cd "$denial_dir" && run_denied tensorplate deploy "${denial_dir}/deploy-bundle" \
+    --deployment-id "$offline_deployment_id" --output json) \
+    >"${denial_dir}/deploy.json" 2>"${denial_dir}/deploy.err" || deploy_status=$?
+  cat "${denial_dir}/deploy.json" "${denial_dir}/deploy.err" ||
+    die "cannot record the deploy output"
+  [[ "$deploy_status" -eq 0 ]] ||
+    die "tensorplate deploy failed under the offline profile with status ${deploy_status}"
+  offline_helper deploy-check --deploy "${denial_dir}/deploy.json" \
+    --deployment "$offline_deployment_id" --out "${denial_dir}/deploy-check.json" ||
+    die "the deploy under the offline profile did not activate ${offline_deployment_id}"
+  run_denied tensorplate status --output json >"${denial_dir}/status-deployed.json" ||
+    die "tensorplate status failed under the offline profile after the deploy"
+  cat "${denial_dir}/status-deployed.json" || die "cannot record the status output"
+  offline_helper status-check --status "${denial_dir}/status-deployed.json" \
+    --deployment "$offline_deployment_id" --profile "$offline_profile" \
+    --out "${denial_dir}/status-deployed-check.json" ||
+    die "status under the offline profile does not report the new deployment"
+
+  offline_helper infer-request --out "${denial_dir}/infer-request.json" >/dev/null ||
+    die "cannot write the inference request"
+  run_denied tensorplate infer --input "${denial_dir}/infer-request.json" \
+    --output-file "${denial_dir}/infer-response.json" ||
+    die "tensorplate infer failed under the offline profile"
+  cat "${denial_dir}/infer-response.json" || die "cannot record the inference response"
+  offline_helper infer-check --request "${denial_dir}/infer-request.json" \
+    --response "${denial_dir}/infer-response.json" --out "${denial_dir}/infer-check.json" ||
+    die "inference under the offline profile did not echo the request"
+
+  run_denied "$python_bin" "$offline_helper_path" probe \
+    --agent-socket "${prefix}/var/run/tensorplate/agent.sock" \
+    --status "${denial_dir}/status-deployed.json" --ports "$offline_ports" \
+    --out "${denial_dir}/probe.json" ||
+    die "the network probe did not run under the offline profile"
+  offline_helper classify --probe "${denial_dir}/probe.json" \
+    --control "${denial_dir}/control.json" --deployment "$offline_deployment_id" \
+    --out "${denial_dir}/classify.json" ||
+    die "the offline profile did not refuse the network as required"
+
+  offline_helper process-tree --job "${denial_dir}/agent-denied.json" \
+    --pids-out "${denial_dir}/tree-pids.txt" --out "${denial_dir}/tree.json" ||
+    die "the agent's process tree lacks a serving worker or backend sidecar"
+  offline_helper sandbox-state --profile "$offline_profile" --expect sandboxed \
+    --pids-file "${denial_dir}/tree-pids.txt" --job "${denial_dir}/observability-denied.json" \
+    --out "${denial_dir}/tree-sandbox.json" ||
+    die "a process in the service trees does not read back as sandboxed with the network denied"
+  offline_helper listeners --pids-file "${denial_dir}/tree-pids.txt" \
+    --status "${denial_dir}/status-deployed.json" --out "${denial_dir}/listeners.json" ||
+    die "a TensorPlate process holds a non-loopback socket, or the agent's tree holds no serving listener"
+
+  doctor_status=0
+  run_denied tensorplate doctor --output json >"${denial_dir}/doctor.json" \
+    2>"${denial_dir}/doctor.err" || doctor_status=$?
+  cat "${denial_dir}/doctor.json" "${denial_dir}/doctor.err" ||
+    die "cannot record the doctor output"
+  offline_helper doctor-check --doctor "${denial_dir}/doctor.json" --status "$doctor_status" \
+    --exact-row macos26-m1pro-16gb --out "${denial_dir}/doctor-check.json" ||
+    die "doctor under the offline profile is not green on the exact row"
+
+  probe_mps run_denied || die "the MPS probe failed under the offline profile"
+
+  # KeepAlive would hide a crash: the same pid and one run prove both
+  # services stayed up through the stage.
+  for service_name in tensorplate-agent tensorplate-observability; do
+    short_name="${service_name#tensorplate-}"
+    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+      >"${denial_dir}/${short_name}-final.txt" ||
+      die "${service_name} is not loaded at the end of the offline stage"
+    offline_helper launchd-job --print "${denial_dir}/${short_name}-final.txt" \
+      --same-pid-as "${denial_dir}/${short_name}-denied.json" \
+      --runs 1 --out "${denial_dir}/${short_name}-final.json" ||
+      die "${service_name} restarted during the offline stage"
+  done
+
+  restore_offline_supervision ||
+    die "normal launchd supervision was not restored after the offline stage"
+  verify_normal_supervision
+
+  offline_helper evidence --dir "$denial_dir" --deployment "$offline_deployment_id" \
+    --out "${evidence_dir}/offline-runtime.json" ||
+    die "cannot write the offline-runtime evidence"
+}
+
+# offline-profile: before any Homebrew change, prove that sandbox-exec
+# still enforces what verify_offline_runtime relies on, using the same
+# profile template on two ephemeral ports.
+verify_offline_profile() {
+  offline_helper preflight --work-dir "${work_dir}/offline-profile" \
+    --out "${evidence_dir}/offline-profile.json" ||
+    die "sandbox-exec does not enforce the offline profile semantics"
 }
 
 uninstall_candidate() {
@@ -1110,7 +1494,8 @@ details = {
     "status-logs": load_json("status-logs.json"),
     "launchd-restart": {"agent": "restarted", "observability": "restarted"},
     "launchd-crash-loop": {"agent_recovered": True},
-    "offline-runtime": {"network_denied_doctor": "pass", "network_denied_mps": "pass"},
+    "offline-profile": load_json("offline-profile.json"),
+    "offline-runtime": load_json("offline-runtime.json"),
     "uninstall": {"all_six_formulae_absent": True, "launchd_jobs_absent": True},
     "baseline-restore": {"linked_version": baseline_version},
     "upgrade": {"from": baseline_version, "to": candidate_version},
@@ -1167,6 +1552,7 @@ run_stage formula-pin capture_formula_pin
 run_stage deploy-input capture_deploy_input
 run_stage baseline tensorplate version
 run_stage tap-trust verify_tap_trust
+run_stage offline-profile verify_offline_profile
 if [[ "$preflight_only" == "1" ]]; then
   write_summary
   write_sanitized_transcript

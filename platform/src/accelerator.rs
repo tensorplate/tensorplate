@@ -395,31 +395,23 @@ mod tests {
         }
     }
 
-    /// A throwaway executable standing in for `nvidia-smi`, so the probe's
-    /// own command handling is exercised rather than only the parser.
+    /// An immutable executable standing in for `nvidia-smi`, with a private
+    /// path for its output so parallel probes cannot overwrite one another.
     #[cfg(unix)]
-    fn write_stub(body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        static NEXT_STUB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-        let path = std::env::temp_dir().join(format!(
-            "tp-nvidia-smi-stub-{}-{}",
-            std::process::id(),
-            NEXT_STUB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        // Written under a staging name and RENAMED into place. Writing
-        // directly to `path` and then executing it races on Linux: these
-        // tests run in parallel, and a `Command::spawn` on another thread
-        // forks while this thread's write descriptor is still open, so the
-        // child inherits a writable fd to the file and the exec fails with
-        // ETXTBSY -- "Text file busy". Rename is atomic and the executed
-        // path never had a writable descriptor, so nothing can inherit one
-        // against it. Cost two CI runs before it was worth fixing.
-        let staging = path.with_extension("staging");
-        std::fs::write(&staging, format!("#!/bin/sh\n{body}\n")).expect("write stub");
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        std::fs::rename(&staging, &path).expect("publish stub");
-        path
+    fn nvidia_smi_stub(fixture: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::Builder::new()
+            .prefix("tp-nvidia-smi-stub-")
+            .tempdir()
+            .expect("stub directory");
+        let path = directory.path().join("nvidia-smi");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/nvidia-smi")
+            .join(fixture);
+        // Never open the executable inode for writing during the tests.
+        // A parallel spawn can inherit a writable descriptor and cause
+        // ETXTBSY on Linux; renaming that inode does not close the descriptor.
+        std::os::unix::fs::symlink(fixture, &path).expect("link stub");
+        (directory, path)
     }
 
     #[test]
@@ -634,7 +626,7 @@ mod tests {
         // A cloud image with drivers baked in, booted on a shape with no
         // GPU, is a real CPU-only host. Reporting it as unreadable would
         // stop it matching the CPU-only row it actually is.
-        let stub = write_stub("echo 'No devices were found' >&2; exit 6");
+        let (_directory, stub) = nvidia_smi_stub("no-devices.sh");
         assert_eq!(
             NvidiaSmiProbe::with_program(stub.to_string_lossy())
                 .sources()
@@ -642,7 +634,6 @@ mod tests {
                 .nvidia_smi_query,
             None
         );
-        std::fs::remove_file(&stub).ok();
     }
 
     #[cfg(unix)]
@@ -652,9 +643,7 @@ mod tests {
         // `parse_device`. Reorder the query and every column silently
         // shifts: the MIG flag would be read from a different field and a
         // partitioned card could resolve to its row.
-        let stub = write_stub(
-            "printf '%s' \"$*\" > \"$0.argv\";              echo 'NVIDIA L4, 23034, 550.54.15, GPU-a, Disabled'",
-        );
+        let (_directory, stub) = nvidia_smi_stub("l4-query.sh");
         let report = NvidiaSmiProbe::with_program(stub.to_string_lossy())
             .detect()
             .expect("stub answers")
@@ -670,8 +659,6 @@ mod tests {
             argv.contains("--format=csv,noheader,nounits"),
             "nounits is what makes memory.total a bare MiB count: {argv}"
         );
-        std::fs::remove_file(&stub).ok();
-        std::fs::remove_file(format!("{}.argv", stub.display())).ok();
     }
 
     #[test]

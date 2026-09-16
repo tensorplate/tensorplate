@@ -16,13 +16,14 @@ use serde_json::json;
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, ControlRequest, ResponseStatus, SupervisionStatusSummary,
 };
+use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
     classify_accelerator_probe_failure, identify, identify_accelerator,
-    AcceleratorProbeFailureClass, HostIdentity, HostReport, NvidiaSmiProbe, PlatformProbeError,
-    PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport, ProfileSelection,
-    RowMatch, SystemHostProbe,
+    AcceleratorProbeFailureClass, HostIdentity, HostReport, MachineTypeSource, NvidiaSmiProbe,
+    PlatformProbeError, PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport,
+    ProfileSelection, RowMatch, SystemHostProbe,
 };
 
 use crate::args::DoctorArgs;
@@ -210,6 +211,18 @@ fn agent_socket_hint() -> &'static str {
     "is `tensorplate-agent` running? check its state in this platform's service supervisor"
 }
 
+/// What to do when a Compute Engine instance whose metadata service could not
+/// be reached has a machine-type record this user cannot read. The record
+/// lives in the state directory, which only root and the `tensorplate` group
+/// can enter; nothing about the record itself is wrong.
+const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reached and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
+
+/// What to do when a Compute Engine instance could not establish its machine
+/// type without the metadata service. Neither re-running as another user nor
+/// attaching output helps: the fix is one agent start in the current boot
+/// with the service reachable, which records the machine type again.
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change";
+
 /// Detection state consumed by the pure host-section renderer.
 ///
 /// Host detection and accelerator detection are deliberately represented
@@ -254,12 +267,21 @@ pub fn render_host_section(
             // different hints. Telling someone whose `/etc/nv_tegra_release`
             // is malformed to re-run as root wastes their next ten minutes.
             let hint = match err {
+                // Read only on a Compute Engine instance whose metadata
+                // service could not be reached, from a directory only root
+                // and the tensorplate group can enter.
+                PlatformProbeError::Unreadable { source_name, .. }
+                    if source_name.ends_with(MACHINE_TYPE_RECORD_PATH) =>
+                {
+                    RECORD_UNREADABLE_HINT
+                }
                 PlatformProbeError::Unreadable { .. } => {
                     "a detection source could not be read — re-run as a user that can read /etc and /proc"
                 }
                 PlatformProbeError::Unrecognized { .. } => {
                     "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"
                 }
+                PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT,
             };
             return vec![
                 Finding::warn(
@@ -322,6 +344,17 @@ pub fn render_host_section(
     }
     if let Some(machine_type) = identity.machine_type.as_deref() {
         os.push_str(&format!(" on {machine_type}"));
+        // Where the shape came from. Offline, a recorded shape is as good
+        // as the live one only because every fact it is bound to still
+        // matches, and the operator filing evidence has to be able to say so.
+        match host.exact.machine_type_source {
+            Some(MachineTypeSource::GceMetadata) => os.push_str(" (from GCE metadata)"),
+            Some(MachineTypeSource::RecordedFromMetadata) => os.push_str(
+                " (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; \
+                 same kernel boot; CPU count, MemTotal and NVIDIA devices unchanged)",
+            ),
+            None => {}
+        }
     }
     let exact = [
         host.exact
@@ -612,6 +645,7 @@ fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
                 PlatformProbeError::Unrecognized { .. } =>
                     "the accelerator source answered but this release could not interpret it; attach `tensorplate doctor --output json` rather than reinstalling the driver"
                         .into(),
+                PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT.into(),
             }),
         ),
         PlatformResolution::HostDetectionFailed => Finding::skipped(

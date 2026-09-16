@@ -32,6 +32,7 @@ pub mod capability;
 pub mod detect;
 pub mod error;
 pub mod identity;
+pub mod machine_type_record;
 pub mod matrix;
 pub mod memory_telemetry;
 pub mod probe;
@@ -48,14 +49,16 @@ pub use accelerator::{
 };
 pub use capability::{AcceleratorObservation, PlatformCapability};
 pub use detect::{
-    identify, identify_jetson_accelerator, identify_platform, nvidia_pci_functions, ExactHostFacts,
-    HostReport, HostSources, L4tRelease, PlatformReport,
+    identify, identify_jetson_accelerator, identify_platform, is_compute_engine, logical_cpu_count,
+    nvidia_display_devices, nvidia_pci_functions, ExactHostFacts, HostReport, HostSources,
+    L4tRelease, PlatformReport,
 };
 pub use error::{PlatformProbeError, PlatformRegistryError};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
     HostIdentity, HostProbe,
 };
+pub use machine_type_record::{MachineTypeRecord, MachineTypeSource, RecordWrite};
 pub use matrix::render_support_matrix;
 pub use memory_telemetry::PlatformMemoryTelemetry;
 pub use probe::SystemHostProbe;

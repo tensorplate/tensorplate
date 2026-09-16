@@ -169,7 +169,10 @@ fn every_committed_row_is_selected_by_its_own_host_identity() {
             sw_vers_build_version: text("sw_vers_build_version"),
             cpu_brand: text("cpu_brand"),
             hw_memsize: text("hw_memsize"),
+            dmi_product_name: text("dmi_product_name"),
             gce_machine_type: text("gce_machine_type"),
+            machine_type_record: text("machine_type_record"),
+            boot_id: text("boot_id"),
             proc_meminfo: text("proc_meminfo"),
             pci_devices: text("pci_devices"),
         };

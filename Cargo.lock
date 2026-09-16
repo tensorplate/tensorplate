@@ -692,6 +692,7 @@ name = "tensorplate-platform"
 version = "0.2.1"
 dependencies = [
  "jsonschema",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
