@@ -1174,6 +1174,38 @@ not-a-json-line
         );
     }
 
+    /// The empty-read note fires on an exit-0 run, which is the case a
+    /// scripted caller meets most often, so `--quiet` has to reach it.
+    #[test]
+    fn the_empty_read_note_is_dropped_under_quiet() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(&path, "").unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path);
+        let args = LogsArgs {
+            component: Some("agent".into()),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human).with_verbosity(crate::args::Verbosity::Quiet);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            err.is_empty(),
+            "--quiet must suppress it: {:?}",
+            String::from_utf8_lossy(&err)
+        );
+    }
+
     /// The one component that does write NDJSON gets no directional half
     /// either: an empty read there means it was quiet, not that its output
     /// is somewhere else.

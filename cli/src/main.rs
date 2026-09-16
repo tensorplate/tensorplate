@@ -117,8 +117,9 @@ fn drive<O: Write, E: Write>(
     let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
     let warnings: Vec<String> = resolved.warning.clone().into_iter().collect();
-    let renderer = Renderer::with_warnings(output_mode, warnings.clone());
-    report_config_warning(output_mode, stderr, resolved.warning.as_deref());
+    let renderer = Renderer::with_warnings(output_mode, warnings.clone())
+        .with_verbosity(parsed.global.verbosity);
+    report_config_warning(&renderer, stderr, resolved.warning.as_deref());
     if let Some(error) = blocking_install_fault(&resolved.source, &parsed.subcommand) {
         return Err(Box::new(DriveError {
             error,
@@ -151,13 +152,13 @@ fn drive<O: Write, E: Write>(
 /// builds its renderer with [`Renderer::with_warnings`], which stamps the
 /// same text into the envelope's `warnings` array on both the ok and the
 /// error path.
-fn report_config_warning<E: Write>(mode: OutputMode, stderr: &mut E, warning: Option<&str>) {
+fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning: Option<&str>) {
     let Some(warning) = warning else {
         return;
     };
     // Best-effort, like the error renderer in `main`: a closed stderr must
     // not change the command's exit code.
-    let _ = Renderer::new(mode).info(stderr, warning);
+    let _ = renderer.info(stderr, warning);
 }
 
 /// Raise an unusable packaged conffile as the config error it is, except
@@ -228,6 +229,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+    use tensorplate_cli::args::Verbosity;
 
     #[test]
     fn command_of_returns_subcommand_name() {
@@ -246,8 +248,27 @@ mod tests {
     #[test]
     fn a_config_warning_is_written_in_human_mode() {
         let mut err = Vec::new();
-        report_config_warning(OutputMode::Human, &mut err, Some(WARNING));
+        report_config_warning(&Renderer::new(OutputMode::Human), &mut err, Some(WARNING));
         assert_eq!(String::from_utf8_lossy(&err), format!("{WARNING}\n"));
+    }
+
+    /// `--help` promises `--quiet` suppresses informational stderr. The
+    /// config warning is the first line a scripted caller meets, so it is
+    /// the one that has to honour it; a `--output json` caller still reads
+    /// the same text from the envelope's `warnings` array.
+    #[test]
+    fn a_config_warning_is_dropped_under_quiet() {
+        let mut err = Vec::new();
+        report_config_warning(
+            &Renderer::new(OutputMode::Human).with_verbosity(Verbosity::Quiet),
+            &mut err,
+            Some(WARNING),
+        );
+        assert!(
+            err.is_empty(),
+            "--quiet must suppress it: {:?}",
+            String::from_utf8_lossy(&err)
+        );
     }
 
     /// `--output json` callers parse stderr as one envelope document. A
@@ -257,7 +278,7 @@ mod tests {
     #[test]
     fn a_config_warning_never_precedes_the_json_error_envelope() {
         let mut err = Vec::new();
-        report_config_warning(OutputMode::Json, &mut err, Some(WARNING));
+        report_config_warning(&Renderer::new(OutputMode::Json), &mut err, Some(WARNING));
         assert!(
             err.is_empty(),
             "stderr must stay the JSON envelope alone, got {:?}",
@@ -268,7 +289,7 @@ mod tests {
     #[test]
     fn no_config_warning_writes_nothing() {
         let mut err = Vec::new();
-        report_config_warning(OutputMode::Human, &mut err, None);
+        report_config_warning(&Renderer::new(OutputMode::Human), &mut err, None);
         assert!(err.is_empty());
     }
 

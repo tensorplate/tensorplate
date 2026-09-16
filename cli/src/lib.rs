@@ -120,7 +120,8 @@ where
     E: Write,
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
-    let renderer = Renderer::with_warnings(effective_output_mode(&parsed.global, &cfg), warnings);
+    let renderer = Renderer::with_warnings(effective_output_mode(&parsed.global, &cfg), warnings)
+        .with_verbosity(parsed.global.verbosity);
 
     // Device registry management is always local, independent of any selected
     // device, and never resolves a transport profile or opens a client.

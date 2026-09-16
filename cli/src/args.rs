@@ -174,7 +174,8 @@ Global flags:
   --output <human|json>     Output mode (default: config output.mode or human).
   --timeout-ms <n>          Per-call agent timeout override.
   --no-color                Disable color in human output.
-  --quiet / --verbose       Suppress / expand informational stderr.
+  --quiet                   Suppress informational stderr notes.
+  --verbose                 Accepted; reserved for v0.2+, same output as the default.
   -h, --help                Print usage and exit.
   -V, --version             Print CLI version and exit.
 

@@ -20,7 +20,7 @@ use std::io::Write;
 
 use serde_json::{json, Value};
 
-use crate::args::OutputMode;
+use crate::args::{OutputMode, Verbosity};
 use crate::error::{CliError, CliResult, ExitCode};
 
 /// Output schema version stamped into the JSON envelope. Independent of
@@ -39,6 +39,7 @@ pub const CLI_OUTPUT_SCHEMA_VERSION: &str = "0.1";
 #[derive(Clone, Debug)]
 pub struct Renderer {
     mode: OutputMode,
+    verbosity: Verbosity,
     warnings: Vec<String>,
 }
 
@@ -47,6 +48,7 @@ impl Renderer {
     pub fn new(mode: OutputMode) -> Self {
         Self {
             mode,
+            verbosity: Verbosity::Normal,
             warnings: Vec::new(),
         }
     }
@@ -54,7 +56,20 @@ impl Renderer {
     /// A renderer that stamps `warnings` into every envelope it writes.
     #[must_use]
     pub fn with_warnings(mode: OutputMode, warnings: Vec<String>) -> Self {
-        Self { mode, warnings }
+        Self {
+            mode,
+            verbosity: Verbosity::Normal,
+            warnings,
+        }
+    }
+
+    /// Apply the caller's `--quiet` choice. Only [`Self::info`] reads it:
+    /// `--quiet` promises to drop informational stderr, and nothing else
+    /// this renderer writes is informational.
+    #[must_use]
+    pub fn with_verbosity(mut self, verbosity: Verbosity) -> Self {
+        self.verbosity = verbosity;
+        self
     }
 
     #[must_use]
@@ -163,10 +178,18 @@ impl Renderer {
     /// and drop it in JSON mode. Subcommands use this to surface deploy
     /// progress without polluting the JSON envelope.
     ///
+    /// Dropped under `--quiet`, which is what that flag promises. A
+    /// `--output json` caller loses nothing by it: informational notes
+    /// were never written in JSON mode, and the envelope carries what a
+    /// script needs.
+    ///
     /// # Errors
     ///
     /// Returns [`CliError::Io`] when the writer fails.
     pub fn info<W: Write + ?Sized>(&self, err: &mut W, line: &str) -> CliResult<()> {
+        if matches!(self.verbosity, Verbosity::Quiet) {
+            return Ok(());
+        }
         if matches!(self.mode, OutputMode::Human) {
             writeln!(err, "{line}")?;
         }
