@@ -262,6 +262,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- `doctor`'s `cuda_runtime` finding reports what is true on the host it
+  runs on. It checked seven fixed system-toolkit paths and said "CUDA not
+  detected; vision-on-TensorRT validation will skip" for everything else,
+  which on an x86_64 GPU host was wrong twice: the driver could be loaded
+  and the card identified, and the amd64 serving worker is built without
+  the TensorRT adapter, so there was no TensorRT validation to skip. The
+  NVIDIA driver and a system CUDA toolkit are now separate facts, probed
+  under separate path lists and each named by the path it was found
+  under — `libcuda` is the driver's own library and no longer counts as a
+  toolkit, and a versioned `libcudart.so.<soname>` does count, so a host
+  carrying only the CUDA runtime package is no longer told it carries
+  nothing. The verdict is taken against the installed build, read from
+  the CLI's own build target because the CLI and the worker ship in one
+  per-architecture artifact set: the arm64 worker links the TensorRT
+  adapter, so no toolkit there is a `warning` with an install hint, while
+  the amd64 worker has no such adapter and its python_pytorch sidecar
+  brings its own CUDA runtime in the PyTorch wheel, so no system toolkit
+  there is `ok`. A host with neither driver nor toolkit is `missing` and
+  names the absent driver; a platform whose build has no CUDA path at all
+  is `skipped`. The finding still never fails `doctor`, so no install and
+  no lifecycle harness changes outcome.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.
