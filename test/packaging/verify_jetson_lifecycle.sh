@@ -2192,6 +2192,14 @@ check "  the removal falls between the upgrade and the last install" yes \
      [[ -n "$remove" && -n "$third" && -n "$fourth" && "$third" -lt "$remove" && "$remove" -lt "$fourth" ]] \
        && echo yes || echo no)"
 remove_line="$(grep -F 'apt-get remove' "${appliance}/sudo.log" || true)"
+# These two read the command the harness issued, not the state the
+# device ends in: this fixture's dpkg database is one record for the
+# whole set, so it cannot refuse the baseline install as a downgrade the
+# way apt-get -y would with a newer tensorplate-common left installed.
+# Dropping either package from the harness's filter still fails here,
+# but for the words in the command rather than for what they caused.
+# Per-package state, as verify_ubuntu_l4_cloud_lifecycle.sh keeps, is
+# what would make this an outcome check.
 check "  the removal names tensorplate-common" yes \
   "$(printf '%s\n' "$remove_line" | tr ' ' '\n' | grep -qx 'tensorplate-common' && echo yes || echo no)"
 check "  and leaves the apt channel's bootstrap package installed" no \
