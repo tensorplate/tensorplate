@@ -895,10 +895,7 @@ not-a-json-line
                 hint.contains("no component on this install writes it"),
                 "on Linux nothing writes NDJSON, and the hint must say so: {hint}"
             );
-            assert!(
-                hint.contains("journalctl -u tensorplate-agent"),
-                "{hint}"
-            );
+            assert!(hint.contains("journalctl -u tensorplate-agent"), "{hint}");
         }
         // On macOS the Homebrew formulas do write this file, and the
         // launcher is what supplied the config naming it, so neither "no
