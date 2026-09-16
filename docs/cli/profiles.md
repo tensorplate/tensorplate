@@ -32,7 +32,9 @@ behaviour. If the packaged file exists but the caller cannot read it —
 `/etc/tensorplate` is `root:tensorplate 0750` — the CLI uses the built-in
 defaults and prints one line on stderr naming the file and the group, so
 commands that do not need the agent keep working and the operator learns
-why the packaged profile is not in effect.
+why the packaged profile is not in effect. Like every other informational
+line the CLI writes, it appears in human output only: under `--output
+json` stderr stays a single envelope document that callers can parse.
 
 ## Config schema
 

@@ -665,7 +665,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   malformed fails the command instead of falling back to defaults that
   disagree with the install; one that exists but cannot be read — the
   config directory is `root:tensorplate 0750` — leaves the defaults in
-  place and prints one line on stderr naming the file and the group.
+  place and prints one line on stderr naming the file and the group. That
+  line is human output only: under `--output json` stderr carries the
+  error envelope and nothing else, so callers that parse it still get one
+  JSON document.
 
 - `tensorplate logs` no longer points at a log file nothing writes. The
   Debian CLI config named `/var/log/tensorplate/tensorplate-agent.log`,

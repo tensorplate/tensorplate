@@ -102,14 +102,9 @@ fn drive<O: Write, E: Write>(
             output_mode: fallback_mode,
             command,
         })?;
-    // A packaged config that exists but could not be read leaves the CLI
-    // on defaults that disagree with the install. Say so on stderr; stdout
-    // stays a clean JSON envelope for `--output json` callers.
-    if let Some(warning) = resolved.warning.as_deref() {
-        let _ = writeln!(stderr, "{warning}");
-    }
     let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
+    report_config_warning(output_mode, stderr, resolved.warning.as_deref());
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
     };
@@ -118,6 +113,24 @@ fn drive<O: Write, E: Write>(
         output_mode,
         command,
     })
+}
+
+/// Surface a config file that was found but not used, so a packaged
+/// install whose settings are not in effect never stays invisible.
+///
+/// Human mode only. In JSON mode stderr carries the error envelope and
+/// nothing else — [`Renderer::render_error`] writes exactly one document
+/// there — so a bare line ahead of it would hand every `--output json`
+/// caller that parses stderr a syntax error instead of a typed failure.
+/// [`Renderer::info`] is the rule every subcommand already follows for
+/// stderr notes.
+fn report_config_warning<E: Write>(mode: OutputMode, stderr: &mut E, warning: Option<&str>) {
+    let Some(warning) = warning else {
+        return;
+    };
+    // Best-effort, like the error renderer in `main`: a closed stderr must
+    // not change the command's exit code.
+    let _ = Renderer::new(mode).info(stderr, warning);
 }
 
 fn command_label(command: &Subcommand) -> &'static str {
@@ -173,5 +186,37 @@ mod tests {
         assert_eq!(command_of(&["doctor".into()]), "doctor");
         assert_eq!(command_of(&[]), "tensorplate");
         assert_eq!(command_of(&["--help".into()]), "tensorplate");
+    }
+
+    const WARNING: &str =
+        "tensorplate: cannot read the packaged cli config `/etc/tensorplate/cli.json`";
+
+    #[test]
+    fn a_config_warning_is_written_in_human_mode() {
+        let mut err = Vec::new();
+        report_config_warning(OutputMode::Human, &mut err, Some(WARNING));
+        assert_eq!(String::from_utf8(err).unwrap(), format!("{WARNING}\n"));
+    }
+
+    /// `--output json` callers parse stderr as one envelope document. A
+    /// plain warning line ahead of it makes that parse fail, so the note
+    /// is dropped in JSON mode; the envelope and the exit code already
+    /// carry the outcome.
+    #[test]
+    fn a_config_warning_never_precedes_the_json_error_envelope() {
+        let mut err = Vec::new();
+        report_config_warning(OutputMode::Json, &mut err, Some(WARNING));
+        assert!(
+            err.is_empty(),
+            "stderr must stay the JSON envelope alone, got {:?}",
+            String::from_utf8_lossy(&err)
+        );
+    }
+
+    #[test]
+    fn no_config_warning_writes_nothing() {
+        let mut err = Vec::new();
+        report_config_warning(OutputMode::Human, &mut err, None);
+        assert!(err.is_empty());
     }
 }
