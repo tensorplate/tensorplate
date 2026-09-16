@@ -264,7 +264,13 @@ Prerequisites:
    this row, `platform_profile` to list it among the host's candidate
    rows, and the registry, agent, socket, serving binary, path layout and
    config files to be ok. `host_os`, `accelerator_facts`,
-   `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted.
+   `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted. On
+   this row `cuda_runtime` is `warning` when no system CUDA toolkit is
+   installed — the arm64 worker carries the TensorRT adapter and cannot
+   load it without the CUDA runtime — so a run whose recorded value is
+   not `ok` on a device that is about to deploy a TensorRT bundle is
+   worth reading before the deploy-smoke stage fails for the same
+   reason. It is not a failing finding and does not stop the stage.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox

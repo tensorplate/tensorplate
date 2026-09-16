@@ -74,7 +74,13 @@ yet:
 - `platform_registry = ok`
 - `python_pytorch_backend = missing` (informational; install in step 5
   if SmolVLA validation is in scope)
-- `cuda_runtime = ok` on a Jetson with JetPack
+- `cuda_runtime = ok` on a Jetson with JetPack, naming the `libcudart`
+  it found; `warning` on a Jetson without it, because the arm64 worker
+  carries the TensorRT adapter and cannot load it without the CUDA
+  runtime. On an x86_64 host it is `ok` with a driver installed and
+  `missing` without one — the amd64 worker has no TensorRT adapter, and
+  the sidecar's CUDA build of PyTorch brings its own runtime, so a host
+  with no system CUDA toolkit is not a defect there. `skipped` on macOS
 - `tensorrt_runtime = ok` on a Jetson with TensorRT
 - `agent_reachable = fail` until the unit is enabled in step 3
 

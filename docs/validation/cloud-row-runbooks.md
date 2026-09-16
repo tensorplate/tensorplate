@@ -60,6 +60,14 @@ when the harness records evidence and later installs them.
 
 ## What a passing run does and does not prove
 
+On these rows doctor reports `cuda_runtime = ok` with the NVIDIA driver
+installed and no system CUDA toolkit: the amd64 serving worker is built
+without the TensorRT adapter, and the python_pytorch sidecar's CUDA
+build of PyTorch carries its own CUDA runtime in the wheel, so no system
+toolkit is required. The finding is paths-only and does not establish
+that the sidecar's PyTorch can reach the accelerator; the prerequisite
+below is what does.
+
 It proves the candidate installs through the shipped installer on this
 OS, that the services come up, that doctor's `platform_row` resolves
 this row **by live detection** with nothing failing, that the control

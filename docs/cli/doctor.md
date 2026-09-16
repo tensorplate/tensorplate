@@ -40,7 +40,8 @@ tensorplate doctor [--skip-agent] [--record <dir>] [--output <human|json>]
 | `serving_binary_installed` | packaging. `/usr/lib/tensorplate/tensorplate-serving` exists. |
 | `python_pytorch_backend` | Packaging probe. The backend descriptor at `/usr/share/tensorplate/backends/python_pytorch/backend.json` is present and parses. |
 | `python_pytorch_runtime` | packaging. The descriptor's Python interpreter exists, meets the declared minimum Python version, imports the declared backend module, and imports PyTorch at or above the declared minimum version. |
-| `cuda_runtime` / `tensorrt_runtime` / `libtorch_runtime` | packaging. Best-effort artifact presence (paths only — actual validation happens in release validation). |
+| `cuda_runtime` | packaging. Whether this host has the CUDA runtime the **installed serving build** needs, which is not the same question on every architecture. The NVIDIA driver and a system CUDA toolkit are reported as separate facts, named by the path each was found under, because different packages install them: `libcuda` is the driver's own user-mode library and is not a toolkit, and a versioned `libcudart.so.<soname>` counts, so a host carrying only the CUDA runtime package is not reported as carrying nothing. The verdict is taken against the build: the arm64 (Jetson) worker is built with the TensorRT adapter and links the CUDA runtime, so a missing toolkit there is `warning` with the install hint — that adapter cannot load without it; the amd64 worker is built without the TensorRT adapter and reaches the accelerator through the python_pytorch sidecar, whose CUDA build of PyTorch ships its own runtime inside the wheel, so a missing system toolkit there is `ok` and says so rather than claiming CUDA was not detected. With no driver and no toolkit it is `missing`, naming the absent driver as the fact that matters. On a platform whose shipped build has no CUDA path at all (macOS, which serves on Metal) it is `skipped`. Always `info` except the TensorRT-linked case above, and never `fail`: a host prerequisite is a reportable state, not an install fault. |
+| `tensorrt_runtime` / `libtorch_runtime` | packaging. Best-effort artifact presence (paths only — actual validation happens in release validation). |
 | `ros2_health_stub` | Packaged observability config exposes the optional ROS 2 health-stub section; runtime publications remain visible in `tensorplate status`. |
 
 Each finding has a stable `id`, `status` (`ok`, `fail`, `missing`, `unsupported`,
@@ -56,7 +57,18 @@ scripts can grep on `id` strings.
 ## Limitations
 
 - CUDA / TensorRT / LibTorch checks assert *artifact presence* only. Functional
-  validation happens in release validation.
+  validation happens in release validation. `cuda_runtime` interprets that
+  presence against the installed build, but it still reads paths: it never
+  queries the driver and never imports the sidecar's PyTorch, so it does not
+  establish that PyTorch can reach the accelerator. Nothing in `doctor`
+  does today — `python_pytorch_runtime` imports `torch` and reads its
+  version, not `torch.cuda`.
+- Which serving build is installed is read from this CLI's own build
+  target, because the CLI and the serving worker are installed from the
+  same per-architecture artifact set. A worker rebuilt from source with
+  different adapter flags is therefore not reflected here. `host_facts`
+  answers the other question — what the machine is — and is read from the
+  machine, never from the build target.
 - The PyTorch runtime check shells out to the interpreter pinned in the
   backend descriptor (e.g. `/usr/bin/python3 -c 'import torch; ...'`). It
   never executes user model code; refused module names that fail an
