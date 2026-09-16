@@ -152,9 +152,9 @@ fn resolve_source(cfg: &LogSourceConfig, args: &LogsArgs) -> CliResult<LogSource
 /// that carries the component the operator asked for: the serving worker
 /// and its backends are children of the agent and share its journal.
 ///
-/// Compiled on every target rather than only on Linux so the mapping from
-/// component to unit is covered wherever the suite runs; only the Linux
-/// build calls it.
+/// Compiled on every target rather than only on Linux so the wording and
+/// the [`journal_commands`] mapping are covered wherever the suite runs;
+/// only the Linux build calls it.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn journal_hint(component: Option<&str>) -> String {
     format!(
