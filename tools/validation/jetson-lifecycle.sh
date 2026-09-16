@@ -342,11 +342,11 @@ assets_digest() {
 # preflight depend on reaching GitHub from the device, and is left as
 # follow-up work rather than decided in passing.
 check_assets_manifest() {
-  local dir="$1" tag="$2" published="$3"
-  python3 - "$dir" "$tag" "$published" <<'PY'
+  local dir="$1" tag="$2" reject_snapshot="$3"
+  python3 - "$dir" "$tag" "$reject_snapshot" <<'PY'
 import json, pathlib, sys
 
-assets, tag, published = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "1"
+assets, tag, reject_snapshot = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "1"
 manifests = sorted(assets.glob("tensorplate-*-artifacts.json"))
 if len(manifests) != 1:
     raise SystemExit(
@@ -355,10 +355,10 @@ if len(manifests) != 1:
 release = json.loads(manifests[0].read_text(encoding="utf-8")).get("release") or {}
 if release.get("tag") != tag:
     raise SystemExit(f"{manifests[0].name} names release tag {release.get('tag')!r}, not {tag!r}")
-if published and (release.get("unreleased") is not False
-                  or release.get("provenance") != "github-release"):
+if reject_snapshot and (release.get("unreleased") is not False
+                        or release.get("provenance") != "github-release"):
     raise SystemExit(
-        f"{manifests[0].name} is not a published release: it records "
+        f"{manifests[0].name} records a local snapshot rather than a release build: it records "
         f"unreleased={release.get('unreleased')!r} provenance={release.get('provenance')!r}"
     )
 PY
@@ -491,7 +491,7 @@ PY
   [[ -f "${BASELINE_DIR}/install.sh" ]] || die "missing ${BASELINE_DIR}/install.sh"
   [[ -f "${BASELINE_DIR}/SHA256SUMS" ]] || die "missing ${BASELINE_DIR}/SHA256SUMS"
   check_assets_manifest "$BASELINE_DIR" "$BASELINE_TAG" 1 ||
-    die "the baseline assets are not the published ${BASELINE_TAG} release set"
+    die "the baseline assets are not a ${BASELINE_TAG} release build"
 
   # After the tags, so a pair the operator named the wrong way round is
   # refused by the option they got wrong rather than by the packages.

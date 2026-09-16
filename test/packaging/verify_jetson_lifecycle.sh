@@ -2343,7 +2343,7 @@ for published_case in "snapshot|unreleased=True" "local-provenance|provenance='l
   check "a ${variant} baseline is refused" "1" \
     "$(baseline_preflight "${td}/evidence-baseline-${variant}" --baseline-tag v0.1.5 \
        --baseline-assets-dir "${td}/baseline-${variant}")"
-  check "  and says it is not a published release" yes "$(said "${published_case#*|}")"
+  check "  and says its manifest records a local snapshot" yes "$(said "${published_case#*|}")"
 done
 
 cp -R "$baseline" "${td}/baseline-tampered"
