@@ -386,7 +386,7 @@ impl CliConfig {
             let path = PathBuf::from(env_value);
             return Ok(ResolvedCliConfig {
                 config: Self::load(&path)?,
-                source: ConfigSource::Environment(path.clone()),
+                source: ConfigSource::Environment(path),
                 warning: None,
             });
         }
