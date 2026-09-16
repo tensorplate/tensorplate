@@ -686,7 +686,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   not exist gets the same answer, so an upgrade that keeps a locally
   modified conffile naming the old path stays actionable; a path that
   cannot be read, and a `--source` the operator named, remain IO errors
-  that name the file. The cloud and Jetson lifecycle harnesses still
+  that name the file. The CPU-only smoke, which runs the real CLI against
+  a real package install, now requires the documented answer instead of
+  discarding the status with `|| true`: exit `0` where a source is
+  configured, or exit `6` whose output names `journalctl -u
+  tensorplate-agent`. The cloud and Jetson lifecycle harnesses still
   record this exit status rather than requiring it.
 
 - `tensorplate logs` says so when a read matched nothing. A source that

@@ -227,8 +227,26 @@ pass "control plane answered a status query"
 
 note "8. logs are reachable at the documented path"
 [[ -d "$TP_LOG_DIR" ]] || die "log directory missing at ${TP_LOG_DIR}"
-tensorplate logs --component agent --tail 20 > "${evidence}/agent.log" 2>&1 || true
-pass "log path present"
+# `tensorplate logs` reads NDJSON files, and this install writes none: both
+# services log to the journal, so the packaged cli config names no
+# log_source.path. The documented answer is exit 6 (`unavailable`) naming
+# the journalctl command to run instead -- never an empty successful read,
+# and never the exit 2 this returned while the CLI ignored the packaged
+# config. A host whose operator did configure a source reads it and exits
+# 0. Any other status is a regression, so the status is checked, not
+# swallowed.
+logs_status=0
+tensorplate logs --component agent --tail 20 > "${evidence}/agent.log" 2>&1 ||
+  logs_status=$?
+case "$logs_status" in
+  0) pass "log path present; an NDJSON source is configured and readable" ;;
+  6)
+    grep -q 'journalctl -u tensorplate-agent' "${evidence}/agent.log" ||
+      die "tensorplate logs exited 6 without naming the journal to read instead"
+    pass "log path present; logs exited 6 and named the journal"
+    ;;
+  *) die "tensorplate logs exited ${logs_status}; expected 0 or 6" ;;
+esac
 
 {
   printf 'result: pass\n'
