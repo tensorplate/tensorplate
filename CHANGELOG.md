@@ -652,6 +652,36 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and which nothing previously parsed, is now read through the agent's own
   config validator.
 
+- The CLI reads the `/etc/tensorplate/cli.json` its own package installs.
+  Discovery was `--config`, then `$TENSORPLATE_CLI_CONFIG`, then built-in
+  defaults, so on a Debian install the packaged conffile had no effect:
+  `doctor` reported the built-in `/var/run/tensorplate/agent.sock` rather
+  than the packaged `/run/tensorplate/agent.sock`, and an operator's edits
+  to the file changed nothing. The packaged conffile is now the step
+  before the built-in defaults. It is one fixed absolute path, not a
+  search, and only root can write it on an installed host. The
+  environment step still wins, so the Homebrew launcher continues to
+  select the config under its own prefix. A packaged config that is
+  malformed fails the command instead of falling back to defaults that
+  disagree with the install; one that exists but cannot be read — the
+  config directory is `root:tensorplate 0750` — leaves the defaults in
+  place and prints one line on stderr naming the file and the group.
+
+- `tensorplate logs` no longer points at a log file nothing writes. The
+  Debian CLI config named `/var/log/tensorplate/tensorplate-agent.log`,
+  which no component creates: both units log to the journal, the agent
+  writes its diagnostics to stderr, and the only NDJSON writer, the
+  observability service's retention sink, is off in the Debian config and
+  carries only that service's own events in any case. The packaged config
+  now names no log path, and a `logs` run with no NDJSON source exits 6
+  (`unavailable`) carrying a hint that names the journal to read instead:
+  `journalctl -u tensorplate-agent` for the agent and for the serving
+  worker and backends it supervises, `journalctl -u
+  tensorplate-observability` for the observability service, both when no
+  component was given. It never returns an empty successful read that
+  looks like "no such events". The cloud and Jetson lifecycle harnesses
+  still record this exit status rather than requiring it.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.
