@@ -29,7 +29,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tensorplate_agent::config::AgentConfig;
@@ -41,20 +41,132 @@ fn repo_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+/// One line of the dh-exec install file, the shell build profile or a Ruby
+/// formula, with its comment removed.
+///
+/// A `#` opens a comment where it begins the line or follows whitespace,
+/// which holds in all three and leaves Ruby's `"#{...}"` interpolation
+/// alone. Every derivation below reads code lines only. A substring search
+/// over whole file text is satisfied by a retired line left behind as a
+/// comment, which is how a packaging or build change that reverts one of
+/// these mappings would otherwise keep its own guard green.
+fn without_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'#' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) {
+            return &line[..index];
+        }
+    }
+    line
+}
+
+/// Every config `packaging/debian/tensorplate-agent.install` installs as
+/// `etc/tensorplate/agent.json`, keyed by the dh-exec architecture filter
+/// that selects it.
+///
+/// Both dh-exec shapes are read, because the file uses both: an explicit
+/// `src => dest` rename, and an install into a directory that keeps the
+/// source basename. The destination is half the match. A config that lands
+/// anywhere other than the path `packaging/debian/tensorplate-agent.service`
+/// starts the agent with is not one any host of that architecture reads,
+/// and a row checked against it would be checked against nothing.
+fn debian_installed_agent_configs() -> BTreeMap<String, String> {
+    let path = repo_path("packaging/debian/tensorplate-agent.install");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut installed = BTreeMap::new();
+    for line in raw.lines() {
+        let fields: Vec<&str> = without_comment(line).split_whitespace().collect();
+        // dh-exec puts the architecture filter first. A line without one
+        // installs everywhere and selects no per-architecture config.
+        let Some((filter, entry)) = fields.split_first() else {
+            continue;
+        };
+        if !(filter.starts_with('[') && filter.ends_with(']')) {
+            continue;
+        }
+        let (source, destination) = match entry {
+            [source, "=>", destination] => ((*source).to_string(), (*destination).to_string()),
+            [source, directory] => {
+                let base = source.rsplit('/').next().unwrap_or(source);
+                (
+                    (*source).to_string(),
+                    format!("{}/{base}", directory.trim_end_matches('/')),
+                )
+            }
+            _ => continue,
+        };
+        if destination == "etc/tensorplate/agent.json" {
+            installed.insert((*filter).to_string(), source);
+        }
+    }
+    installed
+}
+
+/// The config dh-exec installs as the agent conffile under `filter`.
+fn debian_agent_config(filter: &str) -> String {
+    let installed = debian_installed_agent_configs();
+    installed.get(filter).cloned().unwrap_or_else(|| {
+        panic!(
+            "packaging/debian/tensorplate-agent.install installs no agent config as \
+             etc/tensorplate/agent.json under `{filter}`; it installs {installed:?}. \
+             A host that filter selects reads no file at the path its systemd unit names, \
+             so there is nothing for its rows to be checked against"
+        )
+    })
+}
+
+/// The template `packaging/homebrew/Formula/tensorplate-agent.rb` installs
+/// as the agent's `agent.json`.
+///
+/// Both halves are required. A formula that assigns one template and
+/// installs another, or installs it under a different name, ships no
+/// config at the path its service block runs the agent with.
+fn homebrew_agent_config() -> String {
+    let path = repo_path("packaging/homebrew/Formula/tensorplate-agent.rb");
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let mut template = None;
+    let mut installs_it_as_agent_json = false;
+    for line in raw.lines() {
+        let code = without_comment(line);
+        if let Some(assigned) = code.trim().strip_prefix("config = buildpath/") {
+            template = Some(assigned.trim().trim_matches('"').to_string());
+        }
+        if code.contains(r#"install config => "agent.json""#) {
+            installs_it_as_agent_json = true;
+        }
+    }
+    let template = template.unwrap_or_else(|| {
+        panic!(
+            "{} must assign the agent config template it ships to `config`",
+            path.display()
+        )
+    });
+    assert!(
+        installs_it_as_agent_json,
+        "{} assigns `{template}` but does not install it as agent.json, so no Mac reads it",
+        path.display()
+    );
+    template
+}
+
 /// The agent config the packaging installs on a host this row matches.
 ///
-/// `packaging/debian/tensorplate-agent.install` is the source for the apt
-/// rows; the Homebrew formula installs the single macOS template. A
-/// channel and architecture pair with no shipped config returns `None`
-/// rather than falling back to one of the others: guessing here would let
-/// a new row be checked against a config no host of that row ever reads.
-fn shipped_agent_config(channel: PackageChannel, arch: CpuArchitecture) -> Option<&'static str> {
+/// Both answers are read out of the packaging rather than restated here:
+/// the apt pair from the dh-exec filters in
+/// `packaging/debian/tensorplate-agent.install`, the macOS one from the
+/// Homebrew formula. What stays in this file is only the pairing of an
+/// architecture with the filter that selects it, which is a fact about
+/// architectures rather than about packaging. A channel and architecture
+/// pair with no shipped config returns `None` rather than falling back to
+/// one of the others: guessing here would let a new row be checked against
+/// a config no host of that row ever reads.
+fn shipped_agent_config(channel: PackageChannel, arch: CpuArchitecture) -> Option<String> {
     match (channel, arch) {
-        (PackageChannel::Apt, CpuArchitecture::X86_64) => Some("packaging/conf/agent.amd64.json"),
-        (PackageChannel::Apt, CpuArchitecture::Arm64) => Some("packaging/conf/agent.json"),
-        (PackageChannel::Homebrew, CpuArchitecture::Arm64) => {
-            Some("packaging/homebrew/conf/agent.json.in")
-        }
+        (PackageChannel::Apt, CpuArchitecture::X86_64) => Some(debian_agent_config("[amd64]")),
+        (PackageChannel::Apt, CpuArchitecture::Arm64) => Some(debian_agent_config("[!amd64]")),
+        (PackageChannel::Homebrew, CpuArchitecture::Arm64) => Some(homebrew_agent_config()),
         (PackageChannel::Homebrew, CpuArchitecture::X86_64) => None,
     }
 }
@@ -91,7 +203,7 @@ fn unbacked_declarations(row: &PlatformSupportRow) -> Vec<String> {
                 arch.as_str()
             );
         };
-        if !available_backends(relative).contains(&set.backend_path) {
+        if !available_backends(&relative).contains(&set.backend_path) {
             found.push(format!(
                 "row `{}` declares backend path `{}`, which {relative} does not list in \
                  available_backends",
@@ -282,18 +394,25 @@ fn the_builds_behind_the_python_pytorch_only_configs_compile_no_tensorrt() {
 }
 
 /// The amd64 config is installed only by the dh-exec filter, so nothing
-/// else parses it. Its path is read here rather than assumed.
+/// else parses it. The whole mapping is pinned here, source and installed
+/// path together and as a set: a filter whose config stops landing at the
+/// conffile path ships nothing an amd64 host reads, and a filter added
+/// later selects a config no test compares a row against.
 #[test]
 fn the_amd64_agent_config_is_the_one_the_packaging_installs() {
-    let install = repo_path("packaging/debian/tensorplate-agent.install");
-    let raw = std::fs::read_to_string(install).expect("the install file is committed");
-    assert!(
-        raw.contains("[amd64] packaging/conf/agent.amd64.json"),
-        "the amd64 agent config path this test derives must be the one dh-exec selects:\n{raw}"
-    );
-    assert!(
-        raw.contains("[!amd64] packaging/conf/agent.json"),
-        "the non-amd64 agent config path this test derives must be the one dh-exec selects:\n{raw}"
+    let installed = debian_installed_agent_configs();
+    let mapping: Vec<(&str, &str)> = installed
+        .iter()
+        .map(|(filter, source)| (filter.as_str(), source.as_str()))
+        .collect();
+    assert_eq!(
+        mapping,
+        vec![
+            ("[!amd64]", "packaging/conf/agent.json"),
+            ("[amd64]", "packaging/conf/agent.amd64.json"),
+        ],
+        "these are the configs dh-exec installs as /etc/tensorplate/agent.json, and the \
+         per-architecture answers every check in this file is derived from"
     );
     assert!(
         repo_path("packaging/conf/agent.amd64.json").exists(),
@@ -308,15 +427,11 @@ fn the_amd64_agent_config_is_the_one_the_packaging_installs() {
 /// `tensorrt`, so that swap would silently retire this guard on macOS.
 #[test]
 fn the_homebrew_agent_config_is_the_one_the_formula_installs() {
-    let formula = repo_path("packaging/homebrew/Formula/tensorplate-agent.rb");
-    let raw = std::fs::read_to_string(formula).expect("the formula is committed");
-    assert!(
-        raw.contains("packaging/homebrew/conf/agent.json.in"),
-        "the Homebrew agent config path this test derives must be the one the formula reads:\n{raw}"
-    );
-    assert!(
-        raw.contains(r#"install config => "agent.json""#),
-        "and the formula must install it as the agent config:\n{raw}"
+    assert_eq!(
+        homebrew_agent_config(),
+        "packaging/homebrew/conf/agent.json.in",
+        "the Homebrew agent config path this test derives must be the template the formula \
+         installs as agent.json"
     );
     assert!(
         repo_path("packaging/homebrew/conf/agent.json.in").exists(),
