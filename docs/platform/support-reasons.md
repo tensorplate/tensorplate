@@ -30,20 +30,24 @@ an engineer who greps another are looking at the same fact.
 
 ## Boundaries that are easy to blur
 
-**A missing package is not a dead runtime.** `missing_backend_package`
-is about a package; `accelerator_runtime_unavailable` means the thing
-is installed and cannot run. Collapsing them tells an operator whose
-PyTorch cannot reach its accelerator to reinstall a package they already
-have. The classification is one function so both sides cannot drift.
+**A missing package is not a dead runtime.** `missing_backend_package` is
+never about a runtime that is installed and will not run;
+`accelerator_runtime_unavailable` is only that. Collapsing them tells an
+operator whose PyTorch cannot reach its accelerator to reinstall a
+package they already have. The classification is one function so both
+sides cannot drift.
 
-**One reason, two next steps.** `missing_backend_package` covers a
-declared package set that is not installed — install it — and a backend
-path the row declares no package set for, where there is nothing to
-install: admission reads the row's declarations and never looks at the
-installed set, so no package changes that answer. The value stays one
-because the deploy is refused for one kind of cause, a backend path this
-row does not serve; the detail line is what separates them, and it names
-the architecture and the paths the row does declare in the second case.
+**One reason, three producers, two next steps.** Two of the three mean
+install something: a package the matched row requires for the backend
+path a bundle names and that is not installed, and a backend descriptor
+the startup probe reports absent — that one is raised while a deploy's
+bundle is verified, before admission reads the row at all. The third is
+a backend path the row declares no package set for, where there is
+nothing to install: admission reads the row's declarations and never
+looks at the installed set, so no package changes that answer. The value
+stays one because all three refuse the same thing, a backend path this
+host cannot serve; the detail line is what separates them, and in the
+third case it names the architecture and the paths the row does declare.
 It claims nothing about which backends the installed build compiled in:
 the x86_64 rows declare no `tensorrt` path because the amd64 serving
 build has no such adapter (issue #204), but the row records a package
