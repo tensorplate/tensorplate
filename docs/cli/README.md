@@ -57,6 +57,14 @@ Every subcommand supports `--output json`. Envelope schema:
 }
 ```
 
+`warnings` is an optional top-level array of strings, present only when
+there is something to say about the process rather than the command's
+result — today, a packaged CLI config that was found and not used. It is
+how a `--output json` caller tells an install running on the packaged
+profile from one running on the built-in defaults, since informational
+stderr is suppressed in JSON mode. It never substitutes for `error`: a
+command that carries `warnings` still reports its own status normally.
+
 ## Exit codes
 
 See [`exit-codes.md`](./exit-codes.md). The numeric values are part of the v0.1.0

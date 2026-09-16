@@ -45,22 +45,33 @@ never returns an empty, successful read that looks like "no such events".
 that file, for sites that configure `diagnostics_retention.file_path` in
 `/etc/tensorplate/observability.json`.
 
-A configured `log_source.path` that does not exist gets the same answer —
-an upgrade that keeps a locally modified conffile can leave one naming the
-log file earlier packages configured. A path that exists but cannot be
-read, and a `--source` the operator named themselves, stay a plain IO
-error (exit `1`) that names the file.
+A configured `log_source.path` that does not exist is also exit `6` — an
+upgrade that keeps a locally modified conffile can leave one naming the log
+file earlier packages configured. The message says only that the path is
+not there; what that *means* is a platform question, so it is the hint that
+answers it. On Linux nothing writes NDJSON, so the hint says so and names
+the journal. A path that exists but cannot be read, and a `--source` the
+operator named themselves, stay a plain IO error (exit `1`) that names the
+file.
 
 The Homebrew install is different: macOS has no journald, so its packaged
 config enables retention and points `log_source.path` at
-`${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson`.
+`${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson` — the same path
+`observability.json` gives `diagnostics_retention.file_path`. A component
+does write that file there, so the missing-path hint on macOS says the
+ordinary thing instead: the file appears once `brew services start
+tensorplate-observability` has run, and each service's plain-text output is
+in its `*.error.log` beside it meanwhile.
 
 ### A read that matched nothing
 
 Whatever the source, a successful read that returned no entries writes one
 line to stderr naming the source, the `--component` filter if one was
-given, and where that component's own output is instead. In v0.1 the only
-NDJSON writer is the observability service's retention sink: the event
+given, and every other filter that was applied.
+
+That line adds a second half — where the component's own output is instead
+— only when nothing else can explain the empty result. In this release the
+only NDJSON writer is the observability service's retention sink: the event
 listener transport is `in_process` (`unix_socket` is reserved and
 rejected), and the agent and serving worker are separate processes, so
 nothing they emit reaches it. `--component agent` against an events file
@@ -68,8 +79,17 @@ therefore matches nothing however long the file is — on Homebrew, and on
 any Linux site that configures `diagnostics_retention.file_path` and points
 `log_source.path` at it.
 
-Like every other CLI note, the line is human output only: `--output json`
-callers read `payload.entries` from the envelope on stdout.
+It is **not** added when `--level`, `--since-ms`, or `--correlation-id`
+could have excluded every entry, when a `--source` the operator named was
+read (nothing about the install explains a path they chose), when every
+line was malformed, or for `--component observability`, which is the
+service that does write there. In those cases the empty result has a cause
+the command established, and claiming otherwise would send the operator to
+the wrong file.
+
+Like every other CLI note, the line is human output only and `--quiet`
+suppresses it; `--output json` callers read `payload.entries` from the
+envelope on stdout.
 
 ## Filters
 
@@ -81,9 +101,11 @@ callers read `payload.entries` from the envelope on stdout.
   milliseconds old.
 - `--tail`: hard upper bound of 10,000.
 
-Malformed JSON lines are counted and skipped; the count is surfaced to
-stderr so an operator can detect a log writer regression without the
-command failing.
+Malformed JSON lines are counted and skipped, so a log-writer regression
+is visible without the command failing. The count is a CLI note like any
+other: human stderr, suppressed by `--quiet`, and in JSON mode carried by
+`payload.malformed` rather than written to stderr, which stays a single
+envelope document.
 
 ## Output
 
@@ -94,4 +116,5 @@ Human mode renders one row per entry:
 ```
 
 JSON mode emits the entries verbatim under `payload.entries[]` along with the
-resolved source path and kind.
+resolved source path, its kind, and `payload.malformed` — the number of
+lines that were not JSON.

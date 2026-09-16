@@ -25,16 +25,37 @@ Step 3 is one fixed absolute path, never a search of the working directory,
 
 A config found at any step must parse and validate; a malformed one fails
 the command with exit `2` rather than falling back to the defaults, so the
-CLI never quietly talks to a socket the operator did not configure. Step 3
-is the one place a *missing* file is not an error: with no packaged install
-there is nothing to read, and the built-in defaults are the documented
-behaviour. If the packaged file exists but the caller cannot read it —
-`/etc/tensorplate` is `root:tensorplate 0750` — the CLI uses the built-in
-defaults and prints one line on stderr naming the file and the group, so
-commands that do not need the agent keep working and the operator learns
-why the packaged profile is not in effect. Like every other informational
-line the CLI writes, it appears in human output only: under `--output
-json` stderr stays a single envelope document that callers can parse.
+CLI never quietly talks to a socket the operator did not configure. For a
+config the operator named — steps 1 and 2 — that is the whole rule.
+
+Step 3 is different in two ways, because the operator did not choose it.
+
+A *missing* file is not an error: with no packaged install there is nothing
+to read, and the built-in defaults are the documented behaviour.
+
+An *unusable* one — malformed JSON, a document that fails validation, or
+bytes that are not text — still fails every command that needs the
+configured profile, naming the file. `tensorplate doctor` and `tensorplate
+version` are the exception: they run on the built-in defaults and report
+the fault instead. Doctor is what this documentation tells an operator to
+run when an install misbehaves, and its `config_files` finding is where a
+malformed `/etc/tensorplate/*.json` is reported; aborting before it runs
+would take the diagnostic away at the moment it is needed. `version` reads
+nothing from the config at all.
+
+If the packaged file exists but the caller may not read it —
+`/etc/tensorplate` is `root:tensorplate 0750` — every command uses the
+built-in defaults and the CLI prints one line on stderr naming the file and
+the group, so the operator learns why the packaged profile is not in
+effect. That is a property of the caller, not of the install, which is why
+it reports rather than fails.
+
+Both of those notes go to stderr in human output only, and `--quiet`
+suppresses them. Under `--output json` stderr stays a single envelope
+document that callers can parse; the same text is in that envelope's
+optional top-level `warnings` array, on the ok and the error path alike, so
+a scripted caller can still tell an install running on the packaged profile
+from one running on the built-in defaults.
 
 ## Config schema
 
