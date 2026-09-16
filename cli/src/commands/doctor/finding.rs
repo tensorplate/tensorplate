@@ -10,12 +10,14 @@
 // One recorded exception: `cuda_runtime`'s severity range widened when
 // the finding was made build-aware (#205). It reported only `ok` and
 // `missing`, always at `Severity::Info`; it now also reports `warning`
-// (a TensorRT-linked build with no CUDA runtime for its adapter to
-// load) and `skipped` (a build or an install with no CUDA consumer).
-// The id, what it means and its never-`fail` guarantee are unchanged,
-// and no harness asserts on its status — `jetson-lifecycle.sh` records
-// it and the x86_64 ok-lists exclude it. Widening an existing id this
-// way needs that trace first; it is not licence to do it again.
+// (an installed CUDA consumer on the arm64 artifact set with no CUDA
+// runtime to load — the worker's TensorRT adapter, or the sidecar's own
+// PyTorch wheel) and `skipped` (a build or an install with no CUDA
+// consumer at all). The id, what it means and its never-`fail`
+// guarantee are unchanged, and no harness asserts on its status —
+// `jetson-lifecycle.sh` records it and the x86_64 ok-lists exclude it.
+// Widening an existing id this way needs that trace first; it is not
+// licence to do it again.
 
 use serde::Serialize;
 
@@ -48,9 +50,9 @@ pub enum FindingId {
     /// system CUDA toolkit as separate facts, because they are
     /// installed by different packages and a build that carries no
     /// TensorRT adapter needs only the first. `skipped` where nothing
-    /// installed consumes CUDA, `warning` where a TensorRT-linked
-    /// worker has no runtime to load; never `fail`. See the exception
-    /// recorded in the module header above.
+    /// installed consumes CUDA, `warning` where an installed consumer on
+    /// the arm64 artifact set has no runtime to load; never `fail`. See
+    /// the exception recorded in the module header above.
     CudaRuntime,
     Ros2HealthStub,
     ObservabilitySnapshot,
