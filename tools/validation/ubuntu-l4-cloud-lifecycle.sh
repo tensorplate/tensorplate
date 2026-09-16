@@ -17,7 +17,7 @@
 # history to preserve.
 #
 # WHAT A PASSING RUN PROVES
-#   install       the candidate installs on this OS through the shipped
+#   install       (online) the candidate installs on this OS through the shipped
 #                 installer, the services come up, and doctor resolves
 #                 this row by live detection with nothing failing
 #   deploy-smoke  the control plane admits a bundle, runs a worker for
@@ -29,8 +29,15 @@
 #   crash-loop    an agent that cannot load its config is retried and then
 #                 given up on by systemd rather than restarted forever, and
 #                 recovers its deployment once the config is restored
+#   offline       with both services and every CLI call denied all IP
+#                 traffic but 127.0.0.1/32 and ::1/128, doctor still
+#                 resolves this row -- from the boot-bound machine-type
+#                 record, not from metadata -- and a fresh deploy and an
+#                 inference still answer. The denial is a runtime drop-in
+#                 removed on every exit path, and its enforcement is
+#                 proved by a probe whose control ran unrefused first
 #
-# With --baseline-assets-dir, two more stages run after crash-loop. The
+# With --baseline-assets-dir, two more stages run after offline. The
 # baseline is a published, signed predecessor set, always installed with
 # its signature verified:
 #   upgrade       over a fresh baseline install serving a deployment, with
@@ -45,8 +52,11 @@
 #                 baseline set, keeps the operator edit and the set-aside
 #                 state, starts with no active deployment, and deploys and
 #                 serves again
-# The five stages above are always about a clean candidate install, and a
+# The six stages above are always about a clean candidate install, and a
 # run with a baseline leaves the baseline installed when it finishes.
+# Install and upgrade are always online: both fetch nothing but still run
+# the shipped installer as an operator would, and denying them would
+# validate a procedure nobody follows.
 #
 # WHAT IT DOES NOT PROVE
 #   The deploy-smoke bundle selects the device-neutral `fixture` backend
@@ -57,11 +67,8 @@
 #   select yet. Do not describe a run of this harness as GPU validation.
 #
 # Skipped stages have their reason recorded in the report rather than
-# being omitted. Offline is deferred until cloud platform detection can
-# resolve this row without querying GCE metadata. No network policy is
-# changed and no offline behavior is certified by this harness. Without
-# --baseline-assets-dir, upgrade and rollback are skipped as well: there
-# is no predecessor set to move between.
+# being omitted. Without --baseline-assets-dir, upgrade and rollback are
+# skipped: there is no predecessor set to move between.
 #
 # Usage:
 #   tools/validation/ubuntu-l4-cloud-lifecycle.sh \
@@ -124,6 +131,16 @@ readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
 # only so a stubbed appliance can supply the file.
 OPERATOR_CONFIG="${TP_CLOUD_OPERATOR_CONFIG:-/etc/tensorplate/cli.json}"
 OPERATOR_CONFIG_SHA256=""
+# The boot-bound machine-type record the agent writes on every start where
+# the GCE metadata service answered. The offline stage's identity rests on
+# it; see the offline section below.
+readonly MACHINE_TYPE_RECORD="${STATE_DIR}/machine-type.json"
+# The offline mechanism, shared with the Jetson harness: the drop-in text,
+# the denied transient unit's properties, the probe and the
+# classification. Named for the mechanism rather than for a row so both
+# harnesses run the same rule.
+HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly OFFLINE_HELPER="${HARNESS_DIR}/linux_offline_runtime.py"
 
 ROW="$DEFAULT_ROW"
 ASSETS_DIR=""
@@ -256,6 +273,11 @@ preflight() {
   require_command python3
   require_command sha256sum
   require_command dpkg
+  # The offline stage runs every TensorPlate CLI call inside a transient
+  # unit that denies the network, so a host without systemd-run cannot
+  # produce that stage at all.
+  require_command systemd-run
+  [[ -f "$OFFLINE_HELPER" ]] || die "missing ${OFFLINE_HELPER}"
 
   [[ "$HOST_ARCH" == "x86_64" ]] ||
     die "this harness validates x86_64 rows; host reports ${HOST_ARCH}"
@@ -1062,13 +1084,19 @@ cleanup_crash_loop() {
 # knows which stage was active. A second catchable signal must not interrupt
 # restoration; SIGKILL and machine failure cannot be handled by a shell.
 finish_with_cleanup() {
-  local status="$1" cleanup_status=0
+  local status="$1" cleanup_status=0 offline_status=0
   trap - EXIT
   trap '' INT TERM HUP
+  # The network policy first: a host left denied cannot reach anything,
+  # including whatever the operator would use to recover it.
+  cleanup_offline_denial || offline_status=$?
   # Do not make restoration depend on opening another evidence file.
   cleanup_crash_loop || cleanup_status=$?
   # A capture interrupted before it removed its raw copy.
   remove_journal_scratch || cleanup_status=$?
+  if ((cleanup_status == 0)); then
+    cleanup_status="$offline_status"
+  fi
   if ((status == 0)); then
     status="$cleanup_status"
     if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
@@ -1197,6 +1225,319 @@ stage_crash_loop() {
   step "recovered worker round trip" check_worker_round_trip \
     "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" || return
   pass "agent retried and given up on under a broken config; recovered deployment answered once restored"
+}
+
+# --- offline -------------------------------------------------------------
+
+# What this stage certifies, and what makes each part of it necessary.
+#
+# BOTH services, and every TensorPlate CLI call the stage makes, run
+# under a per-unit denial that allows only 127.0.0.1/32 and ::1/128 --
+# never systemd's `localhost` shorthand, which expands to 127.0.0.0/8 and
+# so admits the systemd-resolved stub at 127.0.0.53 and the DNS namespace
+# behind it.
+#
+# The denial is a RUNTIME drop-in under /run/systemd/system. Nothing is
+# written under /etc: a persistent drop-in would outlive this run, and
+# outlive a reboot, on a host whose operator agreed to a validation run
+# and not to a denied appliance. Every exit path removes it, including
+# SIGINT, SIGTERM and SIGHUP, and the removal is read back rather than
+# assumed.
+#
+# Configuring a denial is not enforcing one: `IPAddressDeny=` is silently
+# inert wherever systemd cannot install its BPF filter, and `systemctl
+# show` answers for a dead or nonexistent unit with empty values. So the
+# proof is a probe run inside a denied transient unit -- and the probe
+# means nothing on its own, because a host firewall would refuse it just
+# the same. The control runs FIRST, with nothing denied, and must not be
+# refused; the GCE metadata service must answer it outright, since the
+# whole claim is that the denial is what made that service unreachable.
+#
+# IDENTITY. The agent records the metadata service's answer bound to this
+# kernel boot, the logical CPU count, MemTotal and the NVIDIA display PCI
+# ids. Offline detection uses that record only while the metadata query
+# fails as unreachable and every one of those facts still matches. The
+# install stage runs online and produces the record for this boot, so
+# this stage requires the record to exist before denying anything, and
+# then requires that the identity came FROM it: the agent's `platform
+# identity: ... source=recorded_gce_metadata` line and doctor's host_os
+# finding, rather than a live metadata answer.
+#
+# The record is bound to the boot, so after a reboot the agent must start
+# once with metadata reachable before offline detection works. Offline
+# cold boot is not supported and this stage does not claim it.
+
+# The transient units the CLI and the probe run in, as the operator, so a
+# denied call is the same call this operator makes online.
+OPERATOR_USER=""
+OPERATOR_GROUPS=""
+# A deployment made while denied, distinct from the one the agent
+# re-warms, so the stage proves admission with no network rather than
+# recovery of something admitted with one.
+OFFLINE_DEPLOYMENT_ID=""
+# Units whose runtime drop-in exists on this host right now. Registered
+# before the first one is installed, and cleared only once every one has
+# been removed and both services are back without a policy.
+OFFLINE_DENIAL_UNITS=()
+
+offline_helper() {
+  python3 "$OFFLINE_HELPER" "$@"
+}
+
+# Run a command inside a transient unit, optionally under the denial.
+#
+# --pipe --wait returns the command's own exit status, so a CLI failure
+# is not hidden by systemd-run's; --collect removes the unit whatever
+# that status was, so a failed call leaves nothing behind. The properties
+# come from the mechanism module, so a denied CLI call and the denied
+# probe are denied by exactly the rule the services are.
+run_transient() {
+  local denied="$1"
+  shift
+  local properties=() line
+  if ((denied)); then
+    while IFS= read -r line; do
+      properties+=("$line")
+    done < <(offline_helper transient-properties)
+    if ((${#properties[@]} != 3)); then
+      printf 'could not read the denial properties from %s\n' "$(basename "$OFFLINE_HELPER")" >&2
+      return 1
+    fi
+  fi
+  sudo systemd-run --pipe --wait --collect --quiet \
+    "--property=User=${OPERATOR_USER}" \
+    "--property=SupplementaryGroups=${OPERATOR_GROUPS}" \
+    ${properties[@]+"${properties[@]}"} -- "$@"
+}
+
+run_denied() { run_transient 1 "$@"; }
+run_allowed() { run_transient 0 "$@"; }
+
+# The redirection belongs to the transient unit's own output, so a step
+# that captures JSON cannot also capture systemd-run's diagnostics.
+run_denied_out() {
+  local out="$1"
+  shift
+  run_denied "$@" >"$out"
+}
+
+offline_drop_in_path() {
+  offline_helper drop-in-path --unit "$1"
+}
+
+# A drop-in from an earlier run means this run never applied the denial it
+# would certify. Refused before anything is installed, as rollback refuses
+# a pre-existing state.bak.
+offline_drop_in_absent() {
+  local path
+  path="$(offline_drop_in_path "$1")" || return
+  if [[ -e "$path" ]]; then
+    printf 'a validation denial drop-in for %s is already installed at %s; remove it before running the offline stage\n' \
+      "$1" "$path" >&2
+    return 1
+  fi
+}
+
+# Read the effective address policy back from systemd for both units and
+# file it. Extra arguments go to the module: --absent <path> for each
+# drop-in that must be gone.
+offline_check_policy() {
+  local work status=0 cleanup_status=0
+  work="$(mktemp -d)" || return
+  offline_check_policy_in "$work" "$@" || status=$?
+  rm -rf "$work" || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+offline_check_policy_in() {
+  local work="$1" expect="$2" out="$3"
+  shift 3
+  local unit shows=()
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    # LoadState, ActiveState and InvocationID come back with the policy:
+    # `systemctl show` answers for a unit that does not exist with empty
+    # values, which would read as a unit that allows nothing.
+    step "read the ${unit} address policy" bash -c 'systemctl show -p LoadState -p ActiveState -p InvocationID -p IPAddressDeny -p IPAddressAllow -- "$1" >"$2"' \
+      _ "$unit" "${work}/${unit}.show" || return
+    shows+=(--show "${unit}=${work}/${unit}.show")
+  done
+  step "both units read back as ${expect}" offline_helper check-policy \
+    --expect "$expect" "${shows[@]}" "$@" --out "$out" || return
+}
+
+# Install the runtime drop-ins and restart both services under them.
+offline_deny() {
+  local work status=0 cleanup_status=0
+  work="$(mktemp -d)" || return
+  offline_deny_from "$work" || status=$?
+  rm -rf "$work" || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+offline_deny_from() {
+  local work="$1" unit path
+  step "render the denial drop-in" bash -c 'python3 "$1" drop-in-text >"$2"' \
+    _ "$OFFLINE_HELPER" "${work}/drop-in.conf" || return
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    path="$(offline_drop_in_path "$unit")" || return
+    # Registered before the file exists, never after: an interrupt
+    # between creating it and recording it would leave the host denied
+    # with nothing to remove it.
+    OFFLINE_DENIAL_UNITS+=("$unit")
+    step "install the ${unit} denial drop-in" \
+      sudo install -D -m 0644 "${work}/drop-in.conf" "$path" || return
+    step "the installed ${unit} drop-in is the rendered runtime one" \
+      offline_helper check-drop-in --unit "$unit" --print "$path" || return
+  done
+  step "reload systemd" sudo systemctl daemon-reload || return
+  step "restart both services under denial" \
+    sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  step "services ready under denial" await_services_ready || return
+}
+
+# Remove every drop-in this run installed, put the services back, and
+# prove both read back with no policy at all.
+#
+# Safe to retry after a partial failure, and called from both the stage
+# and the exit and signal handlers, so an interrupted stage still leaves
+# the host's network policy as it found it.
+cleanup_offline_denial() {
+  if ((${#OFFLINE_DENIAL_UNITS[@]} == 0)); then
+    return 0
+  fi
+  local unit path absent=()
+  note "removing the offline denial drop-ins"
+  for unit in "${OFFLINE_DENIAL_UNITS[@]}"; do
+    path="$(offline_drop_in_path "$unit")" || return
+    absent+=(--absent "$path")
+    step "remove the ${unit} drop-in" sudo rm -f "$path" || return
+    # An empty drop-in directory vanishes with /run, but leaving one is
+    # still a change to the host. It fails when another drop-in is there,
+    # which is not this run's to remove.
+    sudo rmdir "$(dirname "$path")" >/dev/null 2>&1 || true
+  done
+  step "reload systemd" sudo systemctl daemon-reload || return
+  step "restart both services without denial" \
+    sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  step "services ready again" await_services_ready || return
+  offline_check_policy none "${EVIDENCE_DIR}/offline-restored.json" \
+    "${absent[@]}" || return
+  OFFLINE_DENIAL_UNITS=()
+}
+
+# Every TensorPlate CLI call this stage makes, each one inside its own
+# denied transient unit: status, doctor, a fresh deploy, and inference.
+offline_cli_under_denial() {
+  local work="$1" doctor_status=0 offline_port
+  local status_file="${EVIDENCE_DIR}/offline-status.json"
+  local doctor_file="${EVIDENCE_DIR}/offline-doctor.json"
+  local deploy_file="${EVIDENCE_DIR}/offline-deploy.json"
+  local after_deploy="${EVIDENCE_DIR}/offline-status-after-deploy.json"
+
+  note "querying the control plane from inside a denied transient unit"
+  step "status under denial" run_denied_out "$status_file" \
+    tensorplate status --output json || return
+  # The deployment the agent re-warmed from durable state while denied,
+  # not the one this stage is about to make.
+  step "status checks" offline_helper status-check \
+    --status "$status_file" --deployment "$DEPLOYMENT_ID" || return
+
+  note "running doctor from inside a denied transient unit"
+  # Doctor exits 10 on a failing finding, so its status is captured and
+  # handed to the check rather than ending the stage here.
+  run_denied_out "$doctor_file" tensorplate doctor --output json || doctor_status=$?
+  step "doctor resolves ${ROW} from the recorded machine type" offline_helper doctor-check \
+    --doctor "$doctor_file" --status "$doctor_status" --exact-row "$ROW" || return
+
+  note "deploying a fresh bundle from inside a denied transient unit"
+  step "fresh deploy under denial" run_denied_out "$deploy_file" \
+    tensorplate deploy "$BUNDLE_STAGING_DIR" \
+    --deployment-id "$OFFLINE_DEPLOYMENT_ID" --output json || return
+  step "deploy checks" offline_helper deploy-check \
+    --deploy "$deploy_file" --deployment "$OFFLINE_DEPLOYMENT_ID" || return
+
+  step "status after the fresh deploy" run_denied_out "$after_deploy" \
+    tensorplate status --output json || return
+  step "the fresh deployment is active" offline_helper status-check \
+    --status "$after_deploy" --deployment "$OFFLINE_DEPLOYMENT_ID" || return
+
+  note "issuing an inference request from inside a denied transient unit"
+  step "build the inference request" offline_helper infer-request \
+    --request-id cloud-offline-1 --out "${work}/infer-request.json" || return
+  step "infer under denial" run_denied tensorplate infer \
+    --input "${work}/infer-request.json" --output-file "${work}/infer-response.json" || return
+  step "inference checks" offline_helper infer-check \
+    --request "${work}/infer-request.json" \
+    --response "${work}/infer-response.json" || return
+
+  # The probe runs against the worker this stage just deployed, so the
+  # allowed loopback port is the one status reports now.
+  offline_port="$(offline_helper serving-port --status "$after_deploy")" || return
+  note "probing the network from inside a denied transient unit"
+  step "denied probe" run_denied python3 "$OFFLINE_HELPER" probe \
+    --agent-socket "$AGENT_SOCKET_PATH" --serving-port "$offline_port" \
+    --out "${EVIDENCE_DIR}/offline-probe.json" || return
+  step "the denial is enforced, not merely configured" offline_helper classify \
+    --probe "${EVIDENCE_DIR}/offline-probe.json" \
+    --control "${EVIDENCE_DIR}/offline-control.json" || return
+}
+
+stage_offline() {
+  local work status=0 cleanup_status=0 scratch_status=0
+  work="$(mktemp -d)" || return
+  stage_offline_in "$work" || status=$?
+  # Restored whatever the checks concluded, so a failed stage leaves an
+  # appliance whose network policy is what it was before the stage.
+  cleanup_offline_denial || cleanup_status=$?
+  rm -rf "$work" || scratch_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+  ((scratch_status == 0)) || return "$scratch_status"
+
+  step "file the offline evidence" offline_helper evidence \
+    --dir "$EVIDENCE_DIR" --deployment "$OFFLINE_DEPLOYMENT_ID" \
+    --out "${EVIDENCE_DIR}/offline-runtime.json" || return
+  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed against an unrefused control; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
+}
+
+stage_offline_in() {
+  local work="$1" serving_port
+  OPERATOR_USER="$(id -un)" || return
+  OPERATOR_GROUPS="$(id -Gn)" || return
+  OFFLINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}-offline"
+
+  # Offline detection has nothing to fall back on without this file, and
+  # only the install stage's online start could have written it.
+  step "the boot-bound machine-type record exists" \
+    sudo test -f "$MACHINE_TYPE_RECORD" || return
+  step "no denial drop-in is already installed for ${AGENT_UNIT}" \
+    offline_drop_in_absent "$AGENT_UNIT" || return
+  step "no denial drop-in is already installed for ${OBSERVABILITY_UNIT}" \
+    offline_drop_in_absent "$OBSERVABILITY_UNIT" || return
+
+  # The control, before anything is denied. EPERM under the denial proves
+  # nothing unless these same operations were not refused a moment
+  # earlier, and unless the metadata service answered one of them.
+  serving_port="$(offline_helper serving-port --status "${EVIDENCE_DIR}/status.json")" || return
+  note "probing the network with nothing denied, as the control"
+  step "control probe" run_allowed python3 "$OFFLINE_HELPER" control \
+    --agent-socket "$AGENT_SOCKET_PATH" --serving-port "$serving_port" \
+    --out "${EVIDENCE_DIR}/offline-control.json" || return
+
+  offline_deny || return
+  offline_check_policy denied "${EVIDENCE_DIR}/offline-denial.json" || return
+
+  offline_cli_under_denial "$work" || return
+
+  # The agent's own account of this start, from this invocation only: a
+  # second identity line would mean it restarted and the earlier line
+  # might have been the online one.
+  capture_current_journal "$AGENT_UNIT" "${EVIDENCE_DIR}/offline-agent-journal.txt" || return
+  step "the machine type came from the record, not from metadata" offline_helper identity-check \
+    --agent-journal "${EVIDENCE_DIR}/offline-agent-journal.txt" \
+    --out "${EVIDENCE_DIR}/offline-identity.json" || return
 }
 
 # --- upgrade and rollback ------------------------------------------------
@@ -1460,8 +1801,13 @@ main() {
   lifecycle_stage status-logs stage_status_logs
   lifecycle_stage restart stage_restart
   lifecycle_stage crash-loop stage_crash_loop
-  lifecycle_skip offline \
-    "deferred: GCE platform detection requires live metadata at 169.254.169.254; offline validation needs product support for identity detection without network access"
+  # Before upgrade, and it has to be: upgrade's clean baseline install
+  # deletes /var/lib/tensorplate and with it the boot-bound machine-type
+  # record, and the baseline release never wrote one. Offline detection
+  # would then have nothing to resolve the row from -- not because the
+  # candidate cannot do it, but because the stage ordering took its
+  # evidence away.
+  lifecycle_stage offline stage_offline
 
   # After crash-loop, so every stage above is about a clean candidate
   # install and no crash-loop restore can still be pending once packages
@@ -1480,9 +1826,9 @@ main() {
   lifecycle_finish
   printf 'evidence: %s\n' "$EVIDENCE_DIR"
   if ((BASELINE_REQUESTED)); then
-    pass "lifecycle run complete; seven stages exercised, one skipped with its reason; the baseline is left installed"
+    pass "lifecycle run complete; all eight canonical stages exercised; the baseline is left installed"
   else
-    pass "lifecycle run complete; five stages exercised, three skipped with reasons"
+    pass "lifecycle run complete; six stages exercised, two skipped with reasons"
   fi
 }
 

@@ -288,6 +288,50 @@ def check_no_denial(unit, text):
     return ({"unit": unit_service_name(unit), "denied": False}, sorted(set(failures)))
 
 
+def check_policy(expect, shows, absent=()):
+    """Both services' effective policy in one answer, plus the drop-in
+    paths that must be gone.
+
+    `shows` is (unit, `systemctl show` output) and `absent` is drop-in
+    paths. A path that still exists, or that names anything but a runtime
+    unit file, is a host this run changed and did not change back. The
+    persistent drop-in is checked on every call, not only after cleanup:
+    nothing here may ever write under /etc/systemd/system."""
+    check = check_denial if expect == "denied" else check_no_denial
+    units, failures = [], []
+    for unit, text in shows:
+        result, unit_failures = check(unit, text)
+        units.append(result["unit"])
+        failures += ["{}:{}".format(result["unit"], name) for name in unit_failures]
+        persistent = os.path.join(PERSISTENT_UNIT_DIR, result["unit"] + ".d", DROP_IN_NAME)
+        if os.path.lexists(persistent):
+            failures.append("{}:no_persistent_drop_in".format(result["unit"]))
+    if not units:
+        failures.append("units_read")
+    removed = 0
+    for path in absent:
+        name = os.path.basename(os.path.dirname(path))
+        if not path.startswith(RUNTIME_UNIT_DIR + "/"):
+            failures.append("removed_path_is_a_runtime_unit_file:" + name)
+        elif os.path.lexists(path):
+            failures.append("drop_in_removed:" + name)
+        else:
+            removed += 1
+    result = {"units": units, "denied": expect == "denied"}
+    if absent:
+        result["drop_ins_removed"] = removed
+    return result, sorted(set(failures))
+
+
+def _show_pair(text):
+    """`<unit>=<path>`, as --show takes it."""
+    if "=" not in text:
+        raise argparse.ArgumentTypeError(
+            "expected <unit>=<path>, found {!r}".format(text))
+    unit, path = text.split("=", 1)
+    return unit, path
+
+
 # --- the network probe --------------------------------------------------
 
 
@@ -637,9 +681,10 @@ def main(argv=None):
     commands.add_parser("drop-in-path").add_argument("--unit", required=True)
     command("check-drop-in", opt("--unit", required=True),
             opt("--print", dest="print_file", required=True))
-    command("check-denial", opt("--unit", required=True),
-            opt("--print", dest="print_file", required=True),
-            opt("--expect", choices=("denied", "none"), required=True))
+    command("check-policy", opt("--expect", choices=("denied", "none"), required=True),
+            opt("--show", type=_show_pair, action="append", default=[], required=True),
+            opt("--absent", action="append", default=[]))
+    command("serving-port", opt("--status", required=True))
     command("probe", opt("--agent-socket", required=True),
             opt("--serving-port", type=int, required=True))
     command("control", opt("--agent-socket", required=True),
@@ -676,11 +721,16 @@ def _run(args):
     elif name == "check-drop-in":
         result, failures = check_drop_in(args.unit, _read(args.print_file))
         _emit(result, args.out, failures, "drop-in checks for " + args.unit)
-    elif name == "check-denial":
-        check = check_denial if args.expect == "denied" else check_no_denial
-        result, failures = check(args.unit, _read(args.print_file))
+    elif name == "check-policy":
+        shows = [(unit, _read(path)) for unit, path in args.show]
+        result, failures = check_policy(args.expect, shows, args.absent)
         _emit(result, args.out, failures,
-              "{} readback checks for {}".format(args.expect, args.unit))
+              "{} address-policy readback checks".format(args.expect))
+    elif name == "serving-port":
+        _, failures, port = status_check(_load_json(args.status), None)
+        if port is None or "serving_url_on_the_allowed_loopback_address" in failures:
+            raise CheckFailed("status reports no serving URL on the allowed loopback address")
+        print(port)
     elif name in ("probe", "control"):
         _emit(run_probe(args.agent_socket, args.serving_port), args.out)
     elif name == "classify":
