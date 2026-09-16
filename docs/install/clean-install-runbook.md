@@ -84,8 +84,10 @@ yet:
   runtime, so a host with no system CUDA toolkit is not a defect there.
   The message names the python_pytorch sidecar as installed or not, so
   it agrees with `python_pytorch_backend` above. `skipped` on macOS, and
-  `skipped` on any host installed with `--cli-only`, which has no
-  serving worker to consume a CUDA runtime
+  `skipped` on a host carrying neither the serving worker nor the
+  python_pytorch sidecar — a `--cli-only` install — since nothing there
+  consumes a CUDA runtime. The sidecar on its own keeps the finding,
+  with the driver deciding it and no system toolkit asked for
 - `tensorrt_runtime = ok` on a Jetson with TensorRT
 - `agent_reachable = fail` until the unit is enabled in step 3
 
