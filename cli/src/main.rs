@@ -195,7 +195,7 @@ mod tests {
     fn a_config_warning_is_written_in_human_mode() {
         let mut err = Vec::new();
         report_config_warning(OutputMode::Human, &mut err, Some(WARNING));
-        assert_eq!(String::from_utf8(err).unwrap(), format!("{WARNING}\n"));
+        assert_eq!(String::from_utf8_lossy(&err), format!("{WARNING}\n"));
     }
 
     /// `--output json` callers parse stderr as one envelope document. A
