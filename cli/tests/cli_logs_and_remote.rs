@@ -144,6 +144,47 @@ fn logs_remote_profile_is_unavailable() {
     assert_eq!(out.status.code().unwrap_or(127), 6);
 }
 
+/// On a native install nothing writes an NDJSON log, so the packaged
+/// config names no `log_source.path`. The command must say where the logs
+/// are instead of printing nothing or telling the operator to configure a
+/// path no component writes.
+#[test]
+fn logs_without_a_source_is_unavailable_and_says_what_to_use() {
+    let td = TempDir::new().unwrap();
+    let dummy_socket = td.path().join("agent.sock");
+    let cli_cfg = td.path().join("cli.json");
+    let body = format!(
+        r#"{{
+            "schema_version":"0.1",
+            "default_profile":"local",
+            "log_source":{{"kind":"file","tail_default":100}},
+            "profiles":{{"local":{{"mode":"local","socket_path":"{}"}}}}
+        }}"#,
+        dummy_socket.display()
+    );
+    std::fs::write(&cli_cfg, body).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_tensorplate"))
+        .env("TENSORPLATE_CLI_CONFIG", &cli_cfg)
+        .args(["--output", "json", "logs", "--component", "agent"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code().unwrap_or(127), 6, "stderr was {stderr}");
+    // The whole failure envelope goes to stderr; stdout stays empty so a
+    // caller parsing `--output json` from stdout is not handed a document
+    // that says a successful read returned nothing.
+    assert!(out.stdout.is_empty(), "stdout was {:?}", out.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stderr)
+        .unwrap_or_else(|e| panic!("stderr must be a JSON envelope ({e}): {stderr}"));
+    assert_eq!(parsed["status"], "unavailable");
+    let hint = parsed["error"]["hint"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the failure must carry a hint: {stderr}"));
+    assert!(hint.contains("--source"), "{hint}");
+    #[cfg(target_os = "linux")]
+    assert!(hint.contains("journalctl -u tensorplate-agent"), "{hint}");
+}
+
 #[test]
 fn unsupported_profile_mode_returns_unavailable() {
     let td = TempDir::new().unwrap();

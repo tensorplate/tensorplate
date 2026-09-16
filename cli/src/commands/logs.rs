@@ -13,7 +13,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -35,8 +35,9 @@ const MAX_TAIL: u64 = 10_000;
 /// # Errors
 ///
 /// Returns:
-/// - [`CliError::UnsupportedProfile`] when the resolved profile is not `local`.
-/// - [`CliError::Config`] when no log source is configured.
+/// - [`CliError::Unavailable`] when the resolved profile is not `local`, or
+///   when no NDJSON log source is configured — carrying a hint that names
+///   where this platform's components do write.
 /// - [`CliError::Io`] when the source cannot be opened.
 pub fn run<W: Write, E: Write>(
     renderer: &Renderer,
@@ -57,7 +58,7 @@ pub fn run<W: Write, E: Write>(
             ),
         });
     }
-    let source = resolve_source(&config.log_source, args.source_override.as_deref())?;
+    let source = resolve_source(&config.log_source, args)?;
     if args.follow {
         return follow_source(renderer, &source, args, stderr);
     }
@@ -99,17 +100,77 @@ impl LogSource {
     }
 }
 
-fn resolve_source(cfg: &LogSourceConfig, override_path: Option<&Path>) -> CliResult<LogSource> {
-    if let Some(path) = override_path {
+fn resolve_source(cfg: &LogSourceConfig, args: &LogsArgs) -> CliResult<LogSource> {
+    if let Some(path) = args.source_override.as_deref() {
         return classify_path(path.to_path_buf());
     }
     let Some(p) = cfg.path.as_deref() else {
-        return Err(CliError::Config(
-            "tensorplate logs: no log_source.path configured; pass --source <path> or set log_source.path in the cli config"
-                .into(),
-        ));
+        // Not a usage mistake: on a native Linux install there is no
+        // NDJSON file to name, because both services log to the journal.
+        // Unavailable is the variant that carries a hint through both
+        // renderers, which is what makes the answer actionable instead of
+        // telling the operator to configure a path nothing writes.
+        return Err(CliError::Unavailable {
+            message:
+                "tensorplate logs: no log_source.path is configured, and this install writes no NDJSON log file"
+                    .into(),
+            hint: Some(no_source_hint(args.component.as_deref())),
+        });
     };
     classify_path(p.to_path_buf())
+}
+
+/// Where the logs actually are when no NDJSON source is configured.
+///
+/// The native packages' units set no `StandardOutput=`, and the agent
+/// writes diagnostics to stderr, so journald holds them. Name the unit
+/// that carries the component the operator asked for: the serving worker
+/// and its backends are children of the agent and share its journal.
+///
+/// Compiled on every target rather than only on Linux so the mapping from
+/// component to unit is covered wherever the suite runs; only the Linux
+/// build calls it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn journal_hint(component: Option<&str>) -> String {
+    let units: &[&str] = match component {
+        Some("observability") => &["tensorplate-observability"],
+        Some("agent" | "serving_worker" | "runtime" | "adapter" | "python_pytorch_sidecar") => {
+            &["tensorplate-agent"]
+        }
+        _ => &["tensorplate-agent", "tensorplate-observability"],
+    };
+    let commands = units
+        .iter()
+        .map(|unit| format!("`journalctl -u {unit}`"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    format!(
+        "this install's services log to the journal: run {commands}. \
+         `tensorplate logs` reads NDJSON files only; pass `--source <path>` for one, \
+         or set `log_source.path` in {} once a component writes it",
+        crate::config::SYSTEM_CLI_CONFIG_PATH,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn no_source_hint(component: Option<&str>) -> String {
+    journal_hint(component)
+}
+
+/// On macOS the packaged event log is named by the Homebrew launcher's
+/// `TENSORPLATE_CLI_CONFIG`, so reaching this hint means the launcher was
+/// bypassed or TensorPlate is not installed from Homebrew.
+#[cfg(target_os = "macos")]
+fn no_source_hint(_component: Option<&str>) -> String {
+    "run the installed `tensorplate` launcher, which points the CLI at the packaged config, \
+     or pass `--source <path>` to read an NDJSON file directly"
+        .into()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn no_source_hint(_component: Option<&str>) -> String {
+    "pass `--source <path>` to read an NDJSON file, or set `log_source.path` in the cli config"
+        .into()
 }
 
 fn classify_path(path: PathBuf) -> CliResult<LogSource> {
@@ -566,22 +627,76 @@ not-a-json-line
         assert_eq!(entries.len(), 1);
     }
 
-    #[test]
-    fn logs_missing_source_errors() {
+    fn missing_source_error(component: Option<&str>) -> CliError {
         let mut cfg = CliConfig::default().validate().unwrap();
         cfg.log_source.path = None;
-        let args = default_args();
+        let args = LogsArgs {
+            component: component.map(Into::into),
+            ..default_args()
+        };
         let r = Renderer::new(OutputMode::Human);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(
+        run(
             &r,
             &profile(ProfileMode::Local),
             &cfg,
             &args,
             &mut out,
             &mut err,
+        )
+        .expect_err("a config with no log source must not succeed")
+    }
+
+    #[test]
+    fn logs_missing_source_is_unavailable_with_an_actionable_hint() {
+        let err = missing_source_error(Some("agent"));
+        let CliError::Unavailable { message, hint } = err else {
+            panic!("expected Unavailable, got {err:?}");
+        };
+        assert!(message.contains("log_source.path"), "{message}");
+        let hint = hint.expect("the failure must say what to use instead");
+        assert!(hint.contains("--source"), "{hint}");
+        // The hint must name a reader that exists on this platform, not
+        // only repeat that the config is empty.
+        #[cfg(target_os = "linux")]
+        assert!(
+            hint.contains("journalctl -u tensorplate-agent"),
+            "the agent's journal unit must be named: {hint}"
         );
-        assert!(matches!(result, Err(CliError::Config(_))));
+        #[cfg(target_os = "macos")]
+        assert!(hint.contains("launcher"), "{hint}");
+    }
+
+    #[test]
+    fn the_journal_hint_names_the_unit_for_the_component_asked_for() {
+        let observability = journal_hint(Some("observability"));
+        assert!(
+            observability.contains("journalctl -u tensorplate-observability"),
+            "{observability}"
+        );
+        assert!(
+            !observability.contains("journalctl -u tensorplate-agent"),
+            "{observability}"
+        );
+
+        // The serving worker is supervised by the agent and shares its
+        // journal; it has no unit of its own.
+        for component in ["agent", "serving_worker", "runtime", "adapter"] {
+            let hint = journal_hint(Some(component));
+            assert!(
+                hint.contains("journalctl -u tensorplate-agent"),
+                "{component}: {hint}"
+            );
+            assert!(
+                !hint.contains("journalctl -u tensorplate-observability"),
+                "{component}: {hint}"
+            );
+        }
+
+        // Without a component, both units are named.
+        let any = journal_hint(None);
+        assert!(any.contains("tensorplate-agent"), "{any}");
+        assert!(any.contains("tensorplate-observability"), "{any}");
     }
 }
