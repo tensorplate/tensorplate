@@ -33,7 +33,11 @@ pub enum FindingId {
     PythonPytorchRuntime,
     TensorrtRuntime,
     LibtorchRuntime,
-    /// packaging: CUDA runtime presence on the device.
+    /// packaging: whether this device has the CUDA runtime the
+    /// installed serving build needs. Reports the NVIDIA driver and a
+    /// system CUDA toolkit as separate facts, because they are
+    /// installed by different packages and a build that carries no
+    /// TensorRT adapter needs only the first.
     CudaRuntime,
     Ros2HealthStub,
     ObservabilitySnapshot,
