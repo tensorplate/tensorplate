@@ -268,10 +268,10 @@ Prerequisites:
    this row `cuda_runtime` is `warning` when no system CUDA toolkit is
    installed, and also when no NVIDIA driver is found at the known paths
    — the arm64 worker carries the TensorRT adapter and cannot load it
-   without both — so a run whose recorded value is
-   not `ok` on a device that is about to deploy a TensorRT bundle is
-   worth reading before the deploy-smoke stage fails for the same
-   reason. It is not a failing finding and does not stop the stage.
+   without both — so a run whose recorded value is not `ok` on a device
+   that is about to deploy a TensorRT bundle is worth reading before the
+   deploy-smoke stage fails for the same reason. It is not a failing
+   finding and does not stop the stage.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox
