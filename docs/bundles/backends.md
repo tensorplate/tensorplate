@@ -16,7 +16,7 @@ how runtime capabilities are normalized.
 
 | Slug              | v0.1.0 status      | Notes                                                                   |
 | ----------------- | ------------------ | ----------------------------------------------------------------------- |
-| `tensorrt`        | Implemented        | Jetson Orin vision validation path.                                     |
+| `tensorrt`        | Implemented        | Jetson Orin vision validation path. `arm64` only: the released `x86_64` serving worker is built without the adapter, so no `x86_64` platform row declares this path. |
 | `libtorch`        | Implemented        | PyTorch graphs that export cleanly into native C++.                     |
 | `python_pytorch`  | Implemented        | Required SmolVLA path through the managed Python sidecar.               |
 | `vitis_ai`        | **Reserved**       | Schema slot for the future Kria/Vitis AI adapter. Parser accepts; deploy compat rejects on Jetson devices because the backend is unavailable. |

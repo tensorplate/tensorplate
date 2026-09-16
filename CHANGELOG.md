@@ -613,6 +613,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   LibTorch distribution's own directory rather than a library. Neither
   finding is build-aware yet and neither fails `doctor`.
 
+- The twenty-two `ubuntu2404-x86` GPU support rows no longer declare a
+  `tensorrt` backend path. The amd64 `tensorplate-serving` build sets
+  `TP_ENABLE_TENSORRT=OFF`, so the shipped binary contains no TensorRT
+  adapter and `packaging/conf/agent.amd64.json` advertises only
+  `python_pytorch`; the rows nonetheless named a `tensorrt` path satisfied
+  by the `tensorplate-serving` package. Deploy admission reads the row, so
+  on an L4, H100, A100 or RTX PRO 6000 host it found that package installed
+  and admitted a TensorRT bundle the worker can only refuse at engine
+  lookup. Such a deploy is now refused with `MissingBackendPackage` naming
+  the undeclared path. The `arm64` Jetson rows keep `tensorrt`: that build
+  compiles the adapter. `doctor` output is unchanged — it never reported a
+  row's declared backend paths, which is part of why the claim went
+  unnoticed.
+
+- A support row may no longer declare a backend path that the agent config
+  shipped for its package channel and CPU architecture does not list in
+  `available_backends`. The mapping is the one
+  `packaging/debian/tensorplate-agent.install` encodes, and it fails
+  closed: a channel and architecture pair with no shipped config is an
+  error to state rather than a row to skip.
+  `packaging/conf/agent.amd64.json`, which only a dh-exec filter installs
+  and which nothing previously parsed, is now read through the agent's own
+  config validator.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.

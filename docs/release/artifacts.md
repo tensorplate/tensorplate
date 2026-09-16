@@ -96,6 +96,18 @@ That configuration, with its compiler and DWARF version, lives in
 `tools/release/amd64-build-profile.sh`, which the release job and
 `build-release-artifacts.sh --arch amd64` both read.
 
+Two committed artifacts state which backends an installed machine can
+serve, and both follow from that build. `packaging/conf/agent.amd64.json`,
+which dh-exec installs as `/etc/tensorplate/agent.json` on amd64, lists
+`python_pytorch` alone; the `x86_64` platform support rows under
+`config/platform/rows/` declare a package set for that path and no other.
+Deploy admission reads the row, so a row naming a path the build does not
+contain would admit a bundle the worker can only refuse at engine lookup.
+`agent/tests/row_backend_declarations.rs` holds the two in agreement: a row
+may not declare a backend path the agent config shipped for its package
+channel and CPU architecture omits. The `arm64` rows keep `tensorrt`,
+because the Jetson build compiles the adapter and its config advertises it.
+
 `--manifest` and `--checksums` may be omitted: they default to
 `tensorplate-${TP_TAG}-artifacts.json` and `SHA256SUMS` inside
 `--artifacts-dir`, where `install.sh` reads them. Any other name or
