@@ -679,8 +679,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   worker and backends it supervises, `journalctl -u
   tensorplate-observability` for the observability service, both when no
   component was given. It never returns an empty successful read that
-  looks like "no such events". The cloud and Jetson lifecycle harnesses
-  still record this exit status rather than requiring it.
+  looks like "no such events". A configured `log_source.path` that does
+  not exist gets the same answer, so an upgrade that keeps a locally
+  modified conffile naming the old path stays actionable; a path that
+  cannot be read, and a `--source` the operator named, remain IO errors
+  that name the file. The cloud and Jetson lifecycle harnesses still
+  record this exit status rather than requiring it.
 
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`

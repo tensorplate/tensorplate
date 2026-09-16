@@ -13,7 +13,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -117,7 +117,23 @@ fn resolve_source(cfg: &LogSourceConfig, args: &LogsArgs) -> CliResult<LogSource
             hint: Some(no_source_hint(args.component.as_deref())),
         });
     };
-    classify_path(p.to_path_buf())
+    // A configured path that is not there is the same operator question as
+    // no path at all, and reaches an upgraded host that kept a conffile
+    // naming the log file earlier packages configured. A path that exists
+    // but cannot be read is a different problem and keeps the IO error
+    // naming it, as does a `--source` the operator chose themselves.
+    match std::fs::metadata(p) {
+        Ok(meta) => classify_meta(p.to_path_buf(), &meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CliError::Unavailable {
+            message: format!(
+                "tensorplate logs: the configured log_source.path `{}` does not exist; \
+                 no component on this install writes it",
+                p.display()
+            ),
+            hint: Some(no_source_hint(args.component.as_deref())),
+        }),
+        Err(e) => Err(stat_error(p, &e)),
+    }
 }
 
 /// Where the logs actually are when no NDJSON source is configured.
@@ -173,13 +189,19 @@ fn no_source_hint(_component: Option<&str>) -> String {
         .into()
 }
 
+fn stat_error(path: &Path, error: &std::io::Error) -> CliError {
+    CliError::Io(format!(
+        "tensorplate logs: cannot stat `{}`: {error}",
+        path.display()
+    ))
+}
+
 fn classify_path(path: PathBuf) -> CliResult<LogSource> {
-    let meta = std::fs::metadata(&path).map_err(|e| {
-        CliError::Io(format!(
-            "tensorplate logs: cannot stat `{}`: {e}",
-            path.display()
-        ))
-    })?;
+    let meta = std::fs::metadata(&path).map_err(|e| stat_error(&path, &e))?;
+    classify_meta(path, &meta)
+}
+
+fn classify_meta(path: PathBuf, meta: &std::fs::Metadata) -> CliResult<LogSource> {
     if meta.is_file() {
         Ok(LogSource {
             kind: LogKind::File,
@@ -666,6 +688,61 @@ not-a-json-line
         );
         #[cfg(target_os = "macos")]
         assert!(hint.contains("launcher"), "{hint}");
+    }
+
+    /// An upgraded host that kept its own copy of an older conffile still
+    /// names `/var/log/tensorplate/tensorplate-agent.log`. That is the same
+    /// question as an unconfigured source, so it gets the same answer
+    /// rather than a bare `cannot stat`.
+    #[test]
+    fn a_configured_path_that_does_not_exist_says_where_the_logs_are() {
+        let td = tempfile::tempdir().unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(td.path().join("tensorplate-agent.log"));
+        let args = LogsArgs {
+            component: Some("agent".into()),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        );
+        let Err(CliError::Unavailable { message, hint }) = result else {
+            panic!("expected Unavailable, got {result:?}");
+        };
+        assert!(message.contains("tensorplate-agent.log"), "{message}");
+        assert!(hint.is_some_and(|h| h.contains("--source")));
+    }
+
+    /// A source the operator named themselves keeps the plain IO error:
+    /// nothing about the install explains a path they chose.
+    #[test]
+    fn an_explicit_missing_source_stays_an_io_error() {
+        let td = tempfile::tempdir().unwrap();
+        let cfg = CliConfig::default().validate().unwrap();
+        let args = LogsArgs {
+            source_override: Some(td.path().join("nope.ndjson")),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        );
+        assert!(matches!(result, Err(CliError::Io(_))), "{result:?}");
     }
 
     #[test]

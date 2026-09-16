@@ -45,6 +45,12 @@ never returns an empty, successful read that looks like "no such events".
 that file, for sites that configure `diagnostics_retention.file_path` in
 `/etc/tensorplate/observability.json`.
 
+A configured `log_source.path` that does not exist gets the same answer —
+an upgrade that keeps a locally modified conffile can leave one naming the
+log file earlier packages configured. A path that exists but cannot be
+read, and a `--source` the operator named themselves, stay a plain IO
+error (exit `1`) that names the file.
+
 The Homebrew install is different: macOS has no journald, so its packaged
 config enables retention and points `log_source.path` at
 `${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson`.
