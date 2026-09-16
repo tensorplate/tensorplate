@@ -82,18 +82,36 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   runs in its own denied transient unit. The denial is a runtime drop-in
   under `/run/systemd/system`, never `/etc`, and is removed on every exit
   path including `SIGINT`, `SIGTERM` and `SIGHUP`, with the removal read
-  back from systemd rather than assumed.
-  Enforcement is established by a probe run under the denial against a
-  control run first with nothing denied: the control must not be refused,
-  and the GCE metadata service must answer it outright, since the stage's
-  claim is that the denial is what made that service unreachable. The
-  control also decides what each operation can prove: one the host could
-  not perform with nothing denied cannot be refused by the denial either,
-  so it is named in the result as an operation this host cannot send
-  rather than reported as a denial that failed to bite. That is the case
-  for every global IPv6 destination on an IPv4-only VM, which is the
-  Compute Engine default: the cgroup egress filter runs after the route
-  lookup, so the answer is `ENETUNREACH` with and without the drop-in.
+  back from systemd rather than assumed. The cleanup is best-effort on
+  every step: a removal that fails for one unit does not stop the other
+  unit's, nor the reload, restart and readback, and a cleanup that still
+  fails prints the drop-in paths and the command that removes them. A
+  drop-in an earlier run left behind is refused in preflight, before
+  anything is installed, as well as by the stage.
+  Enforcement is established by probes run under the denial, each
+  against a control run first with nothing denied: one in a denied
+  transient unit, and one inside each service's own control group,
+  because systemd attaches the filter to each unit on a best-effort basis
+  and a filtered transient unit says nothing about a service whose own
+  attach failed. Joining a service's control group takes root; the helper
+  refuses any group that is not exactly that unit's, reads the move back,
+  and drops to the operator's ids before it sends anything. The controls
+  must not be refused, and the GCE metadata service must answer them
+  outright, over TCP and as a datagram, since the stage's claim is that
+  the denial is what made that service unreachable. A datagram under the
+  denial must be refused with `EPERM`, which the kernel returns from
+  `sendto()`. A TCP connect cannot be: `tcp_connect()` passes on only
+  `ECONNREFUSED` from a transmit, so a connect whose SYN the filter
+  dropped times out. It is accepted as silenced only where its control
+  was answered, and filed apart from the refusals.
+  The control also decides what each operation can prove: one the host
+  could not perform with nothing denied cannot be refused by the denial
+  either, so it is named in the result as an operation this host cannot
+  send rather than reported as a denial that failed to bite -- except a
+  loopback destination, which every host routes. That is the case for
+  every global IPv6 destination on an IPv4-only VM, which is the Compute
+  Engine default: the cgroup egress filter runs after the route lookup,
+  so the answer is `ENETUNREACH` with and without the drop-in.
   Reading the properties back is not enough on its own -- `IPAddressDeny=`
   is silently inert where the BPF filter cannot be installed, and
   `systemctl show` answers for a dead or nonexistent unit with empty
@@ -102,12 +120,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   *loaded* configuration, which counts a drop-in from `daemon-reload`
   onwards whether or not anything restarted under it, so each readback
   compares the invocation id against the one the unit carried before the
-  policy changed -- on the way in and on the way out.
+  policy changed -- on the way in and on the way out. systemd prints the
+  prefix lists from a hash set whose order changes with each PID 1
+  start, so the readback compares them as sets and files them in one
+  canonical order.
   `offline-runtime.json` derives every verdict it states: the enforcement
-  verdict by classifying the same probe and control the document carries,
-  each CLI verdict from the result file that check filed only after it
-  passed, the allow list from what systemd reported, and the
-  persistent-drop-in count from the filesystem.
+  verdict by classifying every probe the document carries against its
+  own control, each CLI verdict from the result file that check filed
+  only after it passed, and the allow list from what systemd reported,
+  which must be exactly the two host addresses. It refuses a restore that
+  read back fewer removals than there were denied units, and a persistent
+  drop-in found on either side of the stage.
   Doctor must still resolve the row with nothing failing, and the
   identity must come from the boot-bound machine-type record rather than
   from a live metadata answer: the agent's
@@ -116,7 +139,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   offline cold boot is not supported, and the runbook says so: after a
   reboot the agent must start once with metadata reachable before offline
   detection works. The stage runs before upgrade, whose clean baseline
-  install deletes the record; install and upgrade stay online.
+  install deletes the record; install and upgrade stay online, and their
+  doctor runs must show the machine type read live from GCE metadata.
   The mechanism lives in `tools/validation/linux_offline_runtime.py`,
   named for the mechanism rather than the row, with its own tests in
   `test/packaging/verify_linux_offline_runtime.py`. The drop-in, the
@@ -124,10 +148,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   what is row-specific is supplied as options, so another systemd harness
   adopts the file unchanged rather than editing it. A row with no
   metadata service passes `--metadata-address none` and
-  `--metadata-operation absent`, which then requires that operation to be
-  absent from both documents rather than letting a missing one read as
-  one that passed; a row whose agent and doctor say something else passes
-  its own expected tokens. Every default is the Compute Engine row's.
+  `--metadata-operation absent`, which then requires both metadata
+  operations to be absent from every document rather than letting a
+  missing one read as one that passed; a row whose agent and doctor say
+  something else passes its own expected tokens, and the doctor check
+  files the phrases it required rather than a machine-type source it did
+  not establish. Every default is the Compute Engine row's.
 
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical

@@ -117,18 +117,33 @@ The denial is `IPAddressDeny=any` with `IPAddressAllow=127.0.0.1/32` and
 `IPAddressAllow=::1/128`. It is deliberately **not** systemd's
 `localhost` shorthand: that expands to `127.0.0.0/8`, which admits the
 systemd-resolved stub at `127.0.0.53` and the whole DNS namespace behind
-it. The probe connects to `127.0.0.53` on both protocols and requires it
-to be refused, so a stage that went back to the shorthand fails rather
-than passing with DNS still reachable.
+it. The probe sends a datagram to `127.0.0.53` and requires it to be
+refused, and connects to it over TCP and requires the connect to go
+unanswered, so a stage that went back to the shorthand fails rather than
+passing with DNS still reachable.
 
 Both services get the denial as a **runtime** drop-in under
 `/run/systemd/system/<unit>.service.d/`. Nothing is written under
 `/etc/systemd/system`: a persistent drop-in would outlive the run and the
 host's next reboot. The drop-ins are removed on every exit path,
 including `SIGINT`, `SIGTERM`, `SIGHUP` and a failed stage, and the
-removal is read back from systemd rather than assumed. If the removal
-itself fails, the run fails and says so. Uncatchable termination such as
-`SIGKILL` cannot run cleanup; a reboot clears `/run` in that case.
+removal is read back from systemd rather than assumed. The cleanup never
+stops at its first failure: a removal that fails for one unit does not
+stop the other unit's, nor the `daemon-reload`, the restart and the
+readback that follow, and the exit handler retries all of it. If the
+removal still fails, the run fails and prints the drop-in paths and the
+command that removes them:
+
+```bash
+sudo rm -f <drop-in paths> && sudo systemctl daemon-reload \
+  && sudo systemctl restart tensorplate-agent tensorplate-observability
+```
+
+Uncatchable termination such as `SIGKILL` cannot run cleanup; a reboot
+clears `/run` in that case. A drop-in left behind that way is refused by
+the next run's preflight, before anything is installed, with its path
+and the same removal command. Install and every other stage before
+offline would otherwise run with both services denied.
 
 Each of `status`, `doctor`, a fresh `deploy` of the smoke bundle under a
 new deployment id, and `infer` runs inside its own denied transient unit
@@ -141,19 +156,46 @@ show` answers for a dead or nonexistent unit with **empty** property
 values — which a readback that only looked for unexpected allow entries
 would read as a denied unit. So the readback requires each unit to be
 loaded, active and carrying an invocation id first, and the verdict on
-enforcement comes from a probe:
+enforcement comes from probes, starting with one in a transient unit:
 
 - the **control** runs first, in a transient unit with no address policy,
   and must not be refused; the GCE metadata service at `169.254.169.254`
-  must answer it outright, since the stage's whole claim is that the
-  denial is what made that service unreachable;
-- the **probe** then runs denied, and every one of the same operations —
-  the metadata service, the resolver stub on TCP and UDP, another
-  loopback address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`
-  documentation addresses, and the same send from a child process — must
-  be refused with `EPERM` or `EACCES`;
+  must answer it outright, over TCP and as a datagram, since the stage's
+  whole claim is that the denial is what made that service unreachable;
+- the **probe** then runs denied, against the same operations: the
+  metadata service, the resolver stub on TCP and UDP, another loopback
+  address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`
+  documentation addresses, and the same send from a child process. Every
+  datagram must be refused outright with `EPERM` or `EACCES`. The two TCP
+  connects must go unanswered (`timeout`), and that counts only where
+  their control was answered;
 - the agent socket, the serving port on `127.0.0.1` and both loopback
   host addresses must still work under the denial.
+
+The two protocols answer differently because the kernel does. systemd's
+filter is a cgroup egress program, and a packet it drops comes back from
+the IP output path as `EPERM`. A UDP `sendto()` returns that to the
+caller. A TCP connect does not: `tcp_connect()` in
+`net/ipv4/tcp_output.c` passes on only `ECONNREFUSED` from a transmit,
+and otherwise leaves the SYN queued for retransmission, so the connect
+waits out its timeout. A timed-out connect is attributable to the denial
+only if the same connect was answered moments earlier, so a control that
+timed out as well fails the stage. The certificate files the timed-out
+connects under `classification.operations_silenced_under_the_denial`,
+apart from the refusals.
+
+systemd also installs the filter on each unit separately, and on a
+best-effort basis: `cgroup_apply_firewall()` in `src/core/cgroup.c`
+ignores whether it worked. A filtered transient unit therefore says
+nothing about a service whose own attach failed. So the datagrams are
+also sent from **inside each service's own control group**, with that
+service's own control taken there before the denial and its probe after
+it, under the same rules. Joining a service's control group takes root.
+The helper refuses any control group that is not exactly that unit's,
+reads the move back from `/proc/self/cgroup`, and drops to the operator's
+uid and gid before it sends anything. The move is the only change it
+makes to the service, and the probe process exits before the services
+are restarted.
 
 The control also decides what each operation can prove. On Linux the
 cgroup egress filter runs *after* the route lookup, so an operation the
@@ -163,7 +205,9 @@ documentation address answers `ENETUNREACH` either way there. Such an
 operation is listed in the certificate under
 `classification.operations_this_host_cannot_send`, and the only thing
 required of the probe is that the denial did not make it start working.
-Everything else has to be refused.
+Loopback destinations are never excused this way: every host routes
+them, and they are what shows the shorthand was not used. Everything else
+has to be refused.
 
 Configuration is not the running service, either. `systemctl show`
 answers with the unit's *loaded* configuration, which counts a drop-in
@@ -171,16 +215,26 @@ from `daemon-reload` onwards whether or not anything restarted under it —
 and stops counting a removed one the same way. So each readback also
 compares the unit's invocation id against the one it carried before the
 policy changed, on the way in and on the way out, and a restart that
-never replaced the running instance fails the stage.
+never replaced the running instance fails the stage. systemd prints both
+prefix lists from a hash set, in an order that changes with each PID 1
+start. The readback compares them as sets and files them in one canonical
+order.
 
 Filed as `offline-control.json`, `offline-probe.json`,
-`offline-classification.json`, `offline-denial.json`,
-`offline-restored.json` and `offline-runtime.json`.
-`offline-runtime.json` states nothing it did not read back: its
-enforcement verdict comes from classifying the probe and control it
-carries, its four CLI verdicts from the result files those checks filed
-only after passing, its allow list from what systemd reported, and its
-persistent-drop-in count from the filesystem.
+`offline-classification.json`, the per-service
+`offline-unit-{control,probe,classification}-<unit>.service.json`,
+`offline-denial.json`, `offline-restored.json` and
+`offline-runtime.json`. `offline-runtime.json` states nothing it did not
+read back:
+
+- its enforcement verdict comes from classifying every probe against its
+  control: the transient unit's and each service's;
+- its four CLI verdicts come from the result files those checks filed
+  only after passing;
+- its allow list is what systemd reported, and must be exactly the two
+  host addresses;
+- the restore must have read back one removal per denied unit;
+- a persistent drop-in found on either side refuses the certificate.
 
 **Identity, and what it costs.** `tensorplate-agent` writes a
 machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
@@ -205,7 +259,12 @@ on a host that has been online since its last boot.
 
 **install and upgrade stay online.** Both run the shipped installer the
 way an operator does, and denying them would validate a procedure nobody
-follows.
+follows. Their doctor runs must show live detection: a `host_os` without
+`(from GCE metadata)` fails the stage, since a recorded shape there would
+mean the metadata service did not answer a host that was meant to be
+online. The stubbed-appliance tests also check the other direction: no
+installer runs with a denial in place, and no CLI call outside the
+offline stage runs denied or in a transient unit.
 
 **offline runs before upgrade, and has to.** Upgrade's clean baseline
 install deletes `/var/lib/tensorplate`, taking the machine-type record
