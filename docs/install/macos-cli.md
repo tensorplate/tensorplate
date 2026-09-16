@@ -74,7 +74,10 @@ system account, shared group access, or group membership change is required.
 The packaged `tensorplate` launcher selects the installed CLI config by
 default, which makes local commands use that UDS. An explicit `--config`
 argument still has highest precedence; `TENSORPLATE_CLI_CONFIG` remains the
-environment override.
+environment override, and a value already set in the shell is left alone.
+Because the launcher always exports it, the Debian conffile step in the
+CLI's discovery chain (`/etc/tensorplate/cli.json`) is never reached on a
+Homebrew install.
 
 ## Packaged runtime discovery
 

@@ -22,8 +22,11 @@ launches/restarts workers, or mutates serving-worker process state directly.
 
 ## Device access profiles
 
-Profiles live in the CLI config (default: `$TENSORPLATE_CLI_CONFIG`, or pass
-`--config <path>`). Schema: [`config/schemas/cli.json`](../../config/schemas/cli.json).
+Profiles live in the CLI config, found in this order: `--config <path>`,
+`$TENSORPLATE_CLI_CONFIG`, the packaged `/etc/tensorplate/cli.json`, then the
+built-in defaults. Schema:
+[`config/schemas/cli.json`](../../config/schemas/cli.json); discovery details
+in [`profiles.md`](profiles.md).
 
 | Mode | Status | Reaches |
 | --- | --- | --- |
@@ -31,8 +34,10 @@ Profiles live in the CLI config (default: `$TENSORPLATE_CLI_CONFIG`, or pass
 | `url` | implemented | Explicit `host:port` over loopback TCP, intended for SSH/VPN/overlay-tunneled workflows. |
 | `ssh_tunnel`, `overlay`, `relay` | reserved | Parse but fail with a typed `Unsupported` error at command execution. |
 
-Default profile, if no config file is present, is `local` against
-`/var/run/tensorplate/agent.sock`. `--agent-url <host:port>` always wins over
+Default profile, if no config file is found at all, is `local` against
+`/var/run/tensorplate/agent.sock`. A native package install is configured
+instead by its own `/etc/tensorplate/cli.json`, which names
+`/run/tensorplate/agent.sock`. `--agent-url <host:port>` always wins over
 `--profile`.
 
 ## JSON output envelope

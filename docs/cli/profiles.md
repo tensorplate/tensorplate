@@ -9,6 +9,31 @@ The CLI talks to **one** agent at a time. Profile selection precedence:
 4. Hard-coded `local` profile against `/var/run/tensorplate/agent.sock` if no
    config is present.
 
+## Config discovery
+
+The config file itself is found in this order, first match wins:
+
+1. `--config <path>`.
+2. `$TENSORPLATE_CLI_CONFIG`. The Homebrew launcher exports this, pointing
+   at the config under its own prefix; a value already set in the shell is
+   left alone.
+3. `/etc/tensorplate/cli.json` — the conffile the native packages install.
+4. The built-in defaults.
+
+Step 3 is one fixed absolute path, never a search of the working directory,
+`$HOME`, or `$PATH`. On an installed host only root can write it.
+
+A config found at any step must parse and validate; a malformed one fails
+the command with exit `2` rather than falling back to the defaults, so the
+CLI never quietly talks to a socket the operator did not configure. Step 3
+is the one place a *missing* file is not an error: with no packaged install
+there is nothing to read, and the built-in defaults are the documented
+behaviour. If the packaged file exists but the caller cannot read it —
+`/etc/tensorplate` is `root:tensorplate 0750` — the CLI uses the built-in
+defaults and prints one line on stderr naming the file and the group, so
+commands that do not need the agent keep working and the operator learns
+why the packaged profile is not in effect.
+
 ## Config schema
 
 [`config/schemas/cli.json`](../../config/schemas/cli.json) is the canonical

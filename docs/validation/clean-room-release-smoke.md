@@ -199,9 +199,14 @@ tensorplate infer \
   --output-file "/tmp/tensorplate-${TP_TAG}-infer-response.json" \
   --output json | tee "/tmp/tensorplate-${TP_TAG}-infer.json"
 tensorplate status --output json | tee "/tmp/tensorplate-${TP_TAG}-status.json"
-tensorplate logs --component agent --tail 100 > "/tmp/tensorplate-${TP_TAG}-agent.log"
-tensorplate logs --component observability --tail 100 > "/tmp/tensorplate-${TP_TAG}-observability.log"
+journalctl -u tensorplate-agent --since "-1h" > "/tmp/tensorplate-${TP_TAG}-agent.log"
+journalctl -u tensorplate-observability --since "-1h" \
+  > "/tmp/tensorplate-${TP_TAG}-observability.log"
 ```
+
+Both services log to the journal on a package install, so `tensorplate
+logs` exits 6 there and names these commands; see
+[`docs/cli/logs.md`](../cli/logs.md).
 
 Expected result:
 

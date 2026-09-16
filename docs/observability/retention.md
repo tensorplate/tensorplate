@@ -23,6 +23,23 @@ The defaults are tuned for a Jetson Orin Nano 8GB Super: the queue uses
 < 1 MiB at peak; the rotation policy keeps disk usage bounded across a
 24h validation run.
 
+### What each package channel configures
+
+`packaging/conf/observability.json` leaves `file_path` unset, so the
+Debian install keeps retention in memory and writes no NDJSON: journald
+already holds both services' output, and the store would in any case hold
+only this service's own events, since the v0.1 listener transport is
+`in_process` and the agent and serving worker are separate processes.
+`packaging/conf/cli.json` therefore configures no `log_source.path`, and
+`tensorplate logs` says to read the journal instead — see
+[`docs/cli/logs.md`](../cli/logs.md).
+
+`packaging/homebrew/conf/observability.json.in` does set `file_path`,
+because macOS has no journald, and the Homebrew CLI config points
+`log_source.path` at the same file. `tensorplate logs --component
+observability` reads it; there are no `agent` entries in it on either
+channel.
+
 ## Drop policy
 
 `drop_oldest` is the v0.1 default and mirrors the safe-state sink: the

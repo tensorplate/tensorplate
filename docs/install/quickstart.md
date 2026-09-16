@@ -72,13 +72,19 @@ Expected summary:
 
 ```bash
 tensorplate status --output json
-tensorplate logs --component agent --tail 100
-tensorplate logs --component observability --tail 100
+journalctl -u tensorplate-agent --since "-1h"
+journalctl -u tensorplate-observability --since "-1h"
 ```
 
 The status output should show the active deployment, backend, request
 counters, health state, and no failed requests after the sample inference.
 Logs should not contain panic-level failures or unbounded payload dumps.
+
+Both services log to the journal on this install, so `tensorplate logs` has
+no NDJSON file to read and exits `6` naming the `journalctl` command above.
+It reads a file you point it at with `--source <path>`, or one named by
+`log_source.path` in `/etc/tensorplate/cli.json`; see
+[`docs/cli/logs.md`](../cli/logs.md).
 
 ## Optional Python/PyTorch Path
 

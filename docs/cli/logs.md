@@ -24,6 +24,31 @@ tensorplate logs
   code `6` (`unavailable`) with a hint to SSH to the device. V01-E12 will
   add an agent-side log API and unlock remote reads.
 
+### Native Linux packages: no NDJSON source
+
+The Debian packages configure **no** `log_source.path`, because nothing in
+the product writes one there: `tensorplate-agent.service` and
+`tensorplate-observability.service` set no `StandardOutput=`, the agent
+writes its diagnostics to stderr, and the observability service's NDJSON
+retention sink is off in the packaged config — and it only ever holds the
+observability service's own events, since the v0.1 event listener is
+in-process and the agent is a separate process.
+
+So on a package install `tensorplate logs` exits `6` (`unavailable`) with a
+hint naming the journal to read instead — `journalctl -u tensorplate-agent`
+for the agent and for the serving worker and backends it supervises,
+`journalctl -u tensorplate-observability` for the observability service. It
+never returns an empty, successful read that looks like "no such events".
+
+`--source <path>` still reads any NDJSON file, and setting
+`log_source.path` in `/etc/tensorplate/cli.json` makes the command read
+that file, for sites that configure `diagnostics_retention.file_path` in
+`/etc/tensorplate/observability.json`.
+
+The Homebrew install is different: macOS has no journald, so its packaged
+config enables retention and points `log_source.path` at
+`${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson`.
+
 ## Filters
 
 - `--component`: exact match on the entry's `component` field.
