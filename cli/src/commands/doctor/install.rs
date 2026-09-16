@@ -1217,9 +1217,16 @@ const CUDA_RUNTIME_SONAME_PREFIX: &str = "libcudart.so.";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServingCudaNeed {
     /// The arm64 (Jetson) package. `tools/release/build-release-artifacts.sh`
-    /// configures it with `TP_ENABLE_TENSORRT=ON` and
+    /// defaults it to `TP_ENABLE_TENSORRT=ON` and
     /// `TP_REQUIRE_TENSORRT_SDK=ON`, so the worker carries the TensorRT
-    /// adapter and links the CUDA runtime the toolkit ships.
+    /// adapter and links the CUDA runtime the toolkit ships. Defaults,
+    /// not fixed values: the loop that refuses those environment
+    /// overrides is inside the amd64 branch, so the arm64 path honours
+    /// them (`test/release/test_build_configuration.py` builds arm64
+    /// with `TP_ENABLE_TENSORRT=OFF` to prove it). An artifact set built
+    /// that way gets a `warning` asking for a runtime its worker does
+    /// not link -- the same limitation as a worker rebuilt from source,
+    /// recorded in docs/cli/doctor.md.
     TensorrtLinked,
     /// The amd64 package. `tools/release/amd64-build-profile.sh` configures
     /// it with `TP_ENABLE_TENSORRT=OFF`, so the worker has no TensorRT
@@ -1359,8 +1366,17 @@ struct InstalledCudaConsumers {
 fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaConsumers {
     InstalledCudaConsumers {
         serving_worker: prefixed(opts, SERVING_BINARY_PATH).is_file(),
-        // Resolved the same way `python_pytorch_backend` resolves it, so
-        // the two findings cannot disagree about the same descriptor.
+        // The same path `python_pytorch_backend` resolves, tested for
+        // existence only. That finding goes on to parse the descriptor
+        // and is a critical `fail` when it does not parse; this one
+        // deliberately still counts such a host as carrying the sidecar,
+        // because the question here is which package is installed and an
+        // invalid descriptor is an installed package with a broken file.
+        // So the two can differ on one host, and where they do, the
+        // report says so: `python_pytorch_backend` is failing in it.
+        // `Err` -- an unusable `TP_BACKEND_DESCRIPTOR_DIR` -- is the same
+        // condition that makes that finding fail, and the message here
+        // names it rather than asserting the sidecar's absence alone.
         python_pytorch_backend: python_backend_descriptor_path(opts)
             .is_ok_and(|descriptor| descriptor.exists()),
     }
@@ -2458,6 +2474,34 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         assert!(ServingCudaNeed::TensorrtLinked.sidecar_needs_system_cuda());
         assert!(!ServingCudaNeed::SidecarRuntime.sidecar_needs_system_cuda());
         assert!(!ServingCudaNeed::NoCudaPath.sidecar_needs_system_cuda());
+    }
+
+    #[test]
+    fn a_descriptor_that_does_not_parse_still_counts_the_sidecar_as_installed() {
+        // `python_pytorch_backend` parses the descriptor and is a
+        // critical `fail` when it does not. This probe asks the other
+        // question -- which package is installed -- and an invalid
+        // descriptor is an installed package with a broken file, so the
+        // two findings differ on such a host by design. Skipping the
+        // CUDA finding there would say nothing on the machine consumes a
+        // CUDA runtime while the sidecar's files are on disk.
+        let td = TempDir::new().unwrap();
+        // `stage_file` writes an empty file, which is not a descriptor.
+        stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+        let opts = cuda_opts(td.path());
+
+        assert!(
+            tensorplate_protocol::backend_descriptor::BackendDescriptor::read_from(&prefixed(
+                &opts,
+                PYTHON_PYTORCH_BACKEND_DESCRIPTOR
+            ))
+            .is_err(),
+            "the fixture must be a descriptor `python_pytorch_backend` rejects"
+        );
+        assert!(
+            probe_installed_cuda_consumers(&opts).python_pytorch_backend,
+            "an installed package with an invalid descriptor is still installed"
+        );
     }
 
     #[test]
