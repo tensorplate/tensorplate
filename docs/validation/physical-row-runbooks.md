@@ -270,8 +270,11 @@ Prerequisites:
    — the arm64 worker carries the TensorRT adapter and cannot load it
    without both — so a run whose recorded value is not `ok` on a device
    that is about to deploy a TensorRT bundle is worth reading before the
-   deploy-smoke stage fails for the same reason. It is not a failing
-   finding and does not stop the stage.
+   deploy-smoke stage fails for the same reason. A Jetson carrying the
+   python_pytorch sidecar and no serving worker is a `warning` under the
+   same condition, for the sidecar's own reason: NVIDIA's aarch64 PyTorch
+   wheel links the JetPack CUDA runtime. It is not a failing finding and
+   does not stop the stage.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox

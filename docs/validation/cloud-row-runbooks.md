@@ -67,7 +67,12 @@ build of PyTorch carries its own CUDA runtime in the wheel, so no system
 toolkit is required. The driver is what that `ok` rests on — with no
 driver the finding is `missing` even if a system CUDA toolkit is
 installed, because `libcuda` comes from the driver package and nothing
-installed reaches the accelerator without it. The message names the
+installed reaches the accelerator without it. On these x86_64 rows the
+driver means `/proc/driver/nvidia/version`, the same file the installer
+reads for its hardware check; a host carrying only the user-mode
+`libcuda.so.1` gets the driverless verdict with a message saying the
+kernel module may not be loaded, so a row whose recorded value is that
+is worth reading before the deploy stage. The message names the
 sidecar as installed or not, so on a run without the Python backend it
 says so rather than citing a wheel that is not on the host. The finding
 is paths-only and does not establish that the sidecar's PyTorch can
