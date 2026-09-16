@@ -1623,11 +1623,28 @@ fn first_existing_artifact(opts: &InstallProbeOptions, paths: &[&str]) -> Option
         .map(|path| (*path).to_string())
 }
 
-/// The first versioned library named `<prefix><soname>` in `dirs`.
+/// Which of several matching names in one directory is reported.
 ///
-/// `read_dir` order is unspecified, so the names are sorted: one host
-/// must report the same path on every run, or the evidence a validation
-/// run files would differ from the one before it for no reason.
+/// `read_dir` order is unspecified and differs between filesystems, so
+/// the choice is made here instead: one host must report the same path
+/// on every run, or the evidence a validation run files would differ
+/// from the one before it for no reason. The order is lexicographic on
+/// the whole file name and is *not* soname order --
+/// `libcudart.so.11.0` sorts before `libcudart.so.9`. The guarantee is
+/// stability, not a choice among versions; the finding reports which
+/// name it took.
+///
+/// Separated from the scan because a fixture cannot pin it: a directory
+/// staged in a test is read back in whatever order that filesystem
+/// happens to use, which on this one is already sorted, so the fixture
+/// would pass with the ordering removed.
+fn stable_library_name(mut names: Vec<String>) -> Option<String> {
+    names.sort();
+    names.into_iter().next()
+}
+
+/// The versioned library named `<prefix><soname>` in the first of
+/// `dirs` that has one.
 fn first_versioned_library(
     opts: &InstallProbeOptions,
     dirs: &[&str],
@@ -1637,13 +1654,12 @@ fn first_versioned_library(
         let Ok(entries) = std::fs::read_dir(prefixed(opts, dir)) else {
             continue;
         };
-        let mut names: Vec<String> = entries
+        let names: Vec<String> = entries
             .flatten()
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| name.len() > prefix.len() && name.starts_with(prefix))
             .collect();
-        names.sort();
-        if let Some(name) = names.first() {
+        if let Some(name) = stable_library_name(names) {
             return Some(format!("{dir}/{name}"));
         }
     }
@@ -2289,6 +2305,11 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the absent sidecar must be named as absent: {}",
             without.message
         );
+        assert_eq!(
+            without.hint.as_deref(),
+            Some(PATHS_ONLY_HINT),
+            "an `ok` that rests on the sidecar must say it is a statement about paths"
+        );
 
         stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
         let with = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
@@ -2461,6 +2482,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the absent driver must be stated, not skipped past: {}",
             cuda.message
         );
+        assert_eq!(cuda.hint.as_deref(), Some(NO_DRIVER_HINT));
     }
 
     #[test]
@@ -2476,6 +2498,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the absent driver is the fact that matters here: {}",
             cuda.message
         );
+        assert_eq!(cuda.hint.as_deref(), Some(NO_DRIVER_HINT));
     }
 
     #[test]
@@ -2500,11 +2523,14 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
-    fn the_versioned_library_scan_reports_the_lowest_soname() {
-        // `read_dir` order is unspecified, so the scan sorts. Pin which
-        // name wins: one host must report the same path on every run, or
-        // the evidence a validation run files differs from the last for
-        // no reason.
+    fn the_versioned_library_scan_reports_one_name_out_of_several() {
+        // Which name wins end to end. Lexicographic on the whole file
+        // name, so `libcudart.so.11.0` beats `libcudart.so.9`; the
+        // property is that one name is chosen and named, not that it is
+        // the lowest soname. The ordering itself is pinned by
+        // `the_library_name_chosen_does_not_depend_on_read_dir_order`,
+        // which this fixture cannot do on a filesystem whose `read_dir`
+        // already returns sorted names.
         let td = TempDir::new().unwrap();
         stage_file(td.path(), "/proc/driver/nvidia/version");
         for name in ["libcudart.so.12", "libcudart.so.11.0", "libcudart.so.9"] {
@@ -2517,9 +2543,30 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         assert!(
             cuda.message
                 .contains("/usr/lib/x86_64-linux-gnu/libcudart.so.11.0"),
-            "the lexicographically first soname must win: {}",
+            "the lexicographically first name must win: {}",
             cuda.message
         );
+    }
+
+    #[test]
+    fn the_library_name_chosen_does_not_depend_on_read_dir_order() {
+        // The evidence-stability guarantee, pinned on the ordering step
+        // rather than on a directory: `read_dir` order is a property of
+        // the filesystem the test happens to run on, and on this one it
+        // is already sorted.
+        let sorted = vec!["libcudart.so.12".to_string(), "libcudart.so.9".to_string()];
+        let reversed = vec!["libcudart.so.9".to_string(), "libcudart.so.12".to_string()];
+
+        assert_eq!(
+            stable_library_name(sorted).as_deref(),
+            Some("libcudart.so.12")
+        );
+        assert_eq!(
+            stable_library_name(reversed).as_deref(),
+            Some("libcudart.so.12"),
+            "the name reported must not depend on the order the directory was read in"
+        );
+        assert_eq!(stable_library_name(Vec::new()), None);
     }
 
     #[test]
@@ -2540,10 +2587,103 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
+    fn the_cuda_contract_lists_are_the_paths_this_finding_promises_to_look_at() {
+        // Written out from literals, because the tests below iterate the
+        // constants and so shrink with them: dropping an entry would
+        // leave every one of them green while a stock toolkit or an L4T
+        // driver layout silently stopped being found. This test is what
+        // makes those loops a coverage claim.
+        assert_eq!(
+            NVIDIA_DRIVER_PATHS,
+            [
+                "/proc/driver/nvidia/version",
+                "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+                "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so",
+                "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so.1",
+                "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so",
+                "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
+            ],
+            "the x86_64 user-mode library belongs in NVIDIA_USER_MODE_DRIVER_PATHS, not here"
+        );
+        assert_eq!(
+            NVIDIA_DRIVER_LIB_DIRS,
+            [
+                "/usr/lib/aarch64-linux-gnu/tegra",
+                "/usr/lib/aarch64-linux-gnu/nvidia",
+                "/usr/lib/aarch64-linux-gnu",
+            ]
+        );
+        assert_eq!(
+            NVIDIA_USER_MODE_DRIVER_PATHS,
+            ["/usr/lib/x86_64-linux-gnu/libcuda.so.1"]
+        );
+        assert_eq!(
+            NVIDIA_USER_MODE_DRIVER_LIB_DIRS,
+            ["/usr/lib/x86_64-linux-gnu"]
+        );
+        assert_eq!(
+            CUDA_TOOLKIT_PATHS,
+            [
+                "/usr/local/cuda/version.txt",
+                "/usr/local/cuda/version.json",
+                "/usr/local/cuda/lib64/libcudart.so",
+                "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+                "/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so",
+                "/usr/lib/x86_64-linux-gnu/libcudart.so",
+                "/usr/lib/aarch64-linux-gnu/libcudart.so",
+            ]
+        );
+        assert_eq!(
+            CUDA_TOOLKIT_LIB_DIRS,
+            [
+                "/usr/local/cuda/lib64",
+                "/usr/local/cuda/targets/aarch64-linux/lib",
+                "/usr/local/cuda/targets/x86_64-linux/lib",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/aarch64-linux-gnu",
+            ]
+        );
+        assert_eq!(NVIDIA_DRIVER_SONAME_PREFIX, "libcuda.so.");
+        assert_eq!(CUDA_RUNTIME_SONAME_PREFIX, "libcudart.so.");
+    }
+
+    #[test]
+    fn the_cuda_hints_name_where_the_unanswered_questions_are_answered() {
+        // Each hint is the finding's only in-band disclosure of what it
+        // did not establish, and the lifecycle harnesses record `status`
+        // and `message` only -- an emptied hint would be invisible in
+        // evidence as well as in the suite. Asserted against literals,
+        // so blanking a constant fails here.
+        assert!(
+            NO_DRIVER_HINT.contains("`accelerator_facts`")
+                && NO_DRIVER_HINT.contains("`platform_row`"),
+            "{NO_DRIVER_HINT}"
+        );
+        assert!(
+            UNLOADED_DRIVER_HINT.contains("`/proc/driver/nvidia/version`")
+                && UNLOADED_DRIVER_HINT.contains("kernel module"),
+            "{UNLOADED_DRIVER_HINT}"
+        );
+        assert!(
+            PATHS_ONLY_HINT.contains("paths only")
+                && PATHS_ONLY_HINT.contains("`python_pytorch_runtime`"),
+            "{PATHS_ONLY_HINT}"
+        );
+        assert!(
+            JETSON_SIDECAR_CUDA_HINT.contains("docs/install/python-pytorch-backend.md")
+                && JETSON_SIDECAR_CUDA_HINT
+                    .contains("/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so"),
+            "{JETSON_SIDECAR_CUDA_HINT}"
+        );
+    }
+
+    #[test]
     fn every_driver_path_in_the_contract_list_is_detected_and_named() {
         // Each entry is a contract path an operator or a validation
-        // record can be pointed at. Staging them one at a time pins the
-        // whole list: a dropped or misspelled entry stops being found.
+        // record can be pointed at. Staging them one at a time proves
+        // each listed path is found and named; that the list still holds
+        // the paths it promises is
+        // `the_cuda_contract_lists_are_the_paths_this_finding_promises_to_look_at`.
         for path in NVIDIA_DRIVER_PATHS {
             let td = TempDir::new().unwrap();
             stage_file(td.path(), path);
