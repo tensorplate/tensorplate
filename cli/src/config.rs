@@ -166,6 +166,24 @@ pub enum ConfigSource {
     /// Built-in defaults: the packaged system config exists but this
     /// caller cannot read it.
     SystemUnreadable(PathBuf),
+    /// Built-in defaults: the packaged system config is present but
+    /// unusable — malformed JSON, a document that fails validation, or
+    /// bytes that are not text at all. Carries the failure so the binary
+    /// can raise it for commands that need the configured profile and
+    /// report it for the ones that diagnose the install.
+    SystemInvalid(PathBuf, String),
+}
+
+impl ConfigSource {
+    /// The parse or read failure behind [`Self::SystemInvalid`], phrased
+    /// as a config error. `None` for every other source.
+    #[must_use]
+    pub fn install_fault(&self) -> Option<&str> {
+        match self {
+            Self::SystemInvalid(_, message) => Some(message.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// A validated config plus how it was found. `warning` carries an
@@ -352,9 +370,16 @@ impl CliConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`CliError::Config`] when a config that was found cannot be
-    /// parsed or fails [`Self::validate`], and when `--config` or
-    /// `$TENSORPLATE_CLI_CONFIG` names a file that cannot be read.
+    /// Returns [`CliError::Config`] when `--config` or
+    /// `$TENSORPLATE_CLI_CONFIG` names a file that cannot be read, parsed,
+    /// or validated: the operator named that file, so nothing else is
+    /// worth guessing at.
+    ///
+    /// A packaged conffile that is present and unusable is *not* an error
+    /// here. It resolves to [`ConfigSource::SystemInvalid`] carrying the
+    /// failure, so the binary can still answer `doctor` and `version` —
+    /// the two commands an operator runs to diagnose exactly this — while
+    /// raising it for every command that needs the configured profile.
     pub fn resolve(explicit: Option<&Path>) -> CliResult<ResolvedCliConfig> {
         Self::resolve_from(
             explicit,
@@ -401,14 +426,19 @@ impl CliConfig {
         }
         match fs::read_to_string(system_path) {
             // A system config that parses is authoritative; one that does
-            // not is an install fault. Falling back to the built-in
-            // defaults here would point every command at a socket the
-            // operator never configured and say nothing about it.
-            Ok(body) => Ok(ResolvedCliConfig {
-                config: Self::parse_json(&body).map_err(|e| name_config_file(system_path, e))?,
-                source: ConfigSource::System(system_path.to_path_buf()),
-                warning: None,
-            }),
+            // not is an install fault. It does not fail here, because the
+            // two commands that diagnose a broken install must survive it
+            // — see [`Self::system_install_fault`] and the binary's
+            // dispatch.
+            Ok(body) => match Self::parse_json(&body).map_err(|e| name_config_file(system_path, e))
+            {
+                Ok(config) => Ok(ResolvedCliConfig {
+                    config,
+                    source: ConfigSource::System(system_path.to_path_buf()),
+                    warning: None,
+                }),
+                Err(e) => Ok(Self::system_install_fault(system_path, &e.to_string())),
+            },
             // No packaged install here: the built-in defaults are the
             // documented behaviour, and saying so on every command would
             // be noise.
@@ -417,12 +447,13 @@ impl CliConfig {
                 source: ConfigSource::BuiltIn,
                 warning: None,
             }),
-            // The file is there but this caller cannot read it — on a
+            // The file is there but this caller may not read it — on a
             // native install, /etc/tensorplate is `root:tensorplate 0750`.
-            // Commands that do not need the agent (doctor, version) still
-            // work on the defaults, so this reports rather than fails, and
-            // says why the packaged settings are not in effect.
-            Err(e) => Ok(ResolvedCliConfig {
+            // That is a property of the caller, not of the install: every
+            // command still works on the defaults, so this reports rather
+            // than fails, and says why the packaged settings are not in
+            // effect.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ResolvedCliConfig {
                 config: Self::default(),
                 warning: Some(format!(
                     "tensorplate: cannot read the packaged cli config `{}`: {e}; using built-in defaults. \
@@ -432,6 +463,33 @@ Join the `{}` group (or re-run as root) to use the packaged profile, or pass --c
                 )),
                 source: ConfigSource::SystemUnreadable(system_path.to_path_buf()),
             }),
+            // Present, permitted, and still unreadable: a conffile that is
+            // not UTF-8 lands here, and group membership is no answer to
+            // it. Treat it as the install fault it is rather than advising
+            // a fix that cannot work.
+            Err(e) => Ok(Self::system_install_fault(
+                system_path,
+                &format!(
+                    "cannot read cli config `{}`: {e}",
+                    system_path.display()
+                ),
+            )),
+        }
+    }
+
+    /// The packaged conffile is present and unusable. Carries the failure
+    /// twice over: as the operator-facing warning the binary prints, and
+    /// inside [`ConfigSource::SystemInvalid`] so commands that need the
+    /// configured profile can raise it as the config error it is.
+    fn system_install_fault(system_path: &Path, fault: &str) -> ResolvedCliConfig {
+        ResolvedCliConfig {
+            config: Self::default(),
+            warning: Some(format!(
+                "tensorplate: the packaged cli config is unusable: {fault}. Using built-in defaults; \
+`doctor` and `version` still answer, every other command fails until `{}` is fixed or --config names another file.",
+                system_path.display(),
+            )),
+            source: ConfigSource::SystemInvalid(system_path.to_path_buf(), fault.to_string()),
         }
     }
 
@@ -723,17 +781,51 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_packaged_config_is_an_error_not_a_silent_default() {
+    fn a_malformed_packaged_config_is_an_install_fault_not_a_silent_default() {
         let td = tempfile::tempdir().unwrap();
         let system = td.path().join("cli.json");
         std::fs::write(&system, "{not json").unwrap();
-        let err = CliConfig::resolve_from(None, None, &system).unwrap_err();
-        let CliError::Config(message) = err else {
-            panic!("expected a config error");
-        };
+        let resolved = CliConfig::resolve_from(None, None, &system).unwrap();
         assert!(
-            message.contains(&system.display().to_string()),
-            "error must name the file: {message}"
+            matches!(resolved.source, ConfigSource::SystemInvalid(_, _)),
+            "a malformed conffile must not resolve as a usable config: {:?}",
+            resolved.source
+        );
+        let fault = resolved
+            .source
+            .install_fault()
+            .expect("SystemInvalid carries the failure")
+            .to_string();
+        assert!(
+            fault.contains(&system.display().to_string()),
+            "the fault must name the file: {fault}"
+        );
+        let warning = resolved.warning.expect("an unusable conffile must warn");
+        assert!(
+            warning.contains(&system.display().to_string()),
+            "the warning must name the file: {warning}"
+        );
+    }
+
+    /// A conffile that is not UTF-8 is an install fault, not a permissions
+    /// problem: `read_to_string` fails with `InvalidData`, and telling the
+    /// operator to join the service group would be advice that cannot
+    /// work. Only `PermissionDenied` gets that answer.
+    #[test]
+    fn a_packaged_config_that_is_not_text_is_an_install_fault() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        std::fs::write(&system, b"{\"schema_version\":\"0.1\",\"x\":\"\xff\"}").unwrap();
+        let resolved = CliConfig::resolve_from(None, None, &system).unwrap();
+        assert!(
+            matches!(resolved.source, ConfigSource::SystemInvalid(_, _)),
+            "non-UTF-8 bytes must not fall back silently: {:?}",
+            resolved.source
+        );
+        let warning = resolved.warning.expect("an unusable conffile must warn");
+        assert!(
+            !warning.contains("group"),
+            "group membership is no answer to a corrupt file: {warning}"
         );
     }
 

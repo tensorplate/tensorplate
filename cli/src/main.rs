@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use tensorplate_cli::args::{self, OutputMode, ParseOutcome, Subcommand};
 use tensorplate_cli::client::{AgentClient, NetAgentClient};
-use tensorplate_cli::config::CliConfig;
+use tensorplate_cli::config::{CliConfig, ConfigSource};
 use tensorplate_cli::error::{CliError, CliResult};
 use tensorplate_cli::output::Renderer;
 
@@ -105,6 +105,13 @@ fn drive<O: Write, E: Write>(
     let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
     report_config_warning(output_mode, stderr, resolved.warning.as_deref());
+    if let Some(error) = blocking_install_fault(&resolved.source, &parsed.subcommand) {
+        return Err(DriveError {
+            error,
+            output_mode,
+            command,
+        });
+    }
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
     };
@@ -131,6 +138,26 @@ fn report_config_warning<E: Write>(mode: OutputMode, stderr: &mut E, warning: Op
     // Best-effort, like the error renderer in `main`: a closed stderr must
     // not change the command's exit code.
     let _ = Renderer::new(mode).info(stderr, warning);
+}
+
+/// Raise an unusable packaged conffile as the config error it is, except
+/// for the two commands that exist to diagnose exactly that.
+///
+/// `doctor` is what the docs tell an operator to run when an install
+/// misbehaves, and its own `config_files` finding is where a malformed
+/// `/etc/tensorplate/*.json` is meant to be reported; `version` says what
+/// is installed and reads nothing from the config. Both answer from the
+/// built-in defaults, with [`report_config_warning`] saying the packaged
+/// settings are not in effect. Aborting before either runs would take the
+/// diagnostic away at the moment it is needed — a state this branch made
+/// reachable by reading the conffile at all. Every other command needs the
+/// configured profile, so for those the fault stays fatal.
+fn blocking_install_fault(source: &ConfigSource, command: &Subcommand) -> Option<CliError> {
+    let fault = source.install_fault()?;
+    if matches!(command, Subcommand::Doctor(_) | Subcommand::Version) {
+        return None;
+    }
+    Some(CliError::Config(fault.to_string()))
 }
 
 fn command_label(command: &Subcommand) -> &'static str {
@@ -175,6 +202,11 @@ fn explicit_output_mode(argv: &[String]) -> Option<OutputMode> {
 
 #[cfg(test)]
 mod tests {
+    // Same allowance every other test module in this crate takes: these
+    // tests build real temp files, and a failed fixture is a test bug that
+    // should abort the test, not be threaded through a Result.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
     use super::*;
 
     #[test]
@@ -218,5 +250,67 @@ mod tests {
         let mut err = Vec::new();
         report_config_warning(OutputMode::Human, &mut err, None);
         assert!(err.is_empty());
+    }
+
+    /// Resolve a real unusable conffile rather than hand-building the
+    /// source, so the test breaks if resolution stops producing it.
+    fn unusable_packaged_config() -> ConfigSource {
+        let td = tempfile::tempdir().expect("tempdir");
+        let system = td.path().join("cli.json");
+        std::fs::write(&system, "{not json").expect("write conffile");
+        let resolved =
+            CliConfig::resolve_from(None, None, &system).expect("an unusable conffile resolves");
+        assert!(resolved.source.install_fault().is_some());
+        resolved.source
+    }
+
+    /// The command the docs name for diagnosing a broken install, and the
+    /// one that reports what is installed, must survive the fault they are
+    /// there to report. Reading the conffile at all is what made this
+    /// state reachable.
+    #[test]
+    fn doctor_and_version_still_run_on_an_unusable_packaged_config() {
+        let source = unusable_packaged_config();
+        assert!(blocking_install_fault(
+            &source,
+            &Subcommand::Doctor(args::DoctorArgs {
+                skip_agent: true,
+                record: None,
+            })
+        )
+        .is_none());
+        assert!(blocking_install_fault(&source, &Subcommand::Version).is_none());
+    }
+
+    /// Every other command needs the configured profile. Running one on
+    /// the built-in defaults would target a socket the operator never
+    /// configured, which is the silent-fallback half of #203.
+    #[test]
+    fn an_unusable_packaged_config_still_fails_commands_that_need_the_profile() {
+        let source = unusable_packaged_config();
+        let error = blocking_install_fault(
+            &source,
+            &Subcommand::Logs(args::LogsArgs {
+                component: None,
+                level: None,
+                since_ms: None,
+                tail: None,
+                follow: false,
+                correlation_id: None,
+                source_override: None,
+            }),
+        )
+        .expect("logs must not run on the defaults");
+        assert_eq!(error.exit_code().as_u8(), 2, "{error}");
+        assert!(
+            error.to_string().contains("cli.json"),
+            "the error must name the conffile: {error}"
+        );
+    }
+
+    /// A conffile that resolved normally raises nothing.
+    #[test]
+    fn a_usable_config_blocks_nothing() {
+        assert!(blocking_install_fault(&ConfigSource::BuiltIn, &Subcommand::Version).is_none());
     }
 }
