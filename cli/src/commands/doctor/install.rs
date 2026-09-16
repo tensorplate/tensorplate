@@ -1125,6 +1125,14 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
 /// successful `nvidia-smi` driver query, none of which this list does.
 /// So the installer can report a driver doctor does not find here --
 /// in practice `libcuda.so.1` below usually closes that gap.
+///
+/// `/proc/driver/nvidia/version` is an x86_64 answer: it comes from
+/// `nvidia.ko`, and L4T drives the Tegra GPU through `nvgpu` instead,
+/// so a Jetson is recognized by its `libcuda` alone. That is why
+/// `NVIDIA_DRIVER_LIB_DIRS` below is scanned as well as these exact
+/// names -- an L4T layout that ships only `libcuda.so.1.1`, or a host
+/// whose `libcuda.so.1` symlink ldconfig has not written, would
+/// otherwise read as driverless.
 const NVIDIA_DRIVER_PATHS: &[&str] = &[
     "/proc/driver/nvidia/version",
     "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
@@ -1136,6 +1144,20 @@ const NVIDIA_DRIVER_PATHS: &[&str] = &[
     "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so",
     "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
 ];
+
+/// Directories searched for a versioned `libcuda.so.<soname>` when none
+/// of the exact driver names above is present. The prefix cannot match
+/// `libcudart.so.*`: the CUDA runtime library's name diverges at the
+/// `r`, before the `.` this prefix requires.
+const NVIDIA_DRIVER_LIB_DIRS: &[&str] = &[
+    "/usr/lib/aarch64-linux-gnu/tegra",
+    "/usr/lib/aarch64-linux-gnu/nvidia",
+    "/usr/lib/aarch64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu",
+];
+
+/// The versioned NVIDIA driver library name, without its soname.
+const NVIDIA_DRIVER_SONAME_PREFIX: &str = "libcuda.so.";
 
 /// Files a **system CUDA toolkit** installs. `libcudart` is the CUDA
 /// runtime library the toolkit ships, which is what a TensorRT-linked
@@ -1220,7 +1242,9 @@ struct CudaArtifacts {
 
 fn probe_cuda_artifacts(opts: &InstallProbeOptions) -> CudaArtifacts {
     CudaArtifacts {
-        driver: first_existing_artifact(opts, NVIDIA_DRIVER_PATHS),
+        driver: first_existing_artifact(opts, NVIDIA_DRIVER_PATHS).or_else(|| {
+            first_versioned_library(opts, NVIDIA_DRIVER_LIB_DIRS, NVIDIA_DRIVER_SONAME_PREFIX)
+        }),
         toolkit: first_existing_artifact(opts, CUDA_TOOLKIT_PATHS).or_else(|| {
             first_versioned_library(opts, CUDA_TOOLKIT_LIB_DIRS, CUDA_RUNTIME_SONAME_PREFIX)
         }),
@@ -2329,6 +2353,81 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                 cuda.message
                     .contains(&format!("NVIDIA driver present (`{path}`)")),
                 "the finding must name the driver path it found: {}",
+                cuda.message
+            );
+            assert_no_staging_prefix(td.path(), &cuda);
+        }
+    }
+
+    #[test]
+    fn an_l4t_driver_library_with_another_soname_is_read_as_a_driver() {
+        // `/proc/driver/nvidia/version` comes from `nvidia.ko`, which a
+        // Jetson does not load, so L4T is recognized by its `libcuda`
+        // alone. A layout that ships `libcuda.so.1.1` and no
+        // `libcuda.so.1` would read as driverless, which on the arm64
+        // build turns a device that is fine into a `warning`.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1.1");
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "ok");
+        assert!(
+            cuda.message.contains(
+                "NVIDIA driver present (`/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1.1`)"
+            ),
+            "the driver library found must be named: {}",
+            cuda.message
+        );
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn the_driver_scan_never_reads_the_cuda_runtime_library_as_a_driver() {
+        // Both scans share `/usr/lib/<triple>`, and `libcuda.so.` is a
+        // prefix of nothing in `libcudart.so.<soname>` -- the names
+        // diverge at the `r`, before the `.`. If that ever stopped
+        // holding, a toolkit-only host would report a driver it has not
+        // got, which is the one error this finding must not make.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.12");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_eq!(cuda.status_label(), "missing");
+        assert!(
+            cuda.message.contains("no NVIDIA driver at the known paths")
+                && cuda
+                    .message
+                    .contains("system CUDA toolkit at `/usr/lib/x86_64-linux-gnu/libcudart.so.12`"),
+            "the CUDA runtime library is a toolkit, never a driver: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn every_driver_library_directory_in_the_contract_list_is_scanned() {
+        for dir in NVIDIA_DRIVER_LIB_DIRS {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), &format!("{dir}/libcuda.so.550.54.15"));
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+            assert_eq!(
+                cuda.status_label(),
+                "ok",
+                "{dir} was not scanned for a versioned driver library: {}",
+                cuda.message
+            );
+            assert!(
+                cuda.message.contains(&format!(
+                    "NVIDIA driver present (`{dir}/libcuda.so.550.54.15`)"
+                )),
+                "the finding must name the driver library it found: {}",
                 cuda.message
             );
             assert_no_staging_prefix(td.path(), &cuda);
