@@ -658,6 +658,14 @@ fn first_stack_mismatch(row: &PlatformSupportRow, observed: &ObservedStack) -> O
 /// pass — it is a row that never claimed to serve that path, which is
 /// exactly the deploy that has no evidence behind it.
 ///
+/// That refusal names the architecture and the paths the row does declare.
+/// Without them the sentence reads as a packaging omission, whose natural
+/// remedy is to install something; the actual cause is that the build
+/// shipped for this platform contains no such adapter, and no package adds
+/// one. What the build contains is not readable at runtime yet (issue
+/// #205), so this says what the row states rather than inspecting the
+/// installed binary.
+///
 /// # Errors
 ///
 /// [`AgentError::PlatformNotAdmissible`] naming
@@ -672,11 +680,24 @@ pub fn check_backend_packages(
         .iter()
         .find(|set| set.backend_path == backend_path)
     else {
+        let declared: Vec<&str> = row
+            .backend_packages()
+            .iter()
+            .map(|set| set.backend_path.as_str())
+            .collect();
+        let declared = if declared.is_empty() {
+            "no backend path at all".to_string()
+        } else {
+            declared.join(", ")
+        };
         return Err(AgentError::PlatformNotAdmissible {
             reason: Some(PlatformReason::MissingBackendPackage),
             detail: format!(
-                "row `{}` declares no package set for backend path `{backend_path}`",
-                row.row_id()
+                "row `{}` declares no package set for backend path `{backend_path}` on {}; \
+                 it declares {declared}. The row records which backends the build shipped for \
+                 this platform contains, so installing a package will not add this one.",
+                row.row_id(),
+                row.cpu().architecture.as_str()
             ),
         });
     };
