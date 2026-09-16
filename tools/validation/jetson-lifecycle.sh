@@ -91,14 +91,30 @@
 
 set -Eeuo pipefail
 
+# Several checks below are Python `assert` statements, and a Python
+# started with PYTHONOPTIMIZE set skips every one of them: the check
+# passes without running. An operator's environment is not allowed to
+# turn a failing check into a pass.
+unset PYTHONOPTIMIZE
+
 readonly DEFAULT_ROW="jetson-orin-nano-8gb-jp62"
 readonly CONFIRM_TOKEN="RESET-TENSORPLATE"
 readonly AGENT_UNIT="tensorplate-agent"
 readonly OBSERVABILITY_UNIT="tensorplate-observability"
 # The apt channel's bootstrap package depends on nothing in TensorPlate
 # and is what a lab image uses to reach the channel, so the run leaves it
-# installed. Every other tensorplate* package is purged.
+# as it found it: installed where it was installed, absent where it was
+# absent. install.sh never installs it, so a device set up by the
+# runbook's own install.sh run does not carry it. Every other
+# tensorplate* package is purged.
 readonly APT_SOURCE_PACKAGE="tensorplate-apt-source"
+# The published predecessor this row's upgrade and rollback are validated
+# against: the last published arm64 runtime set. The harness accepts no
+# other baseline, because nothing in the report could tell a gate which
+# one a run used -- the report's subject names the candidate alone -- and
+# an earlier candidate of the same release is not the upgrade path a
+# Jetson in the field takes. A later release moves this pin on purpose.
+readonly BASELINE_RELEASE_TAG="v0.1.5"
 # The runtime packages that ship a file under /etc, which dh marks as a
 # conffile: agent.json, serving_worker.json, observability.json and
 # cli.json (packaging/debian/tensorplate-*.install). These are the
@@ -154,26 +170,37 @@ readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
 # can supply the file.
 OPERATOR_CONFIG="${TP_JETSON_OPERATOR_CONFIG:-/etc/tensorplate/cli.json}"
 OPERATOR_CONFIG_SHA256=""
-# The two windows in which a run can end with this device's TensorPlate
-# packages taken away and no set installed over them: the upgrade's,
-# between clearing the candidate and installing the baseline, and the
-# rollback's, between the removal and the same install. Set on entering
-# one and cleared once that baseline install returns. While it names a
-# window, an interrupted run says what the device carries rather than
-# leaving the operator to discover it.
+# The windows in which a run can end with this device neither serving
+# the candidate nor carrying a working baseline, named so an interrupted
+# run says what it left rather than leaving the operator to discover it:
 #
-# The two windows leave different devices behind, which is why the name
-# is recorded rather than a flag: the upgrade's clear_install DELETES
-# durable state along with the packages, while the rollback sets it aside
-# under state.bak first.
+#   upgrade           from clearing the candidate until the baseline
+#                     install returns
+#   rollback-stopped  from stopping the candidate's services until the
+#                     removal starts; the candidate is still installed
+#   rollback          from the removal until the baseline install returns
+#
+# Set on entering one and cleared once that baseline install returns.
+# They leave different devices behind, which is why the name is recorded
+# rather than a flag: the upgrade's clear_install DELETES durable state
+# along with the packages, while the rollback sets it aside first.
 STRANDED_WINDOW=""
-# What dpkg reported once the packages were taken away: empty when
-# nothing was left installed, `unknown` when the run never got to read
-# the listing, and otherwise the names still installed. Saying "nothing
-# is installed" on the strength of a command that was issued rather than
-# a listing that was read is how an operator is handed a recovery
-# command that apt refuses.
-STRANDED_PACKAGES_LEFT=unknown
+# What the run did inside the window, as opposed to what dpkg says, which
+# report_stranded_device reads again when it reports. A listing taken
+# before the baseline installer ran says nothing about what that
+# installer left: v0.1.5's install.sh exits non-zero AFTER installing
+# every package when the services do not come up or doctor reports a
+# critical finding.
+#
+#   STRANDED_STATE_CLEARED  clear_install deleted the state directories
+#   STRANDED_STATE_ASIDE    the rollback moved durable state to state.bak
+#   STRANDED_CONFFILES      what check_removed read: `kept`, `lost <pkgs>`,
+#                           or `unread` when it never read a listing
+#   STRANDED_INSTALL_LOG    the baseline installer's output, once started
+STRANDED_STATE_CLEARED=0
+STRANDED_STATE_ASIDE=0
+STRANDED_CONFFILES=unread
+STRANDED_INSTALL_LOG=""
 # Scratch directory holding a bundle this run built, removed on exit.
 BUNDLE_SCRATCH=""
 # Private CLI config pins every command to the installed local agent; an
@@ -238,10 +265,11 @@ Options:
                               its cosign bundle, and the .deb packages.
                               Required.
   --baseline-tag TAG          Release tag of the published predecessor set to
-                              upgrade from and roll back to, such as v0.1.5.
-                              Must be strictly older than --candidate-tag, and
-                              its set's runtime packages strictly older than
-                              the candidate set's, package by package.
+                              upgrade from and roll back to. Must be
+                              ${BASELINE_RELEASE_TAG}, this row's baseline, and
+                              strictly older than --candidate-tag, with its
+                              set's runtime packages strictly older than the
+                              candidate set's, package by package.
   --baseline-assets-dir DIR   The downloaded baseline set, laid out like
                               --candidate-assets-dir. With --baseline-tag,
                               runs the upgrade and rollback stages; without
@@ -515,11 +543,12 @@ preflight_baseline() {
   [[ -n "$BASELINE_DIR" ]] ||
     die "--baseline-tag needs --baseline-assets-dir holding that release's set"
   [[ -d "$BASELINE_DIR" ]] || die "--baseline-assets-dir must name a directory"
-  [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] ||
-    die "--baseline-tag must be a release tag, vX.Y.Z or vX.Y.Z-rc.N"
+  [[ "$BASELINE_TAG" == "$BASELINE_RELEASE_TAG" ]] ||
+    die "--baseline-tag must be ${BASELINE_RELEASE_TAG}, this row's published predecessor; got ${BASELINE_TAG}"
 
   # Strictly older, with a release candidate sorting below the release it
-  # leads to. The tags are what the operator names, what the manifests
+  # leads to, so a candidate that is not newer than the pinned baseline is
+  # refused. The tags are what the operator names, what the manifests
   # bind each directory to, and what the runbook records; the installed
   # package versions are asserted separately against each set's own .deb
   # files once that set is installed.
@@ -598,6 +627,24 @@ preflight() {
   # a run that discovered it missing only once a baseline was named would
   # refuse later than it can.
   require_command dpkg
+
+  # Every release installer this run starts reads TP_INSTALL_* from its
+  # environment, and several of those switch its verification off or
+  # point it elsewhere: TP_INSTALL_ALLOW_UNSIGNED skips the signature
+  # check exactly as --allow-unsigned does, TP_INSTALL_SKIP_SELF_CHECK
+  # skips the installer's own, TP_INSTALL_COSIGN replaces the verifier and
+  # TP_INSTALL_REPO the identity it accepts -- in v0.1.5's install.sh as
+  # in the candidate's. sudo's env_reset drops them only where the sudo
+  # policy does not keep them, so a run carrying any is refused by name.
+  local name installer_knobs=""
+  for name in $(compgen -e); do
+    case "$name" in
+      TP_INSTALL_*) installer_knobs="${installer_knobs:+${installer_knobs} }${name}" ;;
+      *) ;;
+    esac
+  done
+  [[ -z "$installer_knobs" ]] ||
+    die "unset ${installer_knobs} first: this run installs every set with the installer's own defaults, signature verification included"
 
   # Every CLI call the harness makes as the operator goes through the
   # agent's group-only control socket. The group exists only once a
@@ -840,12 +887,16 @@ for line in query.stdout.splitlines():
 PYPACKAGES
 }
 
-# Remove every trace of a previous install: packages, conffiles and state.
+# Remove every trace of the candidate install: packages, conffiles and
+# state.
 #
-# Called by the install stage, and again by the upgrade stage before the
-# baseline is installed fresh: an upgrade has to start from a device that
-# carries the baseline and nothing else, or what the candidate's installer
-# is asked to upgrade is not the baseline.
+# Called by the upgrade stage before the baseline is installed fresh: an
+# upgrade has to start from a device that carries the baseline and
+# nothing else, or what the candidate's installer is asked to upgrade is
+# not the baseline. It is the install stage's own clearing, command for
+# command; that stage keeps its body as it was, so the two are kept in
+# step by hand, and the verifier fails a purge, a leftover package and a
+# failed query in each.
 clear_install() {
   note "clearing any previous TensorPlate install"
   sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
@@ -880,27 +931,38 @@ clear_install() {
     return 1
   fi
   step "clear installed state" sudo rm -rf "${CLEARED_STATE_DIRS[@]}" || return
-  # Read and completed, not assumed: only now may a report from this
-  # window say the device carries no TensorPlate and that the state
-  # directories went with the packages. The listing above is what
-  # establishes the first and the step above the second.
-  STRANDED_PACKAGES_LEFT=""
+  # Completed, not assumed: only now may a report from this window say the
+  # state directories went with the packages.
+  STRANDED_STATE_CLEARED=1
 }
 
-# Install one artifact set through its own shipped installer. Every
-# install this run performs goes through here, so what is true of one is
-# true of all four.
+# The prefix every installer this function starts runs behind: it drops
+# each TP_INSTALL_* variable that sudo's policy or PAM still handed over,
+# for the reasons preflight refuses them in the run's own environment,
+# then replaces itself with the installer. Enumerated rather than listed,
+# so a knob a later install.sh adds is dropped too.
+readonly INSTALLER_ENV_SCRUB='for name in $(compgen -e); do case "$name" in TP_INSTALL_*) unset "$name" ;; esac; done; exec bash "$@"'
+# What both releases' install.sh print once cosign has accepted the
+# SHA256SUMS signature as the TensorPlate release workflow's, and print
+# only then (packaging/scripts/install.sh, verify_checksums_signature, at
+# v0.1.5 and now).
+readonly SIGNATURE_VERIFIED_LINE="==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow"
+
+# Install one artifact set through its own shipped installer, for the
+# upgrade and rollback stages. The install stage keeps its own call.
 #
 # No --allow-unsigned, for either set: install.sh verifies the SHA256SUMS
-# signature with the cosign bundle that was downloaded with it. No
-# --with-python-backend: this row's smoke is the TensorRT engine.
+# signature with the cosign bundle that was downloaded with it, and its
+# output has to say so -- an installer that skipped verification exits 0
+# all the same. No --with-python-backend: this row's smoke is the
+# TensorRT engine.
 #
 # A run with a baseline installs from the same directories again, minutes
 # apart, so the digest recorded in preflight is compared again here and a
 # set whose SHA256SUMS has changed since is refused rather than installed
 # under the identity the earlier verification gave it.
 install_set() {
-  local dir="$1" expected_digest="$2" digest
+  local dir="$1" expected_digest="$2" output="$3" digest
   # An unreadable file reads as an empty digest, which never matches.
   digest="$(assets_digest "$dir")" || digest=""
   if [[ "$digest" != "$expected_digest" ]]; then
@@ -908,23 +970,67 @@ install_set() {
       "$dir" "$expected_digest" "${digest:-unreadable}" >&2
     return 1
   fi
-  step "install.sh" sudo bash "${dir}/install.sh" --local-artifacts "$dir" --yes || return
+  # Set before the installer starts: from here what the device carries
+  # is whatever the installer left, whether or not it succeeded.
+  STRANDED_INSTALL_LOG="$output"
+  step "install.sh" bash -c \
+    'set -o pipefail; sudo bash -c "$1" tensorplate-install "$2/install.sh" --local-artifacts "$2" --yes 2>&1 | tee "$3"' \
+    _ "$INSTALLER_ENV_SCRUB" "$dir" "$output" || return
+  if ! grep -Fxq -- "$SIGNATURE_VERIFIED_LINE" "$output"; then
+    printf '%s/install.sh succeeded without reporting a verified SHA256SUMS signature; expected the line: %s\n' \
+      "$dir" "$SIGNATURE_VERIFIED_LINE" >&2
+    return 1
+  fi
 }
 
 stage_install() {
   step "pin CLI commands to the local agent" prepare_cli_config || return
-  clear_install || return
+  note "clearing any previous TensorPlate install"
+  sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" >/dev/null 2>&1 || true
 
+  # Purge exactly the TensorPlate packages dpkg knows about, and check
+  # that it worked.
+  #
+  # A fixed list names packages that may never have been installed, and
+  # apt-get aborts the WHOLE purge when any name is unknown, leaving every
+  # package installed. Deleting /etc/tensorplate after that removes
+  # conffiles dpkg still owns, and the reinstall treats them as
+  # deliberately deleted and does not put them back. The cloud harness
+  # met exactly that on a real host.
+  local purge=() listing pkg status
+  listing="$(installed_tensorplate_packages)" || return
+  while read -r pkg status; do
+    if [[ -n "$pkg" ]]; then
+      purge+=("$pkg")
+    fi
+  done <<<"$listing"
+  if ((${#purge[@]} > 0)); then
+    step "purge ${purge[*]}" \
+      sudo DEBIAN_FRONTEND=noninteractive apt-get purge -y "${purge[@]}" || return
+  fi
+
+  # Nothing may remain in dpkg -- installed or holding config files --
+  # before the state directories go, or the conffiles are stranded as
+  # described above.
+  listing="$(installed_tensorplate_packages)" || return
+  if [[ -n "$listing" ]]; then
+    printf 'TensorPlate packages remain after the purge: %s\n' "$(printf '%s' "$listing" | tr '\n' ' ')" >&2
+    return 1
+  fi
+  step "clear installed state" sudo rm -rf "${CLEARED_STATE_DIRS[@]}" || return
+
+  # No --allow-unsigned: install.sh verifies the SHA256SUMS signature
+  # with the cosign bundle that was downloaded with the set. No
+  # --with-python-backend: this row's smoke is the TensorRT engine.
   note "installing the candidate through the shipped installer"
-  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" || return
+  step "install.sh" sudo bash "${ASSETS_DIR}/install.sh" --local-artifacts "$ASSETS_DIR" --yes || return
 
   note "enabling the services"
   step "enable ${AGENT_UNIT}" sudo systemctl enable --now "$AGENT_UNIT" || return
   step "enable ${OBSERVABILITY_UNIT}" sudo systemctl enable --now "$OBSERVABILITY_UNIT" || return
   step "services ready" await_services_ready || return
 
-  step "installed versions" \
-    check_installed_versions "$ASSETS_DIR" "${EVIDENCE_DIR}/packages.txt" || return
+  step "installed versions" check_installed_versions "${EVIDENCE_DIR}/packages.txt" || return
   # Doctor writes its report and then exits non-zero when anything fails,
   # so the report is read before the exit status decides the stage: the
   # log then names the failing findings rather than only the exit code.
@@ -949,11 +1055,15 @@ stage_install() {
 # survive at the other set's version, and tensorplate-apt-source is left
 # alone deliberately. The rollback's own check_removed is what shows
 # nothing else is left installed.
+#
+# Usage: check_installed_versions <output> [<assets dir> <set name>]
+# The set defaults to the candidate's, which is what the install stage
+# checks.
 check_installed_versions() {
-  python3 - "$1" "$DEB_ARCH" >"$2" <<'PY'
+  python3 - "${2:-$ASSETS_DIR}" "$DEB_ARCH" "${3:-candidate}" >"$1" <<'PY'
 import json, pathlib, subprocess, sys
 
-assets, deb_arch = pathlib.Path(sys.argv[1]), sys.argv[2]
+assets, deb_arch, set_name = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 # install.sh selects these five for a runtime install without the Python
 # backend; see write_install_deb_list there.
 packages = ["tensorplate-common", "tensorplate-agent", "tensorplate-serving",
@@ -993,7 +1103,7 @@ for package in packages:
         continue
     print(f"{package} {expected.stdout.strip()} {debs[0]}")
 if problems:
-    raise SystemExit("installed package versions do not match the set: " + "; ".join(problems))
+    raise SystemExit(f"installed package versions do not match the {set_name} set: " + "; ".join(problems))
 PY
 }
 
@@ -1047,8 +1157,12 @@ PY
 # a successful identity inference: durable active metadata alone survives
 # worker failure. The optional deploy response adds the initial
 # transaction assertions.
+#
+# The worker must be serving the smoke deployment, unless it is called
+# through check_deployment_round_trip, which names another.
 check_trt_round_trip() {
-  local status_output="$1" result_output="$2" expected_id="$3" deploy_output="${4:-}"
+  local status_output="$1" result_output="$2" deploy_output="${3:-}"
+  local expected_id="${round_trip_deployment_id:-$DEPLOYMENT_ID}"
   local work infer_output infer_command
   work="$(mktemp -d)" || return
   infer_output="${work}/infer-response.json"
@@ -1136,6 +1250,15 @@ PY
   step "remove inference scratch files" rm -rf "$work" || return
 }
 
+# check_trt_round_trip against the deployment named first: the upgrade's
+# and the rollback's, which are not the smoke's. The name is local, so it
+# reaches only this call.
+check_deployment_round_trip() {
+  local round_trip_deployment_id="$1"
+  shift
+  check_trt_round_trip "$@"
+}
+
 # --- deploy-smoke ------------------------------------------------------
 
 stage_deploy_smoke() {
@@ -1183,7 +1306,7 @@ PY
     "$BUNDLE_STAGING_DIR" --deployment-id "$DEPLOYMENT_ID" --output json || return
 
   step "active worker round trip" check_trt_round_trip \
-    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$DEPLOYMENT_ID" "$deploy_output" || return
+    "${work}/status.json" "${EVIDENCE_DIR}/deploy-result.json" "$deploy_output" || return
   step "remove deployment scratch files" rm -rf "$work" || return
   pass "TensorRT bundle admitted, worker ready, identity inference round-tripped"
 }
@@ -1294,8 +1417,7 @@ stage_restart() {
   # Service readiness above therefore permits the same bounded live
   # worker checks used after deploy, without submitting another deploy.
   step "recovered worker round trip" check_trt_round_trip \
-    "${EVIDENCE_DIR}/status-after-restart.json" "${EVIDENCE_DIR}/restart-result.json" \
-    "$DEPLOYMENT_ID" || return
+    "${EVIDENCE_DIR}/status-after-restart.json" "${EVIDENCE_DIR}/restart-result.json" || return
   pass "services restarted with new pids; recovered deployment answered health and identity inference"
 }
 
@@ -1333,9 +1455,11 @@ finish_with_cleanup() {
   trap '' INT TERM HUP
   # Do not make restoration depend on opening another evidence file.
   cleanup_crash_loop || cleanup_status=$?
-  # Says so rather than fixing it: a device left without packages is a
-  # decision for the operator, not something to undo behind them.
-  report_stranded_device
+  # Says so rather than fixing it: a device left without a working install
+  # is a decision for the operator, not something to undo behind them.
+  # Guarded, because this runs under errexit and a terminal that has gone
+  # away fails every write to it; the report below must still be written.
+  report_stranded_device || true
   if ((status == 0)); then
     status="$cleanup_status"
     if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
@@ -1455,8 +1579,7 @@ stage_crash_loop() {
   ((cleanup_status == 0)) || return "$cleanup_status"
 
   step "recovered worker round trip" check_trt_round_trip \
-    "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" \
-    "$DEPLOYMENT_ID" || return
+    "${EVIDENCE_DIR}/status-after-crash-loop.json" "${EVIDENCE_DIR}/crash-loop-recovery.json" || return
   pass "agent retried and given up on under a broken config; recovered deployment answered once restored"
 }
 
@@ -1534,15 +1657,14 @@ stage_upgrade() {
   # nothing else. The candidate installed above is cleared for the same
   # reason the run cleared whatever preceded it.
   #
-  # From here until the baseline install returns this device carries no
-  # TensorPlate, and clear_install has DELETED its conffiles and durable
-  # state rather than setting them aside. That is a worse place to be
-  # left than the rollback's window, so it is reported the same way.
+  # From here until the baseline install returns this device serves
+  # nothing, and clear_install DELETES its conffiles and durable state
+  # rather than setting them aside. That is a worse place to be left than
+  # the rollback's window, so it is reported the same way.
   STRANDED_WINDOW=upgrade
-  STRANDED_PACKAGES_LEFT=unknown
   clear_install || return
   note "installing the ${BASELINE_TAG} baseline through its own installer"
-  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
+  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" "${EVIDENCE_DIR}/install-baseline.txt" || return
   STRANDED_WINDOW=""
   # No systemctl start or enable of the harness's own around either
   # install here: the release installer enables and starts both units
@@ -1551,19 +1673,20 @@ stage_upgrade() {
   # does, and so does the rollback -- and the pair is always stopped
   # together, never one alone: the baseline's observability unit shares
   # the agent's RuntimeDirectory, so stopping one of them alone strands
-  # the other.
+  # the other. The candidate's unit no longer shares it; stopping both
+  # together is right whichever set is installed.
   step "baseline services ready" await_services_ready || return
-  step "baseline versions" \
-    check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-baseline.txt" || return
+  step "baseline versions" check_installed_versions \
+    "${EVIDENCE_DIR}/packages-baseline.txt" "$BASELINE_DIR" "$BASELINE_TAG" || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-baseline.json" || return
 
   # The baseline starts with no deployment -- its state directory was
   # cleared with the rest of the install -- so the deployment the upgrade
   # has to carry across is one the baseline itself created and served.
   deploy_bundle "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" "$BASELINE_DEPLOYMENT_ID" || return
-  step "baseline worker round trip" check_trt_round_trip \
+  step "baseline worker round trip" check_deployment_round_trip "$BASELINE_DEPLOYMENT_ID" \
     "${EVIDENCE_DIR}/status-baseline.json" "${EVIDENCE_DIR}/upgrade-baseline-result.json" \
-    "$BASELINE_DEPLOYMENT_ID" "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" || return
+    "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" || return
 
   # A trailing newline keeps the file valid JSON and its mode unchanged,
   # and makes it differ from the packaged conffile, which is what puts
@@ -1580,10 +1703,10 @@ stage_upgrade() {
 
   before="$(unit_pids)" || return
   note "upgrading to ${CANDIDATE_TAG} over the running baseline"
-  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" || return
+  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" "${EVIDENCE_DIR}/install-upgrade.txt" || return
   step "services ready after the upgrade" await_services_ready || return
-  step "candidate versions" \
-    check_installed_versions "$ASSETS_DIR" "${EVIDENCE_DIR}/packages-after-upgrade.txt" || return
+  step "candidate versions" check_installed_versions \
+    "${EVIDENCE_DIR}/packages-after-upgrade.txt" "$ASSETS_DIR" candidate || return
   after="$(unit_pids)" || return
   if [[ "${after% *}" == "${before% *}" ]]; then
     printf 'agent MainPID %s did not change across the upgrade\n' "${after% *}" >&2
@@ -1602,9 +1725,8 @@ stage_upgrade() {
 
   # No deploy: the candidate has to have re-warmed the deployment the
   # baseline wrote to durable state, and to serve it.
-  step "surviving deployment round trip" check_trt_round_trip \
-    "${EVIDENCE_DIR}/status-after-upgrade.json" "${EVIDENCE_DIR}/upgrade-result.json" \
-    "$BASELINE_DEPLOYMENT_ID" || return
+  step "surviving deployment round trip" check_deployment_round_trip "$BASELINE_DEPLOYMENT_ID" \
+    "${EVIDENCE_DIR}/status-after-upgrade.json" "${EVIDENCE_DIR}/upgrade-result.json" || return
   pass "upgraded in place with new pids; operator edit kept; doctor green and ${ROW} resolved; the baseline's deployment answered on the candidate"
 }
 
@@ -1618,122 +1740,212 @@ stage_upgrade() {
 # /etc/tensorplate/observability.json is exactly the operator-config loss
 # this stage exists to rule out, and it shows up as an absence.
 #
-# The listing is the unfiltered one, so the apt channel's bootstrap
-# package is recorded here too: leaving it installed is part of the
-# procedure being validated, and reading the words the harness passed to
-# apt-get would not show that the device ended up that way.
+# Every other tensorplate* package must be out of dpkg's installed set,
+# which means not-installed or config-files: half-installed, unpacked and
+# half-configured are packages a failed removal left behind as surely as
+# installed is.
 #
-# Also records what is still installed, so a report from this window
-# describes the device rather than the command that was issued.
+# The apt channel's bootstrap package must be exactly as the removal found
+# it, which the caller read from the same unfiltered listing. The runbook's
+# device never had it, and a lab image that reaches the channel through it
+# has it installed; the removal must change neither, and reading the
+# words the harness passed to apt-get would not show that it did not.
+#
+# Records whether the conffiles were kept, for report_stranded_device.
 check_removed() {
-  local listing left="" pkg status
+  local apt_source_before="$1" listing verdict status=0
+  STRANDED_CONFFILES=unread
   listing="$(installed_tensorplate_packages all)" || return
   printf '%s\n' "$listing" >"${EVIDENCE_DIR}/packages-after-remove.txt" || return
-  while read -r pkg status; do
-    if [[ -n "$pkg" && "$status" == installed && "$pkg" != "$APT_SOURCE_PACKAGE" ]]; then
-      left="${left:+${left} }${pkg}"
-    fi
-  done <<<"$listing"
-  STRANDED_PACKAGES_LEFT="$left"
-  python3 - "${EVIDENCE_DIR}/packages-after-remove.txt" "$APT_SOURCE_PACKAGE" \
-    "${CONFFILE_PACKAGES[@]}" <<'PY' || return
+  verdict="$(removal_verdict "${EVIDENCE_DIR}/packages-after-remove.txt" "$apt_source_before")" ||
+    status=$?
+  # Whatever the verdict, it was read: a failed check still says which
+  # conffiles are gone.
+  if [[ "$verdict" == kept || "$verdict" == "lost "* ]]; then
+    STRANDED_CONFFILES="$verdict"
+  fi
+  ((status == 0)) || return "$status"
+  printf 'every removed package kept its conffiles, none is left installed, and %s is still %s\n' \
+    "$APT_SOURCE_PACKAGE" "$apt_source_before"
+}
+
+# check_removed's judgement of one listing. Prints `kept` or `lost <pkgs>`
+# for the conffiles, and fails with every problem it found.
+removal_verdict() {
+  python3 - "$1" "$APT_SOURCE_PACKAGE" "$2" "${CONFFILE_PACKAGES[@]}" <<'PY'
 import sys
 
-path, apt_source = sys.argv[1:3]
-expected = sys.argv[3:]
+path, apt_source, apt_source_before = sys.argv[1:4]
+expected = sys.argv[4:]
 status = {}
 for line in open(path, encoding="utf-8"):
     fields = line.split()
     if len(fields) == 2:
         status[fields[0]] = fields[1]
 
+REMOVED = ("not-installed", "config-files")
 problems = []
+lost = []
 for package in expected:
     found = status.get(package, "absent")
     if found == "config-files":
         continue
-    if found == "installed":
-        problems.append(f"{package} is still {found}")
-    else:
+    if found in ("absent", "not-installed"):
+        lost.append(package)
         problems.append(f"{package} is {found}, not config-files: its conffiles were not kept")
-# Every other tensorplate* package has to be gone from dpkg's installed
-# set. tensorplate-common ships nothing under /etc, so dpkg may report it
-# either config-files or not-installed; what it may not be is installed,
-# which would make the baseline install a downgrade apt-get -y refuses.
+    else:
+        problems.append(f"{package} is still {found}")
+# tensorplate-common ships nothing under /etc, so dpkg may report it
+# either config-files or not-installed; what it may not be is anything
+# else, which would make the baseline install a downgrade apt-get -y
+# refuses.
 for package in sorted(status):
     if package in expected or package == apt_source:
         continue
-    if status[package] == "installed":
-        problems.append(f"{package} is still installed")
-if status.get(apt_source) != "installed":
+    if status[package] not in REMOVED:
+        problems.append(f"{package} is still {status[package]}")
+apt_source_after = status.get(apt_source, "absent")
+if apt_source_after != apt_source_before:
     problems.append(
-        f"{apt_source} is {status.get(apt_source, 'absent')}, not installed: the removal "
-        "must leave the apt channel's bootstrap package alone"
+        f"{apt_source} was {apt_source_before} before the removal and is "
+        f"{apt_source_after} after it: the removal must leave the apt channel's "
+        "bootstrap package as it found it"
     )
+# The one line the caller keeps: whether /etc/tensorplate still holds
+# every conffile, whatever else went wrong.
+print("lost " + " ".join(lost) if lost else "kept")
 if problems:
-    raise SystemExit("the removal did not leave only conffiles: " + "; ".join(problems))
-print(f"every removed package kept its conffiles and {apt_source} is still installed")
+    sys.stderr.write("the removal did not leave only conffiles: " + "; ".join(problems) + "\n")
+    raise SystemExit(1)
 PY
 }
 
-# Printed when the run ends in either window where this device's packages
-# have been taken away and no set has been installed over them, including
-# from a signal.
+# What report_stranded_device says, as text on stdout.
 #
-# It says what was read, not what was attempted. A removal that left a
-# package behind is not a device with nothing installed, and the recovery
-# command below is then the very downgrade `apt-get -y` refuses without
-# --allow-downgrades; a removal whose outcome was never read is not
-# either. Nothing is reinstalled automatically: the operator decides
-# which set this device should carry, and a harness that quietly
-# reinstalled would hide that it had left the device bare.
+# It says what dpkg reports when it runs, not what an earlier listing
+# said or what a command was asked to do. A removal that left a package
+# behind is not a device with nothing installed, and the recovery command
+# is then the very downgrade `apt-get -y` refuses without
+# --allow-downgrades; an installer that failed after installing is not a
+# device with nothing installed either. Nothing is reinstalled
+# automatically: the operator decides which set this device should carry,
+# and a harness that quietly reinstalled would hide that it had left the
+# device without a working install.
+stranded_device_text() {
+  local listing="" read_ok=1 installed="" pkg status query
+  query='dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\n'"'"' '"'"'tensorplate*'"'"
+  listing="$(installed_tensorplate_packages all 2>/dev/null)" || read_ok=0
+  if ((read_ok)); then
+    while read -r pkg status; do
+      if [[ -n "$pkg" && "$pkg" != "$APT_SOURCE_PACKAGE" &&
+            "$status" != not-installed && "$status" != config-files ]]; then
+        installed="${installed:+${installed}, }${pkg} ${status}"
+      fi
+    done <<<"$listing"
+  fi
+
+  case "$STRANDED_WINDOW" in
+    upgrade)
+      printf 'the upgrade did not finish: it had started clearing the candidate and had not completed the %s baseline install.\n' \
+        "$BASELINE_TAG"
+      ;;
+    rollback-stopped)
+      printf 'the rollback did not finish: it had started stopping the candidate'"'"'s services and had not removed any package.\n'
+      ;;
+    rollback)
+      printf 'the rollback did not finish: it had started removing the candidate and had not completed the %s baseline install.\n' \
+        "$BASELINE_TAG"
+      ;;
+    *) ;;
+  esac
+
+  if ((!read_ok)); then
+    printf 'what this device carries could NOT be read. List the packages with:\n  %s\n' "$query"
+  elif [[ -z "$installed" ]]; then
+    printf 'this device has NO TensorPlate installed: dpkg lists no tensorplate* package as installed, %s aside.\n' \
+      "$APT_SOURCE_PACKAGE"
+  else
+    printf 'dpkg lists these TensorPlate packages as present: %s.\n' "$installed"
+  fi
+
+  if [[ -n "$STRANDED_INSTALL_LOG" ]]; then
+    printf 'the %s installer was started and its install was not accepted; its output is in %s. It can fail after installing every package, so what it left is what dpkg lists above.\n' \
+      "$BASELINE_TAG" "$STRANDED_INSTALL_LOG"
+  else
+    printf 'the %s installer was not run.\n' "$BASELINE_TAG"
+  fi
+
+  case "$STRANDED_WINDOW" in
+    upgrade)
+      if ((STRANDED_STATE_CLEARED)); then
+        printf 'the clearing step deleted %s with the packages, durable state included.\n' \
+          "${CLEARED_STATE_DIRS[*]}"
+      else
+        printf 'the clearing step stopped before deleting %s.\n' "${CLEARED_STATE_DIRS[*]}"
+      fi
+      ;;
+    rollback-stopped)
+      printf 'no package was removed, so /etc/tensorplate is as the candidate left it.\n'
+      ;;
+    rollback)
+      case "$STRANDED_CONFFILES" in
+        kept) printf '/etc/tensorplate conffiles are kept.\n' ;;
+        "lost "*)
+          printf 'the removal did NOT keep the /etc/tensorplate conffiles of: %s.\n' \
+            "${STRANDED_CONFFILES#lost }"
+          ;;
+        *) printf 'whether the removal kept the /etc/tensorplate conffiles was NOT read.\n' ;;
+      esac
+      ;;
+    *) ;;
+  esac
+  if ((STRANDED_STATE_ASIDE)); then
+    printf 'durable state is at %s.\n' "$STATE_ASIDE_DIR"
+  elif [[ "$STRANDED_WINDOW" != upgrade ]]; then
+    printf 'durable state is still at %s.\n' "$STATE_DIR"
+  fi
+
+  if [[ "$STRANDED_WINDOW" == rollback-stopped ]]; then
+    printf 'if the candidate is still installed, return to it with:\n'
+    if ((STRANDED_STATE_ASIDE)); then
+      printf '  sudo mv -T %s %s\n' "$STATE_ASIDE_DIR" "$STATE_DIR"
+    fi
+    printf '  sudo systemctl start %s %s\n' "$AGENT_UNIT" "$OBSERVABILITY_UNIT"
+  elif ((!read_ok)); then
+    printf 'once that listing shows no newer TensorPlate package installed, install %s by hand with:\n' \
+      "$BASELINE_TAG"
+    printf '  sudo bash %s/install.sh --local-artifacts %s --yes\n' "$BASELINE_DIR" "$BASELINE_DIR"
+  elif [[ -n "$installed" && -z "$STRANDED_INSTALL_LOG" ]]; then
+    # Nothing the baseline installer did, so these are the candidate's.
+    printf 'while a newer package is installed, installing %s is a downgrade apt-get refuses. Remove those packages first, then install it by hand with:\n' \
+      "$BASELINE_TAG"
+    printf '  sudo bash %s/install.sh --local-artifacts %s --yes\n' "$BASELINE_DIR" "$BASELINE_DIR"
+  else
+    printf 'install %s by hand with:\n  sudo bash %s/install.sh --local-artifacts %s --yes\n' \
+      "$BASELINE_TAG" "$BASELINE_DIR" "$BASELINE_DIR"
+  fi
+  printf 'or re-run this harness, which installs the candidate from scratch -- but its install stage deletes %s first, including any %s. Copy anything you want to keep elsewhere before re-running.\n' \
+    "${CLEARED_STATE_DIRS[*]}" "$STATE_ASIDE_DIR"
+}
+
+# Printed when the run ends inside one of the windows above, including
+# from a signal, and filed beside the stage logs first, so the recovery
+# instructions survive a terminal that is gone -- which is how an SSH
+# session that drops mid-run ends it. Never fails: the EXIT handler that
+# calls it still has the report to write.
 report_stranded_device() {
   [[ -n "$STRANDED_WINDOW" ]] || return 0
-  # What the device carries. Only the empty value means the listing was
-  # read and named nothing: `unknown` is a run that never got that far,
-  # and anything else is what it found still installed.
-  case "$STRANDED_WINDOW:$STRANDED_PACKAGES_LEFT" in
-    upgrade:)
-      printf 'the upgrade cleared the candidate and the %s install did not complete.\n' \
-        "$BASELINE_TAG" >&2
-      printf 'this device has NO TensorPlate installed, and the clearing step deleted %s with the packages, durable state included.\n' \
-        "${CLEARED_STATE_DIRS[*]}" >&2
-      ;;
-    upgrade:*)
-      printf 'the upgrade was clearing the candidate when it stopped, and the %s install did not complete.\n' \
-        "$BASELINE_TAG" >&2
-      printf 'what this device still carries was NOT read, and the clearing step deletes %s. List the packages with:\n  dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\\n'"'"' '"'"'tensorplate*'"'"'\n' \
-        "${CLEARED_STATE_DIRS[*]}" >&2
-      ;;
-    *:)
-      printf 'the rollback removed the candidate and the %s install did not complete.\n' \
-        "$BASELINE_TAG" >&2
-      printf 'this device has NO TensorPlate installed. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
-        "$STATE_ASIDE_DIR" >&2
-      ;;
-    *:unknown)
-      printf 'the rollback was removing the candidate when it stopped, and the %s install did not complete.\n' \
-        "$BASELINE_TAG" >&2
-      printf 'what this device still carries was NOT read. /etc/tensorplate conffiles are kept and durable state is at %s. List the packages with:\n  dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\\n'"'"' '"'"'tensorplate*'"'"'\n' \
-        "$STATE_ASIDE_DIR" >&2
-      ;;
-    *)
-      printf 'the rollback removed the candidate and the %s install did not complete.\n' \
-        "$BASELINE_TAG" >&2
-      printf 'these TensorPlate packages are STILL INSTALLED: %s. /etc/tensorplate conffiles are kept and durable state is at %s.\n' \
-        "$STRANDED_PACKAGES_LEFT" "$STATE_ASIDE_DIR" >&2
-      printf 'the %s install was not attempted: while a newer package is installed it is a downgrade apt-get refuses. Remove them first.\n' \
-        "$BASELINE_TAG" >&2
-      ;;
-  esac
-  printf 'recover it by hand with:\n  sudo bash %s/install.sh --local-artifacts %s --yes\n' \
-    "$BASELINE_DIR" "$BASELINE_DIR" >&2
-  printf 'or re-run this harness, which installs the candidate from scratch -- but its install stage deletes %s first, including any %s. Copy anything you want to keep elsewhere before re-running.\n' \
-    "${CLEARED_STATE_DIRS[*]}" "$STATE_ASIDE_DIR" >&2
+  local report="${EVIDENCE_DIR}/stranded-device.txt"
+  if stranded_device_text >"$report"; then
+    cat "$report" >&2 || true
+  else
+    stranded_device_text >&2 || true
+  fi
+  return 0
 }
 
 stage_rollback() {
-  local remove=() listing pkg status
+  local remove=() listing pkg status apt_source_before=absent
   # What the upgrade left: the candidate serving the deployment the
   # baseline created. Read before anything is stopped, so a device that
   # is not in that state is refused rather than half rolled back.
@@ -1744,8 +1956,11 @@ import json, sys
 
 path, expected = sys.argv[1:]
 active = ((json.load(open(path, encoding="utf-8"))["payload"].get("agent") or {}).get("active")) or {}
-assert active.get("deployment_id") == expected, \
-    f"the rollback must start from {expected}, which the upgrade left active; status reports {active.get('deployment_id')}"
+if active.get("deployment_id") != expected:
+    raise SystemExit(
+        f"the rollback must start from {expected}, which the upgrade left active; "
+        f"status reports {active.get('deployment_id')}"
+    )
 print(f"rolling back from the candidate serving {expected}")
 PY
 
@@ -1758,8 +1973,15 @@ PY
   step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
 
   note "rolling back to ${BASELINE_TAG} by the documented procedure"
+  # From the stop on, the candidate serves nothing until the rollback
+  # completes, so an interrupted run says so. The upgrade's installs have
+  # already set STRANDED_INSTALL_LOG; nothing in this window has started
+  # the baseline installer yet.
+  STRANDED_WINDOW=rollback-stopped
+  STRANDED_INSTALL_LOG=""
   step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+  STRANDED_STATE_ASIDE=1
 
   # Every installed TensorPlate package, not a fixed list, and including
   # tensorplate-common: every runtime package Pre-Depends on common at
@@ -1767,33 +1989,35 @@ PY
   # turns the baseline install into a downgrade, which the apt-get -y
   # inside install.sh refuses without --allow-downgrades. The apt
   # channel's bootstrap package is excluded, as everywhere else in this
-  # run, and a package already reduced to its conffiles has nothing left
-  # to remove.
-  listing="$(installed_tensorplate_packages)" || return
+  # run, and a package already reduced to its conffiles, or that dpkg
+  # knows but never installed, has nothing left to remove. The listing is
+  # the unfiltered one, so it also says what the bootstrap package was
+  # before the removal, which check_removed holds the removal to.
+  listing="$(installed_tensorplate_packages all)" || return
+  printf '%s\n' "$listing" >"${EVIDENCE_DIR}/packages-before-remove.txt" || return
   while read -r pkg status; do
-    if [[ -n "$pkg" && "$status" != "config-files" ]]; then
+    if [[ "$pkg" == "$APT_SOURCE_PACKAGE" ]]; then
+      apt_source_before="$status"
+    elif [[ -n "$pkg" && "$status" != not-installed && "$status" != config-files ]]; then
       remove+=("$pkg")
     fi
   done <<<"$listing"
+  # Entered before the command runs: a removal that fails part way
+  # through leaves the device in this window just as a completed one
+  # does.
+  STRANDED_WINDOW=rollback
   if ((${#remove[@]} > 0)); then
-    # Set before the command runs: a removal that fails part way through
-    # leaves the device in this window just as a completed one does, and
-    # what it left behind is then unread rather than nothing.
-    STRANDED_WINDOW=rollback
-    STRANDED_PACKAGES_LEFT=unknown
     step "remove ${remove[*]}" \
       sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "${remove[@]}" || return
   fi
-  # Reads the listing, so from here the report names what is left rather
-  # than asserting the device is bare.
-  check_removed || return
+  check_removed "$apt_source_before" || return
 
   note "installing the baseline fresh through its own installer"
-  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" || return
+  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" "${EVIDENCE_DIR}/install-rollback.txt" || return
   STRANDED_WINDOW=""
   step "services ready after the rollback" await_services_ready || return
-  step "baseline versions" \
-    check_installed_versions "$BASELINE_DIR" "${EVIDENCE_DIR}/packages-after-rollback.txt" || return
+  step "baseline versions" check_installed_versions \
+    "${EVIDENCE_DIR}/packages-after-rollback.txt" "$BASELINE_DIR" "$BASELINE_TAG" || return
   check_operator_config_kept "the rollback" || return
   step "the set-aside state is preserved" sudo test -f "${STATE_ASIDE_DIR}/state.json" || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
@@ -1808,18 +2032,22 @@ PY
 import json, sys
 
 agent = json.load(open(sys.argv[1], encoding="utf-8"))["payload"].get("agent") or {}
-assert agent.get("available") is True, f"the agent is not available after the rollback: {agent}"
+if agent.get("available") is not True:
+    raise SystemExit(f"the agent is not available after the rollback: {agent}")
 for key in ("active", "previous_active"):
-    assert key in agent, f"status after the rollback does not report {key}"
-    assert agent[key] is None, \
-        f"the rolled-back agent reports {key} {agent[key]}; it loaded state that was set aside"
+    if key not in agent:
+        raise SystemExit(f"status after the rollback does not report {key}")
+    if agent[key] is not None:
+        raise SystemExit(
+            f"the rolled-back agent reports {key} {agent[key]}; it loaded state that was set aside"
+        )
 print("the rolled-back agent answers with no active or previous deployment")
 PY
 
   deploy_bundle "${EVIDENCE_DIR}/rollback-deploy.json" "$ROLLBACK_DEPLOYMENT_ID" || return
-  step "rolled-back worker round trip" check_trt_round_trip \
+  step "rolled-back worker round trip" check_deployment_round_trip "$ROLLBACK_DEPLOYMENT_ID" \
     "${EVIDENCE_DIR}/status-after-redeploy.json" "${EVIDENCE_DIR}/rollback-result.json" \
-    "$ROLLBACK_DEPLOYMENT_ID" "${EVIDENCE_DIR}/rollback-deploy.json" || return
+    "${EVIDENCE_DIR}/rollback-deploy.json" || return
   pass "rolled back to ${BASELINE_TAG}; operator edit kept; state set aside and not loaded; a fresh deployment answered"
 }
 
