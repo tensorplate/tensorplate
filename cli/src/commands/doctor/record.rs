@@ -63,7 +63,7 @@ pub struct RecordOutcome {
     pub notes: Vec<String>,
 }
 
-pub fn run<W: Write>(renderer: Renderer, out: &mut W, dir: &Path) -> CliResult<()> {
+pub fn run<W: Write>(renderer: &Renderer, out: &mut W, dir: &Path) -> CliResult<()> {
     let host_sources = SystemHostProbe::new()
         .sources()
         .map_err(|e| CliError::Config(format!("host sources unreadable: {e}")))?;

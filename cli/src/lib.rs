@@ -96,7 +96,31 @@ where
     E: Write,
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
-    let renderer = Renderer::new(effective_output_mode(&parsed.global, &cfg));
+    run_with_warnings(parsed, cfg, Vec::new(), client_factory, stdout, stderr)
+}
+
+/// [`run`] with process-level warnings — a packaged config that was found
+/// and not used — stamped into every JSON envelope the command writes.
+/// The binary passes what config resolution reported; nothing else needs
+/// them.
+///
+/// # Errors
+///
+/// See [`run`].
+pub fn run_with_warnings<O, E, F>(
+    parsed: ParsedArgs,
+    cfg: CliConfig,
+    warnings: Vec<String>,
+    client_factory: F,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> CliResult<()>
+where
+    O: Write,
+    E: Write,
+    F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
+{
+    let renderer = Renderer::with_warnings(effective_output_mode(&parsed.global, &cfg), warnings);
 
     // Device registry management is always local, independent of any selected
     // device, and never resolves a transport profile or opens a client.

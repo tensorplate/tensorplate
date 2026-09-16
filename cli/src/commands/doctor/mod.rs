@@ -56,7 +56,7 @@ pub fn run<W: Write, E: Write>(
     _stderr: &mut E,
 ) -> CliResult<()> {
     if let Some(dir) = &args.record {
-        return record::run(*renderer, out, dir);
+        return record::run(renderer, out, dir);
     }
     let mut findings = Vec::<Finding>::new();
     findings.push(probe_cli_version());

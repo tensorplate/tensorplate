@@ -28,20 +28,49 @@ use crate::error::{CliError, CliResult, ExitCode};
 pub const CLI_OUTPUT_SCHEMA_VERSION: &str = "0.1";
 
 /// Coarse renderer used by every subcommand.
-#[derive(Clone, Copy, Debug)]
+///
+/// `warnings` carries process-level notes that are not tied to any one
+/// command — today, a packaged config that was found and not used. They
+/// are rendered into the JSON envelope rather than written to stderr,
+/// because a `--output json` caller parses stderr as a single envelope
+/// document and a bare line ahead of it is a syntax error. Without them
+/// the envelope says nothing at all about a config with no effect, which
+/// is the state issue #203 was reported from.
+#[derive(Clone, Debug)]
 pub struct Renderer {
     mode: OutputMode,
+    warnings: Vec<String>,
 }
 
 impl Renderer {
     #[must_use]
     pub fn new(mode: OutputMode) -> Self {
-        Self { mode }
+        Self {
+            mode,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A renderer that stamps `warnings` into every envelope it writes.
+    #[must_use]
+    pub fn with_warnings(mode: OutputMode, warnings: Vec<String>) -> Self {
+        Self { mode, warnings }
     }
 
     #[must_use]
-    pub fn mode(self) -> OutputMode {
+    pub fn mode(&self) -> OutputMode {
         self.mode
+    }
+
+    /// Add `warnings` to `envelope` when there are any. Absent, not empty,
+    /// when there are none: the field is optional in
+    /// `protocol/schemas/cli_output.json` and an empty array would be a
+    /// new thing for every existing caller to skip past.
+    fn stamp_warnings(&self, envelope: &mut Value) {
+        if self.warnings.is_empty() {
+            return;
+        }
+        envelope["warnings"] = json!(self.warnings);
     }
 
     /// Render a successful command result.
@@ -54,7 +83,7 @@ impl Renderer {
     ///
     /// Returns [`CliError::Io`] when the writer fails.
     pub fn ok<W: Write + ?Sized>(
-        self,
+        &self,
         out: &mut W,
         command: &'static str,
         human_block: &str,
@@ -67,7 +96,7 @@ impl Renderer {
                 writeln!(out, "{human_block}")?;
             }
             OutputMode::Json => {
-                let envelope = json!({
+                let mut envelope = json!({
                     "schema_version": CLI_OUTPUT_SCHEMA_VERSION,
                     "command": command,
                     "status": "ok",
@@ -75,6 +104,7 @@ impl Renderer {
                     "transaction_id": transaction_id,
                     "payload": payload,
                 });
+                self.stamp_warnings(&mut envelope);
                 writeln!(out, "{}", serde_json::to_string_pretty(&envelope)?)?;
             }
         }
@@ -90,7 +120,7 @@ impl Renderer {
     /// Returns [`CliError::Io`] only when the writer fails; the error
     /// argument itself is rendered, not re-raised.
     pub fn render_error<W: Write + ?Sized>(
-        self,
+        &self,
         err: &mut W,
         command: &'static str,
         error: &CliError,
@@ -116,12 +146,13 @@ impl Renderer {
                 if let Some(ctx) = error.context() {
                     error_block["context"] = json!(ctx);
                 }
-                let envelope = json!({
+                let mut envelope = json!({
                     "schema_version": CLI_OUTPUT_SCHEMA_VERSION,
                     "command": command,
                     "status": status_for(error),
                     "error": error_block,
                 });
+                self.stamp_warnings(&mut envelope);
                 writeln!(err, "{}", serde_json::to_string_pretty(&envelope)?)?;
             }
         }
@@ -135,7 +166,7 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns [`CliError::Io`] when the writer fails.
-    pub fn info<W: Write + ?Sized>(self, err: &mut W, line: &str) -> CliResult<()> {
+    pub fn info<W: Write + ?Sized>(&self, err: &mut W, line: &str) -> CliResult<()> {
         if matches!(self.mode, OutputMode::Human) {
             writeln!(err, "{line}")?;
         }
@@ -238,6 +269,54 @@ mod tests {
             .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("agent: ready"));
+    }
+
+    /// A packaged config that was found and not used is dropped from
+    /// stderr in JSON mode, so the envelope is the only place a scripted
+    /// caller can learn the install is running on the built-in defaults.
+    /// That is the state issue #203 was reported from, and it must not be
+    /// silent on the path every validation harness uses.
+    #[test]
+    fn a_config_warning_reaches_the_json_envelope_on_both_paths() {
+        let warning =
+            "tensorplate: cannot read the packaged cli config `/etc/tensorplate/cli.json`";
+        let r = Renderer::with_warnings(OutputMode::Json, vec![warning.into()]);
+
+        let mut out = render_buf();
+        r.ok(&mut out, "doctor", "human", json!({}), None, None)
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(parsed["warnings"][0], warning);
+
+        let mut err = render_buf();
+        r.render_error(&mut err, "logs", &CliError::Busy { hint: None })
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&String::from_utf8(err).unwrap()).unwrap();
+        assert_eq!(parsed["warnings"][0], warning);
+    }
+
+    /// Absent, not an empty array: `warnings` is optional in the schema
+    /// and every existing caller predates it.
+    #[test]
+    fn an_envelope_without_warnings_omits_the_field() {
+        let r = Renderer::new(OutputMode::Json);
+        let mut out = render_buf();
+        r.ok(&mut out, "status", "human", json!({}), None, None)
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert!(parsed.get("warnings").is_none(), "{parsed}");
+    }
+
+    /// Human output already carries the warning on stderr, from the
+    /// binary. Repeating it in the human block would double it.
+    #[test]
+    fn human_output_does_not_repeat_the_warning() {
+        let r = Renderer::with_warnings(OutputMode::Human, vec!["packaged config unused".into()]);
+        let mut out = render_buf();
+        r.ok(&mut out, "status", "agent: ready", json!({}), None, None)
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text, "agent: ready\n");
     }
 
     #[test]

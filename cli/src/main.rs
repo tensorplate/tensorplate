@@ -28,10 +28,11 @@ fn main() -> ExitCode {
             // A device-routed remote command already forwarded its own output;
             // mirror its exit code without rendering a second error.
             if !err.error.already_reported() {
-                let renderer = Renderer::new(err.output_mode);
                 // Best-effort: ignore renderer IO errors. If stderr is closed
                 // the OS will signal SIGPIPE before this returns anyway.
-                let _ = renderer.render_error(&mut stderr_lock, err.command, &err.error);
+                let _ = err
+                    .renderer
+                    .render_error(&mut stderr_lock, err.command, &err.error);
             }
             err.error.exit_code().as_u8()
         }
@@ -55,7 +56,11 @@ fn command_of(argv: &[String]) -> &'static str {
 #[derive(Debug)]
 struct DriveError {
     error: CliError,
-    output_mode: OutputMode,
+    /// The renderer to report this failure with. Carries the output mode
+    /// and any process-level warning, so a `--output json` caller sees a
+    /// packaged config that was found and not used in the error envelope
+    /// too, not only on a run that succeeded.
+    renderer: Renderer,
     command: &'static str,
 }
 
@@ -63,19 +68,23 @@ fn drive<O: Write, E: Write>(
     argv: &[String],
     stdout: &mut O,
     stderr: &mut E,
-) -> Result<(), DriveError> {
+) -> Result<(), Box<DriveError>> {
     let fallback_mode = explicit_output_mode(argv).unwrap_or(OutputMode::Human);
-    let outcome = args::parse(argv).map_err(|error| DriveError {
-        error,
-        output_mode: fallback_mode,
-        command: command_of(argv),
+    let outcome = args::parse(argv).map_err(|error| {
+        Box::new(DriveError {
+            error,
+            renderer: Renderer::new(fallback_mode),
+            command: command_of(argv),
+        })
     })?;
     let parsed = match outcome {
         ParseOutcome::Help => {
-            writeln!(stdout, "{}", args::usage_text()).map_err(|error| DriveError {
-                error: CliError::from(error),
-                output_mode: fallback_mode,
-                command: "tensorplate",
+            writeln!(stdout, "{}", args::usage_text()).map_err(|error| {
+                Box::new(DriveError {
+                    error: CliError::from(error),
+                    renderer: Renderer::new(fallback_mode),
+                    command: "tensorplate",
+                })
             })?;
             return Ok(());
         }
@@ -86,51 +95,62 @@ fn drive<O: Write, E: Write>(
                 tensorplate_cli::version(),
                 tensorplate_protocol::PROTOCOL_VERSION
             )
-            .map_err(|error| DriveError {
-                error: CliError::from(error),
-                output_mode: fallback_mode,
-                command: "version",
+            .map_err(|error| {
+                Box::new(DriveError {
+                    error: CliError::from(error),
+                    renderer: Renderer::new(fallback_mode),
+                    command: "version",
+                })
             })?;
             return Ok(());
         }
         ParseOutcome::Run(parsed) => parsed,
     };
     let command = command_label(&parsed.subcommand);
-    let resolved =
-        CliConfig::resolve(parsed.global.config_path.as_deref()).map_err(|error| DriveError {
+    let resolved = CliConfig::resolve(parsed.global.config_path.as_deref()).map_err(|error| {
+        Box::new(DriveError {
             error,
-            output_mode: fallback_mode,
+            renderer: Renderer::new(fallback_mode),
             command,
-        })?;
+        })
+    })?;
     let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
+    let warnings: Vec<String> = resolved.warning.clone().into_iter().collect();
+    let renderer = Renderer::with_warnings(output_mode, warnings.clone());
     report_config_warning(output_mode, stderr, resolved.warning.as_deref());
     if let Some(error) = blocking_install_fault(&resolved.source, &parsed.subcommand) {
-        return Err(DriveError {
+        return Err(Box::new(DriveError {
             error,
-            output_mode,
+            renderer,
             command,
-        });
+        }));
     }
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
     };
-    tensorplate_cli::run(parsed, cfg, factory, stdout, stderr).map_err(|error| DriveError {
-        error,
-        output_mode,
-        command,
-    })
+    tensorplate_cli::run_with_warnings(parsed, cfg, warnings, factory, stdout, stderr).map_err(
+        |error| {
+            Box::new(DriveError {
+                error,
+                renderer,
+                command,
+            })
+        },
+    )
 }
 
 /// Surface a config file that was found but not used, so a packaged
 /// install whose settings are not in effect never stays invisible.
 ///
-/// Human mode only. In JSON mode stderr carries the error envelope and
-/// nothing else — [`Renderer::render_error`] writes exactly one document
-/// there — so a bare line ahead of it would hand every `--output json`
-/// caller that parses stderr a syntax error instead of a typed failure.
-/// [`Renderer::info`] is the rule every subcommand already follows for
-/// stderr notes.
+/// This is the human channel only. In JSON mode stderr carries the error
+/// envelope and nothing else — [`Renderer::render_error`] writes exactly
+/// one document there — so a bare line ahead of it would hand every
+/// `--output json` caller that parses stderr a syntax error instead of a
+/// typed failure. That caller is not left without the warning: `drive`
+/// builds its renderer with [`Renderer::with_warnings`], which stamps the
+/// same text into the envelope's `warnings` array on both the ok and the
+/// error path.
 fn report_config_warning<E: Write>(mode: OutputMode, stderr: &mut E, warning: Option<&str>) {
     let Some(warning) = warning else {
         return;

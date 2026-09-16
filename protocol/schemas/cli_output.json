@@ -18,6 +18,11 @@
     },
     "correlation_id": {"type": "string"},
     "transaction_id": {"type": "string"},
+    "warnings": {
+      "type": "array",
+      "description": "Process-level notes that are not tied to the command's result: today, a packaged CLI config that was found and not used, so a caller can tell an install running on the packaged profile from one running on the built-in defaults. Absent when there are none; never a substitute for `error`.",
+      "items": {"type": "string"}
+    },
     "error": {
       "type": "object",
       "additionalProperties": false,
