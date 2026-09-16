@@ -1233,6 +1233,25 @@ enum ServingCudaNeed {
     NoCudaPath,
 }
 
+impl ServingCudaNeed {
+    /// Whether the python_pytorch sidecar's own PyTorch needs a system
+    /// CUDA runtime on this artifact set's architecture.
+    ///
+    /// Not the same question as what the *worker* needs, and not the
+    /// same answer. On x86_64 the PyPI CUDA wheel vendors its runtime
+    /// libraries under `nvidia/`, so the sidecar runs with no system
+    /// toolkit. On aarch64 it does not: `docs/install/python-pytorch-backend.md`
+    /// has the Jetson operator `apt install` `cuda-libraries-12-6` and
+    /// friends alongside NVIDIA's Jetson wheel, and says that without
+    /// them `import torch` fails on a missing CUDA shared library.
+    /// `cuda-libraries-12-6` is what puts `libcudart.so.12` under
+    /// `/usr/local/cuda/targets/aarch64-linux/lib`, which is already in
+    /// `CUDA_TOOLKIT_LIB_DIRS`.
+    const fn sidecar_needs_system_cuda(self) -> bool {
+        matches!(self, Self::TensorrtLinked)
+    }
+}
+
 /// Which serving build is installed, in the only terms packaging
 /// guarantees.
 ///
@@ -1353,6 +1372,12 @@ fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaCo
 const NO_DRIVER_HINT: &str =
     "`accelerator_facts` and `platform_row` report whether this host has an accelerator at all";
 
+/// The hint a Jetson carrying the sidecar and no JetPack CUDA runtime
+/// carries. Phrased for the sidecar, not for the serving worker: on
+/// this host the worker is not installed, and the requirement comes
+/// from the wheel the operator is about to run.
+const JETSON_SIDECAR_CUDA_HINT: &str = "NVIDIA's Jetson PyTorch wheel links the JetPack CUDA runtime: install the apt packages listed in docs/install/python-pytorch-backend.md so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present";
+
 /// The hint a host carrying the driver's user-mode library and no
 /// kernel interface carries. The library is real and worth naming, but
 /// what it proves is that the package is installed, and the operator
@@ -1423,14 +1448,14 @@ fn cuda_runtime_finding(
                     .into(),
             ),
         ),
-        // The build decides what the *worker* needs, and the worker is
-        // not here. `tensorplate-backend-python-pytorch` only
-        // `Recommends` the serving package, so the sidecar can be
-        // installed alone; it is then the one CUDA consumer on the
-        // host, and its runtime comes from its own wheel on every
-        // build. Asking such a host for the toolkit an absent
-        // TensorRT-linked worker would have wanted states a
-        // requirement of software that is not installed.
+        // `tensorplate-backend-python-pytorch` only `Recommends` the
+        // serving package, so the sidecar can be installed alone; it is
+        // then the one CUDA consumer on the host. What the absent
+        // TensorRT-linked worker would have wanted is not asked for
+        // here -- that would state a requirement of software that is
+        // not installed -- but the sidecar's own wheel has a
+        // requirement of its own, and on aarch64 it is the system CUDA
+        // runtime.
         _ if !installed.serving_worker => {
             let consumer = "no serving worker is installed (see `serving_binary_installed`), so the installed python_pytorch sidecar is the only CUDA consumer here";
             if !found.driver.is_loaded() {
@@ -1441,13 +1466,33 @@ fn cuda_runtime_finding(
                     Some(driver_hint.into()),
                 );
             }
-            Finding::ok(
+            if !need.sidecar_needs_system_cuda() {
+                return Finding::ok(
+                    FindingId::CudaRuntime,
+                    Severity::Info,
+                    format!(
+                        "{driver}; {toolkit}; {consumer}, and a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+                    ),
+                    Some(PATHS_ONLY_HINT.into()),
+                );
+            }
+            if found.toolkit.is_some() {
+                return Finding::ok(
+                    FindingId::CudaRuntime,
+                    Severity::Info,
+                    format!(
+                        "{driver}; {toolkit}; {consumer}, and NVIDIA's Jetson PyTorch wheel links that runtime"
+                    ),
+                    Some(PATHS_ONLY_HINT.into()),
+                );
+            }
+            Finding::warn(
                 FindingId::CudaRuntime,
-                Severity::Info,
+                Severity::Warning,
                 format!(
-                    "{driver}; {toolkit}; {consumer}, and a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+                    "{driver}; {toolkit}; {consumer}, and NVIDIA's Jetson PyTorch wheel links the system CUDA runtime, which `import torch` cannot load without"
                 ),
-                Some(PATHS_ONLY_HINT.into()),
+                Some(JETSON_SIDECAR_CUDA_HINT.into()),
             )
         }
         ServingCudaNeed::TensorrtLinked => {
@@ -2293,15 +2338,14 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         // then the one CUDA consumer on the host, and skipping the
         // finding would state that nothing here consumes a CUDA runtime
         // while the accelerator path of the install is sitting on disk.
+        // The amd64 build: its PyPI CUDA wheel vendors the runtime.
         let td = TempDir::new().unwrap();
         stage_file(td.path(), "/proc/driver/nvidia/version");
         stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
         let opts = cuda_opts(td.path());
 
         let cuda = cuda_runtime_finding(
-            // The TensorRT-linked build, to pin that the absent worker's
-            // build no longer decides: no toolkit is asked for here.
-            ServingCudaNeed::TensorrtLinked,
+            ServingCudaNeed::SidecarRuntime,
             probe_installed_cuda_consumers(&opts),
             &probe_cuda_artifacts(&opts),
         );
@@ -2314,12 +2358,85 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "the installed sidecar must be named as the consumer: {}",
             cuda.message
         );
-        assert!(
-            !cuda.message.contains("JetPack") && cuda.hint != Some("install the JetPack CUDA runtime so `/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so*` is present".to_string()),
-            "no worker is installed that could need JetPack: {} / {:?}",
-            cuda.message,
-            cuda.hint
+        assert_eq!(cuda.hint.as_deref(), Some(PATHS_ONLY_HINT));
+    }
+
+    #[test]
+    fn a_jetson_sidecar_without_the_jetpack_cuda_runtime_is_a_warning() {
+        // NVIDIA's Jetson PyTorch wheel links the JetPack CUDA runtime:
+        // docs/install/python-pytorch-backend.md has the operator apt
+        // install `cuda-libraries-12-6` and friends beside it, and says
+        // `import torch` fails on a missing CUDA shared library without
+        // them. Calling this host fine would be the "installed build
+        // cannot run its accelerator path" error on arm64.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so");
+        stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+        let opts = cuda_opts(td.path());
+
+        let cuda = cuda_runtime_finding(
+            ServingCudaNeed::TensorrtLinked,
+            probe_installed_cuda_consumers(&opts),
+            &probe_cuda_artifacts(&opts),
         );
+
+        assert_eq!(cuda.status_label(), "warning", "{}", cuda.message);
+        assert_eq!(cuda.severity_label(), "warning");
+        assert!(
+            cuda.message
+                .contains("the installed python_pytorch sidecar is the only CUDA consumer here"),
+            "the sidecar is what needs the runtime here: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda
+                .message
+                .contains("serving worker carries the TensorRT adapter"),
+            "no worker is installed whose adapter could need anything: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(JETSON_SIDECAR_CUDA_HINT));
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn a_jetson_sidecar_with_the_jetpack_cuda_runtime_is_ok() {
+        // The same host once the apt list is installed. The finding must
+        // clear, or the hint it gives leads nowhere.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so");
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12",
+        );
+        stage_file(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+        let opts = cuda_opts(td.path());
+
+        let cuda = cuda_runtime_finding(
+            ServingCudaNeed::TensorrtLinked,
+            probe_installed_cuda_consumers(&opts),
+            &probe_cuda_artifacts(&opts),
+        );
+
+        assert_eq!(cuda.status_label(), "ok", "{}", cuda.message);
+        assert!(
+            cuda.message
+                .contains("/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12"),
+            "the runtime that satisfies the wheel must be named: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(PATHS_ONLY_HINT));
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn what_the_sidecar_wheel_needs_is_stated_per_artifact_set() {
+        // Stated rather than derived, so the mapping is pinned: the
+        // aarch64 artifact set is the one whose PyTorch wheel links the
+        // system CUDA runtime.
+        assert!(ServingCudaNeed::TensorrtLinked.sidecar_needs_system_cuda());
+        assert!(!ServingCudaNeed::SidecarRuntime.sidecar_needs_system_cuda());
+        assert!(!ServingCudaNeed::NoCudaPath.sidecar_needs_system_cuda());
     }
 
     #[test]
