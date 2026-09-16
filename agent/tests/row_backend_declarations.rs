@@ -238,6 +238,49 @@ fn no_x86_row_declares_tensorrt() {
     );
 }
 
+/// The premise the whole chain rests on, read from the files that carry
+/// it rather than from a comment.
+///
+/// The guard above compares a row against the shipped agent config; the
+/// config is right only because the build behind it compiles no TensorRT
+/// adapter. Nothing pinned that last link. `test/release/
+/// test_build_configuration.py` derives the amd64 configure arguments
+/// from the profile instead of asserting them, and checks only that the
+/// adapter is never asked for without its SDK — so flipping the flag and
+/// leaving the config and the rows behind fails nothing today. The arm64
+/// `ON` is pinned there, in `ARM64_SNAPSHOT_ARGS`; these two are not.
+///
+/// Turning either of these builds on is a legitimate change. It is not a
+/// change that can be made alone, and this is where that is said.
+#[test]
+fn the_builds_behind_the_python_pytorch_only_configs_compile_no_tensorrt() {
+    for (build, config) in [
+        (
+            "tools/release/amd64-build-profile.sh",
+            "packaging/conf/agent.amd64.json",
+        ),
+        (
+            "packaging/homebrew/Formula/tensorplate-serving.rb",
+            "packaging/homebrew/conf/agent.json.in",
+        ),
+    ] {
+        let path = repo_path(build);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            raw.contains("-DTP_ENABLE_TENSORRT=OFF"),
+            "{build} builds the serving worker for a platform whose agent config \
+             ({config}) advertises no `tensorrt`, and whose rows therefore declare no \
+             `tensorrt` package set. If it now compiles the adapter, both are what have \
+             to change with it"
+        );
+        assert!(
+            !available_backends(config).contains("tensorrt"),
+            "{config} advertises `tensorrt` while {build} compiles no adapter"
+        );
+    }
+}
+
 /// The amd64 config is installed only by the dh-exec filter, so nothing
 /// else parses it. Its path is read here rather than assumed.
 #[test]
