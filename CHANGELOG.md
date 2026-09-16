@@ -279,10 +279,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   adapter, so no toolkit there is a `warning` with an install hint, while
   the amd64 worker has no such adapter and its python_pytorch sidecar
   brings its own CUDA runtime in the PyTorch wheel, so no system toolkit
-  there is `ok`. A host with neither driver nor toolkit is `missing` and
-  names the absent driver; a platform whose build has no CUDA path at all
-  is `skipped`. The finding still never fails `doctor`, so no install and
-  no lifecycle harness changes outcome.
+  there is `ok`. The driver governs the status on its own: `libcuda` is
+  the driver package's library and every CUDA consumer loads through it,
+  so a host with no driver is never `ok` however many toolkit files it
+  carries — `missing` on amd64 and `warning` on the TensorRT-linked
+  build, each naming the absent driver. The message states only what is
+  installed here: the python_pytorch sidecar is named as present or
+  absent rather than assumed, and where no serving worker is installed
+  at all — a `--cli-only` install — the finding is `skipped`, because
+  nothing on the host consumes a CUDA runtime. A platform whose build
+  has no CUDA path at all is `skipped` too. The finding still never
+  fails `doctor`, so no install and no lifecycle harness changes
+  outcome. `cuda_runtime` is the one finding id whose severity range has
+  widened since v0.1.0; the exception is recorded against the contract
+  note in `cli/src/commands/doctor/finding.rs`.
 
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`

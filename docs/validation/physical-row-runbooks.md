@@ -266,8 +266,9 @@ Prerequisites:
    config files to be ok. `host_os`, `accelerator_facts`,
    `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted. On
    this row `cuda_runtime` is `warning` when no system CUDA toolkit is
-   installed — the arm64 worker carries the TensorRT adapter and cannot
-   load it without the CUDA runtime — so a run whose recorded value is
+   installed, and also when no NVIDIA driver is found at the known paths
+   — the arm64 worker carries the TensorRT adapter and cannot load it
+   without both — so a run whose recorded value is
    not `ok` on a device that is about to deploy a TensorRT bundle is
    worth reading before the deploy-smoke stage fails for the same
    reason. It is not a failing finding and does not stop the stage.
