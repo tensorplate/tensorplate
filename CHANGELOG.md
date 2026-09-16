@@ -273,8 +273,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   under — `libcuda` is the driver's own library and no longer counts as a
   toolkit, and a versioned `libcudart.so.<soname>` does count, so a host
   carrying only the CUDA runtime package is no longer told it carries
-  nothing. The verdict is taken against the installed build, read from
-  the CLI's own build target because the CLI and the worker ship in one
+  nothing. Each list falls back to a scan of its own library
+  directories for a versioned soname, so a driver is still found where
+  the exact names are absent: `/proc/driver/nvidia/version` comes from
+  `nvidia.ko`, which L4T does not load, and a Jetson shipping
+  `libcuda.so.1.1` without a `libcuda.so.1` would otherwise have read as
+  driverless and been warned about a device that is fine. The verdict is
+  taken against the installed build, read from the CLI's own build
+  target because the CLI and the worker ship in one
   per-architecture artifact set: the arm64 worker links the TensorRT
   adapter, so no toolkit there is a `warning` with an install hint, while
   the amd64 worker has no such adapter and its python_pytorch sidecar
