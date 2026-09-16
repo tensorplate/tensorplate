@@ -55,6 +55,22 @@ The Homebrew install is different: macOS has no journald, so its packaged
 config enables retention and points `log_source.path` at
 `${HOMEBREW_PREFIX}/var/log/tensorplate/events.ndjson`.
 
+### A read that matched nothing
+
+Whatever the source, a successful read that returned no entries writes one
+line to stderr naming the source, the `--component` filter if one was
+given, and where that component's own output is instead. In v0.1 the only
+NDJSON writer is the observability service's retention sink: the event
+listener transport is `in_process` (`unix_socket` is reserved and
+rejected), and the agent and serving worker are separate processes, so
+nothing they emit reaches it. `--component agent` against an events file
+therefore matches nothing however long the file is — on Homebrew, and on
+any Linux site that configures `diagnostics_retention.file_path` and points
+`log_source.path` at it.
+
+Like every other CLI note, the line is human output only: `--output json`
+callers read `payload.entries` from the envelope on stdout.
+
 ## Filters
 
 - `--component`: exact match on the entry's `component` field.

@@ -689,6 +689,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   that name the file. The cloud and Jetson lifecycle harnesses still
   record this exit status rather than requiring it.
 
+- `tensorplate logs` says so when a read matched nothing. A source that
+  opens and yields no entry is the other way the command could answer
+  with silence, and it is the standing case for `--component agent`
+  against an events file: in v0.1 the only NDJSON writer is the
+  observability service's retention sink, whose event listener transport
+  is `in_process`, so the agent and serving worker — separate processes —
+  never appear in it. That covers the Homebrew install and any Linux site
+  that turns retention on. The command now writes one line to stderr
+  naming the source, the component filter, and where that component's own
+  output is: the journal on Linux, the per-service `*.error.log` beside
+  the packaged event log on Homebrew. Human output only, so `--output
+  json` callers still read `payload.entries` from a clean envelope.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.
