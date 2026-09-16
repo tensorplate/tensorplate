@@ -969,8 +969,17 @@ case "$*" in
       printf '{"schema_version":2,"machine_type":"g2-standard-8"}\n' \
         >"${TP_FAKE_VARLIB}/state/machine-type.json" || exit 9
     fi
-    # A drop-in an earlier run left behind, planted where the harness's
-    # own reset cannot clear it first.
+    ;;
+esac
+# A drop-in an earlier run left behind, planted where the harness's own
+# reset cannot clear it first.
+#
+# Only on the install stage's one-time enable, never on a restart:
+# planting it again after the offline stage's cleanup would fail that
+# cleanup whatever the stage's own refusal did, and the leftover check
+# would pass for a reason that has nothing to do with it.
+case "$*" in
+  *"systemctl enable --now tensorplate-agent"*)
     if [ "${TP_FAKE_MODE:-ok}" = offline-leftover-drop-in ]; then
       leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
       mkdir -p "$leftover" || exit 9

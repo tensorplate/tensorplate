@@ -1503,7 +1503,7 @@ stage_offline() {
 }
 
 stage_offline_in() {
-  local work="$1" serving_port
+  local work="$1" serving_port unit
   OPERATOR_USER="$(id -un)" || return
   OPERATOR_GROUPS="$(id -Gn)" || return
   OFFLINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}-offline"
@@ -1512,10 +1512,13 @@ stage_offline_in() {
   # only the install stage's online start could have written it.
   step "the boot-bound machine-type record exists" \
     sudo test -f "$MACHINE_TYPE_RECORD" || return
-  step "no denial drop-in is already installed for ${AGENT_UNIT}" \
-    offline_drop_in_absent "$AGENT_UNIT" || return
-  step "no denial drop-in is already installed for ${OBSERVABILITY_UNIT}" \
-    offline_drop_in_absent "$OBSERVABILITY_UNIT" || return
+  # One check over both units rather than one per unit: a leftover on
+  # either is the same refusal, and splitting it would let half of it be
+  # removed with the other half still passing.
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    step "no denial drop-in is already installed for ${unit}" \
+      offline_drop_in_absent "$unit" || return
+  done
 
   # The control, before anything is denied. EPERM under the denial proves
   # nothing unless these same operations were not refused a moment
