@@ -144,11 +144,10 @@ fn resolve_source(cfg: &LogSourceConfig, args: &LogsArgs) -> CliResult<LogSource
         Ok(meta) => classify_meta(p.to_path_buf(), &meta),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CliError::Unavailable {
             message: format!(
-                "tensorplate logs: the configured log_source.path `{}` does not exist; \
-                 no component on this install writes it",
+                "tensorplate logs: the configured log_source.path `{}` does not exist",
                 p.display()
             ),
-            hint: Some(no_source_hint(args.component.as_deref())),
+            hint: Some(missing_configured_path_hint(args.component.as_deref())),
         }),
         Err(e) => Err(stat_error(p, &e)),
     }
@@ -212,6 +211,41 @@ fn no_source_hint(_component: Option<&str>) -> String {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn no_source_hint(_component: Option<&str>) -> String {
     "pass `--source <path>` to read an NDJSON file, or set `log_source.path` in the cli config"
+        .into()
+}
+
+/// A configured `log_source.path` that is not there yet.
+///
+/// Distinct from [`no_source_hint`], because the two platforms disagree
+/// about what the absence means. On Linux nothing writes NDJSON, so a
+/// conffile naming a log file — an upgraded host that kept an earlier
+/// package's answer — names a file that will never appear. On macOS the
+/// Homebrew formulas *do* write it: `observability.json.in` sets
+/// `diagnostics_retention.file_path` to the same path `cli.json.in` gives
+/// `log_source.path`, so the ordinary reason it is missing is that the
+/// service has not started and written to it yet. Sending that operator
+/// to "run the installed launcher" would be advice about the thing that
+/// already supplied the config.
+#[cfg(target_os = "linux")]
+fn missing_configured_path_hint(component: Option<&str>) -> String {
+    format!(
+        "no component on this install writes it: {}",
+        journal_hint(component)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn missing_configured_path_hint(_component: Option<&str>) -> String {
+    "the packaged event log appears once the observability service writes to it: start it with \
+     `brew services start tensorplate-observability`. Each service's own plain-text output is in \
+     its `*.error.log` in the Homebrew `var/log/tensorplate` directory, and `--source <path>` \
+     reads any NDJSON file directly"
+        .into()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn missing_configured_path_hint(_component: Option<&str>) -> String {
+    "pass `--source <path>` to read an NDJSON file, or correct `log_source.path` in the cli config"
         .into()
 }
 
@@ -846,7 +880,41 @@ not-a-json-line
             panic!("expected Unavailable, got {result:?}");
         };
         assert!(message.contains("tensorplate-agent.log"), "{message}");
-        assert!(hint.is_some_and(|h| h.contains("--source")));
+        // The message states only what stat established. Whether anything
+        // writes that path is a platform claim, and it belongs in the
+        // hint, where each platform can be right about itself.
+        assert!(
+            !message.contains("no component on this install writes it"),
+            "the message must not claim what only the platform knows: {message}"
+        );
+        let hint = hint.expect("the failure must say what to do instead");
+        assert!(hint.contains("--source"), "{hint}");
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                hint.contains("no component on this install writes it"),
+                "on Linux nothing writes NDJSON, and the hint must say so: {hint}"
+            );
+            assert!(
+                hint.contains("journalctl -u tensorplate-agent"),
+                "{hint}"
+            );
+        }
+        // On macOS the Homebrew formulas do write this file, and the
+        // launcher is what supplied the config naming it, so neither "no
+        // component writes it" nor "run the installed launcher" is true
+        // here. The answer is that the service has not written it yet.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                !hint.contains("launcher"),
+                "the launcher is what supplied this config: {hint}"
+            );
+            assert!(
+                hint.contains("brew services start tensorplate-observability"),
+                "name the service that writes the packaged event log: {hint}"
+            );
+        }
     }
 
     /// A source the operator named themselves keeps the plain IO error:
