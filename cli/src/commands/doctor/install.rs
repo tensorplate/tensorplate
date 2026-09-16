@@ -1113,7 +1113,7 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
     }
 }
 
-/// Files the NVIDIA **driver** installs.
+/// Files that establish the NVIDIA **driver** is loaded.
 ///
 /// `libcuda` is the driver's own user-mode library: the driver package
 /// ships it, the CUDA toolkit does not, and a host can have it with no
@@ -1123,19 +1123,29 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
 /// described as one: the installer tests that file for readability,
 /// honours a `TP_INSTALL_NVIDIA_VERSION` override, and falls back to a
 /// successful `nvidia-smi` driver query, none of which this list does.
-/// So the installer can report a driver doctor does not find here --
-/// in practice `libcuda.so.1` below usually closes that gap.
+/// So the installer can report a driver doctor does not find here.
 ///
-/// `/proc/driver/nvidia/version` is an x86_64 answer: it comes from
-/// `nvidia.ko`, and L4T drives the Tegra GPU through `nvgpu` instead,
-/// so a Jetson is recognized by its `libcuda` alone. That is why
+/// The x86_64 `libcuda` is deliberately not in this list. It comes from
+/// the driver's user-mode package, which installs without a working
+/// kernel module -- a driver upgrade awaiting a reboot, Secure Boot
+/// refusing the module, or `libnvidia-compute-*` pulled onto a GPU-less
+/// VM all leave it behind -- and `packaging/scripts/install.sh` refuses
+/// the same inference in as many words: "The userspace utility can be
+/// installed without a working kernel driver." It is probed separately
+/// through `NVIDIA_USER_MODE_DRIVER_PATHS` and reported as its own,
+/// weaker state, never as a loaded driver.
+///
+/// The aarch64 names stay because that architecture has no kernel
+/// interface to ask for: `/proc/driver/nvidia/version` comes from
+/// `nvidia.ko`, and L4T drives the Tegra GPU through `nvgpu` instead, so
+/// a Jetson is recognized by its `libcuda` alone and demanding the file
+/// there would read every Jetson as driverless. That is also why
 /// `NVIDIA_DRIVER_LIB_DIRS` below is scanned as well as these exact
 /// names -- an L4T layout that ships only `libcuda.so.1.1`, or a host
 /// whose `libcuda.so.1` symlink ldconfig has not written, would
 /// otherwise read as driverless.
 const NVIDIA_DRIVER_PATHS: &[&str] = &[
     "/proc/driver/nvidia/version",
-    "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
     "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
     // L4T keeps the Tegra driver libraries in their own directory and
     // adds it to the loader path with an ld.so.conf.d entry.
@@ -1153,8 +1163,19 @@ const NVIDIA_DRIVER_LIB_DIRS: &[&str] = &[
     "/usr/lib/aarch64-linux-gnu/tegra",
     "/usr/lib/aarch64-linux-gnu/nvidia",
     "/usr/lib/aarch64-linux-gnu",
-    "/usr/lib/x86_64-linux-gnu",
 ];
+
+/// The driver's user-mode library on x86_64. Its presence establishes
+/// that the driver *package* is installed and nothing at all about the
+/// kernel module, so the finding names the library, says
+/// `/proc/driver/nvidia/version` is absent, and gives the verdict a
+/// driverless host gets.
+const NVIDIA_USER_MODE_DRIVER_PATHS: &[&str] = &["/usr/lib/x86_64-linux-gnu/libcuda.so.1"];
+
+/// Directories scanned for a versioned user-mode `libcuda.so.<soname>`,
+/// for the reason `NVIDIA_DRIVER_LIB_DIRS` is scanned: the unversioned
+/// symlink is written by ldconfig and is not guaranteed to be there.
+const NVIDIA_USER_MODE_DRIVER_LIB_DIRS: &[&str] = &["/usr/lib/x86_64-linux-gnu"];
 
 /// The versioned NVIDIA driver library name, without its soname.
 const NVIDIA_DRIVER_SONAME_PREFIX: &str = "libcuda.so.";
@@ -1232,22 +1253,71 @@ const fn installed_serving_cuda_need() -> ServingCudaNeed {
     }
 }
 
+/// What the files on this host say about the NVIDIA driver.
+///
+/// Two states an `Option<String>` would merge are kept apart, because
+/// only one of them may produce an `ok`: the driver is loaded, and the
+/// driver's user-mode package is installed with no evidence that its
+/// kernel module is.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum DriverEvidence {
+    /// Nothing at any of the known paths.
+    #[default]
+    Absent,
+    /// The kernel interface, or -- on aarch64, which does not have one
+    /// -- an L4T driver library.
+    Loaded(String),
+    /// The x86_64 user-mode `libcuda` with no `/proc/driver/nvidia/version`
+    /// beside it: the driver package is installed, the module may not be.
+    UserModeLibraryOnly(String),
+}
+
+impl DriverEvidence {
+    /// The one question the verdict turns on. `UserModeLibraryOnly` is
+    /// not loaded: a host that cannot reach its accelerator must not be
+    /// reported as fine because a library file is on disk.
+    const fn is_loaded(&self) -> bool {
+        matches!(self, Self::Loaded(_))
+    }
+}
+
 /// Which CUDA-related artifacts are on disk, and where. Paths only: a
 /// name here means the file exists, never that anything works.
 #[derive(Clone, Debug, Default)]
 struct CudaArtifacts {
-    driver: Option<String>,
+    driver: DriverEvidence,
     toolkit: Option<String>,
 }
 
 fn probe_cuda_artifacts(opts: &InstallProbeOptions) -> CudaArtifacts {
     CudaArtifacts {
-        driver: first_existing_artifact(opts, NVIDIA_DRIVER_PATHS).or_else(|| {
-            first_versioned_library(opts, NVIDIA_DRIVER_LIB_DIRS, NVIDIA_DRIVER_SONAME_PREFIX)
-        }),
+        driver: probe_driver_evidence(opts),
         toolkit: first_existing_artifact(opts, CUDA_TOOLKIT_PATHS).or_else(|| {
             first_versioned_library(opts, CUDA_TOOLKIT_LIB_DIRS, CUDA_RUNTIME_SONAME_PREFIX)
         }),
+    }
+}
+
+/// The conclusive names are searched first, so a host carrying both
+/// `/proc/driver/nvidia/version` and the user-mode library reports the
+/// loaded driver rather than the weaker state.
+fn probe_driver_evidence(opts: &InstallProbeOptions) -> DriverEvidence {
+    let loaded = first_existing_artifact(opts, NVIDIA_DRIVER_PATHS).or_else(|| {
+        first_versioned_library(opts, NVIDIA_DRIVER_LIB_DIRS, NVIDIA_DRIVER_SONAME_PREFIX)
+    });
+    if let Some(path) = loaded {
+        return DriverEvidence::Loaded(path);
+    }
+    let user_mode = first_existing_artifact(opts, NVIDIA_USER_MODE_DRIVER_PATHS).or_else(|| {
+        first_versioned_library(
+            opts,
+            NVIDIA_USER_MODE_DRIVER_LIB_DIRS,
+            NVIDIA_DRIVER_SONAME_PREFIX,
+        )
+    });
+    match user_mode {
+        Some(path) => DriverEvidence::UserModeLibraryOnly(path),
+        None => DriverEvidence::Absent,
     }
 }
 
@@ -1283,6 +1353,12 @@ fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaCo
 const NO_DRIVER_HINT: &str =
     "`accelerator_facts` and `platform_row` report whether this host has an accelerator at all";
 
+/// The hint a host carrying the driver's user-mode library and no
+/// kernel interface carries. The library is real and worth naming, but
+/// what it proves is that the package is installed, and the operator
+/// needs the next question rather than a verdict doctor cannot reach.
+const UNLOADED_DRIVER_HINT: &str = "the driver package is installed but `/proc/driver/nvidia/version` is absent, so its kernel module may not be loaded — check `nvidia-smi`, a pending reboot, and Secure Boot";
+
 /// The hint every verdict that rests on the sidecar carries: the wheel's
 /// own CUDA runtime is not read here, so a `ok` is a statement about
 /// paths and packages, never about a working device.
@@ -1309,14 +1385,28 @@ fn cuda_runtime_finding(
     found: &CudaArtifacts,
 ) -> Finding {
     let driver = match &found.driver {
-        Some(path) => format!("NVIDIA driver present (`{path}`)"),
-        None => "no NVIDIA driver at the known paths".to_string(),
+        DriverEvidence::Loaded(path) => format!("NVIDIA driver present (`{path}`)"),
+        DriverEvidence::UserModeLibraryOnly(path) => {
+            format!("NVIDIA driver libraries at `{path}` but no `/proc/driver/nvidia/version`")
+        }
+        DriverEvidence::Absent => "no NVIDIA driver at the known paths".to_string(),
     };
     let toolkit = match &found.toolkit {
         Some(path) => format!("system CUDA toolkit at `{path}`"),
         None => "no system CUDA toolkit at the known paths".to_string(),
     };
-    let no_driver = "with no driver, no installed component can reach an NVIDIA accelerator";
+    // Both sentences end the same way, so every consumer that greps for
+    // the consequence finds it under either reading of the driver.
+    let (no_driver, driver_hint) = match &found.driver {
+        DriverEvidence::UserModeLibraryOnly(_) => (
+            "until that module is loaded, no installed component can reach an NVIDIA accelerator",
+            UNLOADED_DRIVER_HINT,
+        ),
+        _ => (
+            "with no driver, no installed component can reach an NVIDIA accelerator",
+            NO_DRIVER_HINT,
+        ),
+    };
     match need {
         ServingCudaNeed::NoCudaPath => Finding::skipped(
             FindingId::CudaRuntime,
@@ -1343,12 +1433,12 @@ fn cuda_runtime_finding(
         // requirement of software that is not installed.
         _ if !installed.serving_worker => {
             let consumer = "no serving worker is installed (see `serving_binary_installed`), so the installed python_pytorch sidecar is the only CUDA consumer here";
-            if found.driver.is_none() {
+            if !found.driver.is_loaded() {
                 return Finding::missing(
                     FindingId::CudaRuntime,
                     Severity::Info,
                     format!("{driver}; {toolkit}; {consumer} — but {no_driver}"),
-                    Some(NO_DRIVER_HINT.into()),
+                    Some(driver_hint.into()),
                 );
             }
             Finding::ok(
@@ -1366,7 +1456,7 @@ fn cuda_runtime_finding(
             } else {
                 "this build's serving worker carries the TensorRT adapter, which cannot load without the CUDA runtime"
             };
-            match (found.driver.is_some(), found.toolkit.is_some()) {
+            match (found.driver.is_loaded(), found.toolkit.is_some()) {
                 (true, true) => Finding::ok(
                     FindingId::CudaRuntime,
                     Severity::Info,
@@ -1386,7 +1476,7 @@ fn cuda_runtime_finding(
                     FindingId::CudaRuntime,
                     Severity::Warning,
                     format!("{driver}; {toolkit}; {adapter}, and {no_driver}"),
-                    Some(NO_DRIVER_HINT.into()),
+                    Some(driver_hint.into()),
                 ),
             }
         }
@@ -1396,12 +1486,12 @@ fn cuda_runtime_finding(
             } else {
                 "this build's serving worker carries no TensorRT adapter, so no system toolkit is required here"
             };
-            if found.driver.is_none() {
+            if !found.driver.is_loaded() {
                 return Finding::missing(
                     FindingId::CudaRuntime,
                     Severity::Info,
                     format!("{driver}; {toolkit}; {toolkit_need} — but {no_driver}"),
-                    Some(NO_DRIVER_HINT.into()),
+                    Some(driver_hint.into()),
                 );
             }
             // The accelerator path of this build is the sidecar, so the
@@ -2387,6 +2477,129 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
+    fn an_x86_64_user_mode_libcuda_alone_is_not_a_loaded_driver() {
+        // The driver's user-mode package installs without a working
+        // kernel module: a driver upgrade awaiting a reboot, Secure Boot
+        // refusing the module, or `libnvidia-compute-*` pulled onto a
+        // GPU-less VM. `packaging/scripts/install.sh` refuses the same
+        // inference, and calling such a host `ok` would be the error
+        // this finding must not make in the other direction.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcuda.so.1");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_ne!(
+            cuda.status_label(),
+            "ok",
+            "a user-mode library is not a loaded kernel module: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.status_label(), "missing");
+        assert!(
+            cuda.message.contains(
+                "NVIDIA driver libraries at `/usr/lib/x86_64-linux-gnu/libcuda.so.1` but no `/proc/driver/nvidia/version`"
+            ),
+            "the library found must be named, and the absent kernel interface with it: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(UNLOADED_DRIVER_HINT));
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn a_versioned_x86_64_user_mode_libcuda_alone_is_not_a_loaded_driver() {
+        // The unversioned symlink is ldconfig's, so the same host can
+        // carry only `libcuda.so.550.54.15`. The scan must reach it and
+        // reach the same verdict.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcuda.so.550.54.15");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_eq!(cuda.status_label(), "missing", "{}", cuda.message);
+        assert!(
+            cuda.message.contains(
+                "NVIDIA driver libraries at `/usr/lib/x86_64-linux-gnu/libcuda.so.550.54.15`"
+            ),
+            "the versioned library found must be named: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn every_user_mode_driver_path_is_read_as_an_unloaded_driver() {
+        for path in NVIDIA_USER_MODE_DRIVER_PATHS {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), path);
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+            assert_ne!(
+                cuda.status_label(),
+                "ok",
+                "{path} was read as a loaded driver: {}",
+                cuda.message
+            );
+            assert!(
+                cuda.message
+                    .contains(&format!("NVIDIA driver libraries at `{path}`")),
+                "the finding must name the library it found: {}",
+                cuda.message
+            );
+            assert_no_staging_prefix(td.path(), &cuda);
+        }
+    }
+
+    #[test]
+    fn the_kernel_interface_outranks_the_user_mode_library() {
+        // Issue #205's host carries both. It has a loaded driver, and
+        // the weaker reading must not displace the stronger one.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcuda.so.1");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_eq!(cuda.status_label(), "ok");
+        assert!(
+            cuda.message
+                .contains("NVIDIA driver present (`/proc/driver/nvidia/version`)"),
+            "the kernel interface is the fact to report: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn an_l4t_layout_is_still_a_loaded_driver_without_the_kernel_interface() {
+        // The other half of the same rule: aarch64 has no
+        // `/proc/driver/nvidia/version` to require, so demanding it
+        // there would read every Jetson as driverless.
+        for path in [
+            "/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+            "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so",
+            "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
+        ] {
+            let td = TempDir::new().unwrap();
+            stage_file(td.path(), path);
+            stage_file(
+                td.path(),
+                "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+            );
+
+            let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+            assert_eq!(cuda.status_label(), "ok", "{path}: {}", cuda.message);
+            assert!(
+                cuda.message
+                    .contains(&format!("NVIDIA driver present (`{path}`)")),
+                "the L4T driver library must read as a loaded driver: {}",
+                cuda.message
+            );
+        }
+    }
+
+    #[test]
     fn the_driver_scan_never_reads_the_cuda_runtime_library_as_a_driver() {
         // Both scans share `/usr/lib/<triple>`, and `libcuda.so.` is a
         // prefix of nothing in `libcudart.so.<soname>` -- the names
@@ -2509,15 +2722,21 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                 for artifacts in [
                     CudaArtifacts::default(),
                     CudaArtifacts {
-                        driver: Some("/proc/driver/nvidia/version".into()),
+                        driver: DriverEvidence::Loaded("/proc/driver/nvidia/version".into()),
                         toolkit: None,
                     },
                     CudaArtifacts {
-                        driver: None,
+                        driver: DriverEvidence::UserModeLibraryOnly(
+                            "/usr/lib/x86_64-linux-gnu/libcuda.so.1".into(),
+                        ),
+                        toolkit: None,
+                    },
+                    CudaArtifacts {
+                        driver: DriverEvidence::Absent,
                         toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
                     },
                     CudaArtifacts {
-                        driver: Some("/proc/driver/nvidia/version".into()),
+                        driver: DriverEvidence::Loaded("/proc/driver/nvidia/version".into()),
                         toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
                     },
                 ] {
@@ -2548,34 +2767,44 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                 .into_iter()
                 .filter(|c| c.serving_worker || c.python_pytorch_backend)
             {
-                for toolkit in [None, Some("/usr/local/cuda/lib64/libcudart.so".to_string())] {
-                    let finding = cuda_runtime_finding(
-                        need,
-                        installed,
-                        &CudaArtifacts {
-                            driver: None,
-                            toolkit: toolkit.clone(),
-                        },
-                    );
-                    assert_ne!(
-                        finding.status_label(),
-                        "ok",
-                        "{need:?} with {installed:?}, no driver and toolkit {toolkit:?} was called ok: {}",
-                        finding.message
-                    );
-                    assert_ne!(
-                        finding.status_label(),
-                        "skipped",
-                        "{need:?} with {installed:?} has a CUDA consumer installed and must not skip: {}",
-                        finding.message
-                    );
-                    assert!(
-                        finding
-                            .message
-                            .contains("no installed component can reach an NVIDIA accelerator"),
-                        "{need:?} with {installed:?} and no driver must say so: {}",
-                        finding.message
-                    );
+                // Both readings that are not a loaded driver: nothing at
+                // all, and the x86_64 user-mode library whose kernel
+                // module may never have been loaded.
+                for driver in [
+                    DriverEvidence::Absent,
+                    DriverEvidence::UserModeLibraryOnly(
+                        "/usr/lib/x86_64-linux-gnu/libcuda.so.1".to_string(),
+                    ),
+                ] {
+                    for toolkit in [None, Some("/usr/local/cuda/lib64/libcudart.so".to_string())] {
+                        let finding = cuda_runtime_finding(
+                            need,
+                            installed,
+                            &CudaArtifacts {
+                                driver: driver.clone(),
+                                toolkit: toolkit.clone(),
+                            },
+                        );
+                        assert_ne!(
+                            finding.status_label(),
+                            "ok",
+                            "{need:?} with {installed:?}, driver {driver:?} and toolkit {toolkit:?} was called ok: {}",
+                            finding.message
+                        );
+                        assert_ne!(
+                            finding.status_label(),
+                            "skipped",
+                            "{need:?} with {installed:?} has a CUDA consumer installed and must not skip: {}",
+                            finding.message
+                        );
+                        assert!(
+                            finding
+                                .message
+                                .contains("no installed component can reach an NVIDIA accelerator"),
+                            "{need:?} with {installed:?} and driver {driver:?} must say so: {}",
+                            finding.message
+                        );
+                    }
                 }
             }
         }
