@@ -24,13 +24,6 @@
   },
   "backend_packages": [
     {
-      "backend_path": "tensorrt",
-      "channel": "apt",
-      "packages": [
-        "tensorplate-serving"
-      ]
-    },
-    {
       "backend_path": "python_pytorch",
       "channel": "apt",
       "packages": [

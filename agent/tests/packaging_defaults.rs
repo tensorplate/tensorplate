@@ -20,6 +20,14 @@ fn packaging_agent_config_path() -> PathBuf {
         .join("agent.json")
 }
 
+fn amd64_agent_config_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("packaging")
+        .join("conf")
+        .join("agent.amd64.json")
+}
+
 fn homebrew_agent_config_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -90,6 +98,31 @@ fn shipped_agent_config_parses_and_validates() {
     assert!(python
         .supported_artifact_kinds
         .contains(&"python_pytorch_entry".to_string()));
+}
+
+#[test]
+fn amd64_agent_config_publishes_only_the_backends_that_build_contains() {
+    // dh-exec installs this file as /etc/tensorplate/agent.json on amd64.
+    // Nothing else in the workspace parsed it, so a change that made it
+    // invalid would only surface when a package was built. The x86_64
+    // serving worker is built with TP_ENABLE_TENSORRT=OFF, so advertising
+    // `tensorrt` here would make the agent accept a bundle it cannot run.
+    let p = amd64_agent_config_path();
+    let raw = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    let cfg = AgentConfig::parse_json(&raw).expect("packaging agent.amd64.json should validate");
+
+    assert_eq!(cfg.available_backends, ["python_pytorch"]);
+    assert!(
+        !cfg.backend_capabilities.contains_key("tensorrt"),
+        "the amd64 build has no TensorRT adapter; its config must publish no TensorRT capability"
+    );
+    assert_eq!(
+        cfg.device_family,
+        tensorplate_protocol::bundle_manifest::DeviceFamily::X86_64,
+        "the amd64 config must declare the device family its bundles target"
+    );
+    assert_eq!(cfg.transport, ControlTransport::UnixSocket);
+    assert_eq!(cfg.worker.mode, WorkerControlMode::Process);
 }
 
 #[test]

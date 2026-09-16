@@ -404,6 +404,59 @@ fn a_backend_path_the_row_never_claimed_is_refused_rather_than_waved_through() {
 }
 
 #[test]
+fn an_x86_gpu_row_refuses_tensorrt_even_with_the_serving_package_installed() {
+    // The amd64 tensorplate-serving build sets TP_ENABLE_TENSORRT=OFF, so
+    // the package being present says nothing about a TensorRT adapter. The
+    // x86_64 rows used to declare `tensorrt` satisfied by that package,
+    // which made this exact host admit a bundle the worker can only refuse
+    // at engine lookup. The refusal must therefore survive the package
+    // being installed, on every x86_64 GPU row and not just the exemplar.
+    let registry = registry();
+    let installed = BTreeSet::from([
+        "tensorplate-serving".to_string(),
+        "tensorplate-backend-python-pytorch".to_string(),
+    ]);
+
+    for row_id in [
+        "ubuntu2404-x86-l4-g2s8",
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        "ubuntu2404-x86-rtxpro6000se-g4s48",
+    ] {
+        let row = registry.row(row_id).expect("row is committed");
+        match check_backend_packages(row, "tensorrt", &installed) {
+            Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+                assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
+                assert!(
+                    detail.contains("tensorrt") && detail.contains(row_id),
+                    "the rejection must name the path and the row: {detail}"
+                );
+            }
+            other => panic!("`{row_id}` must not admit tensorrt, got {other:?}"),
+        }
+        // Discriminating control: the same installed set on the same row
+        // still admits the path the row does declare, so this is a refusal
+        // of one claim rather than of the host.
+        assert!(
+            check_backend_packages(row, "python_pytorch", &installed).is_ok(),
+            "`{row_id}` must still admit the backend it does declare"
+        );
+    }
+}
+
+#[test]
+fn the_jetson_row_still_admits_tensorrt_from_the_serving_package() {
+    // The arm64 release build compiles the adapter, so the same package
+    // does back the claim there. Without this, deleting the path from
+    // every row would look like a fix.
+    let registry = registry();
+    let row = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .expect("the Orin Nano row is committed");
+    let installed = BTreeSet::from(["tensorplate-serving".to_string()]);
+    assert!(check_backend_packages(row, "tensorrt", &installed).is_ok());
+}
+
+#[test]
 fn a_rejected_machine_stays_rejected_whatever_backend_a_bundle_names() {
     // The startup verdict is not something a bundle can talk its way past.
     let registry = registry();
