@@ -108,6 +108,11 @@ readonly CRASH_LOOP_POLLS=40
 # Registered after the backup succeeds and before the config is changed.
 # Kept until restoration and service recovery succeed, including on EXIT.
 CRASH_LOOP_BACKUP=""
+# The scratch directory a journal capture is read into, from its creation
+# until its removal. The EXIT handler removes it too, so a signal that
+# arrives between journalctl writing the raw capture and the capture
+# returning does not leave host metadata behind.
+JOURNAL_SCRATCH=""
 # The documented rollback sets durable state aside under this name
 # (docs/install/lifecycle.md) rather than carrying it back.
 readonly STATE_DIR="/var/lib/tensorplate/state"
@@ -887,13 +892,28 @@ with open(raw, encoding="utf-8") as source, \
 PY
 }
 
+# Create the scratch directory a raw journal capture is read into, and
+# register it for the EXIT handler.
+open_journal_scratch() {
+  JOURNAL_SCRATCH="$(mktemp -d)" || { JOURNAL_SCRATCH=""; return 1; }
+}
+
+# Remove the registered scratch directory, raw capture and all. Safe to
+# call when none is registered, and again after a failure.
+remove_journal_scratch() {
+  [[ -n "$JOURNAL_SCRATCH" ]] || return 0
+  rm -rf "$JOURNAL_SCRATCH" || return
+  JOURNAL_SCRATCH=""
+}
+
 capture_current_journal() {
-  local unit="$1" output="$2" work status=0 cleanup_status=0
-  work="$(mktemp -d)" || return
-  record_current_journal "$unit" "$output" "${work}/journal.json" || status=$?
+  local unit="$1" output="$2" status=0 cleanup_status=0
+  open_journal_scratch || return
+  record_current_journal "$unit" "$output" "${JOURNAL_SCRATCH}/journal.json" || status=$?
   # The raw capture does not outlive the projection, whatever the
-  # verdict on it was.
-  rm -rf "$work" || cleanup_status=$?
+  # verdict on it was. A signal before this line is handled by
+  # finish_with_cleanup.
+  remove_journal_scratch || cleanup_status=$?
   ((status == 0)) || return "$status"
   ((cleanup_status == 0)) || return "$cleanup_status"
 }
@@ -1047,6 +1067,8 @@ finish_with_cleanup() {
   trap '' INT TERM HUP
   # Do not make restoration depend on opening another evidence file.
   cleanup_crash_loop || cleanup_status=$?
+  # A capture interrupted before it removed its raw copy.
+  remove_journal_scratch || cleanup_status=$?
   if ((status == 0)); then
     status="$cleanup_status"
     if [[ -n "${_lc_active:-}" && "$status" -eq 0 ]]; then
@@ -1070,13 +1092,13 @@ install_cleanup_traps() {
 # failures have to be the agent refusing that config, not something else
 # failing at the same time.
 observe_crash_loop() {
-  local since="$1" work status=0 cleanup_status=0
-  work="$(mktemp -d)" || return
-  observe_crash_loop_into "$since" "${work}/journal.json" || status=$?
+  local since="$1" status=0 cleanup_status=0
+  open_journal_scratch || return
+  observe_crash_loop_into "$since" "${JOURNAL_SCRATCH}/journal.json" || status=$?
   # As in capture_current_journal: the raw capture is removed whatever
   # the verdict was, and the verdict is what this returns. stage_crash_loop
   # restores the agent config on both paths.
-  rm -rf "$work" || cleanup_status=$?
+  remove_journal_scratch || cleanup_status=$?
   ((status == 0)) || return "$status"
   ((cleanup_status == 0)) || return "$cleanup_status"
 }

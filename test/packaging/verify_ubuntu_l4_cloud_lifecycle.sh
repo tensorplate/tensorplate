@@ -845,6 +845,24 @@ case "$*" in
 esac
 if [ "$1" = journalctl ]; then
   shift
+  case "${TP_FAKE_MODE:-ok}:$*" in
+    journal-signal-term:*_SYSTEMD_INVOCATION_ID=*|crash-loop-journal-signal-term:*--since*)
+      # The raw capture is written, and then the harness is signalled
+      # before it can project or remove it. The capture runs under a
+      # `bash -c` wrapper, so the harness is found among the ancestors
+      # rather than assumed to be the parent.
+      "${TP_FAKE_JOURNALCTL}" "$@" || exit
+      pid=$PPID
+      while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+        case "$(ps -ww -o args= -p "$pid" 2>/dev/null)" in
+          *"${TP_FAKE_HARNESS}"*) kill -TERM "$pid"; exit 0 ;;
+        esac
+        pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+      done
+      echo 'fixture: no harness process among the ancestors' >&2
+      exit 9
+      ;;
+  esac
   exec "${TP_FAKE_JOURNALCTL}" "$@"
 fi
 exit 0
@@ -1217,6 +1235,7 @@ run_harness() {
     TP_FAKE_MODE="$mode" \
     TP_FAKE_SUDO_LOG="${appliance}/sudo.log" \
     TP_FAKE_JOURNALCTL="${appliance}/bin/journalctl" \
+    TP_FAKE_HARNESS="$harness" \
     TP_FAKE_RESTART_MARKER="${appliance}/restarted" \
     TP_FAKE_INFER_LOG="${appliance}/infer.log" \
     TP_FAKE_PID_FILE="${appliance}/pid" \
@@ -1614,6 +1633,16 @@ for mode in journal-command-fails journal-empty-agent journal-no-entries journal
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
 done
 
+# A signal after journalctl has written the raw capture, and before the
+# harness has projected or removed it. The EXIT handler removes it.
+evidence="${td}/stages-journal-signal-term"
+check "a signal during a journal capture preserves the signal exit status" 143 \
+  "$(run_stages journal-signal-term "$evidence")"
+check "  the interrupted status-logs stage is recorded as failed" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
+check "  and the raw capture is removed on the way out" 0 \
+  "$(scratch_holding_host_metadata)"
+
 # --- crash-loop recovery.
 #
 # This stage breaks the appliance on purpose, so check restoration as
@@ -1667,6 +1696,17 @@ for signal_case in int:130 term:143 hup:129; do
   check "  and starts the restored agent" yes \
     "$(grep -Fxq 'systemctl start tensorplate-agent' "${appliance}/sudo.log" && echo yes || echo no)"
 done
+
+# As during status-logs, but with the agent config broken: the EXIT
+# handler both restores it and removes the raw crash-loop capture.
+evidence="${td}/stages-crash-loop-journal-signal-term"
+check "a signal during the crash-loop capture preserves the signal exit status" 143 \
+  "$(run_stages crash-loop-journal-signal-term "$evidence")"
+check "  the interrupted crash-loop stage is recorded as failed" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+check "  the signal cleanup restores the original config bytes" yes "$(config_restored)"
+check "  and the raw capture is removed on the way out" 0 \
+  "$(scratch_holding_host_metadata)"
 
 evidence="${td}/stages-crash-loop-restore-fails-once"
 check "a failed config restore is retried on exit without hiding its failure" 9 \

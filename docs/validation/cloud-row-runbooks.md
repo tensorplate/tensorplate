@@ -74,9 +74,11 @@ Every journal capture is projected as it is taken. The harness reads
 `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`,
 `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP`
 into the evidence directory, and deletes the scratch directory whatever
-the verdict on the capture was. The host metadata systemd attaches to
-every entry is therefore never recorded, and the projected file is the
-run's only copy — the retention rule in
+the verdict on the capture was. A signal that interrupts a capture
+deletes it on the way out; only a `SIGKILL` or a machine failure can
+leave it behind, in a private directory under `$TMPDIR`. The host
+metadata systemd attaches to every entry is therefore never recorded,
+and the projected file is the run's only copy — the retention rule in
 [the evidence rules](fixture-and-evidence-rules.md) applies to it as the
 raw record. A line that cannot be parsed as a JSON record, including
 journalctl's own `-- No entries --`, is refused rather than copied
