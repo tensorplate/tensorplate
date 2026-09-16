@@ -19,7 +19,8 @@ for v in "${here}/verify_layout.sh" \
          "${here}/verify_macos_offline_runtime.sh" \
          "${here}/verify_descriptor.sh" \
          "${here}/verify_installer.sh" \
-         "${here}/verify_ubuntu_l4_cloud_lifecycle.sh"; do
+         "${here}/verify_ubuntu_l4_cloud_lifecycle.sh" \
+         "${here}/verify_jetson_lifecycle.sh"; do
   ran=$((ran + 1))
   echo "==> $(basename "${v}")"
   "${v}"
