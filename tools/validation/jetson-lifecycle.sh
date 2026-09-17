@@ -164,13 +164,16 @@ CRASH_LOOP_BACKUP=""
 # (docs/install/lifecycle.md) rather than carrying it back.
 readonly STATE_DIR="/var/lib/tensorplate/state"
 readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
-# The agent's deployment state inside each, and the digest of the stopped
-# agent's copy, taken before the rollback moves the directory. What the
-# rollback claims about this file is that its CONTENTS survive the
+# The agent's deployment state, the one file in that directory this stage
+# is written around: without it there is nothing for the rollback to
+# preserve. It is NOT the only durable file there, which is why the check
+# below is about the directory and not about this name.
+readonly STATE_FILE_NAME="state.json"
+# Every file the directory held with its digest, taken with the services
+# stopped and before the rollback moves the directory. What the rollback
+# claims about the set-aside state is that its CONTENTS survive the
 # removal and the baseline install, which a pathname cannot show.
-readonly STATE_FILE="${STATE_DIR}/state.json"
-readonly STATE_ASIDE_FILE="${STATE_ASIDE_DIR}/state.json"
-STATE_FILE_SHA256=""
+STATE_MANIFEST=""
 # The conffile an operator edits before the upgrade, and whose bytes both
 # directions must keep. Every CLI call this run makes is pinned to its own
 # private config, so nothing here reads this file and the edit cannot
@@ -1641,23 +1644,110 @@ privileged_sha256() {
   printf '%s\n' "$digest"
 }
 
+# Every file in a durable-state directory, one "<name> <sha256>" line per
+# file, sorted so that two directories compare as text.
+#
+# The directory is the unit, not one pathname in it. The agent persists
+# state.json AND the same-directory copy state.json.bak it falls back to
+# when the primary fails to decode (agent/src/state.rs), and the
+# observability unit writes its snapshot beside them
+# (packaging/conf/observability.json). A check on a single name would
+# leave the rest of the recoverable state unguarded, and would see
+# nothing at all when a file was added or removed.
+#
+# /var/lib/tensorplate is root-owned, so the listing and every digest go
+# through sudo, the way the journal captures and the crash-loop config
+# backup do, rather than through a sudo path of this check's own.
+# Anything in there that cannot be digested -- a subdirectory, a dangling
+# symlink -- fails here by name rather than being skipped, and a
+# directory with nothing in it fails rather than comparing equal to
+# another empty one.
+state_manifest() {
+  local dir="$1" names name digest manifest=""
+  names="$(sudo ls -A "$dir")" || return
+  names="$(printf '%s\n' "$names" | LC_ALL=C sort)" || return
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    digest="$(privileged_sha256 "${dir}/${name}")" || return
+    manifest="${manifest}${name} ${digest}"$'\n'
+  done <<<"$names"
+  if [[ -z "$manifest" ]]; then
+    printf '%s holds no files; there is no durable state here to preserve\n' "$dir" >&2
+    return 1
+  fi
+  printf '%s' "$manifest"
+}
+
+# The digest of one entry in a manifest, empty when the manifest does not
+# list it. An exact field compare, so a name is never matched as a
+# pattern -- every name here carries a `.`.
+manifest_digest() {
+  printf '%s\n' "$2" | awk -v name="$1" '$1 == name { print $2 }'
+}
+
+# The manifest the rollback has to carry across, taken with the agent
+# stopped and before anything moves or removes the directory: after the
+# move there is no original left to compare the saved copy with.
+#
+# A state directory with no state.json is not the device this stage is
+# written for -- the upgrade deployed before the rollback started -- and
+# a run that accepted one would be comparing two directories that hold
+# nothing the rollback is about.
+capture_state_manifest() {
+  STATE_MANIFEST="$(state_manifest "$STATE_DIR")" || return
+  if [[ -z "$(manifest_digest "$STATE_FILE_NAME" "$STATE_MANIFEST")" ]]; then
+    printf '%s holds no %s: there is no deployment state for the rollback to preserve\n' \
+      "$STATE_DIR" "$STATE_FILE_NAME" >&2
+    return 1
+  fi
+}
+
 # The set-aside state, byte for byte as the stopped agent left it.
 #
 # `test -f` proves only that a pathname is a regular file, so a removal
-# or an install that emptied, truncated or rewrote the saved state would
+# or an install that emptied, truncated or rewrote a saved file would
 # pass it while the recoverable state this stage claims to preserve was
-# gone. Nothing later reads this file back -- the empty-agent and
+# gone. Nothing later reads these files back -- the empty-agent and
 # fresh-deploy checks below exist to show the older agent did NOT load
-# it -- so the digest taken before the move is the only thing that can
-# tell a preserved state file from a destroyed one.
+# them -- so the manifest taken before the move is the only thing that
+# can tell preserved state from destroyed state.
+#
+# The first entry the two disagree on is named, whether it changed, went
+# missing, or was never there before.
 check_state_preserved() {
-  local now
-  now="$(privileged_sha256 "$STATE_ASIDE_FILE")" || return
-  if [[ "$now" != "$STATE_FILE_SHA256" ]]; then
-    printf 'the rollback did not preserve %s: sha256 was %s when the services were stopped, now %s\n' \
-      "$STATE_ASIDE_FILE" "$STATE_FILE_SHA256" "$now" >&2
-    return 1
+  local now name digest saved
+  now="$(state_manifest "$STATE_ASIDE_DIR")" || return
+  if [[ "$now" == "$STATE_MANIFEST" ]]; then
+    return 0
   fi
+  while IFS=' ' read -r name digest; do
+    [[ -n "$name" ]] || continue
+    saved="$(manifest_digest "$name" "$now")"
+    if [[ -z "$saved" ]]; then
+      printf 'the rollback did not preserve %s/%s: it was in the durable state when the services were stopped and the set-aside copy does not hold it\n' \
+        "$STATE_ASIDE_DIR" "$name" >&2
+      return 1
+    fi
+    if [[ "$saved" != "$digest" ]]; then
+      printf 'the rollback did not preserve %s/%s: sha256 was %s when the services were stopped, now %s\n' \
+        "$STATE_ASIDE_DIR" "$name" "$digest" "$saved" >&2
+      return 1
+    fi
+  done <<<"$STATE_MANIFEST"
+  while IFS=' ' read -r name _; do
+    [[ -n "$name" ]] || continue
+    if [[ -z "$(manifest_digest "$name" "$STATE_MANIFEST")" ]]; then
+      printf 'the rollback did not preserve %s: it holds %s, which the durable state did not when the services were stopped\n' \
+        "$STATE_ASIDE_DIR" "$name" >&2
+      return 1
+    fi
+  done <<<"$now"
+  # Unreachable while the manifests are the sorted "<name> <sha256>" lines
+  # both sides build the same way, and a fail-closed backstop if they are
+  # ever not: two manifests that differ must never pass this check.
+  printf 'the rollback did not preserve %s: the set-aside state does not match what the stopped services left\n' \
+    "$STATE_ASIDE_DIR" >&2
+  return 1
 }
 
 # Doctor on the baseline is filed, not asserted. The baseline's own
@@ -1878,7 +1968,7 @@ PY
 # and a harness that quietly reinstalled would hide that it had left the
 # device without a working install.
 stranded_device_text() {
-  local listing="" read_ok=1 installed="" pkg status query
+  local listing="" read_ok=1 installed="" pkg status query saved_state=""
   query='dpkg-query -W -f='"'"'${binary:Package} ${db:Status-Status}\n'"'"' '"'"'tensorplate*'"'"
   listing="$(installed_tensorplate_packages all 2>/dev/null)" || read_ok=0
   if ((read_ok)); then
@@ -1946,7 +2036,28 @@ stranded_device_text() {
     *) ;;
   esac
   if ((STRANDED_STATE_ASIDE)); then
-    printf 'durable state is at %s.\n' "$STATE_ASIDE_DIR"
+    # The pathname alone is what an operator would recover from, and this
+    # report is printed in exactly the window where a baseline install
+    # that failed may already have destroyed what is behind it -- the
+    # stage's own preservation check runs only after that install
+    # returns 0. The manifest taken before the move is what can tell them
+    # which they have, so it is read back here rather than left unused.
+    #
+    # Best-effort, and nothing below may fail: this runs from the EXIT
+    # trap, which still has the report to write.
+    saved_state="$(state_manifest "$STATE_ASIDE_DIR" 2>/dev/null || true)"
+    if [[ -z "$STATE_MANIFEST" ]]; then
+      printf 'durable state is at %s.\n' "$STATE_ASIDE_DIR"
+    elif [[ -z "$saved_state" ]]; then
+      printf 'durable state is at %s, but it could not be read back; whether it still matches the digests taken before the move is NOT known.\n' \
+        "$STATE_ASIDE_DIR"
+    elif [[ "$saved_state" == "$STATE_MANIFEST" ]]; then
+      printf 'durable state is at %s and still matches the digests taken before the move.\n' \
+        "$STATE_ASIDE_DIR"
+    else
+      printf 'durable state is at %s but NO LONGER matches the digests taken before the move; treat it as damaged.\n' \
+        "$STATE_ASIDE_DIR"
+    fi
   elif [[ "$STRANDED_WINDOW" != upgrade ]]; then
     printf 'durable state is still at %s.\n' "$STATE_DIR"
   fi
@@ -2029,8 +2140,7 @@ PY
   # Taken with the agent stopped, so it is the state the rollback has to
   # carry across, and before anything moves or removes it -- after the
   # move there is no original left to compare the saved copy with.
-  STATE_FILE_SHA256="$(step "digest the durable state before setting it aside" \
-    privileged_sha256 "$STATE_FILE")" || return
+  step "digest the durable state before setting it aside" capture_state_manifest || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
   STRANDED_STATE_ASIDE=1
 
@@ -2070,7 +2180,7 @@ PY
   step "baseline versions" check_installed_versions \
     "${EVIDENCE_DIR}/packages-after-rollback.txt" "$BASELINE_DIR" "$BASELINE_TAG" || return
   check_operator_config_kept "the rollback" || return
-  step "the set-aside state is preserved" check_state_preserved || return
+  step "the set-aside state is preserved, file by file" check_state_preserved || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
 
   # The older agent must not have loaded the newer agent's state: it
