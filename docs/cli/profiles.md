@@ -36,12 +36,14 @@ to read, and the built-in defaults are the documented behaviour.
 An *unusable* one — malformed JSON, a document that fails validation, or
 bytes that are not text — still fails every command that needs the
 configured profile, naming the file. `tensorplate doctor` and `tensorplate
-version` are the exception: they run on the built-in defaults and report
-the fault instead. Doctor is what this documentation tells an operator to
-run when an install misbehaves, and its `config_files` finding is where a
-malformed `/etc/tensorplate/*.json` is reported; aborting before it runs
-would take the diagnostic away at the moment it is needed. `version` reads
-nothing from the config at all.
+version` are the exception: they run on the built-in defaults instead of
+aborting. Doctor is what this documentation tells an operator to run when
+an install misbehaves, so it still runs, and it reports the CLI's reason
+for refusing the file as a failing `config_files` finding and exits `10`.
+That holds even for a file that is valid JSON with a recognized
+`schema_version` — for example one whose `default_profile` names a
+profile it does not declare — so doctor never calls such an install
+healthy. `version` reads nothing from the config at all.
 
 If the packaged file exists but the caller may not read it —
 `/etc/tensorplate` is `root:tensorplate 0750` — every command uses the

@@ -667,12 +667,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   document that fails validation, or bytes that are not text — fails every
   command that needs the configured profile, naming the file, instead of
   falling back to defaults that disagree with the install. `doctor` and
-  `version` are exempt: they answer from the built-in defaults and report
-  the fault, because doctor is the command the docs name for diagnosing a
-  broken install (its `config_files` finding is where a malformed
-  `/etc/tensorplate/*.json` belongs) and `version` reads nothing from the
-  config. Reading the conffile at all is what made that failure mode
-  reachable from `/etc`.
+  `version` are exempt: they answer from the built-in defaults instead of
+  aborting, because doctor is the command the docs name for diagnosing a
+  broken install and `version` reads nothing from the config. Doctor
+  reports the CLI's reason for refusing the file as a failing
+  `config_files` finding and exits `10`, including for a file that is
+  valid JSON with a recognized `schema_version` but fails the CLI's own
+  validation, so it never calls such an install healthy. Reading the
+  conffile at all is what made that failure mode reachable from `/etc`.
 
   A packaged config that exists but this caller may not read — the config
   directory is `root:tensorplate 0750` — leaves the defaults in place for
