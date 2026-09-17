@@ -545,7 +545,10 @@ harness: the offline helper reports a failure it did not anticipate as
 status 70 and never a traceback or the exception's message; the
 deploy-smoke bundle check names a file it cannot read by its place in
 the bundle; and the bundle is copied from inside itself, so `cp` names a
-file it cannot copy by a relative path.
+file it cannot copy by a relative path. The scan above still decides: on
+a checkout that root cannot read, such as a home directory on NFS with
+root squashing, `python3` itself names the offline helper's path when it
+cannot open it.
 
 Delete the VM when the run is done.
 
