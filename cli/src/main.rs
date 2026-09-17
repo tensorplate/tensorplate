@@ -11,9 +11,9 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use tensorplate_cli::args::{self, OutputMode, ParseOutcome, Subcommand};
+use tensorplate_cli::args::{self, OutputMode, ParseOutcome, ParsedArgs, Subcommand};
 use tensorplate_cli::client::{AgentClient, NetAgentClient};
-use tensorplate_cli::config::{CliConfig, ConfigSource};
+use tensorplate_cli::config::{CliConfig, ConfigSource, ResolvedCliConfig};
 use tensorplate_cli::error::{CliError, CliResult};
 use tensorplate_cli::output::Renderer;
 
@@ -114,6 +114,23 @@ fn drive<O: Write, E: Write>(
             command,
         })
     })?;
+    run_resolved(parsed, resolved, command, stdout, stderr)
+}
+
+/// Everything `drive` does once config resolution has answered: render
+/// the fallback warning, refuse commands an unusable packaged config
+/// blocks, and run the command with the loader's verdict in hand.
+///
+/// Separate from `drive` because resolution reads the fixed packaged
+/// path; this half takes the resolution as input, so tests can drive it
+/// with a packaged config the loader rejects.
+fn run_resolved<O: Write, E: Write>(
+    parsed: ParsedArgs,
+    resolved: ResolvedCliConfig,
+    command: &'static str,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> Result<(), Box<DriveError>> {
     let cfg = resolved.config;
     let output_mode = tensorplate_cli::effective_output_mode(&parsed.global, &cfg);
     let warnings: Vec<String> = resolved.warning.clone().into_iter().collect();
@@ -130,15 +147,15 @@ fn drive<O: Write, E: Write>(
     let factory = |profile: &tensorplate_cli::ResolvedProfile| -> CliResult<Box<dyn AgentClient>> {
         Ok(Box::new(NetAgentClient::new(profile)))
     };
-    tensorplate_cli::run_with_warnings(parsed, cfg, warnings, factory, stdout, stderr).map_err(
-        |error| {
+    let rejection = resolved.source.install_fault().map(str::to_owned);
+    tensorplate_cli::run_with_warnings(parsed, cfg, warnings, rejection, factory, stdout, stderr)
+        .map_err(|error| {
             Box::new(DriveError {
                 error,
                 renderer,
                 command,
             })
-        },
-    )
+        })
 }
 
 /// Surface a config file that was found but not used, so a packaged
@@ -165,11 +182,12 @@ fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning:
 /// for the two commands that exist to diagnose exactly that.
 ///
 /// `doctor` is what the docs tell an operator to run when an install
-/// misbehaves, and its own `config_files` finding is where a malformed
-/// `/etc/tensorplate/*.json` is meant to be reported; `version` says what
-/// is installed and reads nothing from the config. Both answer from the
-/// built-in defaults, with [`report_config_warning`] saying the packaged
-/// settings are not in effect. Aborting before either runs would take the
+/// misbehaves, and it reports the loader's rejection as a failing
+/// `config_files` finding, so it exits non-zero rather than calling the
+/// install healthy; `version` says what is installed and reads nothing
+/// from the config. Both answer from the built-in defaults, with
+/// [`report_config_warning`] saying the packaged settings are not in
+/// effect. Aborting before either runs would take the
 /// diagnostic away at the moment it is needed — a state this branch made
 /// reachable by reading the conffile at all. Every other command needs the
 /// configured profile, so for those the fault stays fatal.
@@ -321,6 +339,53 @@ mod tests {
         )
         .is_none());
         assert!(blocking_install_fault(&source, &Subcommand::Version).is_none());
+    }
+
+    /// The binary's own wiring: a packaged config the loader rejects is
+    /// handed to doctor, which fails instead of reporting a healthy
+    /// install. Without the hand-off doctor answers from the defaults and
+    /// exits 0 while every command that needs the profile fails.
+    #[test]
+    fn doctor_run_by_the_binary_fails_on_a_rejected_packaged_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let run_doctor = |document: &str| {
+            let system = td.path().join("cli.json");
+            std::fs::write(&system, document).expect("write conffile");
+            let resolved = CliConfig::resolve_from(None, None, &system).expect("resolves");
+            let argv: Vec<String> = ["--output", "json", "doctor", "--skip-agent"]
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            let ParseOutcome::Run(parsed) = args::parse(&argv).expect("parses") else {
+                panic!("doctor parses to a run");
+            };
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let result = run_resolved(parsed, resolved, "doctor", &mut out, &mut err);
+            (result, String::from_utf8(out).expect("utf-8"))
+        };
+
+        let (healthy, _) = run_doctor(
+            r#"{"schema_version":"0.1","default_profile":"local","profiles":{"local":{"mode":"local"}}}"#,
+        );
+        assert!(
+            healthy.is_ok(),
+            "an accepted config must leave doctor healthy"
+        );
+
+        let (rejected, out) = run_doctor(
+            r#"{"schema_version":"0.1","default_profile":"missing","profiles":{"local":{"mode":"local"}}}"#,
+        );
+        let error = rejected.expect_err("doctor must fail on a rejected packaged config");
+        assert!(
+            matches!(error.error, CliError::DoctorFindings { .. }),
+            "expected failing findings, got {:?}",
+            error.error
+        );
+        assert!(
+            out.contains("rejected by the CLI"),
+            "the doctor report must say why: {out}"
+        );
     }
 
     /// Every other command needs the configured profile. Running one on

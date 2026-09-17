@@ -34,6 +34,7 @@ fn staged_options(prefix: &Path) -> InstallProbeOptions {
         prefix: Some(prefix.to_path_buf()),
         probe_backends: false,
         skip_systemd: true,
+        cli_config_rejection: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn the_production_probe_reads_the_installed_registry_location() {
         prefix: None,
         probe_backends: false,
         skip_systemd: true,
+        cli_config_rejection: None,
     };
     let finding = run(&opts)
         .into_iter()

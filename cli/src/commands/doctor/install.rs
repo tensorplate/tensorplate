@@ -43,6 +43,15 @@ pub struct InstallProbeOptions {
     /// Skip systemd presence checks. CLI doctor sets this on non-Linux
     /// hosts.
     pub skip_systemd: bool,
+    /// Why the CLI rejected the packaged `cli.json`, when it did.
+    ///
+    /// `probe_config_files` checks only that a config file exists, carries
+    /// a recognized `schema_version` and has the right ownership. The CLI
+    /// validates `cli.json` further — its default profile must be one it
+    /// declares, for one — so a file this probe would call healthy can
+    /// still leave every operational command failing. The binary passes
+    /// the loader's verdict here so `config_files` reports it.
+    pub cli_config_rejection: Option<String>,
 }
 
 impl Default for InstallProbeOptions {
@@ -52,6 +61,7 @@ impl Default for InstallProbeOptions {
             probe_backends: cfg!(target_os = "linux")
                 || std::env::var_os(install_paths::BACKEND_DESCRIPTOR_DIR_ENV).is_some(),
             skip_systemd: !cfg!(target_os = "linux"),
+            cli_config_rejection: None,
         }
     }
 }
@@ -456,12 +466,18 @@ fn probe_config_files(opts: &InstallProbeOptions) -> Vec<Finding> {
             }
         }
     }
+    if let Some(reason) = &opts.cli_config_rejection {
+        malformed.push(format!(
+            "{}: rejected by the CLI ({reason})",
+            install_paths::CLI_CONFIG_PATH
+        ));
+    }
     if !malformed.is_empty() {
         findings.push(Finding::fail(
             FindingId::ConfigFiles,
             Severity::Critical,
             format!(
-                "config files missing or with unrecognized schema_version: {}",
+                "config files missing, unusable or with unrecognized schema_version: {}",
                 malformed.join(", ")
             ),
             Some("compare against config/schemas/*.json or restore from the package".into()),
@@ -2061,6 +2077,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
+            cli_config_rejection: None,
         };
 
         assert!(
@@ -2081,6 +2098,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: false,
+            cli_config_rejection: None,
         };
         let cli_config = td.path().join("opt/homebrew/etc/tensorplate/cli.json");
         fs::create_dir_all(cli_config.parent().unwrap()).unwrap();
@@ -2129,6 +2147,45 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                 && finding.message.contains('…')
         }));
         assert_eq!(bounded_stderr(stderr.as_bytes()).chars().count(), 513);
+    }
+
+    /// `config_files` checks presence, `schema_version` and ownership.
+    /// A `cli.json` that passes all three can still be refused by the CLI's
+    /// own validation, and that refusal must fail the finding rather than
+    /// leave it reporting a healthy install.
+    #[test]
+    fn a_cli_config_the_cli_rejected_fails_config_files() {
+        let td = TempDir::new().unwrap();
+        stage_install_layout(td.path());
+        let healthy = InstallProbeOptions {
+            prefix: Some(td.path().to_path_buf()),
+            probe_backends: false,
+            skip_systemd: true,
+            cli_config_rejection: None,
+        };
+        let config_files = |opts: &InstallProbeOptions| {
+            run(opts)
+                .into_iter()
+                .find(|f| matches!(f.id, FindingId::ConfigFiles))
+                .unwrap()
+        };
+        assert_eq!(config_files(&healthy).status_label(), "ok");
+
+        let rejected = InstallProbeOptions {
+            cli_config_rejection: Some(
+                "default_profile `missing` is not one of the declared profiles".into(),
+            ),
+            ..healthy
+        };
+        let finding = config_files(&rejected);
+        assert_eq!(finding.status_label(), "fail");
+        assert!(
+            finding.message.contains(install_paths::CLI_CONFIG_PATH)
+                && finding.message.contains("rejected by the CLI")
+                && finding.message.contains("default_profile `missing`"),
+            "the finding must name the file and the CLI's reason: {}",
+            finding.message
+        );
     }
 
     fn stage_install_layout(td: &Path) {
@@ -2196,6 +2253,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: false,
+            cli_config_rejection: None,
         };
         let findings = run(&opts);
         let path_layout = findings
@@ -2242,6 +2300,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: false,
+            cli_config_rejection: None,
         };
         let findings = run(&opts);
         let serving_absent = findings
@@ -2259,6 +2318,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
+            cli_config_rejection: None,
         };
         let findings = run(&opts);
         let backend = findings
@@ -2279,6 +2339,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
+            cli_config_rejection: None,
         };
         let findings = run(&opts);
         let layout = findings
@@ -2295,6 +2356,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.path().to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
+            cli_config_rejection: None,
         };
         let findings = run(&opts);
         let layout = findings
@@ -2330,6 +2392,7 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             prefix: Some(td.to_path_buf()),
             probe_backends: false,
             skip_systemd: true,
+            cli_config_rejection: None,
         }
     }
 

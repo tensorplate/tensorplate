@@ -96,13 +96,26 @@ where
     E: Write,
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
-    run_with_warnings(parsed, cfg, Vec::new(), client_factory, stdout, stderr)
+    run_with_warnings(
+        parsed,
+        cfg,
+        Vec::new(),
+        None,
+        client_factory,
+        stdout,
+        stderr,
+    )
 }
 
 /// [`run`] with process-level warnings — a packaged config that was found
 /// and not used — stamped into every JSON envelope the command writes.
 /// The binary passes what config resolution reported; nothing else needs
 /// them.
+///
+/// `cli_config_rejection` is why the loader refused the packaged
+/// `cli.json`, when it did. `doctor` reports it as a failing
+/// `config_files` finding, so a diagnostic run on such an install cannot
+/// come back healthy while every command that needs the profile fails.
 ///
 /// # Errors
 ///
@@ -111,6 +124,7 @@ pub fn run_with_warnings<O, E, F>(
     parsed: ParsedArgs,
     cfg: CliConfig,
     warnings: Vec<String>,
+    cli_config_rejection: Option<String>,
     client_factory: F,
     stdout: &mut O,
     stderr: &mut E,
@@ -181,7 +195,15 @@ where
         Subcommand::Doctor(opts) => {
             let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
-            commands::doctor::run(&renderer, &profile, &*client, &opts, stdout, stderr)
+            commands::doctor::run(
+                &renderer,
+                &profile,
+                &*client,
+                &opts,
+                cli_config_rejection.as_deref(),
+                stdout,
+                stderr,
+            )
         }
         Subcommand::Deploy(opts) => {
             let profile = resolve_profile()?;
