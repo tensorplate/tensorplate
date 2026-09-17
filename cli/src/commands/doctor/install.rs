@@ -1308,7 +1308,8 @@ impl DriverEvidence {
 }
 
 /// Which CUDA-related artifacts are on disk, and where. Paths only: a
-/// name here means the file exists, never that anything works.
+/// path here resolves to an existing regular file, never that the
+/// library loads or that the device behind it answers.
 #[derive(Clone, Debug, Default)]
 struct CudaArtifacts {
     driver: DriverEvidence,
@@ -1632,12 +1633,36 @@ fn path_exists(p: &str) -> bool {
     Path::new(p).exists()
 }
 
-/// The first of `paths` that exists, reported as the contract path it
-/// was looked for under — never the staging prefix a test injected.
+/// Whether a candidate is library evidence: it must resolve, through
+/// however many symlinks, to an existing regular file.
+///
+/// `exists()` is not that test and a directory entry is weaker still.
+/// `exists()` is true of a directory standing where a library is looked
+/// for, and `read_dir` yields a name whether or not anything is behind
+/// it: ldconfig's soname links outlive the files they point at, so an
+/// incomplete upgrade or a removed package leaves
+/// `libcudart.so.12 -> libcudart.so.12.6.77` dangling in a directory
+/// this probe scans. Accepting either would report a CUDA runtime on a
+/// host whose worker cannot load one — the broken dependency this
+/// finding exists to name. `is_file` follows the link and is false for
+/// a dangling one, for a directory, and for every other non-regular
+/// entry.
+///
+/// `/proc/driver/nvidia/version` passes: procfs files are regular files
+/// (`S_IFREG`), which is why the kernel interface can be held to the
+/// same rule as the libraries.
+fn resolves_to_regular_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// The first of `paths` that resolves to a regular file, reported as
+/// the contract path it was looked for under — never the staging prefix
+/// a test injected, and never the link's target, which on a real host
+/// carries a version this probe has not established.
 fn first_existing_artifact(opts: &InstallProbeOptions, paths: &[&str]) -> Option<String> {
     paths
         .iter()
-        .find(|path| prefixed(opts, path).exists())
+        .find(|path| resolves_to_regular_file(&prefixed(opts, path)))
         .map(|path| (*path).to_string())
 }
 
@@ -1663,6 +1688,12 @@ fn stable_library_name(mut names: Vec<String>) -> Option<String> {
 
 /// The versioned library named `<prefix><soname>` in the first of
 /// `dirs` that has one.
+///
+/// The name is matched first and the entry followed second, so the
+/// filesystem is only asked about entries this probe would otherwise
+/// accept, and an unreadable or dangling entry is skipped rather than
+/// ending the scan: a directory whose only matching name is a dead
+/// symlink must fall through to the next directory, not shadow it.
 fn first_versioned_library(
     opts: &InstallProbeOptions,
     dirs: &[&str],
@@ -1672,11 +1703,19 @@ fn first_versioned_library(
         let Ok(entries) = std::fs::read_dir(prefixed(opts, dir)) else {
             continue;
         };
-        let names: Vec<String> = entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|name| name.len() > prefix.len() && name.starts_with(prefix))
-            .collect();
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name.len() <= prefix.len() || !name.starts_with(prefix) {
+                continue;
+            }
+            if !resolves_to_regular_file(&entry.path()) {
+                continue;
+            }
+            names.push(name);
+        }
         if let Some(name) = stable_library_name(names) {
             return Some(format!("{dir}/{name}"));
         }
@@ -1684,6 +1723,10 @@ fn first_versioned_library(
     None
 }
 
+/// Deliberately `exists()` and not `resolves_to_regular_file`: two of
+/// the LibTorch paths below (`/usr/local/libtorch`, `/opt/libtorch`) are
+/// the unpacked distribution's *directory*, so the rule the CUDA probes
+/// hold to would read every LibTorch install as absent.
 fn any_runtime_artifact_exists(opts: &InstallProbeOptions, paths: &[&str]) -> bool {
     paths.iter().any(|path| {
         opts.prefix.as_ref().map_or_else(
@@ -2135,6 +2178,21 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         let p = td.join(contract_path.trim_start_matches('/'));
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, b"").unwrap();
+    }
+
+    /// A symlink at the contract path whose target is resolved relative
+    /// to the link's own directory, the shape ldconfig writes: no
+    /// staging prefix ever appears inside a staged link, so the fixture
+    /// dangles or resolves for the same reason the real one would.
+    fn stage_symlink(td: &Path, contract_path: &str, target: &str) {
+        let p = td.join(contract_path.trim_start_matches('/'));
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &p).unwrap();
+    }
+
+    /// A directory standing where a library file is looked for.
+    fn stage_dir(td: &Path, contract_path: &str) {
+        fs::create_dir_all(td.join(contract_path.trim_start_matches('/'))).unwrap();
     }
 
     fn cuda_opts(td: &Path) -> InstallProbeOptions {
@@ -2634,6 +2692,213 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "a bare soname prefix is not a toolkit: {}",
             cuda.message
         );
+    }
+
+    #[test]
+    fn a_dangling_versioned_runtime_symlink_is_not_a_toolkit() {
+        // The state an incomplete JetPack upgrade or a removed library
+        // leaves behind: ldconfig's soname link outlives the file it
+        // points at. The name is still in the directory, so a scan that
+        // reads only directory entries calls it a CUDA runtime and the
+        // finding reports `ok` for a worker whose TensorRT adapter
+        // cannot load -- exactly the broken dependency this finding
+        // exists to name.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1");
+        stage_symlink(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12",
+            "libcudart.so.12.6.77",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no system CUDA toolkit"),
+            "a link with no file behind it is not a runtime: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda.message.contains("libcudart.so.12"),
+            "a library that is not there must not be named as found: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(WORKER_JETPACK_CUDA_HINT));
+    }
+
+    #[test]
+    fn a_dangling_versioned_driver_symlink_is_not_a_driver() {
+        // The same failure on the L4T driver directory. The exact-name
+        // probe follows the link and rejects it; the directory scan
+        // behind it must not accept the same name back.
+        let td = TempDir::new().unwrap();
+        stage_symlink(
+            td.path(),
+            "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
+            "libcuda.so.1.1",
+        );
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no NVIDIA driver"),
+            "a link with no driver library behind it is not a driver: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda.message.contains("libcuda.so.1"),
+            "a driver library that is not there must not be named as found: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(NO_DRIVER_HINT));
+    }
+
+    #[test]
+    fn a_directory_named_like_a_versioned_runtime_is_not_a_toolkit() {
+        // A directory entry matching the soname prefix is a name, not a
+        // library. Nothing can `dlopen` it.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        stage_dir(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.12");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no system CUDA toolkit"),
+            "a directory is not a CUDA runtime: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(WORKER_JETPACK_CUDA_HINT));
+    }
+
+    #[test]
+    fn a_directory_at_an_exact_contract_path_is_not_a_toolkit() {
+        // The exact-name probe's own version of the case above:
+        // `exists()` is true for a directory. `libcudart.so` does not
+        // carry the soname prefix, so only the exact-name probe can
+        // reach this entry and the scan behind it cannot mask the
+        // result.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        stage_dir(td.path(), "/usr/local/cuda/lib64/libcudart.so");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no system CUDA toolkit"),
+            "a directory is not a CUDA runtime: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(WORKER_JETPACK_CUDA_HINT));
+    }
+
+    #[test]
+    fn a_directory_at_an_exact_driver_contract_path_is_not_a_driver() {
+        // The driver side of the exact-name probe. `libcuda.so` is
+        // outside the `libcuda.so.` soname prefix, so this entry is
+        // reachable only through `NVIDIA_DRIVER_PATHS`.
+        let td = TempDir::new().unwrap();
+        stage_dir(td.path(), "/usr/lib/aarch64-linux-gnu/nvidia/libcuda.so");
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "warning");
+        assert!(
+            cuda.message.contains("no NVIDIA driver"),
+            "a directory is not a driver library: {}",
+            cuda.message
+        );
+        assert_eq!(cuda.hint.as_deref(), Some(NO_DRIVER_HINT));
+    }
+
+    #[test]
+    fn a_dangling_name_does_not_shadow_a_real_library_in_a_later_directory() {
+        // Rejecting an entry must skip it, not end the scan. A JetPack
+        // upgrade that leaves a dead link in the first directory of
+        // `CUDA_TOOLKIT_LIB_DIRS` while the runtime package's library
+        // sits in a later one is a host with a CUDA runtime, and the
+        // finding has to find it.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        stage_symlink(
+            td.path(),
+            "/usr/local/cuda/lib64/libcudart.so.12",
+            "libcudart.so.12.6.77",
+        );
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.12");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "ok");
+        assert!(
+            cuda.message
+                .contains("/usr/lib/x86_64-linux-gnu/libcudart.so.12"),
+            "the real library in the later directory must be the one named: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda.message.contains("/usr/local/cuda/lib64"),
+            "the directory whose only match was dead must not be reported: {}",
+            cuda.message
+        );
+    }
+
+    #[test]
+    fn a_symlink_chain_that_ends_at_a_real_library_is_accepted() {
+        // The layout a healthy host actually has: ldconfig's soname
+        // link, the vendor's own link, and the file. Rejecting
+        // non-regular entries must not reject these -- the fix follows
+        // links, it does not refuse them.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1.1");
+        stage_symlink(
+            td.path(),
+            "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
+            "libcuda.so.1.1",
+        );
+        stage_file(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12.6.77",
+        );
+        stage_symlink(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12.6",
+            "libcudart.so.12.6.77",
+        );
+        stage_symlink(
+            td.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12",
+            "libcudart.so.12.6",
+        );
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "ok");
+        assert!(
+            cuda.message
+                .contains("/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1"),
+            "the driver link that resolves must still be named: {}",
+            cuda.message
+        );
+        assert!(
+            cuda.message
+                .contains("/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12"),
+            "the runtime link that resolves must still be named: {}",
+            cuda.message
+        );
+        assert_no_staging_prefix(td.path(), &cuda);
     }
 
     #[test]
