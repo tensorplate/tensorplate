@@ -108,7 +108,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   sent, the child process run to a clean exit, each TCP connect
   answered -- and a control that was refused, timed out, or whose child
   exited non-zero or never ran fails the stage by name: it sent nothing,
-  so it cannot show that the later refusal was the denial's doing. The GCE
+  so it cannot show that the later refusal was the denial's doing. The
+  helper files a control only if it could be a baseline, so such a control
+  fails the stage as it is taken, before either service is denied, and
+  `run-denied` refuses one with exit status 1, naming the control rather
+  than the unit, before it sends anything. The GCE
   metadata service must answer the controls outright, over TCP and as a
   datagram, since the stage's claim is that the denial is what made that
   service unreachable. A datagram under the

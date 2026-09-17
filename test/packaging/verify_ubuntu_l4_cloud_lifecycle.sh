@@ -1118,6 +1118,10 @@ m.unix_connect = unix_connect
 m.join_control_group = join_control_group
 m.drop_privileges = drop_privileges
 m.child_udp_send = lambda: m.attempt(lambda: udp_send("192.0.2.1", 9))
+# The transient control's child exiting non-zero: it sent nothing, so it
+# cannot be the baseline the child's refusal is classified against.
+if MODE == "offline-control-child-fails" and not DENIED and not IN_UNIT:
+    m.child_udp_send = lambda: "child_exit_3"
 # A probe that crashes under the denial, with a message that quotes the
 # module's own path -- the checkout's, which is what an unguarded
 # traceback would have put into the stage log. One mode crashes whichever
@@ -2431,6 +2435,7 @@ offline_drop_ins_left() {
 for mode in offline-no-machine-type-record offline-denial-inert offline-localhost-shorthand \
             offline-unit-dead offline-probe-leaks offline-probe-crashes \
             offline-control-refused offline-control-metadata-unreachable \
+            offline-control-child-fails \
             offline-transient-not-denied offline-agent-socket-unreachable \
             offline-doctor-live-metadata offline-doctor-failing offline-doctor-row-warning \
             offline-identity-live-metadata offline-identity-rewrites-record \
@@ -2456,6 +2461,36 @@ for mode in offline-no-machine-type-record offline-denial-inert offline-localhos
   if [[ "$mode" == offline-transient-not-denied ]]; then
     check "  and no CLI call ran while the services were denied" 0 \
       "$(grep -c ' dropins=[1-9]' "${appliance}/cli.log" || true)"
+  fi
+  # A control that cannot be a baseline is refused as it is taken, by the
+  # step that took it and for the operation that did not complete, and
+  # before anything is denied or restarted.
+  control_step=""
+  case "$mode" in
+    offline-control-refused)
+      control_step="control probe"
+      control_failure="control_not_refused:udp_test_net_v4" ;;
+    offline-control-metadata-unreachable)
+      control_step="control probe"
+      control_failure="control_metadata_service_reachable:tcp_gce_metadata" ;;
+    offline-control-child-fails)
+      control_step="control probe"
+      control_failure="control_completed:udp_test_net_v4_from_child" ;;
+    offline-unit-control-refused)
+      control_step="control inside the tensorplate-agent control group"
+      control_failure="control_not_refused:udp_test_net_v4" ;;
+  esac
+  if [[ -n "$control_step" ]]; then
+    check "  and the control is refused as it is taken, naming what it did not do" "yes yes" \
+      "$(printf '%s %s' \
+         "$(grep -Fxq "step failed (exit 1): ${control_step}" \
+              "${evidence}/offline.log" && echo yes || echo no)" \
+         "$(grep -F 'control checks failed: ' "${evidence}/offline.log" \
+              | grep -Fq "$control_failure" && echo yes || echo no)")"
+    check "  before any drop-in is installed or any service restarted for it" "0 0" \
+      "$(grep -c '^install -D -m 0644 ' "${appliance}/sudo.log" || true) $(sed -n \
+           '/python3 .*linux_offline_runtime\.py control/,$p' "${appliance}/sudo.log" \
+           | grep -c 'systemctl restart' || true)"
   fi
 done
 
@@ -2511,21 +2546,16 @@ check "  and the run does not certify itself" fail \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
      "${evidence}/lifecycle-report.json")"
 
-# The two in-service cases fail on the unit they are about, and only
-# there: the transient probe and the other service pass.
-for unit_case in offline-service-filter-not-attached:tensorplate-observability:tensorplate-agent \
-                 offline-unit-control-refused:tensorplate-agent:tensorplate-observability; do
-  unit_mode="${unit_case%%:*}"
-  unit_rest="${unit_case#*:}"
-  failing_unit="${unit_rest%%:*}"
-  passing_unit="${unit_rest#*:}"
-  check "${unit_mode} is refused for ${failing_unit} by its own classification" "yes no" \
-    "$(printf '%s %s' \
-       "$(grep -Fq "step failed (exit 1): the denial is enforced inside the ${failing_unit} control group" \
-            "${td}/stages-${unit_mode}/offline.log" && echo yes || echo no)" \
-       "$(grep -Fq "the denial is enforced inside the ${passing_unit} control group" \
-            "${td}/stages-${unit_mode}/offline.log" && echo yes || echo no)")"
-done
+# A service whose filter never attached fails on that unit, and only
+# there: the transient probe and the other service pass. (A service's
+# control that was refused fails before the denial, above.)
+check "offline-service-filter-not-attached is refused for tensorplate-observability by its own classification" \
+  "yes no" \
+  "$(printf '%s %s' \
+     "$(grep -Fq "step failed (exit 1): the denial is enforced inside the tensorplate-observability control group" \
+          "${td}/stages-offline-service-filter-not-attached/offline.log" && echo yes || echo no)" \
+     "$(grep -Fq "the denial is enforced inside the tensorplate-agent control group" \
+          "${td}/stages-offline-service-filter-not-attached/offline.log" && echo yes || echo no)")"
 
 # One CLI call's unit whose filter never attached, while every other
 # unit's did. The call is never made, the calls before it were, and the

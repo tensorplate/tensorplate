@@ -328,7 +328,17 @@ def kernel_probe(scope="transient", refusal="EPERM", silence="timeout"):
 
 
 def verdict(probe, control, metadata="required", scope="transient"):
-    return m.classify(probe, control, metadata, scope)[1]
+    failures = m.classify(probe, control, metadata, scope)[1]
+    # classify's control half is control_failures, which the stage also
+    # runs on its own as each control is taken: every case below checks
+    # that the two agree.
+    taken = m.control_failures(control, metadata, scope)
+    assert set(taken) <= set(failures), (taken, failures)
+    assert [name for name in taken if name.startswith("control_")] == \
+        [name for name in failures if name.startswith("control_")], (taken, failures)
+    assert all(name.startswith(("control_", "metadata_operation_not_probed:"))
+               for name in taken), taken
+    return failures
 
 
 UDP_DENIED = sorted(name for name in m.DENIED_NAMES if name not in m.TCP_OPERATIONS)
@@ -431,6 +441,23 @@ def test_classify():
         assert verdict(both, failed, scope=scope) == [
             "control_completed:udp_test_net_v4_from_child",
             "refused:udp_test_net_v4_from_child"], scope
+    # What the stage checks as each control is taken, on its own: a
+    # control that completed is a baseline in either scope; the case the
+    # review reproduced is not, whatever a probe would later say; and an
+    # operation the host cannot route is left for classify to name.
+    for scope in m.SCOPES:
+        assert m.control_failures(outcomes("ok", "ok", scope), scope=scope) == []
+        failed = outcomes("ok", "ok", scope)
+        failed["denied"]["udp_test_net_v4_from_child"] = "child_exit_3"
+        assert m.control_failures(failed, scope=scope) == [
+            "control_completed:udp_test_net_v4_from_child"], scope
+        unroutable = outcomes("ok", "ok", scope)
+        unroutable["denied"]["udp_documentation_v6"] = "ENETUNREACH"
+        assert m.control_failures(unroutable, scope=scope) == [], scope
+        # Not an object, or no outcomes at all: nothing completed.
+        for broken in ([], "ok", None, {}, {"denied": [], "allowed": "ok"}):
+            assert "control_completed:udp_test_net_v4_from_child" in \
+                m.control_failures(broken, scope=scope), (scope, broken)
     # A connect is complete when it was answered, and only then.
     assert m.completed_outcomes("tcp_resolver_stub") == m.ANSWERED
     assert m.completed_outcomes(m.METADATA_OPERATION) == m.ANSWERED
@@ -708,14 +735,39 @@ def test_run_denied():
                 assert json.loads(out.read_text())["call"] == "deploy"
             assert m.EXIT_NOT_ENFORCED not in (0, 1, 2, 3, 4, 5, 6, 10, 11, m.EXIT_UNEXPECTED)
 
-            # The control decides too: a control whose child never sent
-            # makes this unit's refusal unattributable.
-            failed_control = outcomes("ok", "ok")
-            failed_control["denied"]["udp_test_net_v4_from_child"] = "child_not_run_OSError"
-            control.write_text(json.dumps(failed_control))
+            # A control that cannot be a baseline makes this unit's refusal
+            # unattributable, and says nothing about this unit's filter: it
+            # is refused as the control's failure, exit 1 rather than 71,
+            # before anything is sent. The case a review found blamed on
+            # the unit: a transient control whose child never sent, with
+            # this unit's own probe refused throughout.
+            for name, value, reason in (
+                ("udp_test_net_v4_from_child", "child_exit_3", "control_completed"),
+                ("udp_test_net_v4_from_child", "child_not_run_OSError", "control_completed"),
+                ("udp_test_net_v4", "EPERM", "control_not_refused"),
+                ("udp_resolver_stub", "ENETUNREACH", "control_routable"),
+                ("udp_gce_metadata", "EHOSTUNREACH", "control_metadata_service_reachable"),
+            ):
+                failed_control = outcomes("ok", "ok")
+                failed_control["denied"][name] = value
+                control.write_text(json.dumps(failed_control))
+                ran, error, stdout, probed = attempt(kernel_probe("unit"))
+                assert ran == [] and probed == [] and not out.exists(), (value, ran, probed)
+                assert type(error) is m.CheckFailed, (value, error)
+                assert error.status == m.EXIT_CHECKS_FAILED, error.status
+                assert str(error) == (
+                    "offline-control.json is not a control the deploy unit can be "
+                    "classified against, so tensorplate was not run: "
+                    "{}:{}".format(reason, name)), error
+                assert stdout == "", stdout
+            # Only the unit scope's operations are asked of it: a transient
+            # control whose metadata connect was not answered is refused
+            # when it is taken, and says nothing about a datagram probe.
+            slow = outcomes("ok", "ok")
+            slow["denied"][m.METADATA_OPERATION] = "timeout"
+            control.write_text(json.dumps(slow))
             ran, error, _, _ = attempt(kernel_probe("unit"))
-            assert ran == [] and isinstance(error, m.NotEnforced), (ran, error)
-            assert "control_completed:udp_test_net_v4_from_child" in str(error), error
+            assert error is None and len(ran) == 1, (error, ran)
             control.write_text(json.dumps(outcomes("ok", "ok")))
 
             # No control to classify against: refused before anything is
@@ -742,8 +794,12 @@ def test_run_denied():
             ran, error, _, probed = attempt(without_probe, metadata_address="")
             assert error is None and len(ran) == 1 and probed == [""], (error, ran, probed)
             ran, error, _, _ = attempt(kernel_probe("unit"), metadata_address="")
+            assert isinstance(error, m.NotEnforced), error
             assert "metadata_operation_not_probed:udp_gce_metadata" in str(error), error
             control.write_text(json.dumps(outcomes("ok", "ok")))
+            ran, error, _, probed = attempt(without_probe, metadata_address="")
+            assert ran == [] and probed == [] and type(error) is m.CheckFailed, (ran, error)
+            assert "metadata_operation_not_probed:udp_gce_metadata" in str(error), error
 
             # A call that cannot be exec'd is named, without its path.
             def missing(file, args):
@@ -802,6 +858,86 @@ def test_run_denied():
         "offline-cli-probe-status-after-deploy.json"
     refused(lambda: m.cli_evidence_name("logs"), "not an offline CLI call")
     passed("a CLI call runs only in a unit whose own probe classified as enforced")
+
+
+def test_controls_checked_as_taken():
+    """A control is filed only if it can be the baseline its probe is
+    classified against, so a host that cannot provide one fails the stage
+    before anything is denied. A probe is filed whatever it says."""
+    import contextlib
+    import io
+
+    taken = {}
+    saved = (m.run_probe, m.run_unit_probe, m.control_group_path,
+             m.join_control_group, m.drop_privileges)
+    m.run_probe = lambda agent_socket, serving_port, address=m.METADATA_ADDRESS: \
+        json.loads(json.dumps(taken["transient"]))
+    m.run_unit_probe = lambda address=m.METADATA_ADDRESS: json.loads(json.dumps(taken["unit"]))
+    m.control_group_path = lambda unit, group: "/not-a-control-group"
+    m.join_control_group = lambda group, path: None
+    m.drop_privileges = lambda uid, gid: None
+    arguments = {
+        "transient": ["--agent-socket", "s", "--serving-port", "1"],
+        "unit": ["--unit", "tensorplate-agent", "--control-group", "g",
+                 "--uid", "1", "--gid", "1"],
+    }
+    try:
+        with tempfile.TemporaryDirectory() as work:
+            out = pathlib.Path(work) / "filed.json"
+
+            def take(subcommand, scope, document, *extra):
+                """Returns the exit status, stderr, and what was filed."""
+                taken[scope] = document
+                if out.exists():
+                    out.unlink()
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    status = m.main([subcommand] + arguments[scope] + list(extra)
+                                    + ["--out", str(out)])
+                filed = json.loads(out.read_text()) if out.exists() else None
+                return status, stderr.getvalue(), filed
+
+            for scope, control, probe in (("transient", "control", "probe"),
+                                          ("unit", "control-unit", "probe-unit")):
+                unit = {"unit": "tensorplate-agent.service"} if scope == "unit" else {}
+                completed = outcomes("ok", "ok", scope)
+                assert take(control, scope, completed) == (0, "", dict(completed, **unit))
+                for name, value, failure in (
+                    ("udp_test_net_v4_from_child", "child_exit_3", "control_completed"),
+                    ("udp_test_net_v4", "EPERM", "control_not_refused"),
+                    ("udp_gce_metadata", "EHOSTUNREACH", "control_metadata_service_reachable"),
+                ):
+                    failed = outcomes("ok", "ok", scope)
+                    failed["denied"][name] = value
+                    assert take(control, scope, failed) == (
+                        1, "error: {} control checks failed: {}:{}\n".format(
+                            scope, failure, name), None), (scope, name)
+                    # The same answers from a probe are filed, and classified
+                    # against its control later.
+                    assert take(probe, scope, failed) == (0, "", dict(failed, **unit))
+                # A row with no metadata service takes its control without
+                # those operations, and refuses one that has them.
+                without = outcomes("ok", "ok", scope)
+                for name in m.METADATA_OPERATIONS:
+                    without["denied"].pop(name, None)
+                assert take(control, scope, without, "--metadata-address", "none") == \
+                    (0, "", dict(without, **unit))
+                status, stderr, filed = take(control, scope, completed,
+                                             "--metadata-address", "none")
+                assert (status, filed) == (1, None), (status, filed)
+                assert "metadata_operation_not_probed:udp_gce_metadata" in stderr, stderr
+            # A connect nothing answered is refused in the transient
+            # control, which is the only one that makes connects.
+            slow = outcomes("ok", "ok")
+            slow["denied"]["tcp_resolver_stub"] = "timeout"
+            assert take("control", "transient", slow) == (
+                1, "error: transient control checks failed: "
+                "control_completed:tcp_resolver_stub\n", None)
+    finally:
+        (m.run_probe, m.run_unit_probe, m.control_group_path,
+         m.join_control_group, m.drop_privileges) = saved
+    passed("a control is filed only if it can be a baseline, before anything is denied")
 
 
 class FakeCredentials:
@@ -1515,7 +1651,7 @@ def test_evidence():
 def main():
     for test in (test_drop_in, test_check_denial, test_check_no_denial, test_check_policy,
                  test_classify, test_probe_outcomes, test_run_denied,
-                 test_unit_probe_mechanics,
+                 test_controls_checked_as_taken, test_unit_probe_mechanics,
                  test_doctor_check, test_identity_check, test_cli_documents,
                  test_command_line, test_command_boundary, test_evidence):
         test()

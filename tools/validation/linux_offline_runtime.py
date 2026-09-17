@@ -718,17 +718,28 @@ def run_denied(call, control, evidence_dir, command, metadata_address=METADATA_A
     document is written to `evidence_dir` as `cli_evidence_name(call)`
     whatever it says, as every probe is. The command runs only if the
     classification passed. Nothing is written to stdout, which is the
-    command's."""
+    command's.
+
+    A control that cannot be a baseline is refused before anything is
+    sent, as a failed check (EXIT_CHECKS_FAILED) that names the control:
+    EXIT_NOT_ENFORCED says this unit's filter did not work, and a
+    control that never completed says nothing about this unit."""
     if not command:
         raise CheckFailed("run-denied needs the command to run after --")
     out = os.path.join(evidence_dir, cli_evidence_name(call))
     baseline = _load_json(control)
     if not isinstance(baseline, dict):
         raise CheckFailed("{} is not a JSON object".format(os.path.basename(control)))
+    metadata = _metadata_operation(metadata_address)
+    unusable = control_failures(baseline, metadata, "unit")
+    if unusable:
+        raise CheckFailed("{} is not a control the {} unit can be classified against, "
+                          "so {} was not run: {}".format(
+                              os.path.basename(control), call,
+                              os.path.basename(command[0]), ", ".join(unusable)))
     document = run_unit_probe(metadata_address)
     document["call"] = call
     _write_document(out, document)
-    metadata = "required" if metadata_address else "absent"
     _, failures = classify(document, baseline, metadata, "unit")
     if failures:
         raise NotEnforced("the {} unit does not enforce the denial, so {} was not run: {}".format(
@@ -822,22 +833,76 @@ def drop_privileges(uid, gid, ops=os):
         raise CheckFailed("the probe did not drop to uid {} gid {}".format(uid, gid))
 
 
+def _outcomes(document, key):
+    value = document.get(key) if isinstance(document, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def control_failures(control, metadata="required", scope="transient"):
+    """Why `control` cannot be the baseline a probe of `scope` is
+    classified against, whatever that probe turns out to say.
+
+    Checked when the control is taken, before anything is denied, so a
+    host that cannot provide a baseline fails the stage before it is
+    changed -- and again by `classify` and `run-denied`, which never take
+    a control on trust. Every name returned starts with `control_`,
+    except `metadata_operation_not_probed`, which a row with no metadata
+    service applies to both documents.
+
+    An operation the host cannot route is not a failure here: it is
+    excused by `classify`, which names it, unless it is a loopback
+    destination every host can send to. Every other operation has to
+    have completed (`completed_outcomes`): a refusal under the denial is
+    attributable only to an operation that went through a moment
+    earlier. The metadata operations must succeed outright rather than
+    merely not be refused: the stage's whole claim is that this service
+    was reachable and the denial is what made it unreachable."""
+    failures = []
+    denied_names, allowed_names = SCOPES[scope]
+    denied = _outcomes(control, "denied")
+    allowed = _outcomes(control, "allowed")
+    names = list(denied_names)
+    if metadata == "absent":
+        names = [name for name in names if name not in METADATA_OPERATIONS]
+        # Absent because the row has no metadata service, not absent
+        # because a probe dropped it: an operation that quietly vanished
+        # from a document must never read as one that passed.
+        for name in METADATA_OPERATIONS:
+            if name in denied:
+                failures.append("metadata_operation_not_probed:" + name)
+    for name in names:
+        outcome = denied.get(name)
+        if name in METADATA_OPERATIONS:
+            if outcome != "ok":
+                failures.append("control_metadata_service_reachable:" + name)
+        elif outcome in UNROUTABLE:
+            if name in ALWAYS_ROUTABLE:
+                failures.append("control_routable:" + name)
+        elif outcome in REFUSED:
+            # Refused by something else on the host.
+            failures.append("control_not_refused:" + name)
+        elif outcome not in completed_outcomes(name):
+            # Missing, a child that failed or never ran, a timeout, or
+            # anything else that is not a send or connect that happened.
+            failures.append("control_completed:" + name)
+    for name in allowed_names:
+        if allowed.get(name) != "ok":
+            failures.append("control_allowed:" + name)
+    return sorted(set(failures))
+
+
 def classify(probe, control, metadata="required", scope="transient"):
     """The probe proves the denial only against a control that completed
     the same operations. Both halves are required: a control that was
     refused by something else on the host, or that never sent at all,
-    makes the probe's refusal unattributable, and a probe that was not
-    refused means the denial did nothing.
+    makes the probe's refusal unattributable (`control_failures`), and a
+    probe that was not refused means the denial did nothing.
 
     The control also decides which operations can prove anything here. An
     operation the host could not perform with nothing denied cannot be
     refused by the denial either; it is named in the result rather than
     reported as a denial that failed to bite -- except for a loopback
     destination, which every host can send to.
-
-    Every other control has to have completed its operation
-    (`completed_outcomes`): a refusal under the denial is attributable
-    only to an operation that went through a moment earlier.
 
     A datagram has to be refused outright (REFUSED). A TCP connect cannot
     be: the kernel reports nothing for a dropped SYN, so it is accepted as
@@ -847,60 +912,39 @@ def classify(probe, control, metadata="required", scope="transient"):
     `scope` names the operation set: `transient` for the probe in a
     denied transient unit, `unit` for the datagram subset run inside a
     service's own control group."""
-    failures = []
+    failures = control_failures(control, metadata, scope)
     denied_names, allowed_names = SCOPES[scope]
-    control_denied = control.get("denied") if isinstance(control.get("denied"), dict) else {}
-    control_allowed = control.get("allowed") if isinstance(control.get("allowed"), dict) else {}
-    probe_denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
-    probe_allowed = probe.get("allowed") if isinstance(probe.get("allowed"), dict) else {}
+    control_denied = _outcomes(control, "denied")
+    probe_denied = _outcomes(probe, "denied")
+    probe_allowed = _outcomes(probe, "allowed")
     names = list(denied_names)
     if metadata == "absent":
         names = [name for name in names if name not in METADATA_OPERATIONS]
-        # Absent because the row has no metadata service, not absent
-        # because a probe dropped it: an operation that quietly vanished
-        # from a document must never read as one that passed.
         for name in METADATA_OPERATIONS:
-            if name in control_denied or name in probe_denied:
+            if name in probe_denied:
                 failures.append("metadata_operation_not_probed:" + name)
     refused_names, silenced_names, unroutable_names = [], [], []
     for name in names:
         outcome = control_denied.get(name)
         probed = probe_denied.get(name)
-        if name in METADATA_OPERATIONS:
-            # The controls that must succeed outright rather than merely
-            # not be refused: the stage's whole claim is that this service
-            # was reachable and the denial is what made it unreachable.
-            if outcome != "ok":
-                failures.append("control_metadata_service_reachable:" + name)
-        elif outcome in UNROUTABLE:
-            if name in ALWAYS_ROUTABLE:
-                failures.append("control_routable:" + name)
-            else:
-                unroutable_names.append(name)
-                # Nothing here to refuse, so the only thing to require is
-                # that the denial did not make it start working.
-                if probed != outcome:
-                    failures.append("probe_matches_the_unroutable_control:" + name)
-                continue
-        elif outcome in REFUSED:
-            # Refused by something else on the host.
-            failures.append("control_not_refused:" + name)
-        elif outcome not in completed_outcomes(name):
-            # Missing, a child that failed or never ran, a timeout, or
-            # anything else that is not a send or connect that happened.
-            failures.append("control_completed:" + name)
+        if (outcome in UNROUTABLE and name not in METADATA_OPERATIONS
+                and name not in ALWAYS_ROUTABLE):
+            unroutable_names.append(name)
+            # Nothing here to refuse, so the only thing to require is
+            # that the denial did not make it start working.
+            if probed != outcome:
+                failures.append("probe_matches_the_unroutable_control:" + name)
+            continue
         if probed in REFUSED:
             refused_names.append(name)
         elif name in TCP_OPERATIONS and probed in SILENCED:
             # Attributable because the control's same connect was
-            # answered, which the checks above required: a connect that
+            # answered, which control_failures required: a connect that
             # timed out with nothing denied as well fails there.
             silenced_names.append(name)
         else:
             failures.append("refused:" + name)
     for name in allowed_names:
-        if control_allowed.get(name) != "ok":
-            failures.append("control_allowed:" + name)
         if probe_allowed.get(name) != "ok":
             failures.append("allowed:" + name)
     result = {
@@ -1291,6 +1335,12 @@ def _metadata_address(value):
     return "" if value == "none" else value
 
 
+def _metadata_operation(metadata_address):
+    """What `classify` requires of the metadata operations, for a probe
+    or control taken with `metadata_address`."""
+    return "required" if metadata_address else "absent"
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1399,6 +1449,16 @@ def _run_bounded(args):
         return EXIT_UNEXPECTED
 
 
+def _taken_control_failures(name, document, args, scope):
+    """A control is checked as it is taken and filed only if it can be the
+    baseline its probe is classified against, so a host that cannot
+    provide one fails the stage before anything is denied. A probe is
+    filed whatever it says, and classified against its control later."""
+    if name not in ("control", "control-unit"):
+        return ()
+    return control_failures(document, _metadata_operation(args.metadata_address), scope)
+
+
 def _run(args):
     name = args.command
     if name == "child-udp":
@@ -1430,7 +1490,9 @@ def _run(args):
         run_denied(args.call, args.control, args.evidence_dir, args.exec_argv,
                    args.metadata_address)
     elif name in ("probe", "control"):
-        _emit(run_probe(args.agent_socket, args.serving_port, args.metadata_address), args.out)
+        document = run_probe(args.agent_socket, args.serving_port, args.metadata_address)
+        _emit(document, args.out, _taken_control_failures(name, document, args, "transient"),
+              "transient control checks")
     elif name in ("probe-unit", "control-unit"):
         # Validated before anything moves: the path is where this process
         # is about to be written.
@@ -1439,7 +1501,8 @@ def _run(args):
         drop_privileges(args.uid, args.gid)
         document = run_unit_probe(args.metadata_address)
         document["unit"] = unit_service_name(args.unit)
-        _emit(document, args.out)
+        _emit(document, args.out, _taken_control_failures(name, document, args, "unit"),
+              "unit control checks")
     elif name == "classify":
         result, failures = classify(_load_json(args.probe), _load_json(args.control),
                                     args.metadata_operation, args.scope)

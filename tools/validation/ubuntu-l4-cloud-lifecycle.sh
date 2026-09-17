@@ -1325,7 +1325,8 @@ stage_crash_loop() {
 # to a clean exit, a connect answered -- because a control that sent
 # nothing cannot show that the later refusal was the denial's doing. The
 # GCE metadata service must answer it outright, since the whole claim is
-# that the denial is what made that service unreachable.
+# that the denial is what made that service unreachable. A control that
+# fails either is refused as it is taken, before anything is denied.
 #
 # systemd attaches the filter to each unit on a best-effort basis, so a
 # filtered transient unit says nothing about a service whose own attach
@@ -1741,8 +1742,9 @@ stage_offline_in() {
 
   # The control, before anything is denied. A refused datagram or a
   # silent connect under the denial proves nothing unless these same
-  # operations were not refused a moment earlier, and unless the metadata
-  # service answered them.
+  # operations completed a moment earlier, and unless the metadata
+  # service answered them. The module files a control only if it did, so
+  # a host that cannot provide a baseline fails here, unchanged.
   #
   # The allowed loopback port is the one the worker is serving on now.
   # status-logs filed status.json three stages ago, and the restart and

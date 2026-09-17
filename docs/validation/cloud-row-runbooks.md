@@ -164,10 +164,12 @@ enforcement comes from probes, starting with one in a transient unit:
   TCP connect answered, accepted or reset. A control that was refused,
   timed out, or whose child exited non-zero or never ran sent nothing, so
   it cannot show that a refusal of the same operation under the denial
-  was the denial's doing; each is named and fails the stage. The GCE
-  metadata service at `169.254.169.254` must answer it outright, over TCP
-  and as a datagram, since the stage's whole claim is that the denial is
-  what made that service unreachable;
+  was the denial's doing. The GCE metadata service at `169.254.169.254`
+  must answer it outright, over TCP and as a datagram, since the stage's
+  whole claim is that the denial is what made that service unreachable.
+  The helper files a control only if it meets both, so a control that
+  does not is named and fails the stage as it is taken, before anything
+  is denied;
 - the **probe** then runs denied, against the same operations: the
   metadata service, the resolver stub on TCP and UDP, another loopback
   address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`
@@ -213,7 +215,11 @@ call's own unit** first, files them as `offline-cli-probe-<call>.json`,
 and classifies them against the transient control. Only if they classify
 as enforced does it exec the call, in the same process and so in the same
 control group, and the unit's exit status is then the call's. Otherwise
-it exits 71 and the call is never made, which fails the stage.
+it exits 71 and the call is never made, which fails the stage. It checks
+the transient control again before it sends anything: a control that
+could not be a baseline says nothing about this unit, so it is refused
+with exit status 1, naming the control rather than the unit, and the call
+is not made either.
 
 The control also decides what each operation can prove. On Linux the
 cgroup egress filter runs *after* the route lookup, so an operation the
