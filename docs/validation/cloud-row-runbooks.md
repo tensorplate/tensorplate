@@ -69,6 +69,21 @@ request returns the expected fixture echo through that worker, and that
 services must have actual journal entries from their current invocation;
 an empty capture or entries from an earlier invocation do not pass.
 
+Every journal capture is projected as it is taken. The harness reads
+`journalctl --output=json` into a scratch directory, writes only
+`MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`,
+`_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP`
+into the evidence directory, and deletes the scratch directory whatever
+the verdict on the capture was. A signal that interrupts a capture
+deletes it on the way out; only a `SIGKILL` or a machine failure can
+leave it behind, in a private directory under `$TMPDIR`. The host
+metadata systemd attaches to every entry is therefore never recorded,
+and the projected file is the run's only copy — the retention rule in
+[the evidence rules](fixture-and-evidence-rules.md) applies to it as the
+raw record. A line that cannot be parsed as a JSON record, including
+journalctl's own `-- No entries --`, is refused rather than copied
+through, and fails the stage that captured it.
+
 After restarting both services, the harness requires new service PIDs,
 the same active deployment in status, a healthy serving endpoint, and
 another successful inference with the expected echo. This checks that
@@ -323,9 +338,9 @@ run's files are known to carry:
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | JSON journal records with host metadata (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) beside the service's messages; keep only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | nothing to edit: the harness projects each capture to `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` as it records it, so the host metadata systemd attaches (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) is never written down. A service's own message can still quote a host name or an address |
 | `install.log`, `upgrade.log`, `rollback.log` | short-format journal lines prefixed with the host name, and the operator's account name in the assets paths the installers echo; inspect both sets' paths in upgrade and rollback logs |
-| `packages.txt` | package descriptions carrying planning identifiers, which do not belong in evidence |
+| `packages.txt` | the TensorPlate packages dpkg listed after the install, without descriptions |
 | `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json` | the file lists and digests of both sets, and which release tags and package versions the upgrade moved between |
 | `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt` | the TensorPlate packages dpkg listed at each step |
 | `doctor-baseline.json`, `doctor-after-rollback.json` and their `.exit` files, `doctor-after-upgrade.json` | doctor on the baseline, filed; doctor after the upgrade, asserted |

@@ -35,7 +35,11 @@ cycle; none is speculative. Violations are correctness bugs, not style.
    evidence is checked by `tools/validation/check-evidence-publication.sh`,
    run with a private literal file before `git add` and with patterns
    only in CI on every pull request; its synthetic values are listed in
-   `docs/validation/evidence/v0.2.1/README.md`.
+   `docs/validation/evidence/v0.2.1/README.md`. Where a harness can
+   record only what belongs in evidence, it does so instead of leaving an
+   editing job behind: the Ubuntu cloud harness projects each journal
+   capture to the service's own fields as it takes it, so the projected
+   capture is the record and no raw copy of it is kept.
 
 ## Asserting
 
