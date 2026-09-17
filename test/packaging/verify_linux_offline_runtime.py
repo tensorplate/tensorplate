@@ -659,10 +659,15 @@ def test_run_denied():
     import errno
     import io
 
-    command = ["tensorplate", "deploy", "/opt/bundle", "--output", "json"]
+    # The evidence directory and the command both under a home directory,
+    # the shape the publication scanner refuses: every message below names
+    # the control and the command by base name alone.
+    command = ["/home/tp-reviewer/bin/tensorplate", "deploy", "/opt/bundle",
+               "--output", "json"]
     saved = m.run_unit_probe
-    with tempfile.TemporaryDirectory() as work:
-        work = pathlib.Path(work)
+    with tempfile.TemporaryDirectory() as root:
+        work = pathlib.Path(root) / "home" / "tp-reviewer" / "evidence"
+        work.mkdir(parents=True)
         control = work / "offline-control.json"
         control.write_text(json.dumps(outcomes("ok", "ok")))
         out = work / m.cli_evidence_name("deploy")
@@ -689,6 +694,7 @@ def test_run_denied():
                                  execute=lambda file, args: ran.append((file, args)))
             except m.CheckFailed as failure:
                 error = failure
+                assert "tp-reviewer" not in str(error), error
             return ran, error, stdout.getvalue(), probed
 
         try:
@@ -696,7 +702,7 @@ def test_run_denied():
             # call is exec'd as given, with nothing written to its stdout.
             ran, error, stdout, probed = attempt(kernel_probe("unit"))
             assert error is None, error
-            assert ran == [("tensorplate", command)], ran
+            assert ran == [(command[0], command)], ran
             assert stdout == "", stdout
             assert probed == [m.METADATA_ADDRESS], probed
             filed = json.loads(out.read_text())
@@ -772,13 +778,15 @@ def test_run_denied():
 
             # No control to classify against: refused before anything is
             # sent, and nothing is filed.
-            for broken in (work / "absent.json", work / "not-an-object.json"):
-                if broken.name == "not-an-object.json":
-                    broken.write_text("[]")
-                ran, error, _, probed = attempt(kernel_probe("unit"), control_path=broken)
+            (work / "not-an-object.json").write_text("[]")
+            for broken, message in (
+                ("absent.json", "cannot read absent.json as JSON: No such file or directory"),
+                ("not-an-object.json", "not-an-object.json is not a JSON object"),
+            ):
+                ran, error, _, probed = attempt(kernel_probe("unit"),
+                                                control_path=work / broken)
                 assert ran == [] and probed == [] and not out.exists(), (ran, probed)
-                assert isinstance(error, m.CheckFailed) and not isinstance(error, m.NotEnforced)
-                assert broken.name in str(error), error
+                assert type(error) is m.CheckFailed and str(error) == message, error
             # No command at all.
             ran, error, _, probed = attempt(kernel_probe("unit"), argv=[])
             assert ran == [] and probed == [] and "needs the command" in str(error), error
@@ -803,8 +811,7 @@ def test_run_denied():
 
             # A call that cannot be exec'd is named, without its path.
             def missing(file, args):
-                raise OSError(errno.ENOENT, "No such file or directory",
-                              "/home/tp-reviewer/bin/" + file)
+                raise OSError(errno.ENOENT, "No such file or directory", file)
             m.run_unit_probe = lambda address=m.METADATA_ADDRESS: kernel_probe("unit")
             try:
                 m.run_denied("deploy", str(control), str(work), command, execute=missing)
@@ -1423,7 +1430,7 @@ def test_command_boundary():
     passed("an unanticipated failure is named by type alone, and no message quotes a path")
 
 
-UNITS =["tensorplate-agent.service", "tensorplate-observability.service"]
+UNITS = ["tensorplate-agent.service", "tensorplate-observability.service"]
 
 
 def denial_document(**changes):
