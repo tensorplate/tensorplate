@@ -158,13 +158,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the operator's edit and the set-aside state to be intact, the older
   agent to report no active or previous deployment, and a fresh
   deployment to serve. The set-aside state is held to its contents, not
-  to its pathname: the stopped agent's `state/state.json` is digested
-  before the move, and `state.bak/state.json` is digested again after the
-  baseline install and required to match, so a removal or an install that
-  emptied, truncated or rewrote it in place fails the stage by name. The
-  checks that follow deliberately do not load that file -- they exist to
-  show the older agent did not -- so nothing else could catch it. Doctor
-  on the baseline is recorded, not asserted.
+  to its pathname, and to the whole directory rather than to one name in
+  it: with the services stopped and before the move, the harness lists
+  `state/` and digests every file in it, then does the same to
+  `state.bak/` after the baseline install and requires the two to match
+  name for name and digest for digest, naming the first file that
+  changed, went missing or was added. A device keeps more there than the
+  agent's `state.json` -- the agent also refreshes `state.json.bak`, the
+  copy it falls back to when the primary fails to decode, and the
+  observability unit writes `observability-snapshot.json` beside them --
+  so a removal or an install that emptied, truncated or rewrote any of
+  them in place fails the stage by name, and a check on one pathname
+  would have credited the rollback with preserving state it never read.
+  The checks that follow deliberately do not load those files -- they
+  exist to show the older agent did not -- so nothing else could catch
+  it. Doctor on the baseline is recorded, not asserted.
   The harness drops `PYTHONOPTIMIZE`, which would otherwise turn its
   Python `assert` checks into passes. A run that ends while the device
   serves nothing -- in the upgrade from clearing the candidate to a
@@ -176,7 +184,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   says the conffiles are kept only when the removal's listing showed
   it, and says whether the baseline installer ran, where durable state
   is, and how to recover, including how to return to the candidate when
-  the rollback stopped before removing anything. A terminal that has
+  the rollback stopped before removing anything. Where it says the state
+  was set aside, it also says what is behind that pathname, because it is
+  written in exactly the window where a baseline install that failed may
+  already have destroyed it and the stage's own check runs only after
+  that install returns: whether the set-aside copy still matches the
+  digests taken before the move, no longer matches them and should be
+  treated as damaged, or could not be read back. That read is
+  best-effort, so the report never fails on it. A terminal that has
   gone away does not stop the lifecycle report from being written. The
   report attests the candidate's `SHA256SUMS` digest; the baseline's is
   filed separately with the upgrade path. `docs/install/lifecycle.md` no

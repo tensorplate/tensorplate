@@ -403,15 +403,24 @@ Prerequisites:
    show that, rather than the words the harness passed to `apt-get`.
    It then installs the baseline
    fresh through its own `install.sh` and requires the baseline versions,
-   the operator's edit, and the set-aside `state.bak/state.json` to be
-   intact. Intact means byte for byte: with the services stopped and
-   before the move, the harness digests `state/state.json`, and after the
-   baseline install it digests `state.bak/state.json` and requires the
-   same sha256. A removal or an install that emptied, truncated or
-   rewrote the saved file in place would leave the pathname a regular
-   file, and nothing later in the stage reads that file back — the checks
-   below exist to show the older agent did **not** load it — so the
-   digest is what makes the preservation claim checkable.
+   the operator's edit, and the whole set-aside `state.bak` directory to
+   be intact. Intact means byte for byte, file by file: with the services
+   stopped and before the move, the harness lists `state/` and digests
+   every file in it, and after the baseline install it does the same to
+   `state.bak/` and requires the two listings to match name for name and
+   digest for digest. A file that changed, that went missing, or that was
+   added is named. It is the directory rather than one pathname in it
+   because a device keeps more than the agent's `state.json` there: the
+   agent also refreshes `state.json.bak`, the copy it falls back to when
+   the primary fails to decode, and the observability unit writes
+   `observability-snapshot.json` beside them. A removal or an install
+   that emptied, truncated or rewrote any of them in place would leave
+   the pathname a regular file, and nothing later in the stage reads
+   those files back — the checks below exist to show the older agent did
+   **not** load them — so the digests are what make the preservation
+   claim checkable. The harness holds whatever the directory carries, so
+   a device that keeps a file none of these names covers is held to it
+   too.
    The older agent must report **no** active or previous
    deployment: the state was set aside on purpose, and what to restore
    from it is the operator's decision. A fresh `<deployment-id>-rollback`
@@ -450,10 +459,18 @@ Prerequisites:
    It says where durable state is: the upgrade's clearing step deletes
    `/etc/tensorplate` and `/var/lib/tensorplate` along with the packages —
    the report says whether it got that far — while the rollback sets
-   durable state aside at `state.bak` first. When the rollback stopped
-   before removing anything, it gives the commands that return to the
-   candidate instead: moving `state.bak` back, when it was moved, and
-   starting both services.
+   durable state aside at `state.bak` first. Where it says `state.bak`,
+   it also says what is behind that pathname, because this report is
+   written in the window where a baseline install that failed may already
+   have destroyed it: whether the set-aside copy **still matches** the
+   digests taken before the move, **no longer matches** them and should
+   be treated as damaged, or could not be read back at all. That read is
+   best-effort — the report is written from the exit path and is never
+   allowed to fail — so an unreadable copy is reported as unknown rather
+   than as either answer. When the rollback stopped before removing
+   anything, it gives the commands that return to the candidate instead:
+   moving `state.bak` back, when it was moved, and starting both
+   services.
 
    Re-running the harness also recovers the device, because its install
    stage purges and installs the candidate from scratch — but that same
