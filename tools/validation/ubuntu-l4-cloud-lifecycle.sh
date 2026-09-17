@@ -37,7 +37,7 @@
 #                 removed on every exit path, and its enforcement is
 #                 proved by probes -- in a denied transient unit and
 #                 inside each service's own control group -- each against
-#                 a control that ran unrefused first
+#                 a control that ran first and completed every operation
 #
 # With --baseline-assets-dir, two more stages run after offline. The
 # baseline is a published, signed predecessor set, always installed with
@@ -1301,9 +1301,12 @@ stage_crash_loop() {
 # show` answers for a dead or nonexistent unit with empty values. So the
 # proof is a probe run inside a denied transient unit -- and the probe
 # means nothing on its own, because a host firewall would refuse it just
-# the same. The control runs FIRST, with nothing denied, and must not be
-# refused; the GCE metadata service must answer it outright, since the
-# whole claim is that the denial is what made that service unreachable.
+# the same. The control runs FIRST, with nothing denied, and every
+# operation in it must have completed -- a datagram sent, the child run
+# to a clean exit, a connect answered -- because a control that sent
+# nothing cannot show that the later refusal was the denial's doing. The
+# GCE metadata service must answer it outright, since the whole claim is
+# that the denial is what made that service unreachable.
 #
 # systemd attaches the filter to each unit on a best-effort basis, so a
 # filtered transient unit says nothing about a service whose own attach
@@ -1662,7 +1665,7 @@ stage_offline() {
   step "file the offline evidence" offline_helper evidence \
     --dir "$EVIDENCE_DIR" --deployment "$OFFLINE_DEPLOYMENT_ID" \
     --out "${EVIDENCE_DIR}/offline-runtime.json" || return
-  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit and inside each service's control group, each against an unrefused control; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
+  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit and inside each service's control group, each against a control that completed the same operations; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
 }
 
 stage_offline_in() {

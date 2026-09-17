@@ -378,10 +378,65 @@ def test_classify():
     # answers with a reset, which is an answer.
     slow = outcomes("ok", "ok")
     slow["denied"]["tcp_resolver_stub"] = "timeout"
-    assert verdict(kernel_probe(), slow) == ["control_answered:tcp_resolver_stub"]
+    assert verdict(kernel_probe(), slow) == ["control_completed:tcp_resolver_stub"]
+    # Whatever the probe says: a refusal is no more attributable than a
+    # silence to a connect nobody answered.
+    refusing = kernel_probe()
+    refusing["denied"]["tcp_resolver_stub"] = "EPERM"
+    assert verdict(refusing, slow) == ["control_completed:tcp_resolver_stub"]
     reset = outcomes("ok", "ok")
     reset["denied"]["tcp_resolver_stub"] = "ECONNREFUSED"
     assert verdict(kernel_probe(), reset) == []
+
+    # A control has to have COMPLETED its operation, not merely not been
+    # refused. The case a review reproduced: a child that exited 3 sent
+    # nothing, so the child's later refusal was certified against a
+    # baseline that established nothing. Every outcome that is not a send
+    # or a connect that happened is named, in both scopes, for the child
+    # and for a datagram the probe process sends itself.
+    not_completed = ("child_exit_3", "child_exit_1", "child_not_run_TimeoutExpired",
+                     "child_not_run_FileNotFoundError", "RuntimeError", "OSError",
+                     "timeout", "ETIMEDOUT", "ECONNREFUSED", "", "EPERM\n", "OK",
+                     "something this module never prints")
+    for scope in m.SCOPES:
+        for name in ("udp_test_net_v4_from_child", "udp_test_net_v4"):
+            for value in not_completed:
+                failed = outcomes("ok", "ok", scope)
+                failed["denied"][name] = value
+                assert verdict(kernel_probe(scope), failed, scope=scope) == [
+                    "control_completed:" + name], (scope, name, value)
+            # Not a string at all.
+            for value in (None, 0, ["ok"], {"ok": True}):
+                failed = outcomes("ok", "ok", scope)
+                failed["denied"][name] = value
+                assert verdict(kernel_probe(scope), failed, scope=scope) == [
+                    "control_completed:" + name], (scope, name, value)
+            # Missing from the control altogether.
+            failed = outcomes("ok", "ok", scope)
+            del failed["denied"][name]
+            assert verdict(kernel_probe(scope), failed, scope=scope) == [
+                "control_completed:" + name], (scope, name)
+        # The denied child failing is not a refusal either, whatever it
+        # printed on the way out: only a child that ran and was refused is.
+        for value in ("child_exit_3", "child_not_run_TimeoutExpired", "RuntimeError", "ok"):
+            probe_child = kernel_probe(scope)
+            probe_child["denied"]["udp_test_net_v4_from_child"] = value
+            assert verdict(probe_child, outcomes("ok", "ok", scope), scope=scope) == [
+                "refused:udp_test_net_v4_from_child"], (scope, value)
+        # Both children failing: each half is named.
+        both = kernel_probe(scope)
+        both["denied"]["udp_test_net_v4_from_child"] = "child_exit_3"
+        failed = outcomes("ok", "ok", scope)
+        failed["denied"]["udp_test_net_v4_from_child"] = "child_exit_3"
+        assert verdict(both, failed, scope=scope) == [
+            "control_completed:udp_test_net_v4_from_child",
+            "refused:udp_test_net_v4_from_child"], scope
+    # A connect is complete when it was answered, and only then.
+    assert m.completed_outcomes("tcp_resolver_stub") == m.ANSWERED
+    assert m.completed_outcomes(m.METADATA_OPERATION) == m.ANSWERED
+    for name in m.DENIED_NAMES:
+        if name not in m.TCP_OPERATIONS:
+            assert m.completed_outcomes(name) == ("ok",), name
 
     # A control refused by something else on the host -- an application
     # firewall, a missing route -- makes the probe's refusal unattributable.
@@ -398,12 +453,13 @@ def test_classify():
     assert verdict(probe, unreachable) == [
         "control_metadata_service_reachable:" + m.METADATA_UDP_OPERATION]
     # The connect that never reached the service cannot be silenced by the
-    # denial either, and both are said.
-    unreachable = outcomes("ok", "ok")
-    unreachable["denied"][m.METADATA_OPERATION] = "EHOSTUNREACH"
-    assert verdict(probe, unreachable) == [
-        "control_answered:" + m.METADATA_OPERATION,
-        "control_metadata_service_reachable:" + m.METADATA_OPERATION]
+    # denial either, and is not excused as an operation this host cannot
+    # send: the metadata service is the one it must reach.
+    for value in ("EHOSTUNREACH", "timeout", "ECONNREFUSED", "child_exit_3"):
+        unreachable = outcomes("ok", "ok")
+        unreachable["denied"][m.METADATA_OPERATION] = value
+        assert verdict(probe, unreachable) == [
+            "control_metadata_service_reachable:" + m.METADATA_OPERATION], value
 
     # An operation the host cannot perform with nothing denied. On Linux
     # the cgroup egress filter runs after the route lookup, so an
@@ -499,7 +555,7 @@ def test_classify():
     # and a transient probe cannot stand in for a unit's.
     assert verdict(probe, control, scope="unit") == []
     assert "refused:tcp_gce_metadata" in verdict(unit_probe, control)
-    passed("classification needs an unrefused control and a refused probe")
+    passed("classification needs a completed control and a refused probe")
 
 
 def test_probe_outcomes():
@@ -1041,6 +1097,15 @@ def test_evidence():
         # transient unit's did.
         ({m.unit_evidence_name("probe", unit): outcomes("ok", "ok", "unit")}, (),
          "do not classify"),
+        # A control whose child never sent anything, on either scope.
+        ({"offline-control.json": dict(outcomes("ok", "ok"), denied=dict(
+            outcomes("ok", "ok")["denied"], udp_test_net_v4_from_child="child_exit_3"))},
+         (), "control_completed:udp_test_net_v4_from_child"),
+        ({m.unit_evidence_name("control", unit): dict(
+            outcomes("ok", "ok", "unit"), denied=dict(
+                outcomes("ok", "ok", "unit")["denied"],
+                udp_test_net_v4_from_child="child_not_run_TimeoutExpired"))},
+         (), "control_completed:udp_test_net_v4_from_child"),
         # A service probed against the transient control instead of its
         # own, or not probed at all.
         ({}, (), None),

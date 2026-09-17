@@ -2252,7 +2252,7 @@ check "  the resolver stub is cut off under the denial, as the shorthand would n
 d=json.load(open(sys.argv[1]))["denied"]
 print(d["tcp_resolver_stub"], d["udp_resolver_stub"])' "${ok_evidence}/offline-probe.json")"
 # Both services, probed from inside their own control groups: each
-# control unrefused before the denial, each probe refused under it.
+# control completed before the denial, each probe refused under it.
 for unit in tensorplate-agent tensorplate-observability; do
   check "  ${unit} was probed inside its own control group, against its own control" \
     "ok EPERM unit 6" \

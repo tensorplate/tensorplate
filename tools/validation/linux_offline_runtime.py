@@ -171,6 +171,26 @@ SILENCED = ("timeout", "ETIMEDOUT")
 ANSWERED = ("ok", "ECONNREFUSED")
 TCP_OPERATIONS = (METADATA_OPERATION, "tcp_resolver_stub")
 
+# What a control has to have reported for a refusal of the same operation
+# under the denial to mean anything: the operation completed.
+#
+# A datagram completed when sendto() returned, which `attempt` records as
+# `ok`, and the child's send completed when the child ran, exited 0 and
+# printed that. A connect completed when the far end answered it. Every
+# other outcome is a control that sent nothing anyone saw -- a child that
+# exited non-zero or never ran, a timeout, an exception's name, a string
+# this module does not produce -- and a control that sent nothing cannot
+# show that the later refusal was this denial's doing. So the controls are
+# checked against these sets rather than against a list of the failures
+# someone thought of. The unroutable outcomes below are the one deliberate
+# exception, and are handled apart.
+DELIVERED = ("ok",)
+
+
+def completed_outcomes(name):
+    """The control outcomes that count as `name` having completed."""
+    return ANSWERED if name in TCP_OPERATIONS else DELIVERED
+
 # Outcomes that mean the send never reached the address filter at all.
 #
 # On Linux the cgroup egress filter runs after the route lookup, so a
@@ -701,10 +721,11 @@ def drop_privileges(uid, gid, ops=os):
 
 
 def classify(probe, control, metadata="required", scope="transient"):
-    """The probe proves the denial only against a control that was not
-    refused. Both halves are required: a control refused by something else
-    on the host makes the probe's refusal unattributable, and a probe that
-    was not refused means the denial did nothing.
+    """The probe proves the denial only against a control that completed
+    the same operations. Both halves are required: a control that was
+    refused by something else on the host, or that never sent at all,
+    makes the probe's refusal unattributable, and a probe that was not
+    refused means the denial did nothing.
 
     The control also decides which operations can prove anything here. An
     operation the host could not perform with nothing denied cannot be
@@ -712,10 +733,14 @@ def classify(probe, control, metadata="required", scope="transient"):
     reported as a denial that failed to bite -- except for a loopback
     destination, which every host can send to.
 
+    Every other control has to have completed its operation
+    (`completed_outcomes`): a refusal under the denial is attributable
+    only to an operation that went through a moment earlier.
+
     A datagram has to be refused outright (REFUSED). A TCP connect cannot
     be: the kernel reports nothing for a dropped SYN, so it is accepted as
-    silenced (SILENCED) only where its control was answered, and filed
-    apart from the refusals.
+    silenced (SILENCED) -- which the control's answered connect is what
+    makes attributable -- and filed apart from the refusals.
 
     `scope` names the operation set: `transient` for the probe in a
     denied transient unit, `unit` for the datagram subset run inside a
@@ -745,8 +770,6 @@ def classify(probe, control, metadata="required", scope="transient"):
             # was reachable and the denial is what made it unreachable.
             if outcome != "ok":
                 failures.append("control_metadata_service_reachable:" + name)
-        elif outcome is None or outcome in REFUSED:
-            failures.append("control_not_refused:" + name)
         elif outcome in UNROUTABLE:
             if name in ALWAYS_ROUTABLE:
                 failures.append("control_routable:" + name)
@@ -757,15 +780,20 @@ def classify(probe, control, metadata="required", scope="transient"):
                 if probed != outcome:
                     failures.append("probe_matches_the_unroutable_control:" + name)
                 continue
+        elif outcome in REFUSED:
+            # Refused by something else on the host.
+            failures.append("control_not_refused:" + name)
+        elif outcome not in completed_outcomes(name):
+            # Missing, a child that failed or never ran, a timeout, or
+            # anything else that is not a send or connect that happened.
+            failures.append("control_completed:" + name)
         if probed in REFUSED:
             refused_names.append(name)
         elif name in TCP_OPERATIONS and probed in SILENCED:
-            if outcome in ANSWERED:
-                silenced_names.append(name)
-            else:
-                # Timed out with nothing denied as well, so the timeout
-                # under the denial is attributable to nothing.
-                failures.append("control_answered:" + name)
+            # Attributable because the control's same connect was
+            # answered, which the checks above required: a connect that
+            # timed out with nothing denied as well fails there.
+            silenced_names.append(name)
         else:
             failures.append("refused:" + name)
     for name in allowed_names:

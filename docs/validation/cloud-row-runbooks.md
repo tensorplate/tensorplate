@@ -159,9 +159,15 @@ loaded, active and carrying an invocation id first, and the verdict on
 enforcement comes from probes, starting with one in a transient unit:
 
 - the **control** runs first, in a transient unit with no address policy,
-  and must not be refused; the GCE metadata service at `169.254.169.254`
-  must answer it outright, over TCP and as a datagram, since the stage's
-  whole claim is that the denial is what made that service unreachable;
+  and every operation in it must have **completed**: each datagram sent,
+  the child process run to a clean exit with its own send done, and each
+  TCP connect answered, accepted or reset. A control that was refused,
+  timed out, or whose child exited non-zero or never ran sent nothing, so
+  it cannot show that a refusal of the same operation under the denial
+  was the denial's doing; each is named and fails the stage. The GCE
+  metadata service at `169.254.169.254` must answer it outright, over TCP
+  and as a datagram, since the stage's whole claim is that the denial is
+  what made that service unreachable;
 - the **probe** then runs denied, against the same operations: the
   metadata service, the resolver stub on TCP and UDP, another loopback
   address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`

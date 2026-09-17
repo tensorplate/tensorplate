@@ -95,8 +95,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and a filtered transient unit says nothing about a service whose own
   attach failed. Joining a service's control group takes root; the helper
   refuses any group that is not exactly that unit's, reads the move back,
-  and drops to the operator's ids before it sends anything. The controls
-  must not be refused, and the GCE metadata service must answer them
+  and drops to the operator's ids before it sends anything. Every
+  operation in a control must have completed -- each datagram sent, the
+  child process run to a clean exit, each TCP connect answered -- and a
+  control that was refused, timed out, or whose child exited non-zero or
+  never ran fails the stage by name: it sent nothing, so it cannot show
+  that the later refusal was the denial's doing. The GCE metadata
+  service must answer the controls
   outright, over TCP and as a datagram, since the stage's claim is that
   the denial is what made that service unreachable. A datagram under the
   denial must be refused with `EPERM`, which the kernel returns from

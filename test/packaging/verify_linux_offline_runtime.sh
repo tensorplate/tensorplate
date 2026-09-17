@@ -3,10 +3,10 @@
 #
 # The Linux offline-runtime mechanism: the per-unit denial drop-in, the
 # readback that refuses a unit systemd is not running, the classification
-# that needs an unrefused control, and the identity checks that require
-# the machine type to have come from the boot-bound record. Writes no
-# unit file outside a temporary directory, runs no systemd command and
-# opens no socket.
+# that needs a control that completed every operation, and the identity
+# checks that require the machine type to have come from the boot-bound
+# record. Writes no unit file outside a temporary directory, runs no
+# systemd command and opens no socket.
 #
 # The harness end -- the offline stage body, its cleanup and its signal
 # handling -- is exercised against the stubbed appliance in
