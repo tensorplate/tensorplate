@@ -1314,15 +1314,79 @@ impl DriverEvidence {
 struct CudaArtifacts {
     driver: DriverEvidence,
     toolkit: Option<String>,
+    /// A name from the driver lists that is present with no library
+    /// behind it, looked for only when no driver was found. What it
+    /// distinguishes is a host part-way through an upgrade from one that
+    /// never carried the driver; it is never evidence of a driver.
+    unresolved_driver_name: Option<String>,
+    /// The same for the toolkit lists.
+    unresolved_toolkit_name: Option<String>,
 }
 
 fn probe_cuda_artifacts(opts: &InstallProbeOptions) -> CudaArtifacts {
+    let driver = probe_driver_evidence(opts);
+    let toolkit = first_existing_artifact(opts, CUDA_TOOLKIT_PATHS).or_else(|| {
+        first_versioned_library(opts, CUDA_TOOLKIT_LIB_DIRS, CUDA_RUNTIME_SONAME_PREFIX)
+    });
     CudaArtifacts {
-        driver: probe_driver_evidence(opts),
-        toolkit: first_existing_artifact(opts, CUDA_TOOLKIT_PATHS).or_else(|| {
-            first_versioned_library(opts, CUDA_TOOLKIT_LIB_DIRS, CUDA_RUNTIME_SONAME_PREFIX)
-        }),
+        // Asked only where the answer is reported: a host that has the
+        // library is told which one it has, and the dead name beside it
+        // changes nothing about that.
+        unresolved_driver_name: match driver {
+            DriverEvidence::Absent => first_unresolved_driver_name(opts),
+            _ => None,
+        },
+        unresolved_toolkit_name: if toolkit.is_none() {
+            first_unresolved_toolkit_name(opts)
+        } else {
+            None
+        },
+        driver,
+        toolkit,
     }
+}
+
+/// The first toolkit name that is present with no library behind it,
+/// searched in the order the toolkit probe searches.
+fn first_unresolved_toolkit_name(opts: &InstallProbeOptions) -> Option<String> {
+    first_artifact_matching(opts, CUDA_TOOLKIT_PATHS, present_but_not_a_library).or_else(|| {
+        first_library_matching(
+            opts,
+            CUDA_TOOLKIT_LIB_DIRS,
+            CUDA_RUNTIME_SONAME_PREFIX,
+            present_but_not_a_library,
+        )
+    })
+}
+
+/// The first driver name that is present with no library behind it,
+/// searched in the order `probe_driver_evidence` searches: the
+/// conclusive names first, then the user-mode library's.
+fn first_unresolved_driver_name(opts: &InstallProbeOptions) -> Option<String> {
+    first_artifact_matching(opts, NVIDIA_DRIVER_PATHS, present_but_not_a_library)
+        .or_else(|| {
+            first_library_matching(
+                opts,
+                NVIDIA_DRIVER_LIB_DIRS,
+                NVIDIA_DRIVER_SONAME_PREFIX,
+                present_but_not_a_library,
+            )
+        })
+        .or_else(|| {
+            first_artifact_matching(
+                opts,
+                NVIDIA_USER_MODE_DRIVER_PATHS,
+                present_but_not_a_library,
+            )
+        })
+        .or_else(|| {
+            first_library_matching(
+                opts,
+                NVIDIA_USER_MODE_DRIVER_LIB_DIRS,
+                NVIDIA_DRIVER_SONAME_PREFIX,
+                present_but_not_a_library,
+            )
+        })
 }
 
 /// The conclusive names are searched first, so a host carrying both
@@ -1411,6 +1475,21 @@ const UNLOADED_DRIVER_HINT: &str = "the driver package is installed but `/proc/d
 /// paths and packages, never about a working device.
 const PATHS_ONLY_HINT: &str = "paths only: whether that PyTorch can reach the accelerator is not established here — see `python_pytorch_runtime` and `accelerator_facts`";
 
+/// What "not found" says, with the name that was there and had nothing
+/// behind it when there was one.
+///
+/// The verdict is the same either way — a name is not a library — but
+/// the two hosts need different work, and a message that reads the same
+/// on both sends an operator who lists the directory the hint names to
+/// a name sitting in it, which reads as doctor being wrong rather than
+/// as the dead link it is.
+fn absent_clause(absent: &str, unresolved_name: Option<&str>) -> String {
+    match unresolved_name {
+        Some(name) => format!("{absent} (`{name}` is a name with no library behind it)"),
+        None => absent.to_string(),
+    }
+}
+
 /// Report the CUDA runtime state of this host against what the
 /// installed build needs from it.
 ///
@@ -1436,14 +1515,24 @@ fn cuda_runtime_finding(
         DriverEvidence::UserModeLibraryOnly(path) => {
             format!("NVIDIA driver libraries at `{path}` but no `/proc/driver/nvidia/version`")
         }
-        DriverEvidence::Absent => "no NVIDIA driver at the known paths".to_string(),
+        DriverEvidence::Absent => absent_clause(
+            "no NVIDIA driver at the known paths",
+            found.unresolved_driver_name.as_deref(),
+        ),
     };
     let toolkit = match &found.toolkit {
         Some(path) => format!("system CUDA toolkit at `{path}`"),
-        None => "no system CUDA toolkit at the known paths".to_string(),
+        None => absent_clause(
+            "no system CUDA toolkit at the known paths",
+            found.unresolved_toolkit_name.as_deref(),
+        ),
     };
     // Both sentences end the same way, so every consumer that greps for
-    // the consequence finds it under either reading of the driver.
+    // the consequence finds it under either reading of the driver. A
+    // dead driver name is named in the clause above and stays on
+    // `NO_DRIVER_HINT`: `UNLOADED_DRIVER_HINT` says the driver package
+    // is installed and its module may not be loaded, and a name with no
+    // library behind it establishes neither.
     let (no_driver, driver_hint) = match &found.driver {
         DriverEvidence::UserModeLibraryOnly(_) => (
             "until that module is loaded, no installed component can reach an NVIDIA accelerator",
@@ -1655,15 +1744,38 @@ fn resolves_to_regular_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// The first of `paths` that resolves to a regular file, reported as
-/// the contract path it was looked for under — never the staging prefix
-/// a test injected, and never the link's target, which on a real host
-/// carries a version this probe has not established.
-fn first_existing_artifact(opts: &InstallProbeOptions, paths: &[&str]) -> Option<String> {
+/// Whether the name is there with no library behind it: a link whose
+/// target is missing, a directory, or another non-regular entry.
+///
+/// The complement of `resolves_to_regular_file` over names that exist at
+/// all. `symlink_metadata` asks about the name itself rather than what
+/// it points at, so a dangling link answers here and nowhere else, while
+/// a name whose directory does not exist answers to neither. The finding
+/// reports it so that a host part-way through an upgrade reads
+/// differently from one that never carried the library: the verdict is
+/// the same on both, and the work is not.
+fn present_but_not_a_library(path: &Path) -> bool {
+    path.symlink_metadata().is_ok() && !resolves_to_regular_file(path)
+}
+
+/// The first of `paths` that `accept`s, reported as the contract path it
+/// was looked for under — never the staging prefix a test injected, and
+/// never the link's target, which on a real host carries a version this
+/// probe has not established.
+fn first_artifact_matching(
+    opts: &InstallProbeOptions,
+    paths: &[&str],
+    accept: fn(&Path) -> bool,
+) -> Option<String> {
     paths
         .iter()
-        .find(|path| resolves_to_regular_file(&prefixed(opts, path)))
+        .find(|path| accept(&prefixed(opts, path)))
         .map(|path| (*path).to_string())
+}
+
+/// The first of `paths` that is a library.
+fn first_existing_artifact(opts: &InstallProbeOptions, paths: &[&str]) -> Option<String> {
+    first_artifact_matching(opts, paths, resolves_to_regular_file)
 }
 
 /// Which of several matching names in one directory is reported.
@@ -1686,18 +1798,20 @@ fn stable_library_name(mut names: Vec<String>) -> Option<String> {
     names.into_iter().next()
 }
 
-/// The versioned library named `<prefix><soname>` in the first of
-/// `dirs` that has one.
+/// The name `<prefix><soname>` that `accept`s in the first of `dirs`
+/// that has one.
 ///
 /// The name is matched first and the entry followed second, so the
 /// filesystem is only asked about entries this probe would otherwise
-/// accept, and an unreadable or dangling entry is skipped rather than
-/// ending the scan: a directory whose only matching name is a dead
-/// symlink must fall through to the next directory, not shadow it.
-fn first_versioned_library(
+/// accept, and a rejected entry is skipped rather than ending the scan:
+/// a directory holding a dead soname link beside a live library must
+/// report the library, and one whose only matching name is dead must
+/// fall through to the next directory rather than shadow it.
+fn first_library_matching(
     opts: &InstallProbeOptions,
     dirs: &[&str],
     prefix: &str,
+    accept: fn(&Path) -> bool,
 ) -> Option<String> {
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(prefixed(opts, dir)) else {
@@ -1711,7 +1825,7 @@ fn first_versioned_library(
             if name.len() <= prefix.len() || !name.starts_with(prefix) {
                 continue;
             }
-            if !resolves_to_regular_file(&entry.path()) {
+            if !accept(&entry.path()) {
                 continue;
             }
             names.push(name);
@@ -1721,6 +1835,16 @@ fn first_versioned_library(
         }
     }
     None
+}
+
+/// The versioned library named `<prefix><soname>` in the first of
+/// `dirs` that has one.
+fn first_versioned_library(
+    opts: &InstallProbeOptions,
+    dirs: &[&str],
+    prefix: &str,
+) -> Option<String> {
+    first_library_matching(opts, dirs, prefix, resolves_to_regular_file)
 }
 
 /// Deliberately `exists()` and not `resolves_to_regular_file`: two of
@@ -2719,8 +2843,12 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "a link with no file behind it is not a runtime: {}",
             cuda.message
         );
+        // The dead name is named, as the name it is: the sentence that
+        // would report it as a runtime that was found is
+        // `system CUDA toolkit at `<path>``, and that is what must not
+        // be here.
         assert!(
-            !cuda.message.contains("libcudart.so.12"),
+            !cuda.message.contains("system CUDA toolkit at `"),
             "a library that is not there must not be named as found: {}",
             cuda.message
         );
@@ -2751,8 +2879,12 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "a link with no driver library behind it is not a driver: {}",
             cuda.message
         );
+        // Named as the dead name it is, and under neither sentence that
+        // would report a driver: `NVIDIA driver present (<path>)` and
+        // `NVIDIA driver libraries at <path>`.
         assert!(
-            !cuda.message.contains("libcuda.so.1"),
+            !cuda.message.contains("NVIDIA driver present")
+                && !cuda.message.contains("NVIDIA driver libraries at"),
             "a driver library that is not there must not be named as found: {}",
             cuda.message
         );
@@ -2915,6 +3047,92 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             cuda.message
         );
         assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
+    fn a_dead_runtime_link_is_named_rather_than_read_as_a_host_that_never_had_cuda() {
+        // Rejecting the link settled the verdict; this settles the
+        // diagnosis. A half-finished JetPack upgrade and a Jetson that
+        // never carried the CUDA runtime need different work, and one
+        // sentence for both sends the operator who runs `ls` on the path
+        // the hint names to a directory with that name in it -- which
+        // reads as doctor being wrong rather than as the dead link it
+        // is.
+        let dead = TempDir::new().unwrap();
+        stage_file(dead.path(), "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1");
+        stage_symlink(
+            dead.path(),
+            "/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12",
+            "libcudart.so.12.6.77",
+        );
+        let dead_link = cuda_finding(dead.path(), ServingCudaNeed::TensorrtLinked);
+
+        let never = TempDir::new().unwrap();
+        stage_file(
+            never.path(),
+            "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1",
+        );
+        let never_had_it = cuda_finding(never.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(dead_link.status_label(), "warning", "{}", dead_link.message);
+        assert_eq!(dead_link.status_label(), never_had_it.status_label());
+        assert_ne!(
+            dead_link.message, never_had_it.message,
+            "a dead soname link and a host that never had CUDA are different states"
+        );
+        assert!(
+            dead_link.message.contains(
+                "(`/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12` is a name with no library behind it)"
+            ),
+            "the dead link must be named as what it is: {}",
+            dead_link.message
+        );
+        assert!(
+            dead_link.message.contains("no system CUDA toolkit"),
+            "naming the dead link must not turn it into a runtime that was found: {}",
+            dead_link.message
+        );
+        assert_eq!(dead_link.hint.as_deref(), Some(WORKER_JETPACK_CUDA_HINT));
+        assert_no_staging_prefix(dead.path(), &dead_link);
+    }
+
+    #[test]
+    fn a_dead_driver_link_is_named_rather_than_read_as_a_host_without_a_driver() {
+        // The driver side of the same question, on the amd64 row where
+        // the user-mode library is what an upgrade leaves a dead name
+        // for. The verdict does not move -- a name is not a driver --
+        // but the message has to say which of the two driverless states
+        // this is.
+        let dead = TempDir::new().unwrap();
+        stage_symlink(
+            dead.path(),
+            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "libcuda.so.535.129.03",
+        );
+        let dead_link = cuda_finding(dead.path(), ServingCudaNeed::SidecarRuntime);
+
+        let never = TempDir::new().unwrap();
+        let never_had_it = cuda_finding(never.path(), ServingCudaNeed::SidecarRuntime);
+
+        assert_eq!(dead_link.status_label(), "missing", "{}", dead_link.message);
+        assert_eq!(dead_link.status_label(), never_had_it.status_label());
+        assert_ne!(
+            dead_link.message, never_had_it.message,
+            "a dead driver link and a host that never had the driver are different states"
+        );
+        assert!(
+            dead_link.message.contains(
+                "(`/usr/lib/x86_64-linux-gnu/libcuda.so.1` is a name with no library behind it)"
+            ),
+            "the dead driver link must be named as what it is: {}",
+            dead_link.message
+        );
+        assert!(
+            dead_link.message.contains("no NVIDIA driver"),
+            "naming the dead link must not turn it into a driver that was found: {}",
+            dead_link.message
+        );
+        assert_no_staging_prefix(dead.path(), &dead_link);
     }
 
     #[test]
@@ -3318,20 +3536,37 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                     CudaArtifacts {
                         driver: DriverEvidence::Loaded("/proc/driver/nvidia/version".into()),
                         toolkit: None,
+                        ..CudaArtifacts::default()
                     },
                     CudaArtifacts {
                         driver: DriverEvidence::UserModeLibraryOnly(
                             "/usr/lib/x86_64-linux-gnu/libcuda.so.1".into(),
                         ),
                         toolkit: None,
+                        ..CudaArtifacts::default()
                     },
                     CudaArtifacts {
                         driver: DriverEvidence::Absent,
                         toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
+                        ..CudaArtifacts::default()
                     },
                     CudaArtifacts {
                         driver: DriverEvidence::Loaded("/proc/driver/nvidia/version".into()),
                         toolkit: Some("/usr/local/cuda/lib64/libcudart.so".into()),
+                        ..CudaArtifacts::default()
+                    },
+                    // The host part-way through an upgrade: names on
+                    // disk with nothing behind them. Naming them in the
+                    // message must not move the verdict.
+                    CudaArtifacts {
+                        driver: DriverEvidence::Absent,
+                        toolkit: None,
+                        unresolved_driver_name: Some(
+                            "/usr/lib/x86_64-linux-gnu/libcuda.so.1".into(),
+                        ),
+                        unresolved_toolkit_name: Some(
+                            "/usr/local/cuda/lib64/libcudart.so.12".into(),
+                        ),
                     },
                 ] {
                     let finding = cuda_runtime_finding(need, installed, &artifacts);
@@ -3377,6 +3612,12 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
                             &CudaArtifacts {
                                 driver: driver.clone(),
                                 toolkit: toolkit.clone(),
+                                // A dead driver name is reported in the
+                                // message and is not evidence of a
+                                // driver: this host stays not-ok.
+                                unresolved_driver_name: matches!(driver, DriverEvidence::Absent)
+                                    .then(|| "/usr/lib/x86_64-linux-gnu/libcuda.so.1".to_string()),
+                                unresolved_toolkit_name: None,
                             },
                         );
                         assert_ne!(
