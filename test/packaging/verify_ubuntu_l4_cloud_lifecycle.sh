@@ -1365,8 +1365,10 @@ case "$*" in
   # it cannot read goes into the published stage log. Any source is
   # copied, so a harness that named the bundle by its own path would have
   # that path printed here too.
+  # The value itself, not "$3": a staging path with a space in it would
+  # still match the joined arguments, and "$3" would be only its first part.
   "rm -rf ${TP_CLOUD_BUNDLE_STAGING:-/nonexistent/unset-staging}")
-    rm -rf "$3"
+    rm -rf "$TP_CLOUD_BUNDLE_STAGING"
     exit
     ;;
   # Between the bundle check and the copy, the bundle directory can stop
