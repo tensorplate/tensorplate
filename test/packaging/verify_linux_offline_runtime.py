@@ -658,7 +658,7 @@ def test_run_denied():
             error = None
             try:
                 with contextlib.redirect_stdout(stdout):
-                    m.run_denied(call, str(control_path), str(out), argv, metadata_address,
+                    m.run_denied(call, str(control_path), str(work), argv, metadata_address,
                                  execute=lambda file, args: ran.append((file, args)))
             except m.CheckFailed as failure:
                 error = failure
@@ -674,6 +674,13 @@ def test_run_denied():
             assert probed == [m.METADATA_ADDRESS], probed
             filed = json.loads(out.read_text())
             assert filed == dict(kernel_probe("unit"), call="deploy"), filed
+            # Filed under the name the certificate reads it back by, which
+            # the module works out from the call.
+            ran, error, _, _ = attempt(kernel_probe("unit"), call="status-after-deploy")
+            assert error is None and len(ran) == 1, (error, ran)
+            filed = work / "offline-cli-probe-status-after-deploy.json"
+            assert json.loads(filed.read_text())["call"] == "status-after-deploy"
+            filed.unlink()
 
             # Not enforced -- the unit's own filter never attached -- and the
             # call is never made. The probe is filed all the same.
@@ -744,7 +751,7 @@ def test_run_denied():
                               "/home/tp-reviewer/bin/" + file)
             m.run_unit_probe = lambda address=m.METADATA_ADDRESS: kernel_probe("unit")
             try:
-                m.run_denied("deploy", str(control), str(out), command, execute=missing)
+                m.run_denied("deploy", str(control), str(work), command, execute=missing)
             except m.CheckFailed as failure:
                 assert str(failure) == "cannot run tensorplate: No such file or directory", failure
                 assert not isinstance(failure, m.NotEnforced)
@@ -760,22 +767,26 @@ def test_run_denied():
     try:
         m.run_denied = lambda *args: recorded.append(args)
         assert m.main(["run-denied", "--call", "status-after-deploy", "--control", "c",
-                       "--out", "o", "--", "tensorplate", "status", "--output", "json",
-                       "--", "x"]) == 0
+                       "--evidence-dir", "o", "--", "tensorplate", "status", "--output",
+                       "json", "--", "x"]) == 0
         assert recorded == [("status-after-deploy", "c", "o",
                              ["tensorplate", "status", "--output", "json", "--", "x"],
                              m.METADATA_ADDRESS)], recorded
         del recorded[:]
-        assert m.main(["run-denied", "--call", "infer", "--control", "c", "--out", "o",
-                       "--metadata-address", "none", "--", "tensorplate"]) == 0
+        assert m.main(["run-denied", "--call", "infer", "--control", "c",
+                       "--evidence-dir", "o", "--metadata-address", "none",
+                       "--", "tensorplate"]) == 0
         assert recorded == [("infer", "c", "o", ["tensorplate"], "")], recorded
     finally:
         m.run_denied = saved
     for argv in (
-        ["run-denied", "--call", "status", "--control", "c", "--out", "o"],
-        ["run-denied", "--call", "status", "--control", "c", "--out", "o", "--"],
-        ["run-denied", "--call", "bogus", "--control", "c", "--out", "o", "--", "true"],
+        ["run-denied", "--call", "status", "--control", "c", "--evidence-dir", "o"],
+        ["run-denied", "--call", "status", "--control", "c", "--evidence-dir", "o", "--"],
+        ["run-denied", "--call", "bogus", "--control", "c", "--evidence-dir", "o",
+         "--", "true"],
         ["run-denied", "--call", "status", "--control", "c", "--", "true"],
+        # The file name is the module's to work out, not the caller's.
+        ["run-denied", "--call", "status", "--control", "c", "--out", "o", "--", "true"],
         ["drop-in-text", "--", "true"],
     ):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -790,7 +801,6 @@ def test_run_denied():
     assert m.cli_evidence_name("status-after-deploy") == \
         "offline-cli-probe-status-after-deploy.json"
     refused(lambda: m.cli_evidence_name("logs"), "not an offline CLI call")
-    assert run("cli-evidence-name", "--call", "infer").stdout == "offline-cli-probe-infer.json\n"
     passed("a CLI call runs only in a unit whose own probe classified as enforced")
 
 
@@ -1201,8 +1211,7 @@ MINIMAL_ARGUMENTS = {
     "doctor-check": ["--doctor", "d", "--status", "0", "--exact-row", ROW],
     "identity-check": ["--agent-journal", "j"],
     "evidence": ["--dir", "d", "--deployment", "d"],
-    "cli-evidence-name": ["--call", "status"],
-    "run-denied": ["--call", "status", "--control", "c", "--out", "o", "--", "true"],
+    "run-denied": ["--call", "status", "--control", "c", "--evidence-dir", "o", "--", "true"],
 }
 
 

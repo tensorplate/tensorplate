@@ -1418,19 +1418,19 @@ run_allowed() { run_transient 0 "$@"; }
 # systemd installs the filter on each unit separately and ignores a
 # failure to, so a probe taken in any other unit -- the denied probe
 # below, or the previous call's unit -- says nothing about this one. The
-# module's run-denied probes from inside this unit, files what it saw as
-# offline-cli-probe-<call>.json, and execs the call only if that probe
-# classifies as enforced against the transient control; otherwise it
-# exits 71 and the call is never made. The call replaces the probe's
-# process, so it runs in the same control group and the unit's exit
-# status is the call's own.
+# module's run-denied probes from inside this unit, files what it saw in
+# the evidence directory as offline-cli-probe-<call>.json -- a name the
+# module works out, as the certificate that reads it back does -- and
+# execs the call only if that probe classifies as enforced against the
+# transient control; otherwise it exits 71 and the call is never made.
+# The call replaces the probe's process, so it runs in the same control
+# group and the unit's exit status is the call's own.
 run_denied_cli() {
-  local call="$1" name
+  local call="$1"
   shift
-  name="$(offline_helper cli-evidence-name --call "$call")" || return
   run_denied python3 "$OFFLINE_HELPER" run-denied --call "$call" \
     --control "${EVIDENCE_DIR}/offline-control.json" \
-    --out "${EVIDENCE_DIR}/${name}" -- "$@"
+    --evidence-dir "$EVIDENCE_DIR" -- "$@"
 }
 
 # The redirection belongs to the transient unit's own output, so a step

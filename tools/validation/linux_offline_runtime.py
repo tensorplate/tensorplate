@@ -685,7 +685,9 @@ CLI_CALLS = ("status", "doctor", "deploy", "status-after-deploy", "infer")
 
 def cli_evidence_name(call):
     """`offline-cli-probe-<call>.json`: the probe the transient unit that
-    ran `call` took of itself, before running it."""
+    ran `call` took of itself, before running it. `run-denied` files it
+    under this name and the certificate reads it back by it, so the name
+    is worked out here and nowhere else."""
     if call not in CLI_CALLS:
         raise CheckFailed("not an offline CLI call: {!r}".format(call))
     return "offline-cli-probe-{}.json".format(call)
@@ -696,7 +698,7 @@ def _write_document(path, document):
         handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
 
 
-def run_denied(call, control, out, command, metadata_address=METADATA_ADDRESS,
+def run_denied(call, control, evidence_dir, command, metadata_address=METADATA_ADDRESS,
                execute=os.execvp):
     """Show that the unit this process is in enforces the denial, then
     become `command`.
@@ -713,11 +715,13 @@ def run_denied(call, control, out, command, metadata_address=METADATA_ADDRESS,
     The probe is the datagram set a service's probe sends: each datagram
     is refused synchronously, so it costs no timeout. It is classified
     against the stage's undenied transient control, and the probe
-    document is written whatever it says, as every probe is. The command
-    runs only if the classification passed. Nothing is written to
-    stdout, which is the command's."""
+    document is written to `evidence_dir` as `cli_evidence_name(call)`
+    whatever it says, as every probe is. The command runs only if the
+    classification passed. Nothing is written to stdout, which is the
+    command's."""
     if not command:
         raise CheckFailed("run-denied needs the command to run after --")
+    out = os.path.join(evidence_dir, cli_evidence_name(call))
     baseline = _load_json(control)
     if not isinstance(baseline, dict):
         raise CheckFailed("{} is not a JSON object".format(os.path.basename(control)))
@@ -1349,15 +1353,13 @@ def build_parser():
             opt("--expect-record", default=RECORD_NOT_APPLICABLE),
             opt("--forbid-source", default=LIVE_SOURCE))
     command("evidence", opt("--dir", required=True), opt("--deployment", required=True))
-    commands.add_parser("cli-evidence-name").add_argument(
-        "--call", choices=CLI_CALLS, required=True)
     # run-denied ... -- COMMAND...: the command is split off before
     # parsing rather than left to argparse, whose handling of `--` has
     # changed between Python releases.
     wrapper = commands.add_parser("run-denied")
     wrapper.add_argument("--call", choices=CLI_CALLS, required=True)
     wrapper.add_argument("--control", required=True)
-    wrapper.add_argument("--out", required=True)
+    wrapper.add_argument("--evidence-dir", required=True)
     wrapper.add_argument("--metadata-address", type=_metadata_address,
                          default=METADATA_ADDRESS)
     return parser
@@ -1424,10 +1426,8 @@ def _run(args):
         print(port)
     elif name == "unit-evidence-name":
         print(unit_evidence_name(args.kind, args.unit))
-    elif name == "cli-evidence-name":
-        print(cli_evidence_name(args.call))
     elif name == "run-denied":
-        run_denied(args.call, args.control, args.out, args.exec_argv,
+        run_denied(args.call, args.control, args.evidence_dir, args.exec_argv,
                    args.metadata_address)
     elif name in ("probe", "control"):
         _emit(run_probe(args.agent_socket, args.serving_port, args.metadata_address), args.out)
