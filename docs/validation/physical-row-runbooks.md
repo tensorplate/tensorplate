@@ -276,8 +276,10 @@ Prerequisites:
    wheel links the JetPack CUDA runtime. It is not a failing finding and
    does not stop the stage. A soname link an incomplete JetPack upgrade
    left behind — `libcudart.so.12` with no file at its target — is
-   reported as no CUDA runtime, not as one, so this `warning` is the
-   first place that upgrade shows up rather than the deploy.
+   reported as no CUDA runtime, not as one, and the message names that
+   link as a name with no library behind it, so this `warning` is the
+   first place that upgrade shows up rather than the deploy, and it says
+   which of the two no-runtime states the device is in.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox

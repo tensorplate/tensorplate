@@ -285,9 +285,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   pointing at nothing, and accepting a directory entry on its name — or
   a directory standing where a library is looked for — would report the
   CUDA runtime as present on a host whose worker cannot load it, which
-  is the broken dependency this finding exists to name. The path
-  reported is the name the probe looked under, never the versioned
-  target a link resolves to. On x86_64 the rule runs the other
+  is the broken dependency this finding exists to name. A rejected
+  candidate is named in the message, which now reads ``no system CUDA
+  toolkit at the known paths (`<path>` is a name with no library behind
+  it)``, so a host part-way through an upgrade no longer reads exactly
+  like one that never carried the library: the verdict is the same on
+  both and the work is not. The driver's clause says the same of a dead
+  driver name and keeps the driverless hint, because a name with no
+  library behind it does not establish that the driver package is
+  installed. The path reported is the name the probe looked under, never
+  the versioned target a link resolves to. The third probe behind this
+  finding — which of the CUDA-consuming components are installed — takes
+  the same rule: the python_pytorch sidecar counts when a descriptor
+  *file* is at its packaged path, parseable or not, and a directory or a
+  dead link standing there is no longer read as an installed sidecar.
+  On x86_64 the rule runs the other
   way: `/proc/driver/nvidia/version` is what establishes a loaded driver,
   and the driver's user-mode `libcuda.so.1` is not accepted in its place
   — that package installs with no working kernel module, which is the
@@ -326,6 +338,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   finding id whose severity range has widened since v0.1.0; the exception
   is recorded against the contract note in
   `cli/src/commands/doctor/finding.rs`.
+
+- `doctor`'s `tensorrt_runtime` and `libtorch_runtime` findings hold
+  each library name to the rule `cuda_runtime` holds its candidates to:
+  a directory or a dead link standing at `libnvinfer.so`,
+  `NvInferVersion.h` or `/usr/lib/libtorch.so` was reported as the
+  runtime being detected and is now reported as absent.
+  `/usr/local/libtorch` and `/opt/libtorch` keep the weaker rule and are
+  detected as directories, because those two names are the unpacked
+  LibTorch distribution's own directory rather than a library. Neither
+  finding is build-aware yet and neither fails `doctor`.
 
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
