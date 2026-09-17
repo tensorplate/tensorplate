@@ -178,11 +178,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   status 70, never with a traceback or the exception's message, either of
   which quotes the checkout's path, and a file it cannot read is named by
   its base name and errno text. The deploy-smoke bundle check names an
-  unreadable bundle file by its place in the bundle for the same reason.
-  The harness's verifier runs a crashing probe from a copy of the harness
-  under a `home/<name>` directory, as CI's own checkout is, and a bundle
-  with a missing model from under one, and requires both runs' evidence
-  to pass the publication scanner with no traceback in it.
+  unreadable bundle file by its place in the bundle for the same reason,
+  and the bundle is copied from inside itself, so `cp` names a file it
+  cannot copy by a relative path. The harness's verifier runs a crashing
+  probe from a copy of the harness under a `home/<name>` directory, as
+  CI's own checkout is, and bundles from under one with a missing model,
+  an unreadable manifest and an unreadable file only the copy reads, and
+  requires every such run's evidence to pass the publication scanner with
+  no traceback or path in it.
 
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical

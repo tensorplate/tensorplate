@@ -542,9 +542,10 @@ directories somewhere without an account name in their paths to keep it
 out of the stage logs. The checkout's own path is kept out by the
 harness: the offline helper reports a failure it did not anticipate as
 `error: <subcommand> failed unexpectedly: <exception type>`, with exit
-status 70 and never a traceback or the exception's message, and the
+status 70 and never a traceback or the exception's message; the
 deploy-smoke bundle check names a file it cannot read by its place in
-the bundle.
+the bundle; and the bundle is copied from inside itself, so `cp` names a
+file it cannot copy by a relative path.
 
 Delete the VM when the run is done.
 

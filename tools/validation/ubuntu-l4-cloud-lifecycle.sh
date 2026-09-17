@@ -842,6 +842,19 @@ PY
 
 # --- deploy-smoke ------------------------------------------------------
 
+# Copy the bundle's contents to a directory that does not exist yet, from
+# inside the bundle. cp names a file it cannot read by the path it was
+# given, and the bundle usually sits under the operator's home: from
+# inside it, that path is relative, and the stage log that records it is
+# published. A subshell, so the harness keeps its own directory.
+copy_bundle_contents() (
+  cd -- "$BUNDLE_DIR" 2>/dev/null || {
+    printf 'cannot enter the deploy-smoke bundle directory\n' >&2
+    exit 1
+  }
+  sudo cp -R . "$1"
+)
+
 # Stage the smoke bundle, deploy it as DEPLOYMENT_ID, and prove the new
 # worker answers health and inference. The live results go to the named
 # file.
@@ -902,7 +915,7 @@ PY
   note "staging the bundle at ${staged_bundle} for the agent to read"
   step "stage the bundle" sudo rm -rf "$staged_bundle" || return
   step "create the staging parent" sudo mkdir -p "$(dirname "$staged_bundle")" || return
-  step "copy the bundle" sudo cp -R "$BUNDLE_DIR" "$staged_bundle" || return
+  step "copy the bundle" copy_bundle_contents "$staged_bundle" || return
   step "make the bundle readable" sudo chmod -R a+rX "$staged_bundle" || return
 
   note "deploying"

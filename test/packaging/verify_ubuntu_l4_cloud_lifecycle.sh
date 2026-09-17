@@ -1360,6 +1360,27 @@ case "$*" in
     [ -f "${TP_FAKE_VARLIB}/state/machine-type.json" ]
     exit
     ;;
+  # The deploy-smoke bundle staging, done for real in the fixture's
+  # staging directory and nowhere else: what cp prints about a bundle file
+  # it cannot read goes into the published stage log. Any source is
+  # copied, so a harness that named the bundle by its own path would have
+  # that path printed here too.
+  "rm -rf ${TP_CLOUD_BUNDLE_STAGING:-/nonexistent/unset-staging}")
+    rm -rf "$3"
+    exit
+    ;;
+  # Between the bundle check and the copy, the bundle directory can stop
+  # being one the operator can enter; a case locks it here to say so.
+  "mkdir -p ${TP_CLOUD_BUNDLE_STAGING%/*}")
+    if [ -n "${TP_FAKE_LOCK_BUNDLE:-}" ]; then
+      chmod 000 "${TP_FAKE_LOCK_BUNDLE}" || exit 9
+    fi
+    exit 0
+    ;;
+  "cp -R "*" ${TP_CLOUD_BUNDLE_STAGING:-/nonexistent/unset-staging}")
+    [ "$#" -eq 4 ] || exit 9
+    exec cp -R "$3" "$4"
+    ;;
   "install -D -m 0644 "*)
     src="$5"
     dst="$6"
@@ -2022,6 +2043,8 @@ packaged_cli_config='{"fixture": "packaged cli config"}'
 # from: this one, except where a case is about the checkout's own path.
 checkout_root="$repo_root"
 checkout_harness="$harness"
+# A bundle directory the sudo stub locks just before the copy, or none.
+locked_bundle=""
 
 # Runs the harness against the stubbed appliance, from a clean fixture
 # state: empty package database, no durable state, the packaged cli
@@ -2095,6 +2118,7 @@ run_harness() {
     TP_FAKE_CLI_LOG="${appliance}/cli.log" \
     TP_FAKE_ONLINE_LOG="${appliance}/online.log" \
     TP_REPO="$checkout_root" \
+    TP_FAKE_LOCK_BUNDLE="$locked_bundle" \
     TP_CLOUD_CRASH_LOOP_POLL_SECONDS=0 \
     bash "$checkout_harness" \
       --assets-dir "$assets_dir" \
@@ -2227,6 +2251,14 @@ PY
 
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence")"
+# Copied from inside the bundle, so cp only ever names relative paths,
+# and still staged as the bundle's own tree rather than nested in it.
+check "  the bundle is staged as a copy of its own tree" "yes yes" \
+  "$(printf '%s %s' \
+     "$(grep -Fxq "cp -R . ${appliance}/staged-bundle" "${appliance}/sudo.log" \
+          && echo yes || echo no)" \
+     "$(diff -r "$bundle" "${appliance}/staged-bundle" >/dev/null 2>&1 \
+          && echo yes || echo no)")"
 for stage in install deploy-smoke status-logs restart crash-loop offline; do
   check "  ${stage} is recorded as a pass" "pass" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
@@ -2984,26 +3016,66 @@ for mode in install-doctor-recorded install-doctor-no-source; do
          "${mode_evidence}/install.log" && echo yes || echo no)"
 done
 
-# A bundle file that cannot be read, from a bundle under a home
-# directory. The deploy-smoke bundle is the checkout's by default, and an
-# OSError's message quotes the whole path: the stage log names the file
-# by its place in the bundle instead.
-home_bundle="${td}/home/tp-reviewer/bundle-without-its-model"
-mkdir -p "$home_bundle"
-cp "${bundle}/manifest.json" "${home_bundle}/manifest.json"
-evidence="${td}/stages-home-bundle-without-its-model"
-check "a bundle whose model cannot be read fails the run" 1 \
-  "$(run_harness ok "$evidence" "" "$assets" --bundle-dir "$home_bundle")"
-check "  after install passed, as a failed deploy-smoke" "pass fail" \
-  "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" install)" \
-     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)")"
-check "  naming the file inside the bundle and the reason" yes \
-  "$(grep -Fxq 'deploy-smoke bundle file "x86-smoke.json" cannot be read: No such file or directory' \
-       "${evidence}/deploy-smoke.log" && echo yes || echo no)"
-check "  and no file of the run quotes a traceback or the bundle's path" 0 \
-  "$(grep -rlF -e Traceback -e "$home_bundle" "$evidence" | wc -l | tr -d ' ')"
-check_publishable "  and the run's evidence passes the publication scanner" \
-  "${td}/home-bundle-scan.out" "$evidence"
+# A bundle that cannot be read, from under a home directory. The
+# deploy-smoke bundle is the checkout's by default, and an OSError's
+# message, cp's and cd's all quote the path they were given: the stage
+# log names a file by its place in the bundle instead. The bundle check
+# reads the manifest and the model; the copy reads every file, so a file
+# the check never opens is the copy's to report, by a relative path. The
+# copy enters the bundle to do that, and a bundle it cannot enter by then
+# is refused without its path and without copying anything else.
+#
+# Each case: what to break, the file, a line the stage log must carry
+# exactly, and an extended regex another of its lines must match -- cp's
+# wording differs between GNU and BSD.
+home_bundle="${td}/home/tp-reviewer/bundle"
+for bundle_case in \
+    "model-missing|x86-smoke.json|deploy-smoke bundle file \"x86-smoke.json\" cannot be read: No such file or directory|^deploy-smoke bundle file .*No such file or directory$" \
+    "manifest-unreadable|manifest.json|deploy-smoke bundle file \"manifest.json\" cannot be read: Permission denied|^deploy-smoke bundle file .*Permission denied$" \
+    "extra-unreadable|extra.bin|step failed (exit 1): copy the bundle|^cp: .*\./extra\.bin.*Permission denied$" \
+    "dir-unenterable||step failed (exit 1): copy the bundle|^cannot enter the deploy-smoke bundle directory$"; do
+  IFS='|' read -r bundle_mode bundle_file bundle_line bundle_pattern <<<"$bundle_case"
+  rm -rf "$home_bundle"
+  mkdir -p "$(dirname "$home_bundle")"
+  cp -R "$bundle" "$home_bundle"
+  case "$bundle_mode" in
+    model-missing)
+      rm -f "${home_bundle}/${bundle_file}"
+      ;;
+    dir-unenterable)
+      locked_bundle="$home_bundle"
+      ;;
+    *)
+      touch "${home_bundle}/${bundle_file}"
+      chmod 000 "${home_bundle}/${bundle_file}"
+      # Root reads a mode-000 file, and this case would prove nothing.
+      check "a ${bundle_mode} bundle's ${bundle_file} is unreadable to this suite" no \
+        "$([[ -r "${home_bundle}/${bundle_file}" ]] && echo yes || echo no)"
+      ;;
+  esac
+  evidence="${td}/stages-home-bundle-${bundle_mode}"
+  check "a ${bundle_mode} bundle fails the run" 1 \
+    "$(run_harness ok "$evidence" "" "$assets" --bundle-dir "$home_bundle")"
+  locked_bundle=""
+  chmod 755 "$home_bundle"
+  chmod -R u+rw "$home_bundle"
+  check "  after install passed, as a failed deploy-smoke" "pass fail" \
+    "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" install)" \
+       "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)")"
+  check "  saying what could not be read, and why" "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fxq "$bundle_line" "${evidence}/deploy-smoke.log" && echo yes || echo no)" \
+       "$(grep -Eq "$bundle_pattern" "${evidence}/deploy-smoke.log" && echo yes || echo no)")"
+  check "  and no file of the run quotes a traceback or the bundle's path" 0 \
+    "$(grep -rlF -e Traceback -e "$home_bundle" "$evidence" | wc -l | tr -d ' ')"
+  check_publishable "  and the run's evidence passes the publication scanner" \
+    "${td}/home-bundle-${bundle_mode}-scan.out" "$evidence"
+  if [[ "$bundle_mode" == dir-unenterable ]]; then
+    check "  and nothing was copied from anywhere else" "0 no" \
+      "$(grep -c '^cp -R ' "${appliance}/sudo.log" || true) $(
+         [[ -e "${appliance}/staged-bundle" ]] && echo yes || echo no)"
+  fi
+done
 
 infer_evidence="${td}/stages-infer-garbled"
 check "an inference that does not echo the input fails deploy-smoke" "fail" \
