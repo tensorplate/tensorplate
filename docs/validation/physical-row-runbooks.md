@@ -404,7 +404,15 @@ Prerequisites:
    It then installs the baseline
    fresh through its own `install.sh` and requires the baseline versions,
    the operator's edit, and the set-aside `state.bak/state.json` to be
-   intact. The older agent must report **no** active or previous
+   intact. Intact means byte for byte: with the services stopped and
+   before the move, the harness digests `state/state.json`, and after the
+   baseline install it digests `state.bak/state.json` and requires the
+   same sha256. A removal or an install that emptied, truncated or
+   rewrote the saved file in place would leave the pathname a regular
+   file, and nothing later in the stage reads that file back — the checks
+   below exist to show the older agent did **not** load it — so the
+   digest is what makes the preservation claim checkable.
+   The older agent must report **no** active or previous
    deployment: the state was set aside on purpose, and what to restore
    from it is the operator's decision. A fresh `<deployment-id>-rollback`
    deploy and identity round trip is what shows the baseline serves.

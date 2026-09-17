@@ -412,9 +412,28 @@ case "$*" in
     [ ! -e "${TP_FAKE_VARLIB}/state.bak" ]
     exit
     ;;
-  "test -f /var/lib/tensorplate/state.bak/state.json")
-    [ -f "${TP_FAKE_VARLIB}/state.bak/state.json" ]
-    exit
+  # The privileged digest of a file under /var/lib/tensorplate, taken
+  # from the fixture's copy of it and printed in sha256sum's own format,
+  # so the harness reads a fixture exactly as it reads a device. A file
+  # that is not there is reported the way sha256sum reports it, by name.
+  "sha256sum /var/lib/tensorplate/"*)
+    [ "$#" -eq 2 ] || exit 9
+    target="${TP_FAKE_VARLIB}/${2#/var/lib/tensorplate/}"
+    if [ ! -f "$target" ]; then
+      printf 'sha256sum: %s: No such file or directory\n' "$2" >&2
+      exit 1
+    fi
+    digest="$(python3 -c 'import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" || exit 9
+    # A sha256sum that prints BSD's format instead of GNU's: every file
+    # then reads as the same leading field, so a digest taken from it
+    # would make any two files compare equal.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ]; then
+      printf 'SHA256 (%s) = %s\n' "$2" "$digest"
+      exit 0
+    fi
+    printf '%s  %s\n' "$digest" "$2"
+    exit 0
     ;;
   "mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak")
     # GNU mv -T: never moves into the target, replaces only an empty one.
@@ -590,6 +609,19 @@ fi
 if [ "$mode" = rollback-state-aside-exists ] && [ "$phase" = upgraded ]; then
   mkdir -p "${TP_FAKE_VARLIB}/state.bak"
   printf '{"fixture":"an earlier rollback"}\n' >"${TP_FAKE_VARLIB}/state.bak/state.json"
+fi
+# The set-aside state destroyed by the install that follows the removal,
+# while its pathname stays a regular file: emptied, truncated, and
+# replaced with different bytes at exactly the same length, which no
+# check on the file's existence or size could tell from the original.
+if [ "$phase" = rolled-back ]; then
+  case "$mode" in
+    rollback-empties-backup) : >"${TP_FAKE_VARLIB}/state.bak/state.json" ;;
+    rollback-truncates-backup) printf '{"fixture":"dur' >"${TP_FAKE_VARLIB}/state.bak/state.json" ;;
+    rollback-rewrites-backup)
+      printf '{"fixture":"durable_state"}\n' >"${TP_FAKE_VARLIB}/state.bak/state.json"
+      ;;
+  esac
 fi
 # What install.sh does when the services do not come up or doctor reports
 # a critical finding: fail AFTER every package is installed.
@@ -2358,6 +2390,12 @@ stranded_filed() {
 signature_line='==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow'
 cleared_dirs='/etc/tensorplate /var/lib/tensorplate /var/log/tensorplate /run/tensorplate'
 candidate_present='tensorplate-agent installed, tensorplate-serving installed, tensorplate-observability installed, tensorplate-cli installed, tensorplate-common installed'
+# The durable state the fixture agent writes on a deploy, and its digest:
+# what the rollback's preservation check has to hold the saved copy to.
+state_fixture='{"fixture":"durable state"}'
+state_sha256="$(printf '%s\n' "$state_fixture" |
+  python3 -c 'import hashlib, sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 
 baseline_evidence="${td}/stages-baseline"
 check "a run with a baseline completes" "0" "$(run_baseline_stages ok "$baseline_evidence" "")"
@@ -2442,8 +2480,23 @@ check "  the removal names every runtime package and nothing else" \
 check "  the state is set aside under the documented name" yes \
   "$(grep -Fxq 'mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak' "${appliance}/sudo.log" \
      && echo yes || echo no)"
-check "  and the set-aside state survived the rollback" yes \
-  "$([[ -f "${appliance}/varlib/state.bak/state.json" ]] && echo yes || echo no)"
+check "  and the set-aside state survived the rollback with its bytes" \
+  "$state_fixture" \
+  "$(cat "${appliance}/varlib/state.bak/state.json" 2>/dev/null || echo missing)"
+# The digest the preservation check compares against is only worth
+# anything if it was taken from the stopped agent's own copy, before the
+# move left no original to compare with.
+check "  digested with the services stopped and before the move" \
+  "systemctl-stop sha256sum mv" \
+  "$(third="$(install_line 3)"
+     tail -n "+$((third + 1))" "${appliance}/sudo.log" |
+       sed -n -e 's/^systemctl stop tensorplate-agent tensorplate-observability$/systemctl-stop/p' \
+              -e 's#^sha256sum /var/lib/tensorplate/state/state.json$#sha256sum#p' \
+              -e 's#^mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak$#mv#p' |
+       tr '\n' ' ' | sed 's/ $//')"
+check "  and the saved copy is read back after the baseline install" yes \
+  "$(fourth="$(install_line 4)"
+     sudo_after "$fourth" 'sha256sum /var/lib/tensorplate/state.bak/state.json')"
 check "  the operator's conffile edit survived both directions" yes "$(operator_config_edited)"
 check "  the baseline versions are filed per package" 5 \
   "$(grep -c "${baseline_version} " "${baseline_evidence}/packages-baseline.txt" || true)"
@@ -2883,6 +2936,10 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
                  "rollback-keeps-candidate-version|1|no|installed package versions do not match the v0.1.5 set" \
                  "rollback-resets-conffile|1|no|the rollback did not keep the operator-edited" \
                  "rollback-state-not-preserved|1|no|step failed (exit 1): the set-aside state is preserved" \
+                 "rollback-empties-backup|1|no|step failed (exit 1): the set-aside state is preserved" \
+                 "rollback-truncates-backup|1|no|step failed (exit 1): the set-aside state is preserved" \
+                 "rollback-rewrites-backup|1|no|step failed (exit 1): the set-aside state is preserved" \
+                 "rollback-digest-not-hex|1|yes|step failed (exit 1): digest the durable state before setting it aside" \
                  "rollback-keeps-state|1|no|it loaded state that was set aside" \
                  "rollback-agent-unavailable|1|no|the agent is not available after the rollback" \
                  "rollback-previous-active|1|no|reports previous_active" \
@@ -2949,6 +3006,40 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
       check "  and that the conffiles and state are where the procedure put them" "yes yes" \
         "$(err_says "$evidence" '/etc/tensorplate conffiles are kept.') $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak.')"
       ;;
+    rollback-digest-not-hex)
+      # A leading field that is not sha256 hex is refused where it is
+      # read, not carried forward: two files digested through such a
+      # sha256sum would otherwise compare equal and the stage would
+      # credit the rollback with preserving state it never read.
+      check "  and names the file it could not digest" yes \
+        "$(logged "${evidence}/rollback.log" \
+           'could not compute a sha256 of /var/lib/tensorplate/state/state.json')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(third="$(install_line 3)"
+           echo "$(sudo_after "$third" 'mv -T')" "$(sudo_after "$third" 'apt-get remove')")"
+      ;;
+    rollback-state-not-preserved)
+      # Nothing is there to read: the check names the file it could not
+      # digest rather than reporting it as changed.
+      check "  and names the file it could not read" yes \
+        "$(logged "${evidence}/rollback.log" \
+           'sha256sum: /var/lib/tensorplate/state.bak/state.json: No such file or directory')"
+      ;;
+    rollback-empties-backup|rollback-truncates-backup|rollback-rewrites-backup)
+      # The pathname is still a regular file in all three, so `test -f`
+      # on it would have passed every one of them.
+      check "  and the backup is still a regular file" yes \
+        "$([[ -f "${appliance}/varlib/state.bak/state.json" ]] && echo yes || echo no)"
+      check "  and the failure names the file whose contents did not survive" yes \
+        "$(logged "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/state.bak/state.json')"
+      check "  and reports the digest the stopped agent's copy had" yes \
+        "$(logged "${evidence}/rollback.log" "sha256 was ${state_sha256} when the services were stopped")"
+      # The checks after it intentionally do not load the backup, so they
+      # cannot stand in for this one: the stage has to stop here.
+      check "  and the stage stopped before reading the agent back" no \
+        "$(logged "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
     rollback-purges-conffiles|rollback-purges-observability)
       if [[ "$mode" == rollback-purges-conffiles ]]; then lost=tensorplate-agent; else lost=tensorplate-observability; fi
       check "  and the report names the conffiles that were lost" yes \
@@ -3012,6 +3103,7 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
 done
 
 for injected_case in "systemctl stop tensorplate-agent tensorplate-observability=stop the services" \
+                     "sha256sum /var/lib/tensorplate/state/state.json=digest the durable state before setting it aside" \
                      "mv -T=set durable state aside" \
                      "apt-get remove=remove tensorplate-"; do
   injected="${injected_case%%=*}"

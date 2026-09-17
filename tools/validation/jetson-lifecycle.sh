@@ -51,8 +51,9 @@
 #                 aside, remove every TensorPlate package except the apt
 #                 channel's bootstrap, install the baseline fresh --
 #                 returns exactly the baseline set, keeps the operator
-#                 edit and the set-aside state, leaves the older agent
-#                 with no deployment to misread, and serves a fresh one
+#                 edit and the set-aside state byte for byte, leaves the
+#                 older agent with no deployment to misread, and serves
+#                 a fresh one
 #
 # A run with a baseline leaves the BASELINE installed when it finishes.
 #
@@ -163,6 +164,13 @@ CRASH_LOOP_BACKUP=""
 # (docs/install/lifecycle.md) rather than carrying it back.
 readonly STATE_DIR="/var/lib/tensorplate/state"
 readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
+# The agent's deployment state inside each, and the digest of the stopped
+# agent's copy, taken before the rollback moves the directory. What the
+# rollback claims about this file is that its CONTENTS survive the
+# removal and the baseline install, which a pathname cannot show.
+readonly STATE_FILE="${STATE_DIR}/state.json"
+readonly STATE_ASIDE_FILE="${STATE_ASIDE_DIR}/state.json"
+STATE_FILE_SHA256=""
 # The conffile an operator edits before the upgrade, and whose bytes both
 # directions must keep. Every CLI call this run makes is pinned to its own
 # private config, so nothing here reads this file and the edit cannot
@@ -1614,6 +1622,44 @@ check_operator_config_kept() {
   fi
 }
 
+# The sha256 of a file only root can read. /var/lib/tensorplate is
+# root-owned, so every read of the durable state goes through sudo, the
+# way the journal captures and the crash-loop config backup do, rather
+# than through a sudo path of this check's own.
+#
+# A missing or unreadable file fails here: sha256sum names it and exits
+# non-zero, and a digest that is not sha256 hex is refused rather than
+# carried forward, so two unreadable files can never compare equal.
+privileged_sha256() {
+  local path="$1" line digest
+  line="$(sudo sha256sum "$path")" || return
+  digest="${line%% *}"
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'could not compute a sha256 of %s: sha256sum printed %s\n' "$path" "$line" >&2
+    return 1
+  fi
+  printf '%s\n' "$digest"
+}
+
+# The set-aside state, byte for byte as the stopped agent left it.
+#
+# `test -f` proves only that a pathname is a regular file, so a removal
+# or an install that emptied, truncated or rewrote the saved state would
+# pass it while the recoverable state this stage claims to preserve was
+# gone. Nothing later reads this file back -- the empty-agent and
+# fresh-deploy checks below exist to show the older agent did NOT load
+# it -- so the digest taken before the move is the only thing that can
+# tell a preserved state file from a destroyed one.
+check_state_preserved() {
+  local now
+  now="$(privileged_sha256 "$STATE_ASIDE_FILE")" || return
+  if [[ "$now" != "$STATE_FILE_SHA256" ]]; then
+    printf 'the rollback did not preserve %s: sha256 was %s when the services were stopped, now %s\n' \
+      "$STATE_ASIDE_FILE" "$STATE_FILE_SHA256" "$now" >&2
+    return 1
+  fi
+}
+
 # Doctor on the baseline is filed, not asserted. The baseline's own
 # install.sh already refuses a critical finding, and the baseline deploy
 # and inference below are what show it is a working place to move from or
@@ -1980,6 +2026,11 @@ PY
   STRANDED_WINDOW=rollback-stopped
   STRANDED_INSTALL_LOG=""
   step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  # Taken with the agent stopped, so it is the state the rollback has to
+  # carry across, and before anything moves or removes it -- after the
+  # move there is no original left to compare the saved copy with.
+  STATE_FILE_SHA256="$(step "digest the durable state before setting it aside" \
+    privileged_sha256 "$STATE_FILE")" || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
   STRANDED_STATE_ASIDE=1
 
@@ -2019,7 +2070,7 @@ PY
   step "baseline versions" check_installed_versions \
     "${EVIDENCE_DIR}/packages-after-rollback.txt" "$BASELINE_DIR" "$BASELINE_TAG" || return
   check_operator_config_kept "the rollback" || return
-  step "the set-aside state is preserved" sudo test -f "${STATE_ASIDE_DIR}/state.json" || return
+  step "the set-aside state is preserved" check_state_preserved || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
 
   # The older agent must not have loaded the newer agent's state: it
@@ -2048,7 +2099,7 @@ PY
   step "rolled-back worker round trip" check_deployment_round_trip "$ROLLBACK_DEPLOYMENT_ID" \
     "${EVIDENCE_DIR}/status-after-redeploy.json" "${EVIDENCE_DIR}/rollback-result.json" \
     "${EVIDENCE_DIR}/rollback-deploy.json" || return
-  pass "rolled back to ${BASELINE_TAG}; operator edit kept; state set aside and not loaded; a fresh deployment answered"
+  pass "rolled back to ${BASELINE_TAG}; operator edit kept; state set aside unchanged and not loaded; a fresh deployment answered"
 }
 
 # --- run ---------------------------------------------------------------

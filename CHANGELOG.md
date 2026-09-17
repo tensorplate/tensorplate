@@ -157,7 +157,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   baseline fresh and requires its services up, the baseline versions,
   the operator's edit and the set-aside state to be intact, the older
   agent to report no active or previous deployment, and a fresh
-  deployment to serve. Doctor on the baseline is recorded, not asserted.
+  deployment to serve. The set-aside state is held to its contents, not
+  to its pathname: the stopped agent's `state/state.json` is digested
+  before the move, and `state.bak/state.json` is digested again after the
+  baseline install and required to match, so a removal or an install that
+  emptied, truncated or rewrote it in place fails the stage by name. The
+  checks that follow deliberately do not load that file -- they exist to
+  show the older agent did not -- so nothing else could catch it. Doctor
+  on the baseline is recorded, not asserted.
   The harness drops `PYTHONOPTIMIZE`, which would otherwise turn its
   Python `assert` checks into passes. A run that ends while the device
   serves nothing -- in the upgrade from clearing the candidate to a
