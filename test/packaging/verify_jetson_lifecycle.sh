@@ -628,6 +628,13 @@ fi
 if [ "$mode" = upgrade-loses-deployment ] && [ "$phase" = upgraded ]; then
   rm -f "${TP_FAKE_ACTIVE_ID}"
 fi
+# An upgrade that leaves the state directory populated but without the
+# agent's deployment state in it. The manifest the rollback takes would
+# still have entries, and two directories holding only the rest would
+# compare equal all the way to a pass.
+if [ "$mode" = rollback-state-file-missing ] && [ "$phase" = upgraded ]; then
+  rm -f "${TP_FAKE_VARLIB}/state/state.json"
+fi
 # A run has deleted /var/lib/tensorplate by now, so this plants the
 # directory where only the rollback's own refusal can catch it.
 if [ "$mode" = rollback-state-aside-exists ] && [ "$phase" = upgraded ]; then
@@ -670,6 +677,10 @@ if [ "$phase" = rolled-back ]; then
       printf '{"fixture":"not what was set aside"}\n' \
         >"${TP_FAKE_VARLIB}/state.bak/state.json.new"
       ;;
+    # Every file gone while the directory stays: the set-aside copy reads
+    # as a directory that is there and holds nothing, which must not be
+    # what "unchanged" means.
+    rollback-empties-state-dir) rm -f "${TP_FAKE_VARLIB}/state.bak/"* ;;
     # The set-aside state destroyed by an install that then fails the way
     # install.sh does, after every package is installed: the stage never
     # reaches its preservation check, and the stranded-device report is
@@ -3033,6 +3044,8 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
                  "rollback-empties-snapshot|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
                  "rollback-deletes-snapshot|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
                  "rollback-adds-state-file|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
+                 "rollback-empties-state-dir|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
+                 "rollback-state-file-missing|1|yes|step failed (exit 1): digest the durable state before setting it aside" \
                  "rollback-digest-not-hex|1|yes|step failed (exit 1): digest the durable state before setting it aside" \
                  "rollback-destroys-backup-then-fails|1|yes|step failed (exit 1): install.sh" \
                  "rollback-keeps-state|1|no|it loaded state that was set aside" \
@@ -3127,6 +3140,13 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
            "ls: cannot access '/var/lib/tensorplate/state.bak': No such file or directory")"
       check "  and does not report it as changed" no \
         "$(logged "${evidence}/rollback.log" 'the rollback did not preserve')"
+      # Nor as the empty directory the case below is about. A listing
+      # whose failure went unchecked would read as a directory holding
+      # nothing, which is a different fact with a different recovery:
+      # there is a set-aside copy to inspect in one and none in the other.
+      check "  nor as a directory that is there and holds nothing" no \
+        "$(logged "${evidence}/rollback.log" \
+           'holds no files; there is no durable state here to preserve')"
       ;;
     rollback-empties-backup|rollback-truncates-backup|rollback-rewrites-backup|\
     rollback-empties-agent-bak|rollback-truncates-agent-bak|rollback-rewrites-agent-bak|\
@@ -3188,6 +3208,35 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
            'the rollback did not preserve /var/lib/tensorplate/state.bak: it holds state.json.new, which the durable state did not when the services were stopped')"
       check "  and the stage stopped before reading the agent back" no \
         "$(logged "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-empties-state-dir)
+      # A directory that is there and holds nothing is not a preserved
+      # one. Saying so about the directory is the honest report: naming
+      # whichever file the comparison happened to reach first would
+      # describe one loss out of three.
+      check "  and the set-aside directory is still there" yes \
+        "$([[ -d "${appliance}/varlib/state.bak" ]] && echo yes || echo no)"
+      check "  and the failure names the directory, not one file in it" yes \
+        "$(logged "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/state.bak holds no files; there is no durable state here to preserve')"
+      # The other half of the pair above: a directory that is there and
+      # holds nothing is not a directory that could not be read.
+      check "  rather than as a directory it could not read" no \
+        "$(logged "${evidence}/rollback.log" 'ls: cannot access')"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(logged "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-state-file-missing)
+      # Refused where the manifest is taken, before the move: a state
+      # directory without the agent's deployment state gives a manifest
+      # that both sides can satisfy while preserving nothing this stage
+      # is about.
+      check "  and says which file the durable state is missing" yes \
+        "$(logged "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/state holds no state.json: there is no deployment state for the rollback to preserve')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(third="$(install_line 3)"
+           echo "$(sudo_after "$third" 'mv -T')" "$(sudo_after "$third" 'apt-get remove')")"
       ;;
     rollback-destroys-backup-then-fails)
       # The install destroyed the saved state and then failed the way
@@ -3270,6 +3319,23 @@ $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and s
       ;;
   esac
 done
+
+# The stranded report's read of the set-aside state is best-effort and
+# runs from the exit path, so it has to be able to fail -- and a read that
+# failed must not read as either answer. Same destructive install as the
+# case above, with the privileged listing of the set-aside copy made to
+# fail: the only reader of that directory in this mode is the report.
+evidence="${td}/stages-rollback-stranded-state-unreadable"
+check "a stranded report that cannot read the set-aside state still files" 1 \
+  "$(run_baseline_stages rollback-destroys-backup-then-fails "$evidence" \
+     'ls -A /var/lib/tensorplate/state.bak')"
+check "  and is filed and printed whole" yes "$(stranded_filed "$evidence")"
+check "  and says the set-aside state could not be read back" yes \
+  "$(err_says "$evidence" \
+     'durable state is at /var/lib/tensorplate/state.bak, but it could not be read back; whether it still matches the digests taken before the move is NOT known.')"
+check "  rather than claiming it matches, or that it is damaged" "no no" \
+  "$(err_says "$evidence" 'still matches the digests taken before the move.') \
+$(err_says "$evidence" 'NO LONGER matches the digests taken before the move')"
 
 for injected_case in "systemctl stop tensorplate-agent tensorplate-observability=stop the services" \
                      "sha256sum /var/lib/tensorplate/state/state.json=digest the durable state before setting it aside" \
