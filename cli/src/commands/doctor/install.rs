@@ -1349,12 +1349,12 @@ fn probe_cuda_artifacts(opts: &InstallProbeOptions) -> CudaArtifacts {
 /// The first toolkit name that is present with no library behind it,
 /// searched in the order the toolkit probe searches.
 fn first_unresolved_toolkit_name(opts: &InstallProbeOptions) -> Option<String> {
-    first_artifact_matching(opts, CUDA_TOOLKIT_PATHS, present_but_not_a_library).or_else(|| {
+    first_artifact_matching(opts, CUDA_TOOLKIT_PATHS, name_is_present).or_else(|| {
         first_library_matching(
             opts,
             CUDA_TOOLKIT_LIB_DIRS,
             CUDA_RUNTIME_SONAME_PREFIX,
-            present_but_not_a_library,
+            name_is_present,
         )
     })
 }
@@ -1363,28 +1363,22 @@ fn first_unresolved_toolkit_name(opts: &InstallProbeOptions) -> Option<String> {
 /// searched in the order `probe_driver_evidence` searches: the
 /// conclusive names first, then the user-mode library's.
 fn first_unresolved_driver_name(opts: &InstallProbeOptions) -> Option<String> {
-    first_artifact_matching(opts, NVIDIA_DRIVER_PATHS, present_but_not_a_library)
+    first_artifact_matching(opts, NVIDIA_DRIVER_PATHS, name_is_present)
         .or_else(|| {
             first_library_matching(
                 opts,
                 NVIDIA_DRIVER_LIB_DIRS,
                 NVIDIA_DRIVER_SONAME_PREFIX,
-                present_but_not_a_library,
+                name_is_present,
             )
         })
-        .or_else(|| {
-            first_artifact_matching(
-                opts,
-                NVIDIA_USER_MODE_DRIVER_PATHS,
-                present_but_not_a_library,
-            )
-        })
+        .or_else(|| first_artifact_matching(opts, NVIDIA_USER_MODE_DRIVER_PATHS, name_is_present))
         .or_else(|| {
             first_library_matching(
                 opts,
                 NVIDIA_USER_MODE_DRIVER_LIB_DIRS,
                 NVIDIA_DRIVER_SONAME_PREFIX,
-                present_but_not_a_library,
+                name_is_present,
             )
         })
 }
@@ -1742,18 +1736,22 @@ fn resolves_to_regular_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Whether the name is there with no library behind it: a link whose
-/// target is missing, a directory, or another non-regular entry.
+/// Whether the name itself is on disk, whatever is or is not behind it.
 ///
-/// The complement of `resolves_to_regular_file` over names that exist at
-/// all. `symlink_metadata` asks about the name itself rather than what
-/// it points at, so a dangling link answers here and nowhere else, while
-/// a name whose directory does not exist answers to neither. The finding
-/// reports it so that a host part-way through an upgrade reads
-/// differently from one that never carried the library: the verdict is
-/// the same on both, and the work is not.
-fn present_but_not_a_library(path: &Path) -> bool {
-    path.symlink_metadata().is_ok() && !resolves_to_regular_file(path)
+/// `symlink_metadata` asks about the name rather than its target, so a
+/// link whose target is missing answers yes here and no to
+/// `resolves_to_regular_file`, while a name under a directory that does
+/// not exist answers no to both.
+///
+/// Presence alone is what is asked, because it is only ever asked where
+/// the library probe already missed: `first_unresolved_toolkit_name` and
+/// `first_unresolved_driver_name` run over the same candidates in the
+/// same order, and each is reached only when none of them resolved to a
+/// regular file. That is what makes a name either of them returns a name
+/// with no library behind it, and why re-testing the resolution here
+/// would be a condition no host can fail.
+fn name_is_present(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
 }
 
 /// The first of `paths` that `accept`s, reported as the contract path it
@@ -3100,6 +3098,14 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             "naming the dead link must not turn it into a runtime that was found: {}",
             dead_link.message
         );
+        // The other direction: a name is reported only where one is
+        // there. A host with nothing staged must not have a contract
+        // path read back to it as a dead name.
+        assert!(
+            !never_had_it.message.contains("is a name with no library"),
+            "nothing is staged here, so no name can be named: {}",
+            never_had_it.message
+        );
         assert_eq!(dead_link.hint.as_deref(), Some(WORKER_JETPACK_CUDA_HINT));
         assert_no_staging_prefix(dead.path(), &dead_link);
     }
@@ -3139,6 +3145,11 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             dead_link.message.contains("no NVIDIA driver"),
             "naming the dead link must not turn it into a driver that was found: {}",
             dead_link.message
+        );
+        assert!(
+            !never_had_it.message.contains("is a name with no library"),
+            "nothing is staged here, so no name can be named: {}",
+            never_had_it.message
         );
         assert_no_staging_prefix(dead.path(), &dead_link);
     }
