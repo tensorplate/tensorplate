@@ -1431,19 +1431,23 @@ struct InstalledCudaConsumers {
 fn probe_installed_cuda_consumers(opts: &InstallProbeOptions) -> InstalledCudaConsumers {
     InstalledCudaConsumers {
         serving_worker: prefixed(opts, SERVING_BINARY_PATH).is_file(),
-        // The same path `python_pytorch_backend` resolves, tested for
-        // existence only. That finding goes on to parse the descriptor
-        // and is a critical `fail` when it does not parse; this one
-        // deliberately still counts such a host as carrying the sidecar,
-        // because the question here is which package is installed and an
-        // invalid descriptor is an installed package with a broken file.
-        // So the two can differ on one host, and where they do, the
-        // report says so: `python_pytorch_backend` is failing in it.
-        // `Err` -- an unusable `TP_BACKEND_DESCRIPTOR_DIR` -- is the same
-        // condition that makes that finding fail, and the message here
-        // names it rather than asserting the sidecar's absence alone.
+        // The same path `python_pytorch_backend` resolves, held to the
+        // rule the library probes are held to: the descriptor a package
+        // installs is a file, and a directory or a link with nothing
+        // behind it standing at that path is a name, not an install.
+        // What is *not* asked here is whether the file parses. That
+        // finding goes on to parse it and is a critical `fail` when it
+        // does not; this one deliberately still counts such a host as
+        // carrying the sidecar, because the question here is which
+        // package is installed and an invalid descriptor is an installed
+        // package with a broken file. So the two can differ on one host,
+        // and where they do, the report says so: `python_pytorch_backend`
+        // is failing in it. `Err` -- an unusable
+        // `TP_BACKEND_DESCRIPTOR_DIR` -- is the same condition that makes
+        // that finding fail, and the message here names it rather than
+        // asserting the sidecar's absence alone.
         python_pytorch_backend: python_backend_descriptor_path(opts)
-            .is_ok_and(|descriptor| descriptor.exists()),
+            .is_ok_and(|descriptor| resolves_to_regular_file(&descriptor)),
     }
 }
 
@@ -3133,6 +3137,37 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             dead_link.message
         );
         assert_no_staging_prefix(dead.path(), &dead_link);
+    }
+
+    #[test]
+    fn a_directory_at_the_backend_descriptor_path_is_not_an_installed_sidecar() {
+        // The third probe behind this finding, held to the rule the two
+        // library probes are held to. No package puts a directory at the
+        // descriptor path, and crediting one makes a `--cli-only` host
+        // -- which consumes no CUDA runtime at all -- carry a verdict
+        // about a sidecar that is not installed.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1");
+        stage_dir(td.path(), PYTHON_PYTORCH_BACKEND_DESCRIPTOR);
+        let opts = cuda_opts(td.path());
+
+        assert!(
+            !probe_installed_cuda_consumers(&opts).python_pytorch_backend,
+            "a directory is not an installed sidecar"
+        );
+
+        let cuda = cuda_runtime_finding(
+            ServingCudaNeed::TensorrtLinked,
+            probe_installed_cuda_consumers(&opts),
+            &probe_cuda_artifacts(&opts),
+        );
+
+        assert_eq!(cuda.status_label(), "skipped", "{}", cuda.message);
+        assert!(
+            cuda.message.contains("no python_pytorch sidecar"),
+            "the skip must say the sidecar is absent: {}",
+            cuda.message
+        );
     }
 
     #[test]
