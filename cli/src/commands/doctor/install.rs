@@ -3144,6 +3144,44 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
+    fn a_dead_name_beside_a_real_library_in_the_same_directory_does_not_hide_it() {
+        // What a CUDA 11 -> 12 upgrade leaves in one directory: the old
+        // soname link with nothing behind it and the new library beside
+        // it. Rejecting the dead name must skip that entry, not the
+        // directory -- stopping at it would report no CUDA runtime on a
+        // host that has one, the inverse of the bug the rejection is
+        // for. The nearest case in this file puts the two names in
+        // different directories, which the scan can survive by falling
+        // through. The assertion below does not depend on `read_dir`
+        // order: the dead name is rejected whenever it is read, so the
+        // live one is the only candidate left to name.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/proc/driver/nvidia/version");
+        stage_symlink(
+            td.path(),
+            "/usr/lib/x86_64-linux-gnu/libcudart.so.11.0",
+            "libcudart.so.11.0.221",
+        );
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libcudart.so.12");
+
+        let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
+
+        assert_eq!(cuda.status_label(), "ok", "{}", cuda.message);
+        assert!(
+            cuda.message
+                .contains("`/usr/lib/x86_64-linux-gnu/libcudart.so.12`"),
+            "the live library beside the dead name must be the one reported: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda.message.contains("libcudart.so.11.0"),
+            "a library that is not there must not be named as found: {}",
+            cuda.message
+        );
+        assert_no_staging_prefix(td.path(), &cuda);
+    }
+
+    #[test]
     fn a_directory_at_the_backend_descriptor_path_is_not_an_installed_sidecar() {
         // The third probe behind this finding, held to the rule the two
         // library probes are held to. No package puts a directory at the
