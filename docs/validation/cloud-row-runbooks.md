@@ -519,7 +519,12 @@ run's files are known to carry:
 
 Check every file and report `detail` before filing. Put both assets
 directories somewhere without an account name in their paths to keep it
-out of the stage logs.
+out of the stage logs. The checkout's own path is kept out by the
+harness: the offline helper reports a failure it did not anticipate as
+`error: <subcommand> failed unexpectedly: <exception type>`, with exit
+status 70 and never a traceback or the exception's message, and the
+deploy-smoke bundle check names a file it cannot read by its place in
+the bundle.
 
 Delete the VM when the run is done.
 

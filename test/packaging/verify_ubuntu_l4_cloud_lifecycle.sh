@@ -1109,11 +1109,20 @@ m.unix_connect = unix_connect
 m.join_control_group = join_control_group
 m.drop_privileges = drop_privileges
 m.child_udp_send = lambda: m.attempt(lambda: udp_send("192.0.2.1", 9))
+# A probe that crashes under the denial, with a message that quotes the
+# module's own path -- the checkout's, which is what an unguarded
+# traceback would have put into the stage log. One mode crashes whichever
+# denied probe runs first, which is a service's; the other only the probe
+# in the denied transient unit.
+def crash(*args, **kwargs):
+    raise RuntimeError("the probe crashed in " + os.path.abspath(m.__file__))
+
+
 if MODE == "offline-probe-crashes" and DENIED:
-    def crash(*args, **kwargs):
-        raise RuntimeError("the probe crashed")
     m.run_probe = crash
     m.run_unit_probe = crash
+if MODE == "offline-transient-probe-crashes" and DENIED and not IN_UNIT:
+    m.run_probe = crash
 sys.exit(m.main())
 PY
 
@@ -1994,6 +2003,11 @@ trap cleanup EXIT
 
 packaged_cli_config='{"fixture": "packaged cli config"}'
 
+# The checkout a stubbed run executes the harness and the offline module
+# from: this one, except where a case is about the checkout's own path.
+checkout_root="$repo_root"
+checkout_harness="$harness"
+
 # Runs the harness against the stubbed appliance, from a clean fixture
 # state: empty package database, no durable state, the packaged cli
 # config. Arguments after the assets directory go to the harness.
@@ -2050,7 +2064,7 @@ run_harness() {
     TP_FAKE_MODE="$mode" \
     TP_FAKE_SUDO_LOG="${appliance}/sudo.log" \
     TP_FAKE_JOURNALCTL="${appliance}/bin/journalctl" \
-    TP_FAKE_HARNESS="$harness" \
+    TP_FAKE_HARNESS="$checkout_harness" \
     TP_FAKE_RESTART_MARKER="${appliance}/restarted" \
     TP_FAKE_INFER_LOG="${appliance}/infer.log" \
     TP_FAKE_PID_FILE="${appliance}/pid" \
@@ -2065,9 +2079,9 @@ run_harness() {
     TP_OFFLINE_CGROUP_ROOT="${appliance}/cgroup" \
     TP_FAKE_CLI_LOG="${appliance}/cli.log" \
     TP_FAKE_ONLINE_LOG="${appliance}/online.log" \
-    TP_REPO="$repo_root" \
+    TP_REPO="$checkout_root" \
     TP_CLOUD_CRASH_LOOP_POLL_SECONDS=0 \
-    bash "$harness" \
+    bash "$checkout_harness" \
       --assets-dir "$assets_dir" \
       --bundle-dir "$bundle" \
       --evidence-dir "$evidence" \
@@ -2114,6 +2128,39 @@ print(next((s["status"] for s in report["stages"] if s["stage"]==sys.argv[2]), "
 }
 stage_log_says() {
   grep -Fq -- "$2" "$1" && echo yes || echo no
+}
+
+# The publication scanner, run the way the runbook gives it to the
+# operator but without the private literal file CI cannot have.
+#
+# Prints the scanner's exit status; its output is kept at the second
+# argument.
+publication_scan() {
+  local output="$1" status=0
+  shift
+  "${repo_root}/tools/validation/check-evidence-publication.sh" \
+    --patterns-only "$@" >"$output" 2>&1 || status=$?
+  printf '%s' "$status"
+}
+# Checks that the scanner admits every directory given, and shows what
+# it found when it does not: the evidence is gone with the temp dir by
+# the time anyone reads a CI log. A finding names a file relative to its
+# directory, so with several directories the refused ones are named too.
+check_publishable() {
+  local what="$1" output="$2" status dir
+  shift 2
+  status="$(publication_scan "$output" "$@")"
+  check "$what" 0 "$status"
+  if [[ "$status" != 0 ]]; then
+    sed 's/^/       /' "$output"
+    if (($# > 1)); then
+      for dir in "$@"; do
+        if [[ "$(publication_scan "${output}.one" "$dir")" != 0 ]]; then
+          printf '       in %s\n' "${dir##*/}"
+        fi
+      done
+    fi
+  fi
 }
 
 # Where the network denial reached, read from what the stubs saw rather
@@ -2368,13 +2415,55 @@ for mode in offline-no-machine-type-record offline-denial-inert offline-localhos
             offline-deny-restart-ignored offline-restore-restart-ignored \
             offline-service-filter-not-attached offline-unit-control-refused; do
   evidence="${td}/stages-${mode}"
-  check "${mode} fails the run" 1 "$(run_stages "$mode" "$evidence")"
+  # A crashing probe exits with the module's status for a failure it did
+  # not anticipate, and the run exits with the failed stage's status.
+  expected_status=1
+  if [[ "$mode" == offline-probe-crashes ]]; then expected_status=70; fi
+  check "${mode} fails the run" "$expected_status" "$(run_stages "$mode" "$evidence")"
   check "  crash-loop passed before it" pass \
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  and offline is recorded as a failure, not a pass" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" offline)"
   check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
 done
+
+# A probe that crashes, from a checkout under a home directory -- the
+# shape of CI's own /home/runner checkout, where an uncaught traceback
+# quoted the module's path into offline.log and the publication scan
+# refused the run's evidence. The module names the subcommand and the
+# exception type and nothing else, so the evidence stays publishable.
+# The harness, the runner and the module are copied there together,
+# because the harness finds the module beside itself.
+home_checkout="${td}/home/tp-reviewer/checkout"
+mkdir -p "${home_checkout}/tools/validation"
+for file in ubuntu-l4-cloud-lifecycle.sh lifecycle-stages.sh linux_offline_runtime.py; do
+  cp "${repo_root}/tools/validation/${file}" "${home_checkout}/tools/validation/${file}"
+done
+checkout_root="$home_checkout"
+checkout_harness="${home_checkout}/tools/validation/ubuntu-l4-cloud-lifecycle.sh"
+for crash_case in "offline-probe-crashes|probe-unit|probe inside the tensorplate-agent control group" \
+                  "offline-transient-probe-crashes|probe|denied probe"; do
+  IFS='|' read -r crash_mode crash_subcommand crash_step <<<"$crash_case"
+  evidence="${td}/stages-home-${crash_mode}"
+  check "${crash_mode}, from a checkout under a home directory, fails the run" 70 \
+    "$(run_stages "$crash_mode" "$evidence")"
+  check "  and offline is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  check "  and the stage log names the subcommand and the exception type" "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fxq "error: ${crash_subcommand} failed unexpectedly: RuntimeError" \
+            "${evidence}/offline.log" && echo yes || echo no)" \
+       "$(grep -Fxq "step failed (exit 70): ${crash_step}" \
+            "${evidence}/offline.log" && echo yes || echo no)")"
+  check "  and no file of the run quotes a traceback, the exception or the checkout" 0 \
+    "$(grep -rlF -e Traceback -e 'the probe crashed' -e "$home_checkout" "$evidence" \
+       | wc -l | tr -d ' ')"
+  check_publishable "  and the run's evidence passes the publication scanner" \
+    "${td}/home-${crash_mode}-scan.out" "$evidence"
+done
+checkout_root="$repo_root"
+checkout_harness="$harness"
 
 # The drop-in removal itself failing must fail the run rather than being
 # reported as a restored host.
@@ -2652,36 +2741,6 @@ check "  and no raw capture is left in the harness's scratch space" 0 \
 # to the scanner that admits it. A stub run's paths are mktemp paths, so
 # a runner whose TMPDIR sat under a home directory would report
 # home-path findings here.
-#
-# Prints the scanner's exit status; its output is kept at the second
-# argument.
-publication_scan() {
-  local output="$1" status=0
-  shift
-  "${repo_root}/tools/validation/check-evidence-publication.sh" \
-    --patterns-only "$@" >"$output" 2>&1 || status=$?
-  printf '%s' "$status"
-}
-# Checks that the scanner admits every directory given, and shows what
-# it found when it does not: the evidence is gone with the temp dir by
-# the time anyone reads a CI log. A finding names a file relative to its
-# directory, so with several directories the refused ones are named too.
-check_publishable() {
-  local what="$1" output="$2" status dir
-  shift 2
-  status="$(publication_scan "$output" "$@")"
-  check "$what" 0 "$status"
-  if [[ "$status" != 0 ]]; then
-    sed 's/^/       /' "$output"
-    if (($# > 1)); then
-      for dir in "$@"; do
-        if [[ "$(publication_scan "${output}.one" "$dir")" != 0 ]]; then
-          printf '       in %s\n' "${dir##*/}"
-        fi
-      done
-    fi
-  fi
-}
 check_publishable "  and the run's own evidence passes the publication scanner" \
   "${td}/publication-scan.out" "$ok_evidence"
 
@@ -2824,6 +2883,27 @@ for mode in install-doctor-recorded install-doctor-no-source; do
     "$(grep -Fq 'host_os does not show live detection from GCE metadata' \
          "${mode_evidence}/install.log" && echo yes || echo no)"
 done
+
+# A bundle file that cannot be read, from a bundle under a home
+# directory. The deploy-smoke bundle is the checkout's by default, and an
+# OSError's message quotes the whole path: the stage log names the file
+# by its place in the bundle instead.
+home_bundle="${td}/home/tp-reviewer/bundle-without-its-model"
+mkdir -p "$home_bundle"
+cp "${bundle}/manifest.json" "${home_bundle}/manifest.json"
+evidence="${td}/stages-home-bundle-without-its-model"
+check "a bundle whose model cannot be read fails the run" 1 \
+  "$(run_harness ok "$evidence" "" "$assets" --bundle-dir "$home_bundle")"
+check "  after install passed, as a failed deploy-smoke" "pass fail" \
+  "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" install)" \
+     "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)")"
+check "  naming the file inside the bundle and the reason" yes \
+  "$(grep -Fxq 'deploy-smoke bundle file "x86-smoke.json" cannot be read: No such file or directory' \
+       "${evidence}/deploy-smoke.log" && echo yes || echo no)"
+check "  and no file of the run quotes a traceback or the bundle's path" 0 \
+  "$(grep -rlF -e Traceback -e "$home_bundle" "$evidence" | wc -l | tr -d ' ')"
+check_publishable "  and the run's evidence passes the publication scanner" \
+  "${td}/home-bundle-scan.out" "$evidence"
 
 infer_evidence="${td}/stages-infer-garbled"
 check "an inference that does not echo the input fails deploy-smoke" "fail" \

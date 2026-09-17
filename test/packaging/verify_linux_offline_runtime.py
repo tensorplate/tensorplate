@@ -1006,7 +1006,108 @@ def test_command_line():
     passed("subcommands report failure through their exit status")
 
 
-UNITS = ["tensorplate-agent.service", "tensorplate-observability.service"]
+# A path of the shape the publication scanner refuses: a checkout under a
+# home directory, as CI's /home/runner/... is.
+HOME_CHECKOUT = "/home/tp-reviewer/checkout/tools/validation/linux_offline_runtime.py"
+
+# The fewest arguments each subcommand parses with.
+MINIMAL_ARGUMENTS = {
+    "drop-in-text": [],
+    "transient-properties": [],
+    "child-udp": [],
+    "drop-in-path": ["--unit", "u"],
+    "unit-evidence-name": ["--kind", "probe", "--unit", "u"],
+    "check-drop-in": ["--unit", "u", "--print", "p"],
+    "check-policy": ["--expect", "none", "--show", "u=p"],
+    "serving-port": ["--status", "s"],
+    "probe": ["--agent-socket", "s", "--serving-port", "1"],
+    "control": ["--agent-socket", "s", "--serving-port", "1"],
+    "probe-unit": ["--unit", "u", "--control-group", "g", "--uid", "1", "--gid", "1"],
+    "control-unit": ["--unit", "u", "--control-group", "g", "--uid", "1", "--gid", "1"],
+    "classify": ["--probe", "p", "--control", "c"],
+    "status-check": ["--status", "s", "--deployment", "d"],
+    "deploy-check": ["--deploy", "s", "--deployment", "d"],
+    "infer-request": ["--request-id", "r"],
+    "infer-check": ["--request", "r", "--response", "s"],
+    "doctor-check": ["--doctor", "d", "--status", "0", "--exact-row", ROW],
+    "identity-check": ["--agent-journal", "j"],
+    "evidence": ["--dir", "d", "--deployment", "d"],
+}
+
+
+def test_command_boundary():
+    """What a subcommand did not anticipate is reported by subcommand and
+    exception type, on one line, and nothing else. A traceback, or an
+    exception's own message, would quote the checkout's path into the
+    stage log -- which is how a crashing probe put a /home/runner path
+    into a CI run's published evidence."""
+    import argparse
+    import contextlib
+    import errno
+    import io
+
+    parser = m.build_parser()
+    subcommands = next(action for action in parser._actions
+                       if isinstance(action, argparse._SubParsersAction)).choices
+    # Every subcommand, so one added outside the boundary is caught here.
+    assert sorted(MINIMAL_ARGUMENTS) == sorted(subcommands), sorted(subcommands)
+    saved = m._run
+    try:
+        for name, arguments in sorted(MINIMAL_ARGUMENTS.items()):
+            for error in (RuntimeError("crashed at " + HOME_CHECKOUT),
+                          OSError(errno.ENOENT, "No such file or directory", HOME_CHECKOUT),
+                          KeyError(HOME_CHECKOUT), KeyboardInterrupt()):
+                def crash(args, error=error):
+                    raise error
+                m._run = crash
+                stderr, stdout = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
+                    status = m.main([name] + arguments)
+                assert status == m.EXIT_UNEXPECTED, (name, error, status)
+                assert stderr.getvalue() == "error: {} failed unexpectedly: {}\n".format(
+                    name, type(error).__name__), (name, stderr.getvalue())
+                assert stdout.getvalue() == "", (name, stdout.getvalue())
+            # A named check is still reported by name, and exits 1.
+            def refuse(args):
+                raise m.CheckFailed("the named check")
+            m._run = refuse
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                assert m.main([name] + arguments) == m.EXIT_CHECKS_FAILED, name
+            assert stderr.getvalue() == "error: the named check\n", stderr.getvalue()
+    finally:
+        m._run = saved
+    assert m.EXIT_UNEXPECTED not in (0, 1, 2, 3, 4, 5, 6, 10, 11)
+
+    # And for real, from a separate process: an --out whose directory does
+    # not exist fails inside open(), whose message names the whole path.
+    with tempfile.TemporaryDirectory() as work:
+        home = pathlib.Path(work) / "home" / "tp-reviewer"
+        result = run("infer-request", "--request-id", "r",
+                     "--out", str(home / "absent" / "request.json"))
+        assert result.returncode == m.EXIT_UNEXPECTED, (result.returncode, result.stderr)
+        assert result.stderr == "error: infer-request failed unexpectedly: FileNotFoundError\n", \
+            result.stderr
+        # A file that cannot be read is a named check, and names the file
+        # by its base name and the reason by its errno text alone.
+        home.mkdir(parents=True)
+        for arguments, expected in (
+            (["classify", "--probe", str(home / "absent.json"), "--control", str(home / "c")],
+             "error: cannot read absent.json as JSON: No such file or directory\n"),
+            (["identity-check", "--agent-journal", str(home / "journal.txt")],
+             "error: cannot read journal.txt: No such file or directory\n"),
+            (["evidence", "--dir", str(home), "--deployment", "d"],
+             "error: cannot read offline-denial.json: No such file or directory\n"),
+            (["serving-port", "--status", str(home)],
+             "error: cannot read tp-reviewer as JSON: Is a directory\n"),
+        ):
+            result = run(*arguments)
+            assert result.returncode == m.EXIT_CHECKS_FAILED, (arguments, result.stderr)
+            assert result.stderr == expected, (arguments, result.stderr)
+    passed("an unanticipated failure is named by type alone, and no message quotes a path")
+
+
+UNITS =["tensorplate-agent.service", "tensorplate-observability.service"]
 
 
 def denial_document(**changes):
@@ -1212,7 +1313,7 @@ def main():
     for test in (test_drop_in, test_check_denial, test_check_no_denial, test_check_policy,
                  test_classify, test_probe_outcomes, test_unit_probe_mechanics,
                  test_doctor_check, test_identity_check, test_cli_documents,
-                 test_command_line, test_evidence):
+                 test_command_line, test_command_boundary, test_evidence):
         test()
     print("linux offline runtime: all checks pass")
     return 0

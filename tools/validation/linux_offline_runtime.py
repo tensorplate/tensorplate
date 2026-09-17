@@ -32,6 +32,10 @@ offline stage with exactly this bar and supplies its own.
 Every subcommand prints its JSON result, writes it to --out when given,
 and exits non-zero naming the checks that failed. Results written to the
 evidence directory carry no host addresses, unit paths or process ids.
+Nothing this module prints quotes a path either: what it writes to
+stderr is filed in the stage log, so a failure it did not anticipate is
+reported by subcommand and exception type alone, with no message and no
+traceback (EXIT_UNEXPECTED).
 
 The fail-open shapes this closes, because each of them turns a stage
 that proves nothing into a stage that passes:
@@ -274,6 +278,25 @@ DOCTOR_FINDINGS_OK = (
 
 class CheckFailed(Exception):
     pass
+
+
+# Exit statuses. Every subcommand exits 0 when its checks passed,
+# EXIT_CHECKS_FAILED naming the checks that did not, and 2 on a usage
+# error (argparse's). EXIT_UNEXPECTED is anything else that went wrong
+# inside this module, named by the exception's type alone: its message
+# and its traceback can quote the checkout's path or the evidence
+# directory's, and what this module prints to stderr is filed in the
+# stage log, which is published.
+EXIT_CHECKS_FAILED = 1
+EXIT_UNEXPECTED = 70
+
+
+def _read_error(error):
+    """Why a file could not be read, without the path str(OSError) quotes.
+    A JSON decoding error names a line and a column and nothing else."""
+    if isinstance(error, OSError):
+        return error.strerror or type(error).__name__
+    return str(error)
 
 
 # --- the drop-in -------------------------------------------------------
@@ -698,7 +721,7 @@ def join_control_group(control_group, path):
             current = [line.rstrip("\n")[3:] for line in handle if line.startswith("0::")]
     except OSError as error:
         raise CheckFailed("cannot join the control group {}: {}".format(
-            control_group, error.strerror or error))
+            control_group, _read_error(error)))
     if current != [control_group]:
         raise CheckFailed("this process did not join {}: it is in {}".format(
             control_group, current or "no unified control group"))
@@ -993,7 +1016,7 @@ def evidence(directory, deployment):
             with open(os.path.join(directory, name), encoding="utf-8") as handle:
                 document = json.load(handle)
         except (OSError, ValueError) as error:
-            raise CheckFailed("cannot read {}: {}".format(name, error))
+            raise CheckFailed("cannot read {}: {}".format(name, _read_error(error)))
         if not isinstance(document, dict):
             raise CheckFailed("{} is not a JSON object".format(name))
         return document
@@ -1141,7 +1164,8 @@ def _load_json(path):
         with open(path, encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, ValueError) as error:
-        raise CheckFailed("cannot read {} as JSON: {}".format(os.path.basename(path), error))
+        raise CheckFailed("cannot read {} as JSON: {}".format(
+            os.path.basename(path), _read_error(error)))
 
 
 def _read(path):
@@ -1151,7 +1175,8 @@ def _read(path):
         with open(path, encoding="utf-8") as handle:
             return handle.read()
     except OSError as error:
-        raise CheckFailed("cannot read {}: {}".format(os.path.basename(path), error.strerror))
+        raise CheckFailed("cannot read {}: {}".format(
+            os.path.basename(path), _read_error(error)))
 
 
 def _emit(result, out, failures=(), what="checks"):
@@ -1169,7 +1194,7 @@ def _metadata_address(value):
     return "" if value == "none" else value
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -1231,13 +1256,32 @@ def main(argv=None):
             opt("--expect-record", default=RECORD_NOT_APPLICABLE),
             opt("--forbid-source", default=LIVE_SOURCE))
     command("evidence", opt("--dir", required=True), opt("--deployment", required=True))
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    return _run_bounded(args)
+
+
+def _run_bounded(args):
+    """The one boundary every subcommand runs behind.
+
+    A named check that failed says which. Anything else -- a bug, a file
+    that vanished, an interrupt -- is named by its type and the
+    subcommand, and nothing more: no message, no traceback. This stderr is
+    filed in the stage log and copied into the report's detail, and both
+    of those would otherwise quote the checkout's path or the evidence
+    directory's into evidence that is published."""
     try:
         return _run(args)
     except CheckFailed as error:
         print("error: {}".format(error), file=sys.stderr)
-        return 1
+        return EXIT_CHECKS_FAILED
+    except (Exception, KeyboardInterrupt) as error:
+        print("error: {} failed unexpectedly: {}".format(
+            args.command, type(error).__name__), file=sys.stderr)
+        return EXIT_UNEXPECTED
 
 
 def _run(args):

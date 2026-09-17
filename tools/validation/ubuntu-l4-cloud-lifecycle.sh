@@ -850,11 +850,27 @@ deploy_bundle() {
   deploy_output="${work}/deploy.json"
 
   note "validating the deploy-smoke bundle before deploying it"
+  # The bundle is the checkout's by default, and the checkout usually sits
+  # under the operator's home. A file that cannot be read is named by its
+  # place in the bundle and its errno text, never by the path an OSError
+  # would quote: this output is the stage log, and the stage log is
+  # published.
   python3 - "$BUNDLE_DIR" <<'PY' || return
 import hashlib, json, pathlib, sys
 
 bundle = pathlib.Path(sys.argv[1]).resolve()
-manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+
+
+def read(relative, binary=False):
+    try:
+        path = bundle / relative
+        return path.read_bytes() if binary else path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit("deploy-smoke bundle file {} cannot be read: {}".format(
+            json.dumps(str(relative)), error.strerror or type(error).__name__))
+
+
+manifest = json.loads(read("manifest.json"))
 if manifest.get("backend_hint") != "python_pytorch":
     raise SystemExit("deploy-smoke bundle must declare backend_hint=python_pytorch")
 models = [a for a in manifest.get("artifacts", [])
@@ -865,10 +881,11 @@ artifact = models[0]
 path = (bundle / artifact["path"]).resolve()
 if bundle not in path.parents:
     raise SystemExit("deploy-smoke model artifact escapes the bundle root")
-digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+relative = path.relative_to(bundle)
+digest = "sha256:" + hashlib.sha256(read(relative, binary=True)).hexdigest()
 if digest != artifact.get("digest"):
     raise SystemExit("deploy-smoke model artifact digest does not match its manifest")
-config = json.loads(path.read_text(encoding="utf-8"))
+config = json.loads(read(relative))
 if config.get("backend_profile") != "fixture":
     raise SystemExit("deploy-smoke config must select the device-neutral fixture profile")
 print(json.dumps({"bundle": manifest.get("name"),

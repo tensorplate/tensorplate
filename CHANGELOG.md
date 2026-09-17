@@ -159,6 +159,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   something else passes its own expected tokens, and the doctor check
   files the phrases it required rather than a machine-type source it did
   not establish. Every default is the Compute Engine row's.
+  Every subcommand of the module runs behind one boundary, because what
+  it prints to stderr lands in the stage log and in a failing report's
+  `detail`: a failure it did not anticipate is reported as
+  `error: <subcommand> failed unexpectedly: <exception type>` with exit
+  status 70, never with a traceback or the exception's message, either of
+  which quotes the checkout's path, and a file it cannot read is named by
+  its base name and errno text. The deploy-smoke bundle check names an
+  unreadable bundle file by its place in the bundle for the same reason.
+  The harness's verifier runs a crashing probe from a copy of the harness
+  under a `home/<name>` directory, as CI's own checkout is, and a bundle
+  with a missing model from under one, and requires both runs' evidence
+  to pass the publication scanner with no traceback in it.
 
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
