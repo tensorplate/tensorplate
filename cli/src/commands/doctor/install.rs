@@ -1680,7 +1680,11 @@ fn probe_optional_runtimes(opts: &InstallProbeOptions) -> Vec<Finding> {
         probe_installed_cuda_consumers(opts),
         &probe_cuda_artifacts(opts),
     );
-    let tensorrt = any_runtime_artifact_exists(
+    // Every TensorRT name is a file — two libraries and a header — so
+    // all three are held to the library rule. LibTorch is the one probe
+    // with a directory among its names, and only those two names take
+    // the weaker rule.
+    let tensorrt = any_runtime_library_exists(
         opts,
         &[
             "/usr/include/NvInferVersion.h",
@@ -1688,14 +1692,8 @@ fn probe_optional_runtimes(opts: &InstallProbeOptions) -> Vec<Finding> {
             "/usr/lib/aarch64-linux-gnu/libnvinfer.so",
         ],
     );
-    let libtorch = any_runtime_artifact_exists(
-        opts,
-        &[
-            "/usr/local/libtorch",
-            "/opt/libtorch",
-            "/usr/lib/libtorch.so",
-        ],
-    );
+    let libtorch = any_runtime_library_exists(opts, &["/usr/lib/libtorch.so"])
+        || any_runtime_directory_exists(opts, &["/usr/local/libtorch", "/opt/libtorch"]);
 
     vec![
         cuda,
@@ -1720,10 +1718,6 @@ fn runtime_finding_simple(id: FindingId, present: bool, ok_msg: &str, miss_msg: 
     } else {
         Finding::missing(id, Severity::Info, miss_msg.to_string(), None)
     }
-}
-
-fn path_exists(p: &str) -> bool {
-    Path::new(p).exists()
 }
 
 /// Whether a candidate is library evidence: it must resolve, through
@@ -1851,17 +1845,27 @@ fn first_versioned_library(
     first_library_matching(opts, dirs, prefix, resolves_to_regular_file)
 }
 
-/// Deliberately `exists()` and not `resolves_to_regular_file`: two of
-/// the LibTorch paths below (`/usr/local/libtorch`, `/opt/libtorch`) are
-/// the unpacked distribution's *directory*, so the rule the CUDA probes
-/// hold to would read every LibTorch install as absent.
-fn any_runtime_artifact_exists(opts: &InstallProbeOptions, paths: &[&str]) -> bool {
-    paths.iter().any(|path| {
-        opts.prefix.as_ref().map_or_else(
-            || path_exists(path),
-            |prefix| prefix.join(path.trim_start_matches('/')).exists(),
-        )
-    })
+/// Whether any of `paths` is a library, under the rule the CUDA probes
+/// hold to: a name with nothing behind it and a directory standing where
+/// a library is looked for are both rejected here too.
+fn any_runtime_library_exists(opts: &InstallProbeOptions, paths: &[&str]) -> bool {
+    paths
+        .iter()
+        .any(|path| resolves_to_regular_file(&prefixed(opts, path)))
+}
+
+/// Whether any of `paths` is a directory an unpacked runtime
+/// distribution was extracted into.
+///
+/// The one exception to the library rule, and it is these names rather
+/// than the probe: `/usr/local/libtorch` and `/opt/libtorch` in
+/// `probe_optional_runtimes` above are the LibTorch archive's own
+/// directory — `lib/`, `include/`, `share/` — so holding them to the
+/// library rule would read every such install as absent. `is_dir`
+/// follows links, so the directory may be reached through one, and a
+/// link with nothing behind it is still rejected.
+fn any_runtime_directory_exists(opts: &InstallProbeOptions, paths: &[&str]) -> bool {
+    paths.iter().any(|path| prefixed(opts, path).is_dir())
 }
 
 #[cfg(unix)]
@@ -3726,5 +3730,82 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
 
         assert_eq!(cuda.status_label(), expected, "{}", cuda.message);
         assert_no_staging_prefix(td.path(), cuda);
+    }
+
+    /// The optional-runtime finding named `id` on the staged host.
+    fn optional_runtime(td: &Path, id: FindingId) -> Finding {
+        probe_optional_runtimes(&cuda_opts(td))
+            .into_iter()
+            .find(|f| f.id == id)
+            .expect("probe_optional_runtimes must report every optional runtime")
+    }
+
+    #[test]
+    fn a_directory_named_like_the_tensorrt_library_is_not_a_tensorrt_runtime() {
+        // Every TensorRT path is a file -- two libraries and a header --
+        // so the rule the CUDA probes hold to applies here unchanged: a
+        // directory standing at one of those names is a name, and
+        // nothing can link against it.
+        let td = TempDir::new().unwrap();
+        stage_dir(td.path(), "/usr/lib/aarch64-linux-gnu/libnvinfer.so");
+
+        let tensorrt = optional_runtime(td.path(), FindingId::TensorrtRuntime);
+
+        assert_eq!(tensorrt.status_label(), "missing", "{}", tensorrt.message);
+    }
+
+    #[test]
+    fn a_dangling_tensorrt_library_link_is_not_a_tensorrt_runtime() {
+        // The same failure an incomplete TensorRT upgrade leaves: the
+        // soname link outlives the library it points at.
+        let td = TempDir::new().unwrap();
+        stage_symlink(
+            td.path(),
+            "/usr/lib/x86_64-linux-gnu/libnvinfer.so",
+            "libnvinfer.so.10.3.0",
+        );
+
+        let tensorrt = optional_runtime(td.path(), FindingId::TensorrtRuntime);
+
+        assert_eq!(tensorrt.status_label(), "missing", "{}", tensorrt.message);
+    }
+
+    #[test]
+    fn a_tensorrt_library_file_is_a_tensorrt_runtime() {
+        // The positive case the rule above must not cost: a real
+        // library at a contract path is still detected.
+        let td = TempDir::new().unwrap();
+        stage_file(td.path(), "/usr/lib/x86_64-linux-gnu/libnvinfer.so");
+
+        let tensorrt = optional_runtime(td.path(), FindingId::TensorrtRuntime);
+
+        assert_eq!(tensorrt.status_label(), "ok", "{}", tensorrt.message);
+    }
+
+    #[test]
+    fn an_unpacked_libtorch_distribution_directory_is_still_a_libtorch_runtime() {
+        // Why LibTorch keeps the weaker rule: `/usr/local/libtorch` and
+        // `/opt/libtorch` are the unpacked distribution's directory, not
+        // a library, so holding those two names to the regular-file rule
+        // would read every LibTorch install as absent.
+        let td = TempDir::new().unwrap();
+        stage_dir(td.path(), "/usr/local/libtorch");
+
+        let libtorch = optional_runtime(td.path(), FindingId::LibtorchRuntime);
+
+        assert_eq!(libtorch.status_label(), "ok", "{}", libtorch.message);
+    }
+
+    #[test]
+    fn a_directory_named_like_the_libtorch_library_is_not_a_libtorch_runtime() {
+        // `/usr/lib/libtorch.so` is a library among those two directory
+        // roots and is held to the library rule, so the exception stays
+        // the two names it was written for.
+        let td = TempDir::new().unwrap();
+        stage_dir(td.path(), "/usr/lib/libtorch.so");
+
+        let libtorch = optional_runtime(td.path(), FindingId::LibtorchRuntime);
+
+        assert_eq!(libtorch.status_label(), "missing", "{}", libtorch.message);
     }
 }
