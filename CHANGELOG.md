@@ -180,12 +180,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   its base name and errno text. The deploy-smoke bundle check names an
   unreadable bundle file by its place in the bundle for the same reason,
   and the bundle is copied from inside itself, so `cp` names a file it
-  cannot copy by a relative path. The harness's verifier runs a crashing
-  probe from a copy of the harness under a `home/<name>` directory, as
-  CI's own checkout is, and bundles from under one with a missing model,
-  an unreadable manifest and an unreadable file only the copy reads, and
-  requires every such run's evidence to pass the publication scanner with
-  no traceback or path in it.
+  cannot copy by a relative path, and a bundle it can no longer enter is
+  refused without naming it. The harness's verifier runs a crashing probe
+  from a copy of the harness under a `home/<name>` directory, as CI's own
+  checkout is, and bundles from under one with a missing model, an
+  unreadable manifest, an unreadable file only the copy reads, and a
+  directory locked just before the copy, and requires every such run's
+  evidence to pass the publication scanner with no traceback or path in
+  it.
 
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
