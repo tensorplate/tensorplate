@@ -112,15 +112,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   helper files a control only if it could be a baseline, so such a control
   fails the stage as it is taken, before either service is denied, and
   `run-denied` refuses one with exit status 1, naming the control rather
-  than the unit, before it sends anything. The GCE
-  metadata service must answer the controls outright, over TCP and as a
-  datagram, since the stage's claim is that the denial is what made that
-  service unreachable. A datagram under the
-  denial must be refused with `EPERM`, which the kernel returns from
-  `sendto()`. A TCP connect cannot be: `tcp_connect()` passes on only
-  `ECONNREFUSED` from a transmit, so a connect whose SYN the filter
-  dropped times out. It is accepted as silenced only where its control
-  was answered, and filed apart from the refusals.
+  than the unit, before it sends anything. The GCE metadata service must
+  answer the controls outright, over TCP and as a datagram, since the
+  stage's claim is that the denial is what made that service unreachable.
+  A datagram under the denial must be refused with `EPERM`, which the
+  kernel returns from `sendto()`. A TCP connect cannot be:
+  `tcp_connect()` passes on only `ECONNREFUSED` from a transmit, so a
+  connect whose SYN the filter dropped times out. It is accepted as
+  silenced only where its control was answered, and filed apart from the
+  refusals.
   The control also decides what each operation can prove: one the host
   could not perform with nothing denied cannot be refused by the denial
   either, so it is named in the result as an operation this host cannot
