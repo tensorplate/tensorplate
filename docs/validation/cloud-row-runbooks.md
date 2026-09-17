@@ -203,6 +203,18 @@ uid and gid before it sends anything. The move is the only change it
 makes to the service, and the probe process exits before the services
 are restarted.
 
+The same holds for the transient units the CLI calls run in. Each is a
+unit of its own, and giving every one of them the same properties
+establishes their configuration, not any one unit's filter: a deploy
+unit whose attach failed would deploy with the network reachable while
+the probe unit after it was filtered. So each CLI call runs behind the
+helper's `run-denied`, which sends the same datagrams from **inside that
+call's own unit** first, files them as `offline-cli-probe-<call>.json`,
+and classifies them against the transient control. Only if they classify
+as enforced does it exec the call, in the same process and so in the same
+control group, and the unit's exit status is then the call's. Otherwise
+it exits 71 and the call is never made, which fails the stage.
+
 The control also decides what each operation can prove. On Linux the
 cgroup egress filter runs *after* the route lookup, so an operation the
 host has no route for answers the same way with and without the drop-in —
@@ -228,13 +240,15 @@ order.
 
 Filed as `offline-control.json`, `offline-probe.json`,
 `offline-classification.json`, the per-service
-`offline-unit-{control,probe,classification}-<unit>.service.json`,
-`offline-denial.json`, `offline-restored.json` and
-`offline-runtime.json`. `offline-runtime.json` states nothing it did not
-read back:
+`offline-unit-{control,probe,classification}-<unit>.service.json`, the
+per-call `offline-cli-probe-<call>.json` for `status`, `doctor`,
+`deploy`, `status-after-deploy` and `infer`, `offline-denial.json`,
+`offline-restored.json` and `offline-runtime.json`.
+`offline-runtime.json` states nothing it did not read back:
 
 - its enforcement verdict comes from classifying every probe against its
-  control: the transient unit's and each service's;
+  control: the transient unit's, each service's, and each CLI call's
+  unit's, which is classified again rather than taken from `run-denied`;
 - its four CLI verdicts come from the result files those checks filed
   only after passing;
 - its allow list is what systemd reported, and must be exactly the two

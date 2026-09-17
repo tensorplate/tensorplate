@@ -625,6 +625,175 @@ def test_probe_outcomes():
     passed("probe outcomes are named, including a child that never ran")
 
 
+def test_run_denied():
+    """A CLI call runs only in a unit whose own probe classified as
+    enforced, and runs there: the probe's process becomes the call."""
+    import contextlib
+    import errno
+    import io
+
+    command = ["tensorplate", "deploy", "/opt/bundle", "--output", "json"]
+    saved = m.run_unit_probe
+    with tempfile.TemporaryDirectory() as work:
+        work = pathlib.Path(work)
+        control = work / "offline-control.json"
+        control.write_text(json.dumps(outcomes("ok", "ok")))
+        out = work / m.cli_evidence_name("deploy")
+
+        def attempt(probe, metadata_address=m.METADATA_ADDRESS, call="deploy",
+                    control_path=control, argv=command):
+            """Run the wrapper with `probe` as what this unit's sends
+            answered. Returns what was exec'd, the CheckFailed raised if
+            any, what was written to stdout, and the addresses probed."""
+            ran, probed = [], []
+
+            def fake_probe(address=m.METADATA_ADDRESS):
+                probed.append(address)
+                return json.loads(json.dumps(probe))
+
+            m.run_unit_probe = fake_probe
+            if out.exists():
+                out.unlink()
+            stdout = io.StringIO()
+            error = None
+            try:
+                with contextlib.redirect_stdout(stdout):
+                    m.run_denied(call, str(control_path), str(out), argv, metadata_address,
+                                 execute=lambda file, args: ran.append((file, args)))
+            except m.CheckFailed as failure:
+                error = failure
+            return ran, error, stdout.getvalue(), probed
+
+        try:
+            # Enforced: the probe is filed with the call it guarded, and the
+            # call is exec'd as given, with nothing written to its stdout.
+            ran, error, stdout, probed = attempt(kernel_probe("unit"))
+            assert error is None, error
+            assert ran == [("tensorplate", command)], ran
+            assert stdout == "", stdout
+            assert probed == [m.METADATA_ADDRESS], probed
+            filed = json.loads(out.read_text())
+            assert filed == dict(kernel_probe("unit"), call="deploy"), filed
+
+            # Not enforced -- the unit's own filter never attached -- and the
+            # call is never made. The probe is filed all the same.
+            for probe, reason in (
+                (outcomes("ok", "ok", "unit"), "refused:udp_gce_metadata"),
+                # The denied child failing is not a refusal either.
+                (dict(kernel_probe("unit"), denied=dict(
+                    kernel_probe("unit")["denied"], udp_test_net_v4_from_child="child_exit_3")),
+                 "refused:udp_test_net_v4_from_child"),
+                # Loopback cut off is a unit that denies too much.
+                (dict(kernel_probe("unit"), allowed=dict.fromkeys(m.UNIT_ALLOWED_NAMES, "EPERM")),
+                 "allowed:udp_loopback_allowed_v4"),
+                # A probe that reported nothing.
+                ({}, "refused:udp_gce_metadata"),
+            ):
+                ran, error, stdout, _ = attempt(probe)
+                assert ran == [], (reason, ran)
+                assert isinstance(error, m.NotEnforced), (reason, error)
+                assert error.status == m.EXIT_NOT_ENFORCED == 71, error.status
+                assert str(error).startswith(
+                    "the deploy unit does not enforce the denial, "
+                    "so tensorplate was not run: "), error
+                assert reason in str(error), (reason, str(error))
+                assert stdout == "", stdout
+                assert json.loads(out.read_text())["call"] == "deploy"
+            assert m.EXIT_NOT_ENFORCED not in (0, 1, 2, 3, 4, 5, 6, 10, 11, m.EXIT_UNEXPECTED)
+
+            # The control decides too: a control whose child never sent
+            # makes this unit's refusal unattributable.
+            failed_control = outcomes("ok", "ok")
+            failed_control["denied"]["udp_test_net_v4_from_child"] = "child_not_run_OSError"
+            control.write_text(json.dumps(failed_control))
+            ran, error, _, _ = attempt(kernel_probe("unit"))
+            assert ran == [] and isinstance(error, m.NotEnforced), (ran, error)
+            assert "control_completed:udp_test_net_v4_from_child" in str(error), error
+            control.write_text(json.dumps(outcomes("ok", "ok")))
+
+            # No control to classify against: refused before anything is
+            # sent, and nothing is filed.
+            for broken in (work / "absent.json", work / "not-an-object.json"):
+                if broken.name == "not-an-object.json":
+                    broken.write_text("[]")
+                ran, error, _, probed = attempt(kernel_probe("unit"), control_path=broken)
+                assert ran == [] and probed == [] and not out.exists(), (ran, probed)
+                assert isinstance(error, m.CheckFailed) and not isinstance(error, m.NotEnforced)
+                assert broken.name in str(error), error
+            # No command at all.
+            ran, error, _, probed = attempt(kernel_probe("unit"), argv=[])
+            assert ran == [] and probed == [] and "needs the command" in str(error), error
+
+            # A row with no metadata service probes without those operations,
+            # and classifies them as absent.
+            without_control = outcomes("ok", "ok")
+            without_probe = kernel_probe("unit")
+            for name in m.METADATA_OPERATIONS:
+                without_control["denied"].pop(name, None)
+                without_probe["denied"].pop(name, None)
+            control.write_text(json.dumps(without_control))
+            ran, error, _, probed = attempt(without_probe, metadata_address="")
+            assert error is None and len(ran) == 1 and probed == [""], (error, ran, probed)
+            ran, error, _, _ = attempt(kernel_probe("unit"), metadata_address="")
+            assert "metadata_operation_not_probed:udp_gce_metadata" in str(error), error
+            control.write_text(json.dumps(outcomes("ok", "ok")))
+
+            # A call that cannot be exec'd is named, without its path.
+            def missing(file, args):
+                raise OSError(errno.ENOENT, "No such file or directory",
+                              "/home/tp-reviewer/bin/" + file)
+            m.run_unit_probe = lambda address=m.METADATA_ADDRESS: kernel_probe("unit")
+            try:
+                m.run_denied("deploy", str(control), str(out), command, execute=missing)
+            except m.CheckFailed as failure:
+                assert str(failure) == "cannot run tensorplate: No such file or directory", failure
+                assert not isinstance(failure, m.NotEnforced)
+            else:
+                raise AssertionError("an exec failure was not reported")
+        finally:
+            m.run_unit_probe = saved
+
+    # The command line: the command is everything after the first --, and
+    # only run-denied takes one.
+    recorded = []
+    saved = m.run_denied
+    try:
+        m.run_denied = lambda *args: recorded.append(args)
+        assert m.main(["run-denied", "--call", "status-after-deploy", "--control", "c",
+                       "--out", "o", "--", "tensorplate", "status", "--output", "json",
+                       "--", "x"]) == 0
+        assert recorded == [("status-after-deploy", "c", "o",
+                             ["tensorplate", "status", "--output", "json", "--", "x"],
+                             m.METADATA_ADDRESS)], recorded
+        del recorded[:]
+        assert m.main(["run-denied", "--call", "infer", "--control", "c", "--out", "o",
+                       "--metadata-address", "none", "--", "tensorplate"]) == 0
+        assert recorded == [("infer", "c", "o", ["tensorplate"], "")], recorded
+    finally:
+        m.run_denied = saved
+    for argv in (
+        ["run-denied", "--call", "status", "--control", "c", "--out", "o"],
+        ["run-denied", "--call", "status", "--control", "c", "--out", "o", "--"],
+        ["run-denied", "--call", "bogus", "--control", "c", "--out", "o", "--", "true"],
+        ["run-denied", "--call", "status", "--control", "c", "--", "true"],
+        ["drop-in-text", "--", "true"],
+    ):
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                m.main(argv)
+            except SystemExit as exit:
+                assert exit.code == 2, (argv, exit.code)
+            else:
+                raise AssertionError("not refused: {}".format(argv))
+
+    assert m.CLI_CALLS == ("status", "doctor", "deploy", "status-after-deploy", "infer")
+    assert m.cli_evidence_name("status-after-deploy") == \
+        "offline-cli-probe-status-after-deploy.json"
+    refused(lambda: m.cli_evidence_name("logs"), "not an offline CLI call")
+    assert run("cli-evidence-name", "--call", "infer").stdout == "offline-cli-probe-infer.json\n"
+    passed("a CLI call runs only in a unit whose own probe classified as enforced")
+
+
 class FakeCredentials:
     """os, as far as drop_privileges uses it, for a process that is root
     until told otherwise. The real calls would change the credentials of
@@ -1032,6 +1201,8 @@ MINIMAL_ARGUMENTS = {
     "doctor-check": ["--doctor", "d", "--status", "0", "--exact-row", ROW],
     "identity-check": ["--agent-journal", "j"],
     "evidence": ["--dir", "d", "--deployment", "d"],
+    "cli-evidence-name": ["--call", "status"],
+    "run-denied": ["--call", "status", "--control", "c", "--out", "o", "--", "true"],
 }
 
 
@@ -1143,6 +1314,8 @@ def evidence_directory(work, drop=(), **overrides):
     for unit in UNITS:
         documents[m.unit_evidence_name("control", unit)] = outcomes("ok", "ok", "unit")
         documents[m.unit_evidence_name("probe", unit)] = kernel_probe("unit")
+    for call in m.CLI_CALLS:
+        documents[m.cli_evidence_name(call)] = dict(kernel_probe("unit"), call=call)
     documents.update(overrides)
     for name, key in drop:
         del documents[name][key]
@@ -1178,6 +1351,14 @@ def test_evidence():
         assert per_unit[unit]["classification"]["scope"] == "unit"
         assert per_unit[unit]["classification"]["operations_refused_under_the_denial"] == \
             sorted(m.UNIT_DENIED_NAMES)
+    # And every CLI call's own unit, against the transient control.
+    per_call = result["cli_units_probed_before_each_call"]
+    assert sorted(per_call) == sorted(m.CLI_CALLS), per_call
+    for call in m.CLI_CALLS:
+        assert per_call[call]["probe"] == dict(kernel_probe("unit"), call=call)
+        assert per_call[call]["classification"]["scope"] == "unit"
+        assert per_call[call]["classification"]["operations_refused_under_the_denial"] == \
+            sorted(m.UNIT_DENIED_NAMES)
     assert result["restore"]["drop_ins_removed"] == 2
     assert result["restore"]["persistent_unit_files_written"] == 0
     assert result["restore"]["units_restarted_without_the_denial"] == UNITS
@@ -1198,6 +1379,14 @@ def test_evidence():
         # transient unit's did.
         ({m.unit_evidence_name("probe", unit): outcomes("ok", "ok", "unit")}, (),
          "do not classify"),
+        # One CLI call's unit whose filter never attached, while every
+        # other unit's did.
+        ({m.cli_evidence_name("deploy"): dict(outcomes("ok", "ok", "unit"), call="deploy")},
+         (), "offline-cli-probe-deploy.json and offline-control.json do not classify"),
+        # A CLI unit's probe filed under another call's name.
+        ({m.cli_evidence_name("infer"): dict(kernel_probe("unit"), call="deploy")}, (),
+         "records the probe of 'deploy', not of infer"),
+        ({}, ((m.cli_evidence_name("status"), "call"),), "records the probe of None"),
         # A control whose child never sent anything, on either scope.
         ({"offline-control.json": dict(outcomes("ok", "ok"), denied=dict(
             outcomes("ok", "ok")["denied"], udp_test_net_v4_from_child="child_exit_3"))},
@@ -1279,7 +1468,8 @@ def test_evidence():
     # A check that never passed filed no document, so its absence refuses
     # the certificate rather than being restated as a pass.
     for missing in ("offline-doctor-check.json", "offline-classification.json",
-                    "offline-infer-check.json", "offline-identity.json"):
+                    "offline-infer-check.json", "offline-identity.json") + tuple(
+                        m.cli_evidence_name(call) for call in m.CLI_CALLS):
         with tempfile.TemporaryDirectory() as work:
             directory = evidence_directory(pathlib.Path(work))
             os.unlink(os.path.join(directory, missing))
@@ -1303,6 +1493,10 @@ def test_evidence():
                                    ("probe", kernel_probe("unit"))):
                 del document["denied"][m.METADATA_UDP_OPERATION]
                 without[m.unit_evidence_name(kind, unit_name)] = document
+        for call in m.CLI_CALLS:
+            document = dict(kernel_probe("unit"), call=call)
+            del document["denied"][m.METADATA_UDP_OPERATION]
+            without[m.cli_evidence_name(call)] = document
         without["offline-classification.json"] = {"metadata_operation": "absent"}
         directory = evidence_directory(pathlib.Path(work), **without)
         assert m.evidence(directory, "d")["classification"]["metadata_operation"] == "absent"
@@ -1311,7 +1505,8 @@ def test_evidence():
 
 def main():
     for test in (test_drop_in, test_check_denial, test_check_no_denial, test_check_policy,
-                 test_classify, test_probe_outcomes, test_unit_probe_mechanics,
+                 test_classify, test_probe_outcomes, test_run_denied,
+                 test_unit_probe_mechanics,
                  test_doctor_check, test_identity_check, test_cli_documents,
                  test_command_line, test_command_boundary, test_evidence):
         test()

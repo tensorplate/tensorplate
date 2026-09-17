@@ -93,17 +93,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   transient unit, and one inside each service's own control group,
   because systemd attaches the filter to each unit on a best-effort basis
   and a filtered transient unit says nothing about a service whose own
-  attach failed. Joining a service's control group takes root; the helper
-  refuses any group that is not exactly that unit's, reads the move back,
-  and drops to the operator's ids before it sends anything. Every
-  operation in a control must have completed -- each datagram sent, the
-  child process run to a clean exit, each TCP connect answered -- and a
-  control that was refused, timed out, or whose child exited non-zero or
-  never ran fails the stage by name: it sent nothing, so it cannot show
-  that the later refusal was the denial's doing. The GCE metadata
-  service must answer the controls
-  outright, over TCP and as a datagram, since the stage's claim is that
-  the denial is what made that service unreachable. A datagram under the
+  attach failed -- and one inside the transient unit of each CLI call, for
+  the same reason: identical properties on every unit are configuration,
+  not that unit's filter. The module's `run-denied` sends the datagrams
+  from inside the call's unit, files them as
+  `offline-cli-probe-<call>.json`, and execs the call in the same process
+  only if they classify as enforced; otherwise it exits 71 and the call
+  is never made. The harness's verifier fails a run in which only the
+  doctor, deploy or infer unit's filter did not attach, and requires that
+  call never to have run. Joining a service's control group takes root;
+  the helper refuses any group that is not exactly that unit's, reads the
+  move back, and drops to the operator's ids before it sends anything.
+  Every operation in a control must have completed -- each datagram
+  sent, the child process run to a clean exit, each TCP connect
+  answered -- and a control that was refused, timed out, or whose child
+  exited non-zero or never ran fails the stage by name: it sent nothing,
+  so it cannot show that the later refusal was the denial's doing. The GCE
+  metadata service must answer the controls outright, over TCP and as a
+  datagram, since the stage's claim is that the denial is what made that
+  service unreachable. A datagram under the
   denial must be refused with `EPERM`, which the kernel returns from
   `sendto()`. A TCP connect cannot be: `tcp_connect()` passes on only
   `ECONNREFUSED` from a transmit, so a connect whose SYN the filter

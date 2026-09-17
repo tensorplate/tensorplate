@@ -134,9 +134,10 @@ assert "/run/systemd/system" in module, "the module does not write runtime unit 
 for forbidden in re.findall(r"/etc/systemd/system\S*", body):
     raise AssertionError(f"the harness names a persistent unit path: {forbidden}")
 
-# Every CLI call the offline stage makes goes through a denied transient
-# unit. Read from the stage's own functions rather than from the whole
-# file, which legitimately calls the CLI online in other stages.
+# Every CLI call the offline stage makes goes through run_denied_cli: a
+# denied transient unit that probes itself before the call. Read from the
+# stage's own functions rather than from the whole file, which
+# legitimately calls the CLI online in other stages.
 stage = "".join(
     match.group(0) for match in re.finditer(
         r"^(?:stage_offline|stage_offline_in|offline_cli_under_denial)\(\) \{\n.*?^\}\n",
@@ -158,8 +159,8 @@ for line in logical.splitlines():
         continue
     calls += 1
     prefix = line[: found.start()]
-    assert "run_denied" in prefix, \
-        f"an offline-stage CLI call is not run in a denied transient unit: {line!r}"
+    assert "run_denied_cli" in prefix, \
+        f"an offline-stage CLI call is not run in a self-probing denied unit: {line!r}"
 assert calls >= 4, \
     "the offline stage no longer runs status, doctor, a deploy and an inference"
 
@@ -964,7 +965,7 @@ case "${1:-}" in
     ;;
   */linux_offline_runtime.py)
     case "${2:-}" in
-      probe|control|probe-unit|control-unit)
+      probe|control|probe-unit|control-unit|run-denied)
         shift
         exec "$TP_FAKE_REAL_PYTHON" "$TP_FAKE_OFFLINE_PROBE_STUB" "$@"
         ;;
@@ -997,11 +998,14 @@ import linux_offline_runtime as m
 
 MODE = os.environ.get("TP_FAKE_MODE", "ok")
 IN_UNIT = sys.argv[1] in ("probe-unit", "control-unit")
+# The probe a CLI call's own transient unit takes before the call, which
+# then execs the stub CLI for real.
+IN_CLI = sys.argv[1] == "run-denied"
 
 
-def unit_argument():
+def option(name):
     arguments = sys.argv[2:]
-    return arguments[arguments.index("--unit") + 1]
+    return arguments[arguments.index(name) + 1]
 
 
 def expand(tokens):
@@ -1016,7 +1020,7 @@ def expand(tokens):
 
 
 if IN_UNIT:
-    UNIT = unit_argument()
+    UNIT = option("--unit")
     running = os.path.join(os.environ["TP_OFFLINE_UNIT_ROOT"], "generation", UNIT + ".running")
     DENIED = os.path.exists(running)
     tokens = []
@@ -1033,6 +1037,11 @@ else:
     UNIT = ""
     DENIED = os.environ.get("TP_FAKE_DENIED") == "1"
     ALLOW = expand(os.environ.get("TP_FAKE_ALLOW", "").split())
+    # systemd's best-effort attach failing for one CLI call's unit only:
+    # created with the denial's properties -- the stub CLI would say it
+    # ran denied -- and sending freely.
+    if IN_CLI and MODE == "offline-cli-filter-not-attached-" + option("--call"):
+        DENIED = False
 
 
 def blocked(host):
@@ -1064,8 +1073,8 @@ def udp_send(host, port, family=socket.AF_INET):
 
 
 def tcp_connect(host, port, family=socket.AF_INET):
-    if IN_UNIT:
-        raise SystemExit("fixture: a probe inside a service's control group opened a TCP connection")
+    if IN_UNIT or IN_CLI:
+        raise SystemExit("fixture: a datagram-only probe opened a TCP connection")
     if blocked(host):
         raise socket.timeout("timed out")
     if refused_control():
@@ -1123,6 +1132,8 @@ if MODE == "offline-probe-crashes" and DENIED:
     m.run_unit_probe = crash
 if MODE == "offline-transient-probe-crashes" and DENIED and not IN_UNIT:
     m.run_probe = crash
+if MODE == "offline-cli-probe-crashes" and DENIED and IN_CLI:
+    m.run_unit_probe = crash
 sys.exit(m.main())
 PY
 
@@ -2277,6 +2288,19 @@ for command in status doctor deploy infer; do
     "$(grep 'systemd-run .*--property=IPAddressDeny=any' "${appliance}/sudo.log" \
        | grep -q -- "-- tensorplate ${command} " && echo yes || echo no)"
 done
+# Each through the module's run-denied, which probes that call's own unit
+# and only then execs the call, in the stage's order.
+check "  each call ran behind a probe of its own unit" \
+  "status doctor deploy status-after-deploy infer" \
+  "$(sed -n 's/^systemd-run .*--property=IPAddressDeny=any.* -- python3 .*linux_offline_runtime\.py run-denied --call \([a-z-]*\) .* -- tensorplate .*/\1/p' \
+       "${appliance}/sudo.log" | tr '\n' ' ' | sed 's/ $//')"
+check "  and the certificate classifies each unit's probe against the transient control" \
+  "deploy:6 doctor:6 infer:6 status:6 status-after-deploy:6" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))["cli_units_probed_before_each_call"]
+print(" ".join("%s:%d" % (call, len(entry["classification"]["operations_refused_under_the_denial"]))
+               for call, entry in sorted(r.items()) if entry["probe"]["call"] == call))' \
+    "${ok_evidence}/offline-runtime.json")"
 check "  the control ran in a transient unit with no denial" "1" \
   "$(grep -c 'systemd-run .*-- python3 .*linux_offline_runtime.py control' "${appliance}/sudo.log")"
 check "  and the control carried no address policy" "0" \
@@ -2415,16 +2439,24 @@ for mode in offline-no-machine-type-record offline-denial-inert offline-localhos
             offline-deny-restart-ignored offline-restore-restart-ignored \
             offline-service-filter-not-attached offline-unit-control-refused; do
   evidence="${td}/stages-${mode}"
-  # A crashing probe exits with the module's status for a failure it did
-  # not anticipate, and the run exits with the failed stage's status.
+  # The run exits with the failed stage's status: a crashing probe's is
+  # the module's for a failure it did not anticipate, and a transient
+  # unit with no filter is refused by the first CLI call's own probe.
   expected_status=1
-  if [[ "$mode" == offline-probe-crashes ]]; then expected_status=70; fi
+  case "$mode" in
+    offline-probe-crashes) expected_status=70 ;;
+    offline-transient-not-denied) expected_status=71 ;;
+  esac
   check "${mode} fails the run" "$expected_status" "$(run_stages "$mode" "$evidence")"
   check "  crash-loop passed before it" pass \
     "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
   check "  and offline is recorded as a failure, not a pass" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" offline)"
   check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  if [[ "$mode" == offline-transient-not-denied ]]; then
+    check "  and no CLI call ran while the services were denied" 0 \
+      "$(grep -c ' dropins=[1-9]' "${appliance}/cli.log" || true)"
+  fi
 done
 
 # A probe that crashes, from a checkout under a home directory -- the
@@ -2441,9 +2473,10 @@ for file in ubuntu-l4-cloud-lifecycle.sh lifecycle-stages.sh linux_offline_runti
 done
 checkout_root="$home_checkout"
 checkout_harness="${home_checkout}/tools/validation/ubuntu-l4-cloud-lifecycle.sh"
-for crash_case in "offline-probe-crashes|probe-unit|probe inside the tensorplate-agent control group" \
-                  "offline-transient-probe-crashes|probe|denied probe"; do
-  IFS='|' read -r crash_mode crash_subcommand crash_step <<<"$crash_case"
+for crash_case in "offline-probe-crashes|probe-unit|probe inside the tensorplate-agent control group|0" \
+                  "offline-cli-probe-crashes|run-denied|status under denial|0" \
+                  "offline-transient-probe-crashes|probe|denied probe|5"; do
+  IFS='|' read -r crash_mode crash_subcommand crash_step crash_calls <<<"$crash_case"
   evidence="${td}/stages-home-${crash_mode}"
   check "${crash_mode}, from a checkout under a home directory, fails the run" 70 \
     "$(run_stages "$crash_mode" "$evidence")"
@@ -2456,6 +2489,8 @@ for crash_case in "offline-probe-crashes|probe-unit|probe inside the tensorplate
             "${evidence}/offline.log" && echo yes || echo no)" \
        "$(grep -Fxq "step failed (exit 70): ${crash_step}" \
             "${evidence}/offline.log" && echo yes || echo no)")"
+  check "  and the CLI calls made under the denial are the ones before the crash" \
+    "$crash_calls" "$(grep -c ' denied=1 ' "${appliance}/cli.log" || true)"
   check "  and no file of the run quotes a traceback, the exception or the checkout" 0 \
     "$(grep -rlF -e Traceback -e 'the probe crashed' -e "$home_checkout" "$evidence" \
        | wc -l | tr -d ' ')"
@@ -2490,6 +2525,41 @@ for unit_case in offline-service-filter-not-attached:tensorplate-observability:t
             "${td}/stages-${unit_mode}/offline.log" && echo yes || echo no)" \
        "$(grep -Fq "the denial is enforced inside the ${passing_unit} control group" \
             "${td}/stages-${unit_mode}/offline.log" && echo yes || echo no)")"
+done
+
+# One CLI call's unit whose filter never attached, while every other
+# unit's did. The call is never made, the calls before it were, and the
+# stage fails on that unit's own probe -- not on anything the call would
+# have done. Doctor is here because its exit status is captured rather
+# than stepped on.
+for cli_case in "doctor|status|doctor resolves ubuntu2404-x86-l4-g2s8 from the recorded machine type|1" \
+                "deploy|status doctor|fresh deploy under denial|71" \
+                "infer|status doctor deploy status|infer under denial|71"; do
+  IFS='|' read -r cli_call cli_before cli_step cli_status <<<"$cli_case"
+  evidence="${td}/stages-offline-cli-filter-not-attached-${cli_call}"
+  check "offline-cli-filter-not-attached-${cli_call} fails the run" "$cli_status" \
+    "$(run_stages "offline-cli-filter-not-attached-${cli_call}" "$evidence")"
+  check "  crash-loop passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and offline is recorded as a failure, not a pass" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  check "  and the ${cli_call} unit is refused before ${cli_call} runs" \
+    "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fq "error: the ${cli_call} unit does not enforce the denial, so tensorplate was not run: refused:" \
+            "${evidence}/offline.log" && echo yes || echo no)" \
+       "$(grep -Fxq "step failed (exit ${cli_status}): ${cli_step}" \
+            "${evidence}/offline.log" && echo yes || echo no)")"
+  check "  and only the calls before it were made, each denied" "$cli_before" \
+    "$(sed -n 's/^\([a-z]*\) denied=1 .*/\1/p' "${appliance}/cli.log" | tr '\n' ' ' | sed 's/ $//')"
+  check "  and its unit's own probe is filed, showing nothing refused" ok \
+    "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+print(" ".join(sorted(set(p["denied"].values()))) if p["call"] == sys.argv[2] else "wrong call")' \
+      "${evidence}/offline-cli-probe-${cli_call}.json" "$cli_call")"
+  check "  and no certificate is filed" no \
+    "$([[ -e "${evidence}/offline-runtime.json" ]] && echo yes || echo no)"
 done
 
 # One unit's removal failing does not stop the other's, nor the reload,

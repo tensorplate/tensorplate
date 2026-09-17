@@ -35,9 +35,11 @@
 #                 record, not from metadata -- and a fresh deploy and an
 #                 inference still answer. The denial is a runtime drop-in
 #                 removed on every exit path, and its enforcement is
-#                 proved by probes -- in a denied transient unit and
-#                 inside each service's own control group -- each against
-#                 a control that ran first and completed every operation
+#                 proved by probes -- in a denied transient unit, inside
+#                 each service's own control group, and inside the unit
+#                 each CLI call runs in, before that call is made -- each
+#                 against a control that ran first and completed every
+#                 operation
 #
 # With --baseline-assets-dir, two more stages run after offline. The
 # baseline is a published, signed predecessor set, always installed with
@@ -1331,6 +1333,13 @@ stage_crash_loop() {
 # service's control group, with a control taken there before the denial
 # and a probe after it.
 #
+# The same holds for the transient units the CLI calls run in: each is a
+# unit of its own, and passing every one the same properties establishes
+# their configuration, not any one unit's filter. So each call runs
+# behind the module's run-denied, which sends those datagrams from inside
+# that unit first and makes the call there only if they classify as
+# enforced.
+#
 # IDENTITY. The agent records the metadata service's answer bound to this
 # kernel boot, the logical CPU count, MemTotal and the NVIDIA display PCI
 # ids. Offline detection uses that record only while the metadata query
@@ -1403,12 +1412,33 @@ run_transient() {
 run_denied() { run_transient 1 "$@"; }
 run_allowed() { run_transient 0 "$@"; }
 
+# A TensorPlate CLI call in its own denied transient unit, made only once
+# that unit has shown that it enforces the denial.
+#
+# systemd installs the filter on each unit separately and ignores a
+# failure to, so a probe taken in any other unit -- the denied probe
+# below, or the previous call's unit -- says nothing about this one. The
+# module's run-denied probes from inside this unit, files what it saw as
+# offline-cli-probe-<call>.json, and execs the call only if that probe
+# classifies as enforced against the transient control; otherwise it
+# exits 71 and the call is never made. The call replaces the probe's
+# process, so it runs in the same control group and the unit's exit
+# status is the call's own.
+run_denied_cli() {
+  local call="$1" name
+  shift
+  name="$(offline_helper cli-evidence-name --call "$call")" || return
+  run_denied python3 "$OFFLINE_HELPER" run-denied --call "$call" \
+    --control "${EVIDENCE_DIR}/offline-control.json" \
+    --out "${EVIDENCE_DIR}/${name}" -- "$@"
+}
+
 # The redirection belongs to the transient unit's own output, so a step
 # that captures JSON cannot also capture systemd-run's diagnostics.
-run_denied_out() {
+run_denied_cli_out() {
   local out="$1"
   shift
-  run_denied "$@" >"$out"
+  run_denied_cli "$@" >"$out"
 }
 
 offline_drop_in_path() {
@@ -1601,7 +1631,8 @@ offline_unit_classify() {
 }
 
 # Every TensorPlate CLI call this stage makes, each one inside its own
-# denied transient unit: status, doctor, a fresh deploy, and inference.
+# denied transient unit that probed itself first: status, doctor, a fresh
+# deploy, and inference. The call names are the module's CLI_CALLS.
 offline_cli_under_denial() {
   local work="$1" doctor_status=0 offline_port
   local status_file="${EVIDENCE_DIR}/offline-status.json"
@@ -1610,7 +1641,7 @@ offline_cli_under_denial() {
   local after_deploy="${EVIDENCE_DIR}/offline-status-after-deploy.json"
 
   note "querying the control plane from inside a denied transient unit"
-  step "status under denial" run_denied_out "$status_file" \
+  step "status under denial" run_denied_cli_out "$status_file" status \
     tensorplate status --output json || return
   # The deployment the agent re-warmed from durable state while denied,
   # not the one this stage is about to make.
@@ -1620,21 +1651,24 @@ offline_cli_under_denial() {
 
   note "running doctor from inside a denied transient unit"
   # Doctor exits 10 on a failing finding, so its status is captured and
-  # handed to the check rather than ending the stage here.
-  run_denied_out "$doctor_file" tensorplate doctor --output json || doctor_status=$?
+  # handed to the check rather than ending the stage here. A unit that
+  # did not enforce the denial never ran doctor, and the check refuses
+  # the empty output and the status alike.
+  run_denied_cli_out "$doctor_file" doctor \
+    tensorplate doctor --output json || doctor_status=$?
   step "doctor resolves ${ROW} from the recorded machine type" offline_helper doctor-check \
     --doctor "$doctor_file" --status "$doctor_status" --exact-row "$ROW" \
     --out "${EVIDENCE_DIR}/offline-doctor-check.json" || return
 
   note "deploying a fresh bundle from inside a denied transient unit"
-  step "fresh deploy under denial" run_denied_out "$deploy_file" \
+  step "fresh deploy under denial" run_denied_cli_out "$deploy_file" deploy \
     tensorplate deploy "$BUNDLE_STAGING_DIR" \
     --deployment-id "$OFFLINE_DEPLOYMENT_ID" --output json || return
   step "deploy checks" offline_helper deploy-check \
     --deploy "$deploy_file" --deployment "$OFFLINE_DEPLOYMENT_ID" \
     --out "${EVIDENCE_DIR}/offline-deploy-check.json" || return
 
-  step "status after the fresh deploy" run_denied_out "$after_deploy" \
+  step "status after the fresh deploy" run_denied_cli_out "$after_deploy" status-after-deploy \
     tensorplate status --output json || return
   step "the fresh deployment is active" offline_helper status-check \
     --status "$after_deploy" --deployment "$OFFLINE_DEPLOYMENT_ID" \
@@ -1643,7 +1677,7 @@ offline_cli_under_denial() {
   note "issuing an inference request from inside a denied transient unit"
   step "build the inference request" offline_helper infer-request \
     --request-id cloud-offline-1 --out "${work}/infer-request.json" || return
-  step "infer under denial" run_denied tensorplate infer \
+  step "infer under denial" run_denied_cli infer tensorplate infer \
     --input "${work}/infer-request.json" --output-file "${work}/infer-response.json" || return
   step "inference checks" offline_helper infer-check \
     --request "${work}/infer-request.json" \
@@ -1682,7 +1716,7 @@ stage_offline() {
   step "file the offline evidence" offline_helper evidence \
     --dir "$EVIDENCE_DIR" --deployment "$OFFLINE_DEPLOYMENT_ID" \
     --out "${EVIDENCE_DIR}/offline-runtime.json" || return
-  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit and inside each service's control group, each against a control that completed the same operations; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
+  pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit, inside each service's control group and inside each CLI call's own unit before the call, each against a control that completed the same operations; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
 }
 
 stage_offline_in() {

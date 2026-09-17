@@ -6,19 +6,21 @@ The offline stage denies both TensorPlate services, and every CLI call it
 makes, all IP traffic but the two loopback host addresses, then requires
 the appliance to keep working. This module renders the per-unit denial,
 reads the denial back from systemd, probes the network from inside a
-denied transient unit and from inside each denied service's own control
-group, classifies every result against an undenied control, and checks
-that the row was resolved from the boot-bound machine-type record rather
-than from a metadata service the denial made unreachable.
+denied transient unit, from inside each denied service's own control
+group and from inside each transient unit a CLI call runs in -- running
+the call there only once that unit's probe passed -- classifies every
+result against an undenied control, and checks that the row was
+resolved from the boot-bound machine-type record rather than from a
+metadata service the denial made unreachable.
 
 It is named for the mechanism, not for a row. The drop-in, the policy
 readback, the probes and the classification carry no row in them. What
 is row-specific is supplied as options, so another systemd harness
 adopts this file unchanged rather than editing it:
 
-  * `probe`, `control`, `probe-unit` and `control-unit` take
-    `--metadata-address`, and `none` omits the metadata operations on a
-    host that has no metadata service;
+  * `probe`, `control`, `probe-unit`, `control-unit` and `run-denied`
+    take `--metadata-address`, and `none` omits the metadata operations
+    on a host that has no metadata service;
   * `classify` takes `--metadata-operation absent`, which then requires
     those operations to be absent from both documents rather than letting
     a missing operation read as one that passed;
@@ -55,10 +57,11 @@ that proves nothing into a stage that passes:
     (src/core/cgroup.c, cgroup_apply_firewall, ignores the result).
     Reading the property back proves the configuration, never the
     enforcement, and a transient unit that was filtered says nothing
-    about a service whose own attach failed. So the probe runs in a
-    transient unit AND inside each service's control group, each against
-    its own control -- and a probe that could not run is a failure,
-    never a skip.
+    about a service, or another transient unit, whose own attach failed.
+    So the probe runs in a transient unit, inside each service's control
+    group, and inside every transient unit a CLI call runs in, before
+    the call and as the condition for making it -- each against its own
+    control -- and a probe that could not run is a failure, never a skip.
   * systemd prints `IPAddressDeny=` and `IPAddressAllow=` from a hash set
     (src/core/dbus-cgroup.c walks it with SET_FOREACH), whose order
     changes with each PID 1 start. The readback compares the prefixes
@@ -277,7 +280,13 @@ DOCTOR_FINDINGS_OK = (
 
 
 class CheckFailed(Exception):
-    pass
+    status = 1
+
+
+class NotEnforced(CheckFailed):
+    """`run-denied` refused to run its command: the unit it is in did not
+    show that it enforces the denial."""
+    status = 71
 
 
 # Exit statuses. Every subcommand exits 0 when its checks passed,
@@ -286,9 +295,13 @@ class CheckFailed(Exception):
 # inside this module, named by the exception's type alone: its message
 # and its traceback can quote the checkout's path or the evidence
 # directory's, and what this module prints to stderr is filed in the
-# stage log, which is published.
-EXIT_CHECKS_FAILED = 1
+# stage log, which is published. EXIT_NOT_ENFORCED is `run-denied`
+# refusing to run its command. The last two are outside the CLI's
+# documented exit codes (0-6, 10, 11), which `run-denied` passes through
+# once it has run the command.
+EXIT_CHECKS_FAILED = CheckFailed.status
 EXIT_UNEXPECTED = 70
+EXIT_NOT_ENFORCED = NotEnforced.status
 
 
 def _read_error(error):
@@ -661,6 +674,68 @@ def run_unit_probe(metadata_address=METADATA_ADDRESS):
                         for name, operation in allowed_operations("", 0)
                         if name in UNIT_ALLOWED_NAMES),
     }
+
+
+# --- running a CLI call in a unit that proved its own enforcement --------
+
+# The TensorPlate CLI calls the offline stage makes, in the order it makes
+# them, each in its own denied transient unit.
+CLI_CALLS = ("status", "doctor", "deploy", "status-after-deploy", "infer")
+
+
+def cli_evidence_name(call):
+    """`offline-cli-probe-<call>.json`: the probe the transient unit that
+    ran `call` took of itself, before running it."""
+    if call not in CLI_CALLS:
+        raise CheckFailed("not an offline CLI call: {!r}".format(call))
+    return "offline-cli-probe-{}.json".format(call)
+
+
+def _write_document(path, document):
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+
+def run_denied(call, control, out, command, metadata_address=METADATA_ADDRESS,
+               execute=os.execvp):
+    """Show that the unit this process is in enforces the denial, then
+    become `command`.
+
+    systemd attaches the address filter to each unit separately and does
+    not act on a failure to (cgroup_apply_firewall), so what a CLI call
+    runs in has to show its own filter works. A probe in another unit
+    shows nothing about this one, and neither does reading back the
+    properties this unit was created with: that is configuration. So the
+    probe runs here, and the command runs here after it -- exec'd, not
+    started as a child, so it is this process in this control group, and
+    the unit's exit status is the command's.
+
+    The probe is the datagram set a service's probe sends: each datagram
+    is refused synchronously, so it costs no timeout. It is classified
+    against the stage's undenied transient control, and the probe
+    document is written whatever it says, as every probe is. The command
+    runs only if the classification passed. Nothing is written to
+    stdout, which is the command's."""
+    if not command:
+        raise CheckFailed("run-denied needs the command to run after --")
+    baseline = _load_json(control)
+    if not isinstance(baseline, dict):
+        raise CheckFailed("{} is not a JSON object".format(os.path.basename(control)))
+    document = run_unit_probe(metadata_address)
+    document["call"] = call
+    _write_document(out, document)
+    metadata = "required" if metadata_address else "absent"
+    _, failures = classify(document, baseline, metadata, "unit")
+    if failures:
+        raise NotEnforced("the {} unit does not enforce the denial, so {} was not run: {}".format(
+            call, os.path.basename(command[0]), ", ".join(failures)))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    try:
+        execute(command[0], command)
+    except OSError as error:
+        raise CheckFailed("cannot run {}: {}".format(
+            os.path.basename(command[0]), _read_error(error)))
 
 
 # --- probing from inside a service's control group -----------------------
@@ -1094,6 +1169,22 @@ def evidence(directory, deployment):
                 unit_evidence_name("probe", unit),
                 unit_evidence_name("control", unit), metadata, "unit"),
         }
+    # And inside each transient unit a CLI call ran in, from that unit's
+    # own probe, for the same reason: another unit's filter says nothing
+    # about this one's. `run-denied` ran the call only after this same
+    # classification passed; it is derived again here rather than taken
+    # on trust, against the transient control.
+    per_call = {}
+    for call in CLI_CALLS:
+        name = cli_evidence_name(call)
+        probe = load(name)
+        if probe.get("call") != call:
+            raise CheckFailed("{} records the probe of {!r}, not of {}".format(
+                name, probe.get("call"), call))
+        per_call[call] = {
+            "probe": probe,
+            "classification": classified(name, "offline-control.json", metadata, "unit"),
+        }
 
     allow = units.get("allowed_prefixes") or []
     if not allow:
@@ -1130,10 +1221,12 @@ def evidence(directory, deployment):
         "probe": load("offline-probe.json"),
         "classification": classification,
         "units_probed_in_their_own_control_group": per_unit,
+        "cli_units_probed_before_each_call": per_call,
         "enforced": all(
             item["ip_traffic_denied_except_the_two_host_addresses"]
             for item in [classification]
-            + [entry["classification"] for entry in per_unit.values()]),
+            + [entry["classification"] for entry in per_unit.values()]
+            + [entry["classification"] for entry in per_call.values()]),
         "identity": load("offline-identity.json"),
         "deployment_id": deployment,
         "cli_under_denial": {
@@ -1256,11 +1349,31 @@ def build_parser():
             opt("--expect-record", default=RECORD_NOT_APPLICABLE),
             opt("--forbid-source", default=LIVE_SOURCE))
     command("evidence", opt("--dir", required=True), opt("--deployment", required=True))
+    commands.add_parser("cli-evidence-name").add_argument(
+        "--call", choices=CLI_CALLS, required=True)
+    # run-denied ... -- COMMAND...: the command is split off before
+    # parsing rather than left to argparse, whose handling of `--` has
+    # changed between Python releases.
+    wrapper = commands.add_parser("run-denied")
+    wrapper.add_argument("--call", choices=CLI_CALLS, required=True)
+    wrapper.add_argument("--control", required=True)
+    wrapper.add_argument("--out", required=True)
+    wrapper.add_argument("--metadata-address", type=_metadata_address,
+                         default=METADATA_ADDRESS)
     return parser
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = []
+    if "--" in argv:
+        split = argv.index("--")
+        argv, command = argv[:split], argv[split + 1:]
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if (args.command == "run-denied") != bool(command):
+        parser.error("run-denied, and only run-denied, takes a command after --")
+    args.exec_argv = command
     return _run_bounded(args)
 
 
@@ -1277,7 +1390,7 @@ def _run_bounded(args):
         return _run(args)
     except CheckFailed as error:
         print("error: {}".format(error), file=sys.stderr)
-        return EXIT_CHECKS_FAILED
+        return error.status
     except (Exception, KeyboardInterrupt) as error:
         print("error: {} failed unexpectedly: {}".format(
             args.command, type(error).__name__), file=sys.stderr)
@@ -1311,6 +1424,11 @@ def _run(args):
         print(port)
     elif name == "unit-evidence-name":
         print(unit_evidence_name(args.kind, args.unit))
+    elif name == "cli-evidence-name":
+        print(cli_evidence_name(args.call))
+    elif name == "run-denied":
+        run_denied(args.call, args.control, args.out, args.exec_argv,
+                   args.metadata_address)
     elif name in ("probe", "control"):
         _emit(run_probe(args.agent_socket, args.serving_port, args.metadata_address), args.out)
     elif name in ("probe-unit", "control-unit"):
