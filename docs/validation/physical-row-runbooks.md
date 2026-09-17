@@ -274,7 +274,10 @@ Prerequisites:
    python_pytorch sidecar and no serving worker is a `warning` under the
    same condition, for the sidecar's own reason: NVIDIA's aarch64 PyTorch
    wheel links the JetPack CUDA runtime. It is not a failing finding and
-   does not stop the stage.
+   does not stop the stage. A soname link an incomplete JetPack upgrade
+   left behind — `libcudart.so.12` with no file at its target — is
+   reported as no CUDA runtime, not as one, so this `warning` is the
+   first place that upgrade shows up rather than the deploy.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox

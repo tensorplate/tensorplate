@@ -278,7 +278,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   names are absent: `/proc/driver/nvidia/version` comes from `nvidia.ko`,
   which L4T does not load, and a Jetson shipping `libcuda.so.1.1` without
   a `libcuda.so.1` would otherwise have read as driverless and been
-  warned about a device that is fine. On x86_64 the rule runs the other
+  warned about a device that is fine. In the exact lists and in the scan
+  alike, a candidate counts only when it resolves to an existing regular
+  file: ldconfig's soname links outlive the files they point at, so an
+  incomplete upgrade or a removed package leaves `libcudart.so.12`
+  pointing at nothing, and accepting a directory entry on its name — or
+  a directory standing where a library is looked for — would report the
+  CUDA runtime as present on a host whose worker cannot load it, which
+  is the broken dependency this finding exists to name. The path
+  reported is the name the probe looked under, never the versioned
+  target a link resolves to. On x86_64 the rule runs the other
   way: `/proc/driver/nvidia/version` is what establishes a loaded driver,
   and the driver's user-mode `libcuda.so.1` is not accepted in its place
   — that package installs with no working kernel module, which is the
