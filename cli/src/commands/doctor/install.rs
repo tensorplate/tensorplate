@@ -2886,16 +2886,32 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
         let cuda = cuda_finding(td.path(), ServingCudaNeed::TensorrtLinked);
 
         assert_eq!(cuda.status_label(), "ok");
+        // Matched with the closing backtick the message puts after the
+        // path, and paired with the two negatives below. A bare
+        // `contains` would be satisfied by the target's own name --
+        // `libcuda.so.1.1` contains `libcuda.so.1` -- so a fix that
+        // rejected every symlink and fell back on the file beside it
+        // would pass this test while breaking every real host.
         assert!(
             cuda.message
-                .contains("/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1"),
+                .contains("`/usr/lib/aarch64-linux-gnu/tegra/libcuda.so.1`"),
             "the driver link that resolves must still be named: {}",
             cuda.message
         );
         assert!(
+            !cuda.message.contains("libcuda.so.1.1"),
+            "the link, not the file behind it, is the contract path: {}",
             cuda.message
-                .contains("/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12"),
+        );
+        assert!(
+            cuda.message
+                .contains("`/usr/local/cuda/targets/aarch64-linux/lib/libcudart.so.12`"),
             "the runtime link that resolves must still be named: {}",
+            cuda.message
+        );
+        assert!(
+            !cuda.message.contains("libcudart.so.12.6"),
+            "the head of the chain is the contract path, not its target: {}",
             cuda.message
         );
         assert_no_staging_prefix(td.path(), &cuda);
