@@ -652,6 +652,115 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and which nothing previously parsed, is now read through the agent's own
   config validator.
 
+- The CLI reads the `/etc/tensorplate/cli.json` its own package installs.
+  Discovery was `--config`, then `$TENSORPLATE_CLI_CONFIG`, then built-in
+  defaults, so on a Debian install the packaged conffile had no effect:
+  `doctor` reported the built-in `/var/run/tensorplate/agent.sock` rather
+  than the packaged `/run/tensorplate/agent.sock`, and an operator's edits
+  to the file changed nothing. The packaged conffile is now the step
+  before the built-in defaults. It is one fixed absolute path, not a
+  search, and only root can write it on an installed host. The
+  environment step still wins, so the Homebrew launcher continues to
+  select the config under its own prefix.
+
+  A packaged config that is present and unusable — malformed JSON, a
+  document that fails validation, or bytes that are not text — fails every
+  command that needs the configured profile, naming the file, instead of
+  falling back to defaults that disagree with the install. `doctor` and
+  `version` are exempt: they answer from the built-in defaults instead of
+  aborting, because doctor is the command the docs name for diagnosing a
+  broken install and `version` reads nothing from the config. Doctor
+  reports the CLI's reason for refusing the file as a failing
+  `config_files` finding and exits `10`, including for a file that is
+  valid JSON with a recognized `schema_version` but fails the CLI's own
+  validation, so it never calls such an install healthy. Reading the
+  conffile at all is what made that failure mode reachable from `/etc`.
+
+  A packaged config that exists but this caller may not read — the config
+  directory is `root:tensorplate 0750` — leaves the defaults in place for
+  every command and prints one line on stderr naming the file and the
+  group. That is a property of the caller, not of the install.
+
+  Both notes are human stderr, suppressed by `--quiet`. Under `--output
+  json` stderr still carries the error envelope and nothing else, and the
+  same text is carried by the envelope's new optional top-level `warnings`
+  array, on the ok and the error path alike — so a scripted caller can
+  tell an install running on the packaged profile from one running on the
+  built-in defaults, which it could not do before.
+
+  Config discovery has a test that fails when the wiring is wrong: which
+  file `resolve()` looks for is now a named function a unit test asserts
+  on, and reading the environment with `var_os` rather than `var` is
+  pinned by driving the binary with a path that is not valid UTF-8. The
+  suite stayed green against a CLI that read the wrong file, which is the
+  blind spot that let this ship.
+
+- `tensorplate logs` no longer points at a log file nothing writes. The
+  Debian CLI config named `/var/log/tensorplate/tensorplate-agent.log`,
+  which no component creates: both units log to the journal, the agent
+  writes its diagnostics to stderr, and the only NDJSON writer, the
+  observability service's retention sink, is off in the Debian config and
+  carries only that service's own events in any case. The packaged config
+  now names no log path, and a `logs` run with no NDJSON source exits 6
+  (`unavailable`) carrying a hint that names the journal to read instead:
+  `journalctl -u tensorplate-agent` for the agent and for the serving
+  worker and backends it supervises, `journalctl -u
+  tensorplate-observability` for the observability service, both when no
+  component was given. It never returns an empty successful read that
+  looks like "no such events". A configured `log_source.path` that does
+  not exist gets the same answer, so an upgrade that keeps a locally
+  modified conffile naming the old path stays actionable; a path that
+  cannot be read, and a `--source` the operator named, remain IO errors
+  that name the file. On macOS the same missing-path case gets its own
+  hint: the Homebrew observability formula does write that file, so the
+  answer there is that `brew services start tensorplate-observability` has
+  not run yet, not that nothing writes it.
+
+  The CPU-only smoke, which runs the real CLI against a real package
+  install, now requires the documented answer instead of discarding the
+  status with `|| true`: exit `6` whose output names `journalctl -u
+  tensorplate-agent`, or exit `0` that returned entries or said why it
+  returned none. It also asserts the evidence line from the issue itself —
+  doctor's `agent_socket` finding must name the packaged
+  `/run/tensorplate/agent.sock`, not the built-in `/var/run/...` — because
+  the `logs` answer alone is identical whether or not the conffile was
+  read. The cloud and Jetson lifecycle harnesses still record this exit
+  status rather than requiring it.
+
+- `tensorplate logs` says so when a read matched nothing. A source that
+  opens and yields no entry is the other way the command could answer
+  with silence, and it is the standing case for `--component agent`
+  against an events file: the only NDJSON writer is the observability
+  service's retention sink, whose event listener transport is
+  `in_process`, so the agent and serving worker — separate processes —
+  never appear in it. That covers the Homebrew install and any Linux site
+  that turns retention on. The command now writes one line to stderr
+  naming the source, the component filter, and every other filter that was
+  applied.
+
+  It adds where that component's own output is — the journal on Linux, the
+  per-service `*.error.log` beside the packaged event log on Homebrew —
+  only when nothing else can explain the empty result: not when `--level`,
+  `--since-ms` or `--correlation-id` could have excluded every entry, not
+  for a `--source` the operator named themselves, not when every line was
+  malformed, and not for `--component observability`, which is the service
+  that does write there. Claiming otherwise sends the operator to the
+  wrong file.
+
+  Human output only, suppressed by `--quiet`, so `--output json` callers
+  still read `payload.entries` from a clean envelope.
+
+- `tensorplate logs` no longer writes the malformed-line count straight to
+  the process's stderr. The bare `eprintln!` emitted a plain line in
+  `--output json` runs, where stderr is a single envelope document, and
+  bypassed the writer the caller passes in, so no test could see it. It is
+  a renderer note now, and JSON callers read the count from
+  `payload.malformed`.
+
+- `--quiet` suppresses informational stderr, as `--help` says it does.
+  `Verbosity` was parsed and read nowhere. The usage line no longer claims
+  `--verbose` expands anything, because nothing expands today.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.

@@ -35,8 +35,9 @@ const MAX_TAIL: u64 = 10_000;
 /// # Errors
 ///
 /// Returns:
-/// - [`CliError::UnsupportedProfile`] when the resolved profile is not `local`.
-/// - [`CliError::Config`] when no log source is configured.
+/// - [`CliError::Unavailable`] when the resolved profile is not `local`, or
+///   when no NDJSON log source is configured — carrying a hint that names
+///   where this platform's components do write.
 /// - [`CliError::Io`] when the source cannot be opened.
 pub fn run<W: Write, E: Write>(
     renderer: &Renderer,
@@ -57,7 +58,7 @@ pub fn run<W: Write, E: Write>(
             ),
         });
     }
-    let source = resolve_source(&config.log_source, args.source_override.as_deref())?;
+    let source = resolve_source(&config.log_source, args)?;
     if args.follow {
         return follow_source(renderer, &source, args, stderr);
     }
@@ -65,10 +66,28 @@ pub fn run<W: Write, E: Write>(
         .tail
         .unwrap_or(config.log_source.tail_default)
         .min(MAX_TAIL);
-    let entries = read_bounded(&source, args, tail)?;
+    let (entries, malformed) = read_bounded(&source, args, tail)?;
+    if malformed > 0 {
+        let _ = renderer.info(
+            stderr,
+            &format!(
+                "logs: skipped {malformed} malformed entries (bounded mode tolerates malformed lines)"
+            ),
+        );
+    }
+    if entries.is_empty() {
+        // The other way this command can say nothing at all. The source
+        // opened, so there is no error to raise, and an empty list reads
+        // as "that component was quiet" — which is wrong whenever the
+        // component never writes NDJSON in the first place. Name where
+        // its output is. Human output only: a JSON caller already has
+        // `entries: []` in the envelope, and stderr is its error channel.
+        let _ = renderer.info(stderr, &empty_read_note(&source, args, malformed));
+    }
     let payload = json!({
         "source": source.display_path(),
         "kind": source.kind_label(),
+        "malformed": malformed,
         "entries": entries,
     });
     let human = render_human(&source, &entries);
@@ -99,26 +118,249 @@ impl LogSource {
     }
 }
 
-fn resolve_source(cfg: &LogSourceConfig, override_path: Option<&Path>) -> CliResult<LogSource> {
-    if let Some(path) = override_path {
+fn resolve_source(cfg: &LogSourceConfig, args: &LogsArgs) -> CliResult<LogSource> {
+    if let Some(path) = args.source_override.as_deref() {
         return classify_path(path.to_path_buf());
     }
     let Some(p) = cfg.path.as_deref() else {
-        return Err(CliError::Config(
-            "tensorplate logs: no log_source.path configured; pass --source <path> or set log_source.path in the cli config"
-                .into(),
-        ));
+        // Not a usage mistake: on a native Linux install there is no
+        // NDJSON file to name, because both services log to the journal.
+        // Unavailable is the variant that carries a hint through both
+        // renderers, which is what makes the answer actionable instead of
+        // telling the operator to configure a path nothing writes.
+        return Err(CliError::Unavailable {
+            message:
+                "tensorplate logs: no log_source.path is configured, and this install writes no NDJSON log file"
+                    .into(),
+            hint: Some(no_source_hint(args.component.as_deref())),
+        });
     };
-    classify_path(p.to_path_buf())
+    // A configured path that is not there is the same operator question as
+    // no path at all, and reaches an upgraded host that kept a conffile
+    // naming the log file earlier packages configured. A path that exists
+    // but cannot be read is a different problem and keeps the IO error
+    // naming it, as does a `--source` the operator chose themselves.
+    match std::fs::metadata(p) {
+        Ok(meta) => classify_meta(p.to_path_buf(), &meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(CliError::Unavailable {
+            message: format!(
+                "tensorplate logs: the configured log_source.path `{}` does not exist",
+                p.display()
+            ),
+            hint: Some(missing_configured_path_hint(args.component.as_deref())),
+        }),
+        Err(e) => Err(stat_error(p, &e)),
+    }
+}
+
+/// Where the logs actually are when no NDJSON source is configured.
+///
+/// The native packages' units set no `StandardOutput=`, and the agent
+/// writes diagnostics to stderr, so journald holds them. Name the unit
+/// that carries the component the operator asked for: the serving worker
+/// and its backends are children of the agent and share its journal.
+///
+/// Compiled on every target rather than only on Linux so the wording and
+/// the [`journal_commands`] mapping are covered wherever the suite runs;
+/// only the Linux build calls it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn journal_hint(component: Option<&str>) -> String {
+    format!(
+        "this install's services log to the journal: run {}. \
+         `tensorplate logs` reads NDJSON files only; pass `--source <path>` for one, \
+         or set `log_source.path` in {} once a component writes it",
+        journal_commands(component),
+        crate::config::SYSTEM_CLI_CONFIG_PATH,
+    )
+}
+
+/// The `journalctl` invocations that carry `component`'s output, joined
+/// for prose. Shared by the no-source hint and the empty-read note so both
+/// name the same units.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn journal_commands(component: Option<&str>) -> String {
+    let units: &[&str] = match component {
+        Some("observability") => &["tensorplate-observability"],
+        Some("agent" | "serving_worker" | "runtime" | "adapter" | "python_pytorch_sidecar") => {
+            &["tensorplate-agent"]
+        }
+        _ => &["tensorplate-agent", "tensorplate-observability"],
+    };
+    units
+        .iter()
+        .map(|unit| format!("`journalctl -u {unit}`"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+#[cfg(target_os = "linux")]
+fn no_source_hint(component: Option<&str>) -> String {
+    journal_hint(component)
+}
+
+/// On macOS the packaged event log is named by the Homebrew launcher's
+/// `TENSORPLATE_CLI_CONFIG`, so reaching this hint means the launcher was
+/// bypassed or TensorPlate is not installed from Homebrew.
+#[cfg(target_os = "macos")]
+fn no_source_hint(_component: Option<&str>) -> String {
+    "run the installed `tensorplate` launcher, which points the CLI at the packaged config, \
+     or pass `--source <path>` to read an NDJSON file directly"
+        .into()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn no_source_hint(_component: Option<&str>) -> String {
+    "pass `--source <path>` to read an NDJSON file, or set `log_source.path` in the cli config"
+        .into()
+}
+
+/// A configured `log_source.path` that is not there yet.
+///
+/// Distinct from [`no_source_hint`], because the two platforms disagree
+/// about what the absence means. On Linux nothing writes NDJSON, so a
+/// conffile naming a log file — an upgraded host that kept an earlier
+/// package's answer — names a file that will never appear. On macOS the
+/// Homebrew formulas *do* write it: `observability.json.in` sets
+/// `diagnostics_retention.file_path` to the same path `cli.json.in` gives
+/// `log_source.path`, so the ordinary reason it is missing is that the
+/// service has not started and written to it yet. Sending that operator
+/// to "run the installed launcher" would be advice about the thing that
+/// already supplied the config.
+#[cfg(target_os = "linux")]
+fn missing_configured_path_hint(component: Option<&str>) -> String {
+    format!(
+        "no component on this install writes it: {}",
+        journal_hint(component)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn missing_configured_path_hint(_component: Option<&str>) -> String {
+    "the packaged event log appears once the observability service writes to it: start it with \
+     `brew services start tensorplate-observability`. Each service's own plain-text output is in \
+     its `*.error.log` in the Homebrew `var/log/tensorplate` directory, and `--source <path>` \
+     reads any NDJSON file directly"
+        .into()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn missing_configured_path_hint(_component: Option<&str>) -> String {
+    "pass `--source <path>` to read an NDJSON file, or correct `log_source.path` in the cli config"
+        .into()
+}
+
+/// Note for a read that opened its source and matched no entries.
+///
+/// Two halves, and the second one is a claim about the install that the
+/// command has to have established before making it.
+///
+/// The first half always prints: which source was read, and every filter
+/// that was applied. An empty result under `--level fatal` or `--since` is
+/// explained by the filter, not by the install.
+///
+/// The second half says where the component's output actually is. In this
+/// release the only NDJSON writer is the observability service's own
+/// retention sink: the event listener transport is `in_process`
+/// (`unix_socket` is reserved and rejected), and the agent and the serving
+/// worker are separate processes, so nothing they emit can reach it. A
+/// `--component agent` read therefore matches nothing however long the
+/// file is, which an empty `entries` list alone does not say. That holds
+/// only when nothing else can explain the empty result: see
+/// [`install_explains_the_empty_read`].
+fn empty_read_note(source: &LogSource, args: &LogsArgs, malformed: u64) -> String {
+    let scope = match args.component.as_deref() {
+        Some(name) => format!(" for component `{name}`"),
+        None => String::new(),
+    };
+    let mut note = format!(
+        "logs: read 0 entries from `{}`{scope}{}.",
+        source.display_path(),
+        applied_filters(args),
+    );
+    if install_explains_the_empty_read(args, malformed) {
+        note.push_str(&format!(
+            " Only the observability service writes NDJSON events in this release; {}.",
+            plain_text_log_hint(args.component.as_deref()),
+        ));
+    }
+    note
+}
+
+/// Whether "this component writes no NDJSON here" is the only explanation
+/// left for an empty read.
+///
+/// It is not, when the operator named the source themselves (nothing about
+/// the install explains a path they chose — the same reasoning
+/// [`resolve_source`] applies to a `--source` that is missing), when a
+/// filter other than `--component` could have excluded every entry, when
+/// every line was malformed, or when the component asked for is the one
+/// service that does write NDJSON.
+fn install_explains_the_empty_read(args: &LogsArgs, malformed: u64) -> bool {
+    args.source_override.is_none()
+        && args.level.is_none()
+        && args.since_ms.is_none()
+        && args.correlation_id.is_none()
+        && malformed == 0
+        && matches!(args.component.as_deref(), Some(name) if name != "observability")
+}
+
+/// The filters that were applied, for the neutral half of the note. The
+/// component is already named in the note's scope clause.
+fn applied_filters(args: &LogsArgs) -> String {
+    let mut applied = Vec::new();
+    if let Some(level) = args.level.as_deref() {
+        applied.push(format!("level={level}"));
+    }
+    if let Some(since) = args.since_ms {
+        applied.push(format!("since_ms={since}"));
+    }
+    if let Some(corr) = args.correlation_id.as_deref() {
+        applied.push(format!("correlation_id={corr}"));
+    }
+    if applied.is_empty() {
+        String::new()
+    } else {
+        format!(" (filters: {})", applied.join(", "))
+    }
+}
+
+/// Where a component's own, non-NDJSON output goes on this platform.
+#[cfg(target_os = "linux")]
+fn plain_text_log_hint(component: Option<&str>) -> String {
+    format!(
+        "every service's own output goes to the journal, so run {}",
+        journal_commands(component)
+    )
+}
+
+/// The Homebrew formulas send each service's stderr to its own file
+/// beside the packaged event log (`agent.error.log`,
+/// `observability.error.log` under `var/log/tensorplate`).
+#[cfg(target_os = "macos")]
+fn plain_text_log_hint(_component: Option<&str>) -> String {
+    "each service's own output goes to its `*.error.log` in the Homebrew \
+     `var/log/tensorplate` directory beside the packaged event log"
+        .into()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn plain_text_log_hint(_component: Option<&str>) -> String {
+    "read that service's own log for its plain-text output".into()
+}
+
+fn stat_error(path: &Path, error: &std::io::Error) -> CliError {
+    CliError::Io(format!(
+        "tensorplate logs: cannot stat `{}`: {error}",
+        path.display()
+    ))
 }
 
 fn classify_path(path: PathBuf) -> CliResult<LogSource> {
-    let meta = std::fs::metadata(&path).map_err(|e| {
-        CliError::Io(format!(
-            "tensorplate logs: cannot stat `{}`: {e}",
-            path.display()
-        ))
-    })?;
+    let meta = std::fs::metadata(&path).map_err(|e| stat_error(&path, &e))?;
+    classify_meta(path, &meta)
+}
+
+fn classify_meta(path: PathBuf, meta: &std::fs::Metadata) -> CliResult<LogSource> {
     if meta.is_file() {
         Ok(LogSource {
             kind: LogKind::File,
@@ -137,7 +379,15 @@ fn classify_path(path: PathBuf) -> CliResult<LogSource> {
     }
 }
 
-fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<Vec<Value>> {
+/// Read up to `tail` matching entries, plus the number of lines that were
+/// not JSON at all.
+///
+/// The malformed count is returned rather than printed: printing it here
+/// wrote a bare line to the process's real stderr, which bypassed the
+/// renderer (so it appeared in `--output json` runs, breaking the
+/// single-envelope rule callers parse stderr under) and bypassed the
+/// injected writer the tests inspect, so no test could observe it.
+fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<(Vec<Value>, u64)> {
     let files = collect_files(source);
     let mut entries = Vec::<Value>::with_capacity(tail as usize);
     let mut malformed = 0u64;
@@ -171,12 +421,7 @@ fn read_bounded(source: &LogSource, args: &LogsArgs, tail: u64) -> CliResult<Vec
         let skip = entries.len() - tail as usize;
         entries.drain(..skip);
     }
-    if malformed > 0 {
-        eprintln!(
-            "tensorplate logs: skipped {malformed} malformed entries (bounded mode tolerates malformed lines)"
-        );
-    }
-    Ok(entries)
+    Ok((entries, malformed))
 }
 
 fn collect_files(source: &LogSource) -> Vec<PathBuf> {
@@ -566,11 +811,60 @@ not-a-json-line
         assert_eq!(entries.len(), 1);
     }
 
-    #[test]
-    fn logs_missing_source_errors() {
+    fn missing_source_error(component: Option<&str>) -> CliError {
         let mut cfg = CliConfig::default().validate().unwrap();
         cfg.log_source.path = None;
-        let args = default_args();
+        let args = LogsArgs {
+            component: component.map(Into::into),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .expect_err("a config with no log source must not succeed")
+    }
+
+    #[test]
+    fn logs_missing_source_is_unavailable_with_an_actionable_hint() {
+        let err = missing_source_error(Some("agent"));
+        let CliError::Unavailable { message, hint } = err else {
+            panic!("expected Unavailable, got {err:?}");
+        };
+        assert!(message.contains("log_source.path"), "{message}");
+        let hint = hint.expect("the failure must say what to use instead");
+        assert!(hint.contains("--source"), "{hint}");
+        // The hint must name a reader that exists on this platform, not
+        // only repeat that the config is empty.
+        #[cfg(target_os = "linux")]
+        assert!(
+            hint.contains("journalctl -u tensorplate-agent"),
+            "the agent's journal unit must be named: {hint}"
+        );
+        #[cfg(target_os = "macos")]
+        assert!(hint.contains("launcher"), "{hint}");
+    }
+
+    /// An upgraded host that kept its own copy of an older conffile still
+    /// names `/var/log/tensorplate/tensorplate-agent.log`. That is the same
+    /// question as an unconfigured source, so it gets the same answer
+    /// rather than a bare `cannot stat`.
+    #[test]
+    fn a_configured_path_that_does_not_exist_says_where_the_logs_are() {
+        let td = tempfile::tempdir().unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(td.path().join("tensorplate-agent.log"));
+        let args = LogsArgs {
+            component: Some("agent".into()),
+            ..default_args()
+        };
         let r = Renderer::new(OutputMode::Human);
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -582,6 +876,364 @@ not-a-json-line
             &mut out,
             &mut err,
         );
-        assert!(matches!(result, Err(CliError::Config(_))));
+        let Err(CliError::Unavailable { message, hint }) = result else {
+            panic!("expected Unavailable, got {result:?}");
+        };
+        assert!(message.contains("tensorplate-agent.log"), "{message}");
+        // The message states only what stat established. Whether anything
+        // writes that path is a platform claim, and it belongs in the
+        // hint, where each platform can be right about itself.
+        assert!(
+            !message.contains("no component on this install writes it"),
+            "the message must not claim what only the platform knows: {message}"
+        );
+        let hint = hint.expect("the failure must say what to do instead");
+        assert!(hint.contains("--source"), "{hint}");
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                hint.contains("no component on this install writes it"),
+                "on Linux nothing writes NDJSON, and the hint must say so: {hint}"
+            );
+            assert!(hint.contains("journalctl -u tensorplate-agent"), "{hint}");
+        }
+        // On macOS the Homebrew formulas do write this file, and the
+        // launcher is what supplied the config naming it, so neither "no
+        // component writes it" nor "run the installed launcher" is true
+        // here. The answer is that the service has not written it yet.
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                !hint.contains("launcher"),
+                "the launcher is what supplied this config: {hint}"
+            );
+            assert!(
+                hint.contains("brew services start tensorplate-observability"),
+                "name the service that writes the packaged event log: {hint}"
+            );
+        }
+    }
+
+    /// A source the operator named themselves keeps the plain IO error:
+    /// nothing about the install explains a path they chose.
+    #[test]
+    fn an_explicit_missing_source_stays_an_io_error() {
+        let td = tempfile::tempdir().unwrap();
+        let cfg = CliConfig::default().validate().unwrap();
+        let args = LogsArgs {
+            source_override: Some(td.path().join("nope.ndjson")),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        );
+        assert!(matches!(result, Err(CliError::Io(_))), "{result:?}");
+    }
+
+    #[test]
+    fn the_journal_hint_names_the_unit_for_the_component_asked_for() {
+        let observability = journal_hint(Some("observability"));
+        assert!(
+            observability.contains("journalctl -u tensorplate-observability"),
+            "{observability}"
+        );
+        assert!(
+            !observability.contains("journalctl -u tensorplate-agent"),
+            "{observability}"
+        );
+
+        // The serving worker is supervised by the agent and shares its
+        // journal; it has no unit of its own.
+        for component in ["agent", "serving_worker", "runtime", "adapter"] {
+            let hint = journal_hint(Some(component));
+            assert!(
+                hint.contains("journalctl -u tensorplate-agent"),
+                "{component}: {hint}"
+            );
+            assert!(
+                !hint.contains("journalctl -u tensorplate-observability"),
+                "{component}: {hint}"
+            );
+        }
+
+        // Without a component, both units are named.
+        let any = journal_hint(None);
+        assert!(any.contains("tensorplate-agent"), "{any}");
+        assert!(any.contains("tensorplate-observability"), "{any}");
+    }
+
+    /// A source that exists and holds no matching entry is the other way
+    /// this command can say nothing. `--component agent` against the only
+    /// NDJSON file either packaged channel can produce is exactly that
+    /// case: the agent is a separate process and writes no events into it,
+    /// so the filter can never match.
+    #[test]
+    fn an_empty_read_says_where_that_component_actually_logs() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(
+            &path,
+            "{\"timestamp\":\"t1\",\"level\":\"info\",\"component\":\"observability\",\"event\":\"start\"}\n",
+        )
+        .unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path.clone());
+        let args = LogsArgs {
+            component: Some("agent".into()),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let note = String::from_utf8(err).unwrap();
+        assert!(note.contains("read 0 entries"), "{note}");
+        assert!(note.contains("component `agent`"), "{note}");
+        assert!(note.contains(&path.display().to_string()), "{note}");
+        #[cfg(target_os = "linux")]
+        assert!(note.contains("journalctl -u tensorplate-agent"), "{note}");
+        #[cfg(target_os = "macos")]
+        assert!(note.contains("error.log"), "{note}");
+    }
+
+    /// The note is an operator aside, not part of the contract: a
+    /// `--output json` caller reads `entries: []` from the envelope on
+    /// stdout and keeps stderr as the error channel alone.
+    #[test]
+    fn the_empty_read_note_is_not_written_in_json_mode() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(&path, "").unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path);
+        let args = default_args();
+        let r = Renderer::new(OutputMode::Json);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(err.is_empty(), "{:?}", String::from_utf8_lossy(&err));
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert!(parsed["payload"]["entries"].as_array().unwrap().is_empty());
+    }
+
+    /// The note must not fire on a read that returned something, or every
+    /// normal `logs` run grows an unexplained line.
+    #[test]
+    fn a_read_that_matched_entries_writes_no_note() {
+        let td = tempfile::tempdir().unwrap();
+        let (cfg, _) = make_cfg(&td);
+        let args = default_args();
+        let r = Renderer::new(OutputMode::Human);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let note = String::from_utf8_lossy(&err).to_string();
+        assert!(!note.contains("read 0 entries"), "{note}");
+    }
+
+    /// The malformed-line count used to go straight to the process's own
+    /// stderr, which no writer the caller passed could see and no renderer
+    /// mode could suppress. It is a renderer note like every other one now:
+    /// on the injected writer in human mode, in the payload in JSON mode,
+    /// and never a bare line ahead of the JSON envelope.
+    #[test]
+    fn the_malformed_line_count_is_a_renderer_note_not_a_bare_stderr_write() {
+        let td = tempfile::tempdir().unwrap();
+        let (cfg, _) = make_cfg(&td);
+        let args = default_args();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let human = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            human.contains("skipped 1 malformed entries"),
+            "the count must reach the caller's stderr: {human}"
+        );
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Json),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            err.is_empty(),
+            "JSON mode keeps stderr the envelope alone: {:?}",
+            String::from_utf8_lossy(&err)
+        );
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        assert_eq!(
+            parsed["payload"]["malformed"], 1,
+            "a JSON caller keeps the count it can no longer read on stderr"
+        );
+    }
+
+    /// The directional half of the note claims the component writes no
+    /// NDJSON here. A `--level` or `--since` that excluded every entry is
+    /// a different cause, and the file the operator named themselves says
+    /// nothing about the install.
+    #[test]
+    fn an_empty_read_a_filter_explains_makes_no_claim_about_the_install() {
+        let td = tempfile::tempdir().unwrap();
+        let (cfg, _) = make_cfg(&td);
+
+        let mut args = default_args();
+        args.component = Some("agent".into());
+        args.level = Some("fatal".into());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let filtered = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            filtered.contains("read 0 entries") && filtered.contains("level=fatal"),
+            "the note must name the filter that was applied: {filtered}"
+        );
+        assert!(
+            !filtered.contains("writes NDJSON events in this release"),
+            "a level filter, not the install, explains this empty read: {filtered}"
+        );
+
+        let empty = td.path().join("chosen.ndjson");
+        std::fs::write(&empty, "").unwrap();
+        let mut args = default_args();
+        args.component = Some("agent".into());
+        args.source_override = Some(empty);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let chosen = String::from_utf8_lossy(&err).to_string();
+        assert!(
+            chosen.contains("read 0 entries") && chosen.contains("chosen.ndjson"),
+            "the note must name the source that was read: {chosen}"
+        );
+        assert!(
+            !chosen.contains("writes NDJSON events in this release"),
+            "nothing about the install explains a path the operator chose: {chosen}"
+        );
+    }
+
+    /// The empty-read note fires on an exit-0 run, which is the case a
+    /// scripted caller meets most often, so `--quiet` has to reach it.
+    #[test]
+    fn the_empty_read_note_is_dropped_under_quiet() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(&path, "").unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path);
+        let args = LogsArgs {
+            component: Some("agent".into()),
+            ..default_args()
+        };
+        let r = Renderer::new(OutputMode::Human).with_verbosity(crate::args::Verbosity::Quiet);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &r,
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        assert!(
+            err.is_empty(),
+            "--quiet must suppress it: {:?}",
+            String::from_utf8_lossy(&err)
+        );
+    }
+
+    /// The one component that does write NDJSON gets no directional half
+    /// either: an empty read there means it was quiet, not that its output
+    /// is somewhere else.
+    #[test]
+    fn an_empty_observability_read_is_not_sent_to_another_file() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("events.ndjson");
+        std::fs::write(&path, "").unwrap();
+        let mut cfg = CliConfig::default().validate().unwrap();
+        cfg.log_source.path = Some(path);
+        let mut args = default_args();
+        args.component = Some("observability".into());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run(
+            &Renderer::new(OutputMode::Human),
+            &profile(ProfileMode::Local),
+            &cfg,
+            &args,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let note = String::from_utf8_lossy(&err).to_string();
+        assert!(note.contains("read 0 entries"), "{note}");
+        assert!(
+            !note.contains("writes NDJSON events in this release"),
+            "observability is the writer; its empty read needs no redirection: {note}"
+        );
     }
 }

@@ -50,7 +50,18 @@ ep.origin  # "http://127.0.0.1:18080"
 
 The CLI config is read from the `config_path` argument, else the
 `TENSORPLATE_CLI_CONFIG` environment variable, else the built-in defaults —
-there is **no arbitrary filesystem search**. The default `local` profile
+there is **no arbitrary filesystem search**.
+
+The `tensorplate` CLI has one more step the SDK does not: it also reads the
+packaged `/etc/tensorplate/cli.json` before falling back to its defaults
+(see [`docs/cli/profiles.md`](../cli/profiles.md)). On a native install the
+two still resolve the same endpoints, because that file declares no
+`serving_url` and its `socket_path` (`/run/tensorplate/agent.sock`) is the
+same socket the SDK default reaches through the `/var/run -> /run` symlink.
+Applications that want the packaged file to drive SDK resolution should pass
+`config_path` or set `TENSORPLATE_CLI_CONFIG`.
+
+The default `local` profile
 discovers the agent over its Unix socket
 (`/var/run/tensorplate/agent.sock`); a `url`-mode profile discovers over the
 configured `agent_url` TCP address. Reserved profile modes

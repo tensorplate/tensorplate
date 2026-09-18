@@ -185,10 +185,11 @@ for f in json.load(open(sys.argv[1]))["payload"]["findings"]:
 PY
   die "tensorplate doctor exited ${doctor_code} on a clean CPU-only install"
 fi
-python3 - "${evidence}/doctor.json" "$EXPECTED_ROW" <<'PY'
+python3 - "${evidence}/doctor.json" "$EXPECTED_ROW" "$TP_AGENT_SOCKET_PATH" "$TP_CLI_CONFIG_PATH" <<'PY'
 import json, sys
-path, expected_row = sys.argv[1:]
-payload = json.load(open(path))["payload"]
+path, expected_row, packaged_socket, cli_config = sys.argv[1:]
+envelope = json.load(open(path))
+payload = envelope["payload"]
 by_id = {f["id"]: f for f in payload["findings"]}
 
 assert payload["failing"] == 0, f"doctor reports {payload['failing']} failing finding(s)"
@@ -205,13 +206,38 @@ for required_ok in ("platform_registry", "agent_reachable", "agent_socket",
     f = by_id[required_ok]
     assert f["status"] == "ok", f"{required_ok} is {f['status']}: {f['message']}"
 
+# The whole of issue #203, on the only host that can answer it: with neither
+# --config nor $TENSORPLATE_CLI_CONFIG set, did the CLI read the conffile the
+# package installed? Doctor takes the socket from the resolved profile, and the
+# packaged and built-in values differ -- /run/... against /var/run/... -- so
+# this finding's message is what tells a fixed CLI from the broken one. The
+# `/var/run -> /run` symlink means BOTH paths reach the live socket and both
+# report `ok`, which is exactly why the status alone proves nothing. The
+# message is the evidence line quoted in #203.
+socket = by_id["agent_socket"]
+assert packaged_socket in socket["message"], (
+    f"doctor reports socket from the built-in defaults, not {cli_config}: {socket['message']}"
+)
+# `assert "/run/..." in message` would also pass on "/var/run/...", so rule the
+# built-in default out by name rather than relying on the substring.
+assert "/var/run/tensorplate" not in socket["message"], (
+    f"doctor reports the built-in default socket; {cli_config} was not read: {socket['message']}"
+)
+
+# A packaged config that was found and not used is reported in the envelope,
+# never silently. Running as root, it must have been readable, so there is
+# nothing to report.
+assert not envelope.get("warnings"), \
+    f"doctor warned about the packaged config while running as root: {envelope['warnings']}"
+
 # The row carries no model-performance claim, so nothing doctor prints may
 # describe this host as Production.
 blob = json.dumps(payload).lower()
 assert "production" not in blob, "doctor output makes a Production claim on a Preview row"
 print(f"doctor: {len(payload['findings'])} findings, 0 failing, row {expected_row}")
+print(f"doctor: agent socket from {cli_config}: {socket['message']}")
 PY
-pass "doctor green; ${EXPECTED_ROW} resolved by live detection; no Production claim"
+pass "doctor green; ${EXPECTED_ROW} resolved by live detection; packaged cli.json in effect"
 
 note "7. control-plane query"
 tensorplate status --output json > "${evidence}/status.json" 2>"${evidence}/status.err" ||
@@ -227,8 +253,39 @@ pass "control plane answered a status query"
 
 note "8. logs are reachable at the documented path"
 [[ -d "$TP_LOG_DIR" ]] || die "log directory missing at ${TP_LOG_DIR}"
-tensorplate logs --component agent --tail 20 > "${evidence}/agent.log" 2>&1 || true
-pass "log path present"
+# `tensorplate logs` reads NDJSON files, and this install writes none: both
+# services log to the journal, so the packaged cli config names no
+# log_source.path. The documented answer is exit 6 (`unavailable`) naming
+# the journalctl command to run instead -- never an empty successful read,
+# and never the exit 2 this returned while the CLI ignored the packaged
+# config. A host whose operator did configure a source reads it and exits
+# 0. Any other status is a regression, so the status is checked, not
+# swallowed.
+logs_status=0
+tensorplate logs --component agent --tail 20 > "${evidence}/agent.log" 2>&1 ||
+  logs_status=$?
+case "$logs_status" in
+  0)
+    # A site that set log_source.path once a component writes one. Exit 0
+    # with nothing printed is the silent case this check exists to rule
+    # out: the agent is a separate process from the only NDJSON writer, so
+    # `--component agent` can be empty forever. Require either entries or
+    # the note that says why there are none.
+    if grep -q 'entries=0' "${evidence}/agent.log"; then
+      grep -q 'read 0 entries' "${evidence}/agent.log" ||
+        die "tensorplate logs read 0 entries and said nothing about why"
+      pass "log path present; an empty read named its source and the reason"
+    else
+      pass "log path present; a configured NDJSON source returned entries"
+    fi
+    ;;
+  6)
+    grep -q 'journalctl -u tensorplate-agent' "${evidence}/agent.log" ||
+      die "tensorplate logs exited 6 without naming the journal to read instead"
+    pass "log path present; logs exited 6 and named the journal"
+    ;;
+  *) die "tensorplate logs exited ${logs_status}; expected 0 or 6" ;;
+esac
 
 {
   printf 'result: pass\n'

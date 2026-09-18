@@ -8,7 +8,6 @@
   "timeout_ms": 30000,
   "log_source": {
     "kind": "file",
-    "path": "/var/log/tensorplate/tensorplate-agent.log",
     "tail_default": 100
   },
   "profiles": {

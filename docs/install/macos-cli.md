@@ -74,7 +74,13 @@ system account, shared group access, or group membership change is required.
 The packaged `tensorplate` launcher selects the installed CLI config by
 default, which makes local commands use that UDS. An explicit `--config`
 argument still has highest precedence; `TENSORPLATE_CLI_CONFIG` remains the
-environment override.
+environment override, and a value already set in the shell is left alone.
+Either way `TENSORPLATE_CLI_CONFIG` is set by the time the binary runs, so
+the conffile step in the CLI's discovery chain (`/etc/tensorplate/cli.json`,
+outside the Homebrew prefix) is never reached through the launcher. The one
+exception is an explicitly empty `TENSORPLATE_CLI_CONFIG`, which the
+launcher leaves alone and the CLI skips: that falls through to the built-in
+defaults on macOS, as it did before the conffile step existed.
 
 ## Packaged runtime discovery
 

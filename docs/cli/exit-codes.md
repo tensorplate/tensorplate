@@ -11,7 +11,7 @@ release validation harness and shell scripts may assert on these.
 |    3 | agent_error       | Agent reachable but rejected the request with a typed error.          |
 |    4 | transport         | Agent unreachable or transport timed out.                             |
 |    5 | busy              | A concurrent agent transaction is in flight.                          |
-|    6 | unavailable       | Operation is structurally unavailable (e.g. rollback with no previous active, reserved profile mode). |
+|    6 | unavailable       | Operation is structurally unavailable (e.g. rollback with no previous active, reserved profile mode, `logs` where this install writes no NDJSON source). |
 |   10 | doctor_findings   | `doctor` returned at least one `fail` finding.                        |
 |   11 | inference_failed  | `infer` got a typed failure from the serving worker.                  |
 

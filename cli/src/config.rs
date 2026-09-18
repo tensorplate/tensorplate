@@ -8,8 +8,13 @@
 // an explicit remote URL for laptop-to-device workflows, and (c) point
 // `tensorplate logs` at the right NDJSON source. Validation runs before
 // any agent call so misspelled fields never leak into network requests.
+//
+// Discovery order is `--config`, then $TENSORPLATE_CLI_CONFIG, then the
+// packaged conffile, then the built-in defaults. The packaged step is one
+// fixed absolute path, not a search: see [`CliConfig::resolve_from`].
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +25,16 @@ use crate::error::{CliError, CliResult};
 /// CLI config schema version. Independent track from the wire protocol;
 /// bumps require an entry in `docs/cli/` and a migration note.
 pub const CLI_CONFIG_SCHEMA_VERSION: &str = "0.1";
+
+/// Environment variable naming the config file to load. Set by the
+/// Homebrew launcher for its own prefix; operators may set it to point
+/// at a per-user config on any channel.
+pub const CLI_CONFIG_ENV: &str = "TENSORPLATE_CLI_CONFIG";
+
+/// The one system config path the CLI reads on its own: the conffile the
+/// native packages install. Not a search path — a single fixed absolute
+/// location that only root can write on an installed host.
+pub const SYSTEM_CLI_CONFIG_PATH: &str = tensorplate_protocol::install_paths::CLI_CONFIG_PATH;
 
 /// Default profile name used when no config file is present.
 pub const DEFAULT_PROFILE_NAME: &str = "local";
@@ -135,6 +150,51 @@ fn default_log_kind() -> String {
 
 const fn default_tail() -> u64 {
     100
+}
+
+/// Where the config in effect for this invocation came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigSource {
+    /// `--config <path>`.
+    Explicit(PathBuf),
+    /// The path named by [`CLI_CONFIG_ENV`].
+    Environment(PathBuf),
+    /// The packaged system config at [`SYSTEM_CLI_CONFIG_PATH`].
+    System(PathBuf),
+    /// Built-in defaults: no config file was found.
+    BuiltIn,
+    /// Built-in defaults: the packaged system config exists but this
+    /// caller cannot read it.
+    SystemUnreadable(PathBuf),
+    /// Built-in defaults: the packaged system config is present but
+    /// unusable — malformed JSON, a document that fails validation, or
+    /// bytes that are not text at all. Carries the failure so the binary
+    /// can raise it for commands that need the configured profile and
+    /// report it for the ones that diagnose the install.
+    SystemInvalid(PathBuf, String),
+}
+
+impl ConfigSource {
+    /// The parse or read failure behind [`Self::SystemInvalid`], phrased
+    /// as a config error. `None` for every other source.
+    #[must_use]
+    pub fn install_fault(&self) -> Option<&str> {
+        match self {
+            Self::SystemInvalid(_, message) => Some(message.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// A validated config plus how it was found. `warning` carries an
+/// operator-facing note about a config that was found but not used; the
+/// binary prints it to stderr so a config with no effect never stays
+/// invisible.
+#[derive(Clone, Debug)]
+pub struct ResolvedCliConfig {
+    pub config: CliConfig,
+    pub source: ConfigSource,
+    pub warning: Option<String>,
 }
 
 /// Versioned CLI configuration.
@@ -295,25 +355,142 @@ impl CliConfig {
                 path.display()
             ))
         })?;
-        Self::parse_json(&body)
+        Self::parse_json(&body).map_err(|e| name_config_file(path, e))
     }
 
-    /// Load the config from `--config <path>` if supplied; otherwise
-    /// fall back to `$TENSORPLATE_CLI_CONFIG`; otherwise return defaults.
+    /// Resolve the config for this invocation, in precedence order:
+    /// `--config <path>`, then `$TENSORPLATE_CLI_CONFIG`, then the
+    /// packaged system config at [`SYSTEM_CLI_CONFIG_PATH`], then the
+    /// built-in defaults.
     ///
-    /// Defaults intentionally do not search arbitrary system paths: that
-    /// would let an attacker plant a config file in a writable dir and
-    /// take control of the operator's CLI.
-    pub fn load_or_default(explicit: Option<&Path>) -> CliResult<Self> {
-        if let Some(p) = explicit {
-            return Self::load(p);
+    /// The system step is a single fixed absolute path, never a search.
+    /// On an installed host only root can write it, so reading it cannot
+    /// be steered by planting a file in a directory the caller controls
+    /// — which is what the loader has always refused to do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError::Config`] when `--config` or
+    /// `$TENSORPLATE_CLI_CONFIG` names a file that cannot be read, parsed,
+    /// or validated: the operator named that file, so nothing else is
+    /// worth guessing at.
+    ///
+    /// A packaged conffile that is present and unusable is *not* an error
+    /// here. It resolves to [`ConfigSource::SystemInvalid`] carrying the
+    /// failure, so the binary can still answer `doctor` and `version` —
+    /// the two commands an operator runs to diagnose exactly this — while
+    /// raising it for every command that needs the configured profile.
+    pub fn resolve(explicit: Option<&Path>) -> CliResult<ResolvedCliConfig> {
+        Self::resolve_from(
+            explicit,
+            std::env::var_os(CLI_CONFIG_ENV),
+            Self::system_config_path(),
+        )
+    }
+
+    /// The packaged conffile [`Self::resolve`] reads when nothing else is
+    /// set. Named rather than inlined so the wiring itself — which file the
+    /// installed binary looks for — is a value a test can assert on. Issue
+    /// #203 was exactly this wiring being wrong with every unit test green.
+    #[must_use]
+    pub fn system_config_path() -> &'static Path {
+        Path::new(SYSTEM_CLI_CONFIG_PATH)
+    }
+
+    /// [`Self::resolve`] with the environment and the system config path
+    /// supplied by the caller, so the precedence chain is testable without
+    /// a real `/etc`.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::resolve`].
+    pub fn resolve_from(
+        explicit: Option<&Path>,
+        env_value: Option<OsString>,
+        system_path: &Path,
+    ) -> CliResult<ResolvedCliConfig> {
+        if let Some(path) = explicit {
+            return Ok(ResolvedCliConfig {
+                config: Self::load(path)?,
+                source: ConfigSource::Explicit(path.to_path_buf()),
+                warning: None,
+            });
         }
-        if let Ok(env_path) = std::env::var("TENSORPLATE_CLI_CONFIG") {
-            if !env_path.is_empty() {
-                return Self::load(Path::new(&env_path));
-            }
+        if let Some(env_value) = env_value.filter(|value| !value.is_empty()) {
+            let path = PathBuf::from(env_value);
+            return Ok(ResolvedCliConfig {
+                config: Self::load(&path)?,
+                source: ConfigSource::Environment(path),
+                warning: None,
+            });
         }
-        Ok(Self::default())
+        match fs::read_to_string(system_path) {
+            // A system config that parses is authoritative; one that does
+            // not is an install fault. It does not fail here, because the
+            // two commands that diagnose a broken install must survive it
+            // — see [`Self::system_install_fault`] and the binary's
+            // dispatch.
+            Ok(body) => match Self::parse_json(&body).map_err(|e| name_config_file(system_path, e))
+            {
+                Ok(config) => Ok(ResolvedCliConfig {
+                    config,
+                    source: ConfigSource::System(system_path.to_path_buf()),
+                    warning: None,
+                }),
+                Err(e) => Ok(Self::system_install_fault(system_path, &e.to_string())),
+            },
+            // No packaged install here: the built-in defaults are the
+            // documented behaviour, and saying so on every command would
+            // be noise.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ResolvedCliConfig {
+                config: Self::default(),
+                source: ConfigSource::BuiltIn,
+                warning: None,
+            }),
+            // The file is there but this caller may not read it — on a
+            // native install, /etc/tensorplate is `root:tensorplate 0750`.
+            // That is a property of the caller, not of the install: every
+            // command still works on the defaults, so this reports rather
+            // than fails, and says why the packaged settings are not in
+            // effect.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(ResolvedCliConfig {
+                config: Self::default(),
+                warning: Some(format!(
+                    "tensorplate: cannot read the packaged cli config `{}`: {e}; using built-in defaults. \
+Join the `{}` group (or re-run as root) to use the packaged profile, or pass --config <path>.",
+                    system_path.display(),
+                    tensorplate_protocol::install_paths::SYSTEM_GROUP,
+                )),
+                source: ConfigSource::SystemUnreadable(system_path.to_path_buf()),
+            }),
+            // Present, permitted, and still unreadable: a conffile that is
+            // not UTF-8 lands here, and group membership is no answer to
+            // it. Treat it as the install fault it is rather than advising
+            // a fix that cannot work.
+            Err(e) => Ok(Self::system_install_fault(
+                system_path,
+                &format!(
+                    "cannot read cli config `{}`: {e}",
+                    system_path.display()
+                ),
+            )),
+        }
+    }
+
+    /// The packaged conffile is present and unusable. Carries the failure
+    /// twice over: as the operator-facing warning the binary prints, and
+    /// inside [`ConfigSource::SystemInvalid`] so commands that need the
+    /// configured profile can raise it as the config error it is.
+    fn system_install_fault(system_path: &Path, fault: &str) -> ResolvedCliConfig {
+        ResolvedCliConfig {
+            config: Self::default(),
+            warning: Some(format!(
+                "tensorplate: the packaged cli config is unusable: {fault}. Using built-in defaults; \
+`doctor` and `version` still answer, every other command fails until `{}` is fixed or --config names another file.",
+                system_path.display(),
+            )),
+            source: ConfigSource::SystemInvalid(system_path.to_path_buf(), fault.to_string()),
+        }
     }
 
     /// Return the profile spec for `name`.
@@ -325,6 +502,19 @@ impl CliConfig {
         self.profiles.get(name).ok_or_else(|| {
             CliError::Config(format!("profile `{name}` is not declared in cli config"))
         })
+    }
+}
+
+/// Name the file a config error came from. Parsing and validation work on
+/// a document, not a path, so without this the operator is told a config is
+/// wrong without being told which one — and with discovery reaching a file
+/// they never named, that is no longer answerable from the command line.
+fn name_config_file(path: &Path, error: CliError) -> CliError {
+    match error {
+        CliError::Config(message) => {
+            CliError::Config(format!("{message}; from `{}`", path.display()))
+        }
+        other => other,
     }
 }
 
@@ -482,10 +672,221 @@ mod tests {
         assert!(!cfg.profile("jump").unwrap().mode.is_supported());
     }
 
+    /// A config naming `socket` so a test can tell which file was read.
+    fn write_config(path: &Path, socket: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"{{"schema_version":"{CLI_CONFIG_SCHEMA_VERSION}","profiles":{{"local":{{"mode":"local","socket_path":"{socket}"}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn socket_of(resolved: &ResolvedCliConfig) -> PathBuf {
+        resolved
+            .config
+            .profile(&resolved.config.default_profile)
+            .unwrap()
+            .socket_path
+            .clone()
+            .unwrap()
+    }
+
     #[test]
-    fn load_or_default_returns_default_when_unspecified() {
-        std::env::remove_var("TENSORPLATE_CLI_CONFIG");
-        let cfg = CliConfig::load_or_default(None).unwrap();
-        assert_eq!(cfg.default_profile, "local");
+    fn resolve_falls_back_to_built_in_defaults_without_any_config() {
+        let td = tempfile::tempdir().unwrap();
+        let absent = td.path().join("absent").join("cli.json");
+        let resolved = CliConfig::resolve_from(None, None, &absent).unwrap();
+        assert_eq!(resolved.config.default_profile, "local");
+        assert_eq!(resolved.source, ConfigSource::BuiltIn);
+        assert!(resolved.warning.is_none());
+        assert_eq!(
+            socket_of(&resolved),
+            PathBuf::from(DEFAULT_LOCAL_AGENT_SOCKET)
+        );
+    }
+
+    #[test]
+    fn resolve_reads_the_packaged_system_config_when_nothing_else_is_set() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        write_config(&system, "/run/tensorplate/agent.sock");
+        let resolved = CliConfig::resolve_from(None, None, &system).unwrap();
+        assert_eq!(
+            socket_of(&resolved),
+            PathBuf::from("/run/tensorplate/agent.sock")
+        );
+        assert_eq!(resolved.source, ConfigSource::System(system));
+        assert!(resolved.warning.is_none());
+    }
+
+    #[test]
+    fn explicit_and_environment_configs_outrank_the_packaged_one() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("system.json");
+        let from_env = td.path().join("env.json");
+        let explicit = td.path().join("explicit.json");
+        write_config(&system, "/run/system.sock");
+        write_config(&from_env, "/run/env.sock");
+        write_config(&explicit, "/run/explicit.sock");
+
+        // The Homebrew launcher exports TENSORPLATE_CLI_CONFIG, so the
+        // env step must keep winning over the packaged path.
+        let by_env =
+            CliConfig::resolve_from(None, Some(from_env.clone().into_os_string()), &system)
+                .unwrap();
+        assert_eq!(socket_of(&by_env), PathBuf::from("/run/env.sock"));
+        assert_eq!(by_env.source, ConfigSource::Environment(from_env.clone()));
+
+        let by_flag =
+            CliConfig::resolve_from(Some(&explicit), Some(from_env.into_os_string()), &system)
+                .unwrap();
+        assert_eq!(socket_of(&by_flag), PathBuf::from("/run/explicit.sock"));
+        assert_eq!(by_flag.source, ConfigSource::Explicit(explicit));
+    }
+
+    #[test]
+    fn an_empty_environment_value_falls_through_to_the_packaged_config() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        write_config(&system, "/run/system.sock");
+        let resolved = CliConfig::resolve_from(None, Some(OsString::from("")), &system).unwrap();
+        assert_eq!(socket_of(&resolved), PathBuf::from("/run/system.sock"));
+    }
+
+    /// Discovery can land on a file the operator never named, so a config
+    /// error that does not say which file it came from is unanswerable.
+    #[test]
+    fn a_config_error_names_the_file_it_came_from() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("cli.json");
+        std::fs::write(&path, r#"{"schema_version":"99.99"}"#).unwrap();
+        let CliError::Config(message) = CliConfig::load(&path).unwrap_err() else {
+            panic!("expected a config error");
+        };
+        assert!(
+            message.contains(&path.display().to_string()),
+            "a validation failure must name the file: {message}"
+        );
+
+        std::fs::write(&path, "{not json").unwrap();
+        let CliError::Config(message) = CliConfig::load(&path).unwrap_err() else {
+            panic!("expected a config error");
+        };
+        assert!(
+            message.contains(&path.display().to_string()),
+            "a parse failure must name the file: {message}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_packaged_config_is_an_install_fault_not_a_silent_default() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        std::fs::write(&system, "{not json").unwrap();
+        let resolved = CliConfig::resolve_from(None, None, &system).unwrap();
+        assert!(
+            matches!(resolved.source, ConfigSource::SystemInvalid(_, _)),
+            "a malformed conffile must not resolve as a usable config: {:?}",
+            resolved.source
+        );
+        let fault = resolved
+            .source
+            .install_fault()
+            .expect("SystemInvalid carries the failure")
+            .to_string();
+        assert!(
+            fault.contains(&system.display().to_string()),
+            "the fault must name the file: {fault}"
+        );
+        let warning = resolved.warning.expect("an unusable conffile must warn");
+        assert!(
+            warning.contains(&system.display().to_string()),
+            "the warning must name the file: {warning}"
+        );
+    }
+
+    /// A conffile that is not UTF-8 is an install fault, not a permissions
+    /// problem: `read_to_string` fails with `InvalidData`, and telling the
+    /// operator to join the service group would be advice that cannot
+    /// work. Only `PermissionDenied` gets that answer.
+    #[test]
+    fn a_packaged_config_that_is_not_text_is_an_install_fault() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        std::fs::write(&system, b"{\"schema_version\":\"0.1\",\"x\":\"\xff\"}").unwrap();
+        let resolved = CliConfig::resolve_from(None, None, &system).unwrap();
+        assert!(
+            matches!(resolved.source, ConfigSource::SystemInvalid(_, _)),
+            "non-UTF-8 bytes must not fall back silently: {:?}",
+            resolved.source
+        );
+        let warning = resolved.warning.expect("an unusable conffile must warn");
+        assert!(
+            !warning.contains("group"),
+            "group membership is no answer to a corrupt file: {warning}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_packaged_config_warns_and_uses_the_defaults() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let td = tempfile::tempdir().unwrap();
+        let etc = td.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let system = etc.join("cli.json");
+        write_config(&system, "/run/system.sock");
+        // Mirrors the installed /etc/tensorplate: a caller outside the
+        // service group cannot traverse the directory.
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let resolved = CliConfig::resolve_from(None, None, &system);
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let resolved = resolved.unwrap();
+        if matches!(resolved.source, ConfigSource::System(_)) {
+            // Running as root, which ignores the mode. Nothing to assert.
+            return;
+        }
+        assert_eq!(
+            resolved.source,
+            ConfigSource::SystemUnreadable(system.clone())
+        );
+        assert_eq!(
+            socket_of(&resolved),
+            PathBuf::from(DEFAULT_LOCAL_AGENT_SOCKET)
+        );
+        let warning = resolved.warning.expect("unreadable config must warn");
+        assert!(
+            warning.contains(&system.display().to_string()),
+            "warning must name the file: {warning}"
+        );
+        assert!(
+            warning.contains("tensorplate` group") || warning.contains("--config"),
+            "warning must say how to fix it: {warning}"
+        );
+    }
+
+    #[test]
+    fn the_packaged_config_path_is_the_installed_conffile() {
+        assert_eq!(
+            SYSTEM_CLI_CONFIG_PATH,
+            tensorplate_protocol::install_paths::CLI_CONFIG_PATH
+        );
+        assert!(Path::new(SYSTEM_CLI_CONFIG_PATH).is_absolute());
+    }
+
+    /// The wiring `resolve()` hands to `resolve_from`. Every other test in
+    /// this module supplies its own path, so without this one the installed
+    /// binary can look for the wrong file — the #203 defect — with the whole
+    /// suite green.
+    #[test]
+    fn resolve_reads_the_installed_conffile_path() {
+        assert_eq!(
+            CliConfig::system_config_path(),
+            Path::new(tensorplate_protocol::install_paths::CLI_CONFIG_PATH)
+        );
     }
 }

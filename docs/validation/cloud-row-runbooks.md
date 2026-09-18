@@ -380,17 +380,15 @@ would claim more than the run establishes:
   supervision block, so the run records `not_configured` rather than a
   healthy supervisor. On these rows that check is a statement about the
   configuration, not about a supervisor being exercised.
-- **`tensorplate logs`.** On a real package install it exits 2 with
-  `no log_source.path configured`. The CLI does not read the packaged
-  `/etc/tensorplate/cli.json` unless `--config` or
-  `TENSORPLATE_CLI_CONFIG` points at it; by default it uses built-in
-  settings, which name no log source. (Every other command still works
-  because those defaults happen to match the packaged socket.) Behind
-  that is a second gap: the file the packaged config names is one
-  nothing in the product writes, since both services log to the
-  journal. The exit status is filed as `logs-command.exit` and the stage
-  requires the journal capture instead — a product gap the run surfaces,
-  not a validation failure.
+- **`tensorplate logs`.** On a real package install it exits 6
+  (`unavailable`) with a hint naming `journalctl -u tensorplate-agent`.
+  Both services log to the journal, so the packaged config declares no
+  `log_source.path` and the NDJSON reader has nothing to read; the
+  command says where the logs are instead of returning an empty
+  successful read. The exit status is filed as `logs-command.exit` and
+  the stage requires the journal capture instead. The harness still
+  records this status rather than requiring it; requiring 6 is a
+  follow-up.
 - **The accelerator.** See below.
 
 It does **not** prove the accelerator computed anything. The

@@ -46,7 +46,9 @@ use std::io::Write;
 
 pub use args::{GlobalArgs, OutputMode, ParsedArgs, Subcommand};
 pub use client::{AgentClient, MockAgentClient, NetAgentClient, ServingClient};
-pub use config::{CliConfig, OutputDefaults, ProfileMode, ProfileSpec};
+pub use config::{
+    CliConfig, ConfigSource, OutputDefaults, ProfileMode, ProfileSpec, ResolvedCliConfig,
+};
 pub use error::{CliError, CliResult, ExitCode};
 pub use output::Renderer;
 pub use profile::ResolvedProfile;
@@ -94,7 +96,46 @@ where
     E: Write,
     F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
 {
-    let renderer = Renderer::new(effective_output_mode(&parsed.global, &cfg));
+    run_with_warnings(
+        parsed,
+        cfg,
+        Vec::new(),
+        None,
+        client_factory,
+        stdout,
+        stderr,
+    )
+}
+
+/// [`run`] with process-level warnings — a packaged config that was found
+/// and not used — stamped into every JSON envelope the command writes.
+/// The binary passes what config resolution reported; nothing else needs
+/// them.
+///
+/// `cli_config_rejection` is why the loader refused the packaged
+/// `cli.json`, when it did. `doctor` reports it as a failing
+/// `config_files` finding, so a diagnostic run on such an install cannot
+/// come back healthy while every command that needs the profile fails.
+///
+/// # Errors
+///
+/// See [`run`].
+pub fn run_with_warnings<O, E, F>(
+    parsed: ParsedArgs,
+    cfg: CliConfig,
+    warnings: Vec<String>,
+    cli_config_rejection: Option<String>,
+    client_factory: F,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> CliResult<()>
+where
+    O: Write,
+    E: Write,
+    F: FnOnce(&ResolvedProfile) -> CliResult<Box<dyn AgentClient>>,
+{
+    let renderer = Renderer::with_warnings(effective_output_mode(&parsed.global, &cfg), warnings)
+        .with_verbosity(parsed.global.verbosity);
 
     // Device registry management is always local, independent of any selected
     // device, and never resolves a transport profile or opens a client.
@@ -154,7 +195,15 @@ where
         Subcommand::Doctor(opts) => {
             let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
-            commands::doctor::run(&renderer, &profile, &*client, &opts, stdout, stderr)
+            commands::doctor::run(
+                &renderer,
+                &profile,
+                &*client,
+                &opts,
+                cli_config_rejection.as_deref(),
+                stdout,
+                stderr,
+            )
         }
         Subcommand::Deploy(opts) => {
             let profile = resolve_profile()?;

@@ -52,11 +52,12 @@ pub fn run<W: Write, E: Write>(
     profile: &ResolvedProfile,
     client: &dyn AgentClient,
     args: &DoctorArgs,
+    cli_config_rejection: Option<&str>,
     out: &mut W,
     _stderr: &mut E,
 ) -> CliResult<()> {
     if let Some(dir) = &args.record {
-        return record::run(*renderer, out, dir);
+        return record::run(renderer, out, dir);
     }
     let mut findings = Vec::<Finding>::new();
     findings.push(probe_cli_version());
@@ -67,7 +68,10 @@ pub fn run<W: Write, E: Write>(
     // packaging install probes: filesystem layout, configs,
     // systemd units, serving binary, backend descriptor + runtime,
     // CUDA/TensorRT/LibTorch.
-    findings.extend(install::run(&install::InstallProbeOptions::default()));
+    findings.extend(install::run(&install::InstallProbeOptions {
+        cli_config_rejection: cli_config_rejection.map(str::to_owned),
+        ..install::InstallProbeOptions::default()
+    }));
     if !args.skip_agent {
         findings.extend(probe_agent(client, profile));
     } else {
@@ -1328,7 +1332,7 @@ mod tests {
         let mut err = Vec::new();
         // We expect the call to succeed because all probes are info/warn
         // (the agent-socket warning does not flip to fail).
-        let result = run(&r, &profile(), &client, &args, &mut out, &mut err);
+        let result = run(&r, &profile(), &client, &args, None, &mut out, &mut err);
         assert!(result.is_ok());
         let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
         let findings = parsed["payload"]["findings"].as_array().unwrap();
@@ -1337,6 +1341,79 @@ mod tests {
             .find(|f| f["id"] == "agent_reachable")
             .unwrap();
         assert_eq!(agent_finding["status"], "skipped");
+    }
+
+    /// A packaged `cli.json` that is valid JSON with a recognized
+    /// `schema_version`, but that the CLI's loader refuses, used to leave
+    /// doctor reporting `config_files: ok` and exiting 0 while every command
+    /// that needs the profile failed. The loader's verdict now fails the
+    /// finding, and doctor exits with its failing-findings code.
+    #[test]
+    fn doctor_fails_on_a_packaged_config_the_loader_rejects() {
+        let td = tempfile::tempdir().unwrap();
+        let system = td.path().join("cli.json");
+        std::fs::write(
+            &system,
+            r#"{"schema_version":"0.1","default_profile":"missing","profiles":{"local":{"mode":"local"}}}"#,
+        )
+        .unwrap();
+        let resolved = CliConfig::resolve_from(None, None, &system)
+            .expect("a rejected packaged config resolves to the built-in defaults");
+        let rejection = resolved
+            .source
+            .install_fault()
+            .expect("the loader rejects an undeclared default profile");
+
+        let args = DoctorArgs {
+            skip_agent: true,
+            record: None,
+        };
+        let r = Renderer::new(OutputMode::Json);
+
+        // The same run without the rejection is healthy, so the rejection
+        // is what fails it.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        assert!(run(
+            &r,
+            &profile(),
+            &MockAgentClient::new(),
+            &args,
+            None,
+            &mut out,
+            &mut err
+        )
+        .is_ok());
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run(
+            &r,
+            &profile(),
+            &MockAgentClient::new(),
+            &args,
+            Some(rejection),
+            &mut out,
+            &mut err,
+        );
+        match result {
+            Err(error @ CliError::DoctorFindings { .. }) => {
+                assert_eq!(error.exit_code(), crate::error::ExitCode::DoctorFindings);
+            }
+            other => panic!("expected failing doctor findings, got {other:?}"),
+        }
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        let config_files = parsed["payload"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "config_files")
+            .unwrap();
+        assert_eq!(config_files["status"], "fail");
+        assert!(config_files["message"]
+            .as_str()
+            .unwrap()
+            .contains("rejected by the CLI"));
     }
 
     #[test]
@@ -1350,7 +1427,7 @@ mod tests {
         let r = Renderer::new(OutputMode::Human);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(&r, &profile(), &client, &args, &mut out, &mut err);
+        let result = run(&r, &profile(), &client, &args, None, &mut out, &mut err);
         match result {
             Err(CliError::DoctorFindings { failing, .. }) => {
                 assert!(failing >= 1);
@@ -1372,7 +1449,7 @@ mod tests {
         let r = Renderer::new(OutputMode::Json);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(&r, &profile(), &client, &args, &mut out, &mut err);
+        let result = run(&r, &profile(), &client, &args, None, &mut out, &mut err);
         assert!(result.is_ok());
         let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
         let findings = parsed["payload"]["findings"].as_array().unwrap();
@@ -1393,7 +1470,7 @@ mod tests {
         let r = Renderer::new(OutputMode::Json);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(&r, &p, &client, &args, &mut out, &mut err);
+        let result = run(&r, &p, &client, &args, None, &mut out, &mut err);
         match result {
             Err(CliError::DoctorFindings { .. }) => {}
             other => panic!("expected DoctorFindings, got {other:?}"),
