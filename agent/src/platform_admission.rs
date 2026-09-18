@@ -658,6 +658,20 @@ fn first_stack_mismatch(row: &PlatformSupportRow, observed: &ObservedStack) -> O
 /// pass — it is a row that never claimed to serve that path, which is
 /// exactly the deploy that has no evidence behind it.
 ///
+/// That refusal names the architecture and the paths the row does declare.
+/// Without them the sentence reads as a packaging omission, whose natural
+/// remedy is to install something. It is not one: this branch compares the
+/// bundle's backend path against what the row declares and never consults
+/// `installed`, so no package changes the outcome.
+///
+/// It stops at that rather than saying the installed build contains no such
+/// adapter. That is true of `tensorrt` on `x86_64` (issue #204), and it is
+/// what makes the row's silence correct there, but it does not follow from
+/// the row: a row may withhold a path its build does contain, nothing
+/// checks that direction, and what a build compiled in is not readable at
+/// runtime (issue #205). Claiming it here would repeat #204's own mistake
+/// in the refusal that reports it.
+///
 /// # Errors
 ///
 /// [`AgentError::PlatformNotAdmissible`] naming
@@ -672,11 +686,23 @@ pub fn check_backend_packages(
         .iter()
         .find(|set| set.backend_path == backend_path)
     else {
+        // Never empty: the row decoder refuses a row that declares no
+        // backend path at all, so there is no "declares nothing" case to
+        // word here.
+        let declared: Vec<&str> = row
+            .backend_packages()
+            .iter()
+            .map(|set| set.backend_path.as_str())
+            .collect();
         return Err(AgentError::PlatformNotAdmissible {
             reason: Some(PlatformReason::MissingBackendPackage),
             detail: format!(
-                "row `{}` declares no package set for backend path `{backend_path}`",
-                row.row_id()
+                "row `{}` declares no package set for backend path `{backend_path}` on {}; \
+                 it declares {}. Admission reads the row's declarations, not the installed \
+                 package set, so installing a package does not add this path.",
+                row.row_id(),
+                row.cpu().architecture.as_str(),
+                declared.join(", ")
             ),
         });
     };

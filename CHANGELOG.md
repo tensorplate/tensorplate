@@ -613,6 +613,45 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   LibTorch distribution's own directory rather than a library. Neither
   finding is build-aware yet and neither fails `doctor`.
 
+- The twenty-two `ubuntu2404-x86` GPU support rows no longer declare a
+  `tensorrt` backend path. The amd64 `tensorplate-serving` build sets
+  `TP_ENABLE_TENSORRT=OFF`, so the shipped binary contains no TensorRT
+  adapter and `packaging/conf/agent.amd64.json` advertises only
+  `python_pytorch`; the rows nonetheless named a `tensorrt` path satisfied
+  by the `tensorplate-serving` package. That was a false published claim
+  about every L4, H100, A100 and RTX PRO 6000 row first, and a live
+  admission hole second. On a stock install the hole was not reachable:
+  the shipped `/etc/tensorplate/agent.json` lists `python_pytorch` alone,
+  and a TensorRT bundle is refused a step earlier, at compatibility
+  evaluation, with `UnavailableBackend`. Deploy admission consults the row
+  only after that check passes, so the row was the last gate exactly where
+  an operator had edited that dpkg conffile to advertise `tensorrt` — and
+  there the row found `tensorplate-serving` installed and admitted a bundle
+  the worker can only refuse at engine lookup. That host is now refused with
+  `MissingBackendPackage` naming the undeclared path, the architecture, the
+  paths the row does declare, and that admission read those declarations
+  rather than the installed package set — so an operator does not read the
+  refusal as something to install. It asserts nothing about which backends
+  the installed build compiled in: that is true of `tensorrt` here and is
+  why the row is right to be silent, but a row records a package set, not a
+  build, and a row withholding a path its build does contain is allowed.
+  `docs/platform/support-reasons.md` now separates the two next steps
+  `missing_backend_package` covers. The `arm64` Jetson rows keep `tensorrt`:
+  that build compiles the adapter. `doctor` output is unchanged — it never
+  reported a row's declared backend paths, and it still reports no
+  installed build's compiled backends, which is part of why the claim went
+  unnoticed.
+
+- A support row may no longer declare a backend path that the agent config
+  shipped for its package channel and CPU architecture does not list in
+  `available_backends`. The mapping is the one
+  `packaging/debian/tensorplate-agent.install` encodes, and it fails
+  closed: a channel and architecture pair with no shipped config is an
+  error to state rather than a row to skip.
+  `packaging/conf/agent.amd64.json`, which only a dh-exec filter installs
+  and which nothing previously parsed, is now read through the agent's own
+  config validator.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.

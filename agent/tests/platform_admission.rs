@@ -404,6 +404,84 @@ fn a_backend_path_the_row_never_claimed_is_refused_rather_than_waved_through() {
 }
 
 #[test]
+fn an_x86_gpu_row_refuses_tensorrt_even_with_the_serving_package_installed() {
+    // The amd64 tensorplate-serving build sets TP_ENABLE_TENSORRT=OFF, so
+    // the package being present says nothing about a TensorRT adapter. The
+    // x86_64 rows used to declare `tensorrt` satisfied by that package,
+    // which made this exact host admit a bundle the worker can only refuse
+    // at engine lookup. The refusal must therefore survive the package
+    // being installed, on every x86_64 GPU row and not just the exemplar.
+    let registry = registry();
+    let installed = BTreeSet::from([
+        "tensorplate-serving".to_string(),
+        "tensorplate-backend-python-pytorch".to_string(),
+    ]);
+
+    for row_id in [
+        "ubuntu2404-x86-l4-g2s8",
+        "ubuntu2404-x86-h100-80g-a3hg1",
+        "ubuntu2404-x86-rtxpro6000se-g4s48",
+    ] {
+        let row = registry.row(row_id).expect("row is committed");
+        match check_backend_packages(row, "tensorrt", &installed) {
+            Err(AgentError::PlatformNotAdmissible { reason, detail }) => {
+                assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
+                // The whole sentence, not a list of fragments it has to
+                // contain. What it must say is fixed: the row, the path,
+                // the architecture, the paths the row does declare, and
+                // that admission read those declarations rather than the
+                // installed set -- without which an operator reads the
+                // refusal as a packaging omission they can fix by
+                // installing something.
+                //
+                // What it must not say is anything about the installed
+                // build. That the amd64 build compiles no TensorRT adapter
+                // is true, and is why the row is right to be silent, but
+                // the row does not record it and the agent cannot read it
+                // (issue #205); asserting it here would restate issue
+                // #204's own mistake -- an unbacked claim about a build --
+                // in the refusal that reports it. Banning the word "build"
+                // rejected one wording of that claim and nothing else, and
+                // would have failed on a future row id or backend path
+                // that happened to contain the word. An equality holds the
+                // refusal to exactly what it can substantiate, however the
+                // addition is phrased.
+                assert_eq!(
+                    detail,
+                    format!(
+                        "row `{row_id}` declares no package set for backend path \
+                         `tensorrt` on x86_64; it declares python_pytorch. Admission \
+                         reads the row's declarations, not the installed package set, \
+                         so installing a package does not add this path."
+                    )
+                );
+            }
+            other => panic!("`{row_id}` must not admit tensorrt, got {other:?}"),
+        }
+        // Discriminating control: the same installed set on the same row
+        // still admits the path the row does declare, so this is a refusal
+        // of one claim rather than of the host.
+        assert!(
+            check_backend_packages(row, "python_pytorch", &installed).is_ok(),
+            "`{row_id}` must still admit the backend it does declare"
+        );
+    }
+}
+
+#[test]
+fn the_jetson_row_still_admits_tensorrt_from_the_serving_package() {
+    // The arm64 release build compiles the adapter, so the same package
+    // does back the claim there. Without this, deleting the path from
+    // every row would look like a fix.
+    let registry = registry();
+    let row = registry
+        .row("jetson-orin-nano-8gb-jp62")
+        .expect("the Orin Nano row is committed");
+    let installed = BTreeSet::from(["tensorplate-serving".to_string()]);
+    assert!(check_backend_packages(row, "tensorrt", &installed).is_ok());
+}
+
+#[test]
 fn a_rejected_machine_stays_rejected_whatever_backend_a_bundle_names() {
     // The startup verdict is not something a bundle can talk its way past.
     let registry = registry();
@@ -676,6 +754,106 @@ fn the_coordinator_applies_backend_admission_after_bundle_verification() {
         harness.worker.calls().expect("worker calls").is_empty(),
         "backend admission must happen before worker prepare"
     );
+}
+
+/// `available_backends` from the config dh-exec installs as
+/// `/etc/tensorplate/agent.json` on amd64, so the test below describes
+/// the hosts the packages produce rather than a list written down twice.
+fn shipped_amd64_backends() -> Vec<String> {
+    let path = repo_root().join("packaging/conf/agent.amd64.json");
+    let raw = std::fs::read_to_string(path).expect("the amd64 agent config is committed");
+    tensorplate_agent::config::AgentConfig::parse_json(&raw)
+        .expect("the amd64 agent config validates")
+        .available_backends
+}
+
+#[test]
+fn which_gate_refuses_tensorrt_on_an_x86_host_depends_on_the_agent_conffile() {
+    // Issue #204 was a false published claim about every x86_64 GPU row,
+    // and separately an admission hole — but not the same one on every
+    // host, and the difference is worth pinning rather than restating in
+    // prose. `/etc/tensorplate/agent.json` is read first: with the config
+    // the amd64 package ships (`python_pytorch` alone) a TensorRT bundle
+    // never reaches the row, because compatibility evaluation refuses it.
+    // That conffile is a dpkg conffile an operator can edit, and the row
+    // is the gate that remains when they do — which is where the stale
+    // declaration admitted a bundle the worker can only refuse at engine
+    // lookup.
+    use std::sync::Arc;
+    use tensorplate_agent::coordinator::Coordinator;
+
+    let harness = common::Harness::new();
+    let detected = detected_from_fixture(l4(&registry()), "ubuntu2404-x86-l4-g2s8");
+    let mut admission =
+        PlatformAdmission::evaluate(&registry(), &detected, &ObservedStack::default(), None);
+    let PlatformAdmission::Supported {
+        installed_packages, ..
+    } = &mut admission
+    else {
+        panic!("the committed L4 row admits its own fixture");
+    };
+    // The package that used to satisfy the row's `tensorrt` claim, held
+    // installed so any refusal below is about the declaration and not
+    // about this host being short of something.
+    installed_packages.insert("tensorplate-serving".to_string());
+
+    let deploy_tensorrt = |available: Vec<String>, deployment: &str| -> AgentError {
+        let mut config = harness.config.clone();
+        config.available_backends = available;
+        let config = config
+            .validate()
+            .expect("the edited backend list stays valid");
+        let coordinator = Arc::new(
+            Coordinator::new(config, harness.store.clone(), harness.worker.clone())
+                .with_platform_admission(admission.clone())
+                .with_platform_registry(registry()),
+        );
+        let bundle = common::write_bundle(
+            harness.td.path(),
+            deployment,
+            common::BundleSpec {
+                backend_hint: Some("tensorrt"),
+                ..Default::default()
+            },
+        );
+        coordinator
+            .deploy(deployment, &bundle, BTreeMap::default(), None, None)
+            .expect_err("a TensorRT deploy must not succeed on an x86_64 host")
+    };
+
+    // The shipped conffile: refused before the row is consulted, so the
+    // row's claim was never the operative gate here. The backend list is
+    // read from the file dh-exec installs rather than restated, so this
+    // stays a statement about what amd64 hosts actually run.
+    let shipped = shipped_amd64_backends();
+    assert!(
+        !shipped.contains(&"tensorrt".to_string()),
+        "the amd64 build has no TensorRT adapter; its config must not advertise one: {shipped:?}"
+    );
+    match deploy_tensorrt(shipped.clone(), "stock-conffile") {
+        AgentError::UnsupportedBackend(backend) => assert_eq!(backend, "tensorrt"),
+        other => panic!(
+            "the shipped amd64 backend list must refuse at compatibility evaluation, got {other:?}"
+        ),
+    }
+
+    // The edited conffile: the row is the gate, and it now refuses.
+    let edited = shipped
+        .into_iter()
+        .chain(["tensorrt".to_string()])
+        .collect();
+    match deploy_tensorrt(edited, "edited-conffile") {
+        AgentError::PlatformNotAdmissible { reason, detail } => {
+            assert_eq!(reason, Some(PlatformReason::MissingBackendPackage));
+            assert!(
+                detail.contains("tensorrt") && detail.contains("ubuntu2404-x86-l4-g2s8"),
+                "the row refusal must name the path and the row: {detail}"
+            );
+        }
+        other => {
+            panic!("an advertised but undeclared backend must be refused by the row, got {other:?}")
+        }
+    }
 }
 
 /// The recorded sources from the in-lab Orin Nano, read from the fixture
