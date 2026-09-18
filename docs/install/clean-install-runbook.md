@@ -74,7 +74,29 @@ yet:
 - `platform_registry = ok`
 - `python_pytorch_backend = missing` (informational; install in step 5
   if SmolVLA validation is in scope)
-- `cuda_runtime = ok` on a Jetson with JetPack
+- `cuda_runtime = ok` on a Jetson with both the L4T driver and JetPack,
+  naming the `libcudart` it found; `warning` on a Jetson missing either,
+  because the arm64 worker carries the TensorRT adapter and cannot load
+  it without the driver and the CUDA runtime. On an x86_64 host it is
+  `ok` with a driver installed and `missing` without one, whether or not
+  a system CUDA toolkit is present — the amd64 worker has no TensorRT
+  adapter, and the sidecar's CUDA build of PyTorch brings its own
+  runtime, so a host with no system CUDA toolkit is not a defect there.
+  A driver on x86_64 means `/proc/driver/nvidia/version`; a host with
+  only `/usr/lib/x86_64-linux-gnu/libcuda.so.1` gets the driverless
+  verdict and a message saying the kernel module may not be loaded,
+  because the driver's user-mode package installs without one. Wherever
+  the verdict rests on the sidecar, the message names it as installed or
+  not, so it agrees with `python_pytorch_backend` above. `skipped` on
+  macOS, and `skipped` on a host carrying neither the serving worker nor
+  the python_pytorch sidecar — a `--cli-only` install — since nothing
+  there consumes a CUDA runtime. The sidecar on its own keeps the
+  finding: the driver still decides it, the absent worker's TensorRT
+  adapter is not asked for, and what the sidecar's own wheel needs is
+  asked for instead — nothing on x86_64, and on this Jetson the JetPack
+  CUDA runtime that NVIDIA's aarch64 PyTorch wheel links, so a
+  sidecar-only Jetson without it is a `warning` pointing at the apt list
+  in [python-pytorch-backend.md](./python-pytorch-backend.md).
 - `tensorrt_runtime = ok` on a Jetson with TensorRT
 - `agent_reachable = fail` until the unit is enabled in step 3
 

@@ -526,6 +526,93 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- `doctor`'s `cuda_runtime` finding reports what is true on the host it
+  runs on. It checked seven fixed system-toolkit paths and said "CUDA not
+  detected; vision-on-TensorRT validation will skip" for everything else,
+  which on an x86_64 GPU host was wrong twice: the driver could be loaded
+  and the card identified, and the amd64 serving worker is built without
+  the TensorRT adapter, so there was no TensorRT validation to skip. The
+  NVIDIA driver and a system CUDA toolkit are now separate facts, probed
+  under separate path lists and each named by the path it was found
+  under — `libcuda` is the driver's own library and no longer counts as a
+  toolkit, and a versioned `libcudart.so.<soname>` does count, so a host
+  carrying only the CUDA runtime package is no longer told it carries
+  nothing. Each list falls back to a scan of its own library directories
+  for a versioned soname, so a driver is still found where the exact
+  names are absent: `/proc/driver/nvidia/version` comes from `nvidia.ko`,
+  which L4T does not load, and a Jetson shipping `libcuda.so.1.1` without
+  a `libcuda.so.1` would otherwise have read as driverless and been
+  warned about a device that is fine. In the exact lists and in the scan
+  alike, a candidate counts only when it resolves to an existing regular
+  file: ldconfig's soname links outlive the files they point at, so an
+  incomplete upgrade or a removed package leaves `libcudart.so.12`
+  pointing at nothing, and accepting a directory entry on its name — or
+  a directory standing where a library is looked for — would report the
+  CUDA runtime as present on a host whose worker cannot load it, which
+  is the broken dependency this finding exists to name. A rejected
+  candidate is named in the message, which now reads ``no system CUDA
+  toolkit at the known paths (`<path>` is a name with no library behind
+  it)``, so a host part-way through an upgrade no longer reads exactly
+  like one that never carried the library: the verdict is the same on
+  both and the work is not. The driver's clause says the same of a dead
+  driver name and keeps the driverless hint, because a name with no
+  library behind it does not establish that the driver package is
+  installed. The path reported is the name the probe looked under, never
+  the versioned target a link resolves to. The third probe behind this
+  finding — which of the CUDA-consuming components are installed — takes
+  the same rule: the python_pytorch sidecar counts when a descriptor
+  *file* is at its packaged path, parseable or not, and a directory or a
+  dead link standing there is no longer read as an installed sidecar.
+  On x86_64 the rule runs the other
+  way: `/proc/driver/nvidia/version` is what establishes a loaded driver,
+  and the driver's user-mode `libcuda.so.1` is not accepted in its place
+  — that package installs with no working kernel module, which is the
+  inference `packaging/scripts/install.sh` already refuses in a comment.
+  Found alone, the library is reported as its own state, naming it and
+  the absent kernel interface, with the verdict a driverless host gets
+  and a hint pointing at the module, `nvidia-smi`, a pending reboot and
+  Secure Boot. The verdict is taken against the installed build, read
+  from the CLI's own build target because the CLI and the worker ship in
+  one per-architecture artifact set: the arm64 worker links the TensorRT
+  adapter, so no toolkit there is a `warning` with an install hint, while
+  the amd64 worker has no such adapter and its python_pytorch sidecar
+  brings its own CUDA runtime in the PyTorch wheel, so no system toolkit
+  there is `ok`. The driver governs the status on its own: `libcuda` is
+  the driver package's library and every CUDA consumer loads through it,
+  so a host with no driver is never `ok` however many toolkit files it
+  carries — `missing` on amd64 and `warning` on the TensorRT-linked
+  build, each naming the absent driver. The message states only what is
+  installed here: wherever the verdict rests on the python_pytorch
+  sidecar it names that sidecar as present or absent rather than assuming
+  it, and where neither the serving worker nor that sidecar is installed
+  — a `--cli-only` install — the finding is `skipped`, because nothing on
+  the host consumes a CUDA runtime. The sidecar's package only
+  `Recommends` the serving one, so it can be installed alone; it is then
+  the host's only CUDA consumer, and the absent worker's TensorRT adapter
+  is not asked for on its behalf. What its own wheel needs is asked for
+  instead, which is an architecture question rather than a build one: the
+  x86_64 PyPI CUDA wheel carries its runtime libraries, so driver and no
+  toolkit is `ok`, while NVIDIA's aarch64 wheel links the JetPack CUDA
+  runtime — the Jetson install guide has the operator `apt install` it
+  and says `import torch` fails on a missing CUDA shared library without
+  it — so on the arm64 artifact set the same host is a `warning` pointing
+  at that apt list. A platform whose build has no CUDA path at all is
+  `skipped` too. The finding still never fails `doctor`, so no install
+  and no lifecycle harness changes outcome. `cuda_runtime` is the one
+  finding id whose severity range has widened since v0.1.0; the exception
+  is recorded against the contract note in
+  `cli/src/commands/doctor/finding.rs`.
+
+- `doctor`'s `tensorrt_runtime` and `libtorch_runtime` findings hold
+  each library name to the rule `cuda_runtime` holds its candidates to:
+  a directory or a dead link standing at `libnvinfer.so`,
+  `NvInferVersion.h` or `/usr/lib/libtorch.so` was reported as the
+  runtime being detected and is now reported as absent.
+  `/usr/local/libtorch` and `/opt/libtorch` keep the weaker rule and are
+  detected as directories, because those two names are the unpacked
+  LibTorch distribution's own directory rather than a library. Neither
+  finding is build-aware yet and neither fails `doctor`.
+
 - NVIDIA probe tests use immutable executable fixtures with isolated
   temporary output paths, avoiding intermittent Linux `Text file busy`
   failures when parallel tests launch a freshly written executable.

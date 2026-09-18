@@ -336,7 +336,22 @@ Prerequisites:
    this row, `platform_profile` to list it among the host's candidate
    rows, and the registry, agent, socket, serving binary, path layout and
    config files to be ok. `host_os`, `accelerator_facts`,
-   `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted.
+   `tensorrt_runtime` and `cuda_runtime` are recorded, not asserted. On
+   this row `cuda_runtime` is `warning` when no system CUDA toolkit is
+   installed, and also when no NVIDIA driver is found at the known paths
+   — the arm64 worker carries the TensorRT adapter and cannot load it
+   without both — so a run whose recorded value is not `ok` on a device
+   that is about to deploy a TensorRT bundle is worth reading before the
+   deploy-smoke stage fails for the same reason. A Jetson carrying the
+   python_pytorch sidecar and no serving worker is a `warning` under the
+   same condition, for the sidecar's own reason: NVIDIA's aarch64 PyTorch
+   wheel links the JetPack CUDA runtime. It is not a failing finding and
+   does not stop the stage. A soname link an incomplete JetPack upgrade
+   left behind — `libcudart.so.12` with no file at its target — is
+   reported as no CUDA runtime, not as one, and the message names that
+   link as a name with no library behind it, so this `warning` is the
+   first place that upgrade shows up rather than the deploy, and it says
+   which of the two no-runtime states the device is in.
 
    **deploy-smoke** deploys the TensorRT identity bundle, staged under
    `/opt/tensorplate-validation/trt-identity` where the agent's sandbox
