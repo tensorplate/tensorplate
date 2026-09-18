@@ -1071,10 +1071,15 @@ def doctor_check(document, status, exact_row,
     if exact_row not in (row.get("message") or ""):
         failures.append("platform_row_exact")
     host_os = (findings.get("host_os") or {}).get("message") or ""
+    # Named for what was checked, not for what the default phrase happens
+    # to be about. A row with no metadata service requires a phrase that
+    # has nothing to do with a machine-type record, and an operator
+    # reading its offline.log must not be sent after a mechanism this
+    # device has none of.
     if host_os_phrase not in host_os:
-        failures.append("host_os_machine_type_from_the_record")
+        failures.append("host_os_names_the_expected_phrase")
     if forbidden_host_os_phrase and forbidden_host_os_phrase in host_os:
-        failures.append("host_os_machine_type_not_from_live_metadata")
+        failures.append("host_os_names_the_forbidden_phrase")
     return ({"doctor": "pass", "platform_row": exact_row,
              "host_os_phrase_required": host_os_phrase or None,
              "host_os_phrase_forbidden": forbidden_host_os_phrase or None},
@@ -1108,7 +1113,10 @@ def identity_check(journal_text, expect_source=RECORDED_SOURCE,
     checks = {
         "identity_logged_once": len(lines) == 1,
         "identity_line_parsed": match is not None,
-        "machine_type_from_the_record": source == expect_source,
+        # As in doctor_check: named for the comparison, because the
+        # expected source is the row's. `none` on a row whose agent
+        # establishes no machine type at all is not a record.
+        "machine_type_source_is_the_expected_one": source == expect_source,
         # A live answer would mean the denial let the metadata query
         # through, whatever the probe said.
         "metadata_service_was_not_reached": not forbid_source or source != forbid_source,
@@ -1285,6 +1293,12 @@ def evidence(directory, deployment):
             "status": verdict("offline-status-check.json", "status"),
             "doctor": verdict("offline-doctor-check.json", "doctor"),
             "deploy": verdict("offline-deploy-check.json", "deploy"),
+            # The agent's own account of what the denied deploy did, as
+            # against the deploy reply's account of itself. Read back
+            # here so a stage that stopped checking it cannot still file
+            # a certificate saying a fresh deployment answered.
+            "status_after_deploy": verdict(
+                "offline-status-after-deploy-check.json", "status"),
             "infer": verdict("offline-infer-check.json", "infer"),
         },
         "restore": {"drop_ins_removed": removed,

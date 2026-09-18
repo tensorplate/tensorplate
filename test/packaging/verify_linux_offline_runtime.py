@@ -1102,9 +1102,9 @@ def test_doctor_check():
         # let the metadata query through, whatever the probe said.
         ({"messages": {"host_os": "ubuntu 24.04 on g2-standard-8 "
                                   + m.DOCTOR_LIVE_PHRASE}}, 0,
-         "host_os_machine_type_not_from_live_metadata"),
+         "host_os_names_the_forbidden_phrase"),
         ({"messages": {"host_os": "ubuntu 24.04"}}, 0,
-         "host_os_machine_type_from_the_record"),
+         "host_os_names_the_expected_phrase"),
     ):
         failures = m.doctor_check(doctor_document(**kwargs), status, ROW)[1]
         assert expected in failures, (expected, failures)
@@ -1122,7 +1122,7 @@ def test_doctor_check():
     assert failures == [], failures
     assert result["host_os_phrase_required"] == "NVIDIA Jetson Orin Nano", result
     assert result["host_os_phrase_forbidden"] is None, result
-    assert "host_os_machine_type_from_the_record" in m.doctor_check(
+    assert "host_os_names_the_expected_phrase" in m.doctor_check(
         jetson, 0, "jetson-orin-nano-8gb")[1]
     # A row that requires no phrase at all is filed as having checked
     # none, never as a machine type recorded from anywhere.
@@ -1152,7 +1152,7 @@ def test_identity_check():
     live = ("platform identity: machine_type=g2-standard-8 "
             "source=gce_metadata record=written")
     failures = m.identity_check(journal(live))[1]
-    assert "machine_type_from_the_record" in failures
+    assert "machine_type_source_is_the_expected_one" in failures
     assert "metadata_service_was_not_reached" in failures
     # A record written while denied would mean the agent either reached
     # the service or recorded the record from itself.
@@ -1176,7 +1176,7 @@ def test_identity_check():
     # type is then not required either.
     assert m.identity_check(journal(undetected), expect_source="none",
                             expect_record="not_applicable", forbid_source="")[1] == []
-    assert "machine_type_from_the_record" in m.identity_check(
+    assert "machine_type_source_is_the_expected_one" in m.identity_check(
         journal(recorded), expect_source="none")[1]
     passed("platform identity must be logged once, from the record")
 
@@ -1459,6 +1459,8 @@ def evidence_directory(work, drop=(), **overrides):
         "offline-identity.json": {"machine_type_source": "recorded_gce_metadata",
                                   "record": "not_applicable"},
         "offline-status-check.json": {"deployment_id": "d-offline", "status": "pass"},
+        "offline-status-after-deploy-check.json": {"deployment_id": "d-offline",
+                                                   "status": "pass"},
         "offline-doctor-check.json": {"doctor": "pass"},
         "offline-deploy-check.json": {"deploy": "pass"},
         "offline-infer-check.json": {"infer": "pass"},
@@ -1489,7 +1491,8 @@ def test_evidence():
     assert result["units_restarted_under_the_denial"] == UNITS
     assert result["enforced"] is True
     assert result["cli_under_denial"] == {"status": "pass", "doctor": "pass",
-                                          "deploy": "pass", "infer": "pass"}
+                                          "deploy": "pass", "infer": "pass",
+                                          "status_after_deploy": "pass"}
     assert result["classification"]["operations_refused_under_the_denial"] == UDP_DENIED
     assert result["classification"]["operations_silenced_under_the_denial"] == \
         sorted(m.TCP_OPERATIONS)
@@ -1620,7 +1623,10 @@ def test_evidence():
     # A check that never passed filed no document, so its absence refuses
     # the certificate rather than being restated as a pass.
     for missing in ("offline-doctor-check.json", "offline-classification.json",
-                    "offline-infer-check.json", "offline-identity.json") + tuple(
+                    "offline-infer-check.json", "offline-identity.json",
+                    # The deploy reply says what the CLI asked for; this
+                    # one says what the agent then reported as active.
+                    "offline-status-after-deploy-check.json") + tuple(
                         m.cli_evidence_name(call) for call in m.CLI_CALLS):
         with tempfile.TemporaryDirectory() as work:
             directory = evidence_directory(pathlib.Path(work))

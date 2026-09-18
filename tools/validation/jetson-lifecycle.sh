@@ -227,6 +227,10 @@ STRANDED_CONFFILES=unread
 STRANDED_INSTALL_LOG=""
 # Scratch directory holding a bundle this run built, removed on exit.
 BUNDLE_SCRATCH=""
+# Where a raw journal capture is read before it is projected. The raw
+# copy never reaches the evidence directory, so it is removed whatever
+# the capture concluded, including on a signal.
+JOURNAL_SCRATCH=""
 # Private CLI config pins every command to the installed local agent; an
 # operator profile must never redirect this run to another control plane
 # or override which worker receives the identity inference.
@@ -265,9 +269,13 @@ DEPLOYMENT_ID="jetson-lifecycle-smoke"
 # it. Derived from --deployment-id in main.
 BASELINE_DEPLOYMENT_ID=""
 ROLLBACK_DEPLOYMENT_ID=""
-# What the offline stage appends to make its own deployment id. Named
-# here because preflight has to know how long the derived id will be.
+# What each stage that does not deploy under --deployment-id itself
+# appends to it. Named here, and derived from nowhere else, because
+# preflight validates every id this run will submit and a suffix it did
+# not know about is one the CLI would refuse mid-run.
 OFFLINE_DEPLOYMENT_SUFFIX="-offline"
+BASELINE_DEPLOYMENT_SUFFIX="-baseline"
+ROLLBACK_DEPLOYMENT_SUFFIX="-rollback"
 # protocol/rust/src/agent_control.rs: a deployment id becomes one
 # filesystem path segment, and the CLI refuses a longer one.
 MAX_DEPLOYMENT_ID_BYTES=128
@@ -327,9 +335,11 @@ Options:
                               /etc, /var/lib, /var/log and /run tensorplate,
                               and ${BUNDLE_STAGING_DIR}.
   --deployment-id ID          Deployment id for the smoke. Default: ${DEPLOYMENT_ID}
-                              The offline stage deploys ID${OFFLINE_DEPLOYMENT_SUFFIX}
-                              alongside it, so the derived id must also stay
-                              within the ${MAX_DEPLOYMENT_ID_BYTES}-byte limit.
+                              The offline, upgrade and rollback stages deploy
+                              ID${OFFLINE_DEPLOYMENT_SUFFIX}, ID${BASELINE_DEPLOYMENT_SUFFIX} and
+                              ID${ROLLBACK_DEPLOYMENT_SUFFIX} alongside it, so every
+                              derived id must also stay within the
+                              ${MAX_DEPLOYMENT_ID_BYTES}-byte limit.
   --preflight-only            Check host eligibility and the inputs, and build
                               the bundle in a temporary directory, then stop
                               without installing anything or writing a report.
@@ -682,15 +692,33 @@ preflight() {
     offline_drop_in_absent "$unit" ||
       die "cannot start with a network denial from an earlier validation run in place, or without confirming there is none; nothing was changed"
   done
-  # The offline stage deploys under ${DEPLOYMENT_ID}${OFFLINE_DEPLOYMENT_SUFFIX},
-  # which the CLI validates as one filesystem path segment. Refused here
-  # rather than six stages in, where the deploy would fail as a CLI
-  # validation error and read as a failure of the denial. The charset is
-  # checked first, so counting characters counts bytes.
-  [[ "$DEPLOYMENT_ID" =~ ^[A-Za-z0-9._-]+$ ]] ||
-    die "--deployment-id must be ASCII letters, digits, dot, dash or underscore: ${DEPLOYMENT_ID}"
-  ((${#DEPLOYMENT_ID} + ${#OFFLINE_DEPLOYMENT_SUFFIX} <= MAX_DEPLOYMENT_ID_BYTES)) ||
-    die "--deployment-id is too long: the offline stage deploys as ${DEPLOYMENT_ID}${OFFLINE_DEPLOYMENT_SUFFIX}, over the ${MAX_DEPLOYMENT_ID_BYTES}-byte deployment id limit"
+  # Every deployment id this run submits: --deployment-id as given, which
+  # deploy-smoke uses, and the three a later stage derives from it. The
+  # CLI validates each as one filesystem path segment, so each is checked
+  # here rather than stages in, where the deploy would fail as a CLI
+  # validation error and read as a failure of the stage that made it --
+  # and the two 9-byte suffixes fail later than the 8-byte one, in the
+  # last two stages of a run with a baseline set.
+  #
+  # Checked whether or not a baseline set was named, so one id is
+  # accepted or refused by one rule however the run is invoked, and a
+  # --preflight-only run answers for the run that follows it rather than
+  # for the narrower one that was typed.
+  #
+  # This is protocol/rust/src/agent_control.rs's is_valid_deployment_id:
+  # the charset is ASCII, so counting characters counts bytes, and `.`
+  # and `..` are reserved path segments that the charset alone admits.
+  local suffix derived
+  for suffix in "" "$OFFLINE_DEPLOYMENT_SUFFIX" "$BASELINE_DEPLOYMENT_SUFFIX" \
+                "$ROLLBACK_DEPLOYMENT_SUFFIX"; do
+    derived="${DEPLOYMENT_ID}${suffix}"
+    [[ "$derived" =~ ^[A-Za-z0-9._-]+$ ]] ||
+      die "--deployment-id must be ASCII letters, digits, dot, dash or underscore: ${DEPLOYMENT_ID}"
+    [[ "$derived" != "." && "$derived" != ".." ]] ||
+      die "--deployment-id must not be . or .., which the CLI reserves as path segments: ${DEPLOYMENT_ID}"
+    ((${#derived} <= MAX_DEPLOYMENT_ID_BYTES)) ||
+      die "--deployment-id is too long: this run deploys as ${derived}, over the ${MAX_DEPLOYMENT_ID_BYTES}-byte deployment id limit"
+  done
 
   # Every release installer this run starts reads TP_INSTALL_* from its
   # environment, and several of those switch its verification off or
@@ -1377,8 +1405,68 @@ PY
 
 # --- status-logs -------------------------------------------------------
 
-# Kept in the same shape as the cloud harness's capture, so a later change
-# to what the evidence copy retains applies to both harnesses together.
+# Keep only the fields the stage assertions read, which are exactly the
+# ones tools/validation/check-evidence-publication.sh admits.
+#
+# journalctl attaches the host name, the machine and boot ids, the
+# command line and the process credentials to every record, so a raw
+# capture cannot be published as it stands. Projecting where the capture
+# is taken rather than before a commit means no raw copy is ever written
+# to the evidence directory, so there is nothing for a hand sanitization
+# pass to miss. This is the cloud harness's project_journal_records, kept
+# the same on both rows so a later change to what an evidence copy
+# retains applies to both together.
+project_journal_records() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+
+KEEP = frozenset((
+    "MESSAGE",
+    "PRIORITY",
+    "SYSLOG_IDENTIFIER",
+    "UNIT",
+    "_PID",
+    "_SYSTEMD_UNIT",
+    "_SYSTEMD_INVOCATION_ID",
+    "__REALTIME_TIMESTAMP",
+))
+
+label, raw, projected = sys.argv[1:]
+with open(raw, encoding="utf-8") as source, \
+        open(projected, "w", encoding="utf-8") as destination:
+    for number, line in enumerate(source, 1):
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            entry = None
+        # journalctl's own diagnostics ("-- No entries --") and anything
+        # else that is not a record are refused rather than copied
+        # through: whatever cannot be projected cannot be published.
+        if not isinstance(entry, dict):
+            raise SystemExit(f"{label}: journal line {number} is not a JSON record")
+        # A value is copied as it stands, including the integer array
+        # journalctl uses for a message that is not UTF-8 text.
+        destination.write(
+            json.dumps({k: v for k, v in entry.items() if k in KEEP}) + "\n")
+PY
+}
+
+# Create the scratch directory a raw journal capture is read into, and
+# register it for the EXIT handler.
+open_journal_scratch() {
+  JOURNAL_SCRATCH="$(mktemp -d)" || { JOURNAL_SCRATCH=""; return 1; }
+}
+
+# Remove the registered scratch directory, raw capture and all. Safe to
+# call when none is registered, and again after a failure.
+remove_journal_scratch() {
+  [[ -n "$JOURNAL_SCRATCH" ]] || return 0
+  rm -rf "$JOURNAL_SCRATCH" || return
+  JOURNAL_SCRATCH=""
+}
+
 # The invocation id of a unit's CURRENT instance. Empty for a unit that
 # does not exist, is not loaded or is not running, which `systemctl show`
 # reports without failing, so the shape is checked rather than the status.
@@ -1397,13 +1485,25 @@ unit_invocation() {
 }
 
 capture_current_journal() {
-  local unit="$1" output="$2" invocation
+  local unit="$1" output="$2" status=0 cleanup_status=0
+  open_journal_scratch || return
+  record_current_journal "$unit" "$output" "${JOURNAL_SCRATCH}/journal.json" || status=$?
+  # The raw capture does not outlive the projection, whatever the verdict
+  # on it was. A signal before this line is handled by finish_with_cleanup.
+  remove_journal_scratch || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+record_current_journal() {
+  local unit="$1" output="$2" raw="$3" invocation
   invocation="$(unit_invocation "$unit")" || return
   # Privilege is needed even when the operator can access the agent
   # socket: membership in tensorplate does not grant journal access.
   step "capture the ${unit} journal" bash -c \
     'sudo journalctl -u "$1" "_SYSTEMD_INVOCATION_ID=$2" -n 100 --no-pager --output=json >"$3"' \
-    _ "$unit" "$invocation" "$output" || return
+    _ "$unit" "$invocation" "$raw" || return
+  project_journal_records "$unit" "$raw" "$output" || return
   python3 - "$output" "${unit%.service}.service" "$invocation" <<'PY' || return
 import json, sys
 
@@ -1558,6 +1658,10 @@ finish_with_cleanup() {
     printf 'warning: could not remove the scratch bundle at %s\n' "$BUNDLE_SCRATCH" >&2
   remove_cli_scratch ||
     printf 'warning: could not remove the private CLI config at %s\n' "$CLI_SCRATCH" >&2
+  # A raw journal capture interrupted before its projection. Left behind,
+  # it is an unprojected copy of the journal in a temporary directory.
+  remove_journal_scratch ||
+    printf 'warning: could not remove the raw journal capture at %s\n' "$JOURNAL_SCRATCH" >&2
   exit "$status"
 }
 
@@ -1574,7 +1678,19 @@ install_cleanup_traps() {
 # failures have to be the agent refusing that config, not something else
 # failing at the same time.
 observe_crash_loop() {
-  local since="$1"
+  local since="$1" status=0 cleanup_status=0
+  open_journal_scratch || return
+  observe_crash_loop_into "$since" "${JOURNAL_SCRATCH}/journal.json" || status=$?
+  # As in capture_current_journal: the raw capture is removed whatever the
+  # verdict was, and the verdict is what this returns. stage_crash_loop
+  # restores the agent config on both paths.
+  remove_journal_scratch || cleanup_status=$?
+  ((status == 0)) || return "$status"
+  ((cleanup_status == 0)) || return "$cleanup_status"
+}
+
+observe_crash_loop_into() {
+  local since="$1" raw="$2"
   local state="" restarts="" last_restarts="" settled=0 attempt result
 
   note "breaking the agent config so every start fails"
@@ -1608,9 +1724,10 @@ observe_crash_loop() {
 
   step "capture the crash-loop journal" bash -c \
     'sudo journalctl -u "$1" --since "@$2" --no-pager --output=json >"$3"' \
-    _ "$AGENT_UNIT" "$since" "${EVIDENCE_DIR}/crash-loop-journal.txt" || return
+    _ "$AGENT_UNIT" "$since" "$raw" || return
+  project_journal_records "crash-loop" "$raw" "${EVIDENCE_DIR}/crash-loop-journal.txt" || return
   python3 - "${EVIDENCE_DIR}/crash-loop-journal.txt" "${AGENT_UNIT}.service" \
-    "$state" "$restarts" "$result" >"${EVIDENCE_DIR}/crash-loop-result.json" <<'PY'
+    "$state" "$restarts" "$result" >"${EVIDENCE_DIR}/crash-loop-result.json" <<'PY' || return
 import json, sys
 
 path, unit, state, restarts, result = sys.argv[1:]
@@ -2825,8 +2942,8 @@ PY
 
 main() {
   parse_args "$@"
-  BASELINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}-baseline"
-  ROLLBACK_DEPLOYMENT_ID="${DEPLOYMENT_ID}-rollback"
+  BASELINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}${BASELINE_DEPLOYMENT_SUFFIX}"
+  ROLLBACK_DEPLOYMENT_ID="${DEPLOYMENT_ID}${ROLLBACK_DEPLOYMENT_SUFFIX}"
   preflight
   prepare_bundle
   if ((PREFLIGHT_ONLY)); then

@@ -110,10 +110,10 @@ run's own names — only the local `--literals` scan can.
 - Retain the raw, unsanitized run privately alongside the release
   record — it is the artifact a later regression gets diffed against.
   Never put it, or the literal file, inside the checkout. The journal
-  captures of the Ubuntu cloud harness are the exception: the harness
-  projects each `journalctl` capture to the service's own fields as it
-  records it, so the projected capture is what is retained and no raw
-  journal copy exists. Every other file of a cloud run is still
+  captures of the Ubuntu cloud and Jetson harnesses are the exception:
+  both project each `journalctl` capture to the service's own fields as
+  they record it, so the projected capture is what is retained and no
+  raw journal copy exists. Every other file of those runs is still
   retained raw.
 
 The full rules these follow are in `docs/validation/fixture-and-evidence-rules.md`.

@@ -355,10 +355,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   recorded none, which is what it says online too.
   While denied, the appliance has to keep working: status answers over
   the agent socket and still reports the deployment the agent re-warmed,
-  a fresh bundle deploys as `<deployment-id>-offline`, and the TensorRT
-  identity engine returns its input unchanged. The stage files
-  `offline-runtime.json`, which re-derives its enforcement verdict from
-  the probes and controls it carries rather than restating one.
+  a fresh bundle deploys as `<deployment-id>-offline` and the agent then
+  reports that deployment as the active one -- the deploy reply is the
+  CLI's account of its own request, and only a status read afterwards is
+  the agent's -- and the TensorRT identity engine returns its input
+  unchanged. The stage files `offline-runtime.json`, which re-derives its
+  enforcement verdict from the probes and controls it carries rather than
+  restating one, and which carries every one of those CLI verdicts, so a
+  stage that stopped making one of the checks cannot still file a
+  certificate that claims it.
+  Every `journalctl` capture the Jetson harness takes is now projected to
+  the service's own fields where it is taken -- the message, its priority
+  and identifier, the unit and invocation, the pid and the timestamp --
+  which is exactly the set
+  `tools/validation/check-evidence-publication.sh` admits. The host name,
+  machine and boot ids, cursor and command line systemd attaches to every
+  record never reach the evidence directory and no raw copy is kept, so
+  the offline stage's `offline-agent-journal.txt` and the
+  `agent-journal.txt`, `observability-journal.txt` and
+  `crash-loop-journal.txt` that predate it are publishable as written
+  rather than by hand. This is the Ubuntu cloud harness's
+  `project_journal_records`, so both rows keep the same set.
   The stage runs between crash-loop and upgrade, and the position is
   load-bearing in both directions: it is about the candidate install the
   stages above exercise and the deployment they left serving, and
@@ -367,8 +384,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `systemd-run`, a harness copied out of the checkout without the offline
   module beside it, a denial drop-in an earlier run left behind (per
   unit, including a dangling symlink, and changing nothing), and a
-  `--deployment-id` outside the allowed charset or long enough that the
-  stage's derived `<id>-offline` would pass the CLI's 128-byte limit.
+  `--deployment-id` that is outside the allowed charset, is one of the
+  reserved path segments `.` and `..`, or is long enough that any id the
+  run derives from it would pass the CLI's 128-byte limit. All four are
+  checked -- the id as given and the `-offline`, `-baseline` and
+  `-rollback` forms -- because the two 9-byte suffixes would otherwise
+  fail in the last two stages of a run, after the upgrade's clearing step
+  has already purged the candidate.
+  Every transient unit the stage starts runs as the operator, with the
+  operator's groups, so what the denial is applied to is the call this
+  operator makes online rather than one made as root.
 
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture

@@ -727,9 +727,43 @@ case "$*" in
 esac
 # Injectable failure, so a privileged step that the harness forgot to
 # check can be caught here rather than on a device.
+#
+# An optional `@denied` or `@restored` suffix narrows the injection to
+# one side of the offline stage, for the commands that stage takes and an
+# earlier one takes too, spelled exactly the same way: `systemctl restart
+# tensorplate-agent tensorplate-observability` is the restart stage's
+# command as well, and `systemctl daemon-reload` and `journalctl` are
+# taken before the denial too. A substring alone would always fail the
+# earlier stage and never reach this one. `denied` is while the agent's
+# runtime drop-in is installed, `restored` is after this run removed one
+# it had installed.
 if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
+  sudo_fail_when=""
+  sudo_fail_match="${TP_FAKE_SUDO_FAIL}"
+  case "${TP_FAKE_SUDO_FAIL}" in
+    *@denied) sudo_fail_when=denied; sudo_fail_match="${TP_FAKE_SUDO_FAIL%@denied}" ;;
+    *@restored) sudo_fail_when=restored; sudo_fail_match="${TP_FAKE_SUDO_FAIL%@restored}" ;;
+  esac
+  agent_conf="${TP_OFFLINE_UNIT_ROOT:-/nowhere}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf"
   case "$*" in
-    *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
+    *"${sudo_fail_match}"*)
+      case "$sudo_fail_when" in
+        "") exit 9 ;;
+        denied) [ -f "$agent_conf" ] && exit 9 ;;
+        restored)
+          [ -f "${TP_OFFLINE_UNIT_ROOT:-/nowhere}/denial-was-installed" ] &&
+            [ ! -f "$agent_conf" ] && exit 9 ;;
+      esac
+      ;;
+  esac
+fi
+# That this run installed a denial drop-in at all, which is what tells
+# the restore-side restart apart from every restart taken before the
+# stage. Recorded after the injection, so a failed install is not one.
+if [ -n "${TP_OFFLINE_UNIT_ROOT:-}" ]; then
+  case "$*" in
+    "install -D -m 0644 "*10-tensorplate-validation-offline.conf)
+      : >"${TP_OFFLINE_UNIT_ROOT}/denial-was-installed" ;;
   esac
 fi
 # A sudo policy or PAM environment that hands every privileged command a
@@ -747,16 +781,29 @@ fi
 if [ "$1" = systemd-run ]; then
   denied=0
   allow=""
+  user=""
+  groups=""
+  flags=""
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --) shift; break ;;
       --property=IPAddressDeny=*) denied=1; shift ;;
       --property=IPAddressAllow=*) allow="${allow}${1#--property=IPAddressAllow=} "; shift ;;
+      --property=User=*) user="${1#--property=User=}"; shift ;;
+      --property=SupplementaryGroups=*) groups="${1#--property=SupplementaryGroups=}"; shift ;;
+      --pipe|--wait|--collect) flags="${flags}${1} "; shift ;;
       *) shift ;;
     esac
   done
   [ "$#" -gt 0 ] || exit 9
+  # Who each transient unit runs as, and how its status comes back.
+  # Recorded rather than ignored: a unit started without these runs the
+  # CLI as root, with root's HOME and without the operator's membership
+  # of the agent's control group, which is a different call from the one
+  # this run says the operator makes -- and one started without --wait
+  # would report systemd-run's exit status instead of the command's.
+  printf '%s|%s|%s\n' "$user" "$groups" "$flags" >>"${TP_FAKE_TRANSIENT_LOG:-/dev/null}"
   case "${TP_FAKE_MODE:-ok}" in
     offline-transient-not-denied) denied=0; allow="" ;;
   esac
@@ -1715,8 +1762,26 @@ case "$1" in
 esac
 STUB
 
+# The metadata journald attaches to every record on a real device, so the
+# harness's projection has something to take out. A projection written as
+# a denylist of the host fields it knew about would pass a stub that
+# emitted only those and then write evidence the scanner refuses on the
+# first real Jetson; for the same reason every service record carries a
+# field no list could name in advance, whose name is new on every run of
+# this file.
+TP_FAKE_JOURNAL_FIELD="TP_FIXTURE_$(python3 -c 'import secrets; print(secrets.token_hex(4).upper())')"
+export TP_FAKE_JOURNAL_FIELD
 cat >"${stub_bin}/journalctl" <<'STUB'
 #!/bin/sh
+zero=00000000000000000000000000000000
+cursor="s=00000000;i=4a1;b=${zero};m=139f2a;t=6591c0;x=51d2"
+# What every record carries, whoever wrote it.
+host_fields="\"_HOSTNAME\":\"tp-synthetic-host\",\"_MACHINE_ID\":\"${zero}\",\"_BOOT_ID\":\"${zero}\",\"__CURSOR\":\"${cursor}\",\"__MONOTONIC_TIMESTAMP\":\"84210000000\",\"__SEQNUM\":\"1185\",\"__SEQNUM_ID\":\"${zero}\""
+# What journald's stream transport adds to a line a service printed.
+service_fields() {
+  printf '"_TRANSPORT":"stdout","_STREAM_ID":"%s","_UID":"998","_GID":"998","_COMM":"%s","_EXE":"/usr/bin/%s","_CMDLINE":"/usr/bin/%s --config /etc/tensorplate/%s.json","_CAP_EFFECTIVE":"0","_SYSTEMD_CGROUP":"/system.slice/%s.service","_SYSTEMD_SLICE":"system.slice","SYSLOG_FACILITY":"3","%s":"fixture"' \
+    "$zero" "$1" "$1" "$1" "${1#tensorplate-}" "$1" "${TP_FAKE_JOURNAL_FIELD:?}"
+}
 invocation=""
 json=0
 since=""
@@ -1742,7 +1807,9 @@ if [ -n "$since" ]; then
   esac
   written=0
   while [ "$written" -lt "$records" ]; do
-    printf '{"_SYSTEMD_UNIT":"%s","MESSAGE":"%s"}\n' "$unit" "$message"
+    printf '{%s,%s,"_SYSTEMD_UNIT":"%s","_PID":"%s","PRIORITY":"3","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
+      "$host_fields" "$(service_fields "${unit%.service}")" "$unit" \
+      "$((4000 + written))" "${unit%.service}" "$message"
     written=$((written + 1))
   done
   exit 0
@@ -1766,8 +1833,9 @@ case "${TP_FAKE_MODE:-ok}:$unit" in
 esac
 message='fixture service started'
 [ "${TP_FAKE_MODE:-ok}" = journal-empty-message ] && message=''
-printf '{"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
-  "$invocation" "$unit" "$message"
+printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4001","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
+  "$host_fields" "$(service_fields "${unit%.service}")" "$invocation" "$unit" \
+  "${unit%.service}" "$message"
 
 # The agent's platform identity line, emitted only by a start that
 # happened under the denial drop-in. On this row the agent establishes no
@@ -1794,10 +1862,18 @@ if [ "$unit" = tensorplate-agent.service ] && [ "$agent_state" = denied ]; then
     offline-identity-twice) repeat=2 ;;
   esac
   while [ "$repeat" -gt 0 ]; do
-    printf '{"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","MESSAGE":"platform identity: %s","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
-      "$invocation" "$unit" "$identity"
+    printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4001","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"platform identity: %s","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
+      "$host_fields" "$(service_fields "${unit%.service}")" "$invocation" "$unit" \
+      "${unit%.service}" "$identity"
     repeat=$((repeat - 1))
   done
+fi
+# What `journalctl --show-cursor` prints after the records: a line that
+# is not a record, after records that are. The projection refuses it
+# where it reads the capture, so the stage's own parser never sees it.
+if [ "${TP_FAKE_MODE:-ok}" = journal-trailing-line ] &&
+   [ "$unit" = tensorplate-agent.service ]; then
+  printf '%s\n' "-- cursor: ${cursor}"
 fi
 STUB
 
@@ -1881,11 +1957,20 @@ case "$command" in
       profile-other-row) profile_row=jetson-orin-nx-16gb-jp62 ;;
       doctor-warns-*) warned="${mode#doctor-warns-}" ;;
     esac
-    # What this row's doctor actually renders into host_os: the JetPack
-    # version, the image identity built from /etc/nv_tegra_release, and
-    # the exact facts. No machine type, because there is no metadata
-    # service on this device to name one.
-    host_os="JetPack 6.2 (L4T R36.4 (Ubuntu 22.04 base)) [exact: version 6.2, L4T R36.4.3]"
+    # What this row's doctor renders into host_os, in the CLI's own order
+    # (cli/src/commands/doctor/mod.rs): the OS a row names and its
+    # version, the image identity in parentheses, the machine type after
+    # it where there is one, then the exact facts. No machine type here,
+    # because there is no metadata service on this device to name one.
+    #
+    # The image identity is the BSP line and the Ubuntu base, lowercase
+    # -- platform/src/detect.rs builds it from row_granularity(), which
+    # is r<major>.x and deliberately not the revision -- and the exact
+    # L4T release is exact(), which is lowercase too. The exact version
+    # is the nvidia-jetpack package's, which carries the build suffix the
+    # row version drops. The recorded fixture for this row carries the
+    # same identity, and the check below reads this line against it.
+    host_os="JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) [exact: version 6.2-b77, L4T r36.4.3]"
     case "$mode" in
       # A machine type doctor could only have got from a metadata
       # service, in each of the two spellings the CLI renders. Under the
@@ -1893,18 +1978,21 @@ case "$command" in
       # that resolved from an answer rather than from local facts.
       offline-doctor-live-metadata)
         if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
-          host_os="JetPack 6.2 on g2-standard-8 (from GCE metadata) [exact: version 6.2, L4T R36.4.3]"
+          host_os="JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) on g2-standard-8 (from GCE metadata) [exact: version 6.2-b77, L4T r36.4.3]"
         fi
         ;;
       offline-doctor-recorded-metadata)
         if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
-          host_os="JetPack 6.2 on g2-standard-8 (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; same kernel boot) [exact: version 6.2, L4T R36.4.3]"
+          host_os="JetPack 6.2 (L4T r36.x (Ubuntu 22.04 base)) on g2-standard-8 (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; same kernel boot; CPU count, MemTotal and NVIDIA devices unchanged) [exact: version 6.2-b77, L4T r36.4.3]"
         fi
         ;;
-      # The L4T release gone from host_os: doctor is no longer naming the
-      # local file this row resolves out of.
+      # The L4T release gone from host_os, from the image identity and
+      # from the exact facts alike: doctor could not read the local file
+      # this row resolves out of, so it names neither.
       offline-doctor-no-l4t)
-        if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then host_os="JetPack 6.2"; fi
+        if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
+          host_os="JetPack 6.2 [exact: version 6.2-b77]"
+        fi
         ;;
       offline-doctor-failing)
         if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then failing=1; fi
@@ -2026,6 +2114,19 @@ JSON
     if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
       [ "$mode" = offline-status-other-deployment ] && active_id=a-different-deployment
       [ "$mode" = offline-status-not-loopback ] && serving_url="\"http://169.254.169.254:${TP_FAKE_SERVING_PORT}/infer\""
+      # The read AFTER the denied deploy, and only that one: the agent
+      # answers with something other than the deployment the deploy
+      # reply said it had made. Keyed on the deploy having landed -- the
+      # active id it wrote ends in the offline suffix -- so the read
+      # before it is untouched and the stage gets as far as the check
+      # that reads this one. The two modes above are applied to every
+      # denied read and are caught by the first `status checks`, which
+      # is why neither of them reaches this step.
+      if [ "$mode" = offline-status-after-deploy-other-deployment ]; then
+        case "$active_id" in
+          *-offline) active_id=a-different-deployment ;;
+        esac
+      fi
     fi
     # The ninth read is the rollback's precondition: the candidate
     # serving what the baseline deployed. A device that is not in that
@@ -2447,24 +2548,56 @@ check "  and leaves it where it is" yes \
   "$([[ -L "${leftover_dir}/10-tensorplate-validation-offline.conf" ]] && echo yes || echo no)"
 preflight_units=""
 
-# The offline stage deploys as <id>-offline, which the CLI validates as
-# one filesystem path segment. Refused here rather than six stages in,
-# where the deploy would fail as a CLI validation error and read as a
-# failure of the denial.
+# Every id this run derives from --deployment-id, each of which the CLI
+# validates as one filesystem path segment: the offline stage's
+# <id>-offline and, in a run with a baseline set, the upgrade and
+# rollback stages' <id>-baseline and <id>-rollback. Refused here rather
+# than stages in, where the deploy would fail as a CLI validation error
+# and read as a failure of the stage that made it.
+#
+# The boundaries are one byte apart, so a guard that bounded only the
+# shortest derivation would pass the middle case. Read against
+# protocol/rust/src/agent_control.rs: MAX_DEPLOYMENT_ID_BYTES is 128.
 long_id="$(printf 'a%.0s' $(seq 1 121))"
 check "a deployment id whose offline form passes the 128-byte limit is refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-long-id" 0.2.1 v0.2.1-rc.2 "$assets" \
       "${confirm[@]}" --deployment-id "$long_id")"
 check "  and names the id the offline stage would have deployed" yes \
   "$(said "deploys as ${long_id}-offline")"
+# 120 bytes: the offline form is exactly 128 and the upgrade and rollback
+# forms are 129. A guard that only bounded the offline form would admit
+# this and fail seven stages later, inside stage_upgrade, after the
+# candidate has been purged.
+baseline_id="${long_id%a}"
+check "a deployment id whose baseline form passes the limit is refused too" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-baseline-id" 0.2.1 v0.2.1-rc.2 "$assets" \
+      "${confirm[@]}" --deployment-id "$baseline_id")"
+check "  and names the id the upgrade stage would have deployed" yes \
+  "$(said "deploys as ${baseline_id}-baseline")"
+# Refused with no baseline set named, as with one: one id is accepted or
+# refused by one rule however the run is invoked, and a --preflight-only
+# run answers for the run that follows it.
+check "  with a baseline set named as well" "1" \
+  "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-baseline-id-set" 0.2.1 v0.2.1-rc.2 \
+      "$assets" "${confirm[@]}" --deployment-id "$baseline_id" \
+      --baseline-tag v0.1.5 --baseline-assets-dir "$baseline_assets")"
 check "  while one byte shorter passes" "0" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-long-id-ok" 0.2.1 v0.2.1-rc.2 "$assets" \
-      "${confirm[@]}" --deployment-id "${long_id%a}")"
+      "${confirm[@]}" --deployment-id "${baseline_id%a}")"
 check "a deployment id outside the allowed charset is refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-bad-id" 0.2.1 v0.2.1-rc.2 "$assets" \
       "${confirm[@]}" --deployment-id 'smoke/../../etc')"
 check "  and names the charset" yes \
   "$(said 'must be ASCII letters, digits, dot, dash or underscore')"
+# `.` and `..` pass the charset and are reserved path segments the CLI
+# rejects, so the charset alone is not the rule.
+for reserved in . ..; do
+  check "a deployment id of ${reserved} is refused although the charset admits it" "1" \
+    "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-reserved-id-${#reserved}" \
+        0.2.1 v0.2.1-rc.2 "$assets" "${confirm[@]}" --deployment-id "$reserved")"
+  check "  and says the CLI reserves it" yes \
+    "$(said 'must not be . or .., which the CLI reserves as path segments')"
+done
 
 # A digest that is not sha256 hex would be refused only when it is
 # recorded, after the install stage has purged the device.
@@ -2596,6 +2729,7 @@ run_stages() {
   : >"${appliance}/deploy.log"
   : >"${appliance}/cxx.log"
   : >"${appliance}/cli-calls.jsonl"
+  : >"${appliance}/transient.log"
   : >"${appliance}/health-requests.log"
   rm -rf "${appliance}/staged-bundle" "${appliance}/scratch" "${appliance}/varlib" \
     "${appliance}/units"
@@ -2633,6 +2767,7 @@ run_stages() {
   env PATH="${stub_bin}:${PATH}" \
     TENSORPLATE_CLI_CONFIG="${appliance}/inherited-cli.json" \
     TP_FAKE_CLI_CALLS="${appliance}/cli-calls.jsonl" \
+    TP_FAKE_TRANSIENT_LOG="${appliance}/transient.log" \
     TP_FAKE_PACKAGE_LIST_CALLS="${appliance}/package-list-reads" \
     TP_FAKE_GROUP=member \
     TP_FAKE_SOCKET="${appliance}/run/agent.sock" \
@@ -2976,6 +3111,30 @@ print(" ".join(sorted(set(control.values()))), " ".join(sorted(set(probe.values(
     "$(grep -Eq "^python3 .*linux_offline_runtime\.py probe-unit --unit ${unit} --control-group /system\.slice/${unit}\.service --uid $(id -u) --gid $(id -g) " \
          "${appliance}/sudo.log" && echo yes || echo no)"
 done
+# The transient units are the operator's own: every CLI call made under
+# the denial, its probe and the control probe run as this account, with
+# its groups, so what the denial is applied to is the call this operator
+# makes online. Without these properties systemd-run runs the unit as
+# root -- a different call, with root's HOME and without the membership
+# of the agent's control group the run checked in preflight -- and the
+# stage would certify it as the operator's.
+#
+# --pipe --wait --collect is read back for the same reason: without
+# --wait the unit's exit status is systemd-run's rather than the CLI's,
+# so a failed call would pass.
+#
+# Seven units: the control probe, the five CLI calls and the denied
+# probe. Every one of them, rather than any one, so a property dropped
+# from one path is not covered by another. The operator is the stubbed
+# session's, not the runner's -- `id` is a stub here, and the harness
+# asks it the same questions it would ask on a device.
+check "  every transient unit ran as the operator, and reported the command's own status" \
+  "7 $("${stub_bin}/id" -un)|$("${stub_bin}/id" -Gn)|--pipe --wait --collect " \
+  "$(python3 -c 'import sys
+lines = [line.rstrip("\n") for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+# One distinct line, or every distinct one, so a single unit started
+# differently from the rest is named rather than averaged away.
+print(len(lines), " and ".join(sorted(set(lines))))' "${appliance}/transient.log")"
 check "  where the certificate carries both" \
   "tensorplate-agent.service tensorplate-observability.service" \
   "$(python3 -c 'import json,sys
@@ -2999,11 +3158,12 @@ print(json.load(open(sys.argv[1]))["payload"]["deployment_id"])' \
 check "  and the TensorRT engine returned its input unchanged under the denial" pass \
   "$(report_field "${ok_evidence}/offline-infer-check.json" infer)"
 check "  the certificate's verdicts are the ones its own documents carry" \
-  "True pass pass pass pass" \
+  "True pass pass pass pass pass" \
   "$(python3 -c 'import json,sys
 r=json.load(open(sys.argv[1]))
 cli=r["cli_under_denial"]
-print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"], cli["infer"])' \
+print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"],
+      cli["status_after_deploy"], cli["infer"])' \
     "${ok_evidence}/offline-runtime.json")"
 check "  and it records both services replaced under the denial and again without it" \
   "tensorplate-agent.service tensorplate-observability.service | tensorplate-agent.service tensorplate-observability.service" \
@@ -3055,6 +3215,163 @@ check "  and the offline evidence names no host address the scanner refuses" 0 \
 if ((offline_certificate_status != 0)); then
   sed 's/^/       /' "$offline_certificate_scan" >&2
 fi
+
+# --- the journal captures are projected where they are captured.
+#
+# The stub journalctl emits the metadata systemd attaches to every real
+# record. What reaches the evidence directory must carry only the fields
+# the stage assertions read -- the set the publication scanner accepts --
+# and must still carry them, or the projection has taken out what the
+# assertions depend on. The record counts are the stub's own, so a
+# projection that dropped records would fail here too.
+#
+# Prints `<records> <keys outside the allowlist> <required keys missing
+# from some record>`.
+journal_projection() {
+  local file="$1"
+  shift
+  python3 - "$file" "$@" <<'PY'
+import json, sys
+
+ALLOWED = {"MESSAGE", "PRIORITY", "SYSLOG_IDENTIFIER", "UNIT", "_PID",
+           "_SYSTEMD_UNIT", "_SYSTEMD_INVOCATION_ID", "__REALTIME_TIMESTAMP"}
+
+path = sys.argv[1]
+required = set(sys.argv[2:])
+extra, missing, records = set(), set(), 0
+for line in open(path, encoding="utf-8"):
+    if not line.strip():
+        continue
+    entry = json.loads(line)
+    records += 1
+    extra |= set(entry) - ALLOWED
+    missing |= required - set(entry)
+print(records, ",".join(sorted(extra)) or "none", ",".join(sorted(missing)) or "none")
+PY
+}
+for journal in agent observability; do
+  check "  the ${journal} journal is projected to the service's own fields" "1 none none" \
+    "$(journal_projection "${ok_evidence}/${journal}-journal.txt" \
+       MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+done
+# The agent instance that ran under the denial: its start record and the
+# platform identity line the offline stage reads out of it.
+check "  the offline agent journal is projected too, identity line and all" "2 none none" \
+  "$(journal_projection "${ok_evidence}/offline-agent-journal.txt" \
+     MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+# The crash-loop capture is taken by timestamp rather than by invocation,
+# so only MESSAGE and _SYSTEMD_UNIT are required of every record here.
+check "  the crash-loop journal is projected to the service's own fields" "5 none none" \
+  "$(journal_projection "${ok_evidence}/crash-loop-journal.txt" MESSAGE _SYSTEMD_UNIT)"
+# A projection that ran but left the raw capture behind would publish
+# nothing, and would still leave host metadata on the machine for the
+# next thing that collects logs. The scratch space is shared by every run
+# in this file, so the count is cumulative: the first run that leaves a
+# capture behind fails its own check, and every later one.
+scratch_holding_host_metadata() {
+  local count=0 file
+  while IFS= read -r file; do
+    if grep -qF '_HOSTNAME' "$file"; then
+      count=$((count + 1))
+    fi
+  done < <(find "${appliance}/scratch" -type f)
+  printf '%s' "$count"
+}
+check "  and no raw capture is left in the harness's scratch space" 0 \
+  "$(scratch_holding_host_metadata)"
+
+# --- and the scanner refuses a capture that was not projected.
+#
+# The four checks above are read against this file's own idea of the
+# allowed set. What decides publication is the scanner, so drive it over
+# the same files: the projected captures pass, and the stub journalctl's
+# own unprojected output for one of them does not. Without the second
+# half the first would certify a harness that had stopped projecting only
+# if the scanner also stopped objecting.
+projected_scan="${td}/journal-projected-scan.out"
+projected_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" --patterns-only \
+  "${ok_evidence}/agent-journal.txt" "${ok_evidence}/observability-journal.txt" \
+  "${ok_evidence}/offline-agent-journal.txt" "${ok_evidence}/crash-loop-journal.txt" \
+  >"$projected_scan" 2>&1 || projected_status=$?
+check "  the projected captures pass the publication scanner" 0 "$projected_status"
+if ((projected_status != 0)); then
+  sed 's/^/       /' "$projected_scan" >&2
+fi
+raw_capture="${td}/raw-agent-journal.txt"
+# Its own unit root, so what the stub prints does not depend on which
+# run left the appliance's generation files as they are: one agent
+# instance that started with nothing denied, which is one record.
+raw_units="${td}/raw-journal-units"
+mkdir -p "${raw_units}/generation"
+printf '1\nopen\n' >"${raw_units}/generation/tensorplate-agent"
+TP_FAKE_MODE=ok TP_OFFLINE_UNIT_ROOT="$raw_units" "${stub_bin}/journalctl" \
+  -u tensorplate-agent _SYSTEMD_INVOCATION_ID=11111111111111111111111111110001 \
+  -n 100 --no-pager --output=json >"$raw_capture"
+# Every field the stub emits and the projection removes, named here so a
+# stub trimmed back to the handful of host fields a denylist would name
+# fails rather than quietly admitting one. The field named per run sorts
+# between SYSLOG_FACILITY and the underscored names.
+check "  the unprojected capture carries the fields the projection removes" \
+  "1 SYSLOG_FACILITY,${TP_FAKE_JOURNAL_FIELD},_BOOT_ID,_CAP_EFFECTIVE,_CMDLINE,_COMM,_EXE,_GID,_HOSTNAME,_MACHINE_ID,_STREAM_ID,_SYSTEMD_CGROUP,_SYSTEMD_SLICE,_TRANSPORT,_UID,__CURSOR,__MONOTONIC_TIMESTAMP,__SEQNUM,__SEQNUM_ID none" \
+  "$(journal_projection "$raw_capture" MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+raw_scan="${td}/journal-raw-scan.out"
+raw_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" --patterns-only \
+  "$raw_capture" >"$raw_scan" 2>&1 || raw_status=$?
+check "  and the scanner refuses it" 1 "$raw_status"
+check "  for its journal fields, and for nothing else" "journal-field" \
+  "$(python3 - "$raw_scan" <<'PY'
+import re, sys
+
+classes = set()
+for line in open(sys.argv[1], encoding="utf-8"):
+    match = re.match(r"^(\S+):\d+: (.+) \(\d+ chars\)$", line.rstrip("\n"))
+    if match:
+        classes.add(match.group(2))
+print(",".join(sorted(classes)) or "none")
+PY
+)"
+# The three lists that have to agree: what the harness keeps, what the
+# scanner admits, and what this file checks against. A rename or an
+# emptied collection reads as no field set at all, which is drift this
+# has to report rather than silently compare nothing.
+check "  the harness, the scanner and this file agree on the allowed fields" yes \
+  "$(python3 - "$harness" "${repo_root}/tools/validation/check-evidence-publication.sh" "$0" <<'PY'
+import re, sys
+
+def field_set(path, name):
+    """The double-quoted strings in the collection `name` is assigned."""
+    body = open(path, encoding="utf-8").read()
+    start = body.find("\n" + name + " = ")
+    if start < 0:
+        return None
+    depth = 0
+    for index in range(start, len(body)):
+        character = body[index]
+        if character in "({[":
+            depth += 1
+        elif character in ")}]":
+            depth -= 1
+            if depth == 0:
+                return frozenset(re.findall(r'"([^"]*)"', body[start:index])) or None
+    return None
+
+harness, scanner, verifier = sys.argv[1:]
+sets = {
+    "harness": field_set(harness, "KEEP"),
+    "scanner": field_set(scanner, "JOURNAL_KEYS"),
+    "verifier": field_set(verifier, "ALLOWED"),
+}
+unread = sorted(where for where, fields in sets.items() if fields is None)
+if unread:
+    print("no field set read from: " + ", ".join(unread))
+elif len(set(sets.values())) != 1:
+    print(" ".join(f"{where} {sorted(fields)}" for where, fields in sets.items()))
+else:
+    print("yes")
+PY
+)"
 
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "${ok_evidence}/lifecycle-report.json" <<'PY'
@@ -3309,8 +3626,9 @@ done
 # --- status-logs.
 for mode_case in "journal-command-fails|9|step failed (exit 9): capture the tensorplate-agent journal" \
                  "journal-empty-agent|1|tensorplate-agent.service: no journal records from the current service invocation" \
-                 "journal-no-entries|1|tensorplate-agent.service: journal output is not a JSON record" \
-                 "journal-not-object|1|tensorplate-agent.service: journal record is not from the current service invocation" \
+                 "journal-no-entries|1|tensorplate-agent: journal line 1 is not a JSON record" \
+                 "journal-not-object|1|tensorplate-agent: journal line 1 is not a JSON record" \
+                 "journal-trailing-line|1|tensorplate-agent: journal line 2 is not a JSON record" \
                  "journal-empty-observability|1|tensorplate-observability.service: no journal records from the current service invocation" \
                  "journal-stale-invocation|1|tensorplate-agent.service: journal record is not from the current service invocation" \
                  "journal-wrong-unit|1|tensorplate-agent.service: journal record is not from the current service invocation" \
@@ -3331,6 +3649,18 @@ for mode_case in "journal-command-fails|9|step failed (exit 9): capture the tens
   check "  and status-logs is recorded as a failure" fail \
     "$(stage_status "${evidence}/lifecycle-report.json" status-logs)"
   check "  for the reason the case provokes" yes "$(logged "${evidence}/status-logs.log" "${rest#*|}")"
+  # Whatever the verdict on a capture, its raw copy is gone: a harness
+  # that skipped the removal on a failing capture leaves host metadata
+  # in the scratch space for the next thing that collects logs.
+  check "  and no raw capture is left in the harness's scratch space" 0 \
+    "$(scratch_holding_host_metadata)"
+  if [[ "$mode" == journal-trailing-line ]]; then
+    # The record before the refused line was filed, and filed projected:
+    # a refusal does not copy the raw capture through.
+    check "  and what was filed before the refusal is projected" "1 none none" \
+      "$(journal_projection "${evidence}/agent-journal.txt" \
+         MESSAGE _SYSTEMD_UNIT _SYSTEMD_INVOCATION_ID)"
+  fi
 done
 check "a failed status read stops status-logs before anything else is recorded" no \
   "$([[ -e "${td}/stages-statuslogs-status-fails/logs-command.exit" ]] && echo yes || echo no)"
@@ -3512,6 +3842,43 @@ check "  and preserves the backup for manual recovery" yes "$(backup_retained)"
 check "  the report does not certify the failed recovery" fail \
   "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
 
+# Whether a check filed its verdict document. `_emit` writes one only
+# after that check passed, so a document that is there is a check that
+# passed and one that is not is a check that never did.
+filed() {
+  [[ -s "$1" ]] && printf 'yes' || printf 'no'
+}
+
+# The doctor fixture renders this row's host_os the way the CLI does, so
+# a later tightening of the harness's --host-os-phrase can be read off
+# it rather than guessed at. The image identity is not transcribed here:
+# it is the one the repository records for this exact row, and platform
+# matching is exact string equality, so a fixture that spelled it
+# differently would make a tightened phrase pass here and fail on every
+# device.
+check "the doctor fixture's host_os carries this row's recorded image identity" yes \
+  "$(python3 - "$0" "${repo_root}/test/platform/host_identity/jetson-orin-nano-8gb-jp62.json" <<'@H@'
+import json, re, sys
+
+verifier, recorded = sys.argv[1:]
+expect = json.load(open(recorded, encoding="utf-8"))["expect"]
+# What the CLI writes before the exact facts: "<os_name> <os_version>
+# (<image_identity>)", and no machine type, because this row has none.
+head = "{} {} ({})".format(expect["os_name"], expect["os_version"],
+                           expect["image_identity"])
+body = open(verifier, encoding="utf-8").read()
+match = re.search(r'^    host_os="([^"]*)"$', body, re.M)
+if not match:
+    print("no: the fixture no longer assigns host_os on its own line")
+elif not match.group(1).startswith(head):
+    print("no: {!r} does not start with {!r}".format(match.group(1), head))
+elif expect["machine_type"] is not None:
+    print("no: the recorded row now expects a machine type")
+else:
+    print("yes")
+@H@
+)"
+
 # --- offline regressions.
 #
 # Every way the offline stage could certify a device it did not deny, an
@@ -3530,11 +3897,13 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
             offline-drop-in-not-removed offline-cleanup-invocation-unreadable \
             offline-leftover-drop-in offline-leftover-drop-in-observability \
             offline-leftover-dangling-symlink \
-            offline-probe-leaks offline-probe-crashes offline-transient-not-denied \
+            offline-probe-leaks offline-probe-crashes offline-cli-probe-crashes \
+            offline-transient-not-denied \
             offline-service-filter-not-attached offline-cli-filter-not-attached-deploy \
             offline-control-refused offline-unit-control-refused offline-control-child-fails \
             offline-agent-socket-unreachable \
             offline-status-other-deployment offline-status-not-loopback \
+            offline-status-after-deploy-other-deployment \
             offline-doctor-live-metadata offline-doctor-recorded-metadata \
             offline-doctor-no-l4t offline-doctor-failing offline-doctor-row-warning \
             offline-identity-live-metadata offline-identity-records offline-identity-twice \
@@ -3546,7 +3915,7 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
   # unit with no filter is refused by the first CLI call's own probe.
   expected_status=1
   case "$mode" in
-    offline-probe-crashes) expected_status=70 ;;
+    offline-probe-crashes|offline-cli-probe-crashes) expected_status=70 ;;
     offline-transient-not-denied|offline-cli-filter-not-attached-deploy) expected_status=71 ;;
     offline-signal-int) expected_status=130 ;;
     offline-signal-term) expected_status=143 ;;
@@ -3627,7 +3996,7 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
       failure="refused:udp_test_net_v4" ;;
     offline-identity-live-metadata)
       step_failed="the agent established no machine type, and recorded none"
-      failure="machine_type_from_the_record" ;;
+      failure="machine_type_source_is_the_expected_one" ;;
     offline-identity-records)
       step_failed="the agent established no machine type, and recorded none"
       failure="record_not_rewritten_while_denied" ;;
@@ -3640,12 +4009,18 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
     offline-status-not-loopback)
       step_failed="status checks"
       failure="serving_url_on_the_allowed_loopback_address" ;;
+    # The deploy reply is the CLI's account of its own request; this is
+    # the agent's account of what it then had active. Only the check
+    # after the second denied status read can catch the difference.
+    offline-status-after-deploy-other-deployment)
+      step_failed="the fresh deployment is active"
+      failure="active_deployment" ;;
     offline-doctor-live-metadata|offline-doctor-recorded-metadata)
       step_failed="doctor resolves jetson-orin-nano-8gb-jp62 from this device's own facts"
-      failure="host_os_machine_type_not_from_live_metadata" ;;
+      failure="host_os_names_the_forbidden_phrase" ;;
     offline-doctor-no-l4t)
       step_failed="doctor resolves jetson-orin-nano-8gb-jp62 from this device's own facts"
-      failure="host_os_machine_type_from_the_record" ;;
+      failure="host_os_names_the_expected_phrase" ;;
     offline-doctor-failing)
       step_failed="doctor resolves jetson-orin-nano-8gb-jp62 from this device's own facts"
       failure="doctor_no_failing_findings" ;;
@@ -3664,6 +4039,14 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
     offline-probe-crashes)
       step_failed="probe inside the tensorplate-agent control group"
       failure="error: probe-unit failed unexpectedly: RuntimeError" ;;
+    # The same crash one layer out: inside the probe a CLI call's own
+    # transient unit takes of itself, where the module has to exit rather
+    # than exec the call it could not clear. A different path from the
+    # one above, which stops in a service's control group, three steps
+    # earlier and before any CLI call is attempted.
+    offline-cli-probe-crashes)
+      step_failed="status under denial"
+      failure="error: run-denied failed unexpectedly: RuntimeError" ;;
     offline-transient-not-denied)
       step_failed="status under denial"
       failure="the status unit does not enforce the denial, so tensorplate was not run" ;;
@@ -3675,6 +4058,27 @@ for mode in offline-denial-inert offline-localhost-shorthand offline-drop-in-ext
     check "  and the stage stopped at ${step_failed}" yes \
       "$(grep -Fq "step failed (exit ${expected_status}): ${step_failed}" \
            "${evidence}/offline.log" && echo yes || echo no)"
+  fi
+  if [[ "$mode" == offline-cli-probe-crashes ]]; then
+    # The call is exec'd by the probe's own process, after the probe
+    # classified: a probe that raised never got there, so the CLI stub
+    # recorded nothing under the denial.
+    check "  and no CLI call was made under the denial" 0 \
+      "$(python3 -c 'import json,sys
+print(sum(1 for line in open(sys.argv[1], encoding="utf-8")
+          if json.loads(line)["denied"] == "1"))' "${appliance}/cli-calls.jsonl")"
+  fi
+  if [[ "$mode" == offline-status-after-deploy-other-deployment ]]; then
+    # Reached only because everything before it passed: the first denied
+    # status read, doctor, the deploy and the deploy's own check. Without
+    # this the case would be another way of failing `status checks` and
+    # would say nothing about the step it exists for.
+    check "  having passed the first status read and the deploy checks" "yes yes" \
+      "$(filed "${evidence}/offline-status-check.json") $(filed "${evidence}/offline-deploy-check.json")"
+    # And the certificate cannot be filed without this step's verdict:
+    # the stage stopped before it, so no offline-runtime.json exists.
+    check "  and no offline certificate was filed" no \
+      "$([[ -e "${evidence}/offline-runtime.json" ]] && echo yes || echo no)"
   fi
   if [[ -n "$failure" ]]; then
     check "  for the reason the case provokes" yes \
@@ -3723,6 +4127,59 @@ print(" ".join(call["command"] for call in calls if call["denied"] == "1"))' \
       ;;
   esac
 done
+
+# --- every privileged step the offline stage takes, failed on its own.
+#
+# The same rule the other stages are held to: errexit is suspended inside
+# a stage body, so an unguarded `sudo ...` there runs on and the stage
+# returns 0. Each command below is failed by itself, and the stage has to
+# record a failure, name the step, and put the network policy back.
+#
+# The first seven are the stage body's, where the stage stops at the
+# first failure. The last three are the cleanup's, which is deliberately
+# best-effort -- a cleanup that stopped at its first failure would leave
+# the rest of the device denied -- so what is required of those is that
+# the failure is named and the stage fails, not that nothing followed.
+#
+# `systemctl restart`, `systemctl daemon-reload` and `journalctl` are
+# taken by earlier stages too, spelled the same way, so those four are
+# narrowed to the side of this stage they belong to: a substring alone
+# would always fail the earlier stage and never reach this one. Every
+# other command named here appears only in this stage.
+agent_drop_in="$(offline_drop_in tensorplate-agent)"
+for injected_case in "install -D -m 0644=install the tensorplate-agent denial drop-in=0" \
+                     "systemctl daemon-reload=reload systemd=0" \
+                     "systemd-run=control probe=0" \
+                     "journalctl@denied=capture the tensorplate-agent journal=0" \
+                     "control-unit=control inside the tensorplate-agent control group=0" \
+                     "probe-unit=probe inside the tensorplate-agent control group=0" \
+                     "systemctl restart@denied=restart both services under denial=0" \
+                     "systemctl daemon-reload@restored=reload systemd=0" \
+                     "systemctl restart@restored=restart both services without denial=0" \
+                     "rm -f ${agent_drop_in}=remove the tensorplate-agent drop-in=1"; do
+  injected="${injected_case%%=*}"
+  rest="${injected_case#*=}"
+  step_name="${rest%=*}"
+  expected_leftovers="${rest##*=}"
+  evidence="${td}/stages-offline-sudo-fails-${step_name// /-}"
+  check "a failing '${step_name}' is recorded as a failed offline stage" fail \
+    "$(run_stages ok "$evidence" "$injected" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  crash-loop passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and the failed step is the one named" yes \
+    "$(logged "${evidence}/offline.log" "step failed (exit 9): ${step_name}")"
+  check "  and the network policy is put back anyway" "$expected_leftovers" \
+    "$(offline_drop_ins_left)"
+  check "  and no offline certificate was filed" no \
+    "$([[ -e "${evidence}/offline-runtime.json" ]] && echo yes || echo no)"
+done
+# The one case that cannot put the policy back: the removal itself is
+# what fails, so the stage says how to remove it by hand rather than
+# leaving the operator to work the path out.
+check "a drop-in the device would not remove is named in the recovery instruction" yes \
+  "$(logged "${td}/stages-offline-sudo-fails-remove-the-tensorplate-agent-drop-in/offline.log" \
+     "the offline network denial may still be in place; remove it with: sudo rm -f")"
 
 # A probe that crashes, from a checkout under a home directory -- the
 # shape of CI's own /home/runner checkout, where an uncaught traceback
