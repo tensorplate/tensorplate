@@ -72,6 +72,123 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Its deploy-smoke bundle selects a device-neutral fixture profile and
   executes no accelerator kernel.
 
+- The Ubuntu x86_64 cloud rows now run the offline stage, so a run with
+  `--baseline-assets-dir` exercises all eight canonical lifecycle stages.
+  Both services, and each of `status`, `doctor`, a fresh deploy and an
+  inference, run under a per-unit denial that allows only `127.0.0.1/32`
+  and `::1/128` -- deliberately not systemd's `localhost` shorthand,
+  which expands to `127.0.0.0/8` and would admit the systemd-resolved
+  stub at `127.0.0.53` and the DNS namespace behind it. Each CLI call
+  runs in its own denied transient unit. The denial is a runtime drop-in
+  under `/run/systemd/system`, never `/etc`, and is removed on every exit
+  path including `SIGINT`, `SIGTERM` and `SIGHUP`, with the removal read
+  back from systemd rather than assumed. The cleanup is best-effort on
+  every step: a removal that fails for one unit does not stop the other
+  unit's, nor the reload, restart and readback, and a cleanup that still
+  fails prints the drop-in paths and the command that removes them. A
+  drop-in an earlier run left behind is refused in preflight, before
+  anything is installed, as well as by the stage.
+  Enforcement is established by probes run under the denial, each
+  against a control run first with nothing denied: one in a denied
+  transient unit, and one inside each service's own control group,
+  because systemd attaches the filter to each unit on a best-effort basis
+  and a filtered transient unit says nothing about a service whose own
+  attach failed -- and one inside the transient unit of each CLI call, for
+  the same reason: identical properties on every unit are configuration,
+  not that unit's filter. The module's `run-denied` sends the datagrams
+  from inside the call's unit, files them as
+  `offline-cli-probe-<call>.json`, and execs the call in the same process
+  only if they classify as enforced; otherwise it exits 71 and the call
+  is never made. The harness's verifier fails a run in which only the
+  doctor, deploy or infer unit's filter did not attach, and requires that
+  call never to have run. Joining a service's control group takes root;
+  the helper refuses any group that is not exactly that unit's, reads the
+  move back, and drops to the operator's ids before it sends anything.
+  Every operation in a control must have completed -- each datagram
+  sent, the child process run to a clean exit, each TCP connect
+  answered -- and a control that was refused, timed out, or whose child
+  exited non-zero or never ran fails the stage by name: it sent nothing,
+  so it cannot show that the later refusal was the denial's doing. The
+  helper files a control only if it could be a baseline, so such a control
+  fails the stage as it is taken, before either service is denied, and
+  `run-denied` refuses one with exit status 1, naming the control rather
+  than the unit, before it sends anything. The GCE metadata service must
+  answer the controls outright, over TCP and as a datagram, since the
+  stage's claim is that the denial is what made that service unreachable.
+  A datagram under the denial must be refused with `EPERM`, which the
+  kernel returns from `sendto()`. A TCP connect cannot be:
+  `tcp_connect()` passes on only `ECONNREFUSED` from a transmit, so a
+  connect whose SYN the filter dropped times out. It is accepted as
+  silenced only where its control was answered, and filed apart from the
+  refusals.
+  The control also decides what each operation can prove: one the host
+  could not perform with nothing denied cannot be refused by the denial
+  either, so it is named in the result as an operation this host cannot
+  send rather than reported as a denial that failed to bite -- except a
+  loopback destination, which every host routes. That is the case for
+  every global IPv6 destination on an IPv4-only VM, which is the Compute
+  Engine default: the cgroup egress filter runs after the route lookup,
+  so the answer is `ENETUNREACH` with and without the drop-in.
+  Reading the properties back is not enough on its own -- `IPAddressDeny=`
+  is silently inert where the BPF filter cannot be installed, and
+  `systemctl show` answers for a dead or nonexistent unit with empty
+  values, so every readback requires a loaded, active unit with an
+  invocation id first. `systemctl show` also answers with the unit's
+  *loaded* configuration, which counts a drop-in from `daemon-reload`
+  onwards whether or not anything restarted under it, so each readback
+  compares the invocation id against the one the unit carried before the
+  policy changed -- on the way in and on the way out. systemd prints the
+  prefix lists from a hash set whose order changes with each PID 1
+  start, so the readback compares them as sets and files them in one
+  canonical order.
+  `offline-runtime.json` derives every verdict it states: the enforcement
+  verdict by classifying every probe the document carries against its
+  own control, each CLI verdict from the result file that check filed
+  only after it passed, and the allow list from what systemd reported,
+  which must be exactly the two host addresses. It refuses a restore that
+  read back fewer removals than there were denied units, and a persistent
+  drop-in found on either side of the stage.
+  Doctor must still resolve the row with nothing failing, and the
+  identity must come from the boot-bound machine-type record rather than
+  from a live metadata answer: the agent's
+  `source=recorded_gce_metadata record=not_applicable` line and doctor's
+  `host_os` finding. Because that record is bound to the kernel boot,
+  offline cold boot is not supported, and the runbook says so: after a
+  reboot the agent must start once with metadata reachable before offline
+  detection works. The stage runs before upgrade, whose clean baseline
+  install deletes the record; install and upgrade stay online, and their
+  doctor runs must show the machine type read live from GCE metadata.
+  The mechanism lives in `tools/validation/linux_offline_runtime.py`,
+  named for the mechanism rather than the row, with its own tests in
+  `test/packaging/verify_linux_offline_runtime.py`. The drop-in, the
+  policy readback, the probe and the classification carry no row in them;
+  what is row-specific is supplied as options, so another systemd harness
+  adopts the file unchanged rather than editing it. A row with no
+  metadata service passes `--metadata-address none` and
+  `--metadata-operation absent`, which then requires both metadata
+  operations to be absent from every document rather than letting a
+  missing one read as one that passed; a row whose agent and doctor say
+  something else passes its own expected tokens, and the doctor check
+  files the phrases it required rather than a machine-type source it did
+  not establish. Every default is the Compute Engine row's.
+  Every subcommand of the module runs behind one boundary, because what
+  it prints to stderr lands in the stage log and in a failing report's
+  `detail`: a failure it did not anticipate is reported as
+  `error: <subcommand> failed unexpectedly: <exception type>` with exit
+  status 70, never with a traceback or the exception's message, either of
+  which quotes the checkout's path, and a file it cannot read is named by
+  its base name and errno text. The deploy-smoke bundle check names an
+  unreadable bundle file by its place in the bundle for the same reason,
+  and the bundle is copied from inside itself, so `cp` names a file it
+  cannot copy by a relative path, and a bundle it can no longer enter is
+  refused without naming it. The harness's verifier runs a crashing probe
+  from a copy of the harness under a `home/<name>` directory, as CI's own
+  checkout is, and bundles from under one with a missing model, an
+  unreadable manifest, an unreadable file only the copy reads, and a
+  directory locked just before the copy, and requires every such run's
+  evidence to pass the publication scanner with no traceback or path in
+  it.
+
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
   lifecycle report itself rather than through the clean-room step
@@ -99,6 +216,103 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   The Jetson runbook now uses this harness, and its prerequisites no
   longer claim the device carries no build toolchain. The clean-room
   harness is unchanged and remains the release clean-room smoke.
+
+- The Jetson lifecycle harness has upgrade and rollback stages, run with
+  `--baseline-tag` and `--baseline-assets-dir` against the last
+  published arm64 runtime set and skipped with that reason when no
+  baseline is given (V021-E05-F01-T02). The baseline is pinned to
+  v0.1.5: the report names only the candidate, so nothing a gate reads
+  could tell an earlier candidate of the same release from the path this
+  row validates. Preflight also refuses a candidate that is not newer
+  than it, a baseline whose runtime packages are not each strictly older
+  than the candidate set's by `dpkg --compare-versions`, one whose
+  `.deb` files `dpkg-deb` cannot read, one whose manifest names another
+  tag, and one whose manifest records it as an unreleased local
+  snapshot. The package comparison is what makes the path installable:
+  the tag is release metadata, and an older tag over newer `.deb`
+  versions would leave the upgrade stage's candidate install a downgrade
+  that the `apt-get -y` inside `install.sh` refuses, on a device the run
+  has already rebuilt twice. The versions compared are read from each
+  `.deb`'s own control field with `dpkg-deb` rather than from the
+  manifest, whose `version` the release driver parses out of the file
+  name and never reads from the package. `upgrade-path.json` records
+  them, so the evidence says why the path was admitted. The snapshot
+  check reads fields the set's own manifest declares and is a snapshot
+  filter rather than a proof of publication; binding a baseline to its
+  public release the way `tools/validation/check-baseline-publication.py`
+  does for the Ubuntu cloud rows would make this preflight depend on
+  reaching GitHub from the device and is left as follow-up work. Both
+  sets are always installed through their own installer with the
+  signature verified, with no option to skip that. Both releases'
+  `install.sh` read `TP_INSTALL_*` variables that switch verification
+  off or point it elsewhere, so preflight refuses a run whose
+  environment sets any of them; the upgrade's and the rollback's
+  installs also run behind a prefix that drops any `TP_INSTALL_*`
+  variable the sudo policy still passes, must print the installer's own
+  "signature verified" line, filed per install, and refuse a set whose
+  `SHA256SUMS` no longer hashes to the digest preflight recorded. The
+  five existing stages keep their bodies, including the install stage's
+  own installer call. Upgrade clears the candidate, installs the
+  baseline, requires its services up, deploys and round-trips the
+  identity engine on it, applies an operator conffile edit, then
+  installs the candidate over the running baseline and requires the
+  services back, the candidate's package versions, new service main
+  pids, the operator's edited conffile, a green doctor resolving this
+  row, and the baseline's deployment still serving with no deploy of the
+  harness's own. Rollback follows the documented procedure: it refuses to
+  replace an existing `state.bak`, stops both services, moves durable
+  state aside, removes every installed `tensorplate*` package except the
+  apt channel bootstrap -- `tensorplate-common` included, without which
+  the older set would be a downgrade `apt-get -y` refuses -- and reads
+  dpkg's own listing unfiltered before and after. Each of the four
+  packages that ship a file under `/etc` must be in `config-files`
+  state, so a package the listing leaves out or reports `not-installed`
+  is caught as purged; every other package must be `not-installed` or
+  `config-files`, so a half-configured one is caught as left behind; and
+  the apt channel bootstrap must be as the removal found it, which on a
+  device set up by `install.sh` alone means absent. It then installs the
+  baseline fresh and requires its services up, the baseline versions,
+  the operator's edit and the set-aside state to be intact, the older
+  agent to report no active or previous deployment, and a fresh
+  deployment to serve. The set-aside state is held to its contents, not
+  to its pathname, and to the whole directory rather than to one name in
+  it: with the services stopped and before the move, the harness lists
+  `state/` and digests every file in it, then does the same to
+  `state.bak/` after the baseline install and requires the two to match
+  name for name and digest for digest, naming the first file that
+  changed, went missing or was added. A device keeps more there than the
+  agent's `state.json` -- the agent also refreshes `state.json.bak`, the
+  copy it falls back to when the primary fails to decode, and the
+  observability unit writes `observability-snapshot.json` beside them --
+  so a removal or an install that emptied, truncated or rewrote any of
+  them in place fails the stage by name, and a check on one pathname
+  would have credited the rollback with preserving state it never read.
+  The checks that follow deliberately do not load those files -- they
+  exist to show the older agent did not -- so nothing else could catch
+  it. Doctor on the baseline is recorded, not asserted.
+  The harness drops `PYTHONOPTIMIZE`, which would otherwise turn its
+  Python `assert` checks into passes. A run that ends while the device
+  serves nothing -- in the upgrade from clearing the candidate to a
+  completed baseline install, or in the rollback from stopping the
+  services to a completed baseline install -- files
+  `stranded-device.txt` beside the stage logs and prints it. The report
+  reads dpkg when it is written rather than repeating a listing taken
+  before an installer that can fail after installing every package,
+  says the conffiles are kept only when the removal's listing showed
+  it, and says whether the baseline installer ran, where durable state
+  is, and how to recover, including how to return to the candidate when
+  the rollback stopped before removing anything. Where it says the state
+  was set aside, it also says what is behind that pathname, because it is
+  written in exactly the window where a baseline install that failed may
+  already have destroyed it and the stage's own check runs only after
+  that install returns: whether the set-aside copy still matches the
+  digests taken before the move, no longer matches them and should be
+  treated as damaged, or could not be read back. That read is
+  best-effort, so the report never fails on it. A terminal that has
+  gone away does not stop the lifecycle report from being written. The
+  report attests the candidate's `SHA256SUMS` digest; the baseline's is
+  filed separately with the upgrade path. `docs/install/lifecycle.md` no
+  longer says only the cloud harness runs the full rollback procedure.
 
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
@@ -188,12 +402,62 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   or a readable regular record within the size limit whose JSON or facts
   cannot establish identity, with a note. Unreadable, oversized, non-regular,
   and symlinked record paths still stop recording before fixture creation.
-  The cloud lifecycle harness still skips its offline stage; that stage is follow-up work.
+  The cloud lifecycle harness's offline stage rests on this record; see
+  the entry above for what it establishes and what the boot binding costs.
   The tests use the recorded L4 `g2-standard-8` host fixture and
   synthetic cases. The H100 row has no recorded host fixture yet, so it
   is not exercised with recorded facts.
 
 ### Changed
+
+- The Ubuntu x86_64 cloud lifecycle harness projects its journal captures
+  where it takes them. `journalctl --output=json` is read into a scratch
+  directory, and only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`,
+  `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and
+  `__REALTIME_TIMESTAMP` are written to `agent-journal.txt`,
+  `observability-journal.txt` and `crash-loop-journal.txt`. The host
+  metadata systemd attaches to every entry -- `_HOSTNAME`, `_MACHINE_ID`,
+  `_BOOT_ID`, `__CURSOR`, `_CMDLINE` and the rest -- is never recorded,
+  so a real run's journal evidence passes the publication scanner with
+  nothing edited by hand, and the projected capture is the record that is
+  retained: no raw copy of it outlives the capture. The scratch directory
+  is removed whatever the verdict on the capture was, and by the
+  harness's exit handler when a signal interrupts the capture; only an
+  uncatchable kill or a machine failure can leave it in `$TMPDIR`. A line
+  that is not a JSON record, including journalctl's own
+  `-- No entries --`, is refused rather than copied through, and fails
+  the stage that captured it. The unit and invocation assertions the
+  status-logs and crash-loop stages make are unchanged and now read the
+  projected records. `packages.txt` is recorded with the same
+  `dpkg-query` the harness already used elsewhere rather than with
+  `dpkg -l`, whose output carries each package's description and the
+  planning identifiers those quote.
+
+  The harness's own verifier checks that all three captures carry the
+  allowed fields and no others, that they still carry the fields the
+  stage assertions read, that a run which fails after the capture still
+  files a projected one, and that the install listing is the query's
+  three fields a line. Its stub journalctl emits the field set journald
+  attaches to a service's output and to systemd's own records, plus one
+  field whose name is new on every run, so only a projection that keeps
+  the service's fields -- not one that drops the host fields it knows --
+  passes. A non-record line after valid records must fail the stage for
+  either kind of capture, with the refused line named in the stage log,
+  because the projection is now the only reader of the raw capture. No
+  run may leave a raw capture in the harness's scratch space: not a
+  passing one, not one whose capture was refused, and not one signalled
+  mid-capture.
+  `tools/validation/check-evidence-publication.sh --patterns-only` must
+  admit the evidence of every stubbed run, passing or failing, with or
+  without a baseline, and must refuse a stubbed run's evidence with a
+  single capture replaced by the unprojected output it was projected
+  from, for that file's journal fields and nothing else. A passing scan
+  on its own would certify a harness that had stopped projecting. The
+  field set the harness keeps, the verifier asserts and the scanner
+  admits is compared across all three files, so no two of them can drift
+  together.
+
+- The packaging verification suite runs in two groups. `test/packaging/run.sh core` holds the packaging, installer and descriptor checks; `run.sh harness` holds the lifecycle harness verifiers, which CI now runs as their own job with a 45-minute budget instead of inside the 15-minute packaging job. The release artifact build runs only the core group, since the harness verifiers check validation tooling rather than the artifacts. With no argument `run.sh` still runs everything, and a verifier in neither group fails the suite. The harness job also installs the release tooling's Python requirements, so its stubbed reports are validated against the lifecycle schema rather than skipping that check.
 
 - The macOS Homebrew lifecycle harness's offline stage now runs the
   installed services with the network denied, not just doctor and an MPS

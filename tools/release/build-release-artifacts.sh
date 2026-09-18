@@ -514,8 +514,10 @@ fi
 [[ -x build/release/tensorplate-serving ]] ||
   die "serving worker binary was not staged at build/release/tensorplate-serving"
 
+# The lifecycle harness verifiers check the validation tooling, not the
+# artifacts being built, so the build runs only the packaging checks.
 note "running packaging verification suite"
-test/packaging/run.sh
+test/packaging/run.sh core
 
 note "building Debian packages"
 build_deb_args=()
