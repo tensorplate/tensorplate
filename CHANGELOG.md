@@ -217,6 +217,103 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   longer claim the device carries no build toolchain. The clean-room
   harness is unchanged and remains the release clean-room smoke.
 
+- The Jetson lifecycle harness has upgrade and rollback stages, run with
+  `--baseline-tag` and `--baseline-assets-dir` against the last
+  published arm64 runtime set and skipped with that reason when no
+  baseline is given (V021-E05-F01-T02). The baseline is pinned to
+  v0.1.5: the report names only the candidate, so nothing a gate reads
+  could tell an earlier candidate of the same release from the path this
+  row validates. Preflight also refuses a candidate that is not newer
+  than it, a baseline whose runtime packages are not each strictly older
+  than the candidate set's by `dpkg --compare-versions`, one whose
+  `.deb` files `dpkg-deb` cannot read, one whose manifest names another
+  tag, and one whose manifest records it as an unreleased local
+  snapshot. The package comparison is what makes the path installable:
+  the tag is release metadata, and an older tag over newer `.deb`
+  versions would leave the upgrade stage's candidate install a downgrade
+  that the `apt-get -y` inside `install.sh` refuses, on a device the run
+  has already rebuilt twice. The versions compared are read from each
+  `.deb`'s own control field with `dpkg-deb` rather than from the
+  manifest, whose `version` the release driver parses out of the file
+  name and never reads from the package. `upgrade-path.json` records
+  them, so the evidence says why the path was admitted. The snapshot
+  check reads fields the set's own manifest declares and is a snapshot
+  filter rather than a proof of publication; binding a baseline to its
+  public release the way `tools/validation/check-baseline-publication.py`
+  does for the Ubuntu cloud rows would make this preflight depend on
+  reaching GitHub from the device and is left as follow-up work. Both
+  sets are always installed through their own installer with the
+  signature verified, with no option to skip that. Both releases'
+  `install.sh` read `TP_INSTALL_*` variables that switch verification
+  off or point it elsewhere, so preflight refuses a run whose
+  environment sets any of them; the upgrade's and the rollback's
+  installs also run behind a prefix that drops any `TP_INSTALL_*`
+  variable the sudo policy still passes, must print the installer's own
+  "signature verified" line, filed per install, and refuse a set whose
+  `SHA256SUMS` no longer hashes to the digest preflight recorded. The
+  five existing stages keep their bodies, including the install stage's
+  own installer call. Upgrade clears the candidate, installs the
+  baseline, requires its services up, deploys and round-trips the
+  identity engine on it, applies an operator conffile edit, then
+  installs the candidate over the running baseline and requires the
+  services back, the candidate's package versions, new service main
+  pids, the operator's edited conffile, a green doctor resolving this
+  row, and the baseline's deployment still serving with no deploy of the
+  harness's own. Rollback follows the documented procedure: it refuses to
+  replace an existing `state.bak`, stops both services, moves durable
+  state aside, removes every installed `tensorplate*` package except the
+  apt channel bootstrap -- `tensorplate-common` included, without which
+  the older set would be a downgrade `apt-get -y` refuses -- and reads
+  dpkg's own listing unfiltered before and after. Each of the four
+  packages that ship a file under `/etc` must be in `config-files`
+  state, so a package the listing leaves out or reports `not-installed`
+  is caught as purged; every other package must be `not-installed` or
+  `config-files`, so a half-configured one is caught as left behind; and
+  the apt channel bootstrap must be as the removal found it, which on a
+  device set up by `install.sh` alone means absent. It then installs the
+  baseline fresh and requires its services up, the baseline versions,
+  the operator's edit and the set-aside state to be intact, the older
+  agent to report no active or previous deployment, and a fresh
+  deployment to serve. The set-aside state is held to its contents, not
+  to its pathname, and to the whole directory rather than to one name in
+  it: with the services stopped and before the move, the harness lists
+  `state/` and digests every file in it, then does the same to
+  `state.bak/` after the baseline install and requires the two to match
+  name for name and digest for digest, naming the first file that
+  changed, went missing or was added. A device keeps more there than the
+  agent's `state.json` -- the agent also refreshes `state.json.bak`, the
+  copy it falls back to when the primary fails to decode, and the
+  observability unit writes `observability-snapshot.json` beside them --
+  so a removal or an install that emptied, truncated or rewrote any of
+  them in place fails the stage by name, and a check on one pathname
+  would have credited the rollback with preserving state it never read.
+  The checks that follow deliberately do not load those files -- they
+  exist to show the older agent did not -- so nothing else could catch
+  it. Doctor on the baseline is recorded, not asserted.
+  The harness drops `PYTHONOPTIMIZE`, which would otherwise turn its
+  Python `assert` checks into passes. A run that ends while the device
+  serves nothing -- in the upgrade from clearing the candidate to a
+  completed baseline install, or in the rollback from stopping the
+  services to a completed baseline install -- files
+  `stranded-device.txt` beside the stage logs and prints it. The report
+  reads dpkg when it is written rather than repeating a listing taken
+  before an installer that can fail after installing every package,
+  says the conffiles are kept only when the removal's listing showed
+  it, and says whether the baseline installer ran, where durable state
+  is, and how to recover, including how to return to the candidate when
+  the rollback stopped before removing anything. Where it says the state
+  was set aside, it also says what is behind that pathname, because it is
+  written in exactly the window where a baseline install that failed may
+  already have destroyed it and the stage's own check runs only after
+  that install returns: whether the set-aside copy still matches the
+  digests taken before the move, no longer matches them and should be
+  treated as damaged, or could not be read back. That read is
+  best-effort, so the report never fails on it. A terminal that has
+  gone away does not stop the lifecycle report from being written. The
+  report attests the candidate's `SHA256SUMS` digest; the baseline's is
+  filed separately with the upgrade path. `docs/install/lifecycle.md` no
+  longer says only the cloud harness runs the full rollback procedure.
+
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
   is validated against its own platform: an x86_64 host is no longer
