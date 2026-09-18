@@ -314,6 +314,62 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   filed separately with the upgrade path. `docs/install/lifecycle.md` no
   longer says only the cloud harness runs the full rollback procedure.
 
+- The Jetson lifecycle harness has an offline stage, so a run with a
+  baseline set now exercises all eight canonical stages and the Jetson
+  row can report `pass` rather than `incomplete`. It is built on
+  `tools/validation/linux_offline_runtime.py`, the mechanism the Ubuntu
+  cloud rows already use, so both rows run the same rule rather than two
+  copies of it. Both services, and every TensorPlate CLI call the stage
+  makes, run under a per-unit denial of all IP traffic but `127.0.0.1/32`
+  and `::1/128` -- never systemd's `localhost` shorthand, which expands
+  to `127.0.0.0/8` and so admits the `systemd-resolved` stub and the DNS
+  namespace behind it. The denial is a runtime drop-in under
+  `/run/systemd/system`; nothing is written under `/etc`, every exit path
+  including INT, TERM and HUP removes it, and the removal is read back
+  from systemd rather than assumed.
+  Configuring a denial is not enforcing one -- `IPAddressDeny=` is
+  silently inert wherever systemd cannot install its BPF filter, and
+  `systemctl show` answers for a dead unit with empty values -- so the
+  stage probes, and does so where systemd attaches the filter: in a
+  denied transient unit, inside each service's own control group, and
+  inside each CLI call's own transient unit before that call, which is
+  made only if its own probe classified as enforced. Every probe is
+  classified against a control taken the same way with nothing denied,
+  and a control whose operations did not complete is refused as it is
+  taken, before anything on the device changes. The readback compares
+  each unit's invocation id from before the restart, so a policy that
+  reached the loaded configuration but no running instance fails.
+  This row has no metadata service, so the probes omit the metadata
+  operations and every classification requires them to be absent from
+  both documents rather than letting an operation that quietly vanished
+  read as one that passed. There is no boot-bound machine-type record on
+  a Jetson and the stage asserts nothing about one: the cloud row's
+  identity claim is about a Compute Engine mechanism this device has none
+  of, and restating it here would certify a fallback path that never
+  runs. What this row requires instead is that the denial changed nothing
+  about how it resolves -- doctor still reporting nothing failing,
+  resolving `jetson-orin-nano-8gb-jp62` exactly, still naming the L4T
+  release read from `/etc/nv_tegra_release` in `host_os` and never a
+  machine type from GCE metadata in either spelling, and the agent's
+  start-up identity line saying it established no machine type and
+  recorded none, which is what it says online too.
+  While denied, the appliance has to keep working: status answers over
+  the agent socket and still reports the deployment the agent re-warmed,
+  a fresh bundle deploys as `<deployment-id>-offline`, and the TensorRT
+  identity engine returns its input unchanged. The stage files
+  `offline-runtime.json`, which re-derives its enforcement verdict from
+  the probes and controls it carries rather than restating one.
+  The stage runs between crash-loop and upgrade, and the position is
+  load-bearing in both directions: it is about the candidate install the
+  stages above exercise and the deployment they left serving, and
+  upgrade's clearing step purges that install and deletes
+  `/var/lib/tensorplate`. Preflight now also refuses a device without
+  `systemd-run`, a harness copied out of the checkout without the offline
+  module beside it, a denial drop-in an earlier run left behind (per
+  unit, including a dangling symlink, and changing nothing), and a
+  `--deployment-id` outside the allowed charset or long enough that the
+  stage's derived `<id>-offline` would pass the CLI's 128-byte limit.
+
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
   is validated against its own platform: an x86_64 host is no longer

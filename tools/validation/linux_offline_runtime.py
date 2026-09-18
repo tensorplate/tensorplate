@@ -9,9 +9,10 @@ reads the denial back from systemd, probes the network from inside a
 denied transient unit, from inside each denied service's own control
 group and from inside each transient unit a CLI call runs in -- running
 the call there only once that unit's probe passed -- classifies every
-result against an undenied control, and checks that the row was
-resolved from the boot-bound machine-type record rather than from a
-metadata service the denial made unreachable.
+result against an undenied control, and checks that the row still
+resolved from whatever the row resolves from with the metadata service
+unreachable -- a boot-bound machine-type record on Compute Engine, local
+facts alone on a row that has no metadata service at all.
 
 It is named for the mechanism, not for a row. The drop-in, the policy
 readback, the probes and the classification carry no row in them. What
@@ -24,12 +25,15 @@ adopts this file unchanged rather than editing it:
   * `classify` takes `--metadata-operation absent`, which then requires
     those operations to be absent from both documents rather than letting
     a missing operation read as one that passed;
+  * `identity-check` takes `--expect-source none`, for a row whose agent
+    establishes no machine type and records none;
   * `doctor-check` and `identity-check` take the tokens the row expects
     its agent and its doctor to say.
 
 Every default is the Compute Engine row's, because that is the row this
-release validates; tools/validation/jetson-lifecycle.sh defers its
-offline stage with exactly this bar and supplies its own.
+module was first written for; tools/validation/jetson-lifecycle.sh runs
+its offline stage to exactly this bar and supplies its own, as a row with
+no metadata service and no machine-type record of any kind.
 
 Every subcommand prints its JSON result, writes it to --out when given,
 and exits non-zero naming the checks that failed. Results written to the
