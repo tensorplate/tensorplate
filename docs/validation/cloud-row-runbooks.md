@@ -22,8 +22,9 @@ directory along with the stage logs it cites and an
 `artifact-digest.txt` naming the candidate artifact set that was
 installed.
 
-**A run today reports `incomplete`, and the release gate refuses the
-row.** That is the accurate state rather than a defect:
+**A run without `--baseline-assets-dir` reports `incomplete`, and the
+release gate refuses the row.** That is the accurate state rather than a
+defect:
 
 | Canonical stage | Cloud rows |
 | --- | --- |
@@ -34,7 +35,7 @@ row.** That is the accurate state rather than a defect:
 | rollback | covered with `--baseline-assets-dir`; **skipped** without it |
 | restart | covered |
 | crash-loop | covered |
-| offline | **skipped** — GCE platform detection requires live metadata |
+| offline | covered |
 
 Upgrade and rollback need a baseline: a published, signed release whose
 amd64 runtime set is older than the candidate's. `v0.1.x` published only
@@ -69,6 +70,21 @@ request returns the expected fixture echo through that worker, and that
 services must have actual journal entries from their current invocation;
 an empty capture or entries from an earlier invocation do not pass.
 
+Every journal capture is projected as it is taken. The harness reads
+`journalctl --output=json` into a scratch directory, writes only
+`MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`,
+`_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP`
+into the evidence directory, and deletes the scratch directory whatever
+the verdict on the capture was. A signal that interrupts a capture
+deletes it on the way out; only a `SIGKILL` or a machine failure can
+leave it behind, in a private directory under `$TMPDIR`. The host
+metadata systemd attaches to every entry is therefore never recorded,
+and the projected file is the run's only copy — the retention rule in
+[the evidence rules](fixture-and-evidence-rules.md) applies to it as the
+raw record. A line that cannot be parsed as a JSON record, including
+journalctl's own `-- No entries --`, is refused rather than copied
+through, and fails the stage that captured it.
+
 After restarting both services, the harness requires new service PIDs,
 the same active deployment in status, a healthy serving endpoint, and
 another successful inference with the expected echo. This checks that
@@ -92,9 +108,202 @@ shell exit. If restoration fails, the run fails and retains the backup,
 with its path reported for manual recovery. Uncatchable termination such
 as `SIGKILL` cannot run cleanup.
 
-**upgrade and rollback** run after crash-loop, so the five stages above
-are always about a clean candidate install. A failed upgrade ends the
-run there, and the report has no rollback record.
+**offline** runs after crash-loop and before upgrade. It denies both
+services, and every TensorPlate CLI call it makes, all IP traffic except
+the two loopback host addresses, and then requires the appliance to keep
+working.
+
+The denial is `IPAddressDeny=any` with `IPAddressAllow=127.0.0.1/32` and
+`IPAddressAllow=::1/128`. It is deliberately **not** systemd's
+`localhost` shorthand: that expands to `127.0.0.0/8`, which admits the
+systemd-resolved stub at `127.0.0.53` and the whole DNS namespace behind
+it. The probe sends a datagram to `127.0.0.53` and requires it to be
+refused, and connects to it over TCP and requires the connect to go
+unanswered, so a stage that went back to the shorthand fails rather than
+passing with DNS still reachable.
+
+Both services get the denial as a **runtime** drop-in under
+`/run/systemd/system/<unit>.service.d/`. Nothing is written under
+`/etc/systemd/system`: a persistent drop-in would outlive the run and the
+host's next reboot. The drop-ins are removed on every exit path,
+including `SIGINT`, `SIGTERM`, `SIGHUP` and a failed stage, and the
+removal is read back from systemd rather than assumed. The cleanup never
+stops at its first failure: a removal that fails for one unit does not
+stop the other unit's, nor the `daemon-reload`, the restart and the
+readback that follow, and the exit handler retries all of it. If the
+removal still fails, the run fails and prints the drop-in paths and the
+command that removes them:
+
+```bash
+sudo rm -f <drop-in paths> && sudo systemctl daemon-reload \
+  && sudo systemctl restart tensorplate-agent tensorplate-observability
+```
+
+Uncatchable termination such as `SIGKILL` cannot run cleanup; a reboot
+clears `/run` in that case. A drop-in left behind that way is refused by
+the next run's preflight, before anything is installed, with its path
+and the same removal command. Install and every other stage before
+offline would otherwise run with both services denied.
+
+Each of `status`, `doctor`, a fresh `deploy` of the smoke bundle under a
+new deployment id, and `infer` runs inside its own denied transient unit
+(`systemd-run --pipe --wait --collect`), as the operator with their own
+groups. The stage never makes an undenied CLI call.
+
+Configuring a denial is not enforcing one. `IPAddressDeny=` is silently
+inert wherever systemd cannot install its BPF filter, and `systemctl
+show` answers for a dead or nonexistent unit with **empty** property
+values — which a readback that only looked for unexpected allow entries
+would read as a denied unit. So the readback requires each unit to be
+loaded, active and carrying an invocation id first, and the verdict on
+enforcement comes from probes, starting with one in a transient unit:
+
+- the **control** runs first, in a transient unit with no address policy,
+  and every operation in it must have **completed**: each datagram sent,
+  the child process run to a clean exit with its own send done, and each
+  TCP connect answered, accepted or reset. A control that was refused,
+  timed out, or whose child exited non-zero or never ran sent nothing, so
+  it cannot show that a refusal of the same operation under the denial
+  was the denial's doing. The GCE metadata service at `169.254.169.254`
+  must answer it outright, over TCP and as a datagram, since the stage's
+  whole claim is that the denial is what made that service unreachable.
+  The helper files a control only if it meets both, so a control that
+  does not is named and fails the stage as it is taken, before anything
+  is denied;
+- the **probe** then runs denied, against the same operations: the
+  metadata service, the resolver stub on TCP and UDP, another loopback
+  address, the `192.0.2.0/24` TEST-NET-1 and `2001:db8::/32`
+  documentation addresses, and the same send from a child process. Every
+  datagram must be refused outright with `EPERM` or `EACCES`. The two TCP
+  connects must go unanswered (`timeout`), and that counts only where
+  their control was answered;
+- the agent socket, the serving port on `127.0.0.1` and both loopback
+  host addresses must still work under the denial.
+
+The two protocols answer differently because the kernel does. systemd's
+filter is a cgroup egress program, and a packet it drops comes back from
+the IP output path as `EPERM`. A UDP `sendto()` returns that to the
+caller. A TCP connect does not: `tcp_connect()` in
+`net/ipv4/tcp_output.c` passes on only `ECONNREFUSED` from a transmit,
+and otherwise leaves the SYN queued for retransmission, so the connect
+waits out its timeout. A timed-out connect is attributable to the denial
+only if the same connect was answered moments earlier, so a control that
+timed out as well fails the stage. The certificate files the timed-out
+connects under `classification.operations_silenced_under_the_denial`,
+apart from the refusals.
+
+systemd also installs the filter on each unit separately, and on a
+best-effort basis: `cgroup_apply_firewall()` in `src/core/cgroup.c`
+ignores whether it worked. A filtered transient unit therefore says
+nothing about a service whose own attach failed. So the datagrams are
+also sent from **inside each service's own control group**, with that
+service's own control taken there before the denial and its probe after
+it, under the same rules. Joining a service's control group takes root.
+The helper refuses any control group that is not exactly that unit's,
+reads the move back from `/proc/self/cgroup`, and drops to the operator's
+uid and gid before it sends anything. The move is the only change it
+makes to the service, and the probe process exits before the services
+are restarted.
+
+The same holds for the transient units the CLI calls run in. Each is a
+unit of its own, and giving every one of them the same properties
+establishes their configuration, not any one unit's filter: a deploy
+unit whose attach failed would deploy with the network reachable while
+the probe unit after it was filtered. So each CLI call runs behind the
+helper's `run-denied`, which sends the same datagrams from **inside that
+call's own unit** first, files them as `offline-cli-probe-<call>.json`,
+and classifies them against the transient control. Only if they classify
+as enforced does it exec the call, in the same process and so in the same
+control group, and the unit's exit status is then the call's. Otherwise
+it exits 71 and the call is never made, which fails the stage. It checks
+the transient control again before it sends anything: a control that
+could not be a baseline says nothing about this unit, so it is refused
+with exit status 1, naming the control rather than the unit, and the call
+is not made either.
+
+The control also decides what each operation can prove. On Linux the
+cgroup egress filter runs *after* the route lookup, so an operation the
+host has no route for answers the same way with and without the drop-in —
+and the default Compute Engine VPC is IPv4-only, so the IPv6
+documentation address answers `ENETUNREACH` either way there. Such an
+operation is listed in the certificate under
+`classification.operations_this_host_cannot_send`, and the only thing
+required of the probe is that the denial did not make it start working.
+Loopback destinations are never excused this way: every host routes
+them, and they are what shows the shorthand was not used. Everything else
+has to be refused.
+
+Configuration is not the running service, either. `systemctl show`
+answers with the unit's *loaded* configuration, which counts a drop-in
+from `daemon-reload` onwards whether or not anything restarted under it —
+and stops counting a removed one the same way. So each readback also
+compares the unit's invocation id against the one it carried before the
+policy changed, on the way in and on the way out, and a restart that
+never replaced the running instance fails the stage. systemd prints both
+prefix lists from a hash set, in an order that changes with each PID 1
+start. The readback compares them as sets and files them in one canonical
+order.
+
+Filed as `offline-control.json`, `offline-probe.json`,
+`offline-classification.json`, the per-service
+`offline-unit-{control,probe,classification}-<unit>.service.json`, the
+per-call `offline-cli-probe-<call>.json` for `status`, `doctor`,
+`deploy`, `status-after-deploy` and `infer`, `offline-denial.json`,
+`offline-restored.json` and `offline-runtime.json`.
+`offline-runtime.json` states nothing it did not read back:
+
+- its enforcement verdict comes from classifying every probe against its
+  control: the transient unit's, each service's, and each CLI call's
+  unit's, which is classified again rather than taken from `run-denied`;
+- its four CLI verdicts come from the result files those checks filed
+  only after passing;
+- its allow list is what systemd reported, and must be exactly the two
+  host addresses;
+- the restore must have read back one removal per denied unit;
+- a persistent drop-in found on either side refuses the certificate.
+
+**Identity, and what it costs.** `tensorplate-agent` writes a
+machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
+every start where the GCE metadata service answered. The record is bound
+to the kernel boot id, the logical CPU count, `MemTotal` and the NVIDIA
+display PCI ids, and offline detection uses it only while the metadata
+query fails as unreachable **and** every one of those facts still
+matches. The stage requires the record to exist before it denies
+anything, and then requires the identity to have come from it: the
+agent's `platform identity: ... source=recorded_gce_metadata
+record=not_applicable` line in its own journal, and doctor's `host_os`
+finding saying the machine type was recorded rather than read live.
+Doctor must still resolve the row with nothing failing.
+
+**Because the record is bound to the boot, offline cold boot is not
+supported.** After a reboot the agent must start once with the metadata
+service reachable before offline detection works at all; a host that
+comes up with the network already denied has no record for that boot and
+fails detection rather than silently reporting no machine type. This
+stage does not claim otherwise, and the runbook's procedure is to run it
+on a host that has been online since its last boot.
+
+**install and upgrade stay online.** Both run the shipped installer the
+way an operator does, and denying them would validate a procedure nobody
+follows. Their doctor runs must show live detection: a `host_os` without
+`(from GCE metadata)` fails the stage, since a recorded shape there would
+mean the metadata service did not answer a host that was meant to be
+online. The stubbed-appliance tests also check the other direction: no
+installer runs with a denial in place, and no CLI call outside the
+offline stage runs denied or in a transient unit.
+
+**offline runs before upgrade, and has to.** Upgrade's clean baseline
+install deletes `/var/lib/tensorplate`, taking the machine-type record
+with it, and the baseline release never wrote one. An offline stage after
+upgrade would fail for want of evidence the stage ordering destroyed.
+
+The report still reports `incomplete` without `--baseline-assets-dir`,
+because upgrade and rollback are skipped. With a baseline, all eight
+canonical stages run.
+
+**upgrade and rollback** run after offline, so the six stages above are
+always about a clean candidate install. A failed upgrade ends the run
+there, and the report has no rollback record.
 
 **upgrade** purges the candidate, installs the baseline through the
 baseline's own `install.sh`, and deploys the smoke bundle on it. The
@@ -139,19 +348,6 @@ to start if `state.bak` exists when it begins, so the move can never
 nest state inside, or replace, a directory it did not create.
 
 A run with a baseline ends with the baseline installed.
-
-**offline is deferred.** On GCE, both the agent's platform detection and
-`tensorplate doctor` query `169.254.169.254` for the machine type. Removing
-network access makes that source unreadable, so doctor cannot resolve
-the row. Offline validation requires product support for trustworthy
-identity detection without network access; exempting metadata or treating
-an undetected row as a pass would not establish that behavior.
-
-The harness records this dependency as the offline skip reason. It does
-not install network drop-ins or produce offline pass artifacts. The
-report remains `incomplete`, and cannot satisfy the release lifecycle
-evidence gate, until offline and the other skipped stages are implemented
-and validated.
 
 The first reported L4 hardware run passed install, deploy-smoke,
 status-logs and restart using the earlier assertions. The stronger
@@ -246,12 +442,21 @@ describe a run of this harness as GPU validation.
    `python_pytorch_runtime` is ok without it. Verify
    `/usr/bin/python3 -c 'import torch'` before starting.
 
-5. **A verified candidate artifact set** copied onto the VM: `install.sh`,
+5. **`systemd-run` available, and the host online since its last boot.**
+   The offline stage runs every CLI call inside a transient unit, so
+   preflight refuses a host without `systemd-run`. It also needs the
+   agent to have started at least once this boot with the GCE metadata
+   service reachable, which the install stage provides: the machine-type
+   record it writes is bound to the boot id, so a VM rebooted into a
+   denied network has nothing to resolve its row from. Do not reboot the
+   VM between the install stage and the offline stage.
+
+6. **A verified candidate artifact set** copied onto the VM: `install.sh`,
    the artifact manifest, `SHA256SUMS`, and the amd64 `.deb` packages.
    The harness re-verifies the set against `SHA256SUMS` before it
    installs anything, and hashes that file as the run's artifact digest.
 
-6. **For upgrade and rollback, the baseline release's assets** in their
+7. **For upgrade and rollback, the baseline release's assets** in their
    own directory: `install.sh`, its one `tensorplate-*-artifacts.json`,
    `SHA256SUMS`, and every other file `SHA256SUMS` lists, not only the
    amd64 packages, because the harness checks the whole list. The
@@ -323,9 +528,9 @@ run's files are known to carry:
 
 | File | Carries |
 | --- | --- |
-| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | JSON journal records with host metadata (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) beside the service's messages; keep only `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` |
+| `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | nothing to edit: the harness projects each capture to `MESSAGE`, `PRIORITY`, `SYSLOG_IDENTIFIER`, `UNIT`, `_PID`, `_SYSTEMD_UNIT`, `_SYSTEMD_INVOCATION_ID` and `__REALTIME_TIMESTAMP` as it records it, so the host metadata systemd attaches (`_HOSTNAME`, `_MACHINE_ID`, `_BOOT_ID`, `__CURSOR` and more) is never written down. A service's own message can still quote a host name or an address |
 | `install.log`, `upgrade.log`, `rollback.log` | short-format journal lines prefixed with the host name, and the operator's account name in the assets paths the installers echo; inspect both sets' paths in upgrade and rollback logs |
-| `packages.txt` | package descriptions carrying planning identifiers, which do not belong in evidence |
+| `packages.txt` | the TensorPlate packages dpkg listed after the install, without descriptions |
 | `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json` | the file lists and digests of both sets, and which release tags and package versions the upgrade moved between |
 | `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt` | the TensorPlate packages dpkg listed at each step |
 | `doctor-baseline.json`, `doctor-after-rollback.json` and their `.exit` files, `doctor-after-upgrade.json` | doctor on the baseline, filed; doctor after the upgrade, asserted |
@@ -334,7 +539,16 @@ run's files are known to carry:
 
 Check every file and report `detail` before filing. Put both assets
 directories somewhere without an account name in their paths to keep it
-out of the stage logs.
+out of the stage logs. The checkout's own path is kept out by the
+harness: the offline helper reports a failure it did not anticipate as
+`error: <subcommand> failed unexpectedly: <exception type>`, with exit
+status 70 and never a traceback or the exception's message; the
+deploy-smoke bundle check names a file it cannot read by its place in
+the bundle; and the bundle is copied from inside itself, so `cp` names a
+file it cannot copy by a relative path. The scan above still decides: on
+a checkout that root cannot read, such as a home directory on NFS with
+root squashing, `python3` itself names the offline helper's path when it
+cannot open it.
 
 Delete the VM when the run is done.
 

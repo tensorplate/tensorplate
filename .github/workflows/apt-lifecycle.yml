@@ -103,9 +103,16 @@ jobs:
             gnupg \
             shellcheck
 
+      # The lifecycle harness verifiers run in their own job below: they
+      # drive each harness through every failure mode and take far longer
+      # than this job's budget allows.
       - name: Packaging verification suite
         shell: bash
-        run: test/packaging/run.sh
+        run: test/packaging/run.sh core
+
+      - name: Packaging suite groups
+        shell: bash
+        run: test/packaging/run_groups_test.sh
 
       - name: Release driver checks
         shell: bash
@@ -146,6 +153,54 @@ jobs:
         env:
           CI: 'true'
         run: test/packaging/verify_arch_package_set.sh
+
+  harness-checks:
+    name: lifecycle harness verifiers
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout with tags
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      # The same tools as the packaging job: several harness checks are
+      # guarded on a tool being present and skip without it.
+      - name: Install check dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            apt-utils \
+            build-essential \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            shellcheck
+
+      # The harness verifiers validate each stubbed run's report against
+      # the lifecycle schema only when jsonschema is importable.
+      - name: Install schema validation dependencies
+        shell: bash
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      - name: Lifecycle harness verifiers
+        shell: bash
+        run: test/packaging/run.sh harness
 
   supervision:
     name: systemd supervision contract
