@@ -360,6 +360,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   admits is compared across all three files, so no two of them can drift
   together.
 
+- The packaging verification suite runs in two groups. `test/packaging/run.sh core` holds the packaging, installer and descriptor checks; `run.sh harness` holds the lifecycle harness verifiers, which CI now runs as their own job with a 45-minute budget instead of inside the 15-minute packaging job. The release artifact build runs only the core group, since the harness verifiers check validation tooling rather than the artifacts. With no argument `run.sh` still runs everything, and a verifier in neither group fails the suite. The harness job also installs the release tooling's Python requirements, so its stubbed reports are validated against the lifecycle schema rather than skipping that check.
+
 - The macOS Homebrew lifecycle harness's offline stage now runs the
   installed services with the network denied, not just doctor and an MPS
   check. Both launchd services run under a `sandbox-exec` profile that
