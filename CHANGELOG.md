@@ -72,6 +72,123 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Its deploy-smoke bundle selects a device-neutral fixture profile and
   executes no accelerator kernel.
 
+- The Ubuntu x86_64 cloud rows now run the offline stage, so a run with
+  `--baseline-assets-dir` exercises all eight canonical lifecycle stages.
+  Both services, and each of `status`, `doctor`, a fresh deploy and an
+  inference, run under a per-unit denial that allows only `127.0.0.1/32`
+  and `::1/128` -- deliberately not systemd's `localhost` shorthand,
+  which expands to `127.0.0.0/8` and would admit the systemd-resolved
+  stub at `127.0.0.53` and the DNS namespace behind it. Each CLI call
+  runs in its own denied transient unit. The denial is a runtime drop-in
+  under `/run/systemd/system`, never `/etc`, and is removed on every exit
+  path including `SIGINT`, `SIGTERM` and `SIGHUP`, with the removal read
+  back from systemd rather than assumed. The cleanup is best-effort on
+  every step: a removal that fails for one unit does not stop the other
+  unit's, nor the reload, restart and readback, and a cleanup that still
+  fails prints the drop-in paths and the command that removes them. A
+  drop-in an earlier run left behind is refused in preflight, before
+  anything is installed, as well as by the stage.
+  Enforcement is established by probes run under the denial, each
+  against a control run first with nothing denied: one in a denied
+  transient unit, and one inside each service's own control group,
+  because systemd attaches the filter to each unit on a best-effort basis
+  and a filtered transient unit says nothing about a service whose own
+  attach failed -- and one inside the transient unit of each CLI call, for
+  the same reason: identical properties on every unit are configuration,
+  not that unit's filter. The module's `run-denied` sends the datagrams
+  from inside the call's unit, files them as
+  `offline-cli-probe-<call>.json`, and execs the call in the same process
+  only if they classify as enforced; otherwise it exits 71 and the call
+  is never made. The harness's verifier fails a run in which only the
+  doctor, deploy or infer unit's filter did not attach, and requires that
+  call never to have run. Joining a service's control group takes root;
+  the helper refuses any group that is not exactly that unit's, reads the
+  move back, and drops to the operator's ids before it sends anything.
+  Every operation in a control must have completed -- each datagram
+  sent, the child process run to a clean exit, each TCP connect
+  answered -- and a control that was refused, timed out, or whose child
+  exited non-zero or never ran fails the stage by name: it sent nothing,
+  so it cannot show that the later refusal was the denial's doing. The
+  helper files a control only if it could be a baseline, so such a control
+  fails the stage as it is taken, before either service is denied, and
+  `run-denied` refuses one with exit status 1, naming the control rather
+  than the unit, before it sends anything. The GCE metadata service must
+  answer the controls outright, over TCP and as a datagram, since the
+  stage's claim is that the denial is what made that service unreachable.
+  A datagram under the denial must be refused with `EPERM`, which the
+  kernel returns from `sendto()`. A TCP connect cannot be:
+  `tcp_connect()` passes on only `ECONNREFUSED` from a transmit, so a
+  connect whose SYN the filter dropped times out. It is accepted as
+  silenced only where its control was answered, and filed apart from the
+  refusals.
+  The control also decides what each operation can prove: one the host
+  could not perform with nothing denied cannot be refused by the denial
+  either, so it is named in the result as an operation this host cannot
+  send rather than reported as a denial that failed to bite -- except a
+  loopback destination, which every host routes. That is the case for
+  every global IPv6 destination on an IPv4-only VM, which is the Compute
+  Engine default: the cgroup egress filter runs after the route lookup,
+  so the answer is `ENETUNREACH` with and without the drop-in.
+  Reading the properties back is not enough on its own -- `IPAddressDeny=`
+  is silently inert where the BPF filter cannot be installed, and
+  `systemctl show` answers for a dead or nonexistent unit with empty
+  values, so every readback requires a loaded, active unit with an
+  invocation id first. `systemctl show` also answers with the unit's
+  *loaded* configuration, which counts a drop-in from `daemon-reload`
+  onwards whether or not anything restarted under it, so each readback
+  compares the invocation id against the one the unit carried before the
+  policy changed -- on the way in and on the way out. systemd prints the
+  prefix lists from a hash set whose order changes with each PID 1
+  start, so the readback compares them as sets and files them in one
+  canonical order.
+  `offline-runtime.json` derives every verdict it states: the enforcement
+  verdict by classifying every probe the document carries against its
+  own control, each CLI verdict from the result file that check filed
+  only after it passed, and the allow list from what systemd reported,
+  which must be exactly the two host addresses. It refuses a restore that
+  read back fewer removals than there were denied units, and a persistent
+  drop-in found on either side of the stage.
+  Doctor must still resolve the row with nothing failing, and the
+  identity must come from the boot-bound machine-type record rather than
+  from a live metadata answer: the agent's
+  `source=recorded_gce_metadata record=not_applicable` line and doctor's
+  `host_os` finding. Because that record is bound to the kernel boot,
+  offline cold boot is not supported, and the runbook says so: after a
+  reboot the agent must start once with metadata reachable before offline
+  detection works. The stage runs before upgrade, whose clean baseline
+  install deletes the record; install and upgrade stay online, and their
+  doctor runs must show the machine type read live from GCE metadata.
+  The mechanism lives in `tools/validation/linux_offline_runtime.py`,
+  named for the mechanism rather than the row, with its own tests in
+  `test/packaging/verify_linux_offline_runtime.py`. The drop-in, the
+  policy readback, the probe and the classification carry no row in them;
+  what is row-specific is supplied as options, so another systemd harness
+  adopts the file unchanged rather than editing it. A row with no
+  metadata service passes `--metadata-address none` and
+  `--metadata-operation absent`, which then requires both metadata
+  operations to be absent from every document rather than letting a
+  missing one read as one that passed; a row whose agent and doctor say
+  something else passes its own expected tokens, and the doctor check
+  files the phrases it required rather than a machine-type source it did
+  not establish. Every default is the Compute Engine row's.
+  Every subcommand of the module runs behind one boundary, because what
+  it prints to stderr lands in the stage log and in a failing report's
+  `detail`: a failure it did not anticipate is reported as
+  `error: <subcommand> failed unexpectedly: <exception type>` with exit
+  status 70, never with a traceback or the exception's message, either of
+  which quotes the checkout's path, and a file it cannot read is named by
+  its base name and errno text. The deploy-smoke bundle check names an
+  unreadable bundle file by its place in the bundle for the same reason,
+  and the bundle is copied from inside itself, so `cp` names a file it
+  cannot copy by a relative path, and a bundle it can no longer enter is
+  refused without naming it. The harness's verifier runs a crashing probe
+  from a copy of the harness under a `home/<name>` directory, as CI's own
+  checkout is, and bundles from under one with a missing model, an
+  unreadable manifest, an unreadable file only the copy reads, and a
+  directory locked just before the copy, and requires every such run's
+  evidence to pass the publication scanner with no traceback or path in
+  it.
+
 - A native lifecycle validation harness for the Jetson Orin Nano row,
   `tools/validation/jetson-lifecycle.sh`, which writes the canonical
   lifecycle report itself rather than through the clean-room step
@@ -188,7 +305,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   or a readable regular record within the size limit whose JSON or facts
   cannot establish identity, with a note. Unreadable, oversized, non-regular,
   and symlinked record paths still stop recording before fixture creation.
-  The cloud lifecycle harness still skips its offline stage; that stage is follow-up work.
+  The cloud lifecycle harness's offline stage rests on this record; see
+  the entry above for what it establishes and what the boot binding costs.
   The tests use the recorded L4 `g2-standard-8` host fixture and
   synthetic cases. The H100 row has no recorded host fixture yet, so it
   is not exercised with recorded facts.

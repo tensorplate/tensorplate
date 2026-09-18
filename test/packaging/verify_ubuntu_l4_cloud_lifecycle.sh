@@ -53,10 +53,20 @@ assert set(run + skipped) == set(canonical), (
 )
 # Upgrade and rollback run when a baseline is supplied and are skipped
 # otherwise, so each is named once each way. Every other stage is named
-# exactly once: offline is always skipped, the rest always run.
+# exactly once, and always runs: nothing is skipped unconditionally.
 assert sorted(run) == sorted(["install", "deploy-smoke", "status-logs", "restart",
-                              "crash-loop", "upgrade", "rollback"]), sorted(run)
-assert sorted(skipped) == sorted(["offline", "upgrade", "rollback"]), sorted(skipped)
+                              "crash-loop", "offline", "upgrade", "rollback"]), sorted(run)
+assert sorted(skipped) == sorted(["upgrade", "rollback"]), sorted(skipped)
+
+# Offline must precede upgrade. Upgrade's clean baseline install deletes
+# /var/lib/tensorplate, taking the boot-bound machine-type record with
+# it, and the baseline release never wrote one -- so an offline stage
+# after it would fail for want of evidence the ordering destroyed.
+offline_call = re.search(r"^\s*lifecycle_stage\s+offline\s", body, re.M)
+upgrade_call = re.search(r"^\s*lifecycle_stage\s+upgrade\s", body, re.M)
+assert offline_call and upgrade_call, "the harness does not run both offline and upgrade"
+assert offline_call.start() < upgrade_call.start(), \
+    "the offline stage runs after upgrade, which has already deleted the machine-type record"
 
 # Every skip states a reason. An unexplained skip is indistinguishable
 # from a stage nobody thought about.
@@ -91,7 +101,108 @@ assert begin_call, "the harness never calls lifecycle_begin"
 before_begin = body[: begin_call.start()]
 assert "artifact-digest.txt" not in before_begin, \
     "the harness writes the digest sidecar before lifecycle_begin, which clears it"
-print("stage coverage: 5 always run, offline skipped, upgrade and rollback run or skipped with a reason; digest recorded after install")
+print("stage coverage: 6 always run, upgrade and rollback run or skipped with a reason; "
+      "offline before upgrade; digest recorded after install")
+PY
+
+# --- the offline stage's own rules, read from the harness text.
+#
+# Three of them cannot be driven from a stub run because they are about
+# what the harness may never do, and one absence looks like any other.
+python3 - "$harness" "${repo_root}/tools/validation/linux_offline_runtime.py" <<'PY'
+import re, sys
+
+harness_path, module_path = sys.argv[1:]
+body = open(harness_path, encoding="utf-8").read()
+module = open(module_path, encoding="utf-8").read()
+
+# The mechanism is shared, not copied: the drop-in text, the transient
+# unit's properties and the classification come from the module, so the
+# Jetson harness adopts the same rule by calling the same file.
+assert "linux_offline_runtime.py" in body, \
+    "the harness does not use the shared offline-runtime module"
+# Naming the properties to read them back is fine; giving one a value is
+# a second copy of the rule that can drift from the module's.
+spelled = re.search(r"IPAddress(?:Allow|Deny)=(?:any|localhost|[0-9A-Fa-f][0-9A-Fa-f:.]*)", body)
+assert not spelled, (
+    "the harness spells the address policy itself instead of taking it from the module: "
+    + (spelled.group(0) if spelled else ""))
+
+# Runtime drop-ins only. A path under /etc would outlive the run and the
+# host's next reboot.
+assert "/run/systemd/system" in module, "the module does not write runtime unit files"
+for forbidden in re.findall(r"/etc/systemd/system\S*", body):
+    raise AssertionError(f"the harness names a persistent unit path: {forbidden}")
+
+# Every CLI call the offline stage makes goes through run_denied_cli: a
+# denied transient unit that probes itself before the call. Read from the
+# stage's own functions rather than from the whole file, which
+# legitimately calls the CLI online in other stages.
+stage = "".join(
+    match.group(0) for match in re.finditer(
+        r"^(?:stage_offline|stage_offline_in|offline_cli_under_denial)\(\) \{\n.*?^\}\n",
+        body, re.M | re.S))
+assert stage, "the offline stage functions are missing"
+# One LOGICAL line at a time -- backslash continuations joined, whole-line
+# comments dropped -- and the CLI's own prefix on that line. Matched over
+# the raw text, `\s` spans newlines, so each "call" ran from the end of
+# the previous match and a nearby comment mentioning run_denied satisfied
+# the assertion for a call that had none.
+logical = re.sub(r"\\\n\s*", " ", stage)
+calls = 0
+for line in logical.splitlines():
+    line = line.strip()
+    if line.startswith("#"):
+        continue
+    found = re.search(r"(?<![\w.-])tensorplate\s", line)
+    if not found:
+        continue
+    calls += 1
+    prefix = line[: found.start()]
+    assert "run_denied_cli" in prefix, \
+        f"an offline-stage CLI call is not run in a self-probing denied unit: {line!r}"
+assert calls >= 4, \
+    "the offline stage no longer runs status, doctor, a deploy and an inference"
+
+# The control runs before the denial is applied. Reversed, a refusal
+# under the denial would be attributable to nothing.
+control = stage.index("control probe")
+deny = stage.index("offline_deny ||")
+assert control < deny, "the offline stage denies the network before running its control"
+# And each service's own control, taken inside its control group, before
+# the denial too; its probe after the readback that proved the services
+# were replaced under it.
+for call in ("offline_unit_probe control", "offline_unit_probe probe",
+             "offline_check_policy denied"):
+    assert call in stage, f"the offline stage no longer calls {call}"
+unit_control = stage.index("offline_unit_probe control")
+unit_probe = stage.index("offline_unit_probe probe")
+readback = stage.index("offline_check_policy denied")
+assert unit_control < deny, \
+    "the offline stage denies the network before taking the in-service controls"
+assert readback < unit_probe, \
+    "the offline stage probes the services before reading back that they were replaced"
+
+# The control's allowed loopback port comes from a status taken after the
+# last thing that respawned the worker. status.json is the status-logs
+# capture, three stages and two respawns earlier; crash-loop is the stage
+# immediately before this one and files its recovery status.
+port_source = re.search(r'serving-port\s+--status "\$\{EVIDENCE_DIR\}/(\S+?)"', logical)
+assert port_source, "the offline stage does not take its control port from a status capture"
+assert port_source.group(1) == "status-after-crash-loop.json", (
+    f"the offline control's loopback port comes from {port_source.group(1)}, "
+    "which predates the restart and crash-loop stages' worker respawns")
+
+# The agent journal is captured before the stage's own CLI calls. The
+# capture is a bounded tail of the invocation's records and the identity
+# line is written once at start, so a deploy, two status calls, an
+# inference and a probe in between can push it out of the window.
+capture = stage.index("capture_current_journal")
+cli_calls = stage.index('offline_cli_under_denial "$work" || return')
+assert capture < cli_calls, (
+    "the offline stage captures the agent journal after its CLI calls, so the "
+    "start-up identity line can fall outside the tail it reads")
+print("offline stage: shared module, runtime drop-ins only, every CLI call denied, control first")
 PY
 
 # --- the bundle must be staged somewhere the sandboxed agent can see.
@@ -196,7 +307,11 @@ PY
 # runner the real systemctl and dpkg exist, and a probe that let them
 # through would query the actual host for services it never installed --
 # answering about the runner rather than about the harness.
-for tool in sudo systemctl; do
+# systemd-run is here because preflight requires it: the offline stage
+# runs every CLI call inside a transient unit, and a host without it
+# cannot produce that stage. The appliance run intercepts the real
+# invocation through its own sudo stub, never through this one.
+for tool in sudo systemctl systemd-run; do
   printf '#!/bin/sh\nexit 0\n' >"${stub_bin}/${tool}"
   chmod +x "${stub_bin}/${tool}"
 done
@@ -548,17 +663,26 @@ check() {
 
 # Runs preflight with every seam pointed at a fixture, and returns the
 # harness's exit status. Nothing here touches the host: --preflight-only
-# stops before the first privileged command.
+# stops before the first privileged command. The unit tree preflight
+# looks for leftover denial drop-ins in is a fixture too, so a runner's
+# own /run never decides a check. PREFLIGHT_PATH and PREFLIGHT_HARNESS
+# replace the search path and the harness for the cases about those.
+preflight_units="${td}/preflight-units"
+mkdir -p "${preflight_units}/run/systemd/system"
+PREFLIGHT_UNIT_ROOT="$preflight_units"
+PREFLIGHT_PATH=""
+PREFLIGHT_HARNESS=""
 preflight() {
   local arch="$1" os_release="$2" nvidia="$3" python_bin="$4" evidence="$5" version="$6"
   shift 6
   set +e
-  env PATH="${stub_bin}:${PATH}" \
+  env PATH="${PREFLIGHT_PATH:-${stub_bin}:${PATH}}" \
     TP_CLOUD_ARCH="$arch" \
     TP_CLOUD_OS_RELEASE="$os_release" \
     TP_CLOUD_NVIDIA_VERSION="$nvidia" \
     TP_CLOUD_PYTHON="$python_bin" \
-    bash "$harness" \
+    TP_OFFLINE_UNIT_ROOT="$PREFLIGHT_UNIT_ROOT" \
+    bash "${PREFLIGHT_HARNESS:-$harness}" \
       --assets-dir "$assets" \
       --bundle-dir "$bundle" \
       --evidence-dir "$evidence" \
@@ -613,6 +737,96 @@ check "a candidate version spelling is refused" "1" \
   "$(preflight "${ok_args[@]}" "${td}/evidence-rc" 0.2.1-rc.1 --confirm RESET-TENSORPLATE)"
 check "  and so is the tilde spelling" "1" \
   "$(preflight "${ok_args[@]}" "${td}/evidence-tilde" '0.2.1~rc.1' --confirm RESET-TENSORPLATE)"
+
+# The offline stage deploys as <id>-offline, which the CLI validates as
+# one filesystem path segment. Refused in preflight rather than five
+# stages in, where the deploy would fail on a CLI validation error and
+# read as a failure of the denial.
+long_id="$(python3 -c 'print("d" * 121)')"
+check "a deployment id whose offline form passes the 128-byte limit is refused" "1" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-longid" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id "$long_id")"
+check "  and names the id the offline stage would have deployed" yes \
+  "$(grep -Fq "deploys as ${long_id}-offline" "${td}/preflight.err" && echo yes || echo no)"
+check "  while the longest one that fits is accepted" "0" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-fitting-id" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id "${long_id%d}")"
+check "a deployment id outside the CLI's charset is refused" "1" \
+  "$(preflight "${ok_args[@]}" "${td}/evidence-badid" 0.2.1 \
+     --confirm RESET-TENSORPLATE --deployment-id 'cloud lifecycle/smoke')"
+check "  and names the charset" yes \
+  "$(grep -Fq "letters, digits, dot, dash or underscore" "${td}/preflight.err" \
+     && echo yes || echo no)"
+
+# The offline stage runs every CLI call in a transient unit, so a host
+# without systemd-run is refused before anything is installed. The search
+# path here holds what preflight runs and nothing else: on a Linux runner
+# the real systemd-run sits in /usr/bin beside everything preflight
+# needs, so prepending a directory could never take it away.
+no_systemd_run="${td}/path-without-systemd-run"
+mkdir -p "$no_systemd_run"
+for tool in sudo systemctl python3 dpkg; do
+  ln -s "${stub_bin}/${tool}" "${no_systemd_run}/${tool}"
+done
+for tool in bash env dirname basename find awk cat sed grep head tr mkdir rm \
+            uname id sha256sum; do
+  if tool_path="$(command -v "$tool")"; then
+    ln -s "$tool_path" "${no_systemd_run}/${tool}"
+  fi
+done
+check "the minimal search path passes preflight with systemd-run added" "0" \
+  "$(ln -s "${stub_bin}/systemd-run" "${no_systemd_run}/systemd-run"
+     PREFLIGHT_PATH="$no_systemd_run" preflight "${ok_args[@]}" \
+       "${td}/evidence-minimal-path" 0.2.1 --confirm RESET-TENSORPLATE
+     rm -f "${no_systemd_run}/systemd-run")"
+check "a host without systemd-run is refused" "1" \
+  "$(PREFLIGHT_PATH="$no_systemd_run" preflight "${ok_args[@]}" \
+     "${td}/evidence-no-systemd-run" 0.2.1 --confirm RESET-TENSORPLATE)"
+check "  and names it" yes \
+  "$(grep -Fq "missing required command: systemd-run" "${td}/preflight.err" \
+     && echo yes || echo no)"
+
+# The offline mechanism is a file beside the harness; a copy of the
+# harness without it is refused rather than failing five stages in.
+lone_harness="${td}/lone-harness/tools/validation/ubuntu-l4-cloud-lifecycle.sh"
+mkdir -p "$(dirname "$lone_harness")"
+cp "$harness" "$lone_harness"
+check "a harness without the offline module beside it is refused" "1" \
+  "$(PREFLIGHT_HARNESS="$lone_harness" preflight "${ok_args[@]}" \
+     "${td}/evidence-lone-harness" 0.2.1 --confirm RESET-TENSORPLATE)"
+check "  and names the missing file" yes \
+  "$(grep -Fq "missing $(dirname "$lone_harness")/linux_offline_runtime.py" \
+       "${td}/preflight.err" && echo yes || echo no)"
+cp "${repo_root}/tools/validation/linux_offline_runtime.py" "$(dirname "$lone_harness")/"
+check "  while the same copy with the module beside it passes" "0" \
+  "$(PREFLIGHT_HARNESS="$lone_harness" preflight "${ok_args[@]}" \
+     "${td}/evidence-lone-harness" 0.2.1 --confirm RESET-TENSORPLATE)"
+
+# A denial drop-in an earlier run left behind would deny both services
+# through install and every stage before offline. Refused in preflight,
+# for either unit and for a dangling symlink, naming the path and how to
+# remove it -- and with nothing changed.
+for leftover_case in tensorplate-agent:file tensorplate-observability:file \
+                     tensorplate-agent:symlink; do
+  leftover_unit="${leftover_case%:*}"
+  leftover_units="${td}/preflight-leftover-${leftover_unit}-${leftover_case#*:}"
+  leftover_dir="${leftover_units}/run/systemd/system/${leftover_unit}.service.d"
+  mkdir -p "$leftover_dir"
+  if [[ "${leftover_case#*:}" == symlink ]]; then
+    ln -s "${leftover_units}/nowhere" "${leftover_dir}/10-tensorplate-validation-offline.conf"
+  else
+    printf '[Service]\n' >"${leftover_dir}/10-tensorplate-validation-offline.conf"
+  fi
+  check "a leftover ${leftover_case#*:} denial for ${leftover_unit} is refused in preflight" "1" \
+    "$(PREFLIGHT_UNIT_ROOT="$leftover_units" preflight "${ok_args[@]}" \
+       "${td}/evidence-leftover" 0.2.1 --confirm RESET-TENSORPLATE)"
+  check "  and says how to remove it" yes \
+    "$(grep -Fq "remove it with: sudo rm -f ${leftover_dir}/10-tensorplate-validation-offline.conf && sudo systemctl daemon-reload && sudo systemctl restart ${leftover_unit}" \
+         "${td}/preflight.err" && echo yes || echo no)"
+  check "  and leaves it where it was" yes \
+    "$([[ -L "${leftover_dir}/10-tensorplate-validation-offline.conf" \
+          || -f "${leftover_dir}/10-tensorplate-validation-offline.conf" ]] && echo yes || echo no)"
+done
 
 mkdir -p "${td}/evidence-dirty"
 : >"${td}/evidence-dirty/lifecycle-report.json"
@@ -732,8 +946,200 @@ check "  because it would be a downgrade" yes \
 # validated one, and it is invisible to any amount of reading.
 appliance="${td}/appliance"
 mkdir -p "${appliance}/bin" "${appliance}/run" "${appliance}/log" "${appliance}/scratch"
-cp "${stub_bin}/python3" "${appliance}/bin/python3"
 real_mktemp="$(command -v mktemp)"
+
+# python3, with the two helpers that must not do the real thing routed to
+# fixtures: the publication check, and the offline probe. Every other
+# Python invocation -- including every other subcommand of the offline
+# module -- still runs the real interpreter on the real file.
+cat >"${appliance}/bin/python3" <<'STUB'
+#!/bin/sh
+case "${1:-}" in
+  "$TP_FAKE_PUBLICATION_HELPER")
+    shift
+    exec "$TP_FAKE_REAL_PYTHON" "$TP_FAKE_PUBLICATION_STUB" "$@"
+    ;;
+  */check-baseline-publication.py)
+    echo 'unexpected publication helper path in fixture' >&2
+    exit 9
+    ;;
+  */linux_offline_runtime.py)
+    case "${2:-}" in
+      probe|control|probe-unit|control-unit|run-denied)
+        shift
+        exec "$TP_FAKE_REAL_PYTHON" "$TP_FAKE_OFFLINE_PROBE_STUB" "$@"
+        ;;
+    esac
+    ;;
+esac
+exec "$TP_FAKE_REAL_PYTHON" "$@"
+STUB
+chmod +x "${appliance}/bin/python3"
+
+# The probes and their controls, with the socket calls replaced by the
+# filter systemd would have installed, answering the way a Linux kernel
+# does: a datagram is refused with EPERM, and a TCP connect whose SYN the
+# filter dropped reports nothing and times out (net/ipv4/tcp_output.c,
+# tcp_connect, returns only -ECONNREFUSED from a transmit).
+#
+# For a transient unit the allow list comes from the properties the
+# harness actually passed to systemd-run, not from a list kept here, so a
+# harness that stopped passing them -- or passed the `localhost`
+# shorthand -- is caught by the probe's own outcomes rather than by a grep
+# over the sudo log. For a probe inside a service's control group it
+# comes from the drop-in that service's running instance was started
+# under, which the sudo stub snapshots at each start.
+export TP_FAKE_OFFLINE_PROBE_STUB="${td}/offline-probe.py"
+cat >"$TP_FAKE_OFFLINE_PROBE_STUB" <<'PY'
+import errno, ipaddress, os, socket, sys
+
+sys.path.insert(0, os.path.join(os.environ["TP_REPO"], "tools", "validation"))
+import linux_offline_runtime as m
+
+MODE = os.environ.get("TP_FAKE_MODE", "ok")
+IN_UNIT = sys.argv[1] in ("probe-unit", "control-unit")
+# The probe a CLI call's own transient unit takes before the call, which
+# then execs the stub CLI for real.
+IN_CLI = sys.argv[1] == "run-denied"
+
+
+def option(name):
+    arguments = sys.argv[2:]
+    return arguments[arguments.index(name) + 1]
+
+
+def expand(tokens):
+    networks = []
+    for token in tokens:
+        if token == "localhost":
+            # systemd's shorthand, expanded the way systemd expands it.
+            networks += [ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128")]
+        else:
+            networks.append(ipaddress.ip_network(token))
+    return networks
+
+
+if IN_UNIT:
+    UNIT = option("--unit")
+    running = os.path.join(os.environ["TP_OFFLINE_UNIT_ROOT"], "generation", UNIT + ".running")
+    DENIED = os.path.exists(running)
+    tokens = []
+    if DENIED:
+        with open(running, encoding="utf-8") as handle:
+            tokens = [line.split("=", 1)[1].strip() for line in handle
+                      if line.startswith("IPAddressAllow=")]
+    # systemd's best-effort attach failing for one service: configured,
+    # restarted, and sending freely.
+    if MODE == "offline-service-filter-not-attached" and UNIT == "tensorplate-observability":
+        DENIED = False
+    ALLOW = expand(tokens)
+else:
+    UNIT = ""
+    DENIED = os.environ.get("TP_FAKE_DENIED") == "1"
+    ALLOW = expand(os.environ.get("TP_FAKE_ALLOW", "").split())
+    # systemd's best-effort attach failing for one CLI call's unit only:
+    # created with the denial's properties -- the stub CLI would say it
+    # ran denied -- and sending freely.
+    if IN_CLI and MODE == "offline-cli-filter-not-attached-" + option("--call"):
+        DENIED = False
+
+
+def blocked(host):
+    address = ipaddress.ip_address(host)
+    return DENIED and not any(address in net for net in ALLOW) \
+        and MODE != "offline-probe-leaks"
+
+
+def refused_control():
+    # A host firewall refusing a control, which makes the probe's own
+    # refusal attributable to nothing: the transient control, or only
+    # the control taken inside one service.
+    if DENIED:
+        return False
+    return MODE == "offline-control-refused" or (
+        MODE == "offline-unit-control-refused" and UNIT == "tensorplate-agent")
+
+
+joined = []
+dropped = []
+
+
+def udp_send(host, port, family=socket.AF_INET):
+    # SystemExit, not an exception the probe would record as an outcome.
+    if IN_UNIT and not (joined and dropped):
+        raise SystemExit("fixture: a service's probe sent before joining its group and dropping root")
+    if blocked(host) or refused_control():
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+
+def tcp_connect(host, port, family=socket.AF_INET):
+    if IN_UNIT or IN_CLI:
+        raise SystemExit("fixture: a datagram-only probe opened a TCP connection")
+    if blocked(host):
+        raise socket.timeout("timed out")
+    if refused_control():
+        raise OSError(errno.EPERM, "Operation not permitted")
+    if not DENIED and host == m.METADATA_ADDRESS \
+            and MODE == "offline-control-metadata-unreachable":
+        raise OSError(errno.EHOSTUNREACH, "No route to host")
+
+
+def unix_connect(path):
+    # AF_UNIX is not IP: the address filter never sees it, and the agent
+    # socket has to keep working under the denial.
+    if MODE == "offline-agent-socket-unreachable":
+        raise OSError(errno.ECONNREFUSED, "Connection refused")
+
+
+def join_control_group(control_group, path):
+    # The module has already refused any group that is not this unit's,
+    # under the fixture's cgroup root; what is checked here is that the
+    # group is the one systemctl reported for it, and that nothing is
+    # probed before the join.
+    expected = "/system.slice/{}.service".format(UNIT)
+    if control_group != expected or path != os.path.join(
+            os.environ["TP_OFFLINE_CGROUP_ROOT"], expected.lstrip("/")):
+        raise m.CheckFailed("fixture: joined {} at {}".format(control_group, path))
+    joined.append(control_group)
+
+
+def drop_privileges(uid, gid, ops=None):
+    if not joined:
+        raise m.CheckFailed("fixture: privileges dropped before joining a control group")
+    if (uid, gid) != (os.getuid(), os.getgid()):
+        raise m.CheckFailed("fixture: the probe would drop to {}:{}, not the operator".format(
+            uid, gid))
+    dropped.append((uid, gid))
+
+
+m.udp_send = udp_send
+m.tcp_connect = tcp_connect
+m.unix_connect = unix_connect
+m.join_control_group = join_control_group
+m.drop_privileges = drop_privileges
+m.child_udp_send = lambda: m.attempt(lambda: udp_send("192.0.2.1", 9))
+# The transient control's child exiting non-zero: it sent nothing, so it
+# cannot be the baseline the child's refusal is classified against.
+if MODE == "offline-control-child-fails" and not DENIED and not IN_UNIT:
+    m.child_udp_send = lambda: "child_exit_3"
+# A probe that crashes under the denial, with a message that quotes the
+# module's own path -- the checkout's, which is what an unguarded
+# traceback would have put into the stage log. One mode crashes whichever
+# denied probe runs first, which is a service's; the other only the probe
+# in the denied transient unit.
+def crash(*args, **kwargs):
+    raise RuntimeError("the probe crashed in " + os.path.abspath(m.__file__))
+
+
+if MODE == "offline-probe-crashes" and DENIED:
+    m.run_probe = crash
+    m.run_unit_probe = crash
+if MODE == "offline-transient-probe-crashes" and DENIED and not IN_UNIT:
+    m.run_probe = crash
+if MODE == "offline-cli-probe-crashes" and DENIED and IN_CLI:
+    m.run_unit_probe = crash
+sys.exit(m.main())
+PY
 
 # An explicit template keeps every harness scratch directory inside the
 # fixture, including backups deliberately retained after failed cleanup.
@@ -763,11 +1169,262 @@ if [ "$1" = bash ] && [ "$2" = -c ] && [ "$3" = 'printf "\n" >>"$1"' ]; then
   printf '\n' >>"$5"
   exit
 fi
+# The offline stage's transient units. Everything before `--` is
+# systemd-run's; what follows is the command, which is run here so the
+# stage's CLI calls and its probe actually execute. TP_FAKE_DENIED says
+# whether the denial properties were passed, so a harness that stopped
+# passing them is caught by the probe coming back unrefused rather than
+# by a grep over this log.
+if [ "$1" = systemd-run ]; then
+  denied=0
+  allow=""
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) shift; break ;;
+      --property=IPAddressDeny=*) denied=1; shift ;;
+      --property=IPAddressAllow=*) allow="${allow}${1#--property=IPAddressAllow=} "; shift ;;
+      *) shift ;;
+    esac
+  done
+  [ "$#" -gt 0 ] || exit 9
+  case "${TP_FAKE_MODE:-ok}" in
+    offline-transient-not-denied) denied=0; allow="" ;;
+  esac
+  # Interrupted with the host denied: the signal handlers have to take
+  # the same cleanup path a failed stage does.
+  if [ "$denied" = 1 ]; then
+    case "${TP_FAKE_MODE:-ok}" in
+      offline-signal-int) kill -INT "$PPID" ;;
+      offline-signal-term) kill -TERM "$PPID" ;;
+      offline-signal-hup) kill -HUP "$PPID" ;;
+    esac
+  fi
+  TP_FAKE_DENIED="$denied"
+  TP_FAKE_ALLOW="$allow"
+  export TP_FAKE_DENIED TP_FAKE_ALLOW
+  exec "$@"
+fi
+# The probe run inside a service's control group, which needs root. The
+# appliance's python3 routes it to the fixture probe, which never touches
+# a real control group; nothing else run under sudo is executed.
+case "$1:$2:${3:-}" in
+  python3:*/linux_offline_runtime.py:probe-unit|python3:*/linux_offline_runtime.py:control-unit)
+    exec "$@"
+    ;;
+esac
+# systemd's loaded configuration and its start generations, which are not
+# the same thing and are the reason the harness compares invocation ids.
+#
+# `systemctl show` answers with what the last `daemon-reload` read, so a
+# drop-in that was installed and reloaded but never restarted under reads
+# back exactly like an enforced one. Only a start replaces the running
+# instance and gives it a new invocation id. Modelling both here is what
+# lets the deny-side restart, the restore-side restart and the reload
+# each fail a named check when they are removed.
+offline_unit_conf() {
+  printf '%s/run/systemd/system/%s.service.d/10-tensorplate-validation-offline.conf' \
+    "${TP_OFFLINE_UNIT_ROOT}" "$1"
+}
+case "$*" in
+  *"systemctl daemon-reload"*)
+    mkdir -p "${TP_OFFLINE_UNIT_ROOT}/generation" || exit 9
+    for unit in tensorplate-agent tensorplate-observability; do
+      conf="$(offline_unit_conf "$unit")"
+      loaded="${TP_OFFLINE_UNIT_ROOT}/generation/${unit}.loaded"
+      if [ -f "$conf" ]; then
+        cp "$conf" "$loaded" || exit 9
+      else
+        rm -f "$loaded" || exit 9
+      fi
+    done
+    ;;
+esac
+case "$*" in
+  *"systemctl enable --now "*|*"systemctl restart "*|*"systemctl start "*)
+    mkdir -p "${TP_OFFLINE_UNIT_ROOT}/generation" || exit 9
+    for word in "$@"; do
+      case "$word" in
+        tensorplate-agent|tensorplate-observability) ;;
+        *) continue ;;
+      esac
+      conf="$(offline_unit_conf "$word")"
+      record="${TP_OFFLINE_UNIT_ROOT}/generation/${word}"
+      generation=$(sed -n 1p "$record" 2>/dev/null)
+      state=$(sed -n 2p "$record" 2>/dev/null)
+      [ -n "$generation" ] || generation=0
+      skip=0
+      case "${TP_FAKE_MODE:-ok}" in
+        # A restart systemd reported and that did not replace the running
+        # instance: the loaded policy still reads back as denied, and the
+        # services are still the ones that started without it.
+        offline-deny-restart-ignored) [ -f "$conf" ] && skip=1 ;;
+        # The mirror of it on the way out: the drop-in is gone and the
+        # loaded policy is empty, but the denied instances are still the
+        # ones running.
+        offline-restore-restart-ignored)
+          [ -f "$conf" ] || { [ "$state" = denied ] && skip=1; } ;;
+      esac
+      if [ "$skip" -eq 0 ]; then
+        generation=$((generation + 1))
+        if [ -f "$conf" ]; then state=denied; else state=open; fi
+        printf '%s\n%s\n' "$generation" "$state" >"$record" || exit 9
+        # What this start was actually made under: the configuration the
+        # last daemon-reload loaded, which is what systemd attaches.
+        if [ -f "${record}.loaded" ]; then
+          cp "${record}.loaded" "${record}.running" || exit 9
+        else
+          rm -f "${record}.running" || exit 9
+        fi
+      fi
+    done
+    ;;
+esac
+# Whether the appliance was online whenever an installer ran: no denial
+# drop-in on disk and no running instance started under one. Install and
+# upgrade have to run the way an operator runs them.
+case "$*" in
+  "bash "*"/install.sh --local-artifacts "*)
+    dropins=0
+    for file in "${TP_OFFLINE_UNIT_ROOT}"/run/systemd/system/*.service.d/10-tensorplate-validation-offline.conf; do
+      if [ -e "$file" ] || [ -L "$file" ]; then dropins=$((dropins + 1)); fi
+    done
+    denied_units=0
+    for file in "${TP_OFFLINE_UNIT_ROOT}"/generation/*.running; do
+      if [ -e "$file" ]; then denied_units=$((denied_units + 1)); fi
+    done
+    printf 'install dropins=%s denied_units=%s\n' "$dropins" "$denied_units" \
+      >>"${TP_FAKE_ONLINE_LOG}"
+    ;;
+esac
+# The agent writes its boot-bound machine-type record on every start where
+# the metadata service answered. An online start does; a start under the
+# denial drop-in does not, which is what makes the offline stage's
+# identity come from the record rather than from a fresh answer.
+case "$*" in
+  *"systemctl enable --now tensorplate-agent"*|*"systemctl restart"*|*"systemctl start tensorplate-agent"*)
+    if [ ! -f "${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf" ] \
+       && [ "${TP_FAKE_MODE:-ok}" != offline-no-machine-type-record ]; then
+      mkdir -p "${TP_FAKE_VARLIB}/state" || exit 9
+      printf '{"schema_version":2,"machine_type":"g2-standard-8"}\n' \
+        >"${TP_FAKE_VARLIB}/state/machine-type.json" || exit 9
+    fi
+    ;;
+esac
+# A drop-in an earlier run left behind, planted where the harness's own
+# reset cannot clear it first.
+#
+# Only on the install stage's one-time enable, never on a restart:
+# planting it again after the offline stage's cleanup would fail that
+# cleanup whatever the stage's own refusal did, and the leftover check
+# would pass for a reason that has nothing to do with it.
+#
+# One mode per unit, and one that plants a dangling symlink rather than a
+# file: the refusal is a `step` per unit, and a mode that only ever
+# planted one leftover would let the other half be deleted with nothing
+# failing.
+case "$*" in
+  *"systemctl enable --now tensorplate-agent"*)
+    case "${TP_FAKE_MODE:-ok}" in
+      offline-leftover-drop-in)
+        leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
+        mkdir -p "$leftover" || exit 9
+        : >"${leftover}/10-tensorplate-validation-offline.conf" || exit 9
+        ;;
+      # A dangling symlink is still a file at that path, and `install -D`
+      # would write through it to wherever it points.
+      offline-leftover-dangling-symlink)
+        leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d"
+        mkdir -p "$leftover" || exit 9
+        ln -s "${TP_OFFLINE_UNIT_ROOT}/nowhere" \
+          "${leftover}/10-tensorplate-validation-offline.conf" || exit 9
+        ;;
+    esac
+    ;;
+esac
+case "$*" in
+  *"systemctl enable --now tensorplate-observability"*)
+    if [ "${TP_FAKE_MODE:-ok}" = offline-leftover-drop-in-observability ]; then
+      leftover="${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-observability.service.d"
+      mkdir -p "$leftover" || exit 9
+      : >"${leftover}/10-tensorplate-validation-offline.conf" || exit 9
+    fi
+    ;;
+esac
 # Package, state and config operations touch only the fixture and the
 # harness's temporary backup. This verifies the bytes can actually be
 # restored, rather than treating a logged copy command as a successful
 # restoration.
 case "$*" in
+  "test -f "*"/machine-type.json")
+    [ -f "${TP_FAKE_VARLIB}/state/machine-type.json" ]
+    exit
+    ;;
+  # The deploy-smoke bundle staging, done for real in the fixture's
+  # staging directory and nowhere else: what cp prints about a bundle file
+  # it cannot read goes into the published stage log. Any source is
+  # copied, so a harness that named the bundle by its own path would have
+  # that path printed here too.
+  # The value itself, not "$3": a staging path with a space in it would
+  # still match the joined arguments, and "$3" would be only its first part.
+  "rm -rf ${TP_CLOUD_BUNDLE_STAGING:-/nonexistent/unset-staging}")
+    rm -rf "$TP_CLOUD_BUNDLE_STAGING"
+    exit
+    ;;
+  # Between the bundle check and the copy, the bundle directory can stop
+  # being one the operator can enter; a case locks it here to say so.
+  "mkdir -p ${TP_CLOUD_BUNDLE_STAGING%/*}")
+    if [ -n "${TP_FAKE_LOCK_BUNDLE:-}" ]; then
+      chmod 000 "${TP_FAKE_LOCK_BUNDLE}" || exit 9
+    fi
+    exit 0
+    ;;
+  "cp -R "*" ${TP_CLOUD_BUNDLE_STAGING:-/nonexistent/unset-staging}")
+    [ "$#" -eq 4 ] || exit 9
+    exec cp -R "$3" "$4"
+    ;;
+  "install -D -m 0644 "*)
+    src="$5"
+    dst="$6"
+    case "$dst" in
+      "${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/"*) ;;
+      *) echo "sudo stub: refusing to install outside the fixture unit root: $dst" >&2; exit 9 ;;
+    esac
+    mkdir -p "$(dirname "$dst")" || exit 9
+    cp "$src" "$dst" || exit 9
+    case "${TP_FAKE_MODE:-ok}" in
+      # A drop-in that reaches the host spelling the shorthand the owner
+      # ruling refuses.
+      offline-localhost-shorthand)
+        sed -e 's|^IPAddressAllow=127.0.0.1/32$|IPAddressAllow=localhost|' \
+            -e '/^IPAddressAllow=::1\/128$/d' "$src" >"$dst" || exit 9
+        ;;
+      # A directive systemd would act on that the address-policy readback
+      # cannot see: the effective IPAddressDeny and IPAddressAllow are
+      # unchanged, so only the on-disk lint can refuse this.
+      offline-drop-in-extra-directive)
+        printf 'ExecStartPre=/bin/true\n' >>"$dst" || exit 9
+        ;;
+      # Written under /etc as well, which no exit path removes.
+      offline-persistent-drop-in)
+        persistent="${TP_OFFLINE_UNIT_ROOT}/etc/systemd/system/${dst##*/run/systemd/system/}"
+        mkdir -p "$(dirname "$persistent")" || exit 9
+        cp "$src" "$persistent" || exit 9
+        ;;
+    esac
+    exit 0
+    ;;
+  "rm -f "*"/10-tensorplate-validation-offline.conf")
+    case "${TP_FAKE_MODE:-ok}" in
+      offline-drop-in-not-removed) exit 0 ;;
+    esac
+    rm -f "$3"
+    exit
+    ;;
+  "rmdir "*".service.d")
+    rmdir "$2" 2>/dev/null
+    exit 0
+    ;;
   "bash "*"/install.sh --local-artifacts "*)
     status=0
     "${TP_FAKE_DPKG_DB}" install "$4" || status=$?
@@ -893,6 +1550,64 @@ case "$1" in
     broken=0
     [ -f "${TP_FAKE_CONFIG_BROKEN}" ] && broken=1
     case "$*" in
+      *IPAddressDeny*)
+        # The effective address policy, the way systemd reports it: the
+        # allow list is whatever the unit's drop-in asks for, expanded --
+        # so `localhost` reads back as 127.0.0.0/8, which is the whole
+        # point of refusing the shorthand.
+        unit=""
+        for word in "$@"; do
+          case "$word" in tensorplate-*) unit="$word" ;; esac
+        done
+        # What the last daemon-reload read, not the file on disk and not
+        # what any running instance was started under: that is what
+        # `systemctl show` answers with, and the whole reason the harness
+        # also compares the invocation id.
+        conf="${TP_OFFLINE_UNIT_ROOT}/generation/${unit}.loaded"
+        generation=$(sed -n 1p "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" 2>/dev/null)
+        case "${TP_FAKE_MODE:-ok}" in
+          offline-unit-dead)
+            # A unit systemd does not have. Every property comes back
+            # empty, which a readback that only looks for unexpected
+            # entries would read as a denied unit.
+            printf 'LoadState=not-found\nActiveState=inactive\nInvocationID=\nIPAddressDeny=\nIPAddressAllow=\n'
+            exit 0
+            ;;
+        esac
+        if [ -z "$generation" ]; then
+          # A unit systemd has but has never started: there is no
+          # instance and so no invocation id to report for one.
+          printf 'LoadState=loaded\nActiveState=inactive\nInvocationID=\nIPAddressDeny=\nIPAddressAllow=\n'
+          exit 0
+        fi
+        printf 'LoadState=loaded\nActiveState=active\n'
+        case "$unit" in
+          tensorplate-agent) prefix=1111111111111111111111111111 ;;
+          *) prefix=2222222222222222222222222222 ;;
+        esac
+        printf 'InvocationID=%s%04x\n' "$prefix" "$generation"
+        if [ -f "$conf" ] && [ "${TP_FAKE_MODE:-ok}" != offline-denial-inert ]; then
+          # systemd prints both lists from a hash set, in an order that
+          # changes with each PID 1 start. One unit reads back in the
+          # drop-in's order and the other in reverse, so a readback that
+          # compared the order could never pass here.
+          if [ "$unit" = tensorplate-agent ]; then
+            printf 'IPAddressDeny=0.0.0.0/0 ::/0\n'
+            order='p'
+          else
+            printf 'IPAddressDeny=::/0 0.0.0.0/0\n'
+            order='1!G;h;$p'
+          fi
+          printf 'IPAddressAllow='
+          sed -n 's/^IPAddressAllow=//p' "$conf" \
+            | sed -e 's/localhost/127.0.0.0\/8 ::1\/128/' | tr ' ' '\n' \
+            | sed -n "$order" | tr '\n' ' ' | sed -e 's/ *$//'
+          printf '\n'
+        else
+          printf 'IPAddressDeny=\nIPAddressAllow=\n'
+        fi
+        exit 0
+        ;;
       *ActiveState*)
         # A looping unit reads as failed between attempts, which is why
         # the harness must not settle on that state alone. One stopped by
@@ -924,10 +1639,37 @@ case "$1" in
         ;;
       *InvocationID*)
         case "$*" in
-          *tensorplate-agent*) printf '11111111111111111111111111111111\n' ;;
-          *tensorplate-observability*) printf '22222222222222222222222222222222\n' ;;
+          *tensorplate-agent*) unit=tensorplate-agent; prefix=1111111111111111111111111111 ;;
+          *tensorplate-observability*)
+            unit=tensorplate-observability; prefix=2222222222222222222222222222 ;;
           *) exit 9 ;;
         esac
+        generation=$(sed -n 1p "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" 2>/dev/null)
+        state=$(sed -n 2p "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" 2>/dev/null)
+        # The agent's id unreadable at exactly one point: while its
+        # instance is still the denied one and its drop-in is already
+        # gone, which is the cleanup's capture before the restart.
+        if [ "${TP_FAKE_MODE:-ok}:$unit:$state" = offline-cleanup-invocation-unreadable:tensorplate-agent:denied ] \
+           && [ ! -e "${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf" ]; then
+          exit 1
+        fi
+        if [ -z "$generation" ]; then
+          printf '\n'
+        else
+          printf '%s%04x\n' "$prefix" "$generation"
+        fi
+        ;;
+      *ControlGroup*)
+        # The group a running unit is in, and nothing for one that is not.
+        unit=""
+        for word in "$@"; do
+          case "$word" in tensorplate-*) unit="$word" ;; esac
+        done
+        if [ -s "${TP_OFFLINE_UNIT_ROOT}/generation/${unit}" ]; then
+          printf '/system.slice/%s.service\n' "$unit"
+        else
+          printf '\n'
+        fi
         ;;
       *MainPID*)
         # A service the upgrade never restarted keeps the pid it had.
@@ -952,6 +1694,14 @@ esac
 STUB
 cp "$fake_dpkg" "${appliance}/bin/dpkg"
 cp "$fake_dpkg" "${appliance}/bin/fake-dpkg-db"
+# Present so preflight's `command -v` finds it, and loud if it is ever
+# invoked directly: a transient unit that denies the network has to be
+# started with privilege, and one started without it would deny nothing.
+cat >"${appliance}/bin/systemd-run" <<'STUB'
+#!/bin/sh
+echo 'systemd-run was invoked without sudo; the transient unit would not be denied' >&2
+exit 9
+STUB
 # The real checksum tool, except that the baseline's digest can be made
 # unreadable, so the harness's refusal of a digest it could not compute
 # is exercised rather than assumed.
@@ -1032,9 +1782,12 @@ if [ -n "$since" ]; then
   fi
   exit 0
 fi
+# The invocation id carries the unit in its prefix and that unit's start
+# generation in its last four digits, so a restart asks for a different
+# invocation than the one before it.
 case "$invocation" in
-  11111111111111111111111111111111) unit=tensorplate-agent.service ;;
-  22222222222222222222222222222222) unit=tensorplate-observability.service ;;
+  1111111111111111111111111111????) unit=tensorplate-agent.service ;;
+  2222222222222222222222222222????) unit=tensorplate-observability.service ;;
   *) exit 9 ;;
 esac
 case "${TP_FAKE_MODE:-ok}:$unit" in
@@ -1050,6 +1803,35 @@ message='fixture service started'
 fields="$(service_fields "${unit%.service}")" || exit
 printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"%s","__REALTIME_TIMESTAMP":"1789300000000000"}\n' \
   "$host_fields" "$fields" "$invocation" "$unit" "${unit%.service}" "$message"
+
+# The agent's platform identity line, emitted only by a start that
+# happened under the denial drop-in: such a start finds the metadata
+# service unreachable and resolves its shape from the boot-bound record.
+#
+# Keyed on the start generation, not on the drop-in file existing. A
+# stage that installed the drop-in and never restarted the agent is a
+# stage whose agent never queried metadata under it, so it gets no
+# identity line at all.
+agent_state="$(sed -n 2p "${TP_OFFLINE_UNIT_ROOT}/generation/tensorplate-agent" 2>/dev/null)"
+if [ "$unit" = tensorplate-agent.service ] && [ "$agent_state" = denied ]; then
+  identity='machine_type=g2-standard-8 source=recorded_gce_metadata record=not_applicable'
+  repeat=1
+  case "${TP_FAKE_MODE:-ok}" in
+    offline-identity-live-metadata)
+      identity='machine_type=g2-standard-8 source=gce_metadata record=written' ;;
+    offline-identity-rewrites-record)
+      identity='machine_type=g2-standard-8 source=recorded_gce_metadata record=written' ;;
+    offline-identity-undetected)
+      identity='machine_type=none source=none record=not_applicable' ;;
+    offline-identity-twice) repeat=2 ;;
+  esac
+  while [ "$repeat" -gt 0 ]; do
+    printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"platform identity: %s","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
+      "$host_fields" "$fields" "$invocation" "$unit" "${unit%.service}" "$identity"
+    repeat=$((repeat - 1))
+  done
+fi
+# What `journalctl --show-cursor` prints after the records.
 if [ "${TP_FAKE_MODE:-ok}:$unit" = journal-trailing-line:tensorplate-agent.service ]; then
   printf '%s\n' "-- cursor: ${cursor}"
 fi
@@ -1066,14 +1848,30 @@ installed="$("${TP_FAKE_DPKG_DB}" phase)"
 state_file="${TP_FAKE_VARLIB}/state/state.json"
 command="$1"
 shift
+# Every call, with whether it ran in a denied transient unit and how many
+# denial drop-ins were on the host at the time. Read against each other,
+# these say which calls the offline stage made and whether each was
+# denied -- whatever helper function the harness made it through.
+dropins=0
+for file in "${TP_OFFLINE_UNIT_ROOT}"/run/systemd/system/*.service.d/10-tensorplate-validation-offline.conf; do
+  if [ -e "$file" ] || [ -L "$file" ]; then dropins=$((dropins + 1)); fi
+done
+printf '%s denied=%s dropins=%s\n' "$command" "${TP_FAKE_DENIED:-unset}" "$dropins" \
+  >>"${TP_FAKE_CLI_LOG}"
 out=""
+deployment="${TP_FAKE_DEPLOYMENT_ID}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output-file) out="$2"; shift 2 ;;
     --input) input="$2"; shift 2 ;;
+    --deployment-id) deployment="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
+# The deployment the appliance is actually serving, which the offline
+# stage changes by deploying a fresh one while denied.
+active="${TP_FAKE_DEPLOYMENT_ID}"
+[ -f "$state_file" ] && active="$(sed 's/.*"active":"\([^"]*\)".*/\1/' "$state_file")"
 case "$command" in
   doctor)
     failing=0
@@ -1084,8 +1882,32 @@ case "$command" in
     case "$mode:$installed" in
       baseline-doctor-failing:baseline|baseline-doctor-failing:rolled-back) failing=1 ;;
     esac
+    # Where host_os says the machine type came from. Denied, the agent
+    # cannot reach the metadata service, so a live answer here would mean
+    # the denial let the query through.
+    machine_type_source=" (from GCE metadata)"
+    if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
+      machine_type_source=" (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; same kernel boot; CPU count, MemTotal and NVIDIA devices unchanged)"
+    fi
+    case "$mode" in
+      offline-doctor-live-metadata) machine_type_source=" (from GCE metadata)" ;;
+      offline-doctor-failing) [ "${TP_FAKE_DENIED:-0}" = 1 ] && failing=1 ;;
+      offline-doctor-row-warning) [ "${TP_FAKE_DENIED:-0}" = 1 ] && row_status=warning ;;
+    esac
+    # The online stages' doctor -- any call not made in a transient unit --
+    # answering from the record or from nothing: a metadata service that
+    # did not answer a host meant to be online.
+    if [ "${TP_FAKE_DENIED:-unset}" = unset ]; then
+      case "$mode:$installed" in
+        install-doctor-recorded:*|upgrade-doctor-recorded:upgraded)
+          machine_type_source=" (recorded from GCE metadata by tensorplate-agent; metadata service unreachable; same kernel boot; CPU count, MemTotal and NVIDIA devices unchanged)"
+          ;;
+        install-doctor-no-source:*) machine_type_source="" ;;
+      esac
+    fi
     cat <<JSON
 {"command":"doctor","payload":{"failing":${failing},"findings":[
+ {"id":"host_os","status":"ok","message":"ubuntu 24.04 on g2-standard-8${machine_type_source}"},
  {"id":"platform_row","status":"${row_status}","message":"resolved ubuntu2404-x86-l4-g2s8"},
  {"id":"platform_profile","status":"ok","message":"host matches 1 candidate support row(s): ubuntu2404-x86-l4-g2s8"},
  {"id":"accelerator_facts","status":"ok","message":"1 accelerator: NVIDIA L4"},
@@ -1106,10 +1928,10 @@ JSON
     # The deployment is durable state: it is what an upgraded agent
     # re-warms, and what a rollback sets aside.
     mkdir -p "${TP_FAKE_VARLIB}/state" || exit 9
-    printf '{"active":"%s"}\n' "${TP_FAKE_DEPLOYMENT_ID}" >"$state_file" || exit 9
+    printf '{"active":"%s"}\n' "$deployment" >"$state_file" || exit 9
     "${TP_FAKE_DPKG_DB}" agent-version >>"${TP_FAKE_DEPLOY_VERSIONS}"
     printf '{"command":"deploy","payload":{"phase":"active","deployment_id":"%s"}}\n' \
-      "${TP_FAKE_DEPLOYMENT_ID}"
+      "$deployment"
     ;;
   status)
     if [ "$mode:$installed" = rollback-agent-unavailable:rolled-back ]; then
@@ -1130,7 +1952,7 @@ JSON
     serving_url="\"http://127.0.0.1:${TP_FAKE_SERVING_PORT}/infer\""
     if [ "$mode:$phase" = restart-no-worker:restarted ]; then serving_url=null; fi
     printf '{"command":"status","payload":{"severity":"ready","agent":{"available":true,"agent_state":"ready","active":{"deployment_id":"%s","backend":"python_pytorch","serving_url":%s},"previous_active":null}}}\n' \
-      "${TP_FAKE_DEPLOYMENT_ID}" "$serving_url"
+      "$active" "$serving_url"
     ;;
   infer)
     printf '%s\n' "$phase" >>"${TP_FAKE_INFER_LOG}"
@@ -1219,6 +2041,13 @@ trap cleanup EXIT
 
 packaged_cli_config='{"fixture": "packaged cli config"}'
 
+# The checkout a stubbed run executes the harness and the offline module
+# from: this one, except where a case is about the checkout's own path.
+checkout_root="$repo_root"
+checkout_harness="$harness"
+# A bundle directory the sudo stub locks just before the copy, or none.
+locked_bundle=""
+
 # Runs the harness against the stubbed appliance, from a clean fixture
 # state: empty package database, no durable state, the packaged cli
 # config. Arguments after the assets directory go to the harness.
@@ -1231,11 +2060,23 @@ run_harness() {
   : >"${appliance}/health-requests.log"
   : >"${appliance}/deploy-versions.log"
   : >"${appliance}/infer-versions.log"
+  : >"${appliance}/cli.log"
+  : >"${appliance}/online.log"
   : >"$TP_FAKE_PUBLICATION_LOG"
   rm -f "${appliance}/restarted" "${appliance}/config-broken" \
     "${appliance}/restarts" "${appliance}/restore-failed" "${appliance}/backup-path" \
     "${appliance}/dpkg-db.json"
-  rm -rf "${appliance}/varlib"
+  rm -rf "${appliance}/varlib" "${appliance}/units"
+  # The fixture's /run and /etc, so a run starts with no unit drop-in and
+  # a leftover from a previous run cannot certify this one.
+  mkdir -p "${appliance}/units/run/systemd/system" "${appliance}/units/etc/systemd/system"
+  # Except where the case is exactly that: a drop-in an earlier run left
+  # behind, there before this run starts.
+  if [[ "$mode" == offline-leftover-before-run ]]; then
+    mkdir -p "${appliance}/units/run/systemd/system/tensorplate-observability.service.d"
+    printf '[Service]\n' \
+      >"${appliance}/units/run/systemd/system/tensorplate-observability.service.d/10-tensorplate-validation-offline.conf"
+  fi
   printf '{"fixture":"original agent config"}\n' >"${appliance}/agent-config"
   printf '%s\n' "$packaged_cli_config" >"${appliance}/cli.json"
   printf '%s\n' "$mode" >"${appliance}/mode"
@@ -1263,7 +2104,7 @@ run_harness() {
     TP_FAKE_MODE="$mode" \
     TP_FAKE_SUDO_LOG="${appliance}/sudo.log" \
     TP_FAKE_JOURNALCTL="${appliance}/bin/journalctl" \
-    TP_FAKE_HARNESS="$harness" \
+    TP_FAKE_HARNESS="$checkout_harness" \
     TP_FAKE_RESTART_MARKER="${appliance}/restarted" \
     TP_FAKE_INFER_LOG="${appliance}/infer.log" \
     TP_FAKE_PID_FILE="${appliance}/pid" \
@@ -1274,8 +2115,14 @@ run_harness() {
     TP_FAKE_BACKUP_PATH="${appliance}/backup-path" \
     TP_FAKE_RESTORE_FAILED="${appliance}/restore-failed" \
     TP_FAKE_RESTARTS_FILE="${appliance}/restarts" \
+    TP_OFFLINE_UNIT_ROOT="${appliance}/units" \
+    TP_OFFLINE_CGROUP_ROOT="${appliance}/cgroup" \
+    TP_FAKE_CLI_LOG="${appliance}/cli.log" \
+    TP_FAKE_ONLINE_LOG="${appliance}/online.log" \
+    TP_REPO="$checkout_root" \
+    TP_FAKE_LOCK_BUNDLE="$locked_bundle" \
     TP_CLOUD_CRASH_LOOP_POLL_SECONDS=0 \
-    bash "$harness" \
+    bash "$checkout_harness" \
       --assets-dir "$assets_dir" \
       --bundle-dir "$bundle" \
       --evidence-dir "$evidence" \
@@ -1324,26 +2171,105 @@ stage_log_says() {
   grep -Fq -- "$2" "$1" && echo yes || echo no
 }
 
+# The publication scanner, run the way the runbook gives it to the
+# operator but without the private literal file CI cannot have.
+#
+# Prints the scanner's exit status; its output is kept at the second
+# argument.
+publication_scan() {
+  local output="$1" status=0
+  shift
+  "${repo_root}/tools/validation/check-evidence-publication.sh" \
+    --patterns-only "$@" >"$output" 2>&1 || status=$?
+  printf '%s' "$status"
+}
+# Checks that the scanner admits every directory given, and shows what
+# it found when it does not: the evidence is gone with the temp dir by
+# the time anyone reads a CI log. A finding names a file relative to its
+# directory, so with several directories the refused ones are named too.
+check_publishable() {
+  local what="$1" output="$2" status dir
+  shift 2
+  status="$(publication_scan "$output" "$@")"
+  check "$what" 0 "$status"
+  if [[ "$status" != 0 ]]; then
+    sed 's/^/       /' "$output"
+    if (($# > 1)); then
+      for dir in "$@"; do
+        if [[ "$(publication_scan "${output}.one" "$dir")" != 0 ]]; then
+          printf '       in %s\n' "${dir##*/}"
+        fi
+      done
+    fi
+  fi
+}
+
+# Where the network denial reached, read from what the stubs saw rather
+# than from the harness text: the offline stage's window in sudo.log --
+# from its record check to its last drop-in removal -- and every CLI call
+# and every installer run with the denial state at that moment.
+#
+#   window     the offline stage's window exists
+#   outside    offline-only privileged commands outside that window
+#   denied     CLI calls made in a denied transient unit
+#   leaked     CLI calls made while drop-ins were installed, not denied
+#   transient  CLI calls made in any transient unit with no drop-in
+#              installed: the online stages never use one
+#   installs   installer runs, and how many ran with a denial in place
+offline_scope() {
+  python3 - "${appliance}/sudo.log" "${appliance}/cli.log" "${appliance}/online.log" <<'PY'
+import re, sys
+
+sudo, cli, online = (open(path, encoding="utf-8").read().splitlines() for path in sys.argv[1:])
+starts = [i for i, line in enumerate(sudo)
+          if re.fullmatch(r"test -f \S*/machine-type\.json", line)]
+ends = [i for i, line in enumerate(sudo)
+        if re.fullmatch(r"rm -f \S*/10-tensorplate-validation-offline\.conf", line)]
+window = len(starts) == 1 and bool(ends) and starts[0] < ends[-1]
+# Commands and arguments, not substrings: a checkout or a temporary
+# directory may be called anything.
+offline_only = re.compile(r"^systemd-run |--property=IPAddress"
+                          r"|/10-tensorplate-validation-offline\.conf(?: |$)"
+                          r"|/linux_offline_runtime\.py ")
+outside = [line for i, line in enumerate(sudo) if offline_only.search(line)
+           and not (window and starts[0] <= i <= ends[-1])]
+calls = []
+for line in cli:
+    command, denied, dropins = line.split()
+    calls.append((command, denied.split("=", 1)[1], int(dropins.split("=", 1)[1])))
+denied = [c for c in calls if c[1] == "1" and c[2] > 0]
+leaked = [c for c in calls if c[2] > 0 and c[1] != "1"]
+transient = [c for c in calls if c[2] == 0 and c[1] != "unset"]
+under_denial = [line for line in online if line != "install dropins=0 denied_units=0"]
+for name, items in (("outside", outside), ("leaked", leaked), ("transient", transient),
+                    ("under_denial", under_denial)):
+    for item in items:
+        print(f"       {name}: {item}", file=sys.stderr)
+print(f"window={'yes' if window else 'no'} outside={len(outside)} denied={len(denied)} "
+      f"leaked={len(leaked)} transient={len(transient)} "
+      f"installs={len(online)} installs_denied={len(under_denial)}")
+PY
+}
+
 ok_evidence="${td}/stages-ok"
 check "a stubbed run completes" "0" "$(run_stages ok "$ok_evidence")"
-for stage in install deploy-smoke status-logs restart crash-loop; do
+# Copied from inside the bundle, so cp only ever names relative paths,
+# and still staged as the bundle's own tree rather than nested in it.
+check "  the bundle is staged as a copy of its own tree" "yes yes" \
+  "$(printf '%s %s' \
+     "$(grep -Fxq "cp -R . ${appliance}/staged-bundle" "${appliance}/sudo.log" \
+          && echo yes || echo no)" \
+     "$(diff -r "$bundle" "${appliance}/staged-bundle" >/dev/null 2>&1 \
+          && echo yes || echo no)")"
+for stage in install deploy-smoke status-logs restart crash-loop offline; do
   check "  ${stage} is recorded as a pass" "pass" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
-for stage in upgrade rollback offline; do
+for stage in upgrade rollback; do
   check "  ${stage} is recorded as skipped" "skipped" "$(stage_status "${ok_evidence}/lifecycle-report.json" "$stage")"
 done
 check "  the skipped stages keep the run incomplete" incomplete \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
     "${ok_evidence}/lifecycle-report.json")"
-check "  offline explains the missing metadata-independent identity support" yes \
-  "$(python3 - "${ok_evidence}/lifecycle-report.json" <<'PY'
-import json, sys
-
-stage = next(s for s in json.load(open(sys.argv[1]))["stages"] if s["stage"] == "offline")
-detail = stage.get("detail", "").lower()
-print("yes" if "metadata" in detail and "identity" in detail else "no")
-PY
-)"
 for stage in upgrade rollback; do
   check "  ${stage} is skipped for want of --baseline-assets-dir" yes \
     "$(python3 - "${ok_evidence}/lifecycle-report.json" "$stage" <<'PY'
@@ -1357,8 +2283,439 @@ done
 check "  without a baseline the candidate is installed once and nothing is removed" "1 0" \
   "$(printf '%s %s' "$(grep -c '/install.sh --local-artifacts' "${appliance}/sudo.log")" \
      "$(grep -c 'apt-get remove' "${appliance}/sudo.log")")"
-check "  a deferred offline stage never mutates network policy" no \
-  "$(grep -Eq 'IPAddress(Deny|Allow)|systemd-run|validation-offline' "${appliance}/sudo.log" && echo yes || echo no)"
+# --- the offline stage, executed against the stubbed appliance.
+#
+# These were negative checks while the stage was deferred -- that the
+# harness never touched network policy. They are the same claims read the
+# other way now: the drop-in IS applied, under /run and nowhere else, and
+# IS removed on the way out.
+offline_drop_in() {
+  printf '%s' "${appliance}/units/run/systemd/system/${1}.service.d/10-tensorplate-validation-offline.conf"
+}
+check "  the offline stage denies both services through runtime drop-ins" "yes yes" \
+  "$(printf '%s %s' \
+     "$(grep -Fq "install -D -m 0644" "${appliance}/sudo.log" && echo yes || echo no)" \
+     "$(grep -F 'install -D -m 0644' "${appliance}/sudo.log" | grep -cq '/run/systemd/system/tensorplate-agent.service.d/' && echo yes || echo no)")"
+check "  and denies the observability service too" yes \
+  "$(grep -F 'install -D -m 0644' "${appliance}/sudo.log" | grep -cq '/run/systemd/system/tensorplate-observability.service.d/' && echo yes || echo no)"
+check "  and never writes a persistent unit file" no \
+  "$(grep -q '/etc/systemd/system' "${appliance}/sudo.log" && echo yes || echo no)"
+check "  and removes every drop-in it installed" "no no" \
+  "$(printf '%s %s' \
+     "$([[ -e "$(offline_drop_in tensorplate-agent)" ]] && echo yes || echo no)" \
+     "$([[ -e "$(offline_drop_in tensorplate-observability)" ]] && echo yes || echo no)")"
+check "  and files the removal it read back from systemd" "2 False" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+print(r["drop_ins_removed"], r["denied"])' "${ok_evidence}/offline-restored.json")"
+check "  the allowed prefixes are the two host addresses, not the localhost shorthand" \
+  "127.0.0.1/32 ::1/128" \
+  "$(python3 -c 'import json,sys
+print(" ".join(json.load(open(sys.argv[1]))["mechanism"]["allow"]))' \
+    "${ok_evidence}/offline-runtime.json")"
+# status twice -- once for the deployment the agent re-warmed while
+# denied, once for the one this stage deployed -- plus doctor, deploy and
+# infer. Every one of them inside its own denied transient unit.
+check "  every CLI call ran in a denied transient unit" "5" \
+  "$(grep -c 'systemd-run .*--property=IPAddressDeny=any.*-- tensorplate ' "${appliance}/sudo.log")"
+check "  and none of them ran in an undenied one" "0" \
+  "$(grep 'systemd-run .*-- tensorplate ' "${appliance}/sudo.log" \
+     | grep -vc 'IPAddressDeny=any' || true)"
+for command in status doctor deploy infer; do
+  check "  ${command} ran denied" yes \
+    "$(grep 'systemd-run .*--property=IPAddressDeny=any' "${appliance}/sudo.log" \
+       | grep -q -- "-- tensorplate ${command} " && echo yes || echo no)"
+done
+# Each through the module's run-denied, which probes that call's own unit
+# and only then execs the call, in the stage's order.
+check "  each call ran behind a probe of its own unit" \
+  "status doctor deploy status-after-deploy infer" \
+  "$(sed -n 's/^systemd-run .*--property=IPAddressDeny=any.* -- python3 .*linux_offline_runtime\.py run-denied --call \([a-z-]*\) .* -- tensorplate .*/\1/p' \
+       "${appliance}/sudo.log" | tr '\n' ' ' | sed 's/ $//')"
+check "  and the certificate classifies each unit's probe against the transient control" \
+  "deploy:6 doctor:6 infer:6 status:6 status-after-deploy:6" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))["cli_units_probed_before_each_call"]
+print(" ".join("%s:%d" % (call, len(entry["classification"]["operations_refused_under_the_denial"]))
+               for call, entry in sorted(r.items()) if entry["probe"]["call"] == call))' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  the control ran in a transient unit with no denial" "1" \
+  "$(grep -c 'systemd-run .*-- python3 .*linux_offline_runtime.py control' "${appliance}/sudo.log")"
+check "  and the control carried no address policy" "0" \
+  "$(grep 'linux_offline_runtime.py control' "${appliance}/sudo.log" | grep -c 'IPAddressDeny')"
+check "  the probe ran denied" "1" \
+  "$(grep -c 'systemd-run .*--property=IPAddressDeny=any.*-- python3 .*linux_offline_runtime.py probe' "${appliance}/sudo.log")"
+# What a kernel answers: the metadata service's connect silenced, its
+# address refused outright as a datagram.
+check "  the metadata service answered the control and went silent under the denial" \
+  "ok ok timeout EPERM" \
+  "$(python3 -c 'import json,sys
+control=json.load(open(sys.argv[1]))["denied"]
+probe=json.load(open(sys.argv[2]))["denied"]
+print(control["tcp_gce_metadata"], control["udp_gce_metadata"],
+      probe["tcp_gce_metadata"], probe["udp_gce_metadata"])' \
+    "${ok_evidence}/offline-control.json" "${ok_evidence}/offline-probe.json")"
+check "  the resolver stub is cut off under the denial, as the shorthand would not have been" \
+  "timeout EPERM" \
+  "$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))["denied"]
+print(d["tcp_resolver_stub"], d["udp_resolver_stub"])' "${ok_evidence}/offline-probe.json")"
+# Both services, probed from inside their own control groups: each
+# control completed before the denial, each probe refused under it.
+for unit in tensorplate-agent tensorplate-observability; do
+  check "  ${unit} was probed inside its own control group, against its own control" \
+    "ok EPERM unit 6" \
+    "$(python3 -c 'import json,sys
+d=sys.argv[1]; u=sys.argv[2]
+control=json.load(open(f"{d}/offline-unit-control-{u}.service.json"))["denied"]
+probe=json.load(open(f"{d}/offline-unit-probe-{u}.service.json"))["denied"]
+c=json.load(open(f"{d}/offline-unit-classification-{u}.service.json"))
+print(" ".join(sorted(set(control.values()))), " ".join(sorted(set(probe.values()))),
+      c["scope"], len(c["operations_refused_under_the_denial"]))' "$ok_evidence" "$unit")"
+  check "  and as root only to join it" yes \
+    "$(grep -Eq "^python3 .*linux_offline_runtime\.py probe-unit --unit ${unit} --control-group /system\.slice/${unit}\.service --uid $(id -u) --gid $(id -g) " \
+         "${appliance}/sudo.log" && echo yes || echo no)"
+done
+check "  where the certificate carries both" \
+  "tensorplate-agent.service tensorplate-observability.service" \
+  "$(python3 -c 'import json,sys
+print(" ".join(sorted(json.load(open(sys.argv[1]))["units_probed_in_their_own_control_group"])))' \
+    "${ok_evidence}/offline-runtime.json")"
+# Read from what the stubs saw: the offline stage made exactly five CLI
+# calls, every one denied; no call before or after it was denied or made
+# in a transient unit at all; the installer ran with no denial in place;
+# and no offline-only privileged command ran outside the stage.
+check "  the denial reached exactly the offline stage" \
+  "window=yes outside=0 denied=5 leaked=0 transient=0 installs=1 installs_denied=0" \
+  "$(offline_scope)"
+check "  the agent socket and the serving port stay reachable under the denial" "ok ok" \
+  "$(python3 -c 'import json,sys
+a=json.load(open(sys.argv[1]))["allowed"]
+print(a["unix_agent_socket"], a["tcp_loopback_serving_port"])' "${ok_evidence}/offline-probe.json")"
+check "  the identity came from the boot-bound record" "recorded_gce_metadata not_applicable" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+print(r["machine_type_source"], r["record"])' "${ok_evidence}/offline-identity.json")"
+check "  a fresh deployment was made while denied" "cloud-lifecycle-smoke-offline" \
+  "$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["payload"]["deployment_id"])' \
+    "${ok_evidence}/offline-deploy.json")"
+check "  the certificate's verdicts are the ones its own documents carry" \
+  "True pass pass pass pass" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+cli=r["cli_under_denial"]
+print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"], cli["infer"])' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  and it records both services replaced under the denial and again without it" \
+  "tensorplate-agent.service tensorplate-observability.service | tensorplate-agent.service tensorplate-observability.service" \
+  "$(python3 -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+print(" ".join(r["units_restarted_under_the_denial"]), "|",
+      " ".join(r["restore"]["units_restarted_without_the_denial"]))' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  and names the operations the denial refused, and the connects it silenced" "6 2" \
+  "$(python3 -c 'import json,sys
+c=json.load(open(sys.argv[1]))["classification"]
+print(len(c["operations_refused_under_the_denial"]), len(c["operations_silenced_under_the_denial"]))' \
+    "${ok_evidence}/offline-runtime.json")"
+check "  and the restored readback compared prefixes the host printed in either order" \
+  "127.0.0.1/32 ::1/128" \
+  "$(python3 -c 'import json,sys
+print(" ".join(json.load(open(sys.argv[1]))["allowed_prefixes"]))' \
+    "${ok_evidence}/offline-denial.json")"
+# Which is only a claim about the readback if the stub really prints the
+# observability unit's lists in the other order: asked directly, for a
+# unit started under the rendered drop-in.
+show_order="${td}/show-order"
+mkdir -p "${show_order}/generation"
+printf '1\ndenied\n' >"${show_order}/generation/tensorplate-observability"
+python3 "${repo_root}/tools/validation/linux_offline_runtime.py" drop-in-text \
+  >"${show_order}/generation/tensorplate-observability.loaded"
+check "  (the observability unit printed both lists in reverse)" \
+  "IPAddressDeny=::/0 0.0.0.0/0|IPAddressAllow=::1/128 127.0.0.1/32" \
+  "$(env TP_OFFLINE_UNIT_ROOT="$show_order" "${appliance}/bin/systemctl" show \
+       -p LoadState -p ActiveState -p InvocationID -p IPAddressDeny -p IPAddressAllow \
+       -- tensorplate-observability | grep '^IPAddress' | tr '\n' '|' | sed 's/|$//')"
+# The claim this check's name makes, run against the file rather than
+# asserted of it: the scanner is what admits published evidence, and an
+# existence test would pass for a document naming an internal address.
+offline_certificate_scan="${td}/offline-certificate-scan.out"
+offline_certificate_status=0
+"${repo_root}/tools/validation/check-evidence-publication.sh" --patterns-only \
+  "${ok_evidence}/offline-runtime.json" >"$offline_certificate_scan" 2>&1 \
+  || offline_certificate_status=$?
+check "  and the offline evidence names no host address the scanner refuses" 0 \
+  "$offline_certificate_status"
+if ((offline_certificate_status != 0)); then
+  sed 's/^/       /' "$offline_certificate_scan" >&2
+fi
+
+# Every way the offline stage could certify a host it did not deny, an
+# identity it did not establish, or a host it did not put back. Each mode
+# must fail the stage AND leave the drop-ins removed: a run that ends
+# with the appliance denied cannot reach anything, including whatever the
+# operator would use to recover it.
+offline_drop_ins_left() {
+  local unit path count=0
+  for unit in tensorplate-agent tensorplate-observability; do
+    path="$(offline_drop_in "$unit")"
+    # -L too: a dangling symlink at that path is a file the run left
+    # behind, and -e alone reports it as gone.
+    [[ -e "$path" || -L "$path" ]] && count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+for mode in offline-no-machine-type-record offline-denial-inert offline-localhost-shorthand \
+            offline-unit-dead offline-probe-leaks offline-probe-crashes \
+            offline-control-refused offline-control-metadata-unreachable \
+            offline-control-child-fails \
+            offline-transient-not-denied offline-agent-socket-unreachable \
+            offline-doctor-live-metadata offline-doctor-failing offline-doctor-row-warning \
+            offline-identity-live-metadata offline-identity-rewrites-record \
+            offline-identity-undetected offline-identity-twice \
+            offline-persistent-drop-in offline-drop-in-extra-directive \
+            offline-deny-restart-ignored offline-restore-restart-ignored \
+            offline-service-filter-not-attached offline-unit-control-refused; do
+  evidence="${td}/stages-${mode}"
+  # The run exits with the failed stage's status: a crashing probe's is
+  # the module's for a failure it did not anticipate, and a transient
+  # unit with no filter is refused by the first CLI call's own probe.
+  expected_status=1
+  case "$mode" in
+    offline-probe-crashes) expected_status=70 ;;
+    offline-transient-not-denied) expected_status=71 ;;
+  esac
+  check "${mode} fails the run" "$expected_status" "$(run_stages "$mode" "$evidence")"
+  check "  crash-loop passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and offline is recorded as a failure, not a pass" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  if [[ "$mode" == offline-transient-not-denied ]]; then
+    check "  and no CLI call ran while the services were denied" 0 \
+      "$(grep -c ' dropins=[1-9]' "${appliance}/cli.log" || true)"
+  fi
+  # A control that cannot be a baseline is refused as it is taken, by the
+  # step that took it and for the operation that did not complete, and
+  # before anything is denied or restarted.
+  control_step=""
+  case "$mode" in
+    offline-control-refused)
+      control_step="control probe"
+      control_failure="control_not_refused:udp_test_net_v4" ;;
+    offline-control-metadata-unreachable)
+      control_step="control probe"
+      control_failure="control_metadata_service_reachable:tcp_gce_metadata" ;;
+    offline-control-child-fails)
+      control_step="control probe"
+      control_failure="control_completed:udp_test_net_v4_from_child" ;;
+    offline-unit-control-refused)
+      control_step="control inside the tensorplate-agent control group"
+      control_failure="control_not_refused:udp_test_net_v4" ;;
+  esac
+  if [[ -n "$control_step" ]]; then
+    check "  and the control is refused as it is taken, naming what it did not do" "yes yes" \
+      "$(printf '%s %s' \
+         "$(grep -Fxq "step failed (exit 1): ${control_step}" \
+              "${evidence}/offline.log" && echo yes || echo no)" \
+         "$(grep -F 'control checks failed: ' "${evidence}/offline.log" \
+              | grep -Fq "$control_failure" && echo yes || echo no)")"
+    check "  before any drop-in is installed or any service restarted for it" "0 0" \
+      "$(grep -c '^install -D -m 0644 ' "${appliance}/sudo.log" || true) $(sed -n \
+           '/python3 .*linux_offline_runtime\.py control/,$p' "${appliance}/sudo.log" \
+           | grep -c 'systemctl restart' || true)"
+  fi
+done
+
+# A probe that crashes, from a checkout under a home directory -- the
+# shape of CI's own /home/runner checkout, where an uncaught traceback
+# quoted the module's path into offline.log and the publication scan
+# refused the run's evidence. The module names the subcommand and the
+# exception type and nothing else, so the evidence stays publishable.
+# The harness, the runner and the module are copied there together,
+# because the harness finds the module beside itself.
+home_checkout="${td}/home/tp-reviewer/checkout"
+mkdir -p "${home_checkout}/tools/validation"
+for file in ubuntu-l4-cloud-lifecycle.sh lifecycle-stages.sh linux_offline_runtime.py; do
+  cp "${repo_root}/tools/validation/${file}" "${home_checkout}/tools/validation/${file}"
+done
+checkout_root="$home_checkout"
+checkout_harness="${home_checkout}/tools/validation/ubuntu-l4-cloud-lifecycle.sh"
+for crash_case in "offline-probe-crashes|probe-unit|probe inside the tensorplate-agent control group|0" \
+                  "offline-cli-probe-crashes|run-denied|status under denial|0" \
+                  "offline-transient-probe-crashes|probe|denied probe|5"; do
+  IFS='|' read -r crash_mode crash_subcommand crash_step crash_calls <<<"$crash_case"
+  evidence="${td}/stages-home-${crash_mode}"
+  check "${crash_mode}, from a checkout under a home directory, fails the run" 70 \
+    "$(run_stages "$crash_mode" "$evidence")"
+  check "  and offline is recorded as a failure" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  check "  and the stage log names the subcommand and the exception type" "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fxq "error: ${crash_subcommand} failed unexpectedly: RuntimeError" \
+            "${evidence}/offline.log" && echo yes || echo no)" \
+       "$(grep -Fxq "step failed (exit 70): ${crash_step}" \
+            "${evidence}/offline.log" && echo yes || echo no)")"
+  check "  and the CLI calls made under the denial are the ones before the crash" \
+    "$crash_calls" "$(grep -c ' denied=1 ' "${appliance}/cli.log" || true)"
+  check "  and no file of the run quotes a traceback, the exception or the checkout" 0 \
+    "$(grep -rlF -e Traceback -e 'the probe crashed' -e "$home_checkout" "$evidence" \
+       | wc -l | tr -d ' ')"
+  check_publishable "  and the run's evidence passes the publication scanner" \
+    "${td}/home-${crash_mode}-scan.out" "$evidence"
+done
+checkout_root="$repo_root"
+checkout_harness="$harness"
+
+# The drop-in removal itself failing must fail the run rather than being
+# reported as a restored host.
+evidence="${td}/stages-offline-drop-in-not-removed"
+check "a drop-in that cannot be removed refuses the run" 1 \
+  "$(run_stages offline-drop-in-not-removed "$evidence")"
+check "  and offline is recorded as a failure" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+check "  and the run does not certify itself" fail \
+  "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' \
+     "${evidence}/lifecycle-report.json")"
+
+# A service whose filter never attached fails on that unit, and only
+# there: the transient probe and the other service pass. (A service's
+# control that was refused fails before the denial, above.)
+check "offline-service-filter-not-attached is refused for tensorplate-observability by its own classification" \
+  "yes no" \
+  "$(printf '%s %s' \
+     "$(grep -Fq "step failed (exit 1): the denial is enforced inside the tensorplate-observability control group" \
+          "${td}/stages-offline-service-filter-not-attached/offline.log" && echo yes || echo no)" \
+     "$(grep -Fq "the denial is enforced inside the tensorplate-agent control group" \
+          "${td}/stages-offline-service-filter-not-attached/offline.log" && echo yes || echo no)")"
+
+# One CLI call's unit whose filter never attached, while every other
+# unit's did. The call is never made, the calls before it were, and the
+# stage fails on that unit's own probe -- not on anything the call would
+# have done. Doctor is here because its exit status is captured rather
+# than stepped on.
+for cli_case in "doctor|status|doctor resolves ubuntu2404-x86-l4-g2s8 from the recorded machine type|1" \
+                "deploy|status doctor|fresh deploy under denial|71" \
+                "infer|status doctor deploy status|infer under denial|71"; do
+  IFS='|' read -r cli_call cli_before cli_step cli_status <<<"$cli_case"
+  evidence="${td}/stages-offline-cli-filter-not-attached-${cli_call}"
+  check "offline-cli-filter-not-attached-${cli_call} fails the run" "$cli_status" \
+    "$(run_stages "offline-cli-filter-not-attached-${cli_call}" "$evidence")"
+  check "  crash-loop passed before it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" crash-loop)"
+  check "  and offline is recorded as a failure, not a pass" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  check "  and the ${cli_call} unit is refused before ${cli_call} runs" \
+    "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fq "error: the ${cli_call} unit does not enforce the denial, so tensorplate was not run: refused:" \
+            "${evidence}/offline.log" && echo yes || echo no)" \
+       "$(grep -Fxq "step failed (exit ${cli_status}): ${cli_step}" \
+            "${evidence}/offline.log" && echo yes || echo no)")"
+  check "  and only the calls before it were made, each denied" "$cli_before" \
+    "$(sed -n 's/^\([a-z]*\) denied=1 .*/\1/p' "${appliance}/cli.log" | tr '\n' ' ' | sed 's/ $//')"
+  check "  and its unit's own probe is filed, showing nothing refused" ok \
+    "$(python3 -c 'import json,sys
+p=json.load(open(sys.argv[1]))
+print(" ".join(sorted(set(p["denied"].values()))) if p["call"] == sys.argv[2] else "wrong call")' \
+      "${evidence}/offline-cli-probe-${cli_call}.json" "$cli_call")"
+  check "  and no certificate is filed" no \
+    "$([[ -e "${evidence}/offline-runtime.json" ]] && echo yes || echo no)"
+done
+
+# One unit's removal failing does not stop the other's, nor the reload,
+# the restart and the readback that follow -- in the stage, or in the
+# exit handler's retry.
+agent_drop_in="$(offline_drop_in tensorplate-agent)"
+observability_drop_in="$(offline_drop_in tensorplate-observability)"
+evidence="${td}/stages-offline-agent-removal-fails"
+check "a drop-in removal that fails for one unit fails the run" 9 \
+  "$(run_stages ok "$evidence" "rm -f ${agent_drop_in}")"
+check "  and offline is recorded as a failure" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+check "  and the other unit's drop-in is removed all the same" "yes no" \
+  "$(printf '%s %s' \
+     "$([[ -e "$agent_drop_in" ]] && echo yes || echo no)" \
+     "$([[ -e "$observability_drop_in" ]] && echo yes || echo no)")"
+check "  and systemd was reloaded after the removals, in the stage and on exit" 3 \
+  "$(grep -c '^systemctl daemon-reload$' "${appliance}/sudo.log")"
+check "  and the operator is told what is left and how to remove it" yes \
+  "$(grep -Fq "remove it with: sudo rm -f ${agent_drop_in} ${observability_drop_in} && sudo systemctl daemon-reload && sudo systemctl restart tensorplate-agent tensorplate-observability" \
+       "${evidence}/offline.log" && echo yes || echo no)"
+
+evidence="${td}/stages-offline-cleanup-invocation-unreadable"
+check "an invocation the cleanup cannot read fails the run" 1 \
+  "$(run_stages offline-cleanup-invocation-unreadable "$evidence")"
+check "  and offline is recorded as a failure" fail \
+  "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+# Both drop-ins go, systemd is reloaded in the stage and again by the exit
+# handler's retry, and the retry -- which can read the agent's invocation
+# by then -- files a readback that compared both.
+check "  but both drop-ins are removed, and the exit handler retries the rest" "0 3" \
+  "$(printf '%s %s' "$(offline_drop_ins_left)" \
+     "$(grep -c '^systemctl daemon-reload$' "${appliance}/sudo.log")")"
+check "  and the retry's readback compared both services' instances" \
+  "tensorplate-agent.service tensorplate-observability.service" \
+  "$(python3 -c 'import json,sys
+print(" ".join(json.load(open(sys.argv[1]))["units_restarted"]))' \
+    "${evidence}/offline-restored.json")"
+
+# A drop-in an earlier run left behind is refused before the run begins:
+# nothing is installed with the services denied.
+evidence="${td}/stages-offline-leftover-before-run"
+check "a leftover drop-in from an earlier run refuses the run" 1 \
+  "$(run_stages offline-leftover-before-run "$evidence" 2>/dev/null)"
+check "  before anything privileged runs, installer included" 0 \
+  "$(wc -l <"${appliance}/sudo.log" | tr -d ' ')"
+check "  and before a report is written" no \
+  "$([[ -e "${evidence}/lifecycle-report.json" ]] && echo yes || echo no)"
+check "  and names the leftover" yes \
+  "$(grep -Fq "is already installed at ${observability_drop_in}" "${evidence}.err" \
+     && echo yes || echo no)"
+
+# A privileged step of the offline stage that fails must fail the stage.
+# Written the obvious way -- errexit is suspended inside a stage body --
+# an unguarded `sudo ...` here would be invisible.
+for failing in "install -D" "systemctl daemon-reload" "systemd-run"; do
+  evidence="${td}/stages-offline-fails-${failing// /-}"
+  check "an offline step that fails (${failing}) is recorded as a failed offline" fail \
+    "$(run_stages ok "$evidence" "$failing" >/dev/null; \
+       stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the drop-ins are still removed" 0 "$(offline_drop_ins_left)"
+done
+
+# A drop-in left by an earlier run means this run never applied the
+# denial it would certify, so it is refused before anything is installed.
+#
+# One case per unit, because the refusal is one `step` per unit: a suite
+# that only ever planted the agent's leftover would let the observability
+# half be deleted with nothing failing. The dangling symlink is the third
+# case: `-e` alone is false for one, and `install -D` would then write
+# through it to wherever it points.
+for leftover_mode in offline-leftover-drop-in offline-leftover-drop-in-observability \
+                     offline-leftover-dangling-symlink; do
+  leftover_evidence="${td}/stages-${leftover_mode}"
+  check "${leftover_mode} refuses the offline stage" fail \
+    "$(run_stages "$leftover_mode" "$leftover_evidence" >/dev/null; \
+       stage_status "${leftover_evidence}/lifecycle-report.json" offline)"
+  check "  and the leftover is not removed by a run that refused it" 1 \
+    "$(offline_drop_ins_left)"
+done
+
+# Signals during the stage take the same cleanup path as a failure.
+for signal_case in int:130 term:143 hup:129; do
+  signal="${signal_case%:*}"
+  expected_status="${signal_case#*:}"
+  evidence="${td}/stages-offline-signal-${signal}"
+  check "${signal} while the network is denied preserves the signal exit status" \
+    "$expected_status" "$(run_stages "offline-signal-${signal}" "$evidence")"
+  check "  the interrupted offline stage is recorded as failed" fail \
+    "$(stage_status "${evidence}/lifecycle-report.json" offline)"
+  check "  and the signal cleanup removes every drop-in" 0 "$(offline_drop_ins_left)"
+done
 check "  the artifact digest reaches the report" "yes" \
   "$(python3 -c 'import json,sys,re
 subject=json.load(open(sys.argv[1]))["subject"]
@@ -1383,10 +2740,23 @@ for phase in initial restarted; do
   check "  ${phase} worker answers its health endpoint" yes \
     "$(grep -Fxq "$phase /health" "${appliance}/health-requests.log" && echo yes || echo no)"
 done
-for invocation in 11111111111111111111111111111111 22222222222222222222222222222222; do
-  check "  journal capture selects current invocation ${invocation}" yes \
-    "$(grep -F "journalctl" "${appliance}/sudo.log" | grep -Fq "_SYSTEMD_INVOCATION_ID=${invocation}" && echo yes || echo no)"
+# Each unit's invocation id carries that unit in its prefix and its start
+# generation in the last four digits, so a capture names one start rather
+# than the unit.
+for prefix in 1111111111111111111111111111 2222222222222222222222222222; do
+  check "  journal capture selects a current invocation of ${prefix}" yes \
+    "$(grep -F "journalctl" "${appliance}/sudo.log" \
+       | grep -Eq "_SYSTEMD_INVOCATION_ID=${prefix}[0-9a-f]{4}" && echo yes || echo no)"
 done
+# And selects the start that was current each time, not one id for the
+# whole run: the agent is restarted between the status-logs capture and
+# the offline one, so the two name different starts.
+check "  and each capture names the start that was current then" yes \
+  "$(grep -F "journalctl" "${appliance}/sudo.log" \
+     | sed -n 's/.*_SYSTEMD_INVOCATION_ID=1111111111111111111111111111\([0-9a-f]\{4\}\).*/\1/p' \
+     | python3 -c 'import sys
+starts = [int(value, 16) for value in sys.stdin.read().split()]
+print("yes" if len(starts) >= 2 and starts[-1] > starts[0] else f"no: {starts}")')"
 
 # --- the kept journal fields are one decision recorded in three files.
 #
@@ -1505,36 +2875,6 @@ check "  and no raw capture is left in the harness's scratch space" 0 \
 # to the scanner that admits it. A stub run's paths are mktemp paths, so
 # a runner whose TMPDIR sat under a home directory would report
 # home-path findings here.
-#
-# Prints the scanner's exit status; its output is kept at the second
-# argument.
-publication_scan() {
-  local output="$1" status=0
-  shift
-  "${repo_root}/tools/validation/check-evidence-publication.sh" \
-    --patterns-only "$@" >"$output" 2>&1 || status=$?
-  printf '%s' "$status"
-}
-# Checks that the scanner admits every directory given, and shows what
-# it found when it does not: the evidence is gone with the temp dir by
-# the time anyone reads a CI log. A finding names a file relative to its
-# directory, so with several directories the refused ones are named too.
-check_publishable() {
-  local what="$1" output="$2" status dir
-  shift 2
-  status="$(publication_scan "$output" "$@")"
-  check "$what" 0 "$status"
-  if [[ "$status" != 0 ]]; then
-    sed 's/^/       /' "$output"
-    if (($# > 1)); then
-      for dir in "$@"; do
-        if [[ "$(publication_scan "${output}.one" "$dir")" != 0 ]]; then
-          printf '       in %s\n' "${dir##*/}"
-        fi
-      done
-    fi
-  fi
-}
 check_publishable "  and the run's own evidence passes the publication scanner" \
   "${td}/publication-scan.out" "$ok_evidence"
 
@@ -1666,6 +3006,78 @@ check "a restart that fails is recorded as a failed restart" "fail" \
 row_evidence="${td}/stages-wrong-row"
 check "a host whose row does not resolve fails the install stage" "fail" \
   "$(run_stages wrong-row "$row_evidence" >/dev/null; stage_status "${row_evidence}/lifecycle-report.json" install)"
+
+# Install runs online, so doctor has to have read the machine type live.
+# A shape from the record, or none at all, fails the stage.
+for mode in install-doctor-recorded install-doctor-no-source; do
+  mode_evidence="${td}/stages-${mode}"
+  check "${mode} fails the install stage" "fail" \
+    "$(run_stages "$mode" "$mode_evidence" >/dev/null; stage_status "${mode_evidence}/lifecycle-report.json" install)"
+  check "  and says doctor did not detect the host live" yes \
+    "$(grep -Fq 'host_os does not show live detection from GCE metadata' \
+         "${mode_evidence}/install.log" && echo yes || echo no)"
+done
+
+# A bundle that cannot be read, from under a home directory. The
+# deploy-smoke bundle is the checkout's by default, and an OSError's
+# message, cp's and cd's all quote the path they were given: the stage
+# log names a file by its place in the bundle instead. The bundle check
+# reads the manifest and the model; the copy reads every file, so a file
+# the check never opens is the copy's to report, by a relative path. The
+# copy enters the bundle to do that, and a bundle it cannot enter by then
+# is refused without its path and without copying anything else.
+#
+# Each case: what to break, the file, a line the stage log must carry
+# exactly, and an extended regex another of its lines must match -- cp's
+# wording differs between GNU and BSD.
+home_bundle="${td}/home/tp-reviewer/bundle"
+for bundle_case in \
+    "model-missing|x86-smoke.json|deploy-smoke bundle file \"x86-smoke.json\" cannot be read: No such file or directory|^deploy-smoke bundle file .*No such file or directory$" \
+    "manifest-unreadable|manifest.json|deploy-smoke bundle file \"manifest.json\" cannot be read: Permission denied|^deploy-smoke bundle file .*Permission denied$" \
+    "extra-unreadable|extra.bin|step failed (exit 1): copy the bundle|^cp: .*\./extra\.bin.*Permission denied$" \
+    "dir-unenterable||step failed (exit 1): copy the bundle|^cannot enter the deploy-smoke bundle directory$"; do
+  IFS='|' read -r bundle_mode bundle_file bundle_line bundle_pattern <<<"$bundle_case"
+  rm -rf "$home_bundle"
+  mkdir -p "$(dirname "$home_bundle")"
+  cp -R "$bundle" "$home_bundle"
+  case "$bundle_mode" in
+    model-missing)
+      rm -f "${home_bundle}/${bundle_file}"
+      ;;
+    dir-unenterable)
+      locked_bundle="$home_bundle"
+      ;;
+    *)
+      touch "${home_bundle}/${bundle_file}"
+      chmod 000 "${home_bundle}/${bundle_file}"
+      # Root reads a mode-000 file, and this case would prove nothing.
+      check "a ${bundle_mode} bundle's ${bundle_file} is unreadable to this suite" no \
+        "$([[ -r "${home_bundle}/${bundle_file}" ]] && echo yes || echo no)"
+      ;;
+  esac
+  evidence="${td}/stages-home-bundle-${bundle_mode}"
+  check "a ${bundle_mode} bundle fails the run" 1 \
+    "$(run_harness ok "$evidence" "" "$assets" --bundle-dir "$home_bundle")"
+  locked_bundle=""
+  chmod 755 "$home_bundle"
+  chmod -R u+rw "$home_bundle"
+  check "  after install passed, as a failed deploy-smoke" "pass fail" \
+    "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" install)" \
+       "$(stage_status "${evidence}/lifecycle-report.json" deploy-smoke)")"
+  check "  saying what could not be read, and why" "yes yes" \
+    "$(printf '%s %s' \
+       "$(grep -Fxq "$bundle_line" "${evidence}/deploy-smoke.log" && echo yes || echo no)" \
+       "$(grep -Eq "$bundle_pattern" "${evidence}/deploy-smoke.log" && echo yes || echo no)")"
+  check "  and no file of the run quotes a traceback or the bundle's path" 0 \
+    "$(grep -rlF -e Traceback -e "$home_bundle" "$evidence" | wc -l | tr -d ' ')"
+  check_publishable "  and the run's evidence passes the publication scanner" \
+    "${td}/home-bundle-${bundle_mode}-scan.out" "$evidence"
+  if [[ "$bundle_mode" == dir-unenterable ]]; then
+    check "  and nothing was copied from anywhere else" "0 no" \
+      "$(grep -c '^cp -R ' "${appliance}/sudo.log" || true) $(
+         [[ -e "${appliance}/staged-bundle" ]] && echo yes || echo no)"
+  fi
+done
 
 infer_evidence="${td}/stages-infer-garbled"
 check "an inference that does not echo the input fails deploy-smoke" "fail" \
@@ -1859,7 +3271,15 @@ check "a run with a baseline completes" 0 "$(run_upgrade_stages ok "$evidence" "
 for stage in install deploy-smoke status-logs restart crash-loop upgrade rollback; do
   check "  ${stage} is recorded as a pass" pass "$(stage_status "$report" "$stage")"
 done
-check "  offline is still skipped" skipped "$(stage_status "$report" offline)"
+check "  offline still passes with a baseline supplied" pass "$(stage_status "$report" offline)"
+# Install and upgrade stay online, rollback too: every installer run with
+# no denial in place, no CLI call outside the offline stage denied or made
+# in a transient unit, and no offline-only privileged command after the
+# stage -- the old never-mutates guard, kept for everything the offline
+# stage is not.
+check "  and the denial reached exactly the offline stage, not install, upgrade or rollback" \
+  "window=yes outside=0 denied=5 leaked=0 transient=0 installs=4 installs_denied=0" \
+  "$(offline_scope)"
 # The install stage's listing is the dpkg-query shape -- `<name> <status>
 # <version>` and nothing else -- which is the reason it is that query:
 # `dpkg -l` adds each package's description, and the packaging
@@ -1895,7 +3315,14 @@ PY
 # baseline, so the scan of the run without one says nothing about them.
 check_publishable "  and the run's own evidence passes the publication scanner" \
   "${td}/upgrade-publication-scan.out" "$evidence"
-check "  and keeps the run incomplete" incomplete \
+# With a baseline every canonical stage runs, so nothing is skipped and
+# the run is no longer incomplete. This is the only configuration in
+# which the harness can produce a complete report.
+check "  and all eight canonical stages ran" 8 \
+  "$(python3 -c 'import json,sys
+stages=json.load(open(sys.argv[1]))["stages"]
+print(sum(1 for s in stages if s["status"] == "pass"))' "$report")"
+check "  so the run is complete" pass \
   "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["outcome"])' "$report")"
 check "  and the report is schema-valid" "yes" \
   "$(python3 - "$schema" "$report" <<'PY'
@@ -1932,13 +3359,16 @@ print(f"{side(path['from'])} -> {side(path['to'])}")
 PY
 )"
 # Which agent version answered each deploy and each inference, in order:
-# deploy-smoke, restart and crash-loop on the candidate; a deploy on the
-# baseline; the baseline's deployment answering on the upgraded candidate
-# without a deploy; and a fresh deploy on the rolled-back baseline.
-check "  deploys ran on candidate, baseline, rolled-back baseline" \
-  "0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1" "$(one_line "${appliance}/deploy-versions.log")"
+# deploy-smoke, restart and crash-loop on the candidate; the offline
+# stage's own fresh deploy and inference, still on the candidate and made
+# with the network denied; a deploy on the baseline; the baseline's
+# deployment answering on the upgraded candidate without a deploy; and a
+# fresh deploy on the rolled-back baseline.
+check "  deploys ran on candidate, candidate under denial, baseline, rolled-back baseline" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1" \
+  "$(one_line "${appliance}/deploy-versions.log")"
 check "  inferences ran on each install in turn" \
-  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
   "$(one_line "${appliance}/infer-versions.log")"
 # Empty when the line is missing, which every check below treats as a
 # failure; `|| true` keeps a missing line from ending the suite early.
@@ -2067,6 +3497,7 @@ for case in \
   "upgrade-observability-not-restarted::observability MainPID 4242 did not change across the upgrade" \
   "upgrade-resets-conffile::the upgrade did not keep the operator-edited" \
   "upgrade-wrong-row::platform_row is warning" \
+  "upgrade-doctor-recorded::host_os does not show live detection from GCE metadata" \
   "upgrade-loses-deployment::worker round-trip checks failed" \
   "ok:set-rc1/install.sh:step failed (exit 9): install.sh" \
   "ok:>>:step failed (exit 9): operator edit"; do
