@@ -9,9 +9,10 @@ reads the denial back from systemd, probes the network from inside a
 denied transient unit, from inside each denied service's own control
 group and from inside each transient unit a CLI call runs in -- running
 the call there only once that unit's probe passed -- classifies every
-result against an undenied control, and checks that the row was
-resolved from the boot-bound machine-type record rather than from a
-metadata service the denial made unreachable.
+result against an undenied control, and checks that the row still
+resolved from whatever the row resolves from with the metadata service
+unreachable -- a boot-bound machine-type record on Compute Engine, local
+facts alone on a row that has no metadata service at all.
 
 It is named for the mechanism, not for a row. The drop-in, the policy
 readback, the probes and the classification carry no row in them. What
@@ -24,12 +25,15 @@ adopts this file unchanged rather than editing it:
   * `classify` takes `--metadata-operation absent`, which then requires
     those operations to be absent from both documents rather than letting
     a missing operation read as one that passed;
+  * `identity-check` takes `--expect-source none`, for a row whose agent
+    establishes no machine type and records none;
   * `doctor-check` and `identity-check` take the tokens the row expects
     its agent and its doctor to say.
 
 Every default is the Compute Engine row's, because that is the row this
-release validates; tools/validation/jetson-lifecycle.sh defers its
-offline stage with exactly this bar and supplies its own.
+module was first written for; tools/validation/jetson-lifecycle.sh runs
+its offline stage to exactly this bar and supplies its own, as a row with
+no metadata service and no machine-type record of any kind.
 
 Every subcommand prints its JSON result, writes it to --out when given,
 and exits non-zero naming the checks that failed. Results written to the
@@ -1067,10 +1071,15 @@ def doctor_check(document, status, exact_row,
     if exact_row not in (row.get("message") or ""):
         failures.append("platform_row_exact")
     host_os = (findings.get("host_os") or {}).get("message") or ""
+    # Named for what was checked, not for what the default phrase happens
+    # to be about. A row with no metadata service requires a phrase that
+    # has nothing to do with a machine-type record, and an operator
+    # reading its offline.log must not be sent after a mechanism this
+    # device has none of.
     if host_os_phrase not in host_os:
-        failures.append("host_os_machine_type_from_the_record")
+        failures.append("host_os_names_the_expected_phrase")
     if forbidden_host_os_phrase and forbidden_host_os_phrase in host_os:
-        failures.append("host_os_machine_type_not_from_live_metadata")
+        failures.append("host_os_names_the_forbidden_phrase")
     return ({"doctor": "pass", "platform_row": exact_row,
              "host_os_phrase_required": host_os_phrase or None,
              "host_os_phrase_forbidden": forbidden_host_os_phrase or None},
@@ -1104,7 +1113,10 @@ def identity_check(journal_text, expect_source=RECORDED_SOURCE,
     checks = {
         "identity_logged_once": len(lines) == 1,
         "identity_line_parsed": match is not None,
-        "machine_type_from_the_record": source == expect_source,
+        # As in doctor_check: named for the comparison, because the
+        # expected source is the row's. `none` on a row whose agent
+        # establishes no machine type at all is not a record.
+        "machine_type_source_is_the_expected_one": source == expect_source,
         # A live answer would mean the denial let the metadata query
         # through, whatever the probe said.
         "metadata_service_was_not_reached": not forbid_source or source != forbid_source,
@@ -1281,6 +1293,12 @@ def evidence(directory, deployment):
             "status": verdict("offline-status-check.json", "status"),
             "doctor": verdict("offline-doctor-check.json", "doctor"),
             "deploy": verdict("offline-deploy-check.json", "deploy"),
+            # The agent's own account of what the denied deploy did, as
+            # against the deploy reply's account of itself. Read back
+            # here so a stage that stopped checking it cannot still file
+            # a certificate saying a fresh deployment answered.
+            "status_after_deploy": verdict(
+                "offline-status-after-deploy-check.json", "status"),
             "infer": verdict("offline-infer-check.json", "infer"),
         },
         "restore": {"drop_ins_removed": removed,

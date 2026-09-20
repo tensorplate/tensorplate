@@ -78,13 +78,7 @@ A harness stage the mapping does not name is evidence for no canonical
 stage. Its `fail` or invalid status makes the outcome `fail`; an unmapped
 `pass` or `skipped` status leaves the canonical stages' outcome unchanged.
 
-### The Jetson harness does not cover all eight stages yet
-
-The Jetson runbook below cannot produce better than an `incomplete`
-report today, and the release gate refuses that row. That is the
-accurate state, not a defect in the runbook. The macOS mapping names
-all eight stages, so a macOS report can be `pass` when all eight passed
-and no unmapped stage failed or recorded an invalid status:
+### Both rows cover all eight stages
 
 | Canonical stage | Jetson | macOS |
 | --- | --- | --- |
@@ -95,13 +89,12 @@ and no unmapped stage failed or recorded an invalid status:
 | rollback | covered with a baseline set | covered |
 | restart | covered | covered |
 | crash-loop | covered | covered |
-| offline | **not implemented** | covered |
+| offline | covered | covered |
 
 Upgrade and rollback run only when the baseline options are given; a run
-without them skips both with that reason. Closing the remaining gap
-means adding offline to the Jetson harness itself. Until then it records
-it as `skipped` with its reason, so the gate reports what is missing
-rather than accepting a partial run.
+without them skips both with that reason and reports `incomplete`, which
+the release gate refuses. A Jetson run that supplies the baseline options
+exercises all eight and can report `pass`.
 
 ## Jetson Orin Nano 8GB Super
 
@@ -148,10 +141,15 @@ Prerequisites:
   verifies the release signature with cosign. A run with a baseline set
   installs four times — candidate, baseline, candidate, baseline — so
   the device needs the apt mirror and the cosign bootstrap to stay
-  reachable throughout, and the run takes correspondingly longer.
+  reachable throughout, and the run takes correspondingly longer. The
+  offline stage denies the network for its own length, and puts it back
+  on every exit path; no installer runs while anything is denied.
+- `systemd-run`, which the offline stage runs every CLI call in a
+  transient unit with. Preflight refuses a device without it.
 - A checkout of this repository on the device at the revision under
-  test: the harness, the bundle generator and the response verifier run
-  from it.
+  test: the harness, the bundle generator, the response verifier and
+  `tools/validation/linux_offline_runtime.py` run from it. The harness
+  finds the offline module beside itself and refuses to start without it.
 
 1. Confirm identity **before** running anything. The row names the BSP
    generation, not a revision:
@@ -289,8 +287,14 @@ Prerequisites:
    older than the candidate's, whose `.deb` files `dpkg-deb` cannot read,
    or whose manifest records it as an unreleased snapshot; a
    `TP_INSTALL_*` variable in the environment; a session outside the
-   `tensorplate` group once that group exists; and a device that cannot
-   build the bundle. The manifest binding matters because the installer accepts
+   `tensorplate` group once that group exists; a device without
+   `systemd-run`, or a harness copied out of the checkout without
+   `tools/validation/linux_offline_runtime.py` beside it, either of which
+   makes the offline stage impossible; a device still carrying a denial
+   drop-in from an earlier run, per unit; a `--deployment-id` outside
+   ASCII letters, digits, dot, dash and underscore, or long enough that
+   the offline stage's `<id>-offline` would pass the CLI's 128-byte
+   deployment-id limit; and a device that cannot build the bundle. The manifest binding matters because the installer accepts
    a signature from any release tag, so a signed set is not thereby the
    set for the tag you named.
 
@@ -372,6 +376,69 @@ Prerequisites:
    requires, including the config restoration crash-loop performs on
    interruption. `tensorplate logs` is recorded, not required, for the
    reason given there.
+
+   **offline** runs between crash-loop and upgrade, and that position is
+   load-bearing: it is about the candidate install every stage above
+   exercises and the deployment they left serving, and the upgrade stage
+   below purges that install and deletes `/var/lib/tensorplate`. Both
+   services, and every CLI call the stage makes, run under a per-unit
+   denial of all IP traffic but `127.0.0.1/32` and `::1/128` — never
+   systemd's `localhost` shorthand, which expands to `127.0.0.0/8` and so
+   admits the `systemd-resolved` stub at `127.0.0.53` and the DNS
+   namespace behind it. The mechanism is
+   `tools/validation/linux_offline_runtime.py`, shared with the Ubuntu
+   cloud rows, so both run the same rule.
+
+   The denial is a **runtime** drop-in under `/run/systemd/system`.
+   Nothing is written under `/etc`: a persistent drop-in would outlive
+   the run and the device's next reboot. Every exit path removes it,
+   including INT, TERM and HUP, and the removal is read back from systemd
+   rather than assumed. Preflight refuses a device that already carries
+   one from an earlier run, per unit, and changes nothing.
+
+   Configuring a denial is not enforcing one — `IPAddressDeny=` is
+   silently inert wherever systemd cannot install its BPF filter, and
+   `systemctl show` answers for a dead unit with empty values — so the
+   stage probes. It takes a control first, with nothing denied, and
+   refuses to go on unless every operation in it completed: a refusal
+   under the denial proves nothing unless the same send went through a
+   moment earlier. It then probes from inside a denied transient unit,
+   from inside each service's own control group, and from inside each CLI
+   call's own transient unit before making that call. Each probe is
+   classified against a control taken the same way, and the readback
+   compares each unit's invocation id from before the restart, so a
+   policy that reached the loaded configuration but no running instance
+   fails.
+
+   **This row has no metadata service.** A Jetson is not a Compute Engine
+   instance, so the probes omit the metadata operations
+   (`--metadata-address none`) and every classification requires them to
+   be **absent** from both documents, rather than letting an operation
+   that quietly vanished read as one that passed. There is no boot-bound
+   machine-type record on this row and the stage asserts nothing about
+   one. What it requires instead is that the denial changed nothing about
+   how the device resolves: doctor must still report nothing failing and
+   resolve `jetson-orin-nano-8gb-jp62` exactly, its `host_os` finding must
+   still name the L4T release read from `/etc/nv_tegra_release` and must
+   **not** have acquired a machine type from GCE metadata in either
+   spelling, and the agent's start-up `platform identity:` line must say
+   it established no machine type and recorded none — which is what it
+   says online as well.
+
+   While denied, the appliance has to keep working: status answers over
+   the agent socket and still reports the smoke deployment on a loopback
+   serving URL, a fresh bundle deploys as `<deployment-id>-offline`,
+   status reports it active, and the TensorRT identity engine returns its
+   input unchanged. `offline-runtime.json` is the stage's certificate,
+   and it re-derives its enforcement verdict from the probes and controls
+   it carries rather than restating one.
+
+   What this stage does **not** establish: it denies the two TensorPlate
+   services and the transient units its own CLI calls run in, not the
+   device. Anything else on the Jetson is as online during that stage as
+   it was before. It is not an offline **cold boot** either — the denial
+   is applied to services that were already running and restarts both
+   under it within the same boot.
 
    **upgrade** clears the candidate, installs the baseline through the
    baseline's own `install.sh`, deploys `<deployment-id>-baseline` on it
@@ -493,11 +560,8 @@ Prerequisites:
    a `state.bak` the message above just pointed at. Copy anything worth
    keeping elsewhere before re-running.
 
-   **offline** is skipped with its reason in the report, so a run today
-   is `incomplete` and the gate refuses the row. Offline under per-unit
-   network denial is follow-up harness work. A hardware run of this
-   native harness on the Jetson is deferred to release validation; the
-   fixture checks do not replace it.
+   A hardware run of this native harness on the Jetson is deferred to
+   release validation; the fixture checks do not replace it.
 
    The digest this run files is the sha256 of the candidate's
    `SHA256SUMS`, taken in preflight once the asset set has verified and
@@ -533,8 +597,11 @@ Prerequisites:
 
    | File | Carries |
    | --- | --- |
-   | `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | raw journal records in JSON, including host metadata fields such as the host name and the machine and boot ids; inspect every field before publishing |
-   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log`, `upgrade.log`, `rollback.log`, `install-baseline.txt`, `install-upgrade.txt`, `install-rollback.txt`, `stranded-device.txt` | everything the stage's commands printed, and each upgrade and rollback install's own output. These carry the assets path the installer echoes — for both sets — which names an account if the assets were under a home directory, and `stranded-device.txt` names the baseline assets path in its recovery command. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
+   | `agent-journal.txt`, `observability-journal.txt`, `crash-loop-journal.txt` | journal records in JSON, projected as they are captured to the service's own fields — the message, its priority and identifier, the unit and invocation, the pid and the timestamp. The host name, machine and boot ids, cursor and command line systemd attaches to every record are never written here, and no raw copy is kept; read them, but there is nothing to strip |
+   | `offline-runtime.json` | the offline stage's certificate: the drop-in name, the allow list systemd reported, the probe and control outcomes by operation name, the per-unit and per-call classifications, and the deployment id. It carries outcome names and prefixes, never a host address, a unit path or a process id — but scan it like everything else |
+   | `offline-agent-journal.txt` | journal records from the agent instance that ran under the denial, projected the same way as the other journal captures |
+   | `offline-denial.json`, `offline-restored.json`, `offline-control.json`, `offline-probe.json`, `offline-classification.json`, `offline-unit-*.json`, `offline-cli-probe-*.json`, `offline-identity.json`, `offline-status*.json`, `offline-doctor*.json`, `offline-deploy*.json`, `offline-infer-check.json` | the documents that certificate is derived from: unit names, invocation ids, prefixes, outcome names, the deployment ids and the loopback serving URL, plus doctor's full report under the denial; scan them as well |
+   | `install.log`, `deploy-smoke.log`, `status-logs.log`, `restart.log`, `crash-loop.log`, `offline.log`, `upgrade.log`, `rollback.log`, `install-baseline.txt`, `install-upgrade.txt`, `install-rollback.txt`, `stranded-device.txt` | everything the stage's commands printed, and each upgrade and rollback install's own output. These carry the assets path the installer echoes — for both sets — which names an account if the assets were under a home directory, and `stranded-device.txt` names the baseline assets path in its recovery command. When services do not become ready, the harness and `install.sh` print `systemctl status` output and journal lines in the short format, and both carry the host name; inspect every line of any stage log that records a failure |
    | `host-facts.txt` | kernel release, OS name, the first line of `/etc/nv_tegra_release`, the systemd version and the power mode; no host name or serial is read, but check the release line |
    | `doctor.json`, `doctor-baseline.json`, `doctor-after-upgrade.json`, `doctor-after-rollback.json` | host OS and accelerator facts, for both the candidate and the baseline |
    | `packages.txt`, `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-before-remove.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt`, `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `upgrade-*.json`, `rollback-*.json`, `agent-cli.log` | package versions and states, file names, release tags and digests, the deployment ids and loopback serving URLs; scan them as well |

@@ -2401,11 +2401,12 @@ check "  a fresh deployment was made while denied" "cloud-lifecycle-smoke-offlin
 print(json.load(open(sys.argv[1]))["payload"]["deployment_id"])' \
     "${ok_evidence}/offline-deploy.json")"
 check "  the certificate's verdicts are the ones its own documents carry" \
-  "True pass pass pass pass" \
+  "True pass pass pass pass pass" \
   "$(python3 -c 'import json,sys
 r=json.load(open(sys.argv[1]))
 cli=r["cli_under_denial"]
-print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"], cli["infer"])' \
+print(r["enforced"], cli["status"], cli["doctor"], cli["deploy"],
+      cli["status_after_deploy"], cli["infer"])' \
     "${ok_evidence}/offline-runtime.json")"
 check "  and it records both services replaced under the denial and again without it" \
   "tensorplate-agent.service tensorplate-observability.service | tensorplate-agent.service tensorplate-observability.service" \

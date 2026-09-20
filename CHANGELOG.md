@@ -314,6 +314,87 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   filed separately with the upgrade path. `docs/install/lifecycle.md` no
   longer says only the cloud harness runs the full rollback procedure.
 
+- The Jetson lifecycle harness has an offline stage, so a run with a
+  baseline set now exercises all eight canonical stages and the Jetson
+  row can report `pass` rather than `incomplete`. It is built on
+  `tools/validation/linux_offline_runtime.py`, the mechanism the Ubuntu
+  cloud rows already use, so both rows run the same rule rather than two
+  copies of it. Both services, and every TensorPlate CLI call the stage
+  makes, run under a per-unit denial of all IP traffic but `127.0.0.1/32`
+  and `::1/128` -- never systemd's `localhost` shorthand, which expands
+  to `127.0.0.0/8` and so admits the `systemd-resolved` stub and the DNS
+  namespace behind it. The denial is a runtime drop-in under
+  `/run/systemd/system`; nothing is written under `/etc`, every exit path
+  including INT, TERM and HUP removes it, and the removal is read back
+  from systemd rather than assumed.
+  Configuring a denial is not enforcing one -- `IPAddressDeny=` is
+  silently inert wherever systemd cannot install its BPF filter, and
+  `systemctl show` answers for a dead unit with empty values -- so the
+  stage probes, and does so where systemd attaches the filter: in a
+  denied transient unit, inside each service's own control group, and
+  inside each CLI call's own transient unit before that call, which is
+  made only if its own probe classified as enforced. Every probe is
+  classified against a control taken the same way with nothing denied,
+  and a control whose operations did not complete is refused as it is
+  taken, before anything on the device changes. The readback compares
+  each unit's invocation id from before the restart, so a policy that
+  reached the loaded configuration but no running instance fails.
+  This row has no metadata service, so the probes omit the metadata
+  operations and every classification requires them to be absent from
+  both documents rather than letting an operation that quietly vanished
+  read as one that passed. There is no boot-bound machine-type record on
+  a Jetson and the stage asserts nothing about one: the cloud row's
+  identity claim is about a Compute Engine mechanism this device has none
+  of, and restating it here would certify a fallback path that never
+  runs. What this row requires instead is that the denial changed nothing
+  about how it resolves -- doctor still reporting nothing failing,
+  resolving `jetson-orin-nano-8gb-jp62` exactly, still naming the L4T
+  release read from `/etc/nv_tegra_release` in `host_os` and never a
+  machine type from GCE metadata in either spelling, and the agent's
+  start-up identity line saying it established no machine type and
+  recorded none, which is what it says online too.
+  While denied, the appliance has to keep working: status answers over
+  the agent socket and still reports the deployment the agent re-warmed,
+  a fresh bundle deploys as `<deployment-id>-offline` and the agent then
+  reports that deployment as the active one -- the deploy reply is the
+  CLI's account of its own request, and only a status read afterwards is
+  the agent's -- and the TensorRT identity engine returns its input
+  unchanged. The stage files `offline-runtime.json`, which re-derives its
+  enforcement verdict from the probes and controls it carries rather than
+  restating one, and which carries every one of those CLI verdicts, so a
+  stage that stopped making one of the checks cannot still file a
+  certificate that claims it.
+  Every `journalctl` capture the Jetson harness takes is now projected to
+  the service's own fields where it is taken -- the message, its priority
+  and identifier, the unit and invocation, the pid and the timestamp --
+  which is exactly the set
+  `tools/validation/check-evidence-publication.sh` admits. The host name,
+  machine and boot ids, cursor and command line systemd attaches to every
+  record never reach the evidence directory and no raw copy is kept, so
+  the offline stage's `offline-agent-journal.txt` and the
+  `agent-journal.txt`, `observability-journal.txt` and
+  `crash-loop-journal.txt` that predate it are publishable as written
+  rather than by hand. This is the Ubuntu cloud harness's
+  `project_journal_records`, so both rows keep the same set.
+  The stage runs between crash-loop and upgrade, and the position is
+  load-bearing in both directions: it is about the candidate install the
+  stages above exercise and the deployment they left serving, and
+  upgrade's clearing step purges that install and deletes
+  `/var/lib/tensorplate`. Preflight now also refuses a device without
+  `systemd-run`, a harness copied out of the checkout without the offline
+  module beside it, a denial drop-in an earlier run left behind (per
+  unit, including a dangling symlink, and changing nothing), and a
+  `--deployment-id` that is outside the allowed charset, is one of the
+  reserved path segments `.` and `..`, or is long enough that any id the
+  run derives from it would pass the CLI's 128-byte limit. All four are
+  checked -- the id as given and the `-offline`, `-baseline` and
+  `-rollback` forms -- because the two 9-byte suffixes would otherwise
+  fail in the last two stages of a run, after the upgrade's clearing step
+  has already purged the candidate.
+  Every transient unit the stage starts runs as the operator, with the
+  operator's groups, so what the denial is applied to is the call this
+  operator makes online rather than one made as root.
+
 - The release installer supports Ubuntu 24.04 on x86_64 as a runtime
   platform alongside JetPack 6.x / L4T 36.x on arm64. Each architecture
   is validated against its own platform: an x86_64 host is no longer
