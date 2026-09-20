@@ -67,8 +67,12 @@ Common options:
                             Derived from --tag when omitted.
   --python-version VERSION   Expected SDK version, for example 0.1.0rc1.
                             Derived from --tag when omitted.
-  --release-branch BRANCH   Expected release branch. Defaults to the
-                            maintenance line release/MAJOR.MINOR.
+  --release-branch BRANCH   Branch the release is cut and tagged on, and the
+                            branch recorded in the manifest. Releases are
+                            tagged off the trunk, so pass `develop`. The
+                            default is the retired release/MAJOR.MINOR
+                            maintenance line, kept only so the v0.1.x tags
+                            reproduce; see docs/release/version-tag-policy.md.
   --base REF                Source ref for cut. Defaults to origin/develop.
   --prep-branch BRANCH      Additional branch accepted for preflight during tooling PR dry runs.
   --artifacts-dir DIR       Directory containing release artifacts.
@@ -142,8 +146,14 @@ require_version() {
 
 default_paths() {
   require_version
-  # Tags live on the per-minor maintenance line (release/0.1, release/0.2);
-  # per-patch release branches are not created.
+  # Releases are tagged off the trunk and no release branch is cut, so
+  # every caller should pass --release-branch develop; the runbook and the
+  # release workflow both do. This default is the retired v0.1.x
+  # maintenance line, kept so those tags still reproduce and pinned by
+  # test/release/run.sh. Changing it changes an asserted contract, so it
+  # is the owner's call rather than a side effect of a release-prep PR.
+  # `cut` will create and push this branch if it is taken as given, and
+  # the tag would then fail the workflow's trunk-ancestry check.
   RELEASE_BRANCH="${RELEASE_BRANCH:-release/${VERSION%.*}}"
   ARTIFACTS_DIR="${ARTIFACTS_DIR:-dist/release/v${VERSION}}"
   MANIFEST="${MANIFEST:-dist/release/v${VERSION}/tensorplate-v${VERSION}-artifacts.json}"

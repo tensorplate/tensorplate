@@ -37,12 +37,12 @@ hotfix branches for unrelated feature work.
 
 | Item | Policy |
 | --- | --- |
-| Branch | `hotfix/vX.Y.Z` |
-| Tag | `vX.Y.Z` |
+| Branch | `hotfix/vX.Y.Z`, branched from and **merged into the trunk before tagging**. The release workflow rejects a tag that is not an ancestor of `develop`, so an unmerged hotfix branch cannot be released from. |
+| Tag | `vX.Y.Z`, annotated, created on the trunk after the hotfix merges. |
 | Changelog | Add a dated `X.Y.Z` section. |
 | Version metadata | Runtime/package patch version becomes `X.Y.Z`; protocol/schema/bundle versions move only if the fix changes those surfaces. |
 | Validation | Run required CI plus the smallest release validation slice that proves the fix. |
-| Artifacts | Rebuild packages from the hotfix commit, generate a new manifest and checksums, and publish under the new tag. |
+| Artifacts | Rebuild packages from the trunk commit carrying the fix, generate a new manifest and checksums, and publish under the new tag. |
 
 Hotfixes preserve frozen public contracts for the release line unless a
 security fix requires a documented exception.

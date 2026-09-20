@@ -591,14 +591,20 @@ jobs:
           MANIFEST: ${{ needs.meta.outputs.manifest }}
           CHECKSUMS: ${{ needs.meta.outputs.checksums }}
           PUBLISH: ${{ needs.meta.outputs.publish }}
+          TRUNK_BRANCH: ${{ needs.meta.outputs.trunk_branch }}
         run: |
           set -Eeuo pipefail
+          # The manifest's release.branch is a published, cosign-covered
+          # claim. This job checks out a tag, so HEAD is detached and the
+          # builder would otherwise record the driver's default release
+          # branch. Releases are tagged off the trunk, so name the trunk.
           args=(
             tools/release/build-release-artifacts.sh
             --version "$VERSION"
             --deb-version "$DEB_VERSION"
             --python-version "$PYTHON_VERSION"
             --tag "$TAG"
+            --branch "$TRUNK_BRANCH"
             --artifacts-dir "$RELEASE_DIR"
             --manifest "$MANIFEST"
             --checksums "$CHECKSUMS"

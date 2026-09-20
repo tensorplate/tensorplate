@@ -15,7 +15,8 @@ name: APT Repository
 #     asset artifact for pre-tag staging validation: signed with the
 #     production key (so test hosts use the shipped bootstrap keyring
 #     unchanged) and hard-restricted to non-production destinations.
-#     Dispatch with --ref pointing at the maintenance branch being staged.
+#     Dispatch with --ref pointing at the trunk; releases are tagged off
+#     the trunk and no release branch is cut.
 #
 # The repository tree is built and signed by tools/release/publish-apt-repo.sh
 # from the GitHub Release assets (checksum + cosign verified). This workflow

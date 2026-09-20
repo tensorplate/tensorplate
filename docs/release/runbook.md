@@ -7,9 +7,12 @@ the release variables first; examples below use `0.1.0`.
 ```bash
 export TP_VERSION=0.1.0
 export TP_TAG="v${TP_VERSION}"
-# One maintenance branch per minor line (release/0.1, release/0.2, ...);
-# every patch of that line is committed and tagged there.
-export TP_RELEASE_BRANCH="release/${TP_VERSION%.*}"
+# Releases are tagged off the trunk. No release branch is cut, ever:
+# keeping a maintenance line in sync with the trunk, and patching an old
+# line while the trunk moves on, is the cost this trades away. Every
+# release command below is passed this branch explicitly, because the
+# release driver still defaults to the retired `release/X.Y` line.
+export TP_TRUNK_BRANCH=develop
 export TP_RELEASE_DIR="dist/release/${TP_TAG}"
 export TP_MANIFEST="${TP_RELEASE_DIR}/tensorplate-${TP_TAG}-artifacts.json"
 export TP_CHECKSUMS="${TP_RELEASE_DIR}/SHA256SUMS"
@@ -21,8 +24,8 @@ export TP_RELEASE_NOTES="docs/release/notes/${TP_TAG}.md"
 The release has two separated phases:
 
 1. Add or update release tooling/docs in a normal implementation PR.
-2. After that PR merges, cut and publish the release from a clean release
-   branch and annotated tag.
+2. After that PR merges, cut and publish the release from a clean trunk
+   checkout and an annotated tag.
 
 The tooling PR is not the release.
 
@@ -33,7 +36,7 @@ Record sign-offs in a copy of
 
 | Role | Responsibility |
 | --- | --- |
-| Release owner | Drives the release branch, tag, GitHub Release, and evidence archive. |
+| Release owner | Drives the release commit, tag, GitHub Release, and evidence archive. |
 | Runtime reviewer | Reviews C++ runtime, serving worker, version surfaces, and adapter risk. |
 | Agent CLI reviewer | Reviews agent, CLI, deploy, rollback, doctor, and status/log command posture. |
 | Packaging reviewer | Reviews `.deb` artifacts, package metadata, maintainer scripts, and checksums. |
@@ -49,7 +52,7 @@ install docs, validation procedure, support posture, and changelog notes.
 ### Version surfaces
 
 The implementation PR also bumps the release version across **every** surface,
-because `prepare` does not bump them all on a finalized maintenance line: its
+because `prepare` does not bump them all on a finalized trunk commit: its
 `prepare_python` step clears the `-dev` suffix but leaves `CMakeLists.txt`'s
 `project(... VERSION X.Y.Z)` and the `Cargo.lock` `tensorplate-*` crate
 versions unchanged (those only carry a `-dev` form on a `develop` cut). Bump,
@@ -102,7 +105,8 @@ test/release/run.sh
 
 Forbidden in the implementation PR:
 
-- Creating the release branch.
+- Creating a release branch. Releases are tagged off the trunk; no release
+  branch is cut.
 - Removing development suffixes as a final release commit.
 - Creating release-candidate or final tags.
 - Publishing a GitHub Release.
@@ -148,9 +152,11 @@ The release owner stops immediately unless all prerequisites are true:
 The publish path is tag-driven:
 
 1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
-2. The script switches to (or creates, once per minor line) the
-   maintenance branch `release/X.Y`, prepares version metadata, commits
-   it, and creates an annotated source tag on that branch.
+2. With `--release-branch "${TP_TRUNK_BRANCH}"` the script switches to the
+   trunk, prepares version metadata, commits it, and creates an annotated
+   source tag there. Without that flag it falls back to the retired
+   `release/X.Y` line and creates a branch the release workflow will then
+   reject; always pass it.
 3. `.github/workflows/release.yml` builds the `.deb` packages from that
    tag, generates the manifest/checksums, and creates the GitHub Release
    with those assets attached after the tag is pushed.
@@ -228,6 +234,7 @@ Preview the local operation:
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
+  --release-branch "${TP_TRUNK_BRANCH}" \
   --final \
   --dry-run
 ```
@@ -237,6 +244,7 @@ Cut the final release source tag locally:
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
+  --release-branch "${TP_TRUNK_BRANCH}" \
   --final \
   --execute \
   --confirm "CUT-${TP_TAG}"
@@ -247,17 +255,20 @@ For a release candidate:
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
+  --release-branch "${TP_TRUNK_BRANCH}" \
   --rc 1 \
   --execute \
   --confirm "CUT-${TP_TAG}-rc.1"
 ```
 
 The script refuses dirty worktrees, existing tags, and unexpected release
-metadata edits. Push the release branch for build-only validation, but do
-not push the tag yet:
+metadata edits. If `cut` made a prepare commit, push the trunk so the tag
+commit is reachable for build-only validation, but do not push the tag
+yet. When every version surface already matches the release version there
+is no prepare commit and nothing to push:
 
 ```bash
-git push origin "${TP_RELEASE_BRANCH}"
+git push origin "${TP_TRUNK_BRANCH}"
 ```
 
 ### 4. Build Release Assets Without Publishing
@@ -267,7 +278,7 @@ Before pushing a final tag or creating a public prerelease, run the
 
 - `tag`: `${TP_TAG}`
 - `publish`: `false`
-- `source_ref`: `${TP_RELEASE_BRANCH}`
+- `source_ref`: `${TP_TRUNK_BRANCH}`
 
 The build-only run must:
 
@@ -314,7 +325,8 @@ git push origin "${TP_TAG}"
 Open the `Release` workflow run for `${TP_TAG}`. It must:
 
 - Verify `${TP_TAG}` is annotated.
-- Verify the tag commit is contained in `${TP_RELEASE_BRANCH}`.
+- Verify annotated tag and trunk ancestry: the tag commit is an ancestor
+  of `origin/${TP_TRUNK_BRANCH}`.
 - Build Rust release binaries.
 - Build the C++ serving worker.
 - Build the complete `amd64` runtime package set and the
@@ -330,8 +342,8 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
   the approval-gated `publish-github` job un-drafts them (Step 9).
 
 The workflow refuses to replace an existing GitHub Release. If it fails
-after creating no release, fix the release branch, cut a new RC tag, or
-delete only the failed unpublished tag according to the tag policy.
+after creating no release, fix the trunk, cut a new RC tag, or delete only
+the failed unpublished tag according to the tag policy.
 
 ### 6. Download And Verify CI Assets
 
@@ -471,7 +483,7 @@ Stop and mark the release blocked if any item is true:
 
 - Required validation gate is not pass or signed conditional-pass.
 - Required CI is unavailable or not green.
-- The release branch has unreviewed commits.
+- The trunk carries unreviewed commits at or below the tag commit.
 - Version metadata or changelog is inconsistent.
 - The final tag already exists.
 - Artifacts are missing, checksums mismatch, or manifest commit/tag data

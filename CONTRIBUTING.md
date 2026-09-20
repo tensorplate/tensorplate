@@ -278,12 +278,12 @@ The version constants live at:
 Reviewers should reject PRs that change a public contract without the
 accompanying changelog entry and version bump.
 
-Versioned public releases are cut only from the per-minor `release/X.Y`
-maintenance line with annotated `vX.Y.Z` tags. The v0.1.x release process,
-tag immutability rules, artifact manifest format, and maintainer sign-off
+Versioned public releases are tagged off the trunk with annotated
+`vX.Y.Z` tags; no release branch is cut. The release process, tag
+immutability rules, artifact manifest format, and maintainer sign-off
 requirements live in [`docs/release/`](docs/release/). The release tooling
 PR is distinct from the final release operation; final publication must
-happen post-merge from a clean release commit and tag.
+happen post-merge from a clean trunk release commit and tag.
 
 ## Pull Request Expectations
 
