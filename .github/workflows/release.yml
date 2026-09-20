@@ -16,7 +16,7 @@ on:
         default: true
         type: boolean
       source_ref:
-        description: 'Optional source ref for build-only validation, for example release/0.1. Publish mode always uses the tag.'
+        description: 'Optional source ref for build-only validation, for example develop. Publish mode always uses the tag.'
         required: false
         type: string
 
@@ -49,7 +49,7 @@ jobs:
       checksums: ${{ steps.meta.outputs.checksums }}
       bundle: ${{ steps.meta.outputs.bundle }}
       notes: ${{ steps.meta.outputs.notes }}
-      release_branch: ${{ steps.meta.outputs.release_branch }}
+      trunk_branch: ${{ steps.meta.outputs.trunk_branch }}
       publish: ${{ steps.meta.outputs.publish }}
       checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
 
@@ -115,6 +115,12 @@ jobs:
             exit 1
           fi
           release_dir="dist/release/${tag}"
+          # Releases are tagged off the trunk; no release branch is cut.
+          # Keeping a maintenance line in sync with the trunk, and
+          # patching an old one while the trunk moves on, is the cost
+          # this trades away. The tag must still descend from the trunk,
+          # which is what the verify step below asserts.
+          trunk_branch="develop"
           {
             echo "tag=${tag}"
             echo "version=${version}"
@@ -127,7 +133,7 @@ jobs:
             echo "checksums=${release_dir}/SHA256SUMS"
             echo "bundle=${release_dir}/SHA256SUMS.cosign.bundle"
             echo "notes=docs/release/notes/v${version}.md"
-            echo "release_branch=release/${version%.*}"
+            echo "trunk_branch=${trunk_branch}"
             echo "publish=${publish}"
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
@@ -504,12 +510,12 @@ jobs:
           apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
             echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
 
-      - name: Verify annotated tag and release branch
+      - name: Verify annotated tag and trunk ancestry
         if: ${{ needs.meta.outputs.publish == 'true' }}
         shell: bash
         env:
           TAG: ${{ needs.meta.outputs.tag }}
-          RELEASE_BRANCH: ${{ needs.meta.outputs.release_branch }}
+          TRUNK_BRANCH: ${{ needs.meta.outputs.trunk_branch }}
         run: |
           set -Eeuo pipefail
           if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" != "tag" ]]; then
@@ -517,9 +523,9 @@ jobs:
             exit 1
           fi
           tag_commit="$(git rev-list -n 1 "$TAG")"
-          git fetch origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
-          if ! git merge-base --is-ancestor "$tag_commit" "origin/${RELEASE_BRANCH}"; then
-            echo "::error::$TAG does not point at ${RELEASE_BRANCH}"
+          git fetch origin "+refs/heads/${TRUNK_BRANCH}:refs/remotes/origin/${TRUNK_BRANCH}"
+          if ! git merge-base --is-ancestor "$tag_commit" "origin/${TRUNK_BRANCH}"; then
+            echo "::error::$TAG is not an ancestor of ${TRUNK_BRANCH}; releases are tagged off the trunk"
             exit 1
           fi
 
