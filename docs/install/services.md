@@ -33,11 +33,21 @@ detection.
 ### Restart policy
 
 Both units use `Restart=on-failure` with a bounded `RestartSec=5` and
-`StartLimitBurst=5` within `StartLimitIntervalSec=60`. The start-limit
+`StartLimitBurst=5` within `StartLimitIntervalSec=300`. The start-limit
 directives live in the `[Unit]` section for the Jetson systemd version. This gives
 systemd enough room to recover from a hard crash without masking a
-broken config: a unit that fails to start five times in a minute
+broken config: a unit that fails to start five times inside that window
 enters `failed` state and stops retrying.
+
+The window is five minutes rather than one because it must contain five
+worst-case restart cycles. A cycle is `RestartSec` plus the unit's own
+startup work, and on a Compute Engine host whose metadata service is
+unreachable the agent's startup includes a bounded detection retry, so a
+cycle can reach roughly thirty seconds. Five of those do not fit in sixty
+seconds, and a window too narrow to contain them never trips the burst --
+the unit would restart forever instead of settling into `failed`. A
+fast-failing unit is unaffected: five starts at a five-second cycle still
+land inside twenty-odd seconds and still stop at the same moment.
 
 Inside the agent, V01-E09 supervises the serving worker with its own
 bounded backoff + crash-loop detector. The two layers do not race:
@@ -101,9 +111,10 @@ The unit files apply the same default sandbox to both services:
 - `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`
 - `LockPersonality=true`, `RestrictRealtime=true`, `RestrictSUIDSGID=true`
 - `Restart=on-failure` with `RestartSec=5`, bounded by
-  `StartLimitBurst=5` / `StartLimitIntervalSec=60`, so a hard crash is
+  `StartLimitBurst=5` / `StartLimitIntervalSec=300`, so a hard crash is
   recovered but a crash loop is given up on instead of masking a config
-  error forever
+  error forever -- the window holds five worst-case cycles, including a
+  start that pays the platform detection retry before failing
 
 `/run/tensorplate` is the **agent's** alone. Only
 `tensorplate-agent.service` declares `RuntimeDirectory=tensorplate` and names

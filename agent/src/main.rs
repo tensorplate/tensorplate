@@ -376,17 +376,18 @@ const DETECTION_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
 /// install failure with the packages already on disk. Raise the installer
 /// default in the same change, or stay well under it.
 ///
-/// IT ALSO LENGTHENS A RESTART CYCLE. `StartLimitBurst=5` /
-/// `StartLimitIntervalSec=60` in the unit rate-limit unit STARTS, so they
-/// only bite when five starts land inside sixty seconds. A start that
+/// IT ALSO LENGTHENS A RESTART CYCLE, WHICH THE UNIT NOW ACCOUNTS FOR.
+/// `StartLimitBurst=5` / `StartLimitIntervalSec` rate-limit unit STARTS, so
+/// they only bite when five starts land inside the window. A start that
 /// pays this budget and then fails after admission — an unopenable state
-/// store, a bound socket — takes this budget plus `RestartSec=5` per
-/// cycle, so at the shipped 20s at most three starts fit in the window
-/// and the unit restarts indefinitely instead of settling into `failed`
-/// where `systemctl status` can see it. Narrow (it needs a Compute Engine
-/// host with unreachable metadata AND a post-admission start failure) and
-/// not addressed here, because the unit is deliberately unchanged in this
-/// change; raising the budget widens it.
+/// store, a bound socket — takes this budget plus `RestartSec=5` per cycle,
+/// so at a 60s window at most three starts fitted and the unit restarted
+/// indefinitely instead of settling into `failed` where `systemctl status`
+/// can see it. Both units now set `StartLimitIntervalSec=300`, which holds
+/// five worst-case cycles; the derivation is in the unit beside the value.
+/// RAISING THIS BUDGET EATS INTO THAT MARGIN — five cycles must stay inside
+/// the window, so a materially larger budget needs the window raised in the
+/// same change.
 ///
 /// This number is a first estimate. Nobody has measured the gap between
 /// `network.target` and the first metadata answer on either production

@@ -26,7 +26,11 @@ Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/
 After=network.target local-fs.target
 Wants=local-fs.target
 StartLimitBurst=5
-StartLimitIntervalSec=60
+# Matches the agent's window. This unit runs no platform detection and does
+# not need the wider window itself, but the two units are required to state
+# one supervision contract -- verify_systemd_units.sh asserts they agree, so
+# an operator reading one can assume the other.
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple

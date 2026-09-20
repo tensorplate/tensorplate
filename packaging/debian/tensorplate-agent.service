@@ -26,8 +26,18 @@ Description=TensorPlate device agent (control plane, deploy transaction, worker 
 Documentation=https://github.com/tensorplate/tensorplate/blob/main/docs/install/services.md
 After=network.target local-fs.target
 Wants=local-fs.target
+# The window must exceed five worst-case restart cycles, or the burst never
+# trips and a genuinely broken agent restarts forever instead of settling
+# into `failed`. A cycle is RestartSec plus the agent's own startup work,
+# and on a Compute Engine host whose metadata service is unreachable that
+# work includes the bounded detection retry -- about 15.5s of sleeping, up
+# to ~25s when each attempt is slow. So a cycle reaches ~30s and five of
+# them ~150s, which a 60s window cannot contain. 300s holds that with
+# margin. Widening costs a fast-failing host nothing: five starts at a 5.3s
+# cycle still fall inside 21s and still trip the burst at the same wall
+# clock, so this only adds the slow-cycle case the old window missed.
 StartLimitBurst=5
-StartLimitIntervalSec=60
+StartLimitIntervalSec=300
 
 [Service]
 # The current v0.1.0 binary opens its listener synchronously and does

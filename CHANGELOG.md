@@ -622,6 +622,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ends at up to the budget plus one attempt's work, and the exhaustion line
   reports the elapsed figure rather than assuming it.
 
+- Both shipped units raise `StartLimitIntervalSec` from 60 to 300 seconds,
+  so a unit that fails repeatedly still settles into `failed` instead of
+  restarting forever. `StartLimitBurst` rate-limits unit STARTS, so it only
+  bites when five of them land inside the window. A start that pays the new
+  detection retry and then fails after admission — an unopenable state
+  store, an already-bound socket — takes that budget plus `RestartSec` per
+  cycle, so at most three such starts fitted in a sixty-second window and
+  the burst never tripped. Five worst-case cycles are about 150 seconds,
+  which 300 holds with margin. A fast-failing unit is unaffected: five
+  starts at a five-second cycle still land inside twenty-odd seconds and
+  still stop at the same wall clock, so this only adds the slow-cycle case
+  the old window missed. `verify_systemd_units.sh` now derives the worst
+  cycle from `DETECTION_RETRY_BUDGET` and `RestartSec` and fails when the
+  window cannot contain `StartLimitBurst` of them, because the two numbers
+  live in different files and nothing previously linked them — raising the
+  retry budget alone would have reintroduced the defect silently.
+
   The retry is gated on which step failed, not on what the error says.
   Both the sources step and the identify step raise the same
   `IdentityUnestablished` variant and mean different things: from the
