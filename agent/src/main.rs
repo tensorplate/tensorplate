@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -202,6 +203,10 @@ fn load_platform_registry(directory: &Path) -> Option<PlatformRegistry> {
 /// unsupported" — so the rejection carries no frozen reason — but it must
 /// also not become "deploy anything". An absent verdict skips the gate
 /// entirely, on exactly the hardware nobody has characterised.
+///
+/// Called exactly once per process, from `load_runtime_config`. The
+/// detection retry budget inside `observe_platform` is therefore a
+/// per-start budget, not a per-call one.
 fn evaluate_platform_admission(
     registry: Option<&PlatformRegistry>,
     config: &mut AgentConfig,
@@ -209,13 +214,30 @@ fn evaluate_platform_admission(
     let Some(registry) = registry else {
         return PlatformAdmission::detection_failed("installed platform registry is unavailable");
     };
+    // Observing is what the registry check gates, so it stays behind it:
+    // a host with no registry must not pay the detection retry budget to
+    // reach a verdict that is already settled.
+    admit_observed_platform(registry, config, observe_platform())
+}
+
+/// Turn one settled observation into the held verdict.
+///
+/// Split from `evaluate_platform_admission` so the verdict can be driven
+/// from a scripted observation without a host: what a deploy is refused or
+/// admitted on is this function's output, and that is what the retry has
+/// to be shown to change.
+fn admit_observed_platform(
+    registry: &PlatformRegistry,
+    config: &mut AgentConfig,
+    observation: Result<Observation, PlatformProbeError>,
+) -> PlatformAdmission {
     // Already validated at config load, so an unparsable value cannot
     // reach here; `ok()` selects the row floor rather than guessing.
     let operator_posture = config
         .admission_posture
         .as_deref()
         .and_then(|value| value.parse::<AdmissionPosture>().ok());
-    let admission = match observe_platform() {
+    let admission = match observation {
         // The accelerator could not be probed. Classified from the host
         // report rather than reported as a bare detection failure, so a
         // broken driver on a card that IS on the bus is named as one.
@@ -227,6 +249,15 @@ fn evaluate_platform_admission(
         }
         Err(err) => detection_failed(&err, &mut std::io::stderr()),
     };
+    // The verdict must be settled before this call. `apply_memory_limit`
+    // early-returns on anything that is not `Supported { capability:
+    // Some(_) }`, so a verdict that becomes supported AFTER this line runs
+    // leaves `device_memory_bytes` as configured — which the shipped
+    // config leaves unset, and both memory gates are Option-gated. That
+    // admits deploys on L4 and H100 with both memory checks silently
+    // disabled. The detection retry is inside `observe_platform` for
+    // exactly this reason; any future late re-detect must re-apply the
+    // ceiling here or it reintroduces that hole.
     admission.apply_memory_limit(config);
     // The posture is reported with its provenance, not just its value. An
     // operator who can see which strictness they are running at, and
@@ -314,13 +345,108 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
         .collect()
 }
 
-/// Everything the verdict is computed from, gathered once.
+/// How many observation attempts one start may make, counting the first.
+const DETECTION_RETRY_ATTEMPTS: u32 = 6;
+/// The delay before the second attempt; every later one doubles it.
+const DETECTION_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
+/// The ceiling on the retry SCHEDULE: no sleep is started that would end
+/// past it, and a sleep that would is shortened to whatever is left.
+///
+/// It is not a ceiling on total elapsed time. The attempt that runs after
+/// the last permitted sleep is not itself bounded by this, so an episode
+/// ends at up to this budget plus one attempt's work — and an attempt's
+/// work has no timeout of its own, because `SystemHostProbe::sources`
+/// forks `uname -m` through an untimed `Command::output()`. The metadata
+/// connect inside it is capped at 250ms; nothing else is.
+///
+/// Deliberately short. Exhausting the budget is byte-identical to the
+/// behaviour before the retry existed, so being too short costs nothing
+/// relative to that; being too long costs real availability, because
+/// `load_runtime_config` runs before the state store is opened, before
+/// startup recovery, before the previously-active worker is re-warmed and
+/// before the control socket is listening — and the CLI does not retry, so
+/// `tensorplate status` fails outright for the length of the window.
+///
+/// RAISING THIS HAS A HARD CEILING ABOVE IT. `packaging/scripts/install.sh`
+/// waits `TP_INSTALL_SERVICE_READY_TIMEOUT_SECONDS` (default 30) for the
+/// agent socket to appear and then `die`s, and this budget is spent before
+/// the socket is created — as is the backend probe that follows it. A
+/// budget raised toward 30s turns an install that would have completed
+/// degraded, with doctor reporting the detection failure, into a hard
+/// install failure with the packages already on disk. Raise the installer
+/// default in the same change, or stay well under it.
+///
+/// IT ALSO LENGTHENS A RESTART CYCLE, WHICH THE UNIT NOW ACCOUNTS FOR.
+/// `StartLimitBurst=5` / `StartLimitIntervalSec` rate-limit unit STARTS, so
+/// they only bite when five starts land inside the window. A start that
+/// pays this budget and then fails after admission — an unopenable state
+/// store, a bound socket — takes this budget plus `RestartSec=5` per cycle,
+/// so at a 60s window at most three starts fitted and the unit restarted
+/// indefinitely instead of settling into `failed` where `systemctl status`
+/// can see it. Both units now set `StartLimitIntervalSec=300`, which holds
+/// five worst-case cycles; the derivation is in the unit beside the value.
+/// RAISING THIS BUDGET EATS INTO THAT MARGIN — five cycles must stay inside
+/// the window, so a materially larger budget needs the window raised in the
+/// same change.
+///
+/// This number is a first estimate. Nobody has measured the gap between
+/// `network.target` and the first metadata answer on either production
+/// cloud row; the recovered, exhausted and stopped lines report exactly
+/// that gap, so the fleet's own journals are what should correct it.
+const DETECTION_RETRY_BUDGET: Duration = Duration::from_secs(20);
+
+/// Everything one successful observation settles: the platform report, the
+/// observed stack, and an accelerator probe failure if the host was
+/// readable but its card was not.
+type Observation = (PlatformReport, ObservedStack, Option<PlatformProbeError>);
+
+/// Which step of one observation attempt failed.
+///
+/// The two steps raise the same error VARIANT and mean different things.
+/// `sources()` raises `IdentityUnestablished` only from `unusable_record`:
+/// the machine-type record is a directory, a symlinked path, or oversized.
+/// That is a tamper signal, it is deterministic, and retrying it would let
+/// a later live answer overwrite the record without the signal ever being
+/// reported. `identify` raises it only from `establish_machine_type`: this
+/// host is a Compute Engine instance whose metadata service could not be
+/// reached and which has no usable record for this boot. Only the second
+/// is retryable, and tagging the step is what tells them apart without
+/// matching on prose.
+#[derive(Debug)]
+enum ObservationFailure {
+    Sources(PlatformProbeError),
+    Identify(PlatformProbeError),
+}
+
+impl ObservationFailure {
+    /// The error this step raised, for the log line that reports it.
+    fn error(&self) -> &PlatformProbeError {
+        match self {
+            Self::Sources(err) | Self::Identify(err) => err,
+        }
+    }
+
+    /// Drop the step tag. Which step failed decides whether to retry; once
+    /// the loop is over, what the caller holds is the error itself, so the
+    /// existing `platform detection failed:` line is unchanged.
+    fn into_error(self) -> PlatformProbeError {
+        match self {
+            Self::Sources(err) | Self::Identify(err) => err,
+        }
+    }
+}
+
+/// One observation attempt: everything the verdict is computed from,
+/// gathered once, tagged with the step that failed if one did.
+///
+/// Which step raised the failure is what decides whether another attempt
+/// could settle it — see [`ObservationFailure`], because the two steps
+/// raise the same error variant and mean different things.
 ///
 /// An integrated accelerator is already in the platform report: it is
 /// identified from the same sources the host is. A discrete card is not —
 /// it is a separate device the vendor tool enumerates — so it is asked for
 /// only when the report carries none.
-/// Observe the platform.
 ///
 /// A HOST probe failure is still fatal — without the host there is nothing
 /// to reason about. An ACCELERATOR probe failure is returned alongside the
@@ -330,11 +456,12 @@ fn parse_dpkg_packages(stdout: &[u8]) -> BTreeSet<String> {
 /// anything can read it. That is what made the usual broken-driver case —
 /// an installed `nvidia-smi` exiting non-zero — surface as an untyped
 /// detection failure.
-fn observe_platform(
-) -> Result<(PlatformReport, ObservedStack, Option<PlatformProbeError>), PlatformProbeError> {
+fn observe_platform_once(log: &mut impl Write) -> Result<Observation, ObservationFailure> {
     let probe = SystemHostProbe::new();
-    let sources = probe.sources()?;
-    let mut report = identify_and_record(&probe, &sources, &mut std::io::stderr())?;
+    let (_sources, mut report) = observe_identity(
+        || probe.sources(),
+        |sources| identify_and_record(&probe, sources, log),
+    )?;
     let mut accelerator_probe_error = None;
     if report.accelerator.is_none() {
         match NvidiaSmiProbe::new().detect() {
@@ -352,6 +479,222 @@ fn observe_platform(
         installed_packages: installed_packages(),
     };
     Ok((report, observed, accelerator_probe_error))
+}
+
+/// The head of one observation — gather the host sources, then identify
+/// the platform from them — with each step's failure tagged by the step
+/// that raised it.
+///
+/// This exists as its own function because the tagging IS the gate. The
+/// two steps raise the same error variant (see [`ObservationFailure`]) and
+/// only the identify step's is retryable, so a tag assigned on the wrong
+/// side either restores the defect or makes the tamper signal retryable.
+/// Inline in `observe_platform_once` that decision is reachable only from
+/// a Compute Engine host; here it is reachable from a test with scripted
+/// steps. Taking the steps as closures also makes the order structural:
+/// `identify` cannot run, and cannot be handed sources it did not get,
+/// unless `sources` succeeded first.
+fn observe_identity<S, R>(
+    sources: impl FnOnce() -> Result<S, PlatformProbeError>,
+    identify: impl FnOnce(&S) -> Result<R, PlatformProbeError>,
+) -> Result<(S, R), ObservationFailure> {
+    let sources = sources().map_err(ObservationFailure::Sources)?;
+    let identified = identify(&sources).map_err(ObservationFailure::Identify)?;
+    Ok((sources, identified))
+}
+
+/// The production wiring of the retry: the real clock, a real sleep, and
+/// the shipped budget, saying everything it does on stderr.
+fn observe_platform() -> Result<Observation, PlatformProbeError> {
+    let mut log = std::io::stderr();
+    observe_with_shipped_policy(
+        || observe_platform_once(&mut std::io::stderr()),
+        std::thread::sleep,
+        Instant::now,
+        &mut log,
+    )
+}
+
+/// The retry driven with the SHIPPED attempt count and budget.
+///
+/// Split from `observe_platform` so a test can drive the numbers this
+/// binary actually ships rather than numbers a test chose. Everything left
+/// in `observe_platform` is the real clock, the real sleep and stderr; the
+/// policy a start runs under is here, where `DETECTION_RETRY_ATTEMPTS`
+/// reading 6 and the loop being GIVEN 6 are the same fact.
+fn observe_with_shipped_policy<T>(
+    attempt: impl FnMut() -> Result<T, ObservationFailure>,
+    sleep: impl FnMut(Duration),
+    now: impl FnMut() -> Instant,
+    log: &mut impl Write,
+) -> Result<T, PlatformProbeError> {
+    observe_with_retry(
+        attempt,
+        sleep,
+        now,
+        DETECTION_RETRY_ATTEMPTS,
+        DETECTION_RETRY_BUDGET,
+        log,
+    )
+}
+
+/// Retry `attempt` while it fails retryably, bounded by both `attempts`
+/// and `budget`, and say on `log` what it did.
+///
+/// No I/O, no real clock and no real sleep of its own: `sleep` and `now`
+/// are supplied, so the whole policy is exercisable without waiting and
+/// without a host. `log` carries only the retry lines; an attempt's own
+/// output goes wherever that attempt was given to write it.
+///
+/// A retry costs one more pass over the host sources — file reads, one
+/// `uname -m` fork, a PCI directory walk and the bounded metadata attempt.
+/// It does not re-run `nvidia-smi` or the package database, which the
+/// caller reaches only after an attempt has already succeeded, and it does
+/// not re-emit the `platform identity:` line, which an attempt writes only
+/// once it has an identity to report.
+///
+/// Four lines are written here, and only when the retry does something:
+/// `platform detection retry:` per failed attempt, then exactly one of
+/// `platform detection recovered:`, `platform detection exhausted:` or
+/// `platform detection stopped:` to close the episode. Every episode that
+/// wrote a retry line closes with one of those three, so an operator can
+/// classify any journal that shows the retry doing anything. With the
+/// existing `platform detection failed:` that is five prefixes sharing
+/// eighteen characters, so a parser must match the whole prefix including
+/// its colon — `platform detection` alone matches all five. The free-text
+/// error is last on every line that carries one, so a trailing `(.+)`
+/// capture works, as it does for the `platform identity:` line the
+/// offline validation stage parses.
+fn observe_with_retry<T>(
+    mut attempt: impl FnMut() -> Result<T, ObservationFailure>,
+    mut sleep: impl FnMut(Duration),
+    mut now: impl FnMut() -> Instant,
+    attempts: u32,
+    budget: Duration,
+    log: &mut impl Write,
+) -> Result<T, PlatformProbeError> {
+    let start = now();
+    // The FIRST error, not the last: a late success must not make the
+    // failure that preceded it invisible, and one line has to tell the
+    // whole episode.
+    let mut first_error: Option<String> = None;
+    let mut made: u32 = 0;
+    loop {
+        made += 1;
+        let failure = match attempt() {
+            Ok(observed) => {
+                if let Some(first) = first_error.as_deref() {
+                    let _ = writeln!(
+                        log,
+                        "platform detection recovered: attempt={made} failed_attempts={} \
+                         elapsed={} first_error={first}",
+                        made - 1,
+                        detection_seconds(now().saturating_duration_since(start)),
+                    );
+                }
+                return Ok(observed);
+            }
+            Err(failure) => failure,
+        };
+        let elapsed = now().saturating_duration_since(start);
+        if !is_retryable(&failure) {
+            // Nothing is said when this is the first attempt, which is the
+            // path every non-Compute-Engine host takes: its journal stays
+            // byte-identical to before the retry existed. Said out loud
+            // once retry lines have been written, because those lines
+            // promised more attempts and the episode is ending early with
+            // its window unspent. Without this, a metadata service that
+            // comes up answering badly mid-window produces a journal that
+            // matches neither of the other terminal shapes.
+            if made > 1 {
+                let _ = writeln!(
+                    log,
+                    "platform detection stopped: attempts={made} elapsed={} budget={} error={}",
+                    detection_seconds(elapsed),
+                    detection_seconds(budget),
+                    failure.error(),
+                );
+            }
+            return Err(failure.into_error());
+        }
+        // Bounded by the count AND the deadline. The deadline SHORTENS the
+        // next sleep to whatever is left rather than abandoning the
+        // schedule, which is what keeps the policy monotonic in attempt
+        // cost: clamped, a host whose attempts are slow runs at least as
+        // long a window and makes at least as many attempts as one whose
+        // attempts are fast. Abandoning instead compares a full doubled
+        // delay against the remaining budget, so a slow host crosses the
+        // threshold a whole delay early and gives up SOONER in absolute
+        // terms — backwards, because attempts are slowest exactly when the
+        // network stack is the thing that is struggling.
+        let next = retry_delay(made + 1, attempts)
+            .map(|delay| delay.min(budget.saturating_sub(elapsed)))
+            .filter(|delay| !delay.is_zero());
+        let Some(delay) = next else {
+            let _ = writeln!(
+                log,
+                "platform detection exhausted: attempts={made} elapsed={} budget={}",
+                detection_seconds(elapsed),
+                detection_seconds(budget),
+            );
+            return Err(failure.into_error());
+        };
+        let _ = writeln!(
+            log,
+            "platform detection retry: attempt={made}/{attempts} elapsed={} next_in={} error={}",
+            detection_seconds(elapsed),
+            detection_seconds(delay),
+            failure.error(),
+        );
+        if first_error.is_none() {
+            first_error = Some(failure.error().to_string());
+        }
+        sleep(delay);
+    }
+}
+
+/// The delay before attempt `next_attempt`, or `None` when the schedule is
+/// over because `next_attempt` is past `attempts`.
+///
+/// Attempt 1 is immediate, so it never has a delay. Every later attempt
+/// doubles from [`DETECTION_RETRY_FIRST_DELAY`]: with six attempts that is
+/// 0.5s, 1s, 2s, 4s and 8s, putting four of the six attempts inside the
+/// first four seconds, where a link that is merely late is most likely to
+/// arrive, without a long tail of connects afterwards.
+///
+/// Explicit sleeps rather than a bare count, because the metadata query's
+/// own timeout does not rate-limit the failure path: a host with no route
+/// yet fails the connect immediately rather than consuming the budget, so
+/// a sleepless loop would spend every attempt in milliseconds. The sleeps
+/// are also what bounds this to at most `attempts` connects per process
+/// start.
+fn retry_delay(next_attempt: u32, attempts: u32) -> Option<Duration> {
+    if next_attempt < 2 || next_attempt > attempts {
+        return None;
+    }
+    // Saturating rather than panicking on an implausible attempt count;
+    // the budget bounds the loop whatever this returns.
+    let factor = 2_u32.checked_pow(next_attempt - 2).unwrap_or(u32::MAX);
+    Some(DETECTION_RETRY_FIRST_DELAY.saturating_mul(factor))
+}
+
+/// Whether this failure is the one a later attempt could plausibly settle.
+///
+/// See [`ObservationFailure`]: only the identify step's
+/// `IdentityUnestablished` is network-shaped. Every other failure returns
+/// on the first attempt, which is what keeps every non-Compute-Engine host
+/// byte-identical to before this retry existed.
+fn is_retryable(failure: &ObservationFailure) -> bool {
+    matches!(
+        failure,
+        ObservationFailure::Identify(PlatformProbeError::IdentityUnestablished { .. })
+    )
+}
+
+/// Seconds to one decimal: the duration form the three detection lines
+/// use, so a parser reads one shape for every elapsed figure.
+fn detection_seconds(duration: Duration) -> String {
+    format!("{:.1}s", duration.as_secs_f64())
 }
 
 /// Identify the platform from `sources`, refresh the machine-type record,
@@ -560,24 +903,46 @@ fn main() -> ExitCode {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
     use super::{
-        detection_failed, identify_and_record, parse_dpkg_packages, parse_homebrew_packages,
-        platform_identity_line,
+        admit_observed_platform, detection_failed, identify_and_record, is_retryable,
+        observe_identity, observe_with_retry, observe_with_shipped_policy, parse_dpkg_packages,
+        parse_homebrew_packages, platform_identity_line, retry_delay, Observation,
+        ObservationFailure, DETECTION_RETRY_ATTEMPTS, DETECTION_RETRY_BUDGET,
     };
+    use tensorplate_agent::config::AgentConfig;
     use tensorplate_agent::error::AgentError;
+    use tensorplate_agent::platform_admission::{ObservedStack, PlatformAdmission};
     use tensorplate_platform::{
-        HostSources, MachineTypeSource, PlatformProbeError, RecordWrite, SystemHostProbe,
+        identify_accelerator, identify_platform, AcceleratorSources, HostSources,
+        MachineTypeSource, PlatformProbeError, PlatformRegistry, RecordWrite, SystemHostProbe,
     };
     use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
 
-    /// The recorded g2-standard-8 L4 host, as a start with the metadata
-    /// service reachable gathers it.
-    fn l4_live_sources() -> HostSources {
+    /// The L4 row, the Production cloud exemplar every recovery case here
+    /// settles on.
+    const L4_ROW: &str = "ubuntu2404-x86-l4-g2s8";
+
+    fn repo_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(relative)
+    }
+
+    /// One committed host-identity fixture as the sources a start gathers.
+    ///
+    /// No committed fixture carries `dmi_product_name`, so a case that
+    /// needs one sets it itself — which is also the only way to stage a
+    /// host whose firmware answers with something that is not Compute
+    /// Engine.
+    fn host_sources(fixture: &str) -> HostSources {
         let body = std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../test/platform/host_identity/ubuntu2404-x86-l4-g2s8.json"),
+            repo_path("test/platform/host_identity").join(format!("{fixture}.json")),
         )
-        .expect("the recorded L4 fixture is committed");
+        .expect("the recorded fixture is committed");
         let fixture: serde_json::Value = serde_json::from_str(&body).expect("fixture parses");
         let text = |key: &str| {
             fixture["sources"]
@@ -597,13 +962,22 @@ mod tests {
             sw_vers_build_version: text("sw_vers_build_version"),
             cpu_brand: text("cpu_brand"),
             hw_memsize: text("hw_memsize"),
-            dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            dmi_product_name: text("dmi_product_name"),
             gce_machine_type: text("gce_machine_type"),
             machine_type_record: None,
             // Synthetic boot identity supplements the recorded hardware facts.
             boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
             proc_meminfo: text("proc_meminfo"),
             pci_devices: text("pci_devices"),
+        }
+    }
+
+    /// The recorded g2-standard-8 L4 host, as a start with the metadata
+    /// service reachable gathers it.
+    fn l4_live_sources() -> HostSources {
+        HostSources {
+            dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            ..host_sources(L4_ROW)
         }
     }
 
@@ -755,5 +1129,789 @@ mod tests {
         );
         assert!(installed.contains("tensorplate-agent"));
         assert!(!installed.contains("tensorplate-backend-python-pytorch"));
+    }
+
+    // ---- detection retry ------------------------------------------------
+    //
+    // The defect: platform detection ran once per start, so a Compute
+    // Engine instance whose metadata service was not up yet held a
+    // detection failure for the whole boot and refused every deploy until
+    // somebody restarted the agent by hand. What has to be shown is not
+    // that a retry loop exists but that the verdict a deploy is gated on
+    // changes -- and that it still does NOT change for the failures that
+    // are not network-shaped.
+
+    /// The retryable failure: a Compute Engine instance whose metadata
+    /// service has not answered yet and which has no record for this boot.
+    /// `attempt` is carried in the detail so a case can tell the first
+    /// error from the last.
+    fn metadata_unreached(attempt: u32) -> PlatformProbeError {
+        PlatformProbeError::IdentityUnestablished {
+            source_name: MACHINE_TYPE_RECORD_PATH.to_string(),
+            detail: format!("no machine type has been recorded on this host (attempt {attempt})"),
+        }
+    }
+
+    /// A clock that moves only when the code under test sleeps, or when an
+    /// attempt says how long it took. Nothing here waits.
+    struct FakeClock {
+        base: Instant,
+        elapsed: Cell<Duration>,
+        slept: RefCell<Vec<Duration>>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                elapsed: Cell::new(Duration::ZERO),
+                slept: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            self.base + self.elapsed.get()
+        }
+
+        fn advance(&self, by: Duration) {
+            self.elapsed.set(self.elapsed.get() + by);
+        }
+
+        fn sleep(&self, delay: Duration) {
+            self.slept.borrow_mut().push(delay);
+            self.advance(delay);
+        }
+
+        fn slept(&self) -> Vec<Duration> {
+            self.slept.borrow().clone()
+        }
+    }
+
+    /// Run the retry against an attempt that fails `failures` times with
+    /// the retryable failure and then succeeds with `success`, charging
+    /// `work` to the clock for every attempt.
+    ///
+    /// Returns what the loop returned and what it said, so a case asserts
+    /// on the outcome and the journal rather than on the loop's internals.
+    fn drive_retry<T>(
+        clock: &FakeClock,
+        failures: u32,
+        attempts: u32,
+        work: Duration,
+        mut success: impl FnMut() -> T,
+    ) -> (Result<T, PlatformProbeError>, String) {
+        let made = Cell::new(0_u32);
+        let mut log = Vec::new();
+        let outcome = observe_with_retry(
+            || {
+                made.set(made.get() + 1);
+                clock.advance(work);
+                if made.get() > failures {
+                    Ok(success())
+                } else {
+                    Err(ObservationFailure::Identify(metadata_unreached(made.get())))
+                }
+            },
+            |delay| clock.sleep(delay),
+            || clock.now(),
+            attempts,
+            DETECTION_RETRY_BUDGET,
+            &mut log,
+        );
+        (outcome, String::from_utf8(log).expect("utf-8"))
+    }
+
+    fn committed_registry() -> PlatformRegistry {
+        PlatformRegistry::load(&repo_path("config/platform")).expect("the committed registry loads")
+    }
+
+    /// The config as shipped. It sets no `device_memory_bytes`, which is
+    /// the case the memory-ceiling guard below is about.
+    fn shipped_config() -> AgentConfig {
+        let raw = std::fs::read_to_string(repo_path("packaging/conf/agent.json"))
+            .expect("the packaged agent config is committed");
+        AgentConfig::parse_json(&raw).expect("the packaged agent config parses")
+    }
+
+    /// What a successful observation of the L4 row carries: the recorded
+    /// host sources identified, plus the recorded `nvidia-smi` answer for
+    /// the same row as its accelerator.
+    fn l4_observation() -> Observation {
+        let mut report = identify_platform(&l4_live_sources()).expect("the L4 fixture identifies");
+        let query = std::fs::read_to_string(
+            repo_path("test/platform/accelerator").join(format!("{L4_ROW}.txt")),
+        )
+        .expect("the recorded L4 accelerator fixture is committed");
+        let card = identify_accelerator(&AcceleratorSources {
+            nvidia_smi_query: Some(query),
+        })
+        .expect("the accelerator fixture parses")
+        .expect("the accelerator fixture reports one card");
+        report.accelerator = Some(card.observation());
+        (report, ObservedStack::default(), None)
+    }
+
+    /// The unreadable failure the metadata service raises while it is
+    /// coming up: the connect succeeds and the peer closes or answers with
+    /// something that is not a machine type. `machine_type_sources` turns
+    /// that into this, inside `probe.sources()`, so it arrives tagged
+    /// `Sources` and is not retryable.
+    fn metadata_answered_badly() -> PlatformProbeError {
+        PlatformProbeError::Unreadable {
+            source_name: "GCE metadata service".to_string(),
+            detail: "metadata service closed the connection without answering".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_step_that_raised_a_failure_is_the_step_that_gets_tagged() {
+        // The tag IS the gate: `Identify(IdentityUnestablished)` retries
+        // and `Sources(IdentityUnestablished)` does not, so a tag assigned
+        // on the wrong side either restores the defect or makes the tamper
+        // signal retryable. In the production wiring that assignment is
+        // reachable only from a Compute Engine host; `observe_identity` is
+        // where a test can reach it.
+        let failure = observe_identity(
+            || Err::<u32, _>(metadata_unreached(1)),
+            |_: &u32| -> Result<u32, PlatformProbeError> {
+                panic!("identify must not run when the sources step failed")
+            },
+        )
+        .expect_err("the sources step failed");
+        assert!(
+            matches!(failure, ObservationFailure::Sources(_)),
+            "{failure:?}"
+        );
+        assert!(
+            !is_retryable(&failure),
+            "an unusable machine-type record is the only way the sources \
+             step raises this variant. Retrying it would let a later live \
+             answer overwrite the record and the tamper signal would never \
+             be reported"
+        );
+
+        let failure = observe_identity(|| Ok(7_u32), |_| Err::<u32, _>(metadata_unreached(1)))
+            .expect_err("the identify step failed");
+        assert!(
+            matches!(failure, ObservationFailure::Identify(_)),
+            "{failure:?}"
+        );
+        assert!(
+            is_retryable(&failure),
+            "a Compute Engine instance whose metadata service has not \
+             answered yet must retry, or #216 is not fixed at all"
+        );
+
+        // The control: the steps run in order and the identified value is
+        // what comes back, so this cannot pass on a build where the two
+        // steps were transposed.
+        let (sources, identified) = observe_identity(|| Ok(7_u32), |sources: &u32| Ok(sources + 1))
+            .expect("both steps ran");
+        assert_eq!((sources, identified), (7, 8));
+    }
+
+    #[test]
+    fn a_failed_identification_writes_no_identity_line() {
+        // `identity_logged_once` is what makes the retry safe to put here:
+        // the offline validation stage requires exactly one `platform
+        // identity:` line per invocation, so an attempt that fails must
+        // write none. `identify_platform` failing before the line is
+        // written is the whole reason that holds, and only this pins it.
+        let temporary = std::env::temp_dir().canonicalize().expect("temporary root");
+        let root = tempfile::tempdir_in(temporary).expect("tempdir");
+        std::fs::create_dir_all(
+            root.path()
+                .join(MACHINE_TYPE_RECORD_PATH.trim_start_matches('/'))
+                .parent()
+                .expect("parent"),
+        )
+        .expect("stage state/");
+        let probe = SystemHostProbe::with_root(root.path());
+
+        let unestablished = HostSources {
+            gce_machine_type: None,
+            machine_type_record: None,
+            ..l4_live_sources()
+        };
+        let mut log = Vec::new();
+        let err = identify_and_record(&probe, &unestablished, &mut log)
+            .expect_err("a Compute Engine instance with no answer and no record cannot identify");
+        assert!(
+            matches!(err, PlatformProbeError::IdentityUnestablished { .. }),
+            "{err:?}"
+        );
+        assert!(
+            log.is_empty(),
+            "a failed attempt must write no `platform identity:` line, or a \
+             boot that recovers on attempt 3 emits three of them and the \
+             offline stage's identity_logged_once check fails on a real \
+             host: {}",
+            String::from_utf8_lossy(&log)
+        );
+
+        // The control. Without it this would pass on a build that writes
+        // no identity line at all.
+        let mut log = Vec::new();
+        identify_and_record(&probe, &l4_live_sources(), &mut log)
+            .expect("the L4 fixture identifies");
+        assert_eq!(
+            String::from_utf8(log)
+                .expect("utf-8")
+                .lines()
+                .filter(|line| line.starts_with("platform identity: "))
+                .count(),
+            1,
+            "a successful attempt writes exactly one"
+        );
+    }
+
+    #[test]
+    fn only_the_identify_steps_identity_failure_is_retryable() {
+        assert!(
+            is_retryable(&ObservationFailure::Identify(metadata_unreached(1))),
+            "a Compute Engine instance whose metadata service has not \
+             answered yet is the whole point of the retry"
+        );
+        assert!(
+            !is_retryable(&ObservationFailure::Sources(metadata_unreached(1))),
+            "the same variant from the sources step is an unusable \
+             machine-type record -- a tamper signal. Retrying it would let \
+             a later live answer overwrite the record and the signal would \
+             never be reported at all"
+        );
+        for other in [
+            PlatformProbeError::Unreadable {
+                source_name: "GCE metadata service".to_string(),
+                detail: "something answered and it was not the metadata service".to_string(),
+            },
+            PlatformProbeError::Unrecognized {
+                source_name: "GCE metadata service".to_string(),
+                detail: "not a machine-type resource name".to_string(),
+            },
+        ] {
+            let rendered = other.to_string();
+            assert!(
+                !is_retryable(&ObservationFailure::Identify(other)),
+                "{rendered} is not network-shaped and must settle on the first attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn the_retry_schedule_doubles_from_half_a_second_and_then_ends() {
+        assert_eq!(retry_delay(1, 6), None, "the first attempt is immediate");
+        assert_eq!(retry_delay(2, 6), Some(Duration::from_millis(500)));
+        assert_eq!(retry_delay(3, 6), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(4, 6), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(5, 6), Some(Duration::from_secs(4)));
+        assert_eq!(retry_delay(6, 6), Some(Duration::from_secs(8)));
+        assert_eq!(retry_delay(7, 6), None, "the schedule ends with the count");
+        assert_eq!(
+            retry_delay(2, 1),
+            None,
+            "one attempt is the no-retry configuration"
+        );
+        let total: Duration = (2..=DETECTION_RETRY_ATTEMPTS)
+            .filter_map(|attempt| retry_delay(attempt, DETECTION_RETRY_ATTEMPTS))
+            .sum();
+        assert_eq!(total, Duration::from_millis(15_500));
+        assert!(
+            total < DETECTION_RETRY_BUDGET,
+            "the count bounds a healthy-clock episode before the budget does"
+        );
+    }
+
+    #[test]
+    fn a_recovered_observation_reports_the_first_error_not_the_last() {
+        let clock = FakeClock::new();
+        let (outcome, log) =
+            drive_retry(&clock, 2, DETECTION_RETRY_ATTEMPTS, Duration::ZERO, || ());
+        assert!(outcome.is_ok(), "the third attempt answered");
+        assert_eq!(
+            clock.slept(),
+            vec![Duration::from_millis(500), Duration::from_secs(1)]
+        );
+        assert_eq!(
+            log,
+            format!(
+                "platform detection retry: attempt=1/6 elapsed=0.0s next_in=0.5s error={}\n\
+                 platform detection retry: attempt=2/6 elapsed=0.5s next_in=1.0s error={}\n\
+                 platform detection recovered: attempt=3 failed_attempts=2 elapsed=1.5s \
+                 first_error={}\n",
+                metadata_unreached(1),
+                metadata_unreached(2),
+                metadata_unreached(1),
+            ),
+            "a late success must not make the earlier failure invisible, so \
+             the recovered line carries the FIRST error"
+        );
+    }
+
+    #[test]
+    fn a_non_retryable_failure_returns_on_the_first_attempt_saying_nothing_new() {
+        let clock = FakeClock::new();
+        let mut log = Vec::new();
+        let made = Cell::new(0_u32);
+        let outcome: Result<(), PlatformProbeError> = observe_with_retry(
+            || {
+                made.set(made.get() + 1);
+                Err(ObservationFailure::Sources(metadata_unreached(made.get())))
+            },
+            |delay| clock.sleep(delay),
+            || clock.now(),
+            DETECTION_RETRY_ATTEMPTS,
+            DETECTION_RETRY_BUDGET,
+            &mut log,
+        );
+        assert!(outcome.is_err());
+        assert_eq!(made.get(), 1, "a tamper signal is not retried");
+        assert!(clock.slept().is_empty(), "and costs no delay");
+        assert!(
+            log.is_empty(),
+            "every non-Compute-Engine host takes this path, so its journal \
+             must be byte-identical to before the retry existed"
+        );
+    }
+
+    #[test]
+    fn exhaustion_says_how_many_attempts_it_made_and_what_bounded_them() {
+        let clock = FakeClock::new();
+        let (outcome, log) = drive_retry(
+            &clock,
+            u32::MAX,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::ZERO,
+            || (),
+        );
+        assert!(outcome.is_err());
+        assert_eq!(
+            clock.slept(),
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ]
+        );
+        assert_eq!(
+            log.lines()
+                .filter(|l| l.starts_with("platform detection retry: "))
+                .count(),
+            5
+        );
+        assert!(
+            log.ends_with("platform detection exhausted: attempts=6 elapsed=15.5s budget=20.0s\n"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_non_retryable_failure_mid_window_closes_the_episode_out_loud() {
+        // The reachable case this is about: attempt 1 cannot reach the
+        // metadata service at all, so it retries; by attempt 2 the route
+        // is up but the endpoint is not serving yet, so `query_metadata`
+        // reports `Answered` and `machine_type_sources` turns it into
+        // `Unreadable` inside `probe.sources()` — tagged `Sources`, and
+        // deliberately not retryable. The episode ends at attempt 2 of 6
+        // with most of its window unspent, and it has to say so: a retry
+        // line has already promised more attempts.
+        let clock = FakeClock::new();
+        let mut log = Vec::new();
+        let made = Cell::new(0_u32);
+        let outcome: Result<(), PlatformProbeError> = observe_with_retry(
+            || {
+                made.set(made.get() + 1);
+                if made.get() == 1 {
+                    Err(ObservationFailure::Identify(metadata_unreached(1)))
+                } else {
+                    Err(ObservationFailure::Sources(metadata_answered_badly()))
+                }
+            },
+            |delay| clock.sleep(delay),
+            || clock.now(),
+            DETECTION_RETRY_ATTEMPTS,
+            DETECTION_RETRY_BUDGET,
+            &mut log,
+        );
+        assert!(outcome.is_err());
+        assert_eq!(made.get(), 2);
+        assert_eq!(clock.slept(), vec![Duration::from_millis(500)]);
+        assert_eq!(
+            String::from_utf8(log).expect("utf-8"),
+            format!(
+                "platform detection retry: attempt=1/6 elapsed=0.0s next_in=0.5s error={}\n\
+                 platform detection stopped: attempts=2 elapsed=0.5s budget=20.0s error={}\n",
+                metadata_unreached(1),
+                metadata_answered_badly(),
+            ),
+            "an episode that wrote a retry line must close with one of the \
+             three terminal lines, or the journal matches no documented \
+             shape and the window it gave up is invisible to the fleet \
+             evidence the budget is supposed to be corrected from"
+        );
+    }
+
+    #[test]
+    fn a_slower_host_does_not_get_fewer_retries_over_a_shorter_window() {
+        // The deadline shortens the next sleep to what is left rather than
+        // abandoning the schedule. Without that, the budget is checked
+        // against a full doubled delay, so a host whose attempts are slow
+        // crosses the threshold a whole delay early and gives up SOONER in
+        // absolute terms than a fast one -- backwards, because attempts are
+        // slowest exactly when the network stack is what is struggling.
+        let mut episodes = Vec::new();
+        for work in [300, 700, 1000, 1500] {
+            let clock = FakeClock::new();
+            let (outcome, log) = drive_retry(
+                &clock,
+                u32::MAX,
+                DETECTION_RETRY_ATTEMPTS,
+                Duration::from_millis(work),
+                || (),
+            );
+            assert!(outcome.is_err());
+            let exhausted = log
+                .lines()
+                .last()
+                .expect("an exhausted episode closes out loud")
+                .to_string();
+            let attempts: u32 = exhausted
+                .split_once("attempts=")
+                .and_then(|(_, rest)| rest.split_once(' '))
+                .expect("the exhausted line names the attempt count")
+                .0
+                .parse()
+                .expect("a number");
+            episodes.push((
+                work,
+                attempts,
+                clock.now().saturating_duration_since(clock.base),
+            ));
+        }
+        for window in episodes.windows(2) {
+            let (slow_work, slow_attempts, slow_elapsed) = window[1];
+            let (fast_work, fast_attempts, fast_elapsed) = window[0];
+            assert!(
+                slow_attempts >= fast_attempts,
+                "{slow_work}ms attempts made {slow_attempts} attempts where \
+                 {fast_work}ms made {fast_attempts}: a slower host must not \
+                 be given fewer tries"
+            );
+            assert!(
+                slow_elapsed >= fast_elapsed,
+                "{slow_work}ms gave up after {slow_elapsed:?} where \
+                 {fast_work}ms ran for {fast_elapsed:?}: a slower host must \
+                 not abandon its window earlier"
+            );
+        }
+        // Concretely: every one of these spends its whole schedule.
+        assert_eq!(
+            episodes
+                .iter()
+                .map(|(_, attempts, _)| *attempts)
+                .collect::<Vec<_>>(),
+            vec![6, 6, 6, 6]
+        );
+    }
+
+    #[test]
+    fn the_shipped_policy_makes_six_attempts_over_the_shipped_budget() {
+        // `observe_platform` is a one-line delegation to this; the numbers
+        // a start actually runs under are passed here. Without this the
+        // constant can read 6 while the call site passes something else --
+        // the defect restored, with fmt, clippy and every other test green.
+        let clock = FakeClock::new();
+        let mut log = Vec::new();
+        let made = Cell::new(0_u32);
+        let outcome: Result<(), PlatformProbeError> = observe_with_shipped_policy(
+            || {
+                made.set(made.get() + 1);
+                Err(ObservationFailure::Identify(metadata_unreached(made.get())))
+            },
+            |delay| clock.sleep(delay),
+            || clock.now(),
+            &mut log,
+        );
+        assert!(outcome.is_err());
+        assert_eq!(made.get(), DETECTION_RETRY_ATTEMPTS, "six attempts ship");
+        assert_eq!(
+            clock.slept(),
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ]
+        );
+        let log = String::from_utf8(log).expect("utf-8");
+        assert!(
+            log.ends_with("platform detection exhausted: attempts=6 elapsed=15.5s budget=20.0s\n"),
+            "{log}"
+        );
+
+        // And the half that matters: the shipped policy recovers from the
+        // failure #216 is about rather than settling it on attempt 1.
+        let clock = FakeClock::new();
+        let mut log = Vec::new();
+        let made = Cell::new(0_u32);
+        let outcome = observe_with_shipped_policy(
+            || {
+                made.set(made.get() + 1);
+                if made.get() > 2 {
+                    Ok(())
+                } else {
+                    Err(ObservationFailure::Identify(metadata_unreached(made.get())))
+                }
+            },
+            |delay| clock.sleep(delay),
+            || clock.now(),
+            &mut log,
+        );
+        assert!(outcome.is_ok(), "the shipped policy retries");
+        assert!(
+            String::from_utf8(log)
+                .expect("utf-8")
+                .contains("platform detection recovered: attempt=3 "),
+            "the shipped call site must pass more than one attempt"
+        );
+    }
+
+    #[test]
+    fn the_budget_stops_the_loop_before_the_attempt_count_does() {
+        // Attempts that each take three seconds: the count would allow six,
+        // the deadline does not. Both bounds are reported, which is what
+        // makes the journal say which one bit.
+        //
+        // Note the reported elapsed: 22.5s against a 20.0s budget. The
+        // budget bounds the SLEEP SCHEDULE, not total elapsed — the attempt
+        // that runs after the last permitted sleep is not itself timed, so
+        // an episode ends at up to the budget plus one attempt's work. That
+        // is the documented contract, and this is the case that shows it.
+        let clock = FakeClock::new();
+        let (outcome, log) = drive_retry(
+            &clock,
+            u32::MAX,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::from_secs(3),
+            || (),
+        );
+        assert!(outcome.is_err());
+        assert_eq!(clock.slept().len(), 4);
+        assert!(
+            log.ends_with("platform detection exhausted: attempts=5 elapsed=22.5s budget=20.0s\n"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_metadata_service_that_answers_on_the_third_attempt_admits_deploys() {
+        // The assertion that matters is on the ADMISSION, not on the loop:
+        // `ensure_supported` is the exact call the coordinator makes before
+        // a deploy, and it is the call that refuses today.
+        let registry = committed_registry();
+        let mut config = shipped_config();
+        let clock = FakeClock::new();
+        let (observation, _log) = drive_retry(
+            &clock,
+            2,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::ZERO,
+            l4_observation,
+        );
+        let admission = admit_observed_platform(&registry, &mut config, observation);
+        assert_eq!(admission.row_id(), Some(L4_ROW));
+        assert!(
+            matches!(admission, PlatformAdmission::Supported { .. }),
+            "{admission:?}"
+        );
+        admission
+            .ensure_supported()
+            .expect("a host whose metadata service came up late must admit deploys");
+    }
+
+    #[test]
+    fn with_a_single_attempt_the_same_scenario_is_refused() {
+        // The mutation control, and the half that makes the case above mean
+        // anything: with the retry reduced to one attempt, the identical
+        // scenario is the defect -- rejected, and refused at the same gate.
+        // Without this, the case above would pass on a build where the
+        // retry did nothing at all.
+        let registry = committed_registry();
+        let mut config = shipped_config();
+        let clock = FakeClock::new();
+        let (observation, log) = drive_retry(&clock, 2, 1, Duration::ZERO, l4_observation);
+        assert!(clock.slept().is_empty(), "one attempt sleeps not at all");
+        assert!(
+            log.ends_with("platform detection exhausted: attempts=1 elapsed=0.0s budget=20.0s\n"),
+            "{log}"
+        );
+        let admission = admit_observed_platform(&registry, &mut config, observation);
+        assert!(
+            matches!(admission, PlatformAdmission::Rejected { .. }),
+            "{admission:?}"
+        );
+        match admission.ensure_supported() {
+            Err(AgentError::PlatformNotAdmissible { detail, .. }) => {
+                assert!(
+                    detail.contains("no machine type has been recorded"),
+                    "{detail}"
+                );
+            }
+            other => panic!("one attempt must reproduce the defect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exhausted_detection_is_still_a_rejection_that_carries_no_frozen_reason() {
+        // Exhaustion must land exactly where a single failed detection
+        // lands today: a rejection with no row and no typed reason. "I
+        // could not look" must not become "your platform is unsupported",
+        // and it must not become "deploy anything" either.
+        let registry = committed_registry();
+        let mut config = shipped_config();
+        let clock = FakeClock::new();
+        let (observation, _log) = drive_retry(
+            &clock,
+            u32::MAX,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::ZERO,
+            l4_observation,
+        );
+        let admission = admit_observed_platform(&registry, &mut config, observation);
+        match &admission {
+            PlatformAdmission::Rejected {
+                row_id: None,
+                reason: None,
+                detail,
+            } => assert!(
+                detail.starts_with("platform detection failed: "),
+                "{detail}"
+            ),
+            other => panic!("exhaustion must stay today's terminal state, got {other:?}"),
+        }
+        assert!(admission.ensure_supported().is_err());
+    }
+
+    #[test]
+    fn a_detection_failure_leaves_the_configured_memory_ceiling_alone() {
+        // The trap a careless version of this fix falls into.
+        // `apply_memory_limit` early-returns on anything that is not
+        // `Supported { capability: Some(_) }`, the shipped config sets no
+        // `device_memory_bytes`, and both memory gates are Option-gated. A
+        // verdict that becomes supported without the ceiling being applied
+        // therefore admits deploys with both memory checks disabled.
+        let registry = committed_registry();
+        let mut config = shipped_config();
+        assert_eq!(
+            config.device_memory_bytes, None,
+            "the shipped config sets no ceiling of its own"
+        );
+        let clock = FakeClock::new();
+        let (observation, _log) = drive_retry(
+            &clock,
+            u32::MAX,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::ZERO,
+            l4_observation,
+        );
+        admit_observed_platform(&registry, &mut config, observation);
+        assert_eq!(
+            config.device_memory_bytes, None,
+            "a detection failure applies no ceiling, so nothing may be \
+             admitted on the strength of one"
+        );
+    }
+
+    #[test]
+    fn a_recovered_detection_applies_the_row_ceiling_once() {
+        let registry = committed_registry();
+        let clock = FakeClock::new();
+        let (observation, _log) = drive_retry(
+            &clock,
+            2,
+            DETECTION_RETRY_ATTEMPTS,
+            Duration::ZERO,
+            l4_observation,
+        );
+        let mut config = shipped_config();
+        let admission = admit_observed_platform(&registry, &mut config, observation);
+        let ceiling = admission
+            .capability()
+            .expect("a supported L4 carries a bounded capability")
+            .max_resident_model_memory();
+        assert_eq!(
+            config.device_memory_bytes,
+            Some(ceiling),
+            "the row ceiling is applied on the recovery path, not skipped"
+        );
+
+        // A settled verdict applies the ceiling exactly once, so the value
+        // the retry path produces is the value one application produces --
+        // an operator floor stays in force and a larger one is reduced.
+        for (configured, expected) in [(ceiling + 1, ceiling), (4096, 4096)] {
+            let clock = FakeClock::new();
+            let (observation, _log) = drive_retry(
+                &clock,
+                2,
+                DETECTION_RETRY_ATTEMPTS,
+                Duration::ZERO,
+                l4_observation,
+            );
+            let mut config = shipped_config();
+            config.device_memory_bytes = Some(configured);
+            admit_observed_platform(&registry, &mut config, observation);
+            assert_eq!(config.device_memory_bytes, Some(expected));
+        }
+    }
+
+    #[test]
+    fn no_non_compute_engine_host_tree_produces_the_retryable_failure() {
+        // The gate rests entirely on `Identify(IdentityUnestablished)`
+        // being unreachable off Compute Engine. That is true by
+        // construction and nothing else pins it, so a change that widened
+        // it would make every host here pay the retry budget.
+        let trees = [
+            ("jetson-orin-nano-8gb-jp62", None),
+            ("macos26-m1pro-16gb", None),
+            // Real board product names, injected here because no committed
+            // host fixture carries `dmi_product_name` at all.
+            (
+                "ubuntu2404-x86-rtxpro6000we-physical",
+                Some("Precision 7960 Tower\n"),
+            ),
+            ("ubuntu2404-x86-cpu", Some("PowerEdge R760xa\n")),
+        ];
+        for (fixture, dmi_product_name) in trees {
+            let sources = HostSources {
+                dmi_product_name: dmi_product_name.map(str::to_string),
+                ..host_sources(fixture)
+            };
+            assert!(
+                !matches!(
+                    identify_platform(&sources),
+                    Err(PlatformProbeError::IdentityUnestablished { .. })
+                ),
+                "`{fixture}` is not a Compute Engine instance and must never \
+                 reach the retryable failure"
+            );
+        }
+
+        // The control. Without it this would pass on a build where nothing
+        // is ever unestablished.
+        let gce_without_an_answer = HostSources {
+            gce_machine_type: None,
+            machine_type_record: None,
+            ..l4_live_sources()
+        };
+        assert!(
+            matches!(
+                identify_platform(&gce_without_an_answer),
+                Err(PlatformProbeError::IdentityUnestablished { .. })
+            ),
+            "a Compute Engine instance with no live answer and no record is \
+             exactly the failure the retry exists for"
+        );
     }
 }

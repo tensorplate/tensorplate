@@ -91,7 +91,7 @@ done
 # installs both with --no-start, and an operator reading one unit's restart
 # policy must be able to assume the other's.
 for directive in 'Restart=on-failure' 'RestartSec=5' 'StartLimitBurst=5' \
-                 'StartLimitIntervalSec=60'; do
+                 'StartLimitIntervalSec=300'; do
   for unit in "${debian}/tensorplate-agent.service" "${debian}/tensorplate-observability.service"; do
     require_line "${unit}" "^${directive}\$"
   done
@@ -108,6 +108,38 @@ done
 if find "${repo_root}/packaging" -name 'tensorplate-serving.service' -print -quit | grep -q .; then
   echo "FAIL: tensorplate-serving.service exists somewhere under packaging/" >&2
   fail=1
+fi
+
+# The start-limit window must contain five worst-case restart cycles, or the
+# burst never trips and a broken agent restarts forever instead of settling
+# into `failed`. That is not a property of the unit alone: a cycle is
+# RestartSec plus the agent's own startup work, and on a Compute Engine host
+# with unreachable metadata that work includes the bounded detection retry in
+# agent/src/main.rs. The two numbers live in different files and nothing
+# linked them, so raising the retry budget could silently break the
+# supervision contract. Derive both and compare.
+agent_main="${repo_root}/agent/src/main.rs"
+retry_budget="$(sed -n 's/^const DETECTION_RETRY_BUDGET: Duration = Duration::from_secs(\([0-9]*\));$/\1/p' "${agent_main}")"
+restart_sec="$(sed -n 's/^RestartSec=\([0-9]*\)$/\1/p' "${debian}/tensorplate-agent.service" | head -n 1)"
+burst="$(sed -n 's/^StartLimitBurst=\([0-9]*\)$/\1/p' "${debian}/tensorplate-agent.service" | head -n 1)"
+window="$(sed -n 's/^StartLimitIntervalSec=\([0-9]*\)$/\1/p' "${debian}/tensorplate-agent.service" | head -n 1)"
+
+if [ -z "${retry_budget}" ] || [ -z "${restart_sec}" ] || [ -z "${burst}" ] || [ -z "${window}" ]; then
+  echo "FAIL: could not read the restart-cycle inputs (budget=${retry_budget:-?} RestartSec=${restart_sec:-?} burst=${burst:-?} window=${window:-?})" >&2
+  echo "      if a constant was renamed, update this check rather than deleting it" >&2
+  fail=1
+else
+  # An attempt has no ceiling of its own, so the budget bounds the sleep
+  # schedule rather than total elapsed. Allow a 25% overshoot before adding
+  # RestartSec, which is the same pessimism the unit comment derives from.
+  worst_cycle=$(( (retry_budget * 125 / 100) + restart_sec + 1 ))
+  need=$(( worst_cycle * burst ))
+  if [ "${window}" -lt "${need}" ]; then
+    echo "FAIL: StartLimitIntervalSec=${window} cannot contain ${burst} restart cycles of ~${worst_cycle}s (need >= ${need}s)" >&2
+    echo "      the detection retry budget is ${retry_budget}s and RestartSec is ${restart_sec}s;" >&2
+    echo "      raise StartLimitIntervalSec in BOTH units, or lower DETECTION_RETRY_BUDGET" >&2
+    fail=1
+  fi
 fi
 
 if [ "${fail}" -eq 0 ]; then

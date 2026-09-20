@@ -301,6 +301,28 @@ fails detection rather than silently reporting no machine type. This
 stage does not claim otherwise, and the runbook's procedure is to run it
 on a host that has been online since its last boot.
 
+**A network that is merely late no longer costs the whole boot.** On a
+Compute Engine host, a start that cannot establish an identity retries
+the observation a bounded number of times over a bounded window before
+settling a verdict, so an agent that starts a second or two ahead of
+DHCP now reaches the metadata service on a later attempt and records the
+machine type as usual. The window is six attempts over a twenty-second
+budget on the sleep schedule, about 15.5 seconds of sleeping in the worst
+case. The journal says what happened: one `platform detection retry:`
+line per failed attempt, then `platform detection recovered:` reporting
+which attempt answered and how long it took, `platform detection
+exhausted:` reporting the attempt count and the budget when none did, or
+`platform detection stopped:` when an attempt failed for a reason another
+attempt cannot settle and the retry ended early. None of these lines
+appears on a host that answers first time, and none appears off Compute
+Engine at all.
+
+This narrows the window rather than removing it. A host whose network is
+denied for longer than the budget, or denied outright, still has no
+record for that boot and still fails detection, so the procedure above is
+unchanged: run the offline stage on a host that has been online since its
+last boot.
+
 **install and upgrade stay online.** Both run the shipped installer the
 way an operator does, and denying them would validate a procedure nobody
 follows. Their doctor runs must show live detection: a `host_os` without
@@ -464,8 +486,10 @@ describe a run of this harness as GPU validation.
    agent to have started at least once this boot with the GCE metadata
    service reachable, which the install stage provides: the machine-type
    record it writes is bound to the boot id, so a VM rebooted into a
-   denied network has nothing to resolve its row from. Do not reboot the
-   VM between the install stage and the offline stage.
+   denied network has nothing to resolve its row from. The agent's
+   bounded start-up detection retry does not change this: it helps a
+   network that is late, not one that is denied. Do not reboot the VM
+   between the install stage and the offline stage.
 
 6. **A verified candidate artifact set** copied onto the VM: `install.sh`,
    the artifact manifest, `SHA256SUMS`, and the amd64 `.deb` packages.
