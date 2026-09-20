@@ -43,6 +43,31 @@ Inside the agent, V01-E09 supervises the serving worker with its own
 bounded backoff + crash-loop detector. The two layers do not race:
 systemd restarts only the agent process; the agent owns the worker.
 
+### Start-up platform detection
+
+The agent settles which platform row it is running on once, at start. On
+a Compute Engine instance that verdict needs the GCE metadata service,
+which on some boots is not answering yet when the unit starts. The agent
+therefore retries the observation a bounded number of times over a
+bounded window before it settles, and says what it did:
+
+- `platform detection recovered: attempt=... elapsed=... first_error=...`
+  — a later attempt answered. The start is normal from here on; the line
+  records the delay and the failure that preceded it so a boot that
+  needed the retry is still visible.
+- `platform detection exhausted: attempts=... elapsed=... budget=...`
+  followed by `platform detection failed: ...` — no attempt answered
+  inside the window. The agent keeps running and keeps listening, but it
+  refuses deploys, because an agent that cannot read its own hardware
+  must not deploy as though the check passed.
+
+The remedy for an exhausted detection is unchanged: restart
+`tensorplate-agent` once with the metadata service reachable.
+
+Neither line is written on a host that answers on the first attempt, and
+neither is written off Compute Engine. On every other platform the
+verdict is settled from local sources and the retry costs nothing.
+
 ### Hardening defaults
 
 The unit files apply the same default sandbox to both services:

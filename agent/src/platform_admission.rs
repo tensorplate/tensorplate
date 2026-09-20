@@ -341,6 +341,21 @@ impl PlatformAdmission {
     ///
     /// An explicitly smaller configured limit remains in force. A larger
     /// configured value is reduced to the detected-and-row-bounded maximum.
+    ///
+    /// **The verdict must be settled before this is called.** This
+    /// early-returns on anything that is not `Supported { capability:
+    /// Some(_) }`, so a verdict that becomes supported afterwards leaves
+    /// `device_memory_bytes` exactly as the operator configured it — and
+    /// the shipped `packaging/conf/agent.json` configures nothing, while
+    /// both memory gates are `Option`-gated. The result is a deploy
+    /// admitted on L4 or H100 with both memory checks silently disabled,
+    /// which is worse than the detection failure it would be healing.
+    ///
+    /// Startup placement is what makes that unreachable today: detection,
+    /// including its bounded retry, settles before this call and
+    /// `device_memory_bytes` is written exactly once. Any future late or
+    /// lazy re-detect must re-apply the ceiling here, or it reopens that
+    /// hole.
     pub fn apply_memory_limit(&self, config: &mut AgentConfig) {
         let Self::Supported {
             capability: Some(capability),
