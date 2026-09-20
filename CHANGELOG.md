@@ -613,9 +613,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   unreachable metadata query settled a detection failure that the agent
   then held until somebody restarted it by hand — on a host that was
   otherwise healthy and would have detected correctly a second later. The
-  observation is now retried up to six times over at most twenty seconds,
-  with the delay doubling from 500ms, and the verdict is settled from
-  whichever attempt answers.
+  observation is now retried up to six times, with the delay doubling from
+  500ms, and the verdict is settled from whichever attempt answers. A
+  twenty-second budget bounds the sleep schedule: no sleep is started that
+  would end past it, and one that would is shortened to whatever is left.
+  It bounds the schedule rather than total elapsed time — the attempt that
+  runs after the last permitted sleep is not itself timed — so an episode
+  ends at up to the budget plus one attempt's work, and the exhaustion line
+  reports the elapsed figure rather than assuming it.
 
   The retry is gated on which step failed, not on what the error says.
   Both the sources step and the identify step raise the same
@@ -641,23 +646,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   point would leave both memory gates disabled, and a regression test and
   a comment at `apply_memory_limit` now pin that ordering.
 
-  Three new journal lines, and only when the retry does something:
+  Four new journal lines, and only when the retry does something:
   `platform detection retry:` per failed attempt with the elapsed time,
-  the next delay and the error; `platform detection recovered:` naming the
-  attempt that answered, how many failed, how long it took and the FIRST
-  error, so a late success does not make the earlier failure invisible;
-  and `platform detection exhausted:` naming both bounds when none
-  answered. Exhaustion is byte-identical to the previous behaviour — the
-  existing `platform detection failed:` line, a rejection carrying no
-  frozen reason, and an agent that keeps listening. A host that answers on
-  the first attempt, and every host that is not a Compute Engine instance,
+  the next delay and the error, then exactly one of three lines closing
+  the episode. `platform detection recovered:` names the attempt that
+  answered, how many failed, how long it took and the FIRST error, so a
+  late success does not make the earlier failure invisible. `platform
+  detection exhausted:` names both bounds when no attempt answered.
+  `platform detection stopped:` names the attempt count, the budget and
+  the error when a failure that is not retryable arrives after the retry
+  has already begun — a metadata service that comes up answering badly
+  mid-window ends the episode with its budget unspent, and an operator
+  reading the journal has to be able to see that rather than infer it.
+  Exhaustion is byte-identical to the previous behaviour — the existing
+  `platform detection failed:` line, a rejection carrying no frozen
+  reason, and an agent that keeps listening. A host that answers on the
+  first attempt, and every host that is not a Compute Engine instance,
   writes none of these lines and pays no delay: the journal is unchanged.
 
   The twenty-second budget is a first estimate. The gap between
   `network.target` and the first metadata answer has not been measured on
-  either production cloud row; the recovered and exhausted lines report
-  exactly that gap, so the fleet's own journals are what should correct
-  it. The systemd unit is deliberately unchanged — there is one agent
+  either production cloud row; the recovered, exhausted and stopped lines
+  report exactly that gap, so the fleet's own journals are what should
+  correct it. Whoever raises it should raise `install.sh`'s
+  `TP_INSTALL_SERVICE_READY_TIMEOUT_SECONDS` with it: that wait defaults
+  to 30 seconds and the budget is spent before the agent socket exists, so
+  a budget pushed toward 30 turns an install that would have completed
+  degraded into a hard failure. The systemd unit is deliberately unchanged — there is one agent
   unit, so ordering it behind `network-online.target` would be paid by
   Jetson, bare-metal and air-gapped installs that have no metadata service
   at all, and shipping both changes at once would make neither effect

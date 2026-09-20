@@ -48,25 +48,47 @@ systemd restarts only the agent process; the agent owns the worker.
 The agent settles which platform row it is running on once, at start. On
 a Compute Engine instance that verdict needs the GCE metadata service,
 which on some boots is not answering yet when the unit starts. The agent
-therefore retries the observation a bounded number of times over a
-bounded window before it settles, and says what it did:
+therefore retries the observation before it settles: up to six attempts,
+the delay doubling from 500ms, bounded by a twenty-second budget on the
+sleep schedule. In the worst case that is six attempts spread over about
+15.5 seconds of sleeping.
 
-- `platform detection recovered: attempt=... elapsed=... first_error=...`
-  — a later attempt answered. The start is normal from here on; the line
-  records the delay and the failure that preceded it so a boot that
-  needed the retry is still visible.
+Each failed attempt writes one line:
+
+- `platform detection retry: attempt=N/6 elapsed=... next_in=... error=...`
+
+The episode then closes with exactly one of three lines:
+
+- `platform detection recovered: attempt=... failed_attempts=...
+  elapsed=... first_error=...` — a later attempt answered. The start is
+  normal from here on; the line records the delay and the failure that
+  preceded it so a boot that needed the retry is still visible.
 - `platform detection exhausted: attempts=... elapsed=... budget=...`
   followed by `platform detection failed: ...` — no attempt answered
   inside the window. The agent keeps running and keeps listening, but it
   refuses deploys, because an agent that cannot read its own hardware
-  must not deploy as though the check passed.
+  must not deploy as though the check passed. The `elapsed` figure can
+  read slightly above `budget`: the budget bounds the sleep schedule, and
+  the attempt after the last sleep is not itself timed.
+- `platform detection stopped: attempts=... elapsed=... budget=... error=...`
+  followed by `platform detection failed: ...` — an attempt failed for a
+  reason another attempt cannot settle, so the retry ended early with
+  most of its budget unspent. The usual cause is a metadata service that
+  has started answering but is not yet serving machine types, which is
+  deliberately not retried: something answering on an unauthenticated
+  link-local address with the wrong content is not treated as flaky.
 
-The remedy for an exhausted detection is unchanged: restart
+The remedy for an exhausted or stopped detection is unchanged: restart
 `tensorplate-agent` once with the metadata service reachable.
 
-Neither line is written on a host that answers on the first attempt, and
-neither is written off Compute Engine. On every other platform the
-verdict is settled from local sources and the retry costs nothing.
+None of these lines is written on a host that answers on the first
+attempt, and none is written off Compute Engine. On every other platform
+the verdict is settled from local sources and the retry costs nothing.
+
+The retry runs before the agent opens its control socket, so it is spent
+inside the window `install.sh` waits for readiness
+(`TP_INSTALL_SERVICE_READY_TIMEOUT_SECONDS`, 30 seconds by default). The
+shipped budget leaves room; raise that variable if you raise the budget.
 
 ### Hardening defaults
 

@@ -306,11 +306,16 @@ Compute Engine host, a start that cannot establish an identity retries
 the observation a bounded number of times over a bounded window before
 settling a verdict, so an agent that starts a second or two ahead of
 DHCP now reaches the metadata service on a later attempt and records the
-machine type as usual. The journal says what happened: `platform
-detection recovered:` reports which attempt answered and how long it
-took, and `platform detection exhausted:` reports the attempt count and
-the budget when none did. Neither line appears on a host that answers
-first time, and neither appears off Compute Engine at all.
+machine type as usual. The window is six attempts over a twenty-second
+budget on the sleep schedule, about 15.5 seconds of sleeping in the worst
+case. The journal says what happened: one `platform detection retry:`
+line per failed attempt, then `platform detection recovered:` reporting
+which attempt answered and how long it took, `platform detection
+exhausted:` reporting the attempt count and the budget when none did, or
+`platform detection stopped:` when an attempt failed for a reason another
+attempt cannot settle and the retry ended early. None of these lines
+appears on a host that answers first time, and none appears off Compute
+Engine at all.
 
 This narrows the window rather than removing it. A host whose network is
 denied for longer than the budget, or denied outright, still has no
