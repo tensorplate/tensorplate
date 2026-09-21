@@ -642,22 +642,86 @@ class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
         )
         return next(iter(jobs.values()))
 
+
+    # Repository helper scripts the job runs. A step that shells out to one
+    # of these elevates whatever the helper elevates, so scanning only the
+    # inline `run:` bodies reports a job as safe while it still cannot run.
+    HELPERS = ("tools/ci/apt-get.sh",)
+
+    def elevated_commands(self, body: str, step_name: str):
+        """Yield (where, binary) for every sudo in a body and in helpers it calls."""
+        for where, text in self.sources(body, step_name):
+            # Comments discuss `sudo tee` by name; scanning them would make
+            # the guard fire on prose rather than on what is run.
+            code = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+            # `sudo` then any flags, then the command it elevates. The shell
+            # array indirection helpers use expands to sudo, so match that too.
+            for match in re.finditer(
+                r"(?:\bsudo\s+|\$\{privileged\[@\]\+\"\$\{privileged\[@\]\}\"\}\s+)"
+                r"((?:-\S+\s+)*)(\S+)",
+                code,
+            ):
+                token = match.group(2)
+                # `"$APT_GET"` and friends: resolve a variable to its default.
+                var = re.fullmatch(r'"?\$\{?(\w+)\}?"?', token)
+                if var:
+                    token = self.script_default(var.group(1)) or token
+                yield where, PurePosixPath(token.strip('"')).name
+
+    def sources(self, body: str, step_name: str):
+        """The step body, plus any repository helper script it invokes."""
+        yield step_name, body
+        for helper in self.HELPERS:
+            if helper in body:
+                text = (REPO_ROOT / helper).read_text()
+                yield f"{step_name} -> {helper}", self.wrapper_branch(text)
+
+    @staticmethod
+    def wrapper_branch(text: str) -> str:
+        """Drop the fallback half of `if ... -x "$APT_WRAPPER"` blocks.
+
+        On the constrained runner the wrapper is installed, so that branch is
+        what runs and the `else` is unreachable there. Scanning both would
+        report `timeout` as an offender on a job that never reaches it, and
+        the honest question this guard asks is what the RUNNER elevates.
+        """
+        out, skipping, depth = [], False, 0
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if skipping:
+                if stripped == "fi" and depth == 0:
+                    skipping = False
+                    out.append(line)
+                    continue
+                if stripped.startswith("if "):
+                    depth += 1
+                elif stripped == "fi":
+                    depth -= 1
+                continue
+            if stripped == "else" and out and 'APT_WRAPPER"' in "".join(out[-8:]):
+                skipping, depth = True, 0
+                continue
+            out.append(line)
+        return "".join(out)
+
+    def script_default(self, name: str):
+        """Resolve VAR="${TP_X:-/usr/bin/y}" in any scanned helper."""
+        for helper in self.HELPERS:
+            text = (REPO_ROOT / helper).read_text()
+            hit = re.search(rf'^{name}="\$\{{[A-Z_]+:-([^}}]+)\}}"', text, re.M)
+            if hit:
+                return hit.group(1)
+        return None
+
     def test_the_self_hosted_job_sudoes_only_granted_binaries(self):
         granted = self.granted_binaries()
         self.assertTrue(granted, "the grant parsed as empty")
         offenders = []
         for step in self.self_hosted_job()["steps"]:
             body = step.get("run") or ""
-            # Comments discuss `sudo tee` by name; scanning them would make
-            # the guard fire on prose rather than on what the job runs.
-            code = "\n".join(
-                line.split("#", 1)[0] for line in body.splitlines()
-            )
-            # `sudo` then any flags, then the command it elevates.
-            for match in re.finditer(r"\bsudo\s+((?:-\S+\s+)*)(\S+)", code):
-                command = PurePosixPath(match.group(2)).name
+            for where, command in self.elevated_commands(body, step.get("name")):
                 if command not in granted:
-                    offenders.append((step.get("name"), command))
+                    offenders.append((where, command))
         self.assertEqual(
             offenders,
             [],

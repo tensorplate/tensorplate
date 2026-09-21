@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The self-hosted Jetson release job no longer elevates binaries the runner
+  is not allowed to run. Two separate steps did: the apt drop-in was written
+  with `sudo tee`, and `tools/ci/apt-get.sh` ran `sudo timeout ... apt-get`
+  and `sudo dpkg --configure -a`. The runner's allowance names `apt-get` and
+  `install` only, so each asked for a password nobody can type; the first
+  failed the initial `v0.2.1-rc.1` build and the second would have failed the
+  step after it.
+
+  The drop-in now goes through `install`. The time bound moves into
+  `/usr/local/sbin/tensorplate-apt`, a root-owned wrapper that
+  `jetson-runner-control.sh` installs alongside the sudoers file, and the
+  allowance names the wrapper instead of `apt-get` -- narrower than before,
+  since the wrapper accepts only `update`, `install` and a `configure-pending`
+  mode. The bound has to be apt's direct parent, which is why it could not
+  simply move outside `sudo`; granting `timeout` would have worked and handed
+  the runner account a root shell via `sudo timeout 1 /bin/sh`.
+
+  Re-run `jetson-runner-control.sh off` then `on` to install the wrapper.
+
 - The release workflow's self-hosted Jetson job writes its apt drop-in with a
   binary the runner is actually allowed to run. `jetson-runner-control.sh`
   installs a deliberately narrow sudoers allowance -- the runner account gets
