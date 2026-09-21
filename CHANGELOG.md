@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The release workflow's self-hosted Jetson job writes its apt drop-in with a
+  binary the runner is actually allowed to run. `jetson-runner-control.sh`
+  installs a deliberately narrow sudoers allowance -- the runner account gets
+  `NOPASSWD` on `apt-get` and `install`, and nothing else -- while the step
+  used `sudo tee`, the spelling every GitHub-hosted copy of it uses. On the
+  Jetson that asks for a password nobody can type, and the job died with
+  `sudo: a password is required` before any package was built. The step had
+  been written for hosted runners and had never run on this one, so it failed
+  the first `v0.2.1-rc.1` build. It now writes a temporary file and installs
+  it with `install`, rather than widening a grant whose whole purpose is to
+  stay small.
+
+  `test/release/test_build_configuration.py` now derives the granted binaries
+  from the control script's `NOPASSWD` line and fails if the self-hosted job
+  elevates anything outside them. The grant and the workflow live in separate
+  files and nothing bound them, which is why a step could be added to that job
+  without anyone noticing it could not run there.
+
 - The release workflow's amd64 package-closure assertion no longer fails on a
   package that is correct. `dpkg-deb -c "$deb" | grep -q PATH` exits at the
   first match, closing the pipe while dpkg-deb's tar still has entries to

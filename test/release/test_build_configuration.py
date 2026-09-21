@@ -12,7 +12,7 @@ right after configure and nothing is compiled.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -595,6 +595,77 @@ class BuildConfigurationTests(unittest.TestCase):
             env={"CDPATH": ".:/"},
         )
         self.assert_reached_configure(result)
+
+
+RUNNER_CONTROL = REPO_ROOT / "tools/release/jetson-runner-control.sh"
+
+
+class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
+    """The self-hosted job may only sudo binaries the runner's grant names.
+
+    `jetson-runner-control.sh` installs a deliberately narrow sudoers file:
+    the runner account gets NOPASSWD on `apt-get` and `install` and nothing
+    else. A step that sudoes anything else asks for a password no one can
+    type, and the job dies mid-build -- which is how the first `v0.2.1-rc.1`
+    build failed, on a step written for hosted runners that had never run on
+    this one. The grant and the workflow live in different files and nothing
+    bound them together, so this does.
+    """
+
+    def granted_binaries(self) -> set:
+        """Binary basenames the control script's sudoers line allows."""
+        text = RUNNER_CONTROL.read_text()
+        line = re.search(
+            r"NOPASSWD: %s, %s\\n' \"\$RUNNER_USER\" \"\$(\w+)\" \"\$(\w+)\"", text
+        )
+        self.assertIsNotNone(
+            line,
+            "could not read the NOPASSWD grant from jetson-runner-control.sh; "
+            "if its shape changed, update this test rather than deleting it",
+        )
+        granted = set()
+        for var in line.groups():
+            default = re.search(rf'^{var}="\$\{{TP_[A-Z_]+:-([^}}]+)\}}"', text, re.M)
+            self.assertIsNotNone(default, f"no default path for {var}")
+            granted.add(PurePosixPath(default.group(1)).name)
+        return granted
+
+    def self_hosted_job(self) -> dict:
+        workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text())
+        jobs = {
+            name: job
+            for name, job in workflow["jobs"].items()
+            if "self-hosted" in (job.get("runs-on") or [])
+        }
+        self.assertEqual(
+            len(jobs), 1, f"expected exactly one self-hosted job, found {sorted(jobs)}"
+        )
+        return next(iter(jobs.values()))
+
+    def test_the_self_hosted_job_sudoes_only_granted_binaries(self):
+        granted = self.granted_binaries()
+        self.assertTrue(granted, "the grant parsed as empty")
+        offenders = []
+        for step in self.self_hosted_job()["steps"]:
+            body = step.get("run") or ""
+            # Comments discuss `sudo tee` by name; scanning them would make
+            # the guard fire on prose rather than on what the job runs.
+            code = "\n".join(
+                line.split("#", 1)[0] for line in body.splitlines()
+            )
+            # `sudo` then any flags, then the command it elevates.
+            for match in re.finditer(r"\bsudo\s+((?:-\S+\s+)*)(\S+)", code):
+                command = PurePosixPath(match.group(2)).name
+                if command not in granted:
+                    offenders.append((step.get("name"), command))
+        self.assertEqual(
+            offenders,
+            [],
+            "the self-hosted job sudoes binaries the runner grant does not "
+            f"allow (granted: {sorted(granted)}). Either use a granted binary "
+            "or widen the grant in jetson-runner-control.sh deliberately: "
+            f"{offenders}",
+        )
 
 
 if __name__ == "__main__":

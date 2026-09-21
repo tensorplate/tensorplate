@@ -574,11 +574,25 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # This job runs on the persistent Jetson runner, whose sudoers
+          # allowance is deliberately narrow -- jetson-runner-control.sh
+          # grants `gha-runner ALL=(root) NOPASSWD: /usr/bin/apt-get,
+          # /usr/bin/install` and nothing else. `sudo tee`, which every
+          # hosted-runner copy of this step uses, is not in that list, so
+          # here it asks for a password no one can type and the job dies.
+          # That is what failed the first v0.2.1-rc.1 build: the step was
+          # written for hosted runners and had never run on this one.
+          # Write the drop-in with a granted binary instead of widening a
+          # grant that exists to stay small.
+          drop_in="$(mktemp)"
           printf '%s\n' \
             'Acquire::Retries "3";' \
             'Acquire::http::Timeout "30";' \
             'Acquire::https::Timeout "30";' \
-            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+            >"$drop_in"
+          sudo install -m 0644 -o root -g root \
+            "$drop_in" /etc/apt/apt.conf.d/99-tensorplate-resilience
+          rm -f "$drop_in"
           apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
             echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
 
