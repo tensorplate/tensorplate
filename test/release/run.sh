@@ -56,20 +56,155 @@ if printf '%s\n' "$cut_dry_run" | grep -q 'release/'; then
   echo "FAIL: cut must not name a release/X.Y maintenance branch" >&2
   exit 1
 fi
-printf '%s\n' "$cut_dry_run" | grep -q 'cut never edits or commits' || {
-  echo "FAIL: cut must not author a commit on a protected trunk" >&2
-  exit 1
-}
-printf '%s\n' "$cut_dry_run" | grep -q 'Would not push develop' || {
-  echo "FAIL: cut must not push the protected trunk" >&2
-  exit 1
-}
-# --push moves the tag and nothing else.
-cut_push_dry_run="$("$script" cut --version 0.1.2 --final --push --dry-run)"
-printf '%s\n' "$cut_push_dry_run" | grep -q 'Would push the tag alone' || {
-  echo "FAIL: cut --push must push the tag alone" >&2
-  exit 1
-}
+# --- `cut` behaviour, executed rather than quoted ------------------------
+#
+# The dry-run assertions above read `cut`'s own printf text. Assertions
+# that quoted "cut never edits or commits" and "Would not push develop"
+# were checked against behavioural mutations and caught neither: inserting
+# `git commit --allow-empty` before `git tag`, and `git push origin
+# "$RELEASE_BRANCH"` beside the tag push, both left the whole driver
+# green, because the printf they read is documentation. What follows runs
+# the real `cut --execute` against a throwaway repo whose origin refuses
+# branch pushes the way the trunk ruleset does, and observes the tag, the
+# commit graph, and the refs origin actually received.
+cut_repo="$tmp/cut-sandbox"
+cut_origin="$tmp/cut-origin.git"
+mkdir -p "$cut_repo"
+for f in CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json CHANGELOG.md \
+         packaging/VERSION packaging/debian/changelog packaging/scripts/install.sh \
+         protocol/rust/src/lib.rs include/tensorplate/version.hpp.in; do
+  mkdir -p "$cut_repo/$(dirname "$f")"
+  cp "$repo_root/$f" "$cut_repo/$f"
+done
+mkdir -p "$cut_repo/config/schemas" "$cut_repo/protocol/schemas" "$cut_repo/docs/release/notes"
+cp "$repo_root"/config/schemas/*.json "$cut_repo/config/schemas/"
+cp "$repo_root"/protocol/schemas/*.json "$cut_repo/protocol/schemas/"
+cut_version="$(tr -d '[:space:]' < "$repo_root/packaging/VERSION")"
+printf '# TensorPlate v%s\n\nSandbox notes.\n' "$cut_version" \
+  > "$cut_repo/docs/release/notes/v${cut_version}.md"
+
+git init -q --bare -b develop "$cut_origin"
+(
+  cd "$cut_repo"
+  git init -q -b develop .
+  git config user.email release-test@example.invalid
+  git config user.name "release test"
+  git remote add origin "$cut_origin"
+  git add -- CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json CHANGELOG.md \
+    packaging protocol config include docs
+  git commit -qm "sandbox base"
+  # Finalize the surfaces in the sandbox so the metadata gate is satisfied
+  # whatever state the real tree is in.
+  "$repo_root/$script" prepare --version "$cut_version" --execute \
+    --confirm "PREPARE-v${cut_version}" >/dev/null
+  git add -- CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json CHANGELOG.md packaging
+  git commit -qm "prepare v${cut_version}" --allow-empty
+  release_commit="$(git rev-parse HEAD)"
+  # The hazard this guards: an unrelated PR merges between the preparation
+  # merge and the maintainer's pull, so the trunk head is no longer the
+  # release commit.
+  printf '\nunrelated trunk change\n' >> docs/release/notes/"v${cut_version}.md"
+  git add -- docs
+  git commit -qm "unrelated trunk commit"
+  trunk_head="$(git rev-parse HEAD)"
+  git push -q origin develop
+
+  # From here origin models the protected trunk: the ruleset names no
+  # bypass actor, so no branch ref may move. Only tags may.
+  cat > "$cut_origin/hooks/pre-receive" <<'HOOK'
+#!/bin/sh
+while read -r _old _new ref; do
+  case "$ref" in
+    refs/tags/*) ;;
+    *) echo "protected trunk: push to $ref rejected" >&2; exit 1 ;;
+  esac
+done
+exit 0
+HOOK
+  chmod +x "$cut_origin/hooks/pre-receive"
+  git fetch -q origin
+
+  cut_sandbox() {
+    "$repo_root/$script" cut --version "$cut_version" \
+      --release-branch develop --expect-commit "$release_commit" "$@"
+  }
+
+  # 1. Standing on the trunk head rather than the release commit must stop
+  #    the cut. Ancestry alone does not catch this: trunk_head IS an
+  #    ancestor of origin/develop, and `prepare` is idempotent, so the
+  #    metadata gate reads as final on it too.
+  [[ "$(git rev-parse HEAD)" == "$trunk_head" ]] || {
+    echo "FAIL: sandbox should be standing on the trunk head" >&2; exit 1; }
+  if out="$(cut_sandbox --rc 1 --execute --confirm "CUT-v${cut_version}-rc.1" 2>&1)"; then
+    echo "FAIL: cut tagged the trunk head instead of the release commit" >&2
+    exit 1
+  fi
+  printf '%s\n' "$out" | grep -q 'not the expected release commit' || {
+    echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
+  [[ -z "$(git tag --list)" ]] || {
+    echo "FAIL: a rejected cut still created a tag" >&2; exit 1; }
+
+  # 2. On the release commit: the tag appears, and nothing else moves.
+  git reset -q --hard "$release_commit"
+  commits_before="$(git rev-list --count HEAD)"
+  cut_sandbox --rc 1 --execute --confirm "CUT-v${cut_version}-rc.1" >/dev/null
+  [[ "$(git rev-parse HEAD)" == "$release_commit" ]] || {
+    echo "FAIL: cut moved HEAD; it must author nothing" >&2; exit 1; }
+  [[ "$(git rev-list --count HEAD)" == "$commits_before" ]] || {
+    echo "FAIL: cut added a commit; it must author nothing" >&2; exit 1; }
+  [[ -z "$(git status --porcelain)" ]] || {
+    echo "FAIL: cut left the worktree dirty; it must edit nothing" >&2; exit 1; }
+  [[ "$(git rev-list -n1 "v${cut_version}-rc.1")" == "$release_commit" ]] || {
+    echo "FAIL: the tag is not on the release commit" >&2; exit 1; }
+  # The condition release.yml asserts before it publishes. A cut that
+  # authored a commit would tag a commit no branch contains, and fail here.
+  git merge-base --is-ancestor "v${cut_version}-rc.1^{commit}" refs/remotes/origin/develop || {
+    echo "FAIL: the tagged commit is not contained in origin/develop" >&2; exit 1; }
+
+  # 3. --push moves the tag and nothing else. The release commit is behind
+  #    the trunk head here, so a cut that also pushed the branch would be
+  #    rejected -- non-fast-forward locally, and by the protection hook if
+  #    it forced. Both surface as a failing cut.
+  origin_trunk_before="$(git -C "$cut_origin" rev-parse refs/heads/develop)"
+  refs_before="$(git -C "$cut_origin" for-each-ref --format='%(refname)' | sort)"
+  cut_sandbox --rc 2 --execute --push --confirm "CUT-v${cut_version}-rc.2" >/dev/null
+  [[ "$(git -C "$cut_origin" rev-parse refs/heads/develop)" == "$origin_trunk_before" ]] || {
+    echo "FAIL: cut --push moved the protected trunk on origin" >&2; exit 1; }
+  refs_after="$(git -C "$cut_origin" for-each-ref --format='%(refname)' | sort)"
+  new_refs="$(comm -13 <(printf '%s\n' "$refs_before") <(printf '%s\n' "$refs_after"))"
+  [[ "$new_refs" == "refs/tags/v${cut_version}-rc.2" ]] || {
+    echo "FAIL: cut --push sent origin more than the tag: ${new_refs:-<nothing>}" >&2; exit 1; }
+
+  # 4. A commit origin/develop does not contain must not be tagged: that is
+  #    the tag release.yml rejects, and the reason `cut` stopped authoring.
+  git commit -q --allow-empty -m "local commit origin has never seen"
+  local_head="$(git rev-parse HEAD)"
+  if out="$("$repo_root/$script" cut --version "$cut_version" --release-branch develop \
+      --expect-commit "$local_head" --rc 3 --execute \
+      --confirm "CUT-v${cut_version}-rc.3" 2>&1)"; then
+    echo "FAIL: cut tagged a commit origin/develop does not contain" >&2
+    exit 1
+  fi
+  printf '%s\n' "$out" | grep -q 'is not an ancestor of origin/develop' || {
+    echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
+  git tag --list | grep -q "v${cut_version}-rc.3" && {
+    echo "FAIL: a rejected cut still created a tag" >&2; exit 1; }
+
+  # 5. Pending release metadata stops the cut, and says which files are
+  #    pending -- `cut` must never finalize them itself.
+  git reset -q --hard "$release_commit"
+  if out="$("$repo_root/$script" cut --version 9.9.9 --release-branch develop \
+      --rc 1 --execute --confirm "CUT-v9.9.9-rc.1" 2>&1)"; then
+    echo "FAIL: cut tagged a tree whose release metadata is not final" >&2
+    exit 1
+  fi
+  printf '%s\n' "$out" | grep -q 'is not final for 9.9.9' || {
+    echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
+  printf '%s\n' "$out" | grep -q 'files still needing release preparation' || {
+    echo "FAIL: cut did not name the files still needing preparation" >&2; exit 1; }
+  [[ -z "$(git status --porcelain)" ]] || {
+    echo "FAIL: a refused cut left release metadata changes behind" >&2; exit 1; }
+)
 
 # publish-apt-repo argument and path validation fails closed.
 if "$publish_apt_script" --output "$tmp/apt-out" --signing-key /nonexistent >/dev/null 2>&1; then

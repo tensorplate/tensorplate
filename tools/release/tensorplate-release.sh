@@ -60,7 +60,6 @@ Usage:
   tensorplate-release.sh cut --version 0.1.0 --rc 1 --execute --push --confirm CUT-v0.1.0-rc.1
   tensorplate-release.sh manifest --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR [options]
   tensorplate-release.sh verify --version 0.1.0 --tag v0.1.0 --manifest FILE --checksums FILE --artifacts-dir DIR
-  tensorplate-release.sh tag --version 0.1.0 (--rc N | --final) --confirm CREATE-v0.1.0[-rc.N] [options]
   tensorplate-release.sh publish --version 0.1.0 --tag v0.1.0 --manifest FILE --checksums FILE --artifacts-dir DIR [options]
 
 Common options:
@@ -94,6 +93,10 @@ Common options:
                             never pushed: it is protected and moves only by
                             merged pull request.
   --confirm TOKEN           Required confirmation token for mutating operations.
+  --expect-commit SHA       For `cut`: require HEAD to be exactly this commit.
+                            The commit the preparation pull request produced,
+                            so a trunk that moved between that merge and this
+                            pull is caught instead of tagged.
 
 Subcommands:
   preflight   Final release readiness check. Fails closed on missing evidence,
@@ -108,10 +111,11 @@ Subcommands:
               annotated source tag without editing or committing anything,
               and optionally pushes the tag so CI builds and publishes
               release assets. Finalizing metadata is `prepare`, in its own
-              pull request, merged first.
+              pull request, merged first. This is the only tag-creation
+              path: a second one without the ancestry check creates exactly
+              the tag the publish workflow rejects.
   manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets and install.sh.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
-  tag         Create an annotated RC or final tag. Never pushes tags.
   publish     Validate assets and create a draft GitHub Release when --execute is
               explicitly confirmed. Dry-run is the default. Requires the
               cosign-signed SHA256SUMS.cosign.bundle next to the checksums.
@@ -220,6 +224,7 @@ parse_common_args() {
   EXECUTE=0
   PUSH=0
   CONFIRM=""
+  EXPECT_COMMIT=""
   TAG=""
   RC=""
   FINAL=0
@@ -248,6 +253,7 @@ parse_common_args() {
       --execute) EXECUTE=1; shift ;;
       --push) PUSH=1; shift ;;
       --confirm) CONFIRM="${2:-}"; shift 2 ;;
+      --expect-commit) EXPECT_COMMIT="${2:-}"; shift 2 ;;
       --tag) TAG="${2:-}"; shift 2 ;;
       --rc) RC="${2:-}"; shift 2 ;;
       --final) FINAL=1; shift ;;
@@ -958,6 +964,9 @@ cmd_cut() {
     note "dry-run: cut release source tag $TAG"
     printf 'Would tag on trunk branch: %s\n' "$RELEASE_BRANCH"
     printf 'Would require the checked-out commit to be an ancestor of origin/%s\n' "$RELEASE_BRANCH"
+    if [[ -n "$EXPECT_COMMIT" ]]; then
+      printf 'Would require HEAD to be exactly: %s\n' "$EXPECT_COMMIT"
+    fi
     printf 'Would require release metadata already final for %s; cut never edits or commits\n' "$VERSION"
     printf 'Would create annotated tag: %s\n' "$TAG"
     printf 'Would not push %s: the protected trunk moves only by merged pull request\n' "$RELEASE_BRANCH"
@@ -991,6 +1000,27 @@ cmd_cut() {
     die "HEAD is not an ancestor of origin/${RELEASE_BRANCH}; the release commit must be merged to the trunk before it is tagged. Run: git pull --ff-only"
   if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$trunk_ref")" ]]; then
     note "HEAD is behind origin/${RELEASE_BRANCH}; tagging that older trunk commit"
+  fi
+
+  # Ancestry alone does not identify the release commit. Between the
+  # preparation PR merging and this pull, any other PR can merge; HEAD is
+  # then that unrelated commit, it is still an ancestor of the trunk, the
+  # metadata gate still reads as final because `prepare` is idempotent,
+  # and the tag lands on a commit nobody reviewed for this release. Naming
+  # the expected commit is the only thing that distinguishes them.
+  if [[ -n "$EXPECT_COMMIT" ]]; then
+    local expected head
+    git rev-parse --verify --quiet "${EXPECT_COMMIT}^{commit}" >/dev/null ||
+      die "--expect-commit ${EXPECT_COMMIT} is not a commit in this repository"
+    expected="$(git rev-parse "${EXPECT_COMMIT}^{commit}")"
+    head="$(git rev-parse HEAD)"
+    [[ "$head" == "$expected" ]] ||
+      die "HEAD is ${head}, not the expected release commit ${expected}.
+The trunk moved between the preparation merge and this checkout, so tagging
+here would name a commit that was never reviewed for this release. Stand on
+the release commit and re-run:
+  git reset --hard ${expected}
+The trunk is never pushed by this procedure, so that reset is local only."
   fi
 
   assert_tag_available "$TAG"
@@ -1446,52 +1476,6 @@ cmd_preflight() {
   run_preflight
 }
 
-cmd_tag() {
-  parse_common_args "$@"
-  PREP_BRANCH=""
-  assert_expected_branch
-  require_clean_worktree
-
-  if [[ "$FINAL" -eq 1 ]]; then
-    TAG="v${VERSION}"
-  elif [[ -n "$RC" ]]; then
-    [[ "$RC" =~ ^[1-9][0-9]*$ ]] || die "--rc must be a positive integer"
-    TAG="v${VERSION}-rc.${RC}"
-  else
-    die "tag requires --rc N or --final"
-  fi
-
-  [[ "$CONFIRM" == "CREATE-${TAG}" ]] ||
-    die "tag creation requires --confirm CREATE-${TAG}"
-
-  if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-    die "tag $TAG already exists locally; refusing to rewrite"
-  fi
-  if git remote get-url origin >/dev/null 2>&1; then
-    local rc
-    set +e
-    git ls-remote --exit-code --tags origin "$TAG" >/tmp/tensorplate-release-ls-remote.log 2>&1
-    rc=$?
-    set -e
-    if [[ "$rc" -eq 0 ]]; then
-      die "tag $TAG already exists on origin; refusing to rewrite"
-    elif [[ "$rc" -ne 2 ]]; then
-      die "could not query origin for tag $TAG; see /tmp/tensorplate-release-ls-remote.log"
-    fi
-  fi
-
-  run_preflight
-
-  local tag_mode=(-a)
-  if [[ "${TP_RELEASE_SIGN_TAG:-0}" == "1" ]]; then
-    tag_mode=(-s)
-  fi
-  git tag "${tag_mode[@]}" "$TAG" -m "TensorPlate ${TAG}"
-  note "created annotated tag $TAG locally"
-  note "review tag metadata with: git show $TAG"
-  note "push only after review: git push origin $TAG"
-}
-
 cmd_publish() {
   parse_common_args "$@"
   [[ -n "$TAG" ]] || die "publish requires --tag"
@@ -1568,7 +1552,6 @@ main() {
     cut) cmd_cut "$@" ;;
     manifest) cmd_manifest "$@" ;;
     verify) cmd_verify "$@" ;;
-    tag) cmd_tag "$@" ;;
     publish) cmd_publish "$@" ;;
     --help|-h|help) usage ;;
     *) die "unknown subcommand '$command'" ;;
