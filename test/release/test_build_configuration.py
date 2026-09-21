@@ -657,7 +657,9 @@ class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
             # `sudo` then any flags, then the command it elevates. The shell
             # array indirection helpers use expands to sudo, so match that too.
             for match in re.finditer(
-                r"(?:\bsudo\s+|\$\{privileged\[@\]\+\"\$\{privileged\[@\]\}\"\}\s+)"
+                r"(?:\bsudo\s+"
+                r"|\$\{privileged\[@\]\+\"?\$\{privileged\[@\]\}\"?\}\s+"
+                r"|\"\$\{privileged\[@\]\}\"\s+)"
                 r"((?:-\S+\s+)*)(\S+)",
                 code,
             ):
@@ -708,7 +710,9 @@ class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
         """Resolve VAR="${TP_X:-/usr/bin/y}" in any scanned helper."""
         for helper in self.HELPERS:
             text = (REPO_ROOT / helper).read_text()
-            hit = re.search(rf'^{name}="\$\{{[A-Z_]+:-([^}}]+)\}}"', text, re.M)
+            hit = re.search(
+                rf'^(?:readonly\s+)?{name}="\$\{{[A-Z_]+:-([^}}]+)\}}"', text, re.M
+            )
             if hit:
                 return hit.group(1)
         return None
@@ -730,6 +734,175 @@ class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
             "or widen the grant in jetson-runner-control.sh deliberately: "
             f"{offenders}",
         )
+
+
+RUNNER_APT_HELPER = REPO_ROOT / "tools/ci/apt-get.sh"
+
+
+class RunnerAllowlistExecutionTests(unittest.TestCase):
+    """Run the real dependency-install path against the real allowlist.
+
+    A static scan of the helper is only as good as its regexes, and one
+    spelling it does not recognise makes it pass while the job cannot run.
+    This drives `tools/ci/apt-get.sh` for real, through a `sudo` that permits
+    exactly what the runner's sudoers file permits, so any spelling that
+    elevates a denied binary fails here the way it fails on the device.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        self.log = self.tmp / "ran.log"
+
+    def stub(self, name: str, body: str) -> Path:
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+        return path
+
+    def build_stubs(self):
+        """Recording stand-ins for every binary the path can reach."""
+        # `timeout <flags> <bound> <cmd> <args>`: record, then run the command.
+        self.stub("timeout", f'echo "timeout $*" >>"{self.log}"\nshift 3\nexec "$@"\n')
+        self.stub("apt-get", f'echo "apt-get $*" >>"{self.log}"\nexit 0\n')
+        self.stub("dpkg", f'echo "dpkg $*" >>"{self.log}"\nexit 0\n')
+        # The generator installs the wrapper root-owned; drop the ownership
+        # flags so it can run unprivileged without changing what it writes.
+        self.stub(
+            "install",
+            'args=""\n'
+            'while [ "$#" -gt 2 ]; do\n'
+            '  case "$1" in -o|-g) shift 2 ;; *) args="$args $1"; shift ;; esac\n'
+            'done\n'
+            '# shellcheck disable=SC2086\n'
+            'exec /usr/bin/install $args "$1" "$2"\n',
+        )
+
+    def generate_wrapper(self) -> Path:
+        """Produce the wrapper with the real jetson-runner-control.sh code."""
+        wrapper = self.tmp / "tensorplate-apt"
+        # `main "$@"` runs on source; strip it so the function can be called.
+        sourceable = self.tmp / "control.sh"
+        sourceable.write_text(
+            RUNNER_CONTROL.read_text().replace('\nmain "$@"\n', "\n")
+        )
+        result = subprocess.run(
+            ["bash", "-c", f'source "{sourceable}"; write_apt_wrapper'],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "TP_JETSON_RUNNER_APT_WRAPPER": str(wrapper),
+                "TP_JETSON_RUNNER_TIMEOUT": str(self.bin / "timeout"),
+                "TP_JETSON_RUNNER_DPKG": str(self.bin / "dpkg"),
+                "TP_JETSON_RUNNER_APT_GET": str(self.bin / "apt-get"),
+                "TP_JETSON_RUNNER_INSTALL": str(self.bin / "install"),
+            },
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(wrapper.exists(), result.stderr)
+        return wrapper
+
+    def allowlist_sudo(self, *permitted: Path) -> Path:
+        """A `sudo` that permits exactly these paths, as the sudoers file does."""
+        cases = "".join(f'  "{p}") shift; exec "{p}" "$@" ;;\n' for p in permitted)
+        return self.stub(
+            "sudo",
+            "case \"$1\" in\n"
+            + cases
+            + 'esac\n'
+            'echo "sudo: a password is required" >&2\n'
+            "exit 1\n",
+        )
+
+    def run_helper(self, helper: Path, wrapper: Path, sudo: Path, *args):
+        return subprocess.run(
+            ["bash", str(helper), *args],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "SUDO_BIN": str(sudo),
+                "APT_WRAPPER_BIN": str(wrapper),
+                "APT_GET_BIN": str(self.bin / "apt-get"),
+                "APT_ATTEMPTS": "1",
+                "APT_BOUND_SECONDS": "240",
+            },
+        )
+
+    def test_the_dependency_install_path_runs_under_the_runner_allowlist(self):
+        self.build_stubs()
+        wrapper = self.generate_wrapper()
+        sudo = self.allowlist_sudo(wrapper, self.bin / "install")
+
+        result = self.run_helper(RUNNER_APT_HELPER, wrapper, sudo, "update")
+
+        self.assertEqual(
+            result.returncode, 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        ran = self.log.read_text()
+        self.assertIn("apt-get update", ran, ran)
+        self.assertIn("timeout -k 30 240", ran, "the bound must still wrap apt")
+
+    def test_the_wrapper_refuses_a_subcommand_the_release_path_does_not_use(self):
+        self.build_stubs()
+        wrapper = self.generate_wrapper()
+        result = subprocess.run(
+            [str(wrapper), "240", "source", "tensorplate"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("refusing apt-get 'source'", result.stderr)
+        self.assertNotIn("apt-get source", self.log.read_text() if self.log.exists() else "")
+
+    def test_configure_pending_is_reachable_through_the_allowlist(self):
+        self.build_stubs()
+        wrapper = self.generate_wrapper()
+        sudo = self.allowlist_sudo(wrapper, self.bin / "install")
+        result = subprocess.run(
+            [str(sudo), str(wrapper), "configure-pending"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("dpkg --configure -a", self.log.read_text())
+
+    def test_elevating_timeout_directly_is_denied_by_the_allowlist(self):
+        """The regression this exists for, in the shape the device sees it."""
+        self.build_stubs()
+        wrapper = self.generate_wrapper()
+        sudo = self.allowlist_sudo(wrapper, self.bin / "install")
+
+        # The helper as it was before the wrapper: sudo elevates `timeout`.
+        mutated = self.tmp / "apt-get-direct.sh"
+        text = RUNNER_APT_HELPER.read_text()
+        opening = '  if ((${#privileged[@]})) && [ -x "$APT_WRAPPER" ]; then'
+        try:
+            start = text.index(opening)
+            end = text.index("  fi", text.index("timeout -k 30", start)) + len("  fi")
+        except ValueError:
+            self.fail(
+                "tools/ci/apt-get.sh no longer routes the bounded call through the "
+                "wrapper, so this test cannot build the denied shape from it. If the "
+                "helper was restructured deliberately, re-point this mutation at the "
+                "new shape -- do not delete it; the static guard alone was what let "
+                "an unrecognised spelling pass."
+            )
+        mutated.write_text(
+            text[:start]
+            + '  "${privileged[@]}" timeout -k 30 "$BOUND_SECONDS" "$APT_GET" "$@" || status=$?'
+            + text[end:]
+        )
+
+        result = self.run_helper(mutated, wrapper, sudo, "update")
+
+        self.assertNotEqual(
+            result.returncode, 0, "elevating timeout must be denied, not silently allowed"
+        )
+        self.assertIn("a password is required", result.stderr)
 
 
 if __name__ == "__main__":
