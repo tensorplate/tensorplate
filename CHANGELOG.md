@@ -679,6 +679,48 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The macOS offline-runtime stage no longer credits an unsandboxed
+  control whose network operation never completed. The control is what
+  distinguishes "the sandbox refused this" from "this never ran", and
+  `classify` rejected only three outcomes -- a missing name, `EPERM`, and
+  a socket that could not be pinned -- so everything else counted as a
+  valid control: a connect that waited out its timeout, a child that
+  exited without reaching its send or never started at all, an exception
+  `attempt` recorded by name, a routing answer for a loopback address
+  `lo0` does route. The probe's `EPERM` was then read as proof of denial
+  against a baseline that had proved nothing, which turns "we could not
+  tell" into "denial proved" in published evidence.
+
+  Controls are now checked against what each operation completing looks
+  like rather than against a list of the failures someone thought of,
+  which is how the Linux module already reads its own controls, under the
+  same two names: `control_not_refused:<operation>` for a refusal by
+  something else on the host, `control_completed:<operation>` for an
+  operation that did not happen. On macOS the sandbox decides on the
+  destination address before the route lookup, so a control carried as
+  far as a routing answer got past where the sandbox would have refused
+  it, and three completions are recognized per operation: a send, bind or
+  listen that returned; the loopback connect the far end refused; and,
+  for the destinations pinned to `lo0`, `ENETUNREACH` or `EHOSTUNREACH`.
+  Each denied operation is placed in one of those sets by destination,
+  and a denial added later that nothing places falls to the strictest
+  set, so it has to be placed deliberately instead of inheriting an
+  excuse from a neighbour.
+
+  The control is also judged as it is taken, before the profile is
+  applied to anything, so a host that cannot provide a baseline now fails
+  the stage before its launchd services are moved under the sandbox
+  rather than after -- again matching the Linux module. `classify` still
+  repeats the check and takes no control on trust.
+
+  `verify_macos_offline_runtime.sh` pins each operation's completion set
+  against a table written out in the test, requires the recorded probes
+  to bear that placement out, and drives every denied operation through
+  every outcome that is not one of its completions, asserting the exact
+  failure each names. A stage case runs the harness with a control child
+  that exits without sending and requires the stage to fail at the
+  control, before anything is denied.
+
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
   boot. Platform detection ran exactly once per start, so a single

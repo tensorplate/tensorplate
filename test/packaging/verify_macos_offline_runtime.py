@@ -543,6 +543,38 @@ RECORDED = {
 }
 
 
+# What each operation's control may report and still count as that
+# operation having completed. Written out here rather than taken from the
+# module, so a placement that changes there has to be made again here.
+# The values are the ones the recorded probes carry: a send, bind or
+# listen that returned; the loopback connect the far end refused; and,
+# for the destinations pinned to lo0, the route lookup's answer, which
+# IPv4 reports as ENETUNREACH and IPv6 as EHOSTUNREACH.
+COMPLETED = dict(
+    {name: ("ok", "ENETUNREACH", "EHOSTUNREACH") for name in (
+        "tcp_public_v4", "tcp_metadata_link_local_v4", "udp_test_net_v4",
+        "udp_documentation_v6", "udp_test_net_v4_from_child",
+        *(f"{protocol}_{host}_{role}_port"
+          for protocol in ("tcp", "udp") for host in ("test_net_v4", "documentation_v6")
+          for role in ("serving", "candidate")))},
+    tcp_loopback_unlisted_port=("ok", "ECONNREFUSED"),
+    udp_fe80_1_unlisted_port=("ok",),
+    udp_loopback_unlisted_port=("ok",),
+    tcp_listen_wildcard_unlisted_port=("ok",),
+    tcp_listen_loopback_unlisted_port=("ok",),
+    udp_bind_wildcard_unlisted_port=("ok",),
+    unix_mdnsresponder=("ok",),
+)
+# Outcomes a control can carry that are not its operation completing.
+# Each arises: a socket the pin refused, a connect that waited out its
+# timeout, a child that exited non-zero or never started, an exception
+# `attempt` recorded by name, and -- for the operations that do not bear
+# them -- a routing answer, a refusal by the far end, and the name
+# missing from the document altogether.
+INCOMPLETE = ("pin_failed", "timeout", "child_exit_1", "child_not_run_OSError",
+              "PermissionError", "ENETUNREACH", "EHOSTUNREACH", "ECONNREFUSED", None)
+
+
 def test_classify():
     recorded = {}
     for variant, expected in RECORDED.items():
@@ -561,17 +593,50 @@ def test_classify():
     assert m.classify(in_stage, final["control"], m.PREFLIGHT_DEPLOYMENT) == []
     # The probe and the control run the same operations, one per name.
     assert [name for name, _ in m.denial_operations((18080, 18081))] == list(m.DENIAL_NAMES)
-    # Every operation's control counts: EPERM, or a socket that could not
-    # be pinned, outside the sandbox would make the sandbox's EPERM moot.
+    # Each name's completion set is the one COMPLETED gives it, so a name
+    # that moves between sets -- or a new denial that falls to the
+    # strictest set because nothing placed it -- has to be moved here
+    # too, and the recorded control bears the placement out.
+    assert sorted(COMPLETED) == sorted(m.DENIAL_NAMES), sorted(COMPLETED)
     for name in m.DENIAL_NAMES:
-        for outcome in ("EPERM", "pin_failed"):
-            control = dict(final["control"], **{name: outcome})
+        assert set(m.completed_outcomes(name)) == set(COMPLETED[name]), name
+        assert final["control"][name] in COMPLETED[name], (name, final["control"][name])
+    # Every operation's control counts, and counts only if the operation
+    # completed. EPERM outside the sandbox says something else on the
+    # host refuses, which would make the sandbox's EPERM moot; anything
+    # that is not the operation going through -- a socket that could not
+    # be pinned, a connect that waited out its timeout, a child that
+    # failed or never started, an exception recorded by name, a routing
+    # answer for a destination lo0 does route, a refusal from a
+    # destination where nothing can refuse, a name missing from the
+    # document -- is a control that never ran the operation the probe's
+    # EPERM is supposed to be attributable to.
+    for name in m.DENIAL_NAMES:
+        control = dict(final["control"], **{name: "EPERM"})
+        expected = ["control_mdnsresponder_reachable"] if name == "unix_mdnsresponder" else \
+            [f"control_not_refused:{name}"]
+        assert m.classify(in_stage, control, m.PREFLIGHT_DEPLOYMENT) == expected, (name, "EPERM")
+        for outcome in INCOMPLETE:
+            if outcome in COMPLETED[name]:
+                continue
+            control = dict(final["control"])
+            if outcome is None:
+                del control[name]
+            else:
+                control[name] = outcome
             expected = ["control_mdnsresponder_reachable"] if name == "unix_mdnsresponder" else \
-                [f"control_not_refused:{name}"]
+                [f"control_completed:{name}"]
             assert m.classify(in_stage, control, m.PREFLIGHT_DEPLOYMENT) == expected, (name, outcome)
+    # The control the recorded probes carry is a baseline; each of those
+    # documents is classified above with no control failure named.
+    assert m.control_failures(final["control"]) == []
+    assert m.control_failures({}) == [
+        "control_mdnsresponder_reachable" if name == "unix_mdnsresponder"
+        else f"control_completed:{name}" for name in m.DENIAL_NAMES]
+    assert m.control_failures(None) == m.control_failures({})
     for mutate, expected in (
         (lambda probe, control: control.pop("udp_fe80_1_unlisted_port"),
-         ["control_not_refused:udp_fe80_1_unlisted_port"]),
+         ["control_completed:udp_fe80_1_unlisted_port"]),
         (lambda probe, control: control.update(unix_mdnsresponder="EPERM"),
          ["control_mdnsresponder_reachable"]),
         (lambda probe, control: probe["denied"].pop("udp_test_net_v4_from_child"),
@@ -857,12 +922,20 @@ def unix_connect(path):
     return None
 
 
+def child_udp_send():
+    if sandboxed():
+        return "ENETUNREACH" if "probe-leaks" in MODES else "EPERM"
+    # A control child that never sent anything: it exited non-zero
+    # without reaching its send.
+    return "child_exit_1" if "control-child-never-ran" in MODES else "ENETUNREACH"
+
+
 m.sandbox_check = sandbox_check
 m.udp_send = udp_send
 m.tcp_connect = tcp_connect
 m.bind_unlisted_port = bind_unlisted_port
 m.unix_connect = unix_connect
-m.child_udp_send = lambda: "EPERM" if sandboxed() and "probe-leaks" not in MODES else "ENETUNREACH"
+m.child_udp_send = child_udp_send
 m.http_get_json = lambda url: {
     "state": "starting" if "health-not-ready" in MODES else "ready",
     "active_model_id": state()["active"],
@@ -1085,8 +1158,9 @@ FAILURE_MODES = {
     "launchagents-drift": ("the tensorplate-agent LaunchAgents plist differs from the formula plist", True),
     "agent-not-ready-after": ("the agent did not answer outside the sandbox after the offline stage", True),
     "agent-config-wildcard-host": ("cannot render the offline profile from the installed agent config", True),
-    "control-refused": ("the offline profile did not refuse the network as required", True),
-    "control-refused-tcp": ("the offline profile did not refuse the network as required", True),
+    "control-refused": ("the unsandboxed network control failed", True),
+    "control-refused-tcp": ("the unsandboxed network control failed", True),
+    "control-child-never-ran": ("the unsandboxed network control failed", True),
     "formula-plist-program-key": ("cannot derive the sandboxed tensorplate-observability launchd plist", True),
     "run-rewrites-arguments": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "run-copies-plist": ("tensorplate-agent is not running as the sandboxed launchd job", True),

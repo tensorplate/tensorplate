@@ -107,6 +107,54 @@ DENIAL_NAMES = (
     "unix_mdnsresponder",
 )
 
+# What a control has to have reported for the sandbox's EPERM on the same
+# operation to mean anything: the operation completed.
+#
+# The sandbox decides on the destination address before the route lookup
+# (see IP_BOUND_IF above), so a control the kernel carried as far as a
+# routing answer got past the point where the sandbox would have refused
+# it. That leaves three shapes a control can legitimately take, one set
+# per operation:
+#
+#   DELIVERED -- the send, bind or listen returned, which `attempt`
+#                records as `ok`, and the child's send completed when the
+#                child ran, exited 0 and printed such an outcome;
+#   ANSWERED  -- a connect the far end answered, which on a loopback port
+#                with nothing listening on it is ECONNREFUSED;
+#   ROUTED    -- a destination pinned to lo0, which lo0 cannot route.
+#                These are the outcomes the recorded probes carry
+#                (test/packaging/fixtures/macos-offline/): IPv4 answers
+#                ENETUNREACH and IPv6 EHOSTUNREACH.
+#
+# Every other outcome is a control that never completed its operation --
+# a socket that could not be pinned, a timeout, a child that exited
+# non-zero or never ran, an exception's name, a name missing from the
+# document, a string this module does not produce -- and a control that
+# never ran the operation cannot show that the sandbox is what stopped
+# the probe. So the controls are checked against these sets rather than
+# against a list of the failures someone thought of.
+DELIVERED = ("ok",)
+ANSWERED = DELIVERED + ("ECONNREFUSED",)
+ROUTED = DELIVERED + ("ENETUNREACH", "EHOSTUNREACH")
+
+# A refusal by policy: what the sandboxed probe must report and the
+# unsandboxed control must not. EPERM from something else on this host --
+# an application firewall, an enclosing sandbox -- would make the
+# sandbox's own EPERM prove nothing.
+REFUSED = ("EPERM",)
+
+# Denied operations addressed off this host, whose sockets are pinned to
+# lo0: their control is answered by the route lookup rather than by
+# anything on the far end. Named by destination, so an operation added
+# for a new destination is placed here only deliberately.
+OFF_HOST_DESTINATIONS = ("public_v4", "metadata_link_local_v4", "test_net_v4",
+                         "documentation_v6")
+OFF_HOST_NAMES = tuple(name for name in DENIAL_NAMES
+                       if any(token in name for token in OFF_HOST_DESTINATIONS))
+# The one denied connect to an address lo0 does route: a loopback port
+# with nothing listening on it, which the far end refuses.
+CONNECT_NAMES = ("tcp_loopback_unlisted_port",)
+
 DOCTOR_FINDINGS_OK = (
     "platform_row",
     "platform_profile",
@@ -850,14 +898,63 @@ def run_probe(agent_socket, health_url, ports, listen_port=None):
     }
 
 
-def classify(probe, control, expected_deployment, listen_port_checked=False):
+def completed_outcomes(name):
+    """The control outcomes that count as `name` having completed.
+
+    A name this module does not place gets the strictest set, so a denial
+    added later has to be placed deliberately rather than inherit an
+    excuse from a neighbour."""
+    if name in OFF_HOST_NAMES:
+        return ROUTED
+    if name in CONNECT_NAMES:
+        return ANSWERED
+    return DELIVERED
+
+
+def control_failures(control):
+    """Why `control` cannot be the baseline a probe is classified
+    against, whatever that probe turns out to say.
+
+    Checked when the control is taken, before the profile is applied to
+    anything, so a host that cannot provide a baseline fails the stage
+    before it is changed -- and again by `classify`, which never takes a
+    control on trust.
+
+    Two things are asked of every denied operation. It must not have been
+    refused by something else on this host (REFUSED): the stage's claim
+    is that this profile is what refuses. And it must have completed
+    (`completed_outcomes`): the sandbox's EPERM is attributable only to
+    an operation that went through, unsandboxed, a moment earlier. A
+    control that never completed says the operation could not be made
+    here, not that the sandbox stopped it. mDNSResponder is asked for
+    both at once: the stage's claim is that this socket was reachable and
+    the profile's deny is what made it unreachable, so its control must
+    answer outright."""
+    outcomes = control if isinstance(control, dict) else {}
     failures = []
     for name in DENIAL_NAMES:
+        outcome = outcomes.get(name)
         if name == "unix_mdnsresponder":
-            if control.get(name) != "ok":
+            if outcome != "ok":
                 failures.append("control_mdnsresponder_reachable")
-        elif control.get(name) in (None, "EPERM", "pin_failed"):
+        elif outcome in REFUSED:
             failures.append(f"control_not_refused:{name}")
+        elif outcome not in completed_outcomes(name):
+            # Missing, a socket that could not be pinned, a timeout, a
+            # child that failed or never ran, or anything else that is
+            # not an operation that happened.
+            failures.append(f"control_completed:{name}")
+    return failures
+
+
+def classify(probe, control, expected_deployment, listen_port_checked=False):
+    """The probe proves the profile denies the network only against a
+    control that completed the same operations without it. Both halves
+    are required: a control that something else on the host refused, or
+    that never completed its operation, makes the probe's EPERM
+    unattributable (`control_failures`), and a probe that was not refused
+    means the profile did nothing."""
+    failures = control_failures(control)
     denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
     for name in DENIAL_NAMES:
         if denied.get(name) != "EPERM":
@@ -1359,7 +1456,13 @@ def _run(args):
                "serving_listener_in_tree": "serving_listener_in_tree" not in failures},
               args.out, failures, "listener checks")
     elif name == "control":
-        _emit(run_control(args.ports), args.out)
+        # A control is checked as it is taken and filed only if it can be
+        # the baseline its probe is classified against, so a host that
+        # cannot provide one fails the stage before anything is denied. A
+        # probe is filed whatever it says, and classified against its
+        # control later.
+        document = run_control(args.ports)
+        _emit(document, args.out, control_failures(document), "unsandboxed control checks")
     elif name == "probe":
         health_url = args.health_url
         if args.status:

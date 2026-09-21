@@ -183,11 +183,20 @@ with `EPERM` for:
 - a TCP listen and a UDP bind on a port other than the serving ports;
 - a child process's send, and mDNSResponder.
 
-An unsandboxed control runs every one of those operations, and none may
-be refused, so an `EPERM` in the sandbox comes from the sandbox; the
-control must also reach mDNSResponder. The probe's non-loopback sockets
-are pinned to `lo0`, so no probe packet leaves the Mac even if the
-sandbox failed to enforce.
+An unsandboxed control runs every one of those operations before the
+profile is applied to anything. None may be refused, so an `EPERM` in the
+sandbox comes from the sandbox, and each must have completed: a send,
+bind or listen that returned, the loopback connect the far end refused,
+or, for the destinations pinned to `lo0`, the route lookup's answer --
+which the sandbox decides ahead of, so a control that got that far got
+past where the sandbox would have refused it. A control that never
+completed its operation says the operation could not be made on this
+host, not that the sandbox stopped it, and the probe's `EPERM` is then
+unattributable. The control is judged as it is taken, so a host that
+cannot provide a baseline fails the stage before it is changed, and again
+when the probe is classified against it. The control must also reach
+mDNSResponder. The probe's non-loopback sockets are pinned to `lo0`, so
+no probe packet leaves the Mac even if the sandbox failed to enforce.
 
 `sandbox_check` must read the agent, its serving worker and backend
 sidecar, and the observability service as sandboxed with the network
