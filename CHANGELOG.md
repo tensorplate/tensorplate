@@ -779,6 +779,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the baseline install, and that no existence check on `state.bak` is
   made at all. The runbook's rollback section states the same claim.
 
+  Review of that change added three things. The two harnesses now hold
+  the guard as the same five functions, and `verify_lifecycle_state_guard.sh`
+  binds them: each body must be byte-identical in
+  `ubuntu-l4-cloud-lifecycle.sh` and `jetson-lifecycle.sh`, and every
+  harness variable those bodies read — derived from the bodies, not
+  listed — must be bound to the same value in both. Nothing else read
+  both files, so a tightening applied to one would have left the other's
+  Production-row evidence weaker while reading as if it had not. The
+  comparison that reports a destroyed file now splits a manifest line at
+  its last space rather than its first, so a state file whose name holds
+  a space is named in full: the verdict was already right, but the
+  failure an operator acts on named a file that does not exist and
+  printed a fragment of the name where a digest belongs. And the
+  refusal of a set-aside directory that is there and holds nothing is
+  held to naming the directory: the emptied-directory case now also
+  requires that no individual file is named, because admitting the empty
+  manifest would still fail the stage while sending the operator to
+  recover one file out of three.
+
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
   boot. Platform detection ran exactly once per start, so a single

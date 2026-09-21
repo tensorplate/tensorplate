@@ -518,6 +518,13 @@ def install(db, directory):
             (aside / "observability-snapshot.json").write_text("")
         elif mode == "rollback-deletes-snapshot":
             (aside / "observability-snapshot.json").unlink(missing_ok=True)
+        # Emptied, exactly as rollback-empties-backup does to
+        # state.json. The failure has to name "two words.json", not the
+        # first word of it: a manifest line is "<name> <sha256>" and a
+        # reader that split it on the FIRST space would report a file
+        # called "two" whose digest began with the rest of the name.
+        elif mode == "rollback-empties-spaced-file":
+            (aside / "two words.json").write_text("")
         elif mode == "rollback-adds-state-file":
             (aside / "state.json.new").write_text('{"fixture": "not what was set aside"}\n')
         # Every file gone while the directory stays: the set-aside copy
@@ -1372,6 +1379,17 @@ case "$*" in
   *"systemctl stop tensorplate-agent"*)
     if [ "${TP_FAKE_MODE:-ok}" = rollback-state-file-missing ]; then
       rm -f "${TP_FAKE_VARLIB}/state/state.json"
+    fi
+    # A durable-state file whose name holds a space, present in the
+    # directory at the one moment that decides the check: when the
+    # manifest is taken. Planted on the rollback's stop for the same
+    # reason as the mode above -- the earlier stages' clear_install stops
+    # wipe /var/lib/tensorplate straight after, so only the rollback's
+    # stop shows. The Production rows hold no such name; this is about
+    # which file the operator is told to go and look at when one appears.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-empties-spaced-file ]; then
+      printf '{"fixture": "a name with a space in it"}\n' \
+        >"${TP_FAKE_VARLIB}/state/two words.json"
     fi
     ;;
 esac
@@ -3701,6 +3719,7 @@ for case in \
   "rollback-deletes-snapshot::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-adds-state-file::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-empties-state-dir::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-empties-spaced-file::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-state-file-missing::step failed (exit 1): digest the durable state before setting it aside" \
   "rollback-digest-not-hex::step failed (exit 1): digest the durable state before setting it aside" \
   "rollback-keeps-state::the rolled-back agent reports active" \
@@ -3821,6 +3840,41 @@ for case in \
       # holds nothing is not a directory that could not be read.
       check "  rather than as a directory it could not read" no \
         "$(stage_log_says "${evidence}/rollback.log" 'ls: cannot access')"
+      # Nor as one file out of three. This is the half a lost refusal
+      # breaks: admit the empty directory as a manifest and the
+      # comparison below it runs, reaching the first C-sorted name the
+      # copy no longer holds and reporting THAT as what the rollback did
+      # not preserve. The stage would still fail, which is why the
+      # positive check above moves on its own -- but the operator would
+      # be sent to recover one file when all of them are gone, and those
+      # are different recoveries. The claim is about the directory, so
+      # no individual file may be named here at all.
+      check "  and names no individual file as the thing that was lost" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rollback did not preserve /var/lib/tensorplate/state.bak/')"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-empties-spaced-file)
+      # A manifest line is "<name> <sha256>", and the name is everything
+      # before the LAST space -- privileged_sha256 refuses any digest
+      # that is not 64 hex characters, so the final field is the digest
+      # and nothing else can be. Split on the FIRST space instead and a
+      # name holding one reads as a shorter name whose digest begins with
+      # the rest of the name, which names a file that does not exist and
+      # prints two things that are not digests. The verdict is right
+      # either way; the diagnosis the operator acts on is not.
+      check "  and the failure names the whole name, spaces and all" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           "the rollback did not preserve /var/lib/tensorplate/state.bak/two words.json: sha256 was")"
+      check "  and not the first word of it" no \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/state.bak/two:')"
+      # Both digests in the message are digests. A first-space split puts
+      # the rest of the name in front of one and leaves the other as a
+      # bare fragment of it.
+      check "  and reports two sha256 digests, not fragments of the name" yes \
+        "$(grep -Eq "sha256 was [0-9a-f]{64} when the services were stopped, now [0-9a-f]{64}$" \
+           "${evidence}/rollback.log" && echo yes || echo no)"
       check "  and the stage stopped before reading the agent back" no \
         "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
       ;;

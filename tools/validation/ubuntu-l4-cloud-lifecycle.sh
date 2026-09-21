@@ -1472,8 +1472,10 @@ offline_drop_in_path() {
 }
 
 # A drop-in from an earlier run means this run never applied the denial it
-# would certify. Refused before anything is installed, as rollback refuses
-# a pre-existing state.bak -- by preflight, and again by the stage.
+# would certify. Refused twice: by preflight, before anything is
+# installed, and again by the offline stage. Rollback refuses a
+# pre-existing state.bak for the same reason, but in the stage only --
+# there is no preflight check for state.bak.
 offline_drop_in_absent() {
   local path
   path="$(offline_drop_in_path "$1")" || return
@@ -1929,10 +1931,26 @@ state_manifest() {
 }
 
 # The digest of one entry in a manifest, empty when the manifest does not
-# list it. An exact field compare, so a name is never matched as a
-# pattern -- every name here carries a `.`.
+# list it.
+#
+# A manifest line is "<name> <sha256>", and the name is everything before
+# the LAST space. privileged_sha256 refuses any digest that is not 64
+# lowercase hex characters, so the final space-separated field is the
+# digest and nothing else can be, whatever the name holds. Splitting on
+# the FIRST space instead reads a name with a space in it as a shorter
+# name whose digest begins with the rest of the name, which names the
+# wrong file in the failure the operator acts on.
+#
+# An exact string compare against the whole name, so a name is never
+# matched as a prefix or as a pattern.
 manifest_digest() {
-  printf '%s\n' "$2" | awk -v name="$1" '$1 == name { print $2 }'
+  local name="$1" line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "${line% *}" == "$name" ]]; then
+      printf '%s\n' "${line##* }"
+    fi
+  done <<<"$2"
 }
 
 # The manifest the rollback has to carry across, taken with the agent
@@ -1965,13 +1983,18 @@ capture_state_manifest() {
 # The first entry the two disagree on is named, whether it changed, went
 # missing, or was never there before.
 check_state_preserved() {
-  local now name digest saved
+  local now line name digest saved
   now="$(state_manifest "$STATE_ASIDE_DIR")" || return
   if [[ "$now" == "$STATE_MANIFEST" ]]; then
     return 0
   fi
-  while IFS=' ' read -r name digest; do
-    [[ -n "$name" ]] || continue
+  # Split at the LAST space, not the first: the digest is the final field
+  # and cannot hold a space, so everything before it is the name however
+  # many spaces the name itself holds. See manifest_digest.
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    name="${line% *}"
+    digest="${line##* }"
     saved="$(manifest_digest "$name" "$now")"
     if [[ -z "$saved" ]]; then
       printf 'the rollback did not preserve %s/%s: it was in the durable state when the services were stopped and the set-aside copy does not hold it\n' \
@@ -1984,8 +2007,9 @@ check_state_preserved() {
       return 1
     fi
   done <<<"$STATE_MANIFEST"
-  while IFS=' ' read -r name _; do
-    [[ -n "$name" ]] || continue
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    name="${line% *}"
     if [[ -z "$(manifest_digest "$name" "$STATE_MANIFEST")" ]]; then
       printf 'the rollback did not preserve %s: it holds %s, which the durable state did not when the services were stopped\n' \
         "$STATE_ASIDE_DIR" "$name" >&2
