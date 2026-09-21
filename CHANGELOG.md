@@ -741,6 +741,44 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `offline-profile.json`), not only as the helper returns them: the
   artifact could otherwise drop the flags with every check still green.
 
+- The Ubuntu x86_64 cloud lifecycle harness no longer credits its
+  rollback stage with preserving operator state on the strength of a
+  pathname. `tools/validation/ubuntu-l4-cloud-lifecycle.sh` asserted the
+  set-aside state with `test -f state.bak/state.json`, which a file
+  truncated to zero bytes, emptied, or rewritten with different content
+  during the removal or the baseline install satisfies just as well as
+  the original — so the stage recorded the documented rollback procedure
+  as preserving durable state it had never read, which is the one thing
+  that stage exists to prove. With the services stopped and before the
+  move, the harness now lists `state/` and digests every file in it, and
+  after the baseline install does the same to `state.bak/` and requires
+  the two to match name for name and digest for digest, naming the first
+  file that changed, went missing or was added. The claim is about the
+  whole directory, not one name in it: a host keeps more there than the
+  agent's `state.json` — the agent also refreshes `state.json.bak`, the
+  copy it falls back to when the primary fails to decode, and the
+  observability unit writes `observability-snapshot.json` beside them —
+  so destroying any of them in place now fails the stage by name. A state
+  directory with no `state.json` is refused where the manifest is taken,
+  before anything is moved or removed, and a `sha256sum` whose leading
+  field is not sha256 hex is refused where it is read rather than carried
+  forward, so two unreadable files can never compare equal. The checks
+  that follow deliberately do not load the set-aside files — they exist
+  to show the older agent did not — so nothing else could have caught
+  this. The Jetson harness was fixed the same way and by the same method,
+  so the two now make the same claim rather than diverging.
+  `verify_ubuntu_l4_cloud_lifecycle.sh` drives the new guard against a
+  stubbed appliance whose durable state holds all three files: thirteen
+  rollback regressions — emptied, truncated and rewritten copies, a
+  deleted recovery copy and snapshot, an added file, an emptied
+  directory, a directory that is gone outright, a missing `state.json`
+  and a non-hex digest — each fail the run at the named step, and a
+  failing privileged digest read is injected as well. The passing run
+  pins that the listing and the digests are taken after the stop and
+  before the move, that the saved copy is read back file by file after
+  the baseline install, and that no existence check on `state.bak` is
+  made at all. The runbook's rollback section states the same claim.
+
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
   boot. Platform detection ran exactly once per start, so a single

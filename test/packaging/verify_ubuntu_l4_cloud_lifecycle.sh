@@ -461,8 +461,15 @@ def install(db, directory):
     if mode == "upgrade-leaves-unlisted-package" and phase == "upgraded":
         packages["tensorplate-unlisted"] = {"status": "installed", "version": "0.2.1~rc.1-1"}
 
-    # install-paths.sh lays out the state directory at configure time.
+    # install-paths.sh lays out the state directory at configure time,
+    # and install.sh brings the services up, so the observability unit's
+    # snapshot is there from the install on. Its path is fixed by
+    # packaging/conf/observability.json, and it is durable state that
+    # lives beside the agent's own: the rollback has to carry it across
+    # too, which is why the preservation check is about the directory.
     (varlib / "state").mkdir(parents=True, exist_ok=True)
+    (varlib / "state" / "observability-snapshot.json").write_text(
+        '{"fixture": "observability snapshot", "schema_version": "0.1"}\n')
     if mode == "upgrade-loses-deployment" and phase == "upgraded":
         shutil.rmtree(varlib / "state")
     # A real run has deleted /var/lib/tensorplate by now, so this plants
@@ -478,6 +485,47 @@ def install(db, directory):
             or (mode == "upgrade-resets-conffile" and phase == "upgraded") \
             or (mode == "rollback-resets-conffile" and phase == "rolled-back"):
         cli_config.write_text(PACKAGED_CLI_CONFIG)
+    # The set-aside state destroyed by the install that follows the
+    # removal, while its pathname stays a regular file: emptied,
+    # truncated, and replaced with different bytes, none of which a check
+    # on the file's existence could tell from the original.
+    #
+    # The same shapes against the agent's recovery copy and against the
+    # observability snapshot, plus one deletion and one addition: the
+    # destruction the rollback has to be held to is destruction ANYWHERE
+    # in the directory it set aside, not in the one name the harness
+    # happens to know. A host whose state.json survives and whose
+    # state.json.bak was emptied has lost exactly the copy that makes a
+    # corrupt primary recoverable.
+    aside = varlib / "state.bak"
+    if phase == "rolled-back":
+        if mode == "rollback-empties-backup":
+            (aside / "state.json").write_text("")
+        # A genuine prefix of what the agent wrote, and -- below --
+        # different bytes at exactly the same length: neither a size nor
+        # a mode tells them from the original, only a digest does.
+        elif mode == "rollback-truncates-backup":
+            (aside / "state.json").write_text('{"active":"cloud-lifecy')
+        elif mode == "rollback-rewrites-backup":
+            (aside / "state.json").write_text('{"active":"cloud-lifecycle-other"}\n')
+        elif mode == "rollback-empties-agent-bak":
+            (aside / "state.json.bak").write_text("")
+        elif mode == "rollback-rewrites-agent-bak":
+            (aside / "state.json.bak").write_text('{"active":"cloud-lifecycle-other"}\n')
+        elif mode == "rollback-deletes-agent-bak":
+            (aside / "state.json.bak").unlink(missing_ok=True)
+        elif mode == "rollback-empties-snapshot":
+            (aside / "observability-snapshot.json").write_text("")
+        elif mode == "rollback-deletes-snapshot":
+            (aside / "observability-snapshot.json").unlink(missing_ok=True)
+        elif mode == "rollback-adds-state-file":
+            (aside / "state.json.new").write_text('{"fixture": "not what was set aside"}\n')
+        # Every file gone while the directory stays: the set-aside copy
+        # reads as a directory that is there and holds nothing, which
+        # must not be what "unchanged" means.
+        elif mode == "rollback-empties-state-dir":
+            for entry in aside.iterdir():
+                entry.unlink()
     db["phase"] = phase
     save(db)
     # The installer's later steps -- readiness, doctor -- can fail after
@@ -1311,6 +1359,22 @@ case "$*" in
     fi
     ;;
 esac
+# An agent that cleared its deployment state as it stopped, which leaves
+# the durable state directory populated and without the one file the
+# rollback stage is about. The manifest taken after this stop still has
+# entries, and two directories holding only the rest would compare equal
+# all the way to a pass. Hooked on the stop rather than on an install
+# because in this fixture state.json IS the active-deployment record: an
+# install that removed it would fail the upgrade's own round trip and the
+# rollback would never run. The clear_install stops that precede it wipe
+# /var/lib/tensorplate straight after, so only the rollback's stop shows.
+case "$*" in
+  *"systemctl stop tensorplate-agent"*)
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-state-file-missing ]; then
+      rm -f "${TP_FAKE_VARLIB}/state/state.json"
+    fi
+    ;;
+esac
 # A drop-in an earlier run left behind, planted where the harness's own
 # reset cannot clear it first.
 #
@@ -1451,9 +1515,43 @@ case "$*" in
     [ ! -e "${TP_FAKE_VARLIB}/state.bak" ]
     exit
     ;;
-  "test -f /var/lib/tensorplate/state.bak/state.json")
-    [ -f "${TP_FAKE_VARLIB}/state.bak/state.json" ]
+  # The privileged listing of a directory under /var/lib/tensorplate: the
+  # entry set the manifest is built from, including the dotfiles `ls -A`
+  # shows. A directory that is not there is reported the way ls reports
+  # it, by name, so a set-aside copy that was removed outright fails the
+  # read rather than reading as empty.
+  "ls -A /var/lib/tensorplate/"*)
+    [ "$#" -eq 3 ] || exit 9
+    target="${TP_FAKE_VARLIB}/${3#/var/lib/tensorplate/}"
+    if [ ! -d "$target" ]; then
+      printf "ls: cannot access '%s': No such file or directory\n" "$3" >&2
+      exit 1
+    fi
+    ls -A "$target"
     exit
+    ;;
+  # The privileged digest of a file under /var/lib/tensorplate, taken
+  # from the fixture's copy of it and printed in sha256sum's own format,
+  # so the harness reads a fixture exactly as it reads a host. A file
+  # that is not there is reported the way sha256sum reports it, by name.
+  "sha256sum /var/lib/tensorplate/"*)
+    [ "$#" -eq 2 ] || exit 9
+    target="${TP_FAKE_VARLIB}/${2#/var/lib/tensorplate/}"
+    if [ ! -f "$target" ]; then
+      printf 'sha256sum: %s: No such file or directory\n' "$2" >&2
+      exit 1
+    fi
+    digest="$(python3 -c 'import hashlib, sys
+print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" || exit 9
+    # A sha256sum that prints BSD's format instead of GNU's: every file
+    # then reads as the same leading field, so a digest taken from it
+    # would make any two files compare equal.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ]; then
+      printf 'SHA256 (%s) = %s\n' "$2" "$digest"
+      exit 0
+    fi
+    printf '%s  %s\n' "$digest" "$2"
+    exit 0
     ;;
   "mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak")
     # GNU mv -T: never moves into the target, replaces only an empty one.
@@ -1929,6 +2027,11 @@ JSON
     # re-warms, and what a rollback sets aside.
     mkdir -p "${TP_FAKE_VARLIB}/state" || exit 9
     printf '{"active":"%s"}\n' "$deployment" >"$state_file" || exit 9
+    # The recovery copy the agent keeps beside the primary and falls back
+    # to when the primary fails to decode (agent/src/state.rs). It is
+    # durable state the rollback has to preserve, and a check on
+    # state.json alone would never see it destroyed.
+    printf '{"active":"%s"}\n' "$deployment" >"${state_file}.bak" || exit 9
     "${TP_FAKE_DPKG_DB}" agent-version >>"${TP_FAKE_DEPLOY_VERSIONS}"
     printf '{"command":"deploy","payload":{"phase":"active","deployment_id":"%s"}}\n' \
       "$deployment"
@@ -3374,8 +3477,16 @@ check "  inferences ran on each install in turn" \
 # Empty when the line is missing, which every check below treats as a
 # failure; `|| true` keeps a missing line from ending the suite early.
 first_baseline_install="$(sudo_line 'set-rc1/install.sh --local-artifacts' || true)"
+last_baseline_install="$(last_sudo_line 'set-rc1/install.sh --local-artifacts' || true)"
 last_candidate_install="$(last_sudo_line 'assets-rc2/install.sh --local-artifacts' || true)"
 remove_line="$(sudo_line 'apt-get remove' || true)"
+# What the upgrade leaves in the durable state directory for the rollback
+# to carry across: the agent's primary state and the recovery copy it
+# keeps beside it, both naming the deployment the baseline made, and the
+# observability unit's snapshot the install lays down.
+aside_state_fixture="{\"active\":\"${deployment_id}\"}"
+aside_agent_bak_fixture="$aside_state_fixture"
+aside_snapshot_fixture='{"fixture": "observability snapshot", "schema_version": "0.1"}'
 check "  the candidate is purged before the baseline is installed" yes \
   "$(purge="$(last_sudo_line 'apt-get purge')"
      [[ -n "$purge" && -n "$first_baseline_install" && "$purge" -lt "$first_baseline_install" ]] && echo yes || echo no)"
@@ -3405,6 +3516,47 @@ a=json.load(open(sys.argv[1]))["payload"]["agent"];print(a.get("available"),a.ge
     "${evidence}/status-after-rollback.json")"
 check "  the candidate's state is set aside, not deleted" yes \
   "$([[ -f "${appliance}/varlib/state.bak/state.json" ]] && echo yes || echo no)"
+# More than one file, which is the reason the check is about the
+# directory: the agent's primary state, the recovery copy it falls back
+# to, and the observability unit's snapshot all live there, and a check
+# on one pathname would leave the other two unguarded.
+check "  the set-aside state is the whole directory, not one file" \
+  "observability-snapshot.json state.json state.json.bak" \
+  "$(python3 -c 'import os, sys; print(" ".join(sorted(os.listdir(sys.argv[1]))))' \
+    "${appliance}/varlib/state.bak")"
+check "  and every file that was set aside survived with its bytes" \
+  "${aside_state_fixture}|${aside_agent_bak_fixture}|${aside_snapshot_fixture}" \
+  "$(cd "${appliance}/varlib/state.bak" 2>/dev/null &&
+     printf '%s|%s|%s' "$(cat state.json 2>/dev/null || echo missing)" \
+       "$(cat state.json.bak 2>/dev/null || echo missing)" \
+       "$(cat observability-snapshot.json 2>/dev/null || echo missing)")"
+# The digests the preservation check compares against are only worth
+# anything if they were taken from the stopped agent's own copies, before
+# the move left no original to compare with. Consecutive reads of the
+# same directory collapse to one token, so this says what happened in
+# what order without pinning how many files the directory holds.
+check "  listed and digested with the services stopped and before the move" \
+  "systemctl-stop ls-state sha256sum-state mv" \
+  "$(if [[ -z "$last_candidate_install" ]]; then echo missing; else
+       tail -n "+$((last_candidate_install + 1))" "${appliance}/sudo.log" |
+         sed -n -e 's/^systemctl stop tensorplate-agent tensorplate-observability$/systemctl-stop/p' \
+                -e 's#^ls -A /var/lib/tensorplate/state$#ls-state#p' \
+                -e 's#^sha256sum /var/lib/tensorplate/state/.*$#sha256sum-state#p' \
+                -e 's#^mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak$#mv#p' |
+         uniq | tr '\n' ' ' | sed 's/ $//'; fi)"
+# Every file, not just the one the harness would have known to look for.
+check "  and the saved copy is read back after the baseline install, file by file" \
+  "yes yes yes yes" \
+  "$(printf '%s %s %s %s' \
+     "$(sudo_after "$last_baseline_install" 'ls -A /var/lib/tensorplate/state.bak')" \
+     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/state.json')" \
+     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/state.json.bak')" \
+     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/observability-snapshot.json')")"
+# And never by existence: `test -f` on a pathname is what this stage used
+# to credit the rollback with, and it passes on a file truncated to
+# nothing.
+check "  and never by existence alone" no \
+  "$(grep -qF 'test -f /var/lib/tensorplate/state.bak' "${appliance}/sudo.log" && echo yes || echo no)"
 check "  the operator's cli.json edit survived both directions" yes \
   "$(python3 -c 'import sys
 print("yes" if open(sys.argv[1],"rb").read() == (sys.argv[2] + "\n\n").encode() else "no")' \
@@ -3538,12 +3690,25 @@ for case in \
   "rollback-remove-purges::tensorplate-agent is absent, not config-files" \
   "rollback-leaves-candidate-package::tensorplate-cli is installed 0.2.1~rc.2-1, expected installed 0.2.1~rc.1-1" \
   "rollback-resets-conffile::the rollback did not keep the operator-edited" \
-  "rollback-state-not-preserved::step failed (exit 1): the set-aside state is preserved" \
+  "rollback-state-not-preserved::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-empties-backup::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-truncates-backup::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-rewrites-backup::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-empties-agent-bak::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-rewrites-agent-bak::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-deletes-agent-bak::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-empties-snapshot::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-deletes-snapshot::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-adds-state-file::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-empties-state-dir::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-state-file-missing::step failed (exit 1): digest the durable state before setting it aside" \
+  "rollback-digest-not-hex::step failed (exit 1): digest the durable state before setting it aside" \
   "rollback-keeps-state::the rolled-back agent reports active" \
   "rollback-keeps-previous::the rolled-back agent reports previous_active" \
   "rollback-agent-unavailable::the agent is not available after the rollback" \
   "rollback-infer-garbled::worker round-trip checks failed" \
   "ok:systemctl stop:step failed (exit 9): stop the services" \
+  "ok:sha256sum /var/lib/tensorplate/state/state.json:step failed (exit 9): digest the durable state before setting it aside" \
   "ok:mv -T:step failed (exit 9): set durable state aside" \
   "ok:apt-get remove:step failed (exit 9): remove tensorplate-"; do
   mode="${case%%:*}"
@@ -3552,7 +3717,7 @@ for case in \
   message="${rest#*:}"
   expected_status=1
   if [[ -n "$sudo_fail" ]]; then expected_status=9; fi
-  evidence="${td}/stages-rollback-${mode}-${sudo_fail// /-}"
+  evidence="${td}/stages-rollback-${mode}-${sudo_fail//[!a-z0-9]/-}"
   check "${mode}${sudo_fail:+ with a failing ${sudo_fail}} fails the run" "$expected_status" \
     "$(run_upgrade_stages "$mode" "$evidence" "$sudo_fail" set-rc1)"
   check "  upgrade passed before it" pass "$(stage_status "${evidence}/lifecycle-report.json" upgrade)"
@@ -3570,6 +3735,121 @@ for case in \
     rollback-remove-leaves-backend)
       check "  and the baseline was never installed over the leftover" no \
         "$(sudo_after "$(sudo_line 'apt-get remove')" 'set-rc1/install.sh')"
+      ;;
+    rollback-state-not-preserved)
+      # The set-aside directory is not there at all: the check names what
+      # it could not read and stops there. Reporting it as CHANGED would
+      # be a different claim -- that something was read and compared --
+      # and would be made on an empty digest, so the read has to fail the
+      # check rather than fall through to the comparison.
+      check "  and names the directory it could not read" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           "ls: cannot access '/var/lib/tensorplate/state.bak': No such file or directory")"
+      check "  and does not report it as changed" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rollback did not preserve')"
+      # Nor as the empty directory the case below is about. A listing
+      # whose failure went unchecked would read as a directory holding
+      # nothing, which is a different fact with a different recovery:
+      # there is a set-aside copy to inspect in one and none in the other.
+      check "  nor as a directory that is there and holds nothing" no \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'holds no files; there is no durable state here to preserve')"
+      ;;
+    rollback-empties-backup|rollback-truncates-backup|rollback-rewrites-backup|\
+    rollback-empties-agent-bak|rollback-rewrites-agent-bak|rollback-empties-snapshot)
+      # Which file each mode destroyed. The pathname is still a regular
+      # file in every one of them, so `test -f` on it would have passed
+      # them all -- including the two that leave the agent's own
+      # state.json untouched and destroy the copy it recovers FROM.
+      case "$mode" in
+        rollback-empties-snapshot) destroyed=observability-snapshot.json ;;
+        rollback-empties-agent-bak|rollback-rewrites-agent-bak) destroyed=state.json.bak ;;
+        *) destroyed=state.json ;;
+      esac
+      check "  and ${destroyed} is still a regular file" yes \
+        "$([[ -f "${appliance}/varlib/state.bak/${destroyed}" ]] && echo yes || echo no)"
+      check "  and the failure names the file whose contents did not survive" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           "the rollback did not preserve /var/lib/tensorplate/state.bak/${destroyed}: sha256 was")"
+      # The checks after it intentionally do not load the set-aside state,
+      # so they cannot stand in for this one: the stage has to stop here.
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-deletes-agent-bak|rollback-deletes-snapshot)
+      # Gone rather than damaged. A check that digested only state.json
+      # could not notice either of these.
+      if [[ "$mode" == rollback-deletes-agent-bak ]]; then
+        gone=state.json.bak
+      else
+        gone=observability-snapshot.json
+      fi
+      check "  and the failure names the file the set-aside copy no longer holds" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           "the rollback did not preserve /var/lib/tensorplate/state.bak/${gone}: it was in the durable state when the services were stopped and the set-aside copy does not hold it")"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-adds-state-file)
+      # Every file that was set aside is still there, byte for byte, and
+      # the install put one more beside them. "Unchanged" has to mean the
+      # directory, or an install that seeded the older agent with state
+      # of its own would read as preservation.
+      check "  and every file that was set aside is intact" "yes yes yes" \
+        "$(cd "${appliance}/varlib/state.bak" &&
+           printf '%s %s %s' \
+             "$([[ "$(cat state.json)" == "$aside_state_fixture" ]] && echo yes || echo no)" \
+             "$([[ "$(cat state.json.bak)" == "$aside_agent_bak_fixture" ]] && echo yes || echo no)" \
+             "$([[ "$(cat observability-snapshot.json)" == "$aside_snapshot_fixture" ]] && echo yes || echo no)")"
+      check "  and the failure names the file that was added" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/state.bak: it holds state.json.new, which the durable state did not when the services were stopped')"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-empties-state-dir)
+      # A directory that is there and holds nothing is not a preserved
+      # one. Saying so about the directory is the honest report: naming
+      # whichever file the comparison happened to reach first would
+      # describe one loss out of three.
+      check "  and the set-aside directory is still there" yes \
+        "$([[ -d "${appliance}/varlib/state.bak" ]] && echo yes || echo no)"
+      check "  and the failure names the directory, not one file in it" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/state.bak holds no files; there is no durable state here to preserve')"
+      # The other half of the pair above: a directory that is there and
+      # holds nothing is not a directory that could not be read.
+      check "  rather than as a directory it could not read" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'ls: cannot access')"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-state-file-missing)
+      # Refused where the manifest is taken, before the move: a state
+      # directory without the agent's deployment state gives a manifest
+      # that both sides can satisfy while preserving nothing this stage
+      # is about.
+      check "  and says which file the durable state is missing" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/state holds no state.json: there is no deployment state for the rollback to preserve')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
+           printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
+      ;;
+    rollback-digest-not-hex)
+      # A leading field that is not sha256 hex is refused where it is
+      # read, not carried forward: two files digested through such a
+      # sha256sum would otherwise compare equal and the stage would
+      # credit the rollback with preserving state it never read. The file
+      # named is the first entry of the state directory in the order the
+      # manifest reads it, C-sorted, not whichever name the harness
+      # happens to care about.
+      check "  and names the file it could not digest" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'could not compute a sha256 of /var/lib/tensorplate/state/observability-snapshot.json')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
+           printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
       ;;
   esac
 done
