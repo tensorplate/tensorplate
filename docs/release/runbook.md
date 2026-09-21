@@ -6,7 +6,16 @@ the release variables first; examples below use `0.1.0`.
 
 ```bash
 export TP_VERSION=0.1.0
-export TP_TAG="v${TP_VERSION}"
+# A release is cut as a candidate first and as a final tag second, and
+# every step below names the tag it is operating on. Set TP_RC to the
+# candidate number for a candidate pass; unset it for the final pass.
+# Re-export the block when you switch passes. Defining TP_TAG as
+# `v${TP_VERSION}` alone made steps 4-6 name a tag that does not exist
+# while the release is on the candidate path: `git rev-parse` exits 128,
+# `git push` reports "src refspec does not match any", and the download
+# step asks for a release nobody cut.
+export TP_RC=1                 # unset TP_RC for the final tag
+export TP_TAG="v${TP_VERSION}${TP_RC:+-rc.${TP_RC}}"
 # Releases are tagged off the trunk. No release branch is cut, ever:
 # keeping a maintenance line in sync with the trunk, and patching an old
 # line while the trunk moves on, is the cost this trades away. The trunk
@@ -18,8 +27,16 @@ export TP_MANIFEST="${TP_RELEASE_DIR}/tensorplate-${TP_TAG}-artifacts.json"
 export TP_CHECKSUMS="${TP_RELEASE_DIR}/SHA256SUMS"
 export TP_SIGNOFF="${TP_RELEASE_DIR}/signoff.md"
 export TP_PREFLIGHT="${TP_RELEASE_DIR}/preflight.md"
-export TP_RELEASE_NOTES="docs/release/notes/${TP_TAG}.md"
+# Release notes are per version, never per tag: every candidate and the
+# final tag publish the same file, which is why `release.yml` and the
+# release driver both derive it from the version.
+export TP_RELEASE_NOTES="docs/release/notes/v${TP_VERSION}.md"
 ```
+
+Each candidate gets its own `TP_RELEASE_DIR`, and the manifest inside it
+carries the candidate's tag — `tensorplate-v0.2.1-rc.1-artifacts.json`, not
+the final name. Step 6 downloads by that name, so re-export the block
+before switching passes rather than editing one variable.
 
 The release has three separated phases:
 
@@ -76,8 +93,20 @@ they are reviewed together, merged together, and tagged as one commit:
 `sdk/python/pyproject.toml` keeps its `.dev0` development version; no
 release step rewrites it, because the wheel version is injected at build.
 
-Also add `docs/release/notes/vX.Y.Z.md` — a **hard tag prerequisite** the
-publish path requires (`release.yml` `--notes-file`; the preflight). Its
+### Release notes
+
+`docs/release/notes/vX.Y.Z.md` **does** ship in the implementation PR. It
+is not a version surface: `prepare` does not write it, it is absent from
+the approved-file list `prepare` is allowed to touch, and
+`ensure_prepare_diff_scope` would reject it if the preparation PR carried
+it. Writing release notes is also review work, not a mechanical bump, so
+it wants the ordinary review cycle rather than the narrow one in step 3a.
+Leave it out of both PRs and the cut fails closed with
+`release notes file is missing: docs/release/notes/vX.Y.Z.md (required by
+the publish path)`.
+
+It is a **hard tag prerequisite** the publish path requires
+(`release.yml` `--notes-file`; the preflight). Its
 supported-environment section must **link
 [`docs/release/support-matrix.md`](support-matrix.md)**, not restate it.
 That file is generated from `config/platform/` and guarded by a golden
@@ -94,8 +123,10 @@ UPDATE_GOLDEN=1 cargo test -p tensorplate-cli --test doctor_host_section
 
 The second guards the `doctor` host section, whose candidate lists change
 whenever a row is added, removed, or rescoped.
-Then
-validate with `prepare --version X.Y.Z --dry-run` and `test/release/run.sh`.
+
+### Validating the implementation PR
+
+Validate with `prepare --version X.Y.Z --dry-run` and `test/release/run.sh`.
 `preflight`/`cut` run `check_version_files`, which fails closed on any stale
 surface (including a partially bumped `Cargo.lock`), so a missed surface stops
 the cut rather than shipping a misversioned build.
@@ -251,36 +282,80 @@ contained, and the workflow's trunk-ancestry check (step 5) rejected it.
 
 #### 3a. Finalize the version surfaces in a preparation PR
 
+The preparation PR is per version, not per tag: it finalizes the
+`${TP_VERSION}` surfaces once, and every candidate and the final tag are
+cut from that same commit.
+
 Skip to 3b when the trunk already carries final metadata for
 `${TP_VERSION}` — `prepare` is then a no-op and there is nothing to merge.
 `cut` checks this itself and stops with the remaining files named, so
-guessing wrong costs one command, not a bad tag.
+guessing wrong costs one command, not a bad tag. The PR can also be
+smaller than the file list below when earlier work already finalized some
+surfaces: `prepare` writes whatever is still pending and leaves the rest
+alone, so a preparation PR that promotes only `CHANGELOG.md` is a normal
+outcome, not a sign something was missed.
 
 ```bash
-git switch --create "release-prep-${TP_TAG}" "origin/${TP_TRUNK_BRANCH}"
+git switch --create "release-prep-v${TP_VERSION}" "origin/${TP_TRUNK_BRANCH}"
 tools/release/tensorplate-release.sh prepare \
   --version "${TP_VERSION}" \
-  --prep-branch "release-prep-${TP_TAG}" \
+  --prep-branch "release-prep-v${TP_VERSION}" \
   --execute \
   --confirm "PREPARE-v${TP_VERSION}"
 git add -- CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json \
   packaging/VERSION packaging/debian/changelog \
   packaging/scripts/install.sh CHANGELOG.md
-git commit -m "Prepare ${TP_TAG} release"
-gh pr create --base "${TP_TRUNK_BRANCH}" --title "Prepare ${TP_TAG} release"
+git commit -m "Prepare v${TP_VERSION} release"
+gh pr create --base "${TP_TRUNK_BRANCH}" --title "Prepare v${TP_VERSION} release"
 ```
 
 `prepare` refuses to touch anything outside that file list, so the PR is
-exactly the version surfaces and nothing else. Merge it under the ordinary
-review and CI rules. Squash or merge commit both work: the tag is created
-afterwards, on whatever commit the merge actually produced.
+exactly the version surfaces and nothing else. `docs/release/notes/vX.Y.Z.md`
+is deliberately not in it — that file ships in the implementation PR, above.
 
-#### 3b. Refresh the trunk and tag the merged commit
+Merge it under the ordinary review and CI rules. Squash or merge commit
+both work: the tag is created afterwards, on whatever commit the merge
+actually produced. **Record that commit** — step 3b tags it by name, and
+it is the only thing that distinguishes the release commit from whatever
+else lands on the trunk next:
+
+```bash
+export TP_RELEASE_COMMIT="$(gh pr view "release-prep-v${TP_VERSION}" \
+  --json mergeCommit --jq '.mergeCommit.oid')"
+echo "${TP_RELEASE_COMMIT}"
+```
+
+When 3a was skipped because the metadata was already final, there is no
+merge commit to read. The release commit is then the reviewed trunk commit
+whose CI you confirmed green in step 1; set `TP_RELEASE_COMMIT` to that SHA
+explicitly rather than letting step 3b take whatever the trunk holds.
+
+#### 3b. Stand on the release commit and tag it
 
 ```bash
 git switch "${TP_TRUNK_BRANCH}"
 git pull --ff-only
+git rev-parse HEAD           # compare against ${TP_RELEASE_COMMIT}
 ```
+
+`git pull` brings the trunk's **head**, which is not necessarily the
+release commit. Any PR that merged between the preparation merge and this
+pull is now HEAD, and nothing downstream will notice: that commit is still
+an ancestor of the trunk, so the ancestry check passes, and `prepare` is
+idempotent, so the metadata gate still reads as final. The tag would land
+on a commit nobody reviewed for this release and CI would publish it.
+That is why 3a recorded `TP_RELEASE_COMMIT`. If HEAD is not that commit,
+stand on it — the trunk is never pushed by this procedure, so the reset is
+local only:
+
+```bash
+git reset --hard "${TP_RELEASE_COMMIT}"
+```
+
+`cut` tags a commit behind the trunk head deliberately and says so
+(`HEAD is behind origin/${TP_TRUNK_BRANCH}; tagging that older trunk
+commit`). Pass `--expect-commit` so the check is enforced rather than
+remembered.
 
 Preview the local operation:
 
@@ -288,44 +363,50 @@ Preview the local operation:
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --release-branch "${TP_TRUNK_BRANCH}" \
+  --expect-commit "${TP_RELEASE_COMMIT}" \
   --final \
   --dry-run
 ```
 
-Cut the final release source tag locally:
+Cut the tag locally. Use `--final` for the final tag and `--rc N` for a
+candidate; `${TP_TAG}` already carries whichever one the variable block at
+the top selected, so the confirmation token is the same line either way:
 
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --release-branch "${TP_TRUNK_BRANCH}" \
+  --expect-commit "${TP_RELEASE_COMMIT}" \
   --final \
   --execute \
   --confirm "CUT-${TP_TAG}"
 ```
 
-For a release candidate:
+For a release candidate, with `TP_RC` set to its number:
 
 ```bash
 tools/release/tensorplate-release.sh cut \
   --version "${TP_VERSION}" \
   --release-branch "${TP_TRUNK_BRANCH}" \
-  --rc 1 \
+  --expect-commit "${TP_RELEASE_COMMIT}" \
+  --rc "${TP_RC}" \
   --execute \
-  --confirm "CUT-${TP_TAG}-rc.1"
+  --confirm "CUT-${TP_TAG}"
 ```
 
 `cut` refuses a dirty worktree, a checkout that is not on the trunk, a
-commit `origin/${TP_TRUNK_BRANCH}` does not already contain, an existing
-tag, and release metadata that is not yet final. The ancestry condition is
-the same one the publish workflow asserts in step 5, so a tag CI would
-reject is never created in the first place.
+commit `origin/${TP_TRUNK_BRANCH}` does not already contain, a HEAD that
+is not `--expect-commit`, an existing tag, and release metadata that is
+not yet final. The ancestry condition is the same one the publish workflow
+asserts in step 5, so a tag CI would reject is never created in the first
+place.
 
 Nothing is pushed here, and nothing needs to be: the preparation PR already
-moved the trunk. Record the commit the tag names — the next step builds
-from it, and it is the commit `cut` was standing on:
+moved the trunk. Confirm the commit the tag names — the next step builds
+from it:
 
 ```bash
-git rev-parse HEAD
+git rev-list -n1 "${TP_TAG}"
 ```
 
 ### 4. Build Release Assets Without Publishing
@@ -557,6 +638,10 @@ Stop and mark the release blocked if any item is true:
 - Required CI is unavailable or not green.
 - The trunk carries unreviewed commits at or below the tag commit.
 - The tag commit is not already contained in `origin/${TP_TRUNK_BRANCH}`.
+- The tag commit is not `${TP_RELEASE_COMMIT}`, the commit step 3a
+  recorded. Pass `cut --expect-commit` so this is enforced rather than
+  eyeballed: ancestry alone does not catch a trunk that moved between the
+  preparation merge and the pull.
 - Version metadata or changelog is inconsistent.
 - The final tag already exists.
 - Artifacts are missing, checksums mismatch, or manifest commit/tag data

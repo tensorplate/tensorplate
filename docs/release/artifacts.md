@@ -334,7 +334,7 @@ tools/release/tensorplate-release.sh publish \
   --artifacts-dir "${TP_RELEASE_DIR}" \
   --manifest "${TP_MANIFEST}" \
   --checksums "${TP_CHECKSUMS}" \
-  --release-notes "docs/release/notes/${TP_TAG}.md" \
+  --release-notes "${TP_RELEASE_NOTES}" \
   --dry-run
 ```
 
