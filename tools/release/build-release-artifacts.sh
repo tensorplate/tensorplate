@@ -64,10 +64,15 @@ Options:
                          TP_ENABLE_PYTHON_PYTORCH_SIDECAR overrides.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
   --snapshot             Build unreleased local-source snapshot artifacts.
-  --branch BRANCH        Branch recorded in the manifest's release.branch field.
-                         Defaults to the checked-out branch, or the short commit
-                         when HEAD is detached, which it is on the tag-driven
-                         release path. The release workflow passes the trunk.
+  --branch BRANCH        Provenance label recorded in the manifest's
+                         release.branch field. Not necessarily a branch: the
+                         publish path passes the trunk, and a build-only
+                         rehearsal passes the ref it was dispatched on, which
+                         the runbook makes the tag's own commit -- so a
+                         rehearsal manifest records a 40-hex SHA equal to
+                         release.commit. Defaults to the checked-out branch, or
+                         the short commit when HEAD is detached, which it is on
+                         the tag-driven release path.
   --build-dir DIR        CMake build directory. Defaults to build/release, or build/snapshot-ARCH for snapshots.
   --sdk-dist-dir DIR     Directory holding the tensorplate-python wheel + sdist to include in the release.
 EOF
@@ -648,5 +653,5 @@ if ((SNAPSHOT)); then
   printf 'Source branch/provenance label: %s\n' "$BRANCH"
 else
   note "release artifacts are ready in $ARTIFACTS_DIR"
-  printf 'Source branch recorded in the manifest: %s\n' "$BRANCH"
+  printf 'Source provenance label recorded in the manifest: %s\n' "$BRANCH"
 fi

@@ -175,6 +175,15 @@ jobs:
           if [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
             commit="$REQUESTED_REF"
           else
+            # source_ref is the one dispatch input with no shape check of
+            # its own (the tag input is regex-checked above), and it is
+            # about to become a path segment in an API call. Constrain it
+            # to ref characters and reject `..` before it gets there, so
+            # the sibling comment above stays true of every input.
+            if [[ ! "$REQUESTED_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ || "$REQUESTED_REF" == *..* ]]; then
+              echo "::error::source_ref must be a branch, tag, or commit ref; got '${REQUESTED_REF}'"
+              exit 1
+            fi
             commit="$(gh api "repos/${REPOSITORY}/commits/${REQUESTED_REF}" --jq '.sha')"
           fi
           if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
