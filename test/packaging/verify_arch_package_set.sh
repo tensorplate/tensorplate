@@ -165,7 +165,14 @@ pass "metapackage ships no payload on ${host_arch}"
 # Package closure for the deploy-smoke path: the serving binary must come from
 # the package, with no source-tree fallback.
 serving="${repo_parent}/tensorplate-serving_${version}_${host_arch}.deb"
-dpkg-deb -c "$serving" | grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' ||
+# Captured before matching: `grep -q` exits at the first match and closes the
+# pipe, dpkg-deb's tar dies on SIGPIPE writing the rest, and `pipefail` makes
+# that the pipeline's status even though the match succeeded. This is the same
+# defect that failed the v0.2.1-rc.1 release build on the workflow's copy.
+# Piping the captured value back into `grep -q` would recreate the race with
+# the shell as the producer, so this matches with a here-string instead.
+serving_contents="$(dpkg-deb -c "$serving")"
+grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' <<<"$serving_contents" ||
   die "tensorplate-serving must ship /usr/lib/tensorplate/tensorplate-serving"
 pass "serving binary ships from the package"
 
