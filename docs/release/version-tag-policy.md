@@ -15,8 +15,8 @@ Examples use:
 ```bash
 export TP_VERSION=0.1.0
 export TP_TAG="v${TP_VERSION}"
-# All X.Y.Z tags are created on the trunk. Pass this to every release
-# command: the driver still defaults to the retired `release/X.Y` line.
+# All X.Y.Z tags are created on the trunk, which is also what the release
+# driver selects by default.
 export TP_TRUNK_BRANCH=develop
 ```
 

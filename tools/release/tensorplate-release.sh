@@ -4,9 +4,10 @@
 # GitOps-oriented release driver for TensorPlate.
 #
 # The implementation PR adds this tooling, but it must not publish the
-# release. Final publication happens later from the per-minor release/X.Y
-# maintenance line: this script creates the reviewed source commit/tag, and
-# CI owns artifact publication.
+# release. Releases are tagged off the trunk, and the trunk is protected:
+# the release commit reaches it as a merged pull request, this script only
+# tags the commit review already put there, and CI owns artifact
+# publication.
 
 set -Eeuo pipefail
 
@@ -53,7 +54,8 @@ usage() {
 Usage:
   tensorplate-release.sh preflight --version 0.1.0 [options]
   tensorplate-release.sh prepare --version 0.1.0 --dry-run
-  tensorplate-release.sh prepare --version 0.1.0 --execute --confirm PREPARE-v0.1.0
+  tensorplate-release.sh prepare --version 0.1.0 --prep-branch release-prep-v0.1.0 \
+      --execute --confirm PREPARE-v0.1.0
   tensorplate-release.sh cut --version 0.1.0 --final --execute --push --confirm CUT-v0.1.0
   tensorplate-release.sh cut --version 0.1.0 --rc 1 --execute --push --confirm CUT-v0.1.0-rc.1
   tensorplate-release.sh manifest --version 0.1.0 --tag v0.1.0 --artifacts-dir DIR [options]
@@ -67,13 +69,11 @@ Common options:
                             Derived from --tag when omitted.
   --python-version VERSION   Expected SDK version, for example 0.1.0rc1.
                             Derived from --tag when omitted.
-  --release-branch BRANCH   Branch the release is cut and tagged on, and the
-                            branch recorded in the manifest. Releases are
-                            tagged off the trunk, so pass `develop`. The
-                            default is the retired release/MAJOR.MINOR
-                            maintenance line, kept only so the v0.1.x tags
-                            reproduce; see docs/release/version-tag-policy.md.
-  --base REF                Source ref for cut. Defaults to origin/develop.
+  --release-branch BRANCH   Trunk branch the release is tagged on, and the
+                            provenance label recorded in the manifest.
+                            Defaults to `develop`: releases are tagged off
+                            the trunk and no release branch is cut. See
+                            docs/release/version-tag-policy.md.
   --prep-branch BRANCH      Additional branch accepted for preflight during tooling PR dry runs.
   --artifacts-dir DIR       Directory containing release artifacts.
   --manifest FILE           Artifact manifest JSON path.
@@ -90,7 +90,9 @@ Common options:
                             local-source snapshot manifest/verify operations.
   --dry-run                 Print intended action without mutating repository or GitHub state.
   --execute                 Execute a mutating operation.
-  --push                    Push the release branch and tag after cut.
+  --push                    Push the release tag after cut. The trunk is
+                            never pushed: it is protected and moves only by
+                            merged pull request.
   --confirm TOKEN           Required confirmation token for mutating operations.
 
 Subcommands:
@@ -100,9 +102,13 @@ Subcommands:
   prepare     Promote release metadata from development values to final values.
               Defaults to non-mutating dry-run unless --execute and confirmation
               are provided.
-  cut         Create/switch the release branch, prepare release metadata,
-              commit it, create an annotated source tag, and optionally push
-              branch + tag so CI builds and publishes release assets.
+  cut         Tag a commit the trunk already contains. Verifies the
+              checkout is on the trunk, is an ancestor of origin's trunk,
+              and already carries final release metadata, then creates the
+              annotated source tag without editing or committing anything,
+              and optionally pushes the tag so CI builds and publishes
+              release assets. Finalizing metadata is `prepare`, in its own
+              pull request, merged first.
   manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets and install.sh.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   tag         Create an annotated RC or final tag. Never pushes tags.
@@ -146,15 +152,12 @@ require_version() {
 
 default_paths() {
   require_version
-  # Releases are tagged off the trunk and no release branch is cut, so
-  # every caller should pass --release-branch develop; the runbook and the
-  # release workflow both do. This default is the retired v0.1.x
-  # maintenance line, kept so those tags still reproduce and pinned by
-  # test/release/run.sh. Changing it changes an asserted contract, so it
-  # is the owner's call rather than a side effect of a release-prep PR.
-  # `cut` will create and push this branch if it is taken as given, and
-  # the tag would then fail the workflow's trunk-ancestry check.
-  RELEASE_BRANCH="${RELEASE_BRANCH:-release/${VERSION%.*}}"
+  # The trunk: the branch a cut must be standing on, and the provenance
+  # label the manifest records. This used to default to the retired
+  # release/MAJOR.MINOR maintenance line, so the ordinary `cut` invocation
+  # created a branch nobody merges and tagged it, and release.yml then
+  # rejected the tag for not descending from the trunk.
+  RELEASE_BRANCH="${RELEASE_BRANCH:-develop}"
   ARTIFACTS_DIR="${ARTIFACTS_DIR:-dist/release/v${VERSION}}"
   MANIFEST="${MANIFEST:-dist/release/v${VERSION}/tensorplate-v${VERSION}-artifacts.json}"
   CHECKSUMS="${CHECKSUMS:-dist/release/v${VERSION}/SHA256SUMS}"
@@ -201,7 +204,6 @@ parse_common_args() {
   DEB_VERSION=""
   PYTHON_VERSION=""
   RELEASE_BRANCH=""
-  BASE_REF="origin/develop"
   PREP_BRANCH=""
   ARTIFACTS_DIR=""
   MANIFEST=""
@@ -230,7 +232,6 @@ parse_common_args() {
       --deb-version) DEB_VERSION="${2:-}"; shift 2 ;;
       --python-version) PYTHON_VERSION="${2:-}"; shift 2 ;;
       --release-branch) RELEASE_BRANCH="${2:-}"; shift 2 ;;
-      --base) BASE_REF="${2:-}"; shift 2 ;;
       --prep-branch) PREP_BRANCH="${2:-}"; shift 2 ;;
       --artifacts-dir) ARTIFACTS_DIR="${2:-}"; shift 2 ;;
       --manifest) MANIFEST="${2:-}"; shift 2 ;;
@@ -914,6 +915,30 @@ run_source_preflight() {
   printf 'source preflight passed with %d checks\n' "${#PASSES[@]}"
 }
 
+# Answers "would `prepare` still change something here?" without leaving a
+# change behind. Stdout is the list of files still needing preparation; a
+# non-zero return means `prepare` itself failed and the question was never
+# answered. The worktree must be clean on entry, because the restore below
+# discards every tracked modification -- including a prepare that failed
+# half-applied, and including anything prepare touched outside the approved
+# set, which a narrower restore would leave behind.
+release_metadata_pending() {
+  require_clean_worktree
+  local status=0
+  prepare_python || status=$?
+  git diff --name-only -- "${APPROVED_PREPARE_FILES[@]}"
+  git checkout --quiet -- .
+  return "$status"
+}
+
+# `cut` tags; it does not author. The trunk is protected -- it requires a
+# pull request and the ruleset names no bypass actor -- so no step here can
+# push a commit to it. Preparing metadata locally and tagging it before the
+# preparation PR merged put the tag on a commit the squash merge then
+# replaced with a different SHA: the tag pointed at a commit no branch
+# contained, and release.yml's trunk-ancestry check rejected it. So the
+# release commit arrives the ordinary way, as a merged PR, and this only
+# tags what is already there.
 cmd_cut() {
   parse_common_args "$@"
   if [[ "$DRY_RUN" -eq 0 && "$EXECUTE" -eq 0 ]]; then
@@ -931,15 +956,15 @@ cmd_cut() {
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
     note "dry-run: cut release source tag $TAG"
-    printf 'Would create or switch release branch: %s\n' "$RELEASE_BRANCH"
-    printf 'Would branch from base ref: %s\n' "$BASE_REF"
-    printf 'Would prepare release metadata for: %s\n' "$VERSION"
-    printf 'Would commit: Prepare %s release\n' "$TAG"
+    printf 'Would tag on trunk branch: %s\n' "$RELEASE_BRANCH"
+    printf 'Would require the checked-out commit to be an ancestor of origin/%s\n' "$RELEASE_BRANCH"
+    printf 'Would require release metadata already final for %s; cut never edits or commits\n' "$VERSION"
     printf 'Would create annotated tag: %s\n' "$TAG"
+    printf 'Would not push %s: the protected trunk moves only by merged pull request\n' "$RELEASE_BRANCH"
     if [[ "$PUSH" -eq 1 ]]; then
-      printf 'Would push branch and tag to origin, triggering release CI.\n'
+      printf 'Would push the tag alone to origin, triggering release CI.\n'
     else
-      printf 'Would leave branch and tag local for review.\n'
+      printf 'Would leave the tag local for review.\n'
     fi
     return 0
   fi
@@ -948,26 +973,49 @@ cmd_cut() {
     die "cut --execute requires --confirm CUT-${TAG}"
   require_clean_worktree
 
-  if git remote get-url origin >/dev/null 2>&1; then
-    git fetch origin --prune --tags
+  git remote get-url origin >/dev/null 2>&1 ||
+    die "origin remote is required: the tag commit is verified against origin/${RELEASE_BRANCH}"
+  git fetch origin --prune --tags
+
+  local branch
+  branch="$(current_branch)"
+  [[ "$branch" == "$RELEASE_BRANCH" ]] ||
+    die "cut must run on the trunk branch '${RELEASE_BRANCH}', not '${branch}'; run: git switch ${RELEASE_BRANCH} && git pull --ff-only"
+
+  # Exactly the condition release.yml asserts before it publishes. Checking
+  # it here means a tag that CI would reject is never created at all.
+  local trunk_ref="refs/remotes/origin/${RELEASE_BRANCH}"
+  git rev-parse --verify --quiet "$trunk_ref" >/dev/null ||
+    die "origin/${RELEASE_BRANCH} is unavailable locally; fetch the trunk before cutting"
+  git merge-base --is-ancestor HEAD "$trunk_ref" ||
+    die "HEAD is not an ancestor of origin/${RELEASE_BRANCH}; the release commit must be merged to the trunk before it is tagged. Run: git pull --ff-only"
+  if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$trunk_ref")" ]]; then
+    note "HEAD is behind origin/${RELEASE_BRANCH}; tagging that older trunk commit"
   fi
 
-  if git show-ref --verify --quiet "refs/heads/${RELEASE_BRANCH}"; then
-    git switch "$RELEASE_BRANCH"
-  else
-    git switch --create "$RELEASE_BRANCH" "$BASE_REF"
-  fi
-
-  require_clean_worktree
   assert_tag_available "$TAG"
-  prepare_python
-  ensure_prepare_diff_scope
-  git add -- "${APPROVED_PREPARE_FILES[@]}"
-  if git diff --cached --quiet; then
-    note "release metadata already matches $VERSION; no prepare commit needed"
-  else
-    git commit -m "Prepare ${TAG} release"
+
+  local pending metadata_status=0
+  pending="$(release_metadata_pending)" || metadata_status=$?
+  ((metadata_status == 0)) ||
+    die "could not evaluate release metadata for ${VERSION}; fix the prepare failure reported above"
+  if [[ -n "$pending" ]]; then
+    printf 'files still needing release preparation:\n' >&2
+    while IFS= read -r file; do
+      [[ -n "$file" ]] || continue
+      printf '  %s\n' "$file" >&2
+    done <<<"$pending"
+    die "release metadata on ${RELEASE_BRANCH} is not final for ${VERSION}, and a cut must not change it.
+Finalize it in a preparation pull request, then tag the merged commit:
+  git switch --create release-prep-v${VERSION} origin/${RELEASE_BRANCH}
+  tools/release/tensorplate-release.sh prepare --version ${VERSION} \\
+    --prep-branch release-prep-v${VERSION} --execute --confirm PREPARE-v${VERSION}
+  git add -- <the files listed above>
+  git commit -m 'Prepare v${VERSION} release'
+  gh pr create --base ${RELEASE_BRANCH}
+After it merges: git switch ${RELEASE_BRANCH} && git pull --ff-only, then re-run this cut."
   fi
+
   run_source_preflight
 
   local tag_mode=(-a)
@@ -975,15 +1023,14 @@ cmd_cut() {
     tag_mode=(-s)
   fi
   git tag "${tag_mode[@]}" "$TAG" -m "TensorPlate ${TAG}"
-  note "created annotated tag $TAG locally"
+  note "created annotated tag $TAG on $(git rev-parse --short HEAD); no commit was made"
 
   if [[ "$PUSH" -eq 1 ]]; then
-    git push origin "$RELEASE_BRANCH"
     git push origin "$TAG"
-    note "pushed $RELEASE_BRANCH and $TAG; release CI owns artifact publication"
+    note "pushed $TAG; release CI owns artifact publication. ${RELEASE_BRANCH} was not pushed and needs no push."
   else
     note "review tag metadata with: git show $TAG"
-    note "push to trigger release CI: git push origin $RELEASE_BRANCH && git push origin $TAG"
+    note "push to trigger release CI: git push origin $TAG"
   fi
 }
 

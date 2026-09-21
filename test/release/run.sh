@@ -39,11 +39,35 @@ python3 "$verify_artifact_identity"
 python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
 
-# Patch tags live on the per-minor maintenance line, not per-version
-# release branches.
+# The trunk is protected: it moves only by merged pull request, so `cut`
+# tags a commit that is already on it and changes nothing. The ordinary
+# invocation -- no flags -- must therefore select the trunk and promise no
+# branch creation, no commit, and no push of the protected branch. This
+# replaces an assertion that pinned the opposite (a release/MAJOR.MINOR
+# default), which is the model this release retires: that default made the
+# plain command create a branch whose tag release.yml rejects for not
+# descending from the trunk.
 cut_dry_run="$("$script" cut --version 0.1.2 --final --dry-run)"
-printf '%s\n' "$cut_dry_run" | grep -q 'release branch: release/0.1' || {
-  echo "FAIL: cut must default to the release/0.1 maintenance line" >&2
+printf '%s\n' "$cut_dry_run" | grep -q 'trunk branch: develop' || {
+  echo "FAIL: cut must default to the trunk" >&2
+  exit 1
+}
+if printf '%s\n' "$cut_dry_run" | grep -q 'release/'; then
+  echo "FAIL: cut must not name a release/X.Y maintenance branch" >&2
+  exit 1
+fi
+printf '%s\n' "$cut_dry_run" | grep -q 'cut never edits or commits' || {
+  echo "FAIL: cut must not author a commit on a protected trunk" >&2
+  exit 1
+}
+printf '%s\n' "$cut_dry_run" | grep -q 'Would not push develop' || {
+  echo "FAIL: cut must not push the protected trunk" >&2
+  exit 1
+}
+# --push moves the tag and nothing else.
+cut_push_dry_run="$("$script" cut --version 0.1.2 --final --push --dry-run)"
+printf '%s\n' "$cut_push_dry_run" | grep -q 'Would push the tag alone' || {
+  echo "FAIL: cut --push must push the tag alone" >&2
   exit 1
 }
 

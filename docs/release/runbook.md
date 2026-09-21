@@ -9,9 +9,9 @@ export TP_VERSION=0.1.0
 export TP_TAG="v${TP_VERSION}"
 # Releases are tagged off the trunk. No release branch is cut, ever:
 # keeping a maintenance line in sync with the trunk, and patching an old
-# line while the trunk moves on, is the cost this trades away. Every
-# release command below is passed this branch explicitly, because the
-# release driver still defaults to the retired `release/X.Y` line.
+# line while the trunk moves on, is the cost this trades away. The trunk
+# is protected and moves only by merged pull request, which is why the
+# release commit below is a merged PR and `cut` only tags it.
 export TP_TRUNK_BRANCH=develop
 export TP_RELEASE_DIR="dist/release/${TP_TAG}"
 export TP_MANIFEST="${TP_RELEASE_DIR}/tensorplate-${TP_TAG}-artifacts.json"
@@ -21,13 +21,16 @@ export TP_PREFLIGHT="${TP_RELEASE_DIR}/preflight.md"
 export TP_RELEASE_NOTES="docs/release/notes/${TP_TAG}.md"
 ```
 
-The release has two separated phases:
+The release has three separated phases:
 
 1. Add or update release tooling/docs in a normal implementation PR.
-2. After that PR merges, cut and publish the release from a clean trunk
-   checkout and an annotated tag.
+2. Finalize the version surfaces in a **preparation PR** and merge it to
+   the trunk (step 3a). The trunk is protected, so the release commit can
+   only arrive this way.
+3. Cut an annotated tag on that merged trunk commit and publish from it
+   (steps 3b onward).
 
-The tooling PR is not the release.
+Neither PR is the release. The tag is.
 
 ## Required Owners
 
@@ -51,25 +54,27 @@ install docs, validation procedure, support posture, and changelog notes.
 
 ### Version surfaces
 
-The implementation PR also bumps the release version across **every** surface,
-because `prepare` does not bump them all on a finalized trunk commit: its
-`prepare_python` step clears the `-dev` suffix but leaves `CMakeLists.txt`'s
-`project(... VERSION X.Y.Z)` and the `Cargo.lock` `tensorplate-*` crate
-versions unchanged (those only carry a `-dev` form on a `develop` cut). Bump,
-by hand, all of:
+The implementation PR does **not** finalize the version surfaces. That is
+the preparation PR in step 3a, and `prepare` writes every one of them, so
+they are reviewed together, merged together, and tagged as one commit:
 
-- `CMakeLists.txt` — `project(... VERSION X.Y.Z)` (leave the protocol/bundle
-  `TP_*_VERSION_*` macros on the protocol track, e.g. `0` / `1` for `0.1`).
+- `CMakeLists.txt` — `project(... VERSION X.Y.Z)` and an empty
+  `TP_RUNTIME_VERSION_SUFFIX`. The protocol/bundle `TP_*_VERSION_*` macros
+  stay on the protocol track (e.g. `0` / `1` for `0.1`) and are never
+  derived from the runtime version.
 - `Cargo.toml` — `[workspace.package] version` and the `tensorplate-protocol`
   path-dependency version.
 - `Cargo.lock` — every `tensorplate-*` crate version (third-party crates
   untouched).
 - `vcpkg.json` — `version-string`.
 - `packaging/VERSION`.
-- `packaging/debian/changelog` — the top stanza `tensorplate (X.Y.Z-1)`.
+- `packaging/scripts/install.sh` — the installer's default version.
+- `packaging/debian/changelog` — a new top stanza `tensorplate (X.Y.Z-1)`
+  above the previous entries.
 - `CHANGELOG.md` — promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`.
-- `sdk/python/pyproject.toml` — the `.dev0` development version (cosmetic; the
-  wheel version is injected at build).
+
+`sdk/python/pyproject.toml` keeps its `.dev0` development version; no
+release step rewrites it, because the wheel version is injected at build.
 
 Also add `docs/release/notes/vX.Y.Z.md` — a **hard tag prerequisite** the
 publish path requires (`release.yml` `--notes-file`; the preflight). Its
@@ -107,7 +112,11 @@ Forbidden in the implementation PR:
 
 - Creating a release branch. Releases are tagged off the trunk; no release
   branch is cut.
-- Removing development suffixes as a final release commit.
+- Finalizing version metadata. Removing development suffixes and promoting
+  the changelog belong to the preparation PR in step 3a, which is reviewed
+  on its own and merged immediately before the tag. Carrying them in an
+  implementation PR leaves the trunk claiming a release nobody has cut, for
+  as long as it takes to cut it.
 - Creating release-candidate or final tags.
 - Publishing a GitHub Release.
 - Treating local build output as public release evidence.
@@ -151,12 +160,13 @@ The release owner stops immediately unless all prerequisites are true:
 
 The publish path is tag-driven:
 
-1. The maintainer runs `tools/release/tensorplate-release.sh cut`.
-2. With `--release-branch "${TP_TRUNK_BRANCH}"` the script switches to the
-   trunk, prepares version metadata, commits it, and creates an annotated
-   source tag there. Without that flag it falls back to the retired
-   `release/X.Y` line and creates a branch the release workflow will then
-   reject; always pass it.
+1. The version metadata for `${TP_VERSION}` is already final on the trunk,
+   put there by the merged preparation PR (step 3a).
+2. The maintainer runs `tools/release/tensorplate-release.sh cut` from a
+   refreshed trunk checkout. It verifies the checked-out commit is one
+   `origin/${TP_TRUNK_BRANCH}` already contains and that its release
+   metadata is final, then creates the annotated source tag on that exact
+   commit. It edits nothing, commits nothing, and never pushes the trunk.
 3. `.github/workflows/release.yml` builds the `.deb` packages from that
    tag, generates the manifest/checksums, and creates the GitHub Release
    with those assets attached after the tag is pushed.
@@ -227,7 +237,50 @@ CI. Normal pull-request CI should remain on GitHub-hosted runners; the
 Jetson runner is for trusted release jobs that require JetPack/CUDA/
 TensorRT on the target architecture.
 
-### 3. Cut The Release Source Tag
+### 3. Put The Release Commit On The Trunk, Then Tag It
+
+The trunk is protected: `develop` requires a pull request and the ruleset
+names no bypass actor, so nothing in this step pushes a commit to it. The
+release commit arrives the ordinary way, as a merged PR, and `cut` only
+tags what is already there.
+
+The order is load-bearing. Preparing version metadata locally and tagging
+it before that PR merged put the tag on a commit the squash merge then
+replaced with a different SHA: the tag pointed at a commit no branch
+contained, and the workflow's trunk-ancestry check (step 5) rejected it.
+
+#### 3a. Finalize the version surfaces in a preparation PR
+
+Skip to 3b when the trunk already carries final metadata for
+`${TP_VERSION}` — `prepare` is then a no-op and there is nothing to merge.
+`cut` checks this itself and stops with the remaining files named, so
+guessing wrong costs one command, not a bad tag.
+
+```bash
+git switch --create "release-prep-${TP_TAG}" "origin/${TP_TRUNK_BRANCH}"
+tools/release/tensorplate-release.sh prepare \
+  --version "${TP_VERSION}" \
+  --prep-branch "release-prep-${TP_TAG}" \
+  --execute \
+  --confirm "PREPARE-v${TP_VERSION}"
+git add -- CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json \
+  packaging/VERSION packaging/debian/changelog \
+  packaging/scripts/install.sh CHANGELOG.md
+git commit -m "Prepare ${TP_TAG} release"
+gh pr create --base "${TP_TRUNK_BRANCH}" --title "Prepare ${TP_TAG} release"
+```
+
+`prepare` refuses to touch anything outside that file list, so the PR is
+exactly the version surfaces and nothing else. Merge it under the ordinary
+review and CI rules. Squash or merge commit both work: the tag is created
+afterwards, on whatever commit the merge actually produced.
+
+#### 3b. Refresh the trunk and tag the merged commit
+
+```bash
+git switch "${TP_TRUNK_BRANCH}"
+git pull --ff-only
+```
 
 Preview the local operation:
 
@@ -261,14 +314,18 @@ tools/release/tensorplate-release.sh cut \
   --confirm "CUT-${TP_TAG}-rc.1"
 ```
 
-The script refuses dirty worktrees, existing tags, and unexpected release
-metadata edits. If `cut` made a prepare commit, push the trunk so the tag
-commit is reachable for build-only validation, but do not push the tag
-yet. When every version surface already matches the release version there
-is no prepare commit and nothing to push:
+`cut` refuses a dirty worktree, a checkout that is not on the trunk, a
+commit `origin/${TP_TRUNK_BRANCH}` does not already contain, an existing
+tag, and release metadata that is not yet final. The ancestry condition is
+the same one the publish workflow asserts in step 5, so a tag CI would
+reject is never created in the first place.
+
+Nothing is pushed here, and nothing needs to be: the preparation PR already
+moved the trunk. Record the commit the tag names — the next step builds
+from it, and it is the commit `cut` was standing on:
 
 ```bash
-git push origin "${TP_TRUNK_BRANCH}"
+git rev-parse HEAD
 ```
 
 ### 4. Build Release Assets Without Publishing
@@ -278,7 +335,22 @@ Before pushing a final tag or creating a public prerelease, run the
 
 - `tag`: `${TP_TAG}`
 - `publish`: `false`
-- `source_ref`: `${TP_TRUNK_BRANCH}`
+- `source_ref`: the tag's commit, **not** a branch name:
+
+  ```bash
+  git rev-parse "${TP_TAG}^{commit}"
+  ```
+
+A branch name moves. Dispatching on `${TP_TRUNK_BRANCH}` validates
+whatever the trunk holds when each job starts, so a PR merging mid-run
+rehearses a tree that is not the one the tag names — and the jobs resolve
+the ref independently, so two of them can build two different trees under
+one release identity. The workflow resolves `source_ref` once and hands
+every dependent job the resolved commit, and passing the tag's own commit
+makes the rehearsal build exactly what the tag will publish.
+
+Leaving `source_ref` empty checks out `${TP_TAG}` instead, which requires
+the tag to be pushed already — the opposite of what this step is for.
 
 The build-only run must:
 
@@ -484,6 +556,7 @@ Stop and mark the release blocked if any item is true:
 - Required validation gate is not pass or signed conditional-pass.
 - Required CI is unavailable or not green.
 - The trunk carries unreviewed commits at or below the tag commit.
+- The tag commit is not already contained in `origin/${TP_TRUNK_BRANCH}`.
 - Version metadata or changelog is inconsistent.
 - The final tag already exists.
 - Artifacts are missing, checksums mismatch, or manifest commit/tag data
