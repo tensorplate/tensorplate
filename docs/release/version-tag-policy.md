@@ -82,6 +82,39 @@ The implementation PR branch may run `prepare --dry-run`, manifest fixture
 checks, and documentation review. It must not create release tags, publish
 assets, or announce the release.
 
+### If the trunk can no longer deliver a patch
+
+The prohibition above is free only while the trunk and the last release are
+the same line. They are today. They stop being the same line the moment work
+for the next minor lands on `develop`: from then on, the only patch the trunk
+can publish for a shipped release is one that carries that work with it.
+
+**A maintenance branch from a shipped release's tag is permitted when that
+happens.** It is not created in advance and it is not a standing branch. The
+conditions, decided now rather than during an incident:
+
+- It branches from the tag of the release being patched, never from `develop`.
+- It carries only the fix. The same fix lands on `develop` first, or
+  simultaneously, so the trunk never regresses relative to a patch.
+- It is authorized explicitly, per release. "We might need one" does not
+  create one.
+- The release workflow's trunk-ancestry check rejects a tag from such a
+  branch by design. **Extending it to accept an authorized maintenance ref is
+  a reviewed change made at that time** — never an emergency edit, and never a
+  bypass added in advance. That gate is what stops an arbitrary commit being
+  published as an official release; a path through it that nobody has
+  exercised is worth less than no path at all.
+
+Nothing here is lost by waiting. A branch from a tag is one command, and the
+tag is immutable, so the capability exists whether or not the branch does.
+What is decided in advance is only that the answer is yes, and on what terms.
+
+Note that a maintenance branch does not reduce what a release costs to
+publish. Evidence binds to the version under test, so a patch release needs
+its own evidence for every Production row exactly as a trunk release does.
+The branch narrows what the patch contains; it does not narrow what must be
+validated before it ships.
+
 ## Tags
 
 | Tag type | Format | Rules |
