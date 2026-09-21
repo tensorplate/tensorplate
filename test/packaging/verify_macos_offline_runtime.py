@@ -19,6 +19,7 @@ Run by verify_macos_offline_runtime.sh. Four parts:
 
 import concurrent.futures
 import copy
+import importlib.util
 import errno
 import json
 import os
@@ -52,13 +53,27 @@ def passed(name):
     print(f"macOS offline runtime: {name}: pass")
 
 
-def refused(operation, fragment):
+def refused(operation, *fragments):
+    assert fragments, "a refusal has to be pinned to something"
     try:
         operation()
     except m.CheckFailed as error:
-        assert fragment in str(error), (fragment, str(error))
+        for fragment in fragments:
+            assert fragment in str(error), (fragment, str(error))
         return
-    raise AssertionError(f"not refused: expected {fragment!r}")
+    raise AssertionError(f"not refused: expected {fragments!r}")
+
+
+# The readback controls, written out here rather than read from the
+# module: the flags go into the evidence, so the set of properties the
+# stage claims to have proved is pinned independently of the module that
+# produces them. A control dropped from the module's table would stop
+# being checked and stop being published, which is exactly the shape of
+# failure these names exist to catch.
+READBACK_CONTROL_NAMES = ("unsandboxed_process_reads_unsandboxed",
+                          "sandboxed_process_reads_network_denied",
+                          "exited_process_rejected",
+                          "unreaped_exited_process_rejected")
 
 
 # --- profile -----------------------------------------------------------
@@ -372,27 +387,53 @@ def test_sandbox_readback():
         try:
             controls = with_patches({"sandbox_check": recorded},
                                     lambda: m.discrimination_controls(profile))
-            assert all(controls.values()), controls
+            # Every control is proved, and each flag is the check's own
+            # result: the evidence publishes this dict verbatim, so a
+            # control that stopped being taken must not be able to reach
+            # it as `true`. Compared against the names written out above,
+            # so dropping one from the module's table fails here.
+            assert controls == dict.fromkeys(READBACK_CONTROL_NAMES, True), controls
+            assert tuple(m.READBACK_CONTROLS) == READBACK_CONTROL_NAMES, tuple(m.READBACK_CONTROLS)
             # A primitive that reads every process as sandboxed.
             with_patches({"sandbox_check": lambda pid, op: 1},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[unsandboxed_process_reads_unsandboxed]",
                                          "unsandboxed process reads as sandboxed"))
             # One that cannot see the sandbox at all.
             with_patches({"sandbox_check": lambda pid, op: 0 if pid == os.getpid() else 0},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[sandboxed_process_reads_network_denied]",
                                          "does not read as sandboxed"))
             # An identity check that notices a reaped process but not a
             # zombie.
             with_patches({"sandbox_check": recorded,
                           "process_identity": lambda pid: (m.process_status(pid) or (None, None))[1]},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[unreaped_exited_process_rejected]",
                                          "unreaped exited process passed the identity check"))
-            # An identity check that never notices an exit.
             real_identity = m.process_identity
+
+            # An identity check that notices a zombie but not a process
+            # that has been reaped: ps lists the zombie and not the
+            # reaped pid, so this one isolates the reaped control, which
+            # the case below fails together with the unreaped one.
+            def reaped_unnoticed(pid):
+                identity = real_identity(pid)
+                if identity is not None:
+                    return identity
+                return None if m.process_status(pid) is not None else "Mon /bin/sleep"
+
+            with_patches({"sandbox_check": recorded, "process_identity": reaped_unnoticed},
+                         lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[exited_process_rejected]",
+                                         "a reaped exited process passed the identity check"))
+            # An identity check that never notices an exit at all fails
+            # both of the exit controls.
             with_patches({"sandbox_check": recorded,
                           "process_identity": lambda pid: real_identity(pid) or "Mon /bin/sleep"},
                          lambda: refused(lambda: m.discrimination_controls(profile),
-                                         "exited process passed the identity check"))
+                                         "[exited_process_rejected]",
+                                         "[unreaped_exited_process_rejected]"))
 
             live = subprocess.Popen(["sleep", "30"])
             try:
@@ -575,6 +616,25 @@ INCOMPLETE = ("pin_failed", "timeout", "child_exit_1", "child_not_run_OSError",
               "PermissionError", "ENETUNREACH", "EHOSTUNREACH", "ECONNREFUSED", None)
 
 
+def helper_with_extra_denial(name):
+    """A copy of the helper carrying one more denied operation, imported
+    under its own module name. It is how the placement rule is asked what
+    it does with a denial added later, which is the only way to tell a
+    rule that places names by hand from one that derives a placement from
+    the text of the name."""
+    source = (REPO / "tools/validation/macos_offline_runtime.py").read_text(encoding="utf-8")
+    anchor = '    "unix_mdnsresponder",\n)\n'
+    assert source.count(anchor) == 1, "DENIAL_NAMES no longer ends where this expects"
+    patched = source.replace(anchor, f'    "unix_mdnsresponder",\n    "{name}",\n)\n', 1)
+    with tempfile.TemporaryDirectory(prefix="tp-offline-denial-") as directory:
+        path = pathlib.Path(directory) / "macos_offline_runtime_extra_denial.py"
+        path.write_text(patched, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
 def test_classify():
     recorded = {}
     for variant, expected in RECORDED.items():
@@ -601,6 +661,21 @@ def test_classify():
     for name in m.DENIAL_NAMES:
         assert set(m.completed_outcomes(name)) == set(COMPLETED[name]), name
         assert final["control"][name] in COMPLETED[name], (name, final["control"][name])
+    placed = set(m.OFF_HOST_NAMES) | set(m.CONNECT_NAMES)
+    assert placed <= set(m.DENIAL_NAMES), sorted(placed - set(m.DENIAL_NAMES))
+    # Placement is by name and by hand. Asking `completed_outcomes` about
+    # a name that is not a denial answers DELIVERED whatever the rule is,
+    # so the question has to be put to a helper that really carries the
+    # extra denial: a new operation to a destination already in the
+    # loosest set -- the likely addition -- must still land in the
+    # strictest set, not inherit its neighbour's excuse, and no existing
+    # operation may move because a name was added next to it.
+    added = "udp_test_net_v4_brand_new_port"
+    extra = helper_with_extra_denial(added)
+    assert extra.DENIAL_NAMES == m.DENIAL_NAMES + (added,), extra.DENIAL_NAMES
+    assert extra.completed_outcomes(added) == extra.DELIVERED, extra.completed_outcomes(added)
+    for name in m.DENIAL_NAMES:
+        assert extra.completed_outcomes(name) == m.completed_outcomes(name), name
     # Every operation's control counts, and counts only if the operation
     # completed. EPERM outside the sandbox says something else on the
     # host refuses, which would make the sandbox's EPERM moot; anything
@@ -1106,6 +1181,14 @@ def check_clean_run(world):
     assert evidence["process_tree"] == {"processes": 3, "serving_workers": 1, "backend_sidecars": 1,
                                         "all_sandboxed_network_denied": True}, evidence["process_tree"]
     assert set(evidence["probe"]["denied"].values()) == {"EPERM"}, evidence["probe"]
+    # The probe's EPERM is only worth what its control is worth, and the
+    # artifact carries both. The control runs unsandboxed against this
+    # host, so the errno is the host's and not fixed here; what is fixed
+    # is that every denied operation is present and completed.
+    control = evidence["control"]
+    assert sorted(control) == sorted(m.DENIAL_NAMES), sorted(control)
+    for name in m.DENIAL_NAMES:
+        assert control[name] in COMPLETED[name], (name, control[name])
     assert evidence["admission"] == {"row": "macos26-m1pro-16gb", "reason": "none", "evidence": "validated"}
     assert evidence["listeners"]["loopback_only"] and evidence["restore"]["no_sandboxed_process_remains"]
     denied = [call for call in world.calls if call["tool"] == "sandbox-exec"]

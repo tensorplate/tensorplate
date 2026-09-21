@@ -64,6 +64,23 @@ brew trust --formula \
   tensorplate/tap/tensorplate-serving
 ```
 
+On each device, take the unsandboxed network control once before the
+stage needs it:
+
+```bash
+python3 tools/validation/macos_offline_runtime.py control --ports 18080,18081
+```
+
+It runs every denied operation unsandboxed and exits non-zero naming
+`control_completed:<operation>` if any of them did not complete on this
+host. The offline stage takes the same control and fails the same way, so
+running it first turns a device whose baseline falls outside the recorded
+completion sets into an answer that costs seconds rather than a stage
+setup. It touches no launchd job, no Homebrew state and no package: every
+socket is pinned to `lo0`. If a device does report an operation the sets
+do not cover, record the outcome and widen the set for that operation
+deliberately -- do not loosen the stage to get past it.
+
 Before the mutating run, add `--preflight-only` to the command below. The
 preflight writes the host, formula-pin, baseline, tap-trust, and
 offline-profile artifacts but does not alter packages, tap files, or
@@ -204,7 +221,10 @@ denied. Each read is bracketed by a check that the process is still the
 same one and has not exited, because `sandbox_check` reports an exited
 pid, reaped or not, as sandboxed. Every run first proves the readback
 tells a sandboxed process from an unsandboxed one, an exited one and an
-unreaped one. Every internet socket a TensorPlate process holds must be
+unreaped one. Each of those four results is recorded from the check that
+produced it and the run stops if any is unproved, so the flags
+`offline-runtime.json` carries report checks that ran on the device
+rather than properties the helper asserts of itself. Every internet socket a TensorPlate process holds must be
 bound to loopback: the agent's process tree, the observability service
 and any other process running a TensorPlate binary. The agent's tree
 must hold the serving listener. A socket that was never bound has no

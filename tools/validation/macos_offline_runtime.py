@@ -145,12 +145,27 @@ REFUSED = ("EPERM",)
 
 # Denied operations addressed off this host, whose sockets are pinned to
 # lo0: their control is answered by the route lookup rather than by
-# anything on the far end. Named by destination, so an operation added
-# for a new destination is placed here only deliberately.
-OFF_HOST_DESTINATIONS = ("public_v4", "metadata_link_local_v4", "test_net_v4",
-                         "documentation_v6")
-OFF_HOST_NAMES = tuple(name for name in DENIAL_NAMES
-                       if any(token in name for token in OFF_HOST_DESTINATIONS))
+# anything on the far end. Listed one name at a time rather than matched
+# against the destinations in the names: a substring rule reads a new
+# operation to a destination already listed -- the likely addition --
+# straight into this, the loosest set, which is the excuse-inheritance
+# `completed_outcomes` says cannot happen. Spelling the names out means
+# an operation added later is placed here by hand or not at all.
+OFF_HOST_NAMES = (
+    "tcp_public_v4",
+    "tcp_metadata_link_local_v4",
+    "udp_test_net_v4",
+    "udp_documentation_v6",
+    "tcp_test_net_v4_serving_port",
+    "udp_test_net_v4_serving_port",
+    "tcp_documentation_v6_serving_port",
+    "udp_documentation_v6_serving_port",
+    "tcp_test_net_v4_candidate_port",
+    "udp_test_net_v4_candidate_port",
+    "tcp_documentation_v6_candidate_port",
+    "udp_documentation_v6_candidate_port",
+    "udp_test_net_v4_from_child",
+)
 # The one denied connect to an address lo0 does route: a loopback port
 # with nothing listening on it, which the far end refuses.
 CONNECT_NAMES = ("tcp_loopback_unlisted_port",)
@@ -533,12 +548,48 @@ def read_sandbox_state(pid):
     }
 
 
+# The four properties the readback must have on this host for any
+# sandbox_check result to mean anything, and what an unproved one says.
+# `evidence()` publishes the flags `discrimination_controls` returns
+# verbatim, so each is derived there from the observation that proves it
+# and none is written down as proved: a control that stops being taken
+# reads False and fails the stage, rather than publishing a measured-
+# looking `true` for a check nobody ran.
+READBACK_CONTROLS = {
+    "unsandboxed_process_reads_unsandboxed":
+        "this unsandboxed process reads as sandboxed",
+    "sandboxed_process_reads_network_denied":
+        "a process started under the profile does not read as sandboxed with the network denied",
+    "exited_process_rejected":
+        "a reaped exited process passed the identity check",
+    "unreaped_exited_process_rejected":
+        "an unreaped exited process passed the identity check",
+}
+
+
+def readback_rejects(pid):
+    """Whether the readback refuses to report on `pid` because the process
+    it named is gone. The answer is the observation itself, so a control
+    derived from it cannot report a check that was not made."""
+    try:
+        read_sandbox_state(pid)
+    except ProcessGone:
+        return True
+    return False
+
+
 def discrimination_controls(profile_path, attempts=100):
     """Prove, on this host and now, that the readback tells sandboxed from
     unsandboxed processes and rejects a process that has exited, whether
-    or not its parent has reaped it yet."""
-    if any(read_sandbox_state(os.getpid()).values()):
-        raise CheckFailed("readback control: this unsandboxed process reads as sandboxed")
+    or not its parent has reaped it yet.
+
+    Each flag starts False and is assigned the result of the check that
+    proves it, so deleting or weakening a check leaves its flag False
+    rather than leaving a `True` behind; anything still unproved at the
+    end fails here, before the stage can carry it into the evidence."""
+    proved = dict.fromkeys(READBACK_CONTROLS, False)
+    proved["unsandboxed_process_reads_unsandboxed"] = \
+        not any(read_sandbox_state(os.getpid()).values())
     exited = subprocess.Popen(["/usr/bin/true"])
     try:
         # Not reaped until the finally clause: ps lists it as a zombie.
@@ -549,12 +600,7 @@ def discrimination_controls(profile_path, attempts=100):
             time.sleep(0.05)
         else:
             raise CheckFailed("readback control: the exited process never showed as a zombie")
-        try:
-            read_sandbox_state(exited.pid)
-        except ProcessGone:
-            pass
-        else:
-            raise CheckFailed("readback control: an unreaped exited process passed the identity check")
+        proved["unreaped_exited_process_rejected"] = readback_rejects(exited.pid)
     finally:
         exited.wait()
     sleeper = subprocess.Popen(["sandbox-exec", "-f", profile_path, "/bin/sleep", "60"],
@@ -569,26 +615,20 @@ def discrimination_controls(profile_path, attempts=100):
             time.sleep(0.05)
         else:
             raise CheckFailed("readback control: the sandboxed sleeper never started")
-        if not all(read_sandbox_state(sleeper.pid).values()):
-            raise CheckFailed(
-                "readback control: a process started under the profile does not read as "
-                "sandboxed with the network denied"
-            )
+        proved["sandboxed_process_reads_network_denied"] = \
+            all(read_sandbox_state(sleeper.pid).values())
     finally:
         sleeper.kill()
         sleeper.wait()
-    try:
-        read_sandbox_state(sleeper.pid)
-    except ProcessGone:
-        pass
-    else:
-        raise CheckFailed("readback control: a reaped exited process passed the identity check")
-    return {
-        "unsandboxed_process_reads_unsandboxed": True,
-        "sandboxed_process_reads_network_denied": True,
-        "exited_process_rejected": True,
-        "unreaped_exited_process_rejected": True,
-    }
+    proved["exited_process_rejected"] = readback_rejects(sleeper.pid)
+    # Named in brackets so a test or an operator can tell
+    # `exited_process_rejected` from `unreaped_exited_process_rejected`,
+    # one of which reads as a substring of the other.
+    unproved = [name for name in READBACK_CONTROLS if not proved[name]]
+    if unproved:
+        raise CheckFailed("readback control not proved: " + "; ".join(
+            f"[{name}] {READBACK_CONTROLS[name]}" for name in unproved))
+    return proved
 
 
 def _read_states(required_pids, optional_pids, expect):

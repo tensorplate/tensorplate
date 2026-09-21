@@ -702,8 +702,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   it, and three completions are recognized per operation: a send, bind or
   listen that returned; the loopback connect the far end refused; and,
   for the destinations pinned to `lo0`, `ENETUNREACH` or `EHOSTUNREACH`.
-  Each denied operation is placed in one of those sets by destination,
-  and a denial added later that nothing places falls to the strictest
+  Each denied operation is placed in one of those sets by name, spelled
+  out one at a time rather than matched against the destination in the
+  name: a substring rule reads a new operation to a destination already
+  listed -- the likely addition -- straight into the loosest set on its
+  own. A denial added later that nothing places falls to the strictest
   set, so it has to be placed deliberately instead of inheriting an
   excuse from a neighbour.
 
@@ -720,6 +723,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   failure each names. A stage case runs the harness with a control child
   that exits without sending and requires the stage to fail at the
   control, before anything is denied.
+
+- The macOS offline-runtime evidence no longer reports readback controls
+  that were not measured. Before reading whether a process is sandboxed,
+  the stage proves on the host that the readback tells a sandboxed
+  process from an unsandboxed one and rejects a process that has exited,
+  reaped or not. Those four proofs raised on failure but returned four
+  hardcoded `true` literals, and `offline-runtime.json` published the
+  literals, so the artifact reported four measurements whatever the
+  checks had done -- and one of the four could be deleted outright with
+  the verifier staying green, because nothing exercised it. Each flag is
+  now the result of the check that proves it and starts false, anything
+  still unproved fails the stage by name before it can reach the
+  evidence, and `verify_macos_offline_runtime.sh` drives each of the four
+  to failure on its own.
 
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
