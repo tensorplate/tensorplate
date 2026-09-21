@@ -24,6 +24,9 @@ CARGO_BIN="${TP_JETSON_RUNNER_CARGO_BIN:-/home/${RUNNER_USER}/.cargo/bin}"
 APT_GET="${TP_JETSON_RUNNER_APT_GET:-/usr/bin/apt-get}"
 INSTALL="${TP_JETSON_RUNNER_INSTALL:-/usr/bin/install}"
 VISUDO="${TP_JETSON_RUNNER_VISUDO:-/usr/sbin/visudo}"
+TIMEOUT_BIN="${TP_JETSON_RUNNER_TIMEOUT:-/usr/bin/timeout}"
+DPKG_BIN="${TP_JETSON_RUNNER_DPKG:-/usr/bin/dpkg}"
+APT_WRAPPER="${TP_JETSON_RUNNER_APT_WRAPPER:-/usr/local/sbin/tensorplate-apt}"
 
 usage() {
   cat <<EOF
@@ -103,17 +106,76 @@ ensure_runner_path() {
   fi
 }
 
+# The runner needs apt under a hard time bound, and the bound has to be
+# apt's direct parent -- `timeout N sudo apt-get` signals sudo, which does
+# not pass it on. Granting `timeout` would solve that and hand the runner
+# account a root shell: `sudo timeout 1 /bin/sh`. So the bound moves into a
+# root-owned wrapper and the grant names the wrapper, which is both narrower
+# than the old `apt-get` grant and the only path that needs to exist.
+write_apt_wrapper() {
+  local tmp
+  [[ -x "$TIMEOUT_BIN" ]] || die "timeout not found at $TIMEOUT_BIN"
+  [[ -x "$APT_GET" ]] || die "apt-get not found at $APT_GET"
+  [[ -x "$DPKG_BIN" ]] || die "dpkg not found at $DPKG_BIN"
+
+  tmp="$(mktemp)"
+  cat >"$tmp" <<WRAPPER
+#!/bin/sh
+# Managed by TensorPlate jetson-runner-control.sh. Do not edit; \`off\`
+# removes it and \`on\` rewrites it.
+#
+# Usage: tensorplate-apt <bound-seconds> <apt-get argument>...
+#        tensorplate-apt configure-pending
+#
+# Exists so the runner account can run a time-bounded apt without holding
+# NOPASSWD on \`timeout\`, which would be equivalent to unrestricted root.
+set -eu
+
+if [ "\${1:-}" = "configure-pending" ]; then
+  [ "\$#" -eq 1 ] || { echo "tensorplate-apt: configure-pending takes no arguments" >&2; exit 64; }
+  exec "$DPKG_BIN" --configure -a
+fi
+
+bound="\${1:-}"
+case "\$bound" in
+  ''|*[!0-9]*) echo "tensorplate-apt: first argument must be a bound in seconds" >&2; exit 64 ;;
+esac
+shift
+
+# Only the subcommands the release path uses. A wrapper that forwards any
+# apt-get verb would re-admit \`apt-get source\` and friends as root.
+case "\${1:-}" in
+  update|install) ;;
+  *) echo "tensorplate-apt: refusing apt-get '\${1:-}'" >&2; exit 64 ;;
+esac
+
+exec "$TIMEOUT_BIN" -k 30 "\$bound" "$APT_GET" "\$@"
+WRAPPER
+  "$INSTALL" -m 0755 -o root -g root "$tmp" "$APT_WRAPPER" || {
+    rm -f "$tmp"
+    return 1
+  }
+  rm -f "$tmp"
+  note "installed bounded apt wrapper at ${APT_WRAPPER}"
+}
+
+remove_apt_wrapper() {
+  rm -f "$APT_WRAPPER"
+}
+
 write_sudoers() {
   local tmp
   [[ -x "$VISUDO" ]] || die "visudo not found at $VISUDO"
-  [[ -x "$APT_GET" ]] || die "apt-get not found at $APT_GET"
   [[ -x "$INSTALL" ]] || die "install not found at $INSTALL"
+  [[ -x "$APT_WRAPPER" ]] || die "apt wrapper not found at $APT_WRAPPER"
 
   tmp="$(mktemp)"
   {
     printf '# Managed by TensorPlate jetson-runner-control.sh\n'
     printf '# Temporary release-build allowance for the Jetson self-hosted runner.\n'
-    printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$RUNNER_USER" "$APT_GET" "$INSTALL"
+    printf '# The wrapper replaces a bare apt-get grant: it bounds apt in time as\n'
+    printf '# root and accepts only the subcommands the release path uses.\n'
+    printf '%s ALL=(root) NOPASSWD: %s, %s\n' "$RUNNER_USER" "$APT_WRAPPER" "$INSTALL"
   } >"$tmp"
   "$VISUDO" -cf "$tmp" >/dev/null || {
     rm -f "$tmp"
@@ -136,6 +198,7 @@ cmd_on() {
   ensure_runner_configured
   install_service_if_needed
   ensure_runner_path
+  write_apt_wrapper
   write_sudoers
   note "starting ${RUNNER_SERVICE}"
   systemctl enable --now "$RUNNER_SERVICE"
@@ -152,6 +215,7 @@ cmd_off() {
     note "runner service is not installed: ${RUNNER_SERVICE}"
   fi
   remove_sudoers
+  remove_apt_wrapper
   cmd_status
 }
 

@@ -257,11 +257,19 @@ sudo tools/release/jetson-runner-control.sh on
 
 After the build-only or publish workflow finishes, turn the runner back
 off. This stops and disables the systemd service and removes the temporary
-release sudoers allowance for the `gha-runner` account:
+release sudoers allowance for the `gha-runner` account, and the bounded
+apt wrapper that allowance names:
 
 ```bash
 sudo tools/release/jetson-runner-control.sh off
 ```
+
+`on` installs `/usr/local/sbin/tensorplate-apt`, a root-owned wrapper that
+runs apt under a hard time bound, and grants the runner account `NOPASSWD`
+on that path and `install` -- not on `apt-get` itself, and deliberately not
+on `timeout`, which would be a root shell. **Re-run `off` then `on` after
+updating this checkout** if the wrapper or the allowance changed, or the
+runner keeps whatever the last `on` installed.
 
 Do not leave this persistent self-hosted runner online for general OSS PR
 CI. Normal pull-request CI should remain on GitHub-hosted runners; the

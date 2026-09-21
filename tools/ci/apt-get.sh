@@ -33,6 +33,10 @@ readonly ATTEMPTS="${APT_ATTEMPTS:-3}"
 
 # Overridable so the behaviour can be exercised without root or a network.
 readonly APT_GET="${APT_GET_BIN:-apt-get}"
+# Installed by tools/release/jetson-runner-control.sh on the self-hosted
+# release runner, whose sudoers grant names it instead of apt-get. Absent
+# everywhere else, where sudo is unrestricted and the bound is applied here.
+readonly APT_WRAPPER="${APT_WRAPPER_BIN:-/usr/local/sbin/tensorplate-apt}"
 
 # Nothing to elevate when already root. The packaging rehearsal runs that
 # way, and a container with no sudo installed is a normal place to run it,
@@ -70,7 +74,15 @@ while true; do
   status=0
   # `-k 30`: if apt ignores SIGTERM (mid-dpkg, say), SIGKILL follows. With
   # timeout as apt's direct parent both signals reach apt itself.
-  ${privileged[@]+"${privileged[@]}"} timeout -k 30 "$BOUND_SECONDS" "$APT_GET" "$@" || status=$?
+  if ((${#privileged[@]})) && [ -x "$APT_WRAPPER" ]; then
+    # A constrained runner: the bound lives inside a root-owned wrapper, so
+    # the account needs NOPASSWD on that one path rather than on `timeout`,
+    # which would be a root shell. The wrapper applies the same
+    # `timeout -k 30` with apt as its direct child.
+    "${privileged[@]}" "$APT_WRAPPER" "$BOUND_SECONDS" "$@" || status=$?
+  else
+    ${privileged[@]+"${privileged[@]}"} timeout -k 30 "$BOUND_SECONDS" "$APT_GET" "$@" || status=$?
+  fi
 
   if (( status == 0 )); then
     exit 0
@@ -90,7 +102,11 @@ while true; do
   # A bound that fires mid-unpack leaves dpkg needing a hand before the
   # next attempt can do anything. Advisory: it fails harmlessly when there
   # is nothing interrupted to configure.
-  ${privileged[@]+"${privileged[@]}"} dpkg --configure -a || true
+  if ((${#privileged[@]})) && [ -x "$APT_WRAPPER" ]; then
+    "${privileged[@]}" "$APT_WRAPPER" configure-pending || true
+  else
+    ${privileged[@]+"${privileged[@]}"} dpkg --configure -a || true
+  fi
 
   sleep $(( attempt * 10 ))
   attempt=$(( attempt + 1 ))
