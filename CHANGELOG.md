@@ -736,7 +736,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   now the result of the check that proves it and starts false, anything
   still unproved fails the stage by name before it can reach the
   evidence, and `verify_macos_offline_runtime.sh` drives each of the four
-  to failure on its own.
+  to failure on its own. The verifier also checks all four as the
+  published `offline-runtime.json` carries them (and, on macOS,
+  `offline-profile.json`), not only as the helper returns them: the
+  artifact could otherwise drop the flags with every check still green.
 
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole

@@ -1189,6 +1189,13 @@ def check_clean_run(world):
     assert sorted(control) == sorted(m.DENIAL_NAMES), sorted(control)
     for name in m.DENIAL_NAMES:
         assert control[name] in COMPLETED[name], (name, control[name])
+    # The readback flags as the artifact publishes them, not as
+    # `discrimination_controls` returned them: a flag proved and then
+    # dropped on the way into offline-runtime.json is a claim nobody
+    # reading the evidence gets. Pinned against the names written out
+    # above, so a smaller set or a false flag is red here.
+    assert evidence["readback_controls"] == dict.fromkeys(READBACK_CONTROL_NAMES, True), \
+        evidence["readback_controls"]
     assert evidence["admission"] == {"row": "macos26-m1pro-16gb", "reason": "none", "evidence": "validated"}
     assert evidence["listeners"]["loopback_only"] and evidence["restore"]["no_sandboxed_process_remains"]
     denied = [call for call in world.calls if call["tool"] == "sandbox-exec"]
@@ -1795,9 +1802,18 @@ def test_darwin():
         print("macOS offline runtime: real sandbox-exec preflight: skipped (not macOS or no sandbox-exec)")
         return
     with tempfile.TemporaryDirectory(prefix="tp-offline-darwin-") as directory:
-        result, failures = m.preflight(os.path.join(directory, "final"))
-        assert failures == [], (failures, result)
-        assert all(result["readback_controls"].values())
+        # Through the subcommand the harness runs, read back from the file
+        # it writes: offline-profile.json is the evidence, so the readback
+        # flags are pinned there rather than on the function's return. A
+        # failed check exits non-zero and writes nothing.
+        out = pathlib.Path(directory) / "offline-profile.json"
+        run = subprocess.run([sys.executable, str(REPO / "tools/validation/macos_offline_runtime.py"),
+                              "preflight", "--work-dir", os.path.join(directory, "final"),
+                              "--out", str(out)], capture_output=True, text=True, timeout=600)
+        assert run.returncode == 0, (run.returncode, run.stderr[-2000:], run.stdout[-2000:])
+        published = json.loads(out.read_text())
+        assert published["readback_controls"] == dict.fromkeys(READBACK_CONTROL_NAMES, True), \
+            published["readback_controls"]
         for variant, render in MUTANT_PROFILES.items():
             result, failures = m.preflight(os.path.join(directory, variant), render=render)
             assert failures == RECORDED[variant], (variant, failures, result["probe"])
