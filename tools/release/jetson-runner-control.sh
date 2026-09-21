@@ -131,6 +131,12 @@ write_apt_wrapper() {
 # NOPASSWD on \`timeout\`, which would be equivalent to unrestricted root.
 set -eu
 
+if [ "\${1:-}" = "probe" ]; then
+  # Reachable only if the sudoers grant permits this path. \`status\` uses it
+  # instead of inferring the grant from a binary that is no longer in it.
+  exit 0
+fi
+
 if [ "\${1:-}" = "configure-pending" ]; then
   [ "\$#" -eq 1 ] || { echo "tensorplate-apt: configure-pending takes no arguments" >&2; exit 64; }
   exec "$DPKG_BIN" --configure -a
@@ -225,10 +231,19 @@ print_sudoers_status() {
     if [[ "${EUID}" -eq 0 ]]; then
       "$VISUDO" -cf "$SUDOERS_FILE" >/dev/null &&
         printf 'sudoers_valid: yes\n'
-      if sudo -u "$RUNNER_USER" sudo -n "$APT_GET" --version >/dev/null 2>&1; then
-        printf 'runner_can_sudo_apt_get: yes\n'
+      # The grant names the wrapper, not apt-get: a bare apt-get grant let
+      # the runner run every apt subcommand as root, and `timeout` could not
+      # be granted at all without handing it a root shell. Probing apt-get
+      # here would report `no` on a correctly provisioned runner.
+      if sudo -u "$RUNNER_USER" sudo -n "$APT_WRAPPER" probe >/dev/null 2>&1; then
+        printf 'runner_can_sudo_apt_wrapper: yes\n'
       else
-        printf 'runner_can_sudo_apt_get: no\n'
+        printf 'runner_can_sudo_apt_wrapper: no\n'
+      fi
+      if [[ -x "$APT_WRAPPER" ]]; then
+        printf 'apt_wrapper: present (%s)\n' "$APT_WRAPPER"
+      else
+        printf 'apt_wrapper: ABSENT (%s) -- run off then on from a current checkout\n' "$APT_WRAPPER"
       fi
       if sudo -u "$RUNNER_USER" sudo -n "$INSTALL" --version >/dev/null 2>&1; then
         printf 'runner_can_sudo_install: yes\n'
