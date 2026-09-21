@@ -8,6 +8,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- `jetson-runner-control.sh status` reports the grant the runner actually
+  has. It probed whether the runner account could `sudo apt-get`, which the
+  previous change deliberately removed from the allowance, so a correctly
+  provisioned runner printed `runner_can_sudo_apt_get: no` -- the right state
+  wearing the shape of a failure -- and nothing reported on the wrapper that
+  replaced it. Status now runs a `probe` mode through the wrapper, which is
+  reachable only if the sudoers grant permits that path, and says plainly
+  whether the wrapper is installed at all. An absent wrapper names the
+  remedy, because the way to get one is to re-run `off` and `on` from a
+  checkout new enough to contain it -- which is exactly the mistake that
+  cost two release-workflow runs.
+
 - The self-hosted Jetson release job no longer elevates binaries the runner
   is not allowed to run. Two separate steps did: the apt drop-in was written
   with `sudo tee`, and `tools/ci/apt-get.sh` ran `sudo timeout ... apt-get`
