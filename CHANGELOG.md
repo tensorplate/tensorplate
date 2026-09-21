@@ -6,6 +6,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow's amd64 package-closure assertion no longer fails on a
+  package that is correct. `dpkg-deb -c "$deb" | grep -q PATH` exits at the
+  first match, closing the pipe while dpkg-deb's tar still has entries to
+  write; tar dies on SIGPIPE, and under `set -o pipefail` that becomes the
+  pipeline's status even though the match succeeded. The step then reported
+  `tensorplate-serving amd64 package does not ship
+  /usr/lib/tensorplate/tensorplate-serving` and printed, directly beneath it,
+  a listing containing that file. It failed the `v0.2.1-rc.1` build, where the
+  package was correct and every downstream publish job was skipped.
+
+  Both copies of the check now match against a here-string, which has no
+  producer process to signal. Capturing the listing into a variable is not
+  sufficient on its own: piping that variable back into `grep -q` recreates
+  the identical race with the shell as the producer, which is worth stating
+  because it is the obvious fix and it does not work.
+  `test/packaging/verify_arch_package_set.sh` carried the same pipeline and is
+  fixed with it; it had not fired only because its stub-built archive is small
+  enough that tar finishes writing before grep exits.
+
 ## [0.2.1] - 2026-09-21
 
 ### Added

@@ -433,16 +433,30 @@ jobs:
           # from the package alone, with no source-tree fallback. Installing
           # and running it needs a real root and is part of the hardware gate.
           serving="$(echo dist/amd64/tensorplate-serving_*_amd64.deb)"
-          dpkg-deb -c "$serving" | grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' || {
+          # Read the listing into a variable before matching it. `grep -q`
+          # exits at the first match, which closes the pipe while dpkg-deb's
+          # tar still has entries to write; tar then dies on SIGPIPE, and
+          # under `pipefail` that failure becomes the pipeline's status even
+          # though the match succeeded -- the assertion then reports the file
+          # missing and prints a listing containing it. Capturing into a
+          # variable is not enough on its own: piping the variable back into
+          # `grep -q` recreates the same race with the shell as the producer.
+          # A here-string has no producer process to signal.
+          serving_contents="$(dpkg-deb -c "$serving")"
+          grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' \
+            <<<"$serving_contents" || {
             echo "::error::tensorplate-serving amd64 package does not ship /usr/lib/tensorplate/tensorplate-serving"
-            dpkg-deb -c "$serving"
+            printf '%s\n' "$serving_contents"
             exit 1
           }
           # The staged binary must be an x86-64 ELF, not an arm64 one that
-          # leaked in from a stale build directory.
-          file build/release/tensorplate-serving | grep -q 'x86-64' || {
+          # leaked in from a stale build directory. Captured first for the
+          # same reason, so the check cannot fail on a producer that outlives
+          # the match.
+          staged_kind="$(file build/release/tensorplate-serving)"
+          grep -q 'x86-64' <<<"$staged_kind" || {
             echo "::error::staged serving worker is not an x86-64 binary"
-            file build/release/tensorplate-serving
+            printf '%s\n' "$staged_kind"
             exit 1
           }
           # The metapackage must stay an empty dependency bundle on this
