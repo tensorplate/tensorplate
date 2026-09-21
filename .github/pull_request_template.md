@@ -40,8 +40,8 @@ Linked issue: #
 ## Release Impact
 
 - [ ] This PR is not a release operation.
-- [ ] This PR updates release tooling or docs only and does not create a release branch, final tag, or GitHub Release.
-- [ ] This PR is a release-branch/hotfix PR and includes release-script preflight, artifact manifest, checksum, sign-off, and validation evidence.
+- [ ] This PR updates release tooling or docs only and does not create a release commit, final tag, or GitHub Release.
+- [ ] This PR is a release or hotfix PR onto the trunk and includes release-script preflight, artifact manifest, checksum, sign-off, and validation evidence.
 
 ExecutionSession/interface justification, if applicable:
 

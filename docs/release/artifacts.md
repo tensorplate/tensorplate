@@ -141,10 +141,19 @@ Generate manifest and checksums:
 tools/release/tensorplate-release.sh manifest \
   --version "${TP_VERSION}" \
   --tag "${TP_TAG}" \
+  --release-branch develop \
   --artifacts-dir "${TP_RELEASE_DIR}" \
   --manifest "${TP_MANIFEST}" \
   --checksums "${TP_CHECKSUMS}"
 ```
+
+`--release-branch` is what lands in the manifest's `release.branch` field,
+which is covered by `SHA256SUMS` and the cosign signature over it. It is a
+signed claim about where the assets came from, so it must name the ref they
+were actually built from. It defaults to the trunk, `develop`, which is what
+a published tag earns — the release workflow verifies the tag descends from
+the trunk before it publishes. A build-only rehearsal from some other ref
+records that ref instead.
 
 For a release candidate, keep `--version` canonical: for example,
 `--version 0.2.1 --tag v0.2.1-rc.1`. The driver derives Debian version
@@ -164,7 +173,7 @@ The manifest is JSON with this stable shape:
     "version": "X.Y.Z",
     "tag": "vX.Y.Z",
     "commit": "<git-sha>",
-    "branch": "release/X.Y",
+    "branch": "develop",
     "generated_at_utc": "YYYY-MM-DDTHH:MM:SSZ"
   },
   "target": {
@@ -282,8 +291,13 @@ use `--allow-unsigned`. Consumers verify with `cosign verify-blob` and
 
 ## GitHub Release Attachment Procedure
 
-1. Cut the local annotated source tag with `tools/release/tensorplate-release.sh cut`.
-2. Push only the reviewed release branch.
+1. Merge the version-surface preparation PR to the trunk, then cut the
+   local annotated source tag on the merged commit with
+   `tools/release/tensorplate-release.sh cut --release-branch develop`.
+   Releases are tagged off the trunk; no release branch is cut, and `cut`
+   itself commits nothing.
+2. Nothing to push at this point. The trunk already contains the tag
+   commit, and it is protected: it moves only by merged pull request.
 3. For pre-publication validation, run the `Release` workflow manually
    with `publish=false`. It builds all `.deb` packages, copies
    `install.sh`, generates the manifest and `SHA256SUMS`, uploads the
@@ -320,7 +334,7 @@ tools/release/tensorplate-release.sh publish \
   --artifacts-dir "${TP_RELEASE_DIR}" \
   --manifest "${TP_MANIFEST}" \
   --checksums "${TP_CHECKSUMS}" \
-  --release-notes "docs/release/notes/${TP_TAG}.md" \
+  --release-notes "${TP_RELEASE_NOTES}" \
   --dry-run
 ```
 

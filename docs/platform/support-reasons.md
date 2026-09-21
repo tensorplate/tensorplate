@@ -26,7 +26,7 @@ an engineer who greps another are looking at the same fact.
 | `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
 | `telemetry_degraded` | In a supplied collector snapshot, a telemetry source expected on the matched row fails or omits its result. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source degrades status and is recorded without blocking. A signal the row declares `not_applicable` was never asked for and cannot produce this. Live non-memory collectors remain part of hardware validation; their absence from the ordinary startup path is not synthesized as either success or failure. |
 | `row_planned_not_validated` | The machine matches a Planned row exactly: named, carrying no validation evidence. |
-| `unsupported_accelerator_topology` | The detected accelerator count is not one. Every supported accelerator row is single-device, so a readable multi-device host is refused before SKU comparison; a supported card installed twice does not inherit its single-device row's validation. |
+| `unsupported_accelerator_topology` | The detected accelerator set is heterogeneous, or its device count matches no row that otherwise fits the host and SKU. Rows declare an exact `device_count` and the registry carries multi-device rows, so this is a count miss against the registry rather than a refusal of every multi-device host; a supported card installed in a count no row names does not inherit that row's validation. |
 
 ## Boundaries that are easy to blur
 
@@ -65,9 +65,9 @@ nonempty `nvidia-smi` device row must parse before the host can receive a
 topology verdict. A malformed row, unusable product name, or unknown MIG
 state on any device remains an interpretation failure, not evidence of a
 broken driver. For a fully parsed answer, MIG enabled on any device takes
-precedence over the count-based refusal. Otherwise, more than one device
-reports `unsupported_accelerator_topology`; the release does not select a
-supported subset of those devices.
+precedence over the count-based refusal. Otherwise a device count that
+matches no row reports `unsupported_accelerator_topology`; the release does
+not select a supported subset of those devices to fit a smaller row.
 
 **An absent sensor is not a failed one, and its explanation is a row
 fact.** A row that declares a signal `not_applicable` carries free text

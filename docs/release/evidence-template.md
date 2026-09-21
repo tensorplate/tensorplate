@@ -8,7 +8,7 @@ announcement.
 
 ```text
 Release: vX.Y.Z
-Release branch: release/X.Y
+Release branch: develop (releases are tagged off the trunk)
 Release commit: TODO
 Final tag: vX.Y.Z
 Tag object: TODO

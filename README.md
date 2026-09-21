@@ -170,7 +170,7 @@ Package owners, allowed dependencies, and review gates: [docs/architecture/owner
 
 ## Contributing
 
-Issues are organized as **Epic → Feature → Task**, plus **Bug** for regressions and contract violations. Branches are named after issues (`git checkout -b issue-##`). Pull requests should link an issue, cover acceptance criteria, include test evidence, and note changelog impact. Release branches use the per-minor `release/X.Y` maintenance line; final tags are annotated `vX.Y.Z` and are never retagged ([policy](docs/release/version-tag-policy.md)).
+Issues are organized as **Epic → Feature → Task**, plus **Bug** for regressions and contract violations. Branches are named after issues (`git checkout -b issue-##`). Pull requests should link an issue, cover acceptance criteria, include test evidence, and note changelog impact. Releases are tagged off the trunk; no release branch is cut. Final tags are annotated `vX.Y.Z` and are never retagged ([policy](docs/release/version-tag-policy.md)).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution contract.
 

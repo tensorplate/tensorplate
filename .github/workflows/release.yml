@@ -16,7 +16,7 @@ on:
         default: true
         type: boolean
       source_ref:
-        description: 'Optional source ref for build-only validation, for example release/0.1. Publish mode always uses the tag.'
+        description: 'Optional source ref for build-only validation. Pass the commit the tag names, not a moving branch. Publish mode always uses the tag.'
         required: false
         type: string
 
@@ -49,9 +49,10 @@ jobs:
       checksums: ${{ steps.meta.outputs.checksums }}
       bundle: ${{ steps.meta.outputs.bundle }}
       notes: ${{ steps.meta.outputs.notes }}
-      release_branch: ${{ steps.meta.outputs.release_branch }}
+      trunk_branch: ${{ steps.meta.outputs.trunk_branch }}
       publish: ${{ steps.meta.outputs.publish }}
-      checkout_ref: ${{ steps.meta.outputs.checkout_ref }}
+      checkout_ref: ${{ steps.source.outputs.checkout_ref }}
+      source_label: ${{ steps.source.outputs.source_label }}
 
     steps:
       - name: Resolve release metadata
@@ -115,6 +116,12 @@ jobs:
             exit 1
           fi
           release_dir="dist/release/${tag}"
+          # Releases are tagged off the trunk; no release branch is cut.
+          # Keeping a maintenance line in sync with the trunk, and
+          # patching an old one while the trunk moves on, is the cost
+          # this trades away. The tag must still descend from the trunk,
+          # which is what the verify step below asserts.
+          trunk_branch="develop"
           {
             echo "tag=${tag}"
             echo "version=${version}"
@@ -127,9 +134,66 @@ jobs:
             echo "checksums=${release_dir}/SHA256SUMS"
             echo "bundle=${release_dir}/SHA256SUMS.cosign.bundle"
             echo "notes=docs/release/notes/v${version}.md"
-            echo "release_branch=release/${version%.*}"
+            echo "trunk_branch=${trunk_branch}"
             echo "publish=${publish}"
             echo "checkout_ref=${checkout_ref}"
+          } >>"$GITHUB_OUTPUT"
+
+      # Every dependent job checks out one value, resolved once, here. A
+      # branch name is not that value: each job resolves it independently
+      # when it starts, so a merge landing mid-run can hand two jobs two
+      # different trees under one release identity.
+      #
+      # Publication keeps the tag ref itself. The annotated-tag and
+      # trunk-ancestry checks below are assertions about the tag object,
+      # and the tag is immutable by policy, so there is nothing to pin.
+      - name: Pin the source ref to one commit
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PUBLISH: ${{ steps.meta.outputs.publish }}
+          TRUNK_BRANCH: ${{ steps.meta.outputs.trunk_branch }}
+          REQUESTED_REF: ${{ steps.meta.outputs.checkout_ref }}
+        run: |
+          set -Eeuo pipefail
+          # The manifest's release.branch is a published, cosign-covered
+          # provenance claim. On the publish path the tag is verified to
+          # descend from the trunk, so the trunk is the label it earns.
+          if [[ "$PUBLISH" == "true" ]]; then
+            {
+              echo "checkout_ref=${REQUESTED_REF}"
+              echo "source_label=${TRUNK_BRANCH}"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A build-only dispatch builds whatever ref it was given, which
+          # may be an unmerged branch. Labelling those artifacts with the
+          # trunk would claim a provenance they do not have, so record the
+          # ref this run actually built.
+          if [[ "$REQUESTED_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            commit="$REQUESTED_REF"
+          else
+            # source_ref is the one dispatch input with no shape check of
+            # its own (the tag input is regex-checked above), and it is
+            # about to become a path segment in an API call. Constrain it
+            # to ref characters and reject `..` before it gets there, so
+            # the sibling comment above stays true of every input.
+            if [[ ! "$REQUESTED_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ || "$REQUESTED_REF" == *..* ]]; then
+              echo "::error::source_ref must be a branch, tag, or commit ref; got '${REQUESTED_REF}'"
+              exit 1
+            fi
+            commit="$(gh api "repos/${REPOSITORY}/commits/${REQUESTED_REF}" --jq '.sha')"
+          fi
+          if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::could not resolve source ref ${REQUESTED_REF} to a commit"
+            exit 1
+          fi
+          printf 'build-only source %s pinned to %s\n' "$REQUESTED_REF" "$commit"
+          {
+            echo "checkout_ref=${commit}"
+            echo "source_label=${REQUESTED_REF}"
           } >>"$GITHUB_OUTPUT"
 
   evidence_gate:
@@ -504,12 +568,12 @@ jobs:
           apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
             echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
 
-      - name: Verify annotated tag and release branch
+      - name: Verify annotated tag and trunk ancestry
         if: ${{ needs.meta.outputs.publish == 'true' }}
         shell: bash
         env:
           TAG: ${{ needs.meta.outputs.tag }}
-          RELEASE_BRANCH: ${{ needs.meta.outputs.release_branch }}
+          TRUNK_BRANCH: ${{ needs.meta.outputs.trunk_branch }}
         run: |
           set -Eeuo pipefail
           if [[ "$(git cat-file -t "$TAG" 2>/dev/null || true)" != "tag" ]]; then
@@ -517,9 +581,9 @@ jobs:
             exit 1
           fi
           tag_commit="$(git rev-list -n 1 "$TAG")"
-          git fetch origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
-          if ! git merge-base --is-ancestor "$tag_commit" "origin/${RELEASE_BRANCH}"; then
-            echo "::error::$TAG does not point at ${RELEASE_BRANCH}"
+          git fetch origin "+refs/heads/${TRUNK_BRANCH}:refs/remotes/origin/${TRUNK_BRANCH}"
+          if ! git merge-base --is-ancestor "$tag_commit" "origin/${TRUNK_BRANCH}"; then
+            echo "::error::$TAG is not an ancestor of ${TRUNK_BRANCH}; releases are tagged off the trunk"
             exit 1
           fi
 
@@ -585,14 +649,23 @@ jobs:
           MANIFEST: ${{ needs.meta.outputs.manifest }}
           CHECKSUMS: ${{ needs.meta.outputs.checksums }}
           PUBLISH: ${{ needs.meta.outputs.publish }}
+          SOURCE_LABEL: ${{ needs.meta.outputs.source_label }}
         run: |
           set -Eeuo pipefail
+          # The manifest's release.branch is a published, cosign-covered
+          # claim. This job checks out a tag or a pinned commit, so HEAD is
+          # detached and the builder would otherwise record its own default.
+          # The meta job resolved what this run is entitled to say: the
+          # trunk when publishing a tag verified to descend from it, and the
+          # ref actually built when this is a build-only dispatch, which may
+          # be an unmerged branch.
           args=(
             tools/release/build-release-artifacts.sh
             --version "$VERSION"
             --deb-version "$DEB_VERSION"
             --python-version "$PYTHON_VERSION"
             --tag "$TAG"
+            --branch "$SOURCE_LABEL"
             --artifacts-dir "$RELEASE_DIR"
             --manifest "$MANIFEST"
             --checksums "$CHECKSUMS"
