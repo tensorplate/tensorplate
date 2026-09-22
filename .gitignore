@@ -13,6 +13,10 @@
 # Logs
 *.log
 logs/
+# Except the stage logs a release evidence bundle cites, which the release
+# gate reads from the checkout: an ignored one is silently left out of the
+# commit, and only the final tag's gate would notice.
+!docs/validation/evidence/**/*.log
 
 # Environment files
 .env

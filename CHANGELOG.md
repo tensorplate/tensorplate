@@ -22,7 +22,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   block a final tag. The evidence README's scan step now covers a host or
   account name that is also ordinary evidence text, which a literal file
   cannot list bare: its identifying forms are listed instead, and every
-  remaining occurrence is read before `git add`.
+  remaining occurrence is read before `git add`. Stage logs under
+  `docs/validation/evidence/` are no longer caught by the repository's
+  `*.log` ignore rule, which left a plain `git add` committing a bundle
+  without the logs its report cites.
 
 ### Fixed
 
