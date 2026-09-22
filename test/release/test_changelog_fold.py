@@ -128,6 +128,15 @@ class ChangelogFoldTests(unittest.TestCase):
     # --- the fold ------------------------------------------------------
 
     def test_entries_fold_into_matching_and_newly_opened_subsections(self) -> None:
+        # The release section holds two "### Fixed" blocks, which is what
+        # accumulating entries under one version looks like -- [0.2.1] holds
+        # fifteen "### Added". The moved entry goes to the top of the FIRST
+        # of them, so newest-first holds for the section as a whole.
+        #
+        # "### Security" is a block the release section has none of, and the
+        # already-released [9.9.8] below it has one. The fold's lower
+        # boundary is the end of the release section, so [9.9.8]'s block is
+        # not a candidate: the entry ships in 9.9.9 and a block opens there.
         folded = self.fold(
             PROLOGUE
             + f"""## [Unreleased]
@@ -150,7 +159,15 @@ class ChangelogFoldTests(unittest.TestCase):
 
 - An older fix.
 
+### Fixed
+
+- An older fix filed in a second block.
+
 ## [9.9.8] - 2025-12-01
+
+### Security
+
+- An ancient security fix.
 
 ### Fixed
 
@@ -178,11 +195,60 @@ class ChangelogFoldTests(unittest.TestCase):
 
 - An older fix.
 
+### Fixed
+
+- An older fix filed in a second block.
+
 ## [9.9.8] - 2025-12-01
+
+### Security
+
+- An ancient security fix.
 
 ### Fixed
 
 - An ancient fix.
+""",
+        )
+
+    def test_repeated_subsections_under_unreleased_all_move(self) -> None:
+        # One PR per "### Fixed" block is the shape [Unreleased] is usually
+        # in: thirty of the last forty commits to touch the file left
+        # repeated same-named blocks behind. Every block's entries move, in
+        # the order they are written in.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Fixed
+
+- A fix from the newest PR.
+
+### Fixed
+
+- A fix from the PR before it.
+
+{DATED}
+
+### Fixed
+
+- An older fix.
+"""
+        )
+        self.assertEqual(
+            folded,
+            PROLOGUE
+            + f"""## [Unreleased]
+
+{DATED}
+
+### Fixed
+
+- A fix from the newest PR.
+
+- A fix from the PR before it.
+
+- An older fix.
 """,
         )
 
@@ -211,6 +277,153 @@ class ChangelogFoldTests(unittest.TestCase):
             ["### Fixed"],
         )
         self.assertNotIn("### Added", folded.split("\n"))
+
+    # A fence opened at column 0 is the other place a heading-shaped line
+    # sits at column 0 without being a heading. Nothing in CONTRIBUTING.md
+    # or the changelog docs requires an entry's fence to be indented.
+
+    def test_a_column_0_fence_in_the_release_section_is_not_a_subsection(self) -> None:
+        # Reading the quoted "### Added" as a block would file the moved
+        # entry inside the fence, where it renders as code: a shipping entry
+        # invisible in the published notes, at exit 0, idempotently.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Added
+
+- A brand new feature.
+
+{DATED}
+
+### Fixed
+
+- An older fix that quotes a changelog:
+
+```markdown
+### Added
+- quoted
+```
+
+- Another older fix.
+"""
+        )
+        self.assertEqual(
+            folded,
+            PROLOGUE
+            + f"""## [Unreleased]
+
+{DATED}
+
+### Added
+
+- A brand new feature.
+
+### Fixed
+
+- An older fix that quotes a changelog:
+
+```markdown
+### Added
+- quoted
+```
+
+- Another older fix.
+""",
+        )
+
+    def test_a_column_0_fence_in_an_entry_moves_with_the_entry(self) -> None:
+        # Reading the quoted "### Added" as a block splits one entry across
+        # two subsections and leaves the fence unterminated.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Fixed
+
+- An entry showing output:
+
+```console
+### Added
+not a heading
+```
+
+- A second entry.
+
+{DATED}
+
+### Fixed
+
+- An older fix.
+"""
+        )
+        self.assertEqual(
+            folded,
+            PROLOGUE
+            + f"""## [Unreleased]
+
+{DATED}
+
+### Fixed
+
+- An entry showing output:
+
+```console
+### Added
+not a heading
+```
+
+- A second entry.
+
+- An older fix.
+""",
+        )
+
+    def test_a_column_0_fence_hides_the_section_headings_it_quotes(self) -> None:
+        # The "## " readers take the same view: a quoted [Unreleased] is not
+        # a second [Unreleased], and a quoted dated heading is not a second
+        # section. Reading them as headings refuses a legitimate file.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Fixed
+
+- An entry quoting what a changelog looks like:
+
+```markdown
+## [Unreleased]
+
+## [{VERSION}] - 2020-01-01
+```
+
+{DATED}
+
+### Fixed
+
+- An older fix.
+"""
+        )
+        self.assertEqual(
+            folded,
+            PROLOGUE
+            + f"""## [Unreleased]
+
+{DATED}
+
+### Fixed
+
+- An entry quoting what a changelog looks like:
+
+```markdown
+## [Unreleased]
+
+## [{VERSION}] - 2020-01-01
+```
+
+- An older fix.
+""",
+        )
 
     def test_the_fold_is_idempotent(self) -> None:
         source = (
@@ -353,6 +566,50 @@ class ChangelogFoldTests(unittest.TestCase):
 - An older fix.
 """,
             "not by the [9.9.9] section",
+        )
+
+    def test_unreleased_as_the_last_section_of_the_file_is_refused(self) -> None:
+        # The same shape as the test above with nothing after [Unreleased],
+        # which is where the "what follows it" lookup runs off the end. The
+        # guard must still be the thing that speaks.
+        self.refuse(
+            PROLOGUE
+            + f"""{DATED}
+
+### Fixed
+
+- An older fix.
+
+## [Unreleased]
+
+### Fixed
+
+- The newest fix.
+""",
+            f"followed by the end of the file, not by the [{VERSION}] section",
+        )
+
+    def test_a_column_0_fence_that_is_never_closed_is_refused(self) -> None:
+        # Every heading below an unclosed fence would read as quoted, so the
+        # file's shape cannot be established at all. Refuse, do not guess.
+        self.refuse(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Fixed
+
+- An entry whose fence is never closed:
+
+```console
+$ tensorplate doctor
+
+{DATED}
+
+### Fixed
+
+- An older fix.
+""",
+            "fenced block opened at column 0 on line 11 that is never closed",
         )
 
     def test_content_before_the_first_subsection_of_unreleased_is_refused(self) -> None:

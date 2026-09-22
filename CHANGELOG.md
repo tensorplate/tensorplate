@@ -44,10 +44,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   for is opened at its top; entry text, including indented continuation
   lines and fenced blocks, is carried over byte for byte; and
   `[Unreleased]` is left present and empty, so a second run changes
-  nothing. A shape the step does not recognise -- no `[Unreleased]`, a
-  repeated heading, a version section that is not the one directly below
-  `[Unreleased]`, or content ahead of a section's first subsection -- is
-  refused rather than guessed at. `cut` now refuses to tag until a
+  nothing. A heading-shaped line inside a fence opened at column 0 is
+  quoted text rather than a section, so an entry that shows a changelog's
+  own shape moves intact instead of being filed into the fence. A shape
+  the step does not recognise -- no `[Unreleased]`, a repeated heading, a
+  version section that is not the one directly below `[Unreleased]`,
+  content ahead of a section's first subsection, or a fence left open --
+  is refused rather than guessed at. `cut` now refuses to tag until a
   preparation pull request commits the fold, which is what should happen
   whenever the trunk moved since the last one. Folding this release's own
   entries is that pull request's job, not this change's.

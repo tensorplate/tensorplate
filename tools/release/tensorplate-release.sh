@@ -872,6 +872,12 @@ if not lines[0].startswith(f"tensorplate ({version}-1)"):
 # Headings are read only at column 0. Entries are bullet lists whose
 # continuation lines are indented under the bullet, so a "### " inside an
 # entry is indented, is entry text, and moves with the entry.
+#
+# A fence opened at column 0 is the other place a heading-shaped line is
+# not a heading: it renders as code, not as a section. Reading one as a
+# heading files entries into the fence, where they render as code too and
+# are gone from the published notes, so the scan tracks fence state and
+# what a fence holds is never a heading. A fence left open is refused.
 changelog = Path("CHANGELOG.md")
 lines = changelog.read_text().split("\n")
 
@@ -879,8 +885,36 @@ UNRELEASED = "## [Unreleased]"
 release_prefix = f"## [{version}] - "
 
 
+def fenced_lines():
+    """The lines inside a fenced block opened at column 0."""
+    inside = set()
+    opened = None
+    opened_at = 0
+    for i, line in enumerate(lines):
+        marker = line[:3]
+        if opened is None:
+            if marker in ("```", "~~~"):
+                opened, opened_at = marker, i
+        elif marker == opened:
+            opened = None
+        else:
+            inside.add(i)
+    if opened is not None:
+        raise SystemExit(
+            "CHANGELOG.md has a fenced block opened at column 0 on line "
+            f"{opened_at + 1} that is never closed: {lines[opened_at]!r}. "
+            "Close it, or indent it under its entry, before preparing."
+        )
+    return inside
+
+
+FENCED = fenced_lines()
+
+
 def sole_heading(matches, what):
-    found = [i for i, line in enumerate(lines) if matches(line)]
+    found = [
+        i for i, line in enumerate(lines) if i not in FENCED and matches(line)
+    ]
     if len(found) > 1:
         raise SystemExit(
             "CHANGELOG.md has {} '{}' headings, at lines {}; expected one".format(
@@ -893,7 +927,7 @@ def sole_heading(matches, what):
 def section_end(start):
     """Index of the heading that closes the section opened at `start`."""
     for i in range(start + 1, len(lines)):
-        if lines[i].startswith("## "):
+        if i not in FENCED and lines[i].startswith("## "):
             return i
     return len(lines)
 
@@ -902,7 +936,7 @@ def subsections(start, stop, what):
     """The "### " blocks in lines[start:stop], as (name, first, last)."""
     blocks = []
     for i in range(start, stop):
-        if lines[i].startswith("### "):
+        if i not in FENCED and lines[i].startswith("### "):
             if blocks:
                 blocks[-1][2] = i
             blocks.append([lines[i][4:].strip(), i, stop])
@@ -945,11 +979,18 @@ if release is None:
 else:
     unreleased_end = section_end(unreleased)
     if release != unreleased_end:
+        # section_end answers len(lines) when nothing follows [Unreleased],
+        # which is the shape a dated section placed above it leaves behind.
+        following = (
+            f"{lines[unreleased_end]!r} at line {unreleased_end + 1}"
+            if unreleased_end < len(lines)
+            else "the end of the file"
+        )
         raise SystemExit(
-            f"CHANGELOG.md: [Unreleased] is followed by {lines[unreleased_end]!r} "
-            f"at line {unreleased_end + 1}, not by the [{version}] section. The "
-            "version being prepared must be the section directly below "
-            "[Unreleased] before its entries can be folded into it."
+            f"CHANGELOG.md: [Unreleased] is followed by {following}, not by "
+            f"the [{version}] section. The version being prepared must be "
+            "the section directly below [Unreleased] before its entries can "
+            "be folded into it."
         )
     moved = {}
     for name, first, last in subsections(unreleased + 1, release, "[Unreleased]"):
