@@ -158,7 +158,12 @@ candidate_active=0
 # The installed agent config and the crash-loop stage's copy of it.
 agent_config=""
 agent_config_backup=""
-trust_added=()
+# The file snapshot_formula_trust records the entry-time formula trust
+# in, once it has; restore_formula_trust changes nothing before then.
+formula_trust_entry=""
+# Set by resolve_service_labels in each stage that names a launchd job.
+agent_label=""
+observability_label=""
 active_stage=""
 active_stage_log=""
 active_stage_started=""
@@ -174,6 +179,47 @@ offline_profile=""
 
 offline_helper() {
   python3 "$offline_helper_path" "$@"
+}
+
+# Homebrew has named a service's launchd job two ways, and a service
+# loaded by one Homebrew keeps its label under the next. The harness
+# names no label itself: macos_offline_runtime.py LABEL_FORMS lists the
+# forms and says where they come from in Homebrew's source.
+#
+# Every label a service may be loaded under, for the paths that must work
+# whether or not its keg is installed.
+service_label_forms() {
+  offline_helper label-forms --service "$1"
+}
+
+# The label of an installed service: the Label of the plist Homebrew
+# generated in its keg. `brew services start` installs that definition as
+# ~/Library/LaunchAgents/<label>.plist and loads it under the same label,
+# so this one value names the keg plist, the LaunchAgents plist and the
+# job. Fails unless exactly one keg plist of a known form exists and its
+# Label is its name.
+service_label() {
+  label_keg="$(brew --prefix "$1")" || return 1
+  offline_helper service-label --keg "$label_keg" --service "$1"
+}
+
+# Set agent_label and observability_label for the calling stage.
+resolve_service_labels() {
+  agent_label="$(service_label tensorplate-agent)" ||
+    die "cannot resolve the tensorplate-agent launchd label from its keg"
+  observability_label="$(service_label tensorplate-observability)" ||
+    die "cannot resolve the tensorplate-observability launchd label from its keg"
+}
+
+# The label resolve_service_labels set for a service.
+label_of() {
+  case "$1" in
+    tensorplate-agent) label_found="$agent_label" ;;
+    tensorplate-observability) label_found="$observability_label" ;;
+    *) label_found="" ;;
+  esac
+  [[ -n "$label_found" ]] || return 1
+  printf '%s\n' "$label_found"
 }
 
 restore_tap() {
@@ -212,10 +258,81 @@ tell_operator() {
   /usr/bin/printf '%s\n' "$*" >&4 2>/dev/null || true
 }
 
+# The six formulae's per-formula trust entries, as Homebrew holds them
+# before this run can change them: read-only.
+snapshot_formula_trust() {
+  trust_json="$(brew trust --json=v1)" || return 1
+  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" \
+    >"${work_dir}/formula-trust-at-entry" <<'PY' || return 1
+import json
+import sys
+
+tap_name = sys.argv[1].lower()
+trusted = {item.lower() for item in json.loads(sys.argv[2]).get("formulae", [])}
+for name in sys.argv[3:]:
+    if f"{tap_name}/{name}" in trusted:
+        print(f"{tap_name}/{name}")
+PY
+  formula_trust_entry="${work_dir}/formula-trust-at-entry"
+}
+
+# One `trust <formula>` line for each entry-time entry that is missing
+# now, and one `untrust <formula>` line for each entry there is now that
+# there was not at entry.
+formula_trust_changes() {
+  trust_json="$(brew trust --json=v1)" || return 1
+  python3 - "$tap_name" "$trust_json" "$formula_trust_entry" "${FORMULAE[@]}" <<'PY'
+import json
+import sys
+
+tap_name = sys.argv[1].lower()
+trusted = {item.lower() for item in json.loads(sys.argv[2]).get("formulae", [])}
+with open(sys.argv[3], encoding="utf-8") as handle:
+    at_entry = set(handle.read().split())
+for name in sys.argv[4:]:
+    full_name = f"{tap_name}/{name}"
+    if full_name in at_entry and full_name not in trusted:
+        print("trust", full_name)
+    elif full_name not in at_entry and full_name in trusted:
+        print("untrust", full_name)
+PY
+}
+
+# Put the six formulae's per-formula trust back to what the operator had
+# at entry. `brew uninstall` drops the trust entry of each tap formula it
+# removes unless the whole tap is trusted (Library/Homebrew/cmd/
+# uninstall.rb, trusted_items_to_remove), and `brew install` and
+# `brew upgrade` trust the tap formula they are named for
+# (Homebrew::Trust.trust_fully_qualified_items!), so the run removes
+# trust the operator granted and adds some they did not. This re-trusts
+# each entry-time entry that is missing and untrusts each one that was
+# not there at entry, which only this run can have added; no other trust
+# is touched. The installs that need the entry trust call it first, and
+# cleanup calls it last, so it returns a status instead of calling die.
 restore_formula_trust() {
-  [[ "${#trust_added[@]}" -gt 0 ]] || return 0
-  brew untrust --formula "${trust_added[@]}" >/dev/null 2>&1 || true
-  trust_added=()
+  [[ -n "$formula_trust_entry" ]] || return 0
+  trust_status=0
+  trust_changes="$(formula_trust_changes)" || trust_status=1
+  if [[ "$trust_status" -eq 0 && -n "$trust_changes" ]]; then
+    while read -r trust_action trust_formula; do
+      if ! brew "$trust_action" --formula "$trust_formula" </dev/null; then
+        trust_status=1
+      elif [[ "$trust_action" == "trust" ]]; then
+        printf 'formula trust: re-trusted %s, trusted at entry\n' "$trust_formula"
+      else
+        printf 'formula trust: untrusted %s, not trusted at entry\n' "$trust_formula"
+      fi
+    done <<<"$trust_changes"
+    # Read back rather than trusting the exit statuses.
+    trust_changes="$(formula_trust_changes)" || trust_status=1
+  fi
+  trust_at_entry="$(tr '\n' ' ' <"$formula_trust_entry")"
+  trust_at_entry="${trust_at_entry% }"
+  if [[ "$trust_status" -ne 0 || -n "$trust_changes" ]]; then
+    tell_operator "error: TensorPlate formula trust is not as it was at entry, when the per-formula entries were: ${trust_at_entry:-none}; compare brew trust --json=v1"
+    return 1
+  fi
+  printf 'formula trust: as at entry, when the per-formula entries were: %s\n' "${trust_at_entry:-none}"
 }
 
 formula_is_installed() {
@@ -253,11 +370,11 @@ restore_baseline() {
   fi
 }
 
-# Boot out one service's launchd job if, and only if, it was loaded to run
-# under sandbox-exec: a normal job is left alone. Called from cleanup, so
-# it returns a status instead of calling die.
+# Boot out the launchd job with this label if, and only if, it was loaded
+# to run under sandbox-exec: a normal job is left alone. Called from
+# cleanup, so it returns a status instead of calling die.
 purge_offline_job() {
-  purge_target="gui/$(id -u)/homebrew.mxcl.$1"
+  purge_target="gui/$(id -u)/$1"
   purge_status=0
   purge_print="$(launchctl print "$purge_target" 2>/dev/null)" || purge_status=$?
   # launchctl print exits 113 for a label that is not loaded.
@@ -291,8 +408,19 @@ purge_offline_job() {
 # offline_services_stopped says this run stopped them. Never calls die.
 restore_offline_supervision() {
   restore_status=0
-  purge_offline_job tensorplate-agent || restore_status=1
-  purge_offline_job tensorplate-observability || restore_status=1
+  # Under every label a service may be loaded under, not the one its keg
+  # names: cleanup also runs with the keg gone, and a sandboxed job left
+  # by a run under an earlier Homebrew keeps that Homebrew's label.
+  for restore_service in tensorplate-agent tensorplate-observability; do
+    if ! restore_labels="$(service_label_forms "$restore_service")"; then
+      tell_operator "error: cannot list the launchd labels of ${restore_service}; inspect launchctl list for a job running under sandbox-exec"
+      restore_status=1
+      continue
+    fi
+    for restore_label in $restore_labels; do
+      purge_offline_job "$restore_label" || restore_status=1
+    done
+  done
   [[ "$restore_status" -eq 0 ]] || return 1
   [[ "$offline_services_stopped" == "1" ]] || return 0
   brew services start tensorplate-observability || restore_status=1
@@ -348,7 +476,8 @@ cleanup() {
     restore_tap
   fi
   [[ -z "$lifecycle_marker" ]] || rm -f "$lifecycle_marker"
-  restore_formula_trust
+  # Last: every install and uninstall above changes formula trust.
+  restore_formula_trust || { [[ "$status" -ne 0 ]] || status=1; }
   if [[ -n "$agent_config_backup" && -f "$agent_config_backup" ]]; then
     # Every restore attempt failed: keep the work directory, which holds
     # the only copy of the agent config, and fail the run.
@@ -571,15 +700,32 @@ print(json.dumps({
 PY
 }
 
+# Also refuses a tap on a custom remote. Homebrew then keys a formula's
+# trust entry by the remote rather than the tap name (Library/Homebrew/
+# trust.rb, item_trust_name), so `brew trust`, `brew install` and
+# `brew uninstall` add and remove entries snapshot_formula_trust and
+# restore_formula_trust cannot see, and the restore could never put the
+# entry trust back. Checked here, before anything changes.
 verify_tap_trust() {
-  trust_json="$(brew trust --json=v1)"
-  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
+  trust_json="$(brew trust --json=v1)" || return 1
+  tap_json="$(brew tap-info --json=v1 "$tap_name")" || return 1
+  python3 - "$tap_name" "$trust_json" "$tap_json" "${FORMULAE[@]}" <<'PY'
 import json
 import sys
 
 tap_name = sys.argv[1].lower()
 trusted = json.loads(sys.argv[2])
-formula_names = sys.argv[3:]
+taps = json.loads(sys.argv[3])
+formula_names = sys.argv[4:]
+if len(taps) != 1 or taps[0].get("name", "").lower() != tap_name:
+    raise SystemExit(f"brew tap-info does not describe {tap_name}")
+# Tap#uses_custom_remote?: a remote that is not the tap's default GitHub
+# one. A tap with no remote keys its trust by name.
+if taps[0].get("remote") and taps[0].get("custom_remote") is not False:
+    raise SystemExit(
+        f"{tap_name} uses a custom remote, so Homebrew keys its formula trust by that remote and "
+        "this harness cannot restore it; run against a tap on its default remote"
+    )
 trusted_taps = {item.lower() for item in trusted.get("taps", [])}
 trusted_formulae = {item.lower() for item in trusted.get("formulae", [])}
 missing = [
@@ -591,33 +737,6 @@ if missing:
     joined = " ".join(missing)
     raise SystemExit(f"formula trust is missing; run `brew trust --formula {joined}`")
 PY
-}
-
-ensure_candidate_formula_trust() {
-  trust_json="$(brew trust --json=v1)"
-  missing_trust_file="${work_dir}/missing-formula-trust"
-  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" \
-    >"$missing_trust_file" <<'PY'
-import json
-import sys
-
-tap_name = sys.argv[1].lower()
-trusted = json.loads(sys.argv[2])
-formula_names = sys.argv[3:]
-trusted_taps = {item.lower() for item in trusted.get("taps", [])}
-trusted_formulae = {item.lower() for item in trusted.get("formulae", [])}
-for name in formula_names:
-    full_name = f"{tap_name}/{name}"
-    if tap_name not in trusted_taps and full_name not in trusted_formulae:
-        print(full_name)
-PY
-  missing_formulae=()
-  while IFS= read -r formula_name; do
-    [[ -n "$formula_name" ]] && missing_formulae+=("$formula_name")
-  done <"$missing_trust_file"
-  [[ "${#missing_formulae[@]}" -gt 0 ]] || return 0
-  brew trust --formula "${missing_formulae[@]}"
-  trust_added+=("${missing_formulae[@]}")
 }
 
 record_formula_graph() {
@@ -645,6 +764,9 @@ install_candidate_clean() {
       die "formula remains installed before clean install: ${formula_name}"
     fi
   done
+  # Removing the graph dropped the trust of each formula it uninstalled,
+  # and Homebrew refuses to load an untrusted dependency.
+  restore_formula_trust || die "cannot restore the entry formula trust before the clean install"
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew install --formula "${tap_name}/tensorplate"
   candidate_active=1
@@ -778,6 +900,7 @@ PY
 }
 
 start_services() {
+  resolve_service_labels
   agent_error_log="$(brew --prefix)/var/log/tensorplate/agent.error.log"
   if [[ -f "$agent_error_log" ]]; then
     agent_error_log_start="$(stat -f '%z' "$agent_error_log")"
@@ -803,8 +926,10 @@ start_services() {
     die "tensorplate-serving unexpectedly exposes a Homebrew service"
   fi
   brew services list
-  launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
-  launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
+  launchctl print "gui/$(id -u)/${agent_label}" ||
+    die "tensorplate-agent is not loaded as ${agent_label}, the label its keg plist carries"
+  launchctl print "gui/$(id -u)/${observability_label}" ||
+    die "tensorplate-observability is not loaded as ${observability_label}, the label its keg plist carries"
 }
 
 # Any arguments are a command prefix the probe runs under; the offline
@@ -1042,12 +1167,13 @@ PY
 }
 
 restart_services() {
+  resolve_service_labels
   before_agent="$(
-    launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent" |
+    launchctl print "gui/$(id -u)/${agent_label}" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
   before_observability="$(
-    launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability" |
+    launchctl print "gui/$(id -u)/${observability_label}" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
   brew services restart tensorplate-agent
@@ -1056,11 +1182,11 @@ restart_services() {
   wait_for_service tensorplate-observability
   wait_for_agent_ready
   after_agent="$(
-    launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent" |
+    launchctl print "gui/$(id -u)/${agent_label}" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
   after_observability="$(
-    launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-observability" |
+    launchctl print "gui/$(id -u)/${observability_label}" |
       awk '/^[[:space:]]*pid = / {print $3; exit}'
   )"
   [[ -n "$before_agent" && -n "$after_agent" && "$before_agent" != "$after_agent" ]] ||
@@ -1073,6 +1199,7 @@ restart_services() {
 }
 
 exercise_crash_loop() {
+  resolve_service_labels
   agent_config="$(brew --prefix)/etc/tensorplate/agent.json"
   # launchd appends to this log and nothing truncates it, so config errors
   # from earlier runs are still in it. Only output written after the
@@ -1087,7 +1214,8 @@ exercise_crash_loop() {
   chmod 0640 "$agent_config"
   brew services restart tensorplate-agent >/dev/null 2>&1 || true
   sleep 12
-  launchctl print "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
+  launchctl print "gui/$(id -u)/${agent_label}" ||
+    die "tensorplate-agent is not loaded as ${agent_label} after its config was broken"
   tail -c "+$((crash_loop_agent_log_start + 1))" "$crash_loop_agent_log" \
     >"${work_dir}/agent-error-crash-loop.log" ||
     die "cannot read the agent launchd error log after breaking the config"
@@ -1118,9 +1246,10 @@ run_denied() {
 enter_offline_denial() {
   offline_services_stopped=1
   for service_name in tensorplate-agent tensorplate-observability; do
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
     brew services stop --keep "$service_name" ||
       die "brew services stop --keep ${service_name} failed"
-    if launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" >/dev/null 2>&1; then
+    if launchctl print "gui/${uid}/${label}" >/dev/null 2>&1; then
       die "${service_name} is still loaded after brew services stop --keep"
     fi
   done
@@ -1130,14 +1259,19 @@ enter_offline_denial() {
     die "a TensorPlate process or serving-port listener outlived the stopped services"
   for service_name in tensorplate-observability tensorplate-agent; do
     formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
+    # The derived plist keeps the keg plist's Label, and `brew services
+    # run --file` bootstraps the file it is given under the Label inside
+    # it (services/cli.rb launchctl_load), so the sandboxed job has the
+    # normal job's label and launchd reports this file as its path.
     offline_helper derive-plist \
-      --formula-plist "${formula_prefix}/homebrew.mxcl.${service_name}.plist" \
-      --label "homebrew.mxcl.${service_name}" \
+      --formula-plist "${formula_prefix}/${label}.plist" \
+      --label "$label" \
       --program "${formula_prefix}/bin/${service_name}" \
       --profile "$offline_profile" \
-      --plist-out "${denial_dir}/homebrew.mxcl.${service_name}.plist" ||
+      --plist-out "${denial_dir}/${label}.plist" ||
       die "cannot derive the sandboxed ${service_name} launchd plist"
-    brew services run "$service_name" --file="${denial_dir}/homebrew.mxcl.${service_name}.plist" ||
+    brew services run "$service_name" --file="${denial_dir}/${label}.plist" ||
       die "brew services run --file failed for ${service_name}"
   done
 }
@@ -1168,15 +1302,16 @@ wait_for_denied_status() {
 verify_normal_supervision() {
   for service_name in tensorplate-agent tensorplate-observability; do
     formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
-    launch_agent="${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist"
-    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
+    launch_agent="${HOME}/Library/LaunchAgents/${label}.plist"
+    launchctl print "gui/${uid}/${label}" \
       >"${denial_dir}/${service_name#tensorplate-}-restored.txt" ||
       die "${service_name} is not loaded after the offline stage"
     offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-restored.txt" \
       --program "${formula_prefix}/bin/${service_name}" --path "$launch_agent" \
       --out "${denial_dir}/${service_name#tensorplate-}-restored.json" ||
       die "${service_name} is not back under its normal launchd job"
-    cmp "$launch_agent" "${formula_prefix}/homebrew.mxcl.${service_name}.plist" ||
+    cmp "$launch_agent" "${formula_prefix}/${label}.plist" ||
       die "the ${service_name} LaunchAgents plist differs from the formula plist"
   done
   wait_for_agent_ready || die "the agent did not answer outside the sandbox after the offline stage"
@@ -1217,15 +1352,17 @@ verify_offline_runtime() {
   [[ -z "$agent_config_backup" ]] ||
     die "the agent config is still replaced by the crash-loop stage"
   mkdir -p "$denial_dir" || die "cannot create the offline-runtime work directory"
+  resolve_service_labels
 
   for service_name in tensorplate-agent tensorplate-observability; do
     formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
-    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
+    launchctl print "gui/${uid}/${label}" \
       >"${denial_dir}/${service_name#tensorplate-}-before.txt" ||
       die "${service_name} is not loaded before the offline stage"
     offline_helper launchd-job --print "${denial_dir}/${service_name#tensorplate-}-before.txt" \
       --program "${formula_prefix}/bin/${service_name}" \
-      --path "${HOME}/Library/LaunchAgents/homebrew.mxcl.${service_name}.plist" ||
+      --path "${HOME}/Library/LaunchAgents/${label}.plist" ||
       die "${service_name} is not running under its normal launchd job before the offline stage"
   done
 
@@ -1246,11 +1383,12 @@ verify_offline_runtime() {
   for service_name in tensorplate-agent tensorplate-observability; do
     short_name="${service_name#tensorplate-}"
     formula_prefix="$(brew --prefix "$service_name")" || die "brew --prefix ${service_name} failed"
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
     # Homebrew's run returns after bootstrap loads the definition; the
     # first process can still be pending. Retry only a valid definition
     # with no PID and zero runs, never a wrong definition or a crash.
     for ((launch_attempt = 1; launch_attempt <= 30; launch_attempt += 1)); do
-      launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+      launchctl print "gui/${uid}/${label}" \
         >"${denial_dir}/${short_name}-denied.txt" ||
         die "${service_name} is not loaded after brew services run --file"
       cat "${denial_dir}/${short_name}-denied.txt" || die "cannot record the sandboxed ${service_name} job"
@@ -1259,8 +1397,8 @@ verify_offline_runtime() {
       launch_status=0
       offline_helper launchd-job --print "${denial_dir}/${short_name}-denied.txt" \
         --program /usr/bin/sandbox-exec \
-        --path "${denial_dir}/homebrew.mxcl.${service_name}.plist" \
-        --sandboxed-arguments-from "${formula_prefix}/homebrew.mxcl.${service_name}.plist" \
+        --path "${denial_dir}/${label}.plist" \
+        --sandboxed-arguments-from "${formula_prefix}/${label}.plist" \
         --profile "$offline_profile" --startup \
         --out "${denial_dir}/${short_name}-denied.json" || launch_status=$?
       case "$launch_status" in
@@ -1355,7 +1493,8 @@ verify_offline_runtime() {
   # services stayed up through the stage.
   for service_name in tensorplate-agent tensorplate-observability; do
     short_name="${service_name#tensorplate-}"
-    launchctl print "gui/${uid}/homebrew.mxcl.${service_name}" \
+    label="$(label_of "$service_name")" || die "no launchd label resolved for ${service_name}"
+    launchctl print "gui/${uid}/${label}" \
       >"${denial_dir}/${short_name}-final.txt" ||
       die "${service_name} is not loaded at the end of the offline stage"
     offline_helper launchd-job --print "${denial_dir}/${short_name}-final.txt" \
@@ -1389,10 +1528,20 @@ uninstall_candidate() {
       die "formula remains installed after uninstall: ${formula_name}"
     fi
   done
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist" ]] ||
-    die "tensorplate-agent LaunchAgent plist remains after uninstall"
-  [[ ! -e "$HOME/Library/LaunchAgents/homebrew.mxcl.tensorplate-observability.plist" ]] ||
-    die "tensorplate-observability LaunchAgent plist remains after uninstall"
+  # The kegs are gone, so check every label either service may have had.
+  for service_name in tensorplate-agent tensorplate-observability; do
+    labels="$(service_label_forms "$service_name")" ||
+      die "cannot list the launchd labels of ${service_name}"
+    for label in $labels; do
+      [[ ! -e "${HOME}/Library/LaunchAgents/${label}.plist" ]] ||
+        die "${service_name} LaunchAgent plist ${label}.plist remains after uninstall"
+      uninstall_print_status=0
+      launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1 || uninstall_print_status=$?
+      # launchctl print exits 113 for a label that is not loaded.
+      [[ "$uninstall_print_status" -eq 113 ]] ||
+        die "${service_name} launchd job ${label} is still loaded after uninstall (launchctl print exited ${uninstall_print_status})"
+    done
+  done
   [[ ! -e "$(brew --prefix)/bin/tensorplate" ]] ||
     die "tensorplate launcher remains after uninstall"
 }
@@ -1413,7 +1562,8 @@ install_baseline() {
 }
 
 upgrade_from_baseline() {
-  ensure_candidate_formula_trust
+  # The uninstall stage dropped the components' trust.
+  restore_formula_trust || die "cannot restore the entry formula trust before the upgrade"
   stage_candidate_tap
   HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
     brew upgrade --formula "${tap_name}/tensorplate"
@@ -1551,6 +1701,9 @@ run_stage host-facts collect_host_facts
 run_stage formula-pin capture_formula_pin
 run_stage deploy-input capture_deploy_input
 run_stage baseline tensorplate version
+# Before anything that installs or uninstalls: restore_formula_trust puts
+# back what this records.
+snapshot_formula_trust || die "cannot record the formula trust the run starts with"
 run_stage tap-trust verify_tap_trust
 run_stage offline-profile verify_offline_profile
 if [[ "$preflight_only" == "1" ]]; then
@@ -1583,7 +1736,8 @@ run_stage upgrade upgrade_from_baseline
 run_stage rollback rollback_to_baseline
 # shellcheck disable=SC2016 # The expression is evaluated by bash -c.
 run_stage tap-restored bash -c '[[ -z "$(git -C "$1" status --porcelain)" ]]' _ "$tap_repo"
-restore_formula_trust
+restore_formula_trust >>"${evidence_dir}/cleanup.log" 2>&1 ||
+  die "formula trust is not as it was at entry; see ${evidence_dir}/cleanup.log"
 write_summary
 write_sanitized_transcript
 
