@@ -798,6 +798,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   manifest would still fail the stage while sending the operator to
   recover one file out of three.
 
+  A further review closed three gaps in that. The half of the
+  comparison that reports an ADDED file splits its lines on its own, and
+  no case reached it: the spaced-name case changes a file, so reverting
+  only that loop to a first-space split left every verifier green while
+  the failure named a file called `extra` for one called `extra file.json`.
+  `rollback-adds-spaced-file` now plants the latter in the set-aside copy
+  and requires the whole name. The binding had blind spots of its own.
+  It counted only the canonical `name() {` line, so a one-line
+  redefinition after the checked copy -- the one bash actually runs --
+  passed; and it derived only upper-case names read as `$NAME` or
+  `${NAME}`, `${NAME%`, `${NAME#`, `${NAME:`, so both bodies reading
+  `${NAME-}` or `${#NAME}` of a variable only one harness defines passed
+  too. It now counts every spelling bash accepts, derives names in either
+  case through every expansion form, and requires each to be bound on
+  exactly one line in each harness, in any spelling -- a caller's
+  shadowing `local` included. It then plants each of those drifts into
+  copies of the two harnesses and requires itself to refuse every one for
+  its own reason, so deleting any one rule fails its own run.
+
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
   boot. Platform detection ran exactly once per start, so a single

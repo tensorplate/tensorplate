@@ -527,6 +527,13 @@ def install(db, directory):
             (aside / "two words.json").write_text("")
         elif mode == "rollback-adds-state-file":
             (aside / "state.json.new").write_text('{"fixture": "not what was set aside"}\n')
+        # Added, as rollback-adds-state-file does, under a name that
+        # holds a space. The comparison that reports an added file reads
+        # the set-aside manifest, not the one taken before the move, so
+        # it splits its lines on its own: a reader that cut at the FIRST
+        # space would report a file called "extra" that nobody wrote.
+        elif mode == "rollback-adds-spaced-file":
+            (aside / "extra file.json").write_text('{"fixture": "not what was set aside"}\n')
         # Every file gone while the directory stays: the set-aside copy
         # reads as a directory that is there and holds nothing, which
         # must not be what "unchanged" means.
@@ -3718,6 +3725,7 @@ for case in \
   "rollback-empties-snapshot::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-deletes-snapshot::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-adds-state-file::step failed (exit 1): the set-aside state is preserved, file by file" \
+  "rollback-adds-spaced-file::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-empties-state-dir::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-empties-spaced-file::step failed (exit 1): the set-aside state is preserved, file by file" \
   "rollback-state-file-missing::step failed (exit 1): digest the durable state before setting it aside" \
@@ -3823,6 +3831,21 @@ for case in \
       check "  and the failure names the file that was added" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
            'the rollback did not preserve /var/lib/tensorplate/state.bak: it holds state.json.new, which the durable state did not when the services were stopped')"
+      check "  and the stage stopped before reading the agent back" no \
+        "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
+      ;;
+    rollback-adds-spaced-file)
+      # The added-file half of the comparison, held to the same rule as
+      # the changed-file half is by rollback-empties-spaced-file: the name
+      # is everything before a manifest line's LAST space. It is a
+      # separate loop over a separate manifest, and the two cases are
+      # what keep each of them honest -- neither reaches the other's.
+      check "  and the failure names the whole added name, spaces and all" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/state.bak: it holds extra file.json, which the durable state did not when the services were stopped')"
+      check "  and not the first word of it" no \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/state.bak: it holds extra,')"
       check "  and the stage stopped before reading the agent back" no \
         "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
       ;;
