@@ -1,0 +1,7 @@
+==> querying the control plane
+status: control plane answered and still reports the smoke deployment
+==> recording the operator-facing log command
+==> tensorplate logs exited 6: no component writes /var/log/tensorplate/tensorplate-agent.log on a packaged Linux install
+tensorplate-agent.service: captured 6 journal record(s) from the current invocation
+tensorplate-observability.service: captured 2 journal record(s) from the current invocation
+PASS: status answered and still reports the deployment; both current service journals captured; log command status recorded

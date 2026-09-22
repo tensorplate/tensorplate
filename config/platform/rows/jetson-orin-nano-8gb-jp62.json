@@ -62,7 +62,7 @@
     }
   },
   "support_level": "Production",
-  "provenance": "spec_authored",
+  "provenance": "recorded",
   "validation_environment": {
     "kind": "physical",
     "identity": "Jetson Orin Nano 8GB Super, Super power mode (in lab)"

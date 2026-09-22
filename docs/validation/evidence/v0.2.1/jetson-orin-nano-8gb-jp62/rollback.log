@@ -1,0 +1,141 @@
+rolling back from the candidate serving jetson-lifecycle-smoke-baseline
+==> rolling back to v0.1.5 by the documented procedure
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  tensorplate-agent tensorplate-cli tensorplate-common
+  tensorplate-observability tensorplate-serving
+0 upgraded, 0 newly installed, 5 to remove and 369 not upgraded.
+After this operation, 7,412 kB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 201058 files and directories currently installed.)
+Removing tensorplate-agent (0.2.1~rc.2-1) ...
+Removing tensorplate-cli (0.2.1~rc.2-1) ...
+Removing tensorplate-serving (0.2.1~rc.2-1) ...
+Removing tensorplate-observability (0.2.1~rc.2-1) ...
+Removing tensorplate-common (0.2.1~rc.2-1) ...
+dpkg: warning: while removing tensorplate-common, directory '/usr/share/tensorplate' not empty so not removed
+every removed package kept its conffiles, none is left installed, and tensorplate-apt-source is still installed
+==> installing the baseline fresh through its own installer
+==> TensorPlate installer v0.1.5
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying install.sh with SHA256SUMS
+install.sh: OK
+==> OS validation passed: JetPack 6.x / L4T 36.x baseline detected
+==> hardware validation passed: NVIDIA Jetson Orin Nano Engineering Reference Developer Kit Super, arch=aarch64
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying local artifacts with SHA256SUMS
+tensorplate-v0.1.5-artifacts.json: OK
+tensorplate-common_0.1.5-1_all.deb: OK
+tensorplate-agent_0.1.5-1_arm64.deb: OK
+tensorplate-serving_0.1.5-1_arm64.deb: OK
+tensorplate-observability_0.1.5-1_arm64.deb: OK
+tensorplate-cli_0.1.5-1_arm64.deb: OK
+==> updating apt package metadata
+Hit:1 https://repo.download.nvidia.com/jetson/common r36.5 InRelease
+Hit:2 https://pub-REDACTED.r2.dev/apt jammy InRelease
+Hit:3 http://ports.ubuntu.com/ubuntu-ports jammy InRelease
+Hit:4 https://repo.download.nvidia.com/jetson/t234 r36.5 InRelease
+Hit:6 http://ports.ubuntu.com/ubuntu-ports jammy-updates InRelease
+Hit:7 https://repo.download.nvidia.com/jetson/ffmpeg r36.5 InRelease
+Hit:8 http://ports.ubuntu.com/ubuntu-ports jammy-backports InRelease
+Hit:5 https://packagecloud.io/ookla/speedtest-cli/ubuntu jammy InRelease
+Hit:9 http://ports.ubuntu.com/ubuntu-ports jammy-security InRelease
+Reading package lists...
+==> installing TensorPlate runtime packages with apt --reinstall
+Reading package lists...
+Building dependency tree...
+Reading state information...
+Suggested packages:
+  tensorplate-backend-python-pytorch
+The following NEW packages will be installed:
+  tensorplate-agent tensorplate-cli tensorplate-common
+  tensorplate-observability tensorplate-serving
+0 upgraded, 5 newly installed, 0 to remove and 369 not upgraded.
+Need to get 0 B/1,660 kB of archives.
+After this operation, 4,021 kB of additional disk space will be used.
+Get:1 /tmp/tensorplate-install-v0.1.5.0OMQCg/tensorplate-common_0.1.5-1_all.deb tensorplate-common all 0.1.5-1 [6,712 B]
+Get:2 /tmp/tensorplate-install-v0.1.5.0OMQCg/tensorplate-agent_0.1.5-1_arm64.deb tensorplate-agent arm64 0.1.5-1 [530 kB]
+Get:3 /tmp/tensorplate-install-v0.1.5.0OMQCg/tensorplate-observability_0.1.5-1_arm64.deb tensorplate-observability arm64 0.1.5-1 [295 kB]
+Get:4 /tmp/tensorplate-install-v0.1.5.0OMQCg/tensorplate-serving_0.1.5-1_arm64.deb tensorplate-serving arm64 0.1.5-1 [307 kB]
+Get:5 /tmp/tensorplate-install-v0.1.5.0OMQCg/tensorplate-cli_0.1.5-1_arm64.deb tensorplate-cli arm64 0.1.5-1 [521 kB]
+debconf: delaying package configuration, since apt-utils is not installed
+Selecting previously unselected package tensorplate-common.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 200992 files and directories currently installed.)
+Preparing to unpack .../tensorplate-common_0.1.5-1_all.deb ...
+Unpacking tensorplate-common (0.1.5-1) ...
+Setting up tensorplate-common (0.1.5-1) ...
+Selecting previously unselected package tensorplate-agent.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 201003 files and directories currently installed.)
+Preparing to unpack .../tensorplate-agent_0.1.5-1_arm64.deb ...
+Unpacking tensorplate-agent (0.1.5-1) ...
+Selecting previously unselected package tensorplate-observability.
+Preparing to unpack .../tensorplate-observability_0.1.5-1_arm64.deb ...
+Unpacking tensorplate-observability (0.1.5-1) ...
+Selecting previously unselected package tensorplate-serving.
+Preparing to unpack .../tensorplate-serving_0.1.5-1_arm64.deb ...
+Unpacking tensorplate-serving (0.1.5-1) ...
+Selecting previously unselected package tensorplate-cli.
+Preparing to unpack .../tensorplate-cli_0.1.5-1_arm64.deb ...
+Unpacking tensorplate-cli (0.1.5-1) ...
+Setting up tensorplate-observability (0.1.5-1) ...
+Setting up tensorplate-serving (0.1.5-1) ...
+Setting up tensorplate-agent (0.1.5-1) ...
+Setting up tensorplate-cli (0.1.5-1) ...
+
+Configuration file '/etc/tensorplate/cli.json'
+ ==> Modified (by you or by a script) since installation.
+ ==> Package distributor has shipped an updated version.
+ ==> Keeping old config file as default.
+==> enabling TensorPlate services
+==> waiting for TensorPlate services to become ready
+==> running tensorplate doctor --output json
+==> TensorPlate v0.1.5 install complete
+Installed TensorPlate runtime packages from local artifacts at /home/tp-synthetic-operator/tensorplate-evidence/assets-v0.1.5.
+Next: use tensorplate status and tensorplate doctor for operational checks.
+==> doctor on the baseline exited 0; filed as evidence, not asserted
+the rolled-back agent answers with no active or previous deployment
+==> deploying jetson-lifecycle-smoke-rollback from the staged bundle
+==> issuing the identity inference request
+{
+  "command": "infer",
+  "correlation_id": "cli-64301472-cebe-489f-816c-62a432e8a9af",
+  "payload": {
+    "endpoint": "http://127.0.0.1:18080/infer",
+    "endpoint_source": "agent-discovered",
+    "result": {
+      "correlation_id": "cli-64301472-cebe-489f-816c-62a432e8a9af",
+      "outputs": [
+        {
+          "name": "features",
+          "payload_b64": "AAAAAAAAgD8AAABAAABAQAAAgEAAAKBAAADAQAAA4EAAAABBAAAQQQAAIEEAADBBAABAQQAAUEEAAGBBAABwQQAAgEEAAIhBAACQQQAAmEEAAKBBAACoQQAAsEEAALhBAADAQQAAyEEAANBBAADYQQAA4EEAAOhBAADwQQAA+EEAAABCAAAEQgAACEIAAAxCAAAQQgAAFEIAABhCAAAcQgAAIEIAACRCAAAoQgAALEIAADBCAAA0QgAAOEIAADxC",
+          "tensor": {
+            "byte_offset": 0,
+            "byte_size": 192,
+            "dtype": "float32",
+            "layout": "row_major",
+            "shape": [
+              1,
+              3,
+              4,
+              4
+            ]
+          }
+        }
+      ],
+      "request_id": "validation-trt-identity-1",
+      "schema_version": "0.1",
+      "status": "success",
+      "timing": {
+        "execution_latency_ns": 972697
+      }
+    }
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
+trt_identity_response: ok
+PASS: rolled back to v0.1.5; operator edit kept; state set aside unchanged and not loaded; a fresh deployment answered

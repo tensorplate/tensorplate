@@ -1,0 +1,42 @@
+==> restarting both services (agent pid 19270, observability pid 19271)
+==> issuing the identity inference request
+{
+  "command": "infer",
+  "correlation_id": "cli-1409d685-ea4b-4dc5-98c4-d849e6631a85",
+  "payload": {
+    "endpoint": "http://127.0.0.1:18080/infer",
+    "endpoint_source": "agent-discovered",
+    "result": {
+      "correlation_id": "cli-1409d685-ea4b-4dc5-98c4-d849e6631a85",
+      "outputs": [
+        {
+          "name": "features",
+          "payload_b64": "AAAAAAAAgD8AAABAAABAQAAAgEAAAKBAAADAQAAA4EAAAABBAAAQQQAAIEEAADBBAABAQQAAUEEAAGBBAABwQQAAgEEAAIhBAACQQQAAmEEAAKBBAACoQQAAsEEAALhBAADAQQAAyEEAANBBAADYQQAA4EEAAOhBAADwQQAA+EEAAABCAAAEQgAACEIAAAxCAAAQQgAAFEIAABhCAAAcQgAAIEIAACRCAAAoQgAALEIAADBCAAA0QgAAOEIAADxC",
+          "tensor": {
+            "byte_offset": 0,
+            "byte_size": 192,
+            "dtype": "float32",
+            "layout": "row_major",
+            "shape": [
+              1,
+              3,
+              4,
+              4
+            ]
+          }
+        }
+      ],
+      "request_id": "validation-trt-identity-1",
+      "schema_version": "0.1",
+      "status": "success",
+      "timing": {
+        "execution_latency_ns": 1000698
+      }
+    }
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
+trt_identity_response: ok
+PASS: services restarted with new pids; recovered deployment answered health and identity inference
