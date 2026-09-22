@@ -37,12 +37,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   uninstalls the candidate graph, so every run that reached the clean
   install ended with only `tensorplate/tap/tensorplate` trusted, re-added by
   the baseline install, while the harness untrusted only entries it had
-  added itself. It now
-  records the six formulae's per-formula trust before the tap-trust stage
-  and puts exactly that set back before the clean install, before the
-  upgrade and on exit: it re-trusts what an uninstall removed, untrusts
-  what an install added, adds nothing else and lists each change in
-  `cleanup.log`. The clean install needs this as well: a graph left
+  added itself. It now records the six formulae's per-formula trust before
+  the tap-trust stage and puts exactly that set back before the clean
+  install, before the upgrade and on exit: it re-trusts what an uninstall
+  removed, untrusts what an install added, adds nothing else and logs each
+  change. The clean install needs this as well: a graph left
   installed by an interrupted run lost its trust when the stage removed it,
   and Homebrew refuses to load an untrusted dependency.
 
