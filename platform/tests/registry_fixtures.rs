@@ -184,11 +184,11 @@ fn planned_rows_carry_no_claims() {
 
 /// The tag gate: a Production claim must rest on a recorded run.
 ///
-/// **Ignored on purpose, and expected to FAIL when run today.** All five
-/// committed Production rows are `spec_authored` with evidence directories
-/// that do not exist, so this cannot be a PR-blocking check without
-/// blocking every PR. It is a release-prep step instead — see the pre-tag
-/// checklist in `docs/release/runbook.md`.
+/// **Ignored on purpose, and expected to FAIL when run today.** It fails
+/// while any committed Production row is still `spec_authored`, and a row
+/// stays that way until its evidence is recorded, so this cannot be a
+/// PR-blocking check without blocking every PR. It is a release-prep step
+/// instead — see the pre-tag checklist in `docs/release/runbook.md`.
 ///
 /// It exists because the guard below is weaker than it reads.
 /// `production_rows_declare_where_evidence_is_filed` asserts a row DECLARES

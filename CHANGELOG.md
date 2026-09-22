@@ -19,7 +19,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   replaced by their synthetic forms: the operator's home directory and the
   storage id in the device's apt source URL. It is the first Production
   row `check-evidence-bundles.sh` reports complete; the other three still
-  block a final tag.
+  block a final tag. The evidence README's scan step now covers a host or
+  account name that is also ordinary evidence text, which a literal file
+  cannot list bare: its identifying forms are listed instead, and every
+  remaining occurrence is read before `git add`.
 
 ### Fixed
 
