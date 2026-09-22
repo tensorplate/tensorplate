@@ -406,7 +406,10 @@ for package, arch, deb_version in (
     ("tensorplate-backend-python-pytorch", "all", version),
     ("tensorplate-apt-source", "all", version),
 ):
-    name = f"{package}_{deb_version}_{arch}.deb"
+    # Named as the release publishes it: GitHub has no `~`, so the release
+    # build stages a 0.2.1~rc.2-1 package as 0.2.1.rc.2-1. Its control
+    # Version keeps the tilde.
+    name = f"{package}_{deb_version.replace('~', '.')}_{arch}.deb"
     control_version = deb_version
     # A .deb whose control Version is not the one the manifest and the
     # file name carry. The release driver parses the manifest's version
@@ -435,7 +438,7 @@ for package, arch, deb_version in (
 if variant == "duplicate-cli":
     # A manifest naming the CLI twice for this architecture, which leaves
     # no single package to compare the installed version against.
-    artifacts.append({"file": f"tensorplate-cli_{version}_arm64.deb",
+    artifacts.append({"file": f"tensorplate-cli_{version.replace('~', '.')}_arm64.deb",
                       "package": "tensorplate-cli", "architecture": "arm64",
                       "version": version})
 manifest = {"release": release, "artifacts": artifacts}
@@ -2424,7 +2427,11 @@ check "  and say exactly one is expected" yes "$(said 'expected exactly one tens
 
 tampered="${td}/assets-tampered"
 cp -R "$assets" "$tampered"
-printf 'Package: tensorplate-agent\nVersion: 6.6.6-1\n' >"${tampered}/tensorplate-agent_${candidate_version}_arm64.deb"
+# Overwrite the listed package, not a new file beside it: an unlisted file
+# changes nothing sha256sum -c reads.
+tampered_deb="${tampered}/tensorplate-agent_${candidate_version/\~/.}_arm64.deb"
+[[ -f "$tampered_deb" ]] || { printf 'FAIL: fixture has no %s to tamper with\n' "$tampered_deb" >&2; exit 1; }
+printf 'Package: tensorplate-agent\nVersion: 6.6.6-1\n' >"$tampered_deb"
 check "assets that fail their checksums are refused" "1" \
   "$(preflight aarch64 "$jammy" "$r36" "${td}/evidence-tampered" 0.2.1 v0.2.1-rc.2 "$tampered" "${confirm[@]}")"
 check "  and say the set failed verification" yes "$(said 'failed verification')"

@@ -409,10 +409,18 @@ def install(db, directory):
         return 0
     manifest = json.loads(manifests[0].read_text())
     tag = manifest["release"]["tag"]
-    wanted = {
-        a["package"]: a["version"] for a in manifest["artifacts"]
-        if a.get("package") in RUNTIME and a.get("architecture") in ("amd64", "all")
-    }
+    # install.sh's selection, and apt's version: the one the package
+    # carries, never the manifest's.
+    wanted = {}
+    for a in manifest["artifacts"]:
+        if a.get("package") in RUNTIME and a.get("architecture") in ("amd64", "all") \
+                and str(a.get("file", "")).endswith(".deb"):
+            control = re.search(r"^Version: (.+)$",
+                                (pathlib.Path(directory) / a["file"]).read_text(), re.M)
+            if not control:
+                print(f"E: {a['file']} is not a Debian package", file=sys.stderr)
+                return 100
+            wanted[a["package"]] = control.group(1)
     packages = db["packages"]
     for name, version in wanted.items():
         current = packages.get(name)
@@ -596,6 +604,21 @@ PY
 cp "$fake_dpkg" "${stub_bin}/dpkg"
 chmod +x "${stub_bin}/dpkg"
 
+# dpkg-deb, which the harness uses to read the Version each package
+# carries: what apt orders on and dpkg-query reports once it is installed.
+# Each fixture .deb is a control-style text file.
+cat >"${stub_bin}/dpkg-deb" <<'STUB'
+#!/bin/sh
+[ "$1" = -f ] && [ "$3" = Version ] || exit 9
+# A file that is not a package, whatever its name says.
+if ! grep -q '^Package: ' "$2" 2>/dev/null; then
+  printf 'dpkg-deb: error: %s is not a Debian format archive\n' "$2" >&2
+  exit 2
+fi
+sed -n 's/^Version: //p' "$2"
+STUB
+chmod +x "${stub_bin}/dpkg-deb"
+
 cat >"${td}/os-release.noble" <<'EOF'
 ID=ubuntu
 VERSION_ID="24.04"
@@ -631,10 +654,13 @@ else
 fi
 
 # Release-shaped sets for upgrade and rollback: the installer, a manifest
-# in the release build's shape, and SHA256SUMS over both. The manifest
-# lists an arm64 build beside each amd64 one, as a published release's
-# does, so the harness has to select by architecture. None of the .deb
-# files exist; the fake package database installs from the manifest.
+# in the release build's shape, the packages, and SHA256SUMS over all of
+# them. The manifest lists an arm64 build beside each amd64 one, as a
+# published release's does, so the harness has to select by architecture.
+# Each .deb is a control-style text file the dpkg-deb stub reads, named as
+# the release publishes it: GitHub has no `~`, so a candidate's
+# 0.2.1~rc.N-1 package is published as 0.2.1.rc.N-1. The fake package
+# database installs each at the version it carries, as apt does.
 #
 # `set-rc1` rather than `assets-rc1`, so a search of the sudo log for the
 # candidate's `assets-rc2/` path cannot match the baseline's lines.
@@ -646,24 +672,37 @@ root = pathlib.Path(sys.argv[1])
 PER_ARCH = ("tensorplate-agent", "tensorplate-serving", "tensorplate-observability", "tensorplate-cli")
 ALL_ARCH = ("tensorplate-common", "tensorplate-backend-python-pytorch", "tensorplate-apt-source", "tensorplate")
 
-def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None, extra=()):
+def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None,
+         controls=None, corrupt=(), extra=()):
     directory = root / name
     directory.mkdir(parents=True)
     deb_version = f"0.2.1~rc.{rc}-1"
+    published_version = deb_version.replace("~", ".")
     (directory / "install.sh").write_text(f"#!/bin/sh\n# fixture installer, v0.2.1-rc.{rc}\nexit 0\n")
     artifacts = []
+    listed = ["install.sh"]
     for package in PER_ARCH + ALL_ARCH:
         if package in drop:
             continue
         for arch in (("amd64", "arm64") if package in PER_ARCH else ("all",)):
+            file = f"{package}_{published_version}_{arch}.deb"
+            # `versions` changes what the manifest declares, `controls` what
+            # the package itself carries, and `corrupt` leaves a file that
+            # is not a package at all under a good one's name.
+            control = (f"Package: {package}\n"
+                       f"Version: {(controls or {}).get(package, deb_version)}\n"
+                       f"Architecture: {arch}\n")
+            if package in corrupt:
+                control = "not a Debian archive\n"
+            (directory / file).write_text(control)
+            listed.append(file)
             artifacts.append({
-                "file": f"{package}_{deb_version}_{arch}.deb",
+                "file": file,
                 "package": package,
                 "version": (versions or {}).get(package, deb_version),
                 "architecture": arch,
             })
     artifacts.extend(extra)
-    listed = ["install.sh"]
     if manifest:
         release = {"project": "tensorplate", "version": "0.2.1", "tag": f"v0.2.1-rc.{rc}",
                    "provenance": "github-release", "unreleased": False}
@@ -699,6 +738,16 @@ make("set-rc1-wheel-named-agent", 1, extra=({
 # dpkg --compare-versions reads an empty version as older than any other,
 # so only the harness's own check refuses this set.
 make("set-rc1-empty-version", 1, versions={"tensorplate-backend-python-pytorch": ""})
+# The package carries a newer version than its manifest declares. Only a
+# harness that reads the package sees it, and apt orders on the package.
+make("set-rc1-deb-newer", 1, controls={"tensorplate-agent": "0.2.1~rc.3-1"})
+make("set-rc1-deb-corrupt", 1, corrupt=("tensorplate-serving",))
+# A manifest recording each version as its file name spells it, which is
+# what reading versions off the published names gives. 0.2.1.rc.2-1 sorts
+# above 0.2.1-1, so nothing may order on it; the packages still say
+# 0.2.1~rc.2-1.
+make("assets-rc2-published-versions", 2,
+     versions={p: "0.2.1.rc.2-1" for p in PER_ARCH + ALL_ARCH})
 (make("set-rc1-noinstaller", 1) / "install.sh").unlink()
 (make("set-rc1-nosums", 1) / "SHA256SUMS").unlink()
 tampered = make("set-rc1-tampered", 1)
@@ -827,7 +876,7 @@ check "  and names the charset" yes \
 # needs, so prepending a directory could never take it away.
 no_systemd_run="${td}/path-without-systemd-run"
 mkdir -p "$no_systemd_run"
-for tool in sudo systemctl python3 dpkg; do
+for tool in sudo systemctl python3 dpkg dpkg-deb; do
   ln -s "${stub_bin}/${tool}" "${no_systemd_run}/${tool}"
 done
 for tool in bash env dirname basename find awk cat sed grep head tr mkdir rm \
@@ -996,6 +1045,21 @@ check "a baseline newer than the candidate is refused" "1" \
   "$(preflight_upgrade "${fixtures}/set-rc1" "${fixtures}/assets-rc2" "${td}/evidence-upgrade-swapped")"
 check "  because it would be a downgrade" yes \
   "$(preflight_said "the baseline's 0.2.1~rc.2-1 is not older than the candidate's 0.2.1~rc.1-1")"
+
+# What apt orders on is the control Version inside each .deb. The
+# manifest's is derived from the file name by the release driver, and the
+# file name spells a candidate the way GitHub publishes it, so neither can
+# stand in for the package.
+check "a baseline whose .deb carries a newer version than its manifest is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-deb-newer" "${td}/evidence-upgrade-deb-newer")"
+check "  and compares the version the package carries" yes \
+  "$(preflight_said "tensorplate-agent: the baseline's 0.2.1~rc.3-1 is not older than the candidate's 0.2.1~rc.2-1")"
+check "a candidate whose manifest spells its versions as its file names do is ordered on its packages" "0" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2-published-versions" "${fixtures}/set-rc1" "${td}/evidence-upgrade-published-versions")"
+check "a baseline with a .deb dpkg-deb cannot read is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-deb-corrupt" "${td}/evidence-upgrade-deb-corrupt")"
+check "  and names the file and what dpkg-deb did" yes \
+  "$(preflight_said "the baseline set's tensorplate-serving_0.2.1.rc.1-1_amd64.deb does not carry a readable Debian Version in its control file: dpkg-deb exited 2")"
 
 # --- the stages, executed against a stubbed appliance.
 #
@@ -1816,6 +1880,7 @@ case "$1" in
 esac
 STUB
 cp "$fake_dpkg" "${appliance}/bin/dpkg"
+cp "${stub_bin}/dpkg-deb" "${appliance}/bin/dpkg-deb"
 cp "$fake_dpkg" "${appliance}/bin/fake-dpkg-db"
 # Present so preflight's `command -v` finds it, and loud if it is ever
 # invoked directly: a transient unit that denies the network has to be

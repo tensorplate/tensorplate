@@ -481,8 +481,10 @@ PY
 # only after the device has already been rebuilt twice.
 #
 # The versions compared are read from each .deb's own control field with
-# dpkg-deb, not from the manifest. The manifest's `version` is parsed out
-# of the file name by the release driver (tools/release/tensorplate-release.sh)
+# dpkg-deb, not from the manifest and never from the file name, whose
+# published spelling of a candidate (0.2.1.rc.2, GitHub having no `~`)
+# sorts above the release it leads to. The manifest's `version` is derived
+# from the file name by the release driver (tools/release/tensorplate-release.sh)
 # and never read from the package, so a .deb whose control Version says
 # something else -- an epoch, which a file name cannot carry, or a
 # hand-assembled directory -- would be ordered on a string apt does not

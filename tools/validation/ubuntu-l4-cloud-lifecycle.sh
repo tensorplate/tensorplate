@@ -295,6 +295,11 @@ preflight() {
   require_command python3
   require_command sha256sum
   require_command dpkg
+  # Reads the package versions the upgrade path compares when a baseline
+  # is given. Required unconditionally, as dpkg is: every host carrying
+  # dpkg has it, and a run should not discover it missing only once a
+  # baseline was named.
+  require_command dpkg-deb
   # The offline stage runs every TensorPlate CLI call inside a transient
   # unit that denies the network, so a host without systemd-run cannot
   # produce that stage at all.
@@ -427,14 +432,32 @@ def read_set(label, directory):
                 f"the {label} set must list exactly one {package} package for amd64 "
                 f"or all; found {len(matches)}"
             )
-        # The version parsed from the package file name, which is the
-        # Debian version dpkg records; release.version is the canonical
-        # spelling and is the same for every candidate of a release.
-        version = matches[0].get("version")
-        if not isinstance(version, str) or not DEBIAN_VERSION.fullmatch(version):
+        # The manifest has to declare a version for every package it
+        # publishes; a set that does not is malformed whatever the .deb
+        # says, and dpkg --compare-versions would read a missing one as
+        # older than anything.
+        declared = matches[0].get("version")
+        if not isinstance(declared, str) or not DEBIAN_VERSION.fullmatch(declared):
             raise SystemExit(
-                f"the {label} set lists {package} at version {version!r}, "
+                f"the {label} set lists {package} at version {declared!r}, "
                 "which is not a Debian version"
+            )
+        # What apt will order on, and what dpkg-query reports once it is
+        # installed: the control Version inside the .deb. Not the
+        # manifest's, which the release driver derives from the file name,
+        # and not the file name, whose published spelling of a candidate
+        # (0.2.1.rc.1, where the package says 0.2.1~rc.1) sorts above the
+        # release it leads to.
+        read = subprocess.run(
+            ["dpkg-deb", "-f", str(pathlib.Path(directory) / matches[0]["file"]), "Version"],
+            capture_output=True, text=True,
+        )
+        version = read.stdout.strip()
+        if read.returncode != 0 or not DEBIAN_VERSION.fullmatch(version):
+            raise SystemExit(
+                f"the {label} set's {matches[0]['file']} does not carry a readable "
+                f"Debian Version in its control file: dpkg-deb exited {read.returncode} "
+                f"and reported {version!r}"
             )
         packages[package] = version
     return manifest.get("release") or {}, packages
@@ -1823,8 +1846,9 @@ stage_offline_in() {
 # --- upgrade and rollback ------------------------------------------------
 
 # The installed TensorPlate packages are exactly one side of the upgrade
-# path: every package in that set installed at its manifest version, and
-# nothing else installed or half-installed. tensorplate-apt-source is left
+# path: every package in that set installed at the version its .deb
+# carries, as read_upgrade_path read it, and nothing else installed or
+# half-installed. tensorplate-apt-source is left
 # out on both counts; it configures an APT channel, depends on nothing in
 # TensorPlate, and neither install.sh nor a rollback touches it.
 check_installed_versions() {

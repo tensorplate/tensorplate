@@ -8,6 +8,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A release candidate's signed `SHA256SUMS` and manifest now name the files
+  the release contains. GitHub rewrites `~` to `.` in an uploaded asset's
+  name, so `v0.2.1-rc.1` serves `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`
+  while both lists name `tensorplate-agent_0.2.1~rc.1-1_arm64.deb`, which is
+  a 404. `install.sh` fails on the first package it downloads, the Jetson
+  lifecycle harness refuses the set, and `sha256sum -c SHA256SUMS` over the
+  published release reports thirteen listed files it cannot read. Final
+  releases carry no tilde and were never affected.
+
+  `build-release-artifacts.sh` now stages every package under the name GitHub
+  serves before anything records it, and manifest generation and
+  verification refuse any asset name that still holds a `~`. Only the file
+  name changes. Each package's control Version stays `0.2.1~rc.1-1`, and the
+  manifest records that version, not the published spelling, which sorts
+  above `0.2.1`. The Ubuntu cloud lifecycle harness ordered the upgrade path
+  on the manifest's version. It now reads each package's control Version
+  with `dpkg-deb`, as the Jetson harness already did.
+
+  `v0.2.1-rc.1` stays uninstallable with its own installer. The next
+  candidate is the first one built this way.
+
 - `jetson-runner-control.sh status` reports the grant the runner actually
   has. It probed whether the runner account could `sudo apt-get`, which the
   previous change deliberately removed from the allowance, so a correctly
