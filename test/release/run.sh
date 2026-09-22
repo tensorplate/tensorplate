@@ -16,10 +16,41 @@ publish_apt_script="tools/release/publish-apt-repo.sh"
 publish_homebrew_script="tools/release/publish-homebrew-formula.sh"
 verify_homebrew_formulas="test/release/verify_homebrew_formulas.sh"
 verify_artifact_identity="test/release/test_artifact_identity.py"
+verify_published_release="test/release/test_published_release.py"
+verify_release_asset_names="test/release/test_release_asset_names.py"
 verify_build_source_identity="test/release/test_build_source_identity.py"
 verify_build_configuration="test/release/test_build_configuration.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+
+# A fixture package: the control fields dpkg-deb -f reads, as text.
+fixture_deb() {
+  local path="$1" package="$2" version="$3" arch="$4" note="$5"
+  printf 'Package: %s\nVersion: %s\nArchitecture: %s\nDescription: %s\n' \
+    "$package" "$version" "$arch" "$note" >"$path"
+}
+
+# Stage packages into an artifacts directory the way a release build does:
+# with build-release-artifacts.sh's own staging functions, lifted out of it
+# because the script itself compiles the runtime. A fixture that named its
+# own files would pass whatever names the build published.
+stage_like_release() {
+  local dest="$1" deb_version="$2" functions
+  shift 2
+  functions="$(sed -n '/^release_asset_name() {$/,/^}$/p;/^stage_release_debs() {$/,/^}$/p' "$build_script")"
+  if [[ "$functions" != *"release_asset_name() {"*"stage_release_debs() {"* ]]; then
+    echo "FAIL: $build_script no longer defines release_asset_name and stage_release_debs" >&2
+    return 1
+  fi
+  (
+    DEB_VERSION="$deb_version"
+    # shellcheck disable=SC2329  # called by the eval'd stage_release_debs
+    die() { echo "FAIL: release staging: $*" >&2; exit 1; }
+    eval "$functions"
+    : "$DEB_VERSION"  # read by stage_release_debs
+    stage_release_debs "$dest" "$@"
+  )
+}
 
 bash -n "$script"
 bash -n "$build_script"
@@ -36,8 +67,32 @@ bash -n "$publish_homebrew_script"
 "$publish_homebrew_script" --help >/dev/null
 "$verify_homebrew_formulas"
 python3 "$verify_artifact_identity"
+python3 "$verify_published_release"
+python3 "$verify_release_asset_names"
 python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
+
+# Manifest generation reads each package's control Version with dpkg-deb,
+# and every fixture package below is a control-style text file. This
+# stand-in reads one as dpkg-deb reads a package (test_artifact_identity.py
+# holds the same one; test_published_release.py repeats its cases with real
+# packages where dpkg is installed). It goes on PATH only after the Python
+# suites above, which would otherwise take it for the real dpkg-deb.
+mkdir -p "$tmp/stub-bin"
+cat >"$tmp/stub-bin/dpkg-deb" <<'STUB'
+#!/bin/sh
+if [ "$#" -ne 3 ] || [ "$1" != -f ]; then
+  echo "dpkg-deb stand-in: unexpected arguments: $*" >&2
+  exit 9
+fi
+if ! grep -q '^Package: ' "$2" 2>/dev/null; then
+  printf "dpkg-deb: error: '%s' is not a Debian format archive\n" "$2" >&2
+  exit 2
+fi
+sed -n "s/^$3: //p" "$2"
+STUB
+chmod +x "$tmp/stub-bin/dpkg-deb"
+export PATH="$tmp/stub-bin:$PATH"
 
 # The trunk is protected: it moves only by merged pull request, so `cut`
 # tags a commit that is already on it and changes nothing. The ordinary
@@ -273,7 +328,7 @@ done
 
 mkdir -p "$tmp/artifacts"
 for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
-  printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_all.deb"
+  fixture_deb "$tmp/artifacts/${pkg}_0.1.0-1_all.deb" "$pkg" 0.1.0-1 all "fixture artifact for $pkg"
 done
 for pkg in \
   tensorplate-agent \
@@ -281,7 +336,7 @@ for pkg in \
   tensorplate-observability \
   tensorplate-cli \
   tensorplate; do
-  printf 'fixture artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb"
+  fixture_deb "$tmp/artifacts/${pkg}_0.1.0-1_arm64.deb" "$pkg" 0.1.0-1 arm64 "fixture artifact for $pkg"
 done
 # The complete x86_64 runtime set ships alongside the arm64 target.
 for pkg in \
@@ -290,7 +345,7 @@ for pkg in \
   tensorplate-observability \
   tensorplate-cli \
   tensorplate; do
-  printf 'fixture amd64 artifact for %s\n' "$pkg" > "$tmp/artifacts/${pkg}_0.1.0-1_amd64.deb"
+  fixture_deb "$tmp/artifacts/${pkg}_0.1.0-1_amd64.deb" "$pkg" 0.1.0-1 amd64 "fixture amd64 artifact for $pkg"
 done
 printf 'fixture installer\n' > "$tmp/artifacts/install.sh"
 # The SDK distribution rides in the same signed manifest, and verify requires
@@ -409,7 +464,7 @@ done
 # would prove nothing about the new one.
 mkdir -p "$tmp/artifacts-stray-arch"
 cp "$tmp/artifacts/"* "$tmp/artifacts-stray-arch/"
-printf 'stray artifact\n' > "$tmp/artifacts-stray-arch/tensorplate-cli_0.1.0-1_riscv64.deb"
+fixture_deb "$tmp/artifacts-stray-arch/tensorplate-cli_0.1.0-1_riscv64.deb" tensorplate-cli 0.1.0-1 riscv64 "stray artifact"
 if "$script" manifest \
   --version 0.1.0 \
   --tag v0.1.0 \
@@ -425,7 +480,7 @@ fi
 # amd64 build of it means something went wrong in staging.
 mkdir -p "$tmp/artifacts-stray-pkg"
 cp "$tmp/artifacts/"* "$tmp/artifacts-stray-pkg/"
-printf 'stray artifact\n' > "$tmp/artifacts-stray-pkg/tensorplate-common_0.1.0-1_amd64.deb"
+fixture_deb "$tmp/artifacts-stray-pkg/tensorplate-common_0.1.0-1_amd64.deb" tensorplate-common 0.1.0-1 amd64 "stray artifact"
 if "$script" manifest \
   --version 0.1.0 \
   --tag v0.1.0 \
@@ -478,9 +533,9 @@ fi
 
 snapshot_version="0.1.0~dev.20260604.deadbeef1234"
 snapshot_tag="snapshot-develop-deadbeef1234"
-mkdir -p "$tmp/snapshot-artifacts"
+mkdir -p "$tmp/snapshot-artifacts" "$tmp/snapshot-built"
 for pkg in tensorplate-common tensorplate-backend-python-pytorch tensorplate-apt-source; do
-  printf 'fixture snapshot artifact for %s\n' "$pkg" > "$tmp/snapshot-artifacts/${pkg}_${snapshot_version}-1_all.deb"
+  fixture_deb "$tmp/snapshot-built/${pkg}_${snapshot_version}-1_all.deb" "$pkg" "${snapshot_version}-1" all "fixture snapshot artifact for $pkg"
 done
 for pkg in \
   tensorplate-agent \
@@ -488,8 +543,9 @@ for pkg in \
   tensorplate-observability \
   tensorplate-cli \
   tensorplate; do
-  printf 'fixture snapshot artifact for %s\n' "$pkg" > "$tmp/snapshot-artifacts/${pkg}_${snapshot_version}-1_arm64.deb"
+  fixture_deb "$tmp/snapshot-built/${pkg}_${snapshot_version}-1_arm64.deb" "$pkg" "${snapshot_version}-1" arm64 "fixture snapshot artifact for $pkg"
 done
+stage_like_release "$tmp/snapshot-artifacts" "$snapshot_version" "$tmp/snapshot-built"/*.deb || exit 1
 printf 'fixture snapshot installer\n' > "$tmp/snapshot-artifacts/install.sh"
 
 "$script" manifest \
@@ -524,7 +580,15 @@ assert release["provenance"] == "local-source-snapshot"
 assert release["unreleased"] is True
 assert release["source_kind"] == "local-source-branch"
 assert "local-source-snapshot" in release["labels"]
-assert any("~dev.20260604.deadbeef1234-1" in artifact["file"] for artifact in manifest["artifacts"])
+debs = [artifact for artifact in manifest["artifacts"] if artifact.get("package")]
+assert len(debs) == 8, debs
+# Named as GitHub would publish them, recorded at the version dpkg reports.
+for artifact in debs:
+    assert artifact["file"].startswith(
+        f'{artifact["package"]}_0.1.0.dev.20260604.deadbeef1234-1_'
+    ), artifact
+    assert artifact["version"] == "0.1.0~dev.20260604.deadbeef1234-1", artifact
+assert not [line for line in checksums if "~" in line], checksums
 assert len(checksums) == 10  # manifest self-digest + 8 packages + install.sh
 PY
 
@@ -636,7 +700,7 @@ done
   # 1. A real candidate must survive manifest generation AND verification.
   #    Checking require_version alone passed while the manifest layer still
   #    rejected every candidate artifact by name.
-  fx="$(mktemp -d)"; art="$fx/artifacts"; mkdir -p "$art"
+  fx="$(mktemp -d)"; art="$fx/artifacts"; mkdir -p "$art" "$fx/built"
   for pkg in tensorplate-common tensorplate-agent tensorplate-serving \
              tensorplate-observability tensorplate-cli \
              tensorplate-backend-python-pytorch tensorplate-apt-source tensorplate; do
@@ -644,12 +708,13 @@ done
       tensorplate-common|tensorplate-backend-python-pytorch|tensorplate-apt-source) a=all ;;
       *) a=arm64 ;;
     esac
-    : >"$art/${pkg}_${deb}-1_${a}.deb"
+    fixture_deb "$fx/built/${pkg}_${deb}-1_${a}.deb" "$pkg" "${deb}-1" "$a" "candidate fixture"
   done
   for pkg in tensorplate tensorplate-agent tensorplate-serving \
              tensorplate-observability tensorplate-cli; do
-    : >"$art/${pkg}_${deb}-1_amd64.deb"
+    fixture_deb "$fx/built/${pkg}_${deb}-1_amd64.deb" "$pkg" "${deb}-1" amd64 "candidate fixture"
   done
+  stage_like_release "$art" "$deb" "$fx/built"/*.deb || { rm -rf "$fx"; exit 1; }
   : >"$art/tensorplate_python-${py}-py3-none-any.whl"
   : >"$art/tensorplate_python-${py}.tar.gz"
   : >"$art/install.sh"

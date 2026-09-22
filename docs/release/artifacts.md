@@ -38,7 +38,9 @@ The release must include one `.deb` asset for each package:
 | `tensorplate-apt-source` | yes | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component. |
 | `tensorplate` | yes | Full-runtime metapackage, built once per runtime architecture; empty payload, strict-versioned depends on the runtime set. |
 
-Expected asset names follow Debian binary-package naming:
+Expected asset names follow Debian binary-package naming, shown here for a
+final release. A candidate's names spell the `~` in its package version as
+`.`, the name GitHub serves; see the manifest section below.
 
 ```text
 tensorplate-common_${TP_VERSION}-1_all.deb
@@ -162,6 +164,25 @@ For a release candidate, keep `--version` canonical: for example,
 The top-level `release.version` remains `0.2.1`; each artifact records
 its own version, such as `0.2.1~rc.1-1` for a Debian package or `0.2.1rc1`
 for an SDK wheel. The same identity rules apply to `verify` and `publish`.
+
+A candidate's package file names spell that version with `.` in place of
+`~`, for example `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`. GitHub rewrites
+`~` to `.` in an uploaded asset's name, so `build-release-artifacts.sh`
+stages each package under the name GitHub will serve before the manifest and
+`SHA256SUMS` record it, and `manifest` and `verify` refuse any asset name
+that still holds a `~`. Only the file name changes: the package's own
+Version, and the version the manifest records for it, stay `0.2.1~rc.1-1`.
+Order packages by the version inside them (`dpkg-deb -f FILE Version`),
+never by file name. `0.2.1.rc.1-1` sorts above `0.2.1-1`. A final release's
+names have no tilde and are unchanged.
+
+Because a published name cannot tell `.` from `~`, `manifest` records each
+package's version from its control file with `dpkg-deb`, and refuses a
+package whose control Version is not the one its name stands for: a
+package built as `0.2.1.rc.1-1` would otherwise be staged under the same
+name as `0.2.1~rc.1-1` and signed into the manifest as it. `manifest`
+therefore needs `dpkg-deb` (from `dpkg`) on the machine that runs it, and
+refuses to run without it.
 
 The manifest is JSON with this stable shape:
 

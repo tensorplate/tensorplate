@@ -910,6 +910,32 @@ jobs:
 
           gh "${args[@]}"
 
+      # GitHub stores an uploaded asset under a name of its own choosing:
+      # it served v0.2.1-rc.1's packages with `.` where their names had
+      # `~`, so that release's signed SHA256SUMS named files it did not
+      # contain. The build stages every package under the name GitHub is
+      # known to serve; this reads back the names it actually serves and
+      # fails on any difference. A final release is still a draft here, so
+      # the failure stops it before the approval-gated un-draft and every
+      # channel publish. A candidate is already public, and this is the
+      # alarm that it needs superseding.
+      - name: Check the served asset names against SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build_packages.outputs.tag }}
+          CHECKSUMS: ${{ needs.build_packages.outputs.checksums }}
+          BUNDLE: ${{ needs.build_packages.outputs.bundle }}
+        run: |
+          set -Eeuo pipefail
+          served="${RUNNER_TEMP}/release-assets.json"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets >"$served"
+          python3 tools/release/check-release-asset-names.py \
+            --checksums "$CHECKSUMS" \
+            --also "$(basename -- "$CHECKSUMS")" \
+            --also "$(basename -- "$BUNDLE")" \
+            --release-json "$served"
+
   publish-pypi:
     name: publish tensorplate-python to PyPI
     needs: [meta, publish-release]

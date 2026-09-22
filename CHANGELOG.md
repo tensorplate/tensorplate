@@ -8,6 +8,39 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A release candidate's signed `SHA256SUMS` and manifest now name the files
+  the release contains. GitHub rewrites `~` to `.` in an uploaded asset's
+  name, so `v0.2.1-rc.1` served `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`
+  while both lists named `tensorplate-agent_0.2.1~rc.1-1_arm64.deb`, which
+  was a 404. `install.sh` failed on the first package it downloaded, the
+  Jetson lifecycle harness refused the set, and `sha256sum -c SHA256SUMS`
+  over the published release reported thirteen listed files it could not
+  read. Final releases carry no tilde and were never affected.
+
+  `build-release-artifacts.sh` now stages every package under the name GitHub
+  serves before anything records it, and manifest generation and
+  verification refuse any asset name that still holds a `~`. Only the file
+  name changes. Each package's control Version stays `0.2.1~rc.1-1`, and the
+  manifest records that version, not the published spelling, which sorts
+  above `0.2.1`. Because the published name can no longer tell `.` from
+  `~`, manifest generation reads each package's control Version with
+  `dpkg-deb`, records that, and refuses a package whose control Version is
+  not the one its name stands for; it now needs `dpkg-deb` to run. The
+  Ubuntu cloud lifecycle harness ordered the upgrade path on the manifest's
+  version. It now reads each package's control Version with `dpkg-deb`, as
+  the Jetson harness already did, and both harnesses name a listed package
+  that is missing from the set instead of reporting it as unreadable.
+
+  The release workflow now reads back the asset names a new GitHub Release
+  serves and fails unless they are exactly the names `SHA256SUMS` lists,
+  plus `SHA256SUMS` and its signature bundle. That checks GitHub's actual
+  behaviour rather than the one rewrite the build models, and for a final
+  release it runs while the release is still a draft.
+
+  `v0.2.1-rc.1`'s release and tag are no longer on GitHub. The next
+  candidate is the first one built this way, and the first that can serve
+  as the amd64 upgrade and rollback baseline.
+
 - `jetson-runner-control.sh status` reports the grant the runner actually
   has. It probed whether the runner account could `sudo apt-get`, which the
   previous change deliberately removed from the allowance, so a correctly

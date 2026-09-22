@@ -115,6 +115,8 @@ Subcommands:
               path: a second one without the ancestry check creates exactly
               the tag the publish workflow rejects.
   manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets and install.sh.
+              Needs dpkg-deb: each package's recorded version is read from its
+              control file.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   publish     Validate assets and create a draft GitHub Release when --execute is
               explicitly confirmed. Dry-run is the default. Requires the
@@ -202,7 +204,8 @@ command_exists() {
 parse_common_args() {
   VERSION=""
   # A release candidate spells its identity three ways: the manifest
-  # records the canonical version, the .deb files carry the Debian form,
+  # records the canonical version, the .deb packages carry the Debian form
+  # (their file names spell its `~` as `.`, the name GitHub publishes),
   # and the wheel carries the PEP 440 form. Defaulting both to the
   # canonical version keeps a final release single-identity.
   DEB_VERSION=""
@@ -1075,6 +1078,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1090,6 +1095,47 @@ deb_version = os.environ.get("TP_DEB_VERSION") or version
 python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
+
+
+def published_name(name):
+    # GitHub serves an uploaded asset whose name holds `~` under the name
+    # with `.` in its place, so an asset list naming the `~` file names a
+    # file the release does not contain. build-release-artifacts.sh stages
+    # every package under this name before anything records it.
+    return name.replace("~", ".")
+
+
+# How the package version is spelled in a published file name. The version
+# recorded for each package is still the Debian one, tilde and all: it is
+# what dpkg reports and apt orders on, and the published spelling of a
+# candidate sorts above its own release.
+published_deb_version = published_name(deb_version)
+
+# The published name cannot tell `.` from `~`, so the version this manifest
+# signs for a package is bound to the package itself: its control Version,
+# as dpkg-deb reads it, has to be the version the name was taken to mean. A
+# package built as 0.2.1.rc.1-1, which dpkg sorts above 0.2.1-1, is staged
+# under the same name as one built as 0.2.1~rc.1-1.
+dpkg_deb = shutil.which("dpkg-deb")
+if dpkg_deb is None:
+    raise SystemExit(
+        "dpkg-deb is required: manifest generation records each package's "
+        "version from its control file (install dpkg)"
+    )
+
+
+def control_version(path):
+    read = subprocess.run(
+        [dpkg_deb, "-f", str(path), "Version"], capture_output=True, text=True
+    )
+    if read.returncode != 0:
+        raise SystemExit(
+            f"{path.name}: dpkg-deb could not read its control Version "
+            f"(exit {read.returncode}): {read.stderr.strip()}"
+        )
+    return read.stdout.strip()
+
+
 required = [
     "tensorplate-common",
     "tensorplate-agent",
@@ -1121,10 +1167,17 @@ for package in required:
         continue
     target_matches = []
     for path in matches:
+        if published_name(path.name) != path.name:
+            raise SystemExit(
+                f"{path.name}: GitHub would publish this asset as "
+                f"{published_name(path.name)}, so SHA256SUMS would list a file the "
+                "release does not contain; stage it under that name, as "
+                "build-release-artifacts.sh does"
+            )
         match = re.match(r"(?P<package>.+)_(?P<version>[^_]+)_(?P<arch>[^_]+)\.deb$", path.name)
         if not match:
             raise SystemExit(f"artifact name is not Debian-like: {path.name}")
-        package_version = match.group("version")
+        file_version = match.group("version")
         arch = match.group("arch")
         # The glob that found this file is a PREFIX match, so the name parsed
         # from the filename is not necessarily the required-list entry that
@@ -1132,11 +1185,17 @@ for package in required:
         # `tensorplate-agent`. Every decision below must use the parsed name,
         # or a stray file rides into the manifest under a sibling's identity.
         parsed_package = match.group("package")
-        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+        if not (file_version == published_deb_version
+                or file_version.startswith(published_deb_version + "-")):
             raise SystemExit(
-                f"{path.name}: package version {package_version} does not match "
-                f"the release's package version {deb_version}"
+                f"{path.name}: package version {file_version} does not match "
+                f"the release's package version {deb_version}, published as "
+                f"{published_deb_version}"
             )
+        # The Debian version, with --deb-version's tilde put back. Exact
+        # because staging refuses a name holding any other tilde, and held
+        # to the package's control Version below.
+        package_version = deb_version + file_version[len(published_deb_version):]
         if parsed_package != package and parsed_package not in required:
             raise SystemExit(
                 f"{path.name}: file name does not match a published package "
@@ -1162,12 +1221,18 @@ for package in required:
         # and an `else` would report the whole secondary set as absent.
         if arch == secondary_arch:
             secondary_matches.append(parsed_package)
+        control = control_version(path)
+        if control != package_version:
+            raise SystemExit(
+                f"{path.name}: the package's control Version is {control!r}, not "
+                f"{package_version}, the version its name is published for"
+            )
         digest = sha256(path)
         artifacts.append(
             {
                 "file": path.name,
                 "package": parsed_package,
-                "version": package_version,
+                "version": control,
                 "architecture": arch,
                 "target_os": target_os if arch in (target_arch, "all") else secondary_target_os,
                 "size_bytes": path.stat().st_size,
@@ -1262,6 +1327,13 @@ manifest = {
 
 manifest_out = Path(manifest_path)
 checksums_out = Path(checksums_path)
+# Every name SHA256SUMS will list, not only the packages checked above.
+for name in [manifest_out.name] + [artifact["file"] for artifact in artifacts]:
+    if published_name(name) != name:
+        raise SystemExit(
+            f"{name}: GitHub would publish this asset as {published_name(name)}, "
+            "so SHA256SUMS would list a file the release does not contain"
+        )
 manifest_out.parent.mkdir(parents=True, exist_ok=True)
 checksums_out.parent.mkdir(parents=True, exist_ok=True)
 manifest_out.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -1299,6 +1371,15 @@ deb_version = os.environ.get("TP_DEB_VERSION") or version
 python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
 root = Path(artifacts_dir)
+
+
+def published_name(name):
+    # The name GitHub serves an uploaded asset under: `~` becomes `.`.
+    # The manifest generator's copy of this rule says why it matters.
+    return name.replace("~", ".")
+
+
+published_deb_version = published_name(deb_version)
 manifest = json.loads(Path(manifest_path).read_text())
 if manifest.get("release", {}).get("version") != version:
     raise SystemExit("manifest version mismatch")
@@ -1315,10 +1396,21 @@ for line in Path(checksums_path).read_text().splitlines():
     if not line.strip():
         continue
     digest, filename = line.split(None, 1)
-    checksums[filename.strip()] = digest
+    filename = filename.strip()
+    # A strict `sha256sum -c SHA256SUMS` over the published release reads
+    # every name listed, so one GitHub rewrites fails it for everybody.
+    if published_name(filename) != filename:
+        raise SystemExit(
+            f"SHA256SUMS lists {filename}, which GitHub publishes as {published_name(filename)}"
+        )
+    checksums[filename] = digest
 
 for artifact in manifest.get("artifacts", []):
     name = artifact["file"]
+    if published_name(name) != name:
+        raise SystemExit(
+            f"{name}: the manifest names an asset GitHub publishes as {published_name(name)}"
+        )
     # Hashes bind bytes to a manifest, but do not prove those bytes belong
     # to the requested candidate. Check the artifact's identity even when
     # its manifest and checksum file have been regenerated together.
@@ -1331,13 +1423,27 @@ for artifact in manifest.get("artifacts", []):
         )
         if not match:
             raise SystemExit(f"artifact name is not Debian-like: {name}")
-        package_version = match.group("version")
-        if not (package_version == deb_version or package_version.startswith(deb_version + "-")):
+        file_version = match.group("version")
+        if not (file_version == published_deb_version
+                or file_version.startswith(published_deb_version + "-")):
             raise SystemExit(
-                f"{name}: package version {package_version} does not match "
+                f"{name}: package version {file_version} does not match "
+                f"the release's package version {deb_version}, published as "
+                f"{published_deb_version}"
+            )
+        # The manifest records the Debian version, which the file name
+        # carries in its published spelling.
+        recorded = artifact.get("version")
+        if not isinstance(recorded, str) or not (
+            recorded == deb_version or recorded.startswith(deb_version + "-")
+        ):
+            raise SystemExit(
+                f"{name}: manifest package version {recorded!r} does not match "
                 f"the release's package version {deb_version}"
             )
-        for field in ("package", "version", "architecture"):
+        if published_name(recorded) != file_version:
+            raise SystemExit(f"{name}: manifest version mismatch with artifact filename")
+        for field in ("package", "architecture"):
             if artifact.get(field) != match.group(field):
                 raise SystemExit(f"{name}: manifest {field} mismatch with artifact filename")
     elif artifact.get("kind") in sdk_files or name.startswith("tensorplate_python-"):

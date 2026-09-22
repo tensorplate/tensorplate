@@ -87,6 +87,45 @@ note() {
   printf '==> %s\n' "$*"
 }
 
+# The name GitHub serves a release asset under. GitHub rewrites `~` to `.`
+# in the name of an uploaded asset: v0.2.1-rc.1 uploaded
+# tensorplate-agent_0.2.1~rc.1-1_arm64.deb, and the release serves it only
+# as tensorplate-agent_0.2.1.rc.1-1_arm64.deb (the tilde URL is a 404),
+# while its signed SHA256SUMS and manifest named the tilde file. `~` is
+# the one rewrite relied on because it is the one observed; manifest
+# generation refuses any asset name that still carries one.
+#
+# Only the file name changes. The package's control Version stays
+# 0.2.1~rc.1-1, and that is what apt, dpkg and the lifecycle harnesses
+# order on. The file name must never be: 0.2.1.rc.1 sorts ABOVE 0.2.1.
+release_asset_name() {
+  printf '%s\n' "${1//\~/.}"
+}
+
+# Copy each package into the artifacts directory under the name GitHub
+# will serve it as. This is the only way a .deb enters that directory, so
+# the file on disk, the manifest's `file`, SHA256SUMS, the signature over
+# it and the published asset all carry one name.
+stage_release_debs() {
+  local dest="$1" deb name published
+  shift
+  for deb in "$@"; do
+    name="$(basename -- "$deb")"
+    # Manifest generation recovers the package version from the published
+    # name by restoring the tilde of --deb-version, which is exact only
+    # while that is the only tilde the name holds.
+    if [[ "${name#*_"${DEB_VERSION}"-}" == *"~"* ]]; then
+      die "$name carries a '~' outside its package version ${DEB_VERSION}; its published name would not identify its version"
+    fi
+    published="$(release_asset_name "$name")"
+    if [[ -e "${dest%/}/${published}" ]]; then
+      die "two packages would be published as ${published}"
+    fi
+    cp -- "$deb" "${dest%/}/${published}" ||
+      die "could not stage $name as ${dest%/}/${published}"
+  done
+}
+
 VERSION=""
 DEB_VERSION=""
 PYTHON_VERSION=""
@@ -580,7 +619,7 @@ if [[ "$TARGET_ARCH" != "$SECONDARY_ARCH" ]]; then
     fi
   done
 fi
-cp "${debs[@]}" "$ARTIFACTS_DIR/"
+stage_release_debs "$ARTIFACTS_DIR" "${debs[@]}"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 
 # The installer is published as a release asset, and its documented flow is

@@ -230,11 +230,11 @@ Prerequisites:
    newer packages would make the upgrade stage's candidate install a
    downgrade that `apt-get -y` refuses — after the device had already
    been rebuilt twice. The versions compared are read from each `.deb`'s
-   own control field with `dpkg-deb`, not from the manifest: the release
-   driver parses the manifest's `version` out of the file name and never
-   reads the package, so a set whose two disagree would be ordered on a
-   string `apt` does not use. The comparison is recorded in
-   `upgrade-path.json`.
+   own control field with `dpkg-deb`, not from the manifest: earlier
+   releases, the `v0.1.5` baseline among them, took the manifest's
+   `version` from the file name without reading the package, so a set
+   whose two disagree would be ordered on a string `apt` does not use.
+   The comparison is recorded in `upgrade-path.json`.
 
    The snapshot check reads fields the set's own manifest declares, so it
    keeps a locally built set out of the run but is not by itself a proof
