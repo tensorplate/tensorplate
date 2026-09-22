@@ -189,8 +189,9 @@ sudo bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
 
 The wrapper clones or checks out the requested branch, builds snapshot
-packages named with `X.Y.Z~dev.YYYYMMDD.gitsha`, generates a local
-manifest and `SHA256SUMS`, verifies them with
+packages versioned `X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it
+`X.Y.Z.dev.YYYYMMDD.gitsha`, as a release names its packages), generates
+a local manifest and `SHA256SUMS`, verifies them with
 `tools/release/tensorplate-release.sh`, then invokes the same
 `install.sh` path with `--local-artifacts --allow-unsigned`. There is no
 second installer implementation.

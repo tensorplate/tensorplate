@@ -483,12 +483,14 @@ PY
 # The versions compared are read from each .deb's own control field with
 # dpkg-deb, not from the manifest and never from the file name, whose
 # published spelling of a candidate (0.2.1.rc.2, GitHub having no `~`)
-# sorts above the release it leads to. The manifest's `version` is derived
-# from the file name by the release driver (tools/release/tensorplate-release.sh)
-# and never read from the package, so a .deb whose control Version says
-# something else -- an epoch, which a file name cannot carry, or a
-# hand-assembled directory -- would be ordered on a string apt does not
-# use. check_installed_versions already reads the control field after
+# sorts above the release it leads to. The release driver
+# (tools/release/tensorplate-release.sh) holds the manifest's `version` to
+# each package's control field, but earlier releases, the v0.1.5 baseline
+# among them, took it from the file name without reading the package, and
+# a hand-assembled directory records whatever it was given. A .deb whose
+# control Version says something else -- an epoch, which a file name
+# cannot carry -- would be ordered on a string apt does not use.
+# check_installed_versions already reads the control field after
 # each install; reading it here moves that truth to preflight, before
 # the device has been rebuilt at all.
 #
@@ -544,18 +546,26 @@ def read_set(label, directory):
                 f"the {label} set lists {package} at version {declared!r}, "
                 "which is not a Debian version"
             )
+        # A listed file that is not there is its own failure, not an
+        # unreadable package: a download of v0.2.1-rc.1 held each package
+        # under the name GitHub served, not the one its manifest listed.
+        deb = pathlib.Path(directory) / matches[0]["file"]
+        if not deb.is_file():
+            raise SystemExit(
+                f"the {label} set's manifest lists {matches[0]['file']}, "
+                f"which is not in {directory}"
+            )
         # What apt will order on. dpkg-deb is a required command, checked
         # in preflight before this runs.
         read = subprocess.run(
-            ["dpkg-deb", "-f", str(pathlib.Path(directory) / matches[0]["file"]), "Version"],
-            capture_output=True, text=True,
+            ["dpkg-deb", "-f", str(deb), "Version"], capture_output=True, text=True,
         )
         version = read.stdout.strip()
         if read.returncode != 0 or not DEBIAN_VERSION.fullmatch(version):
             raise SystemExit(
                 f"the {label} set's {matches[0]['file']} does not carry a readable "
                 f"Debian Version in its control file: dpkg-deb exited {read.returncode} "
-                f"and reported {version!r}"
+                f"and reported {version!r}: {read.stderr.strip()}"
             )
         packages[package] = version
     return manifest.get("release") or {}, packages

@@ -85,12 +85,13 @@ export VCPKG_ROOT=/opt/vcpkg
 bash packaging/scripts/build-install-from-source.sh --branch develop --no-install --arch arm64
 ```
 
-The output directory contains snapshot packages named
-`X.Y.Z~dev.YYYYMMDD.gitsha`, `install.sh`, a snapshot manifest, and
-`SHA256SUMS`. Copy that directory to the Jetson and install through the
-same local-artifact installer path printed by the wrapper. These artifacts
-are unreleased and unsigned; use them for validation, not as public release
-evidence.
+The output directory contains snapshot packages versioned
+`X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it
+`X.Y.Z.dev.YYYYMMDD.gitsha`, as a release names its packages),
+`install.sh`, a snapshot manifest, and `SHA256SUMS`. Copy that directory
+to the Jetson and install through the same local-artifact installer path
+printed by the wrapper. These artifacts are unreleased and unsigned; use
+them for validation, not as public release evidence.
 
 ## Verifying cross-compiled artifacts on device
 

@@ -501,6 +501,13 @@ Open the `Release` workflow run for `${TP_TAG}`. It must:
   the wheel + sdist, manifest, checksum file, and `SHA256SUMS.cosign.bundle`.
   RC tags are public prereleases; final tags are created as **drafts**, then
   the approval-gated `publish-github` job un-drafts them (Step 9).
+- Read back the asset names the new release serves and fail unless they
+  are exactly the names `SHA256SUMS` lists, plus `SHA256SUMS` and its
+  bundle. GitHub stores an asset under a name of its own choosing (it
+  serves `~` as `.`), and a release whose signed list names a file it does
+  not serve cannot be installed or verified. A final release is still a
+  draft at this point; a candidate is already public, and a failure here
+  means it must be superseded by the next RC.
 
 The workflow refuses to replace an existing GitHub Release. If it fails
 after creating no release, fix the trunk, cut a new RC tag, or delete only
@@ -529,7 +536,9 @@ cosign verify-blob \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 sha256sum -c SHA256SUMS
-gh attestation verify "tensorplate-agent_${TP_VERSION}-1_arm64.deb" \
+# A candidate's package file names spell its `~rc.N` as `.rc.N`, the name
+# GitHub serves; the package's own Version keeps the tilde.
+gh attestation verify "tensorplate-agent_${TP_VERSION}${TP_RC:+.rc.${TP_RC}}-1_arm64.deb" \
   --repo tensorplate/tensorplate
 ```
 

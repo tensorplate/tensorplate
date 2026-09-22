@@ -39,9 +39,13 @@ defect:
 
 Upgrade and rollback need a baseline: a published, signed release whose
 amd64 runtime set is older than the candidate's. `v0.1.x` published only
-the CLI for that architecture, so the first release that can serve is
-`v0.2.1-rc.1`, once it is published. Without `--baseline-assets-dir` the
-harness skips both stages and names the option in the skip reason.
+the CLI for that architecture, so the first release that can serve is the
+first candidate published with an amd64 runtime set under the names its
+manifest lists. `v0.2.1-rc.1` is not one: its manifest and signed
+`SHA256SUMS` named each package with a `~` that GitHub serves as `.`, and
+its release and tag are no longer on GitHub. Without
+`--baseline-assets-dir` the harness skips both stages and names the
+option in the skip reason.
 
 A local build or a snapshot is never a baseline. Preflight refuses a
 baseline whose manifest records a local source snapshot or an unreleased

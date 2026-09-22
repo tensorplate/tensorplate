@@ -176,6 +176,14 @@ Order packages by the version inside them (`dpkg-deb -f FILE Version`),
 never by file name. `0.2.1.rc.1-1` sorts above `0.2.1-1`. A final release's
 names have no tilde and are unchanged.
 
+Because a published name cannot tell `.` from `~`, `manifest` records each
+package's version from its control file with `dpkg-deb`, and refuses a
+package whose control Version is not the one its name stands for: a
+package built as `0.2.1.rc.1-1` would otherwise be staged under the same
+name as `0.2.1~rc.1-1` and signed into the manifest as it. `manifest`
+therefore needs `dpkg-deb` (from `dpkg`) on the machine that runs it, and
+refuses to run without it.
+
 The manifest is JSON with this stable shape:
 
 ```json

@@ -412,10 +412,10 @@ for package, arch, deb_version in (
     name = f"{package}_{deb_version.replace('~', '.')}_{arch}.deb"
     control_version = deb_version
     # A .deb whose control Version is not the one the manifest and the
-    # file name carry. The release driver parses the manifest's version
-    # out of the file name and never reads the package, so only a harness
-    # that reads the control field sees this -- and the control field is
-    # what apt orders on.
+    # file name carry. Earlier releases took the manifest's version
+    # from the file name without reading the package, so only a
+    # harness that reads the control field sees this -- and the control
+    # field is what apt orders on.
     if variant == "deb-version-newer" and package == "tensorplate-agent" and arch == "arm64":
         control_version = "9.9.9-1"
     control = f"Package: {package}\nVersion: {control_version}\nArchitecture: {arch}\n"
@@ -423,7 +423,10 @@ for package, arch, deb_version in (
     # manifest entry of a good one.
     if variant == "deb-corrupt" and package == "tensorplate-serving" and arch == "arm64":
         control = "not a Debian archive\n"
-    (directory / name).write_text(control, encoding="utf-8")
+    # Listed but not there, as each package of a downloaded v0.2.1-rc.1
+    # is: GitHub served it under another name.
+    if not (variant == "deb-absent" and package == "tensorplate-serving" and arch == "arm64"):
+        (directory / name).write_text(control, encoding="utf-8")
     entry = {"file": name, "package": package, "architecture": arch,
              # The release manifest records each package's Debian version
              # beside its file; the upgrade path is compared on the
@@ -4611,11 +4614,11 @@ check "  and says the two sets form no upgrade path" yes \
   "$(said 'the baseline and candidate sets do not form an upgrade path')"
 check "  before anything privileged ran" "" "$(cat "${td}/preflight-sudo.log")"
 
-# What apt orders on is the control Version inside the .deb. The release
-# driver parses the manifest's `version` out of the file name and never
-# reads the package, so a set whose two disagree is admitted by anything
-# that compares the manifest -- and refused by apt-get on a device the
-# run has already rebuilt twice.
+# What apt orders on is the control Version inside the .deb. Earlier
+# releases took the manifest's `version` from the file name without
+# reading the package, so a set whose two disagree is admitted by
+# anything that compares the manifest -- and refused by apt-get on a
+# device the run has already rebuilt twice.
 make_assets "${td}/baseline-deb-newer" v0.1.5 "$baseline_version" deb-version-newer
 check "a baseline whose .deb carries a newer version than its manifest is refused" "1" \
   "$(baseline_preflight "${td}/evidence-deb-newer" --baseline-tag v0.1.5 \
@@ -4637,7 +4640,17 @@ check "a baseline with a .deb dpkg-deb cannot read is refused" "1" \
   "$(baseline_preflight "${td}/evidence-deb-corrupt" --baseline-tag v0.1.5 \
      --baseline-assets-dir "${td}/baseline-deb-corrupt")"
 check "  and names the file and what dpkg-deb did" yes \
-  "$(said "the baseline set's tensorplate-serving_${baseline_version}_arm64.deb does not carry a readable Debian Version in its control file: dpkg-deb exited 2")"
+  "$(said "the baseline set's tensorplate-serving_${baseline_version}_arm64.deb does not carry a readable Debian Version in its control file: dpkg-deb exited 2 and reported '': dpkg-deb: error: ${td}/baseline-deb-corrupt/tensorplate-serving_${baseline_version}_arm64.deb is not a Debian format archive")"
+check "  before anything privileged ran" "" "$(cat "${td}/preflight-sudo.log")"
+
+# A listed .deb that is not there is named as missing, not as a package
+# dpkg-deb cannot read.
+make_assets "${td}/baseline-deb-absent" v0.1.5 "$baseline_version" deb-absent
+check "a baseline whose manifest lists a .deb it does not hold is refused" "1" \
+  "$(baseline_preflight "${td}/evidence-deb-absent" --baseline-tag v0.1.5 \
+     --baseline-assets-dir "${td}/baseline-deb-absent")"
+check "  and names the listed file that is not there" yes \
+  "$(said "the baseline set's manifest lists tensorplate-serving_${baseline_version}_arm64.deb, which is not in ${td}/baseline-deb-absent")"
 check "  before anything privileged ran" "" "$(cat "${td}/preflight-sudo.log")"
 
 # dpkg --compare-versions reads an empty version as older than any other,

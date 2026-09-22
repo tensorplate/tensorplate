@@ -8,12 +8,20 @@ fixtures have valid checksums, so the rejection cases reach the version and
 filename checks they are intended to protect.
 
 Every fixture package enters its artifacts directory through the release
-build's own staging code, so the file names under test are the ones a
-release publishes rather than names a fixture chose.
+build's own staging functions, lifted out of build-release-artifacts.sh and
+run as written, so the file names under test are the ones those functions
+give. That the build routes its packages through them is
+test_build_configuration.py's end-to-end case.
+
+Each fixture package is a control-style text file, and a dpkg-deb stand-in
+on PATH reads its Version the way dpkg-deb reads a package's control file.
+test_published_release.py repeats the control-version cases with real
+packages and the real dpkg-deb where dpkg is installed.
 """
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -22,6 +30,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from typing import Callable
 import unittest
 
 
@@ -62,6 +71,52 @@ eval "$functions"
 : "$DEB_VERSION"  # read by stage_release_debs
 stage_release_debs "$dest" "$@"
 """
+
+
+# `dpkg-deb -f FILE FIELD` over a fixture package: a control-style text
+# file, whose fields it prints as dpkg-deb prints a package's. Anything else
+# is refused the way dpkg-deb refuses a file that is not a Debian archive.
+DPKG_DEB_STUB = r"""#!/bin/sh
+if [ "$#" -ne 3 ] || [ "$1" != -f ]; then
+  echo "dpkg-deb stand-in: unexpected arguments: $*" >&2
+  exit 9
+fi
+if ! grep -q '^Package: ' "$2" 2>/dev/null; then
+  printf "dpkg-deb: error: '%s' is not a Debian format archive\n" "$2" >&2
+  exit 2
+fi
+sed -n "s/^$3: //p" "$2"
+"""
+
+_stub_directory: Path | None = None
+
+
+def dpkg_deb_stub_directory() -> Path:
+    """A directory holding only the dpkg-deb stand-in, for the front of PATH."""
+    global _stub_directory
+    if _stub_directory is None:
+        _stub_directory = Path(tempfile.mkdtemp(prefix="tp-dpkg-deb-stub-"))
+        atexit.register(shutil.rmtree, _stub_directory, ignore_errors=True)
+        stub = _stub_directory / "dpkg-deb"
+        stub.write_text(DPKG_DEB_STUB)
+        stub.chmod(0o755)
+    return _stub_directory
+
+
+def fixture_control(package: str, version: str, architecture: str, note: str) -> str:
+    """A fixture package: the control fields dpkg-deb -f reads, as text."""
+    return (
+        f"Package: {package}\nVersion: {version}\nArchitecture: {architecture}\n"
+        f"Description: {note}\n"
+    )
+
+
+def write_fixture_package(built: Path, package: str, version: str, architecture: str,
+                          note: str) -> Path:
+    """Write a fixture package under the name dpkg-buildpackage gives it."""
+    path = built / f"{package}_{version}_{architecture}.deb"
+    path.write_text(fixture_control(package, version, architecture, note))
+    return path
 
 
 def run_release_staging(
@@ -131,12 +186,23 @@ FIXTURE_KINDS = {
 
 
 def run_command(
-    argv: tuple[str, ...] | list[str], *, cwd: Path
+    argv: tuple[str, ...] | list[str], *, cwd: Path, stub_dpkg_deb: bool = True,
+    path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run a command, by default with the dpkg-deb stand-in first on PATH.
+
+    stub_dpkg_deb=False leaves PATH as it is, for real packages and the real
+    dpkg-deb; path replaces PATH outright.
+    """
+    env = {**os.environ, "LC_ALL": "C"}
+    if stub_dpkg_deb:
+        env["PATH"] = f"{dpkg_deb_stub_directory()}{os.pathsep}{env['PATH']}"
+    if path is not None:
+        env["PATH"] = path
     return subprocess.run(
         argv,
         cwd=cwd,
-        env={**os.environ, "LC_ALL": "C"},
+        env=env,
         capture_output=True,
         text=True,
         timeout=30,
@@ -165,7 +231,8 @@ def init_fixture_repo(repo: Path) -> None:
 
 
 def make_release_set(
-    case_root: Path, kind: str, repo: Path, *, release_layout: bool = False
+    case_root: Path, kind: str, repo: Path, *, release_layout: bool = False,
+    build_package: Callable[[Path, str, str, str], Path] | None = None,
 ) -> ArtifactFixture:
     """Build, stage and manifest one release artifact set.
 
@@ -174,6 +241,11 @@ def make_release_set(
     driver. With release_layout the manifest and SHA256SUMS land in the
     artifacts directory under the names a release publishes, which is the
     layout install.sh and the lifecycle harnesses read.
+
+    build_package(built, package, version, architecture) makes each package
+    in place of the control-style fixture. Given one, the driver runs with
+    the dpkg-deb on PATH rather than the stand-in, so the packages it builds
+    have to be real.
     """
     if kind not in FIXTURE_KINDS:
         raise AssertionError(f"unknown fixture kind: {kind}")
@@ -183,17 +255,19 @@ def make_release_set(
     built.mkdir(parents=True)
     artifacts.mkdir(parents=True)
 
+    def build(package: str, architecture: str) -> None:
+        if build_package is None:
+            write_fixture_package(built, package, f"{deb_version}-1", architecture,
+                                  f"{kind} fixture for {package} {architecture}")
+        else:
+            build_package(built, package, f"{deb_version}-1", architecture)
+
     for package in REQUIRED_PACKAGES:
-        architecture = "all" if package in ALL_PACKAGES else "arm64"
-        (built / f"{package}_{deb_version}-1_{architecture}.deb").write_text(
-            f"{kind} fixture for {package} {architecture}\n"
-        )
+        build(package, "all" if package in ALL_PACKAGES else "arm64")
     if not snapshot:
         for package in SECONDARY_PACKAGES:
-            (built / f"{package}_{deb_version}-1_amd64.deb").write_text(
-                f"{kind} fixture for {package} amd64\n"
-            )
-    staged = run_release_staging(artifacts, deb_version, sorted(built.iterdir()))
+            build(package, "amd64")
+    staged = run_release_staging(artifacts, deb_version, sorted(built.glob("*.deb")))
     if staged.returncode != 0:
         raise AssertionError(f"release staging failed:\n{staged.stdout}\n{staged.stderr}")
     if not snapshot:
@@ -223,7 +297,8 @@ def make_release_set(
         checksums=checksums,
     )
     result = run_command(
-        ("bash", str(RELEASE_DRIVER), "manifest", *identity_args(fixture)), cwd=repo
+        ("bash", str(RELEASE_DRIVER), "manifest", *identity_args(fixture)), cwd=repo,
+        stub_dpkg_deb=build_package is None,
     )
     if result.returncode != 0:
         raise AssertionError(
@@ -736,6 +811,113 @@ class ReleaseArtifactIdentityTests(unittest.TestCase):
             result.stderr,
         )
         self.assertEqual((dest / github_served_name(name)).read_text(), "one\n")
+
+    def test_manifest_generation_refuses_a_listed_manifest_name_github_rewrites(self) -> None:
+        # SHA256SUMS lists the manifest itself, so its name is published too.
+        fixture = self._make_fixture("rc")
+        args = self._identity_args(fixture)
+        tilde = fixture.manifest.with_name("tensorplate-v0.2.1-rc~1-artifacts.json")
+        args[args.index("--manifest") + 1] = str(tilde)
+        result = self._driver("manifest", *args)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            f"{tilde.name}: GitHub would publish this asset as "
+            "tensorplate-v0.2.1-rc.1-artifacts.json",
+            result.stderr,
+        )
+        self.assertFalse(tilde.exists())
+
+    def test_verify_refuses_a_manifest_naming_a_file_github_rewrites(self) -> None:
+        # SHA256SUMS lists only served names, but the manifest names a
+        # tilde file: install.sh downloads by the manifest's `file`, so the
+        # manifest alone is enough to send it to a 404.
+        fixture = self._make_fixture("rc")
+        manifest = json.loads(fixture.manifest.read_text())
+        artifact = self._package_artifact(manifest)
+        served = artifact["file"]
+        tilde = "tensorplate-agent_0.2.1~rc.1-1_arm64.deb"
+        self.assertEqual(github_served_name(tilde), served)
+        artifact["file"] = tilde
+        fixture.manifest.write_text(json.dumps(manifest, indent=2) + "\n")
+        fixture.checksums.write_text(
+            f"{self._artifact_digest(fixture.manifest)}  {fixture.manifest.name}\n"
+            + "".join(
+                f"{a['sha256']}  {served if a['file'] == tilde else a['file']}\n"
+                for a in manifest["artifacts"]
+            )
+        )
+        self.assertNotIn("~", fixture.checksums.read_text())
+        result = self._verify(fixture)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            f"{tilde}: the manifest names an asset GitHub publishes as {served}",
+            result.stderr,
+        )
+
+    # --- the version the manifest signs is the package's own --------------
+
+    def test_a_manifest_records_each_package_at_its_control_version(self) -> None:
+        for kind in ("final", "rc", "snapshot"):
+            with self.subTest(kind=kind):
+                fixture = self._make_fixture(kind)
+                manifest = json.loads(fixture.manifest.read_text())
+                for artifact in manifest["artifacts"]:
+                    if artifact.get("package"):
+                        control = (fixture.artifacts / artifact["file"]).read_text()
+                        self.assertIn(f"\nVersion: {artifact['version']}\n", control)
+
+    def test_manifest_generation_refuses_a_package_built_at_the_published_spelling(
+        self,
+    ) -> None:
+        # 0.2.1.rc.1-1 is a different version from 0.2.1~rc.1-1, and dpkg
+        # sorts it above 0.2.1-1, but both are staged under the same name.
+        # The name cannot tell them apart; the package can.
+        fixture = self._make_fixture("rc")
+        staged = fixture.artifacts / "tensorplate-agent_0.2.1.rc.1-1_arm64.deb"
+        staged.write_text(
+            fixture_control("tensorplate-agent", "0.2.1.rc.1-1", "arm64", "built dotted")
+        )
+        result = self._driver("manifest", *self._identity_args(fixture))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "tensorplate-agent_0.2.1.rc.1-1_arm64.deb: the package's control Version "
+            "is '0.2.1.rc.1-1', not 0.2.1~rc.1-1, the version its name is published for",
+            result.stderr,
+        )
+
+    def test_manifest_generation_refuses_a_package_dpkg_deb_cannot_read(self) -> None:
+        fixture = self._make_fixture("final")
+        staged = fixture.artifacts / "tensorplate-serving_0.2.1-1_arm64.deb"
+        staged.write_text("not a Debian archive\n")
+        result = self._driver("manifest", *self._identity_args(fixture))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "tensorplate-serving_0.2.1-1_arm64.deb: dpkg-deb could not read its control "
+            "Version (exit 2): dpkg-deb: error: ",
+            result.stderr,
+        )
+        self.assertIn("is not a Debian format archive", result.stderr)
+
+    def test_manifest_generation_refuses_without_dpkg_deb(self) -> None:
+        fixture = self._make_fixture("final")
+        # Everything the driver runs before it records a package, and no
+        # dpkg-deb.
+        bin_dir = self.root / "bin-without-dpkg-deb"
+        bin_dir.mkdir()
+        for tool in ("bash", "git", "python3"):
+            found = shutil.which(tool)
+            self.assertIsNotNone(found, tool)
+            (bin_dir / tool).symlink_to(found)
+        result = run_command(
+            ("bash", str(RELEASE_DRIVER), "manifest", *self._identity_args(fixture)),
+            cwd=self.repo, stub_dpkg_deb=False, path=str(bin_dir),
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "dpkg-deb is required: manifest generation records each package's "
+            "version from its control file",
+            result.stderr,
+        )
 
 
 if __name__ == "__main__":

@@ -7,10 +7,14 @@ The builder runs against a fixture checkout with stub dpkg, shellcheck,
 cargo, cmake and clang++ on PATH. The stub cmake records the environment
 compilers and every argument it is given and then fails, so each case stops
 right after configure and nothing is compiled.
+
+ReleaseStagingTests run the builder past configure to the end, with the
+build steps stubbed, to see which names its packages are published under.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -31,6 +35,13 @@ except ImportError:  # pragma: no cover - exercised only on a bare host
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_artifact_identity import (  # noqa: E402
+    DPKG_DEB_STUB,
+    fixture_control,
+    github_served_name,
+)
 BUILD_SCRIPT = REPO_ROOT / "tools/release/build-release-artifacts.sh"
 PROFILE = "tools/release/amd64-build-profile.sh"
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
@@ -121,7 +132,9 @@ def read_cmake_calls(log: Path) -> list[dict]:
     return calls
 
 
-class BuildConfigurationTests(unittest.TestCase):
+class BuilderFixture(unittest.TestCase):
+    """The fixture checkout and stubs every builder case runs against."""
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -345,6 +358,8 @@ class BuildConfigurationTests(unittest.TestCase):
         self.cmake_log.unlink()
         return calls[0]
 
+
+class BuildConfigurationTests(BuilderFixture):
     # -- arm64 is unchanged --------------------------------------------------
 
     def test_arm64_snapshot_configure_is_unchanged(self) -> None:
@@ -598,6 +613,174 @@ class BuildConfigurationTests(unittest.TestCase):
 
 
 RUNNER_CONTROL = REPO_ROOT / "tools/release/jetson-runner-control.sh"
+
+
+# dpkg-buildpackage as the release build runs it: every package built
+# from packaging/debian, written to the repository's parent directory under
+# the name dpkg gives it, at the version the (staged) changelog carries.
+FAKE_BUILD_DEB = r"""#!/usr/bin/env bash
+set -euo pipefail
+version="$(sed -n '1s/^tensorplate (\([^)]*\)).*/\1/p' packaging/debian/changelog)"
+[[ -n "$version" ]] || { echo "build-deb stand-in: no version in the changelog" >&2; exit 1; }
+for spec in tensorplate-common:all tensorplate-backend-python-pytorch:all \
+            tensorplate-apt-source:all tensorplate-agent:arm64 tensorplate-serving:arm64 \
+            tensorplate-observability:arm64 tensorplate-cli:arm64 tensorplate:arm64; do
+  package="${spec%%:*}" arch="${spec##*:}"
+  printf 'Package: %s\nVersion: %s\nArchitecture: %s\nDescription: built\n' \
+    "$package" "$version" "$arch" >"../${package}_${version}_${arch}.deb"
+done
+"""
+
+SECONDARY_PACKAGES = (
+    "tensorplate-agent",
+    "tensorplate-serving",
+    "tensorplate-observability",
+    "tensorplate-cli",
+    "tensorplate",
+)
+
+
+def modern_bash() -> bool:
+    """Whether the bash on PATH is one the builder runs under (4+: mapfile)."""
+    result = subprocess.run(
+        ["bash", "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0 and result.stdout.strip().isdigit() \
+        and int(result.stdout.strip()) >= 4
+
+
+class ReleaseStagingTests(BuilderFixture):
+    """The release build, run to the end, publishes packages under served names.
+
+    Compiling, the packaging suite and dpkg-buildpackage are stubbed; the
+    collection, staging, manifest and verification are the builder's and
+    the release driver's own. A dpkg-deb stand-in reads each package's
+    control fields, as the driver does with the real one.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if modern_bash():
+            return
+        message = ("the bash on PATH is older than 4, and the builder collects packages "
+                   "with mapfile; the release build's staging NOT verified end to end here")
+        if os.environ.get("CI") == "true":
+            raise AssertionError(message)
+        raise unittest.SkipTest(message)
+
+    def setUp(self) -> None:
+        super().setUp()
+        write_executable(self.fake_bin / "dpkg-deb", DPKG_DEB_STUB)
+        for relative, text in (
+            ("packaging/scripts/build-deb.sh", FAKE_BUILD_DEB),
+            ("test/packaging/run.sh", "#!/bin/sh\nexit 0\n"),
+            # Where the C++ build leaves the serving worker.
+            ("build/release/serving_worker/tensorplate-serving", "#!/bin/sh\nexit 0\n"),
+        ):
+            target = self.repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_executable(target, text)
+        driver = self.repo / "tools/release/tensorplate-release.sh"
+        shutil.copy2(REPO_ROOT / "tools/release/tensorplate-release.sh", driver)
+        identity = ["-c", "user.name=TensorPlate Tests", "-c", "user.email=tests@tensorplate.invalid"]
+        for step in (["git", "add", "-A"], ["git", *identity, "commit", "-qm", "fixture"]):
+            subprocess.run(step, cwd=self.repo, check=True, capture_output=True)
+
+    def build(self, tag: str, deb_version: str, python_version: str):
+        """Run the release build for tag, with the amd64 set and SDK staged."""
+        # The amd64 runtime set, which the release job moves into the
+        # repository's parent before the build, as dpkg named it.
+        for package in SECONDARY_PACKAGES:
+            (self.root / f"{package}_{deb_version}-1_amd64.deb").write_text(
+                fixture_control(package, f"{deb_version}-1", "amd64", "amd64 job")
+            )
+        sdk = self.root / "sdk"
+        sdk.mkdir()
+        (sdk / f"tensorplate_python-{python_version}-py3-none-any.whl").write_text("wheel\n")
+        (sdk / f"tensorplate_python-{python_version}.tar.gz").write_text("sdist\n")
+        result = subprocess.run(
+            [str(BUILD_SCRIPT), "--version", "0.2.1", "--tag", tag,
+             "--deb-version", deb_version, "--python-version", python_version,
+             "--skip-tag-verify", "--artifacts-dir", "artifacts", "--arch", "arm64",
+             "--sdk-dist-dir", str(sdk)],
+            cwd=self.repo,
+            env=self.environment("arm64", {"FIXTURE_CMAKE_STATUS": "0"}),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=120, check=False,
+        )
+        return result, self.repo / "artifacts"
+
+    def expected_packages(self, deb_version: str) -> list[tuple[str, str]]:
+        packages = [("tensorplate-common", "all"), ("tensorplate-backend-python-pytorch", "all"),
+                    ("tensorplate-apt-source", "all")]
+        packages += [(package, "arm64") for package in SECONDARY_PACKAGES]
+        packages += [(package, "amd64") for package in SECONDARY_PACKAGES]
+        return sorted(packages)
+
+    def assert_published_as(self, artifacts: Path, tag: str, deb_version: str) -> None:
+        served = sorted(
+            f"{package}_{github_served_name(deb_version)}-1_{arch}.deb"
+            for package, arch in self.expected_packages(deb_version)
+        )
+        self.assertEqual(sorted(path.name for path in artifacts.glob("*.deb")), served)
+        # Every name the signed list carries is one GitHub serves unchanged,
+        # and names a file the set holds.
+        listed = [line.split(maxsplit=1)[1]
+                  for line in (artifacts / "SHA256SUMS").read_text().splitlines() if line]
+        self.assertEqual([name for name in listed if github_served_name(name) != name], [])
+        self.assertEqual(sorted(listed), sorted(
+            path.name for path in artifacts.iterdir() if path.name != "SHA256SUMS"
+        ))
+        manifest = json.loads((artifacts / f"tensorplate-{tag}-artifacts.json").read_text())
+        for artifact in manifest["artifacts"]:
+            if artifact.get("package"):
+                # Recorded at the package's own version, tilde and all.
+                self.assertEqual(artifact["version"], f"{deb_version}-1", artifact)
+
+    def test_a_candidate_build_publishes_its_packages_under_the_names_github_serves(self) -> None:
+        result, artifacts = self.build(RELEASE_TAG, RELEASE_DEB_VERSION, "0.2.1rc1")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("manifest verified", result.stdout)
+        self.assert_published_as(artifacts, RELEASE_TAG, RELEASE_DEB_VERSION)
+        # dpkg named them with the tilde; only the staged copies differ.
+        self.assertTrue((self.root / "tensorplate-agent_0.2.1~rc.1-1_arm64.deb").is_file())
+        self.assertTrue((artifacts / "tensorplate-agent_0.2.1.rc.1-1_arm64.deb").is_file())
+        self.assert_changelog_restored()
+
+    def test_a_final_build_publishes_its_packages_under_the_names_dpkg_gave_them(self) -> None:
+        result, artifacts = self.build("v0.2.1", "0.2.1", "0.2.1")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assert_published_as(artifacts, "v0.2.1", "0.2.1")
+        self.assertEqual(
+            sorted(path.name for path in artifacts.glob("*.deb")),
+            sorted(path.name for path in self.root.glob("*.deb")),
+        )
+
+
+class ReleaseStagingRouteTests(unittest.TestCase):
+    """Where ReleaseStagingTests cannot run: packages reach the artifacts
+    directory only through stage_release_debs, read from the builder's
+    source. Weaker than running it, and it runs everywhere."""
+
+    def test_the_build_stages_its_packages_only_through_stage_release_debs(self) -> None:
+        source = BUILD_SCRIPT.read_text()
+        body = re.search(r"(?ms)^stage_release_debs\(\) \{\n(.*?)^\}\n", source)
+        self.assertIsNotNone(body, "build-release-artifacts.sh defines no stage_release_debs")
+        outside = source.replace(body.group(0), "")
+        calls = re.findall(r"(?m)^.*\bstage_release_debs\b.*$", outside)
+        self.assertEqual(calls, ['stage_release_debs "$ARTIFACTS_DIR" "${debs[@]}"'], calls)
+        # After the collector has gathered every package, before anything
+        # records them.
+        call = outside.index(calls[0])
+        self.assertGreater(call, outside.rindex('debs+=("${matches[0]}")'))
+        self.assertLess(call, outside.index('note "generating manifest and checksums"'))
+        # And no other copy, move, install or link of a package anywhere.
+        movers = [
+            line for line in outside.splitlines()
+            if re.search(r"^\s*(cp|mv|install|ln|rsync)\b", line)
+            and re.search(r"\.deb|\bdebs\b|\$\{?deb\b", line)
+        ]
+        self.assertEqual(movers, [])
 
 
 class SelfHostedRunnerPrivilegeTests(unittest.TestCase):

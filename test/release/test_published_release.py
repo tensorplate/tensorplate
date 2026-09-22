@@ -12,7 +12,8 @@ rewrite, and check the two things the rewrite could break:
   the release URL and from a local copy of the assets;
 - the lifecycle harnesses still order a candidate below its release on the
   version inside each package, never on the name it is published under,
-  whose spelling of a candidate sorts above the release it leads to.
+  whose spelling of a candidate sorts above the release it leads to, and
+  the manifest signs each package at that version.
 
 The ordering tests need dpkg-deb and dpkg. They run wherever those are
 installed, which includes the CI runner (where their absence fails the
@@ -35,10 +36,13 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_artifact_identity import (  # noqa: E402
+    RELEASE_DRIVER,
     REPO_ROOT,
     github_served_name,
+    identity_args,
     init_fixture_repo,
     make_release_set,
+    run_command,
     run_release_staging,
 )
 
@@ -355,6 +359,7 @@ class PublishedReleaseInstallTests(unittest.TestCase):
         self.assertEqual(apt_log, [])
 
 
+
 def _dpkg_available() -> bool:
     return bool(shutil.which("dpkg-deb") and shutil.which("dpkg"))
 
@@ -488,6 +493,39 @@ class ControlVersionOrderingTests(unittest.TestCase):
         # Why nothing may order on the published name: its spelling of the
         # candidate sorts ABOVE the release, the inversion #191 fixed.
         self.assertTrue(self._dpkg_orders("0.2.1.rc.1-1", "gt", "0.2.1-1"))
+
+    def test_the_manifest_signs_each_package_at_the_version_dpkg_deb_reads(self) -> None:
+        repo = self.root / "repo"
+        init_fixture_repo(repo)
+        fixture = make_release_set(self.root / "set", "rc", repo, build_package=self._build_deb)
+        manifest = json.loads(fixture.manifest.read_text())
+        debs = [artifact for artifact in manifest["artifacts"] if artifact.get("package")]
+        self.assertEqual(len(debs), 13)
+        for artifact in debs:
+            self.assertEqual(artifact["version"], "0.2.1~rc.1-1", artifact)
+            self.assertEqual(
+                self._dpkg_deb_version(fixture.artifacts / artifact["file"]), artifact["version"]
+            )
+
+        # A package built at the published spelling, staged by the release
+        # build's code, lands under the name a 0.2.1~rc.1-1 build gets.
+        staged = fixture.artifacts / "tensorplate-agent_0.2.1.rc.1-1_arm64.deb"
+        staged.unlink()
+        dotted = self._build_deb(self.root / "dotted", "tensorplate-agent", "0.2.1.rc.1-1", "arm64")
+        result = run_release_staging(fixture.artifacts, self.RC, [dotted])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(staged.is_file())
+        self.assertTrue(self._dpkg_orders(self._dpkg_deb_version(staged), "gt", "0.2.1-1"))
+        result = run_command(
+            ("bash", str(RELEASE_DRIVER), "manifest", *identity_args(fixture)),
+            cwd=repo, stub_dpkg_deb=False,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "tensorplate-agent_0.2.1.rc.1-1_arm64.deb: the package's control Version is "
+            "'0.2.1.rc.1-1', not 0.2.1~rc.1-1, the version its name is published for",
+            result.stderr,
+        )
 
     def test_both_harnesses_order_published_sets_on_their_control_versions(self) -> None:
         for record_published in (False, True):

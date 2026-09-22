@@ -115,6 +115,8 @@ Subcommands:
               path: a second one without the ancestry check creates exactly
               the tag the publish workflow rejects.
   manifest    Generate artifact manifest JSON and SHA256SUMS for .deb assets and install.sh.
+              Needs dpkg-deb: each package's recorded version is read from its
+              control file.
   verify      Verify an annotated tag plus manifest/checksum/artifact integrity.
   publish     Validate assets and create a draft GitHub Release when --execute is
               explicitly confirmed. Dry-run is the default. Requires the
@@ -1076,6 +1078,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1106,6 +1110,32 @@ def published_name(name):
 # what dpkg reports and apt orders on, and the published spelling of a
 # candidate sorts above its own release.
 published_deb_version = published_name(deb_version)
+
+# The published name cannot tell `.` from `~`, so the version this manifest
+# signs for a package is bound to the package itself: its control Version,
+# as dpkg-deb reads it, has to be the version the name was taken to mean. A
+# package built as 0.2.1.rc.1-1, which dpkg sorts above 0.2.1-1, is staged
+# under the same name as one built as 0.2.1~rc.1-1.
+dpkg_deb = shutil.which("dpkg-deb")
+if dpkg_deb is None:
+    raise SystemExit(
+        "dpkg-deb is required: manifest generation records each package's "
+        "version from its control file (install dpkg)"
+    )
+
+
+def control_version(path):
+    read = subprocess.run(
+        [dpkg_deb, "-f", str(path), "Version"], capture_output=True, text=True
+    )
+    if read.returncode != 0:
+        raise SystemExit(
+            f"{path.name}: dpkg-deb could not read its control Version "
+            f"(exit {read.returncode}): {read.stderr.strip()}"
+        )
+    return read.stdout.strip()
+
+
 required = [
     "tensorplate-common",
     "tensorplate-agent",
@@ -1163,7 +1193,8 @@ for package in required:
                 f"{published_deb_version}"
             )
         # The Debian version, with --deb-version's tilde put back. Exact
-        # because staging refuses a name holding any other tilde.
+        # because staging refuses a name holding any other tilde, and held
+        # to the package's control Version below.
         package_version = deb_version + file_version[len(published_deb_version):]
         if parsed_package != package and parsed_package not in required:
             raise SystemExit(
@@ -1190,12 +1221,18 @@ for package in required:
         # and an `else` would report the whole secondary set as absent.
         if arch == secondary_arch:
             secondary_matches.append(parsed_package)
+        control = control_version(path)
+        if control != package_version:
+            raise SystemExit(
+                f"{path.name}: the package's control Version is {control!r}, not "
+                f"{package_version}, the version its name is published for"
+            )
         digest = sha256(path)
         artifacts.append(
             {
                 "file": path.name,
                 "package": parsed_package,
-                "version": package_version,
+                "version": control,
                 "architecture": arch,
                 "target_os": target_os if arch in (target_arch, "all") else secondary_target_os,
                 "size_bytes": path.stat().st_size,

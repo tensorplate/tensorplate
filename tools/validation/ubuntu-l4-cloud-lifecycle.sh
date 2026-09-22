@@ -442,22 +442,31 @@ def read_set(label, directory):
                 f"the {label} set lists {package} at version {declared!r}, "
                 "which is not a Debian version"
             )
+        # A listed file that is not there is its own failure, not an
+        # unreadable package: a download of v0.2.1-rc.1 held each package
+        # under the name GitHub served, not the one its manifest listed.
+        deb = pathlib.Path(directory) / matches[0]["file"]
+        if not deb.is_file():
+            raise SystemExit(
+                f"the {label} set's manifest lists {matches[0]['file']}, "
+                f"which is not in {directory}"
+            )
         # What apt will order on, and what dpkg-query reports once it is
         # installed: the control Version inside the .deb. Not the
-        # manifest's, which the release driver derives from the file name,
-        # and not the file name, whose published spelling of a candidate
+        # manifest's, which earlier releases took from the file name
+        # without reading the package, and not the file name, whose
+        # published spelling of a candidate
         # (0.2.1.rc.1, where the package says 0.2.1~rc.1) sorts above the
         # release it leads to.
         read = subprocess.run(
-            ["dpkg-deb", "-f", str(pathlib.Path(directory) / matches[0]["file"]), "Version"],
-            capture_output=True, text=True,
+            ["dpkg-deb", "-f", str(deb), "Version"], capture_output=True, text=True,
         )
         version = read.stdout.strip()
         if read.returncode != 0 or not DEBIAN_VERSION.fullmatch(version):
             raise SystemExit(
                 f"the {label} set's {matches[0]['file']} does not carry a readable "
                 f"Debian Version in its control file: dpkg-deb exited {read.returncode} "
-                f"and reported {version!r}"
+                f"and reported {version!r}: {read.stderr.strip()}"
             )
         packages[package] = version
     return manifest.get("release") or {}, packages

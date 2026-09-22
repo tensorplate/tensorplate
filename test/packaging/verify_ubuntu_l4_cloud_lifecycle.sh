@@ -321,12 +321,14 @@ done
 #
 # As `dpkg` it compares versions, because the upgrade path is refused or
 # admitted on that comparison, and a stub that answered 0 for everything
-# would admit any pair. It knows the two version shapes release builds
-# produce, and treats an empty version as older than any other, as dpkg
-# does -- so a manifest with no version is admitted by the comparison
-# alone, and only the harness's own version check refuses it. Any other
-# shape exits 2, where dpkg would reject some and only warn about others;
-# the harness refuses those before comparing as well.
+# would admit any pair. It orders versions with dpkg's own algorithm, so
+# each sorts here where it sorts on a host: 0.2.1.rc.1-1 above 0.2.1-1,
+# not refused as a shape the stub does not know, which would fail a
+# harness that compared it for the stub's reason rather than the order's.
+# It treats an empty version as older than any other, as dpkg does -- so
+# a manifest with no version is admitted by the comparison alone, and
+# only the harness's own version check refuses it -- and exits 2 on the
+# versions dpkg rejects outright.
 #
 # As `fake-dpkg-db` it is the appliance's package database: install.sh
 # installs a set's runtime packages from its manifest, apt-get purges and
@@ -339,22 +341,97 @@ cat >"$fake_dpkg" <<'PY'
 #!/usr/bin/env python3
 import json, os, pathlib, re, shutil, sys
 
-VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:~rc\.(\d+))?-(\d+)")
 RUNTIME = (
     "tensorplate-common", "tensorplate-agent", "tensorplate-serving",
     "tensorplate-observability", "tensorplate-cli", "tensorplate-backend-python-pytorch",
 )
 PACKAGED_CLI_CONFIG = '{"fixture": "packaged cli config"}\n'
 
-def version_key(version):
+# Debian version ordering as dpkg implements it (lib/dpkg/version.c and
+# parsehelp.c), so the harness is ordered here the way a host orders it:
+# `~` sorts before everything, even the end of the string, which is what
+# puts 0.2.1~rc.1-1 below 0.2.1-1 and 0.2.1.rc.1-1 above it. A version
+# dpkg rejects outright is an error (dpkg exits 2); one it only warns
+# about is compared anyway, as dpkg compares it.
+def parse_version(version):
+    """(epoch, upstream, revision), or an error string where dpkg errors."""
+    version = version.strip(" \t")
     if version == "":
-        return ()
-    match = VERSION.fullmatch(version)
-    if not match:
-        return None
-    major, minor, patch, rc, revision = match.groups()
-    # A candidate sorts before its release, as Debian's tilde does.
-    return (int(major), int(minor), int(patch), 0 if rc else 1, int(rc or 0), int(revision))
+        return "version string is empty"
+    if any(c in " \t" for c in version):
+        return "version string has embedded spaces"
+    epoch = 0
+    if ":" in version:
+        head, _, version = version.partition(":")
+        if head == "":
+            return "epoch in version is empty"
+        if not head.isdigit():
+            return "epoch in version is not number"
+        if version == "":
+            return "nothing after colon in version number"
+        epoch = int(head)
+    upstream, hyphen, revision = version.rpartition("-")
+    if not hyphen:
+        upstream, revision = version, ""
+    elif revision == "":
+        return "revision number is empty"
+    if upstream == "":
+        return "version number is empty"
+    return (epoch, upstream, revision)
+
+def isdigit(c):
+    return "0" <= c <= "9"
+
+def isalpha(c):
+    return c.isascii() and c.isalpha()
+
+def order(c):
+    if isdigit(c):
+        return 0
+    if isalpha(c):
+        return ord(c)
+    if c == "~":
+        return -1
+    return ord(c) + 256 if c else 0
+
+def verrevcmp(a, b):
+    i = j = 0
+    while i < len(a) or j < len(b):
+        first_diff = 0
+        while (i < len(a) and not isdigit(a[i])) or (j < len(b) and not isdigit(b[j])):
+            ac = order(a[i] if i < len(a) else "")
+            bc = order(b[j] if j < len(b) else "")
+            if ac != bc:
+                return ac - bc
+            i += 1
+            j += 1
+        while i < len(a) and a[i] == "0":
+            i += 1
+        while j < len(b) and b[j] == "0":
+            j += 1
+        while i < len(a) and isdigit(a[i]) and j < len(b) and isdigit(b[j]):
+            if not first_diff:
+                first_diff = ord(a[i]) - ord(b[j])
+            i += 1
+            j += 1
+        if i < len(a) and isdigit(a[i]):
+            return 1
+        if j < len(b) and isdigit(b[j]):
+            return -1
+        if first_diff:
+            return first_diff
+    return 0
+
+def compare_versions(left, right):
+    """dpkg --compare-versions' ordering: <0, 0 or >0."""
+    if left[0] != right[0]:
+        return left[0] - right[0]
+    return verrevcmp(left[1], right[1]) or verrevcmp(left[2], right[2])
+
+def dpkg_version(version):
+    # dpkg --compare-versions reads an empty argument as a blank version,
+    # older than any other, rather than as an error.
+    return (0, "", "") if version == "" else parse_version(version)
 
 def dpkg(args):
     if args and args[0] == "-l":
@@ -374,12 +451,14 @@ def dpkg(args):
         return 0
     if len(args) != 4:
         return 2
-    left, op, right = version_key(args[1]), args[2], version_key(args[3])
-    if left is None or right is None:
-        print(f"dpkg: error: version has bad syntax: {args[1]!r} {args[3]!r}", file=sys.stderr)
-        return 2
-    results = {"lt": left < right, "le": left <= right, "eq": left == right,
-               "ne": left != right, "ge": left >= right, "gt": left > right}
+    left, op, right = dpkg_version(args[1]), args[2], dpkg_version(args[3])
+    for text, parsed in ((args[1], left), (args[3], right)):
+        if isinstance(parsed, str):
+            print(f"dpkg: error: version '{text}' has bad syntax: {parsed}", file=sys.stderr)
+            return 2
+    cmp = compare_versions(left, right)
+    results = {"lt": cmp < 0, "le": cmp <= 0, "eq": cmp == 0,
+               "ne": cmp != 0, "ge": cmp >= 0, "gt": cmp > 0}
     if op not in results:
         return 2
     return 0 if results[op] else 1
@@ -425,7 +504,8 @@ def install(db, directory):
     for name, version in wanted.items():
         current = packages.get(name)
         if current and current["status"] == "installed" \
-                and version_key(version) < version_key(current["version"]):
+                and compare_versions(parse_version(version),
+                                     parse_version(current["version"])) < 0:
             print("E: Packages were downgraded and -y was used without --allow-downgrades.",
                   file=sys.stderr)
             return 100
@@ -673,12 +753,19 @@ PER_ARCH = ("tensorplate-agent", "tensorplate-serving", "tensorplate-observabili
 ALL_ARCH = ("tensorplate-common", "tensorplate-backend-python-pytorch", "tensorplate-apt-source", "tensorplate")
 
 def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None,
-         controls=None, corrupt=(), extra=()):
+         controls=None, corrupt=(), extra=(), listed_as_built=False):
+    """A release set; rc=None makes the final release.
+
+    listed_as_built makes it v0.2.1-rc.1 as GitHub serves it: the manifest
+    and SHA256SUMS list each package under the `~` name dpkg gave it, and
+    the file is present only under the `.` name GitHub served.
+    """
     directory = root / name
     directory.mkdir(parents=True)
-    deb_version = f"0.2.1~rc.{rc}-1"
+    tag = "v0.2.1" if rc is None else f"v0.2.1-rc.{rc}"
+    deb_version = "0.2.1-1" if rc is None else f"0.2.1~rc.{rc}-1"
     published_version = deb_version.replace("~", ".")
-    (directory / "install.sh").write_text(f"#!/bin/sh\n# fixture installer, v0.2.1-rc.{rc}\nexit 0\n")
+    (directory / "install.sh").write_text(f"#!/bin/sh\n# fixture installer, {tag}\nexit 0\n")
     artifacts = []
     listed = ["install.sh"]
     for package in PER_ARCH + ALL_ARCH:
@@ -695,6 +782,9 @@ def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None
             if package in corrupt:
                 control = "not a Debian archive\n"
             (directory / file).write_text(control)
+            if listed_as_built:
+                (directory / file).rename(directory / f"{package}_{deb_version}_{arch}.deb")
+                file = f"{package}_{deb_version}_{arch}.deb"
             listed.append(file)
             artifacts.append({
                 "file": file,
@@ -704,10 +794,10 @@ def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None
             })
     artifacts.extend(extra)
     if manifest:
-        release = {"project": "tensorplate", "version": "0.2.1", "tag": f"v0.2.1-rc.{rc}",
+        release = {"project": "tensorplate", "version": "0.2.1", "tag": tag,
                    "provenance": "github-release", "unreleased": False}
         release.update(release_fields or {})
-        manifest_name = f"tensorplate-v0.2.1-rc.{rc}-artifacts.json"
+        manifest_name = f"tensorplate-{tag}-artifacts.json"
         (directory / manifest_name).write_text(json.dumps(
             {"release": release, "artifacts": artifacts}, indent=2) + "\n")
         listed.append(manifest_name)
@@ -715,6 +805,10 @@ def make(name, rc, *, manifest=True, release_fields=None, drop=(), versions=None
     # platforms rather than depending on which checksum tool is present.
     (directory / "SHA256SUMS").write_text("".join(
         f"{hashlib.sha256((directory / f).read_bytes()).hexdigest()}  {f}\n" for f in listed))
+    if listed_as_built:
+        for f in listed:
+            if "~" in f:
+                (directory / f).rename(directory / f.replace("~", "."))
     return directory
 
 make("assets-rc2", 2)
@@ -742,12 +836,17 @@ make("set-rc1-empty-version", 1, versions={"tensorplate-backend-python-pytorch":
 # harness that reads the package sees it, and apt orders on the package.
 make("set-rc1-deb-newer", 1, controls={"tensorplate-agent": "0.2.1~rc.3-1"})
 make("set-rc1-deb-corrupt", 1, corrupt=("tensorplate-serving",))
-# A manifest recording each version as its file name spells it, which is
-# what reading versions off the published names gives. 0.2.1.rc.2-1 sorts
-# above 0.2.1-1, so nothing may order on it; the packages still say
-# 0.2.1~rc.2-1.
-make("assets-rc2-published-versions", 2,
-     versions={p: "0.2.1.rc.2-1" for p in PER_ARCH + ALL_ARCH})
+# The final release, and a candidate baseline whose manifest records each
+# version as its file name spells it, which is what reading versions off
+# the published names gives. The packages still say 0.2.1~rc.1-1, which
+# sorts below 0.2.1-1; the manifest's 0.2.1.rc.1-1 sorts above it, so a
+# harness ordering on the manifest refuses this upgrade and one ordering
+# on the packages admits it.
+make("assets-final", None)
+make("set-rc1-published-versions", 1,
+     versions={p: "0.2.1.rc.1-1" for p in PER_ARCH + ALL_ARCH})
+# v0.2.1-rc.1 as a download of it from GitHub held it.
+make("set-rc1-as-served", 1, listed_as_built=True)
 (make("set-rc1-noinstaller", 1) / "install.sh").unlink()
 (make("set-rc1-nosums", 1) / "SHA256SUMS").unlink()
 tampered = make("set-rc1-tampered", 1)
@@ -1046,20 +1145,35 @@ check "a baseline newer than the candidate is refused" "1" \
 check "  because it would be a downgrade" yes \
   "$(preflight_said "the baseline's 0.2.1~rc.2-1 is not older than the candidate's 0.2.1~rc.1-1")"
 
-# What apt orders on is the control Version inside each .deb. The
-# manifest's is derived from the file name by the release driver, and the
-# file name spells a candidate the way GitHub publishes it, so neither can
-# stand in for the package.
+# What apt orders on is the control Version inside each .deb. Earlier
+# releases took the manifest's from the file name without reading the
+# package, and the file name spells a candidate the way GitHub publishes
+# it, so neither can stand in for the package.
 check "a baseline whose .deb carries a newer version than its manifest is refused" "1" \
   "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-deb-newer" "${td}/evidence-upgrade-deb-newer")"
 check "  and compares the version the package carries" yes \
   "$(preflight_said "tensorplate-agent: the baseline's 0.2.1~rc.3-1 is not older than the candidate's 0.2.1~rc.2-1")"
-check "a candidate whose manifest spells its versions as its file names do is ordered on its packages" "0" \
-  "$(preflight_upgrade "${fixtures}/assets-rc2-published-versions" "${fixtures}/set-rc1" "${td}/evidence-upgrade-published-versions")"
+# The fake dpkg orders as dpkg does, so this passes because the harness
+# compares 0.2.1~rc.1-1 with 0.2.1-1, and would fail if it compared the
+# manifest's 0.2.1.rc.1-1, which sorts above the release.
+check "a candidate baseline whose manifest spells its versions as its file names do upgrades to the release" "0" \
+  "$(preflight_upgrade "${fixtures}/assets-final" "${fixtures}/set-rc1-published-versions" "${td}/evidence-upgrade-published-versions")"
+check "the release is not a baseline for its own candidate" "1" \
+  "$(preflight_upgrade "${fixtures}/set-rc1" "${fixtures}/assets-final" "${td}/evidence-upgrade-final-first")"
+check "  because 0.2.1-1 sorts above 0.2.1~rc.1-1" yes \
+  "$(preflight_said "tensorplate-common: the baseline's 0.2.1-1 is not older than the candidate's 0.2.1~rc.1-1")"
 check "a baseline with a .deb dpkg-deb cannot read is refused" "1" \
   "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-deb-corrupt" "${td}/evidence-upgrade-deb-corrupt")"
 check "  and names the file and what dpkg-deb did" yes \
-  "$(preflight_said "the baseline set's tensorplate-serving_0.2.1.rc.1-1_amd64.deb does not carry a readable Debian Version in its control file: dpkg-deb exited 2")"
+  "$(preflight_said "the baseline set's tensorplate-serving_0.2.1.rc.1-1_amd64.deb does not carry a readable Debian Version in its control file: dpkg-deb exited 2 and reported '': dpkg-deb: error: ${fixtures}/set-rc1-deb-corrupt/tensorplate-serving_0.2.1.rc.1-1_amd64.deb is not a Debian format archive")"
+
+# A download of v0.2.1-rc.1: its manifest lists each package under a `~`
+# name the download does not hold. Refused as a file that is not there,
+# not as a package dpkg-deb cannot read.
+check "a baseline whose manifest lists packages it does not hold is refused" "1" \
+  "$(preflight_upgrade "${fixtures}/assets-rc2" "${fixtures}/set-rc1-as-served" "${td}/evidence-upgrade-as-served")"
+check "  and names the listed file that is not there" yes \
+  "$(preflight_said "the baseline set's manifest lists tensorplate-common_0.2.1~rc.1-1_all.deb, which is not in ${fixtures}/set-rc1-as-served")"
 
 # --- the stages, executed against a stubbed appliance.
 #
