@@ -29,6 +29,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- `prepare` now folds `[Unreleased]` into the dated section for the version
+  being prepared, rather than only opening that section the first time it
+  runs. A tag is cut from a trunk commit, so every entry under
+  `[Unreleased]` at that commit ships in that tag; once the heading
+  existed the step did nothing, so this release's own entries -- nine of
+  them, merged after the heading was opened -- stayed under `[Unreleased]`
+  above the `0.2.1` section and shipped filed as unreleased. Nothing caught
+  it: a `prepare` that changes nothing is exactly how
+  `release_metadata_pending`, and so `cut`, reports the metadata final.
+
+  The fold is a pure move. Entries go to the top of the same-named
+  subsection, newest first; a subsection the release section has no block
+  for is opened at its top; entry text, including indented continuation
+  lines and fenced blocks, is carried over byte for byte; and
+  `[Unreleased]` is left present and empty, so a second run changes
+  nothing. A shape the step does not recognise -- no `[Unreleased]`, a
+  repeated heading, a version section that is not the one directly below
+  `[Unreleased]`, or content ahead of a section's first subsection -- is
+  refused rather than guessed at. `cut` now refuses to tag until a
+  preparation pull request commits the fold, which is what should happen
+  whenever the trunk moved since the last one. Folding this release's own
+  entries is that pull request's job, not this change's.
+
 - The macOS Homebrew lifecycle harness names each service's launchd job the
   way the installed Homebrew does. Homebrew 6.0.22 changed the label and
   keg plist name of a formula's service from `homebrew.mxcl.<formula>` to

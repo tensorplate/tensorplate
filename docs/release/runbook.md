@@ -88,7 +88,12 @@ they are reviewed together, merged together, and tagged as one commit:
 - `packaging/scripts/install.sh` — the installer's default version.
 - `packaging/debian/changelog` — a new top stanza `tensorplate (X.Y.Z-1)`
   above the previous entries.
-- `CHANGELOG.md` — promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`.
+- `CHANGELOG.md` — open `## [X.Y.Z] - YYYY-MM-DD` under `[Unreleased]`,
+  and move whatever `[Unreleased]` holds into it, leaving `[Unreleased]`
+  empty. The tag is cut from a trunk commit, so everything under
+  `[Unreleased]` at that commit ships in it. Entries merged after an
+  earlier preparation PR therefore make the changelog pending again, and
+  the cut refuses until a further preparation PR folds them in.
 
 `sdk/python/pyproject.toml` keeps its `.dev0` development version; no
 release step rewrites it, because the wheel version is injected at build.

@@ -850,15 +850,142 @@ if not lines[0].startswith(f"tensorplate ({version}-1)"):
     )
     debian.write_text(stanza + existing)
 
+# CHANGELOG.md: the dated section for this version must hold everything
+# the tag will ship, and [Unreleased] must hold nothing.
+#
+# A tag is cut from a trunk commit, so every entry under [Unreleased] at
+# that commit ships in that tag. Opening the dated section is only half of
+# that. It files the entries that exist the first time it runs -- they end
+# up below the new heading -- and then does nothing ever again, so entries
+# merged after the preparation PR land under [Unreleased] once more, above
+# the dated section, and ship filed as unreleased. 0.2.1 shipped nine that
+# way and nothing caught it: a prepare that changes nothing is exactly how
+# `release_metadata_pending` reports the metadata final.
+#
+# So prepare also FOLDS. It moves whatever [Unreleased] holds down into
+# the dated section and leaves [Unreleased] empty, which makes the cut
+# report the changelog pending until a preparation PR commits the fold.
+# The fold is a pure move: an entry's text, including its indented
+# continuation lines and fenced blocks, is carried over byte for byte, and
+# a second run changes nothing.
+#
+# Headings are read only at column 0. Entries are bullet lists whose
+# continuation lines are indented under the bullet, so a "### " inside an
+# entry is indented, is entry text, and moves with the entry.
 changelog = Path("CHANGELOG.md")
-text = changelog.read_text()
-release_heading = f"## [{version}] - "
-if release_heading not in text:
-    marker = "## [Unreleased]\n"
-    if marker not in text:
-        raise SystemExit("CHANGELOG.md is missing ## [Unreleased]")
-    text = text.replace(marker, f"{marker}\n## [{version}] - {today}\n", 1)
-changelog.write_text(text)
+lines = changelog.read_text().split("\n")
+
+UNRELEASED = "## [Unreleased]"
+release_prefix = f"## [{version}] - "
+
+
+def sole_heading(matches, what):
+    found = [i for i, line in enumerate(lines) if matches(line)]
+    if len(found) > 1:
+        raise SystemExit(
+            "CHANGELOG.md has {} '{}' headings, at lines {}; expected one".format(
+                len(found), what, ", ".join(str(i + 1) for i in found)
+            )
+        )
+    return found[0] if found else None
+
+
+def section_end(start):
+    """Index of the heading that closes the section opened at `start`."""
+    for i in range(start + 1, len(lines)):
+        if lines[i].startswith("## "):
+            return i
+    return len(lines)
+
+
+def subsections(start, stop, what):
+    """The "### " blocks in lines[start:stop], as (name, first, last)."""
+    blocks = []
+    for i in range(start, stop):
+        if lines[i].startswith("### "):
+            if blocks:
+                blocks[-1][2] = i
+            blocks.append([lines[i][4:].strip(), i, stop])
+        elif lines[i].strip() and not blocks:
+            raise SystemExit(
+                f"CHANGELOG.md: {what} has content before its first '### ' "
+                f"subsection, at line {i + 1}: {lines[i]!r}"
+            )
+    return [tuple(block) for block in blocks]
+
+
+def body_of(first, last):
+    """A block's entries, with the blank lines at its edges trimmed off."""
+    body = lines[first + 1 : last]
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    return body
+
+
+def first_entry_line(first, last):
+    """Where a block's entries start: past the blank line under its heading."""
+    at = first + 1
+    while at < last and not lines[at].strip():
+        at += 1
+    return at
+
+
+unreleased = sole_heading(lambda line: line == UNRELEASED, UNRELEASED)
+if unreleased is None:
+    raise SystemExit("CHANGELOG.md is missing ## [Unreleased]")
+release = sole_heading(lambda line: line.startswith(release_prefix), release_prefix)
+
+if release is None:
+    # First preparation for this version: open the dated section directly
+    # under [Unreleased], which files everything below it under the new
+    # heading and leaves [Unreleased] empty.
+    lines[unreleased + 1 : unreleased + 1] = ["", f"## [{version}] - {today}"]
+else:
+    unreleased_end = section_end(unreleased)
+    if release != unreleased_end:
+        raise SystemExit(
+            f"CHANGELOG.md: [Unreleased] is followed by {lines[unreleased_end]!r} "
+            f"at line {unreleased_end + 1}, not by the [{version}] section. The "
+            "version being prepared must be the section directly below "
+            "[Unreleased] before its entries can be folded into it."
+        )
+    moved = {}
+    for name, first, last in subsections(unreleased + 1, release, "[Unreleased]"):
+        body = body_of(first, last)
+        if not body:
+            continue
+        if name in moved:
+            moved[name].extend([""] + body)
+        else:
+            moved[name] = body
+    if moved:
+        release_end = section_end(release)
+        held = {}
+        for name, first, last in subsections(
+            release + 1, release_end, f"the [{version}] section"
+        ):
+            held.setdefault(name, (first, last))
+        # Newest first is the convention inside a subsection, so the moved
+        # entries go above the ones the release section already holds. A
+        # subsection it has no block for opens a new block at its top.
+        inserts = {}
+        opened = []
+        for name, body in moved.items():
+            if name in held:
+                at = first_entry_line(*held[name])
+                inserts.setdefault(at, []).extend(body + [""])
+            else:
+                opened.extend([f"### {name}", ""] + body + [""])
+        if opened:
+            inserts.setdefault(first_entry_line(release, release_end), []).extend(opened)
+        # Descending, so an insertion never shifts the ones still to come.
+        for at in sorted(inserts, reverse=True):
+            lines[at:at] = inserts[at]
+        lines[unreleased + 1 : release] = [""]
+
+changelog.write_text("\n".join(lines))
 PY
 }
 
