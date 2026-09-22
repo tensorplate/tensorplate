@@ -5,8 +5,9 @@
 #
 # Usage: run.sh [all|core|harness]
 #
-#   core     the packaging, installer and descriptor checks. Fast, and what
-#            the release artifact build runs.
+#   core     the packaging, installer and descriptor checks, and the
+#            static checks over the lifecycle harnesses that drive no
+#            appliance. Fast, and what the release artifact build runs.
 #   harness  the lifecycle validation harness verifiers. They drive each
 #            harness against a stubbed appliance through every failure
 #            mode, which takes far longer than the core checks, so CI
@@ -29,7 +30,8 @@ verify_ready_check.sh
 verify_systemd_units.sh
 verify_lifecycle_scripts.sh
 verify_descriptor.sh
-verify_installer.sh"
+verify_installer.sh
+verify_lifecycle_state_guard.sh"
 
 harness="verify_macos_homebrew_lifecycle.sh
 verify_macos_offline_runtime.sh

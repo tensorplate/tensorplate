@@ -741,6 +741,82 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `offline-profile.json`), not only as the helper returns them: the
   artifact could otherwise drop the flags with every check still green.
 
+- The Ubuntu x86_64 cloud lifecycle harness no longer credits its
+  rollback stage with preserving operator state on the strength of a
+  pathname. `tools/validation/ubuntu-l4-cloud-lifecycle.sh` asserted the
+  set-aside state with `test -f state.bak/state.json`, which a file
+  truncated to zero bytes, emptied, or rewritten with different content
+  during the removal or the baseline install satisfies just as well as
+  the original — so the stage recorded the documented rollback procedure
+  as preserving durable state it had never read, which is the one thing
+  that stage exists to prove. With the services stopped and before the
+  move, the harness now lists `state/` and digests every file in it, and
+  after the baseline install does the same to `state.bak/` and requires
+  the two to match name for name and digest for digest, naming the first
+  file that changed, went missing or was added. The claim is about the
+  whole directory, not one name in it: a host keeps more there than the
+  agent's `state.json` — the agent also refreshes `state.json.bak`, the
+  copy it falls back to when the primary fails to decode, and the
+  observability unit writes `observability-snapshot.json` beside them —
+  so destroying any of them in place now fails the stage by name. A state
+  directory with no `state.json` is refused where the manifest is taken,
+  before anything is moved or removed, and a `sha256sum` whose leading
+  field is not sha256 hex is refused where it is read rather than carried
+  forward, so two unreadable files can never compare equal. The checks
+  that follow deliberately do not load the set-aside files — they exist
+  to show the older agent did not — so nothing else could have caught
+  this. The Jetson harness was fixed the same way and by the same method,
+  so the two now make the same claim rather than diverging.
+  `verify_ubuntu_l4_cloud_lifecycle.sh` drives the new guard against a
+  stubbed appliance whose durable state holds all three files: thirteen
+  rollback regressions — emptied, truncated and rewritten copies, a
+  deleted recovery copy and snapshot, an added file, an emptied
+  directory, a directory that is gone outright, a missing `state.json`
+  and a non-hex digest — each fail the run at the named step, and a
+  failing privileged digest read is injected as well. The passing run
+  pins that the listing and the digests are taken after the stop and
+  before the move, that the saved copy is read back file by file after
+  the baseline install, and that no existence check on `state.bak` is
+  made at all. The runbook's rollback section states the same claim.
+
+  Review of that change added three things. The two harnesses now hold
+  the guard as the same five functions, and `verify_lifecycle_state_guard.sh`
+  binds them: each body must be byte-identical in
+  `ubuntu-l4-cloud-lifecycle.sh` and `jetson-lifecycle.sh`, and every
+  harness variable those bodies read — derived from the bodies, not
+  listed — must be bound to the same value in both. Nothing else read
+  both files, so a tightening applied to one would have left the other's
+  Production-row evidence weaker while reading as if it had not. The
+  comparison that reports a destroyed file now splits a manifest line at
+  its last space rather than its first, so a state file whose name holds
+  a space is named in full: the verdict was already right, but the
+  failure an operator acts on named a file that does not exist and
+  printed a fragment of the name where a digest belongs. And the
+  refusal of a set-aside directory that is there and holds nothing is
+  held to naming the directory: the emptied-directory case now also
+  requires that no individual file is named, because admitting the empty
+  manifest would still fail the stage while sending the operator to
+  recover one file out of three.
+
+  A further review closed three gaps in that. The half of the
+  comparison that reports an ADDED file splits its lines on its own, and
+  no case reached it: the spaced-name case changes a file, so reverting
+  only that loop to a first-space split left every verifier green while
+  the failure named a file called `extra` for one called `extra file.json`.
+  `rollback-adds-spaced-file` now plants the latter in the set-aside copy
+  and requires the whole name. The binding had blind spots of its own.
+  It counted only the canonical `name() {` line, so a one-line
+  redefinition after the checked copy -- the one bash actually runs --
+  passed; and it derived only upper-case names read as `$NAME` or
+  `${NAME}`, `${NAME%`, `${NAME#`, `${NAME:`, so both bodies reading
+  `${NAME-}` or `${#NAME}` of a variable only one harness defines passed
+  too. It now counts every spelling bash accepts, derives names in either
+  case through every expansion form, and requires each to be bound on
+  exactly one line in each harness, in any spelling -- a caller's
+  shadowing `local` included. It then plants each of those drifts into
+  copies of the two harnesses and requires itself to refuse every one for
+  its own reason, so deleting any one rule fails its own run.
+
 - A Compute Engine instance whose metadata service is not answering yet
   when `tensorplate-agent` starts no longer refuses deploys for the whole
   boot. Platform detection ran exactly once per start, so a single

@@ -376,10 +376,29 @@ Before installing the baseline fresh through its `install.sh`, it
 requires that no TensorPlate package other than `tensorplate-apt-source`
 is still installed and that the agent's conffiles were kept.
 It passes when exactly the baseline's packages are installed, the edited
-`cli.json` still has its bytes, `state.bak/state.json` is preserved, the
-rolled-back agent answers with no active or previous deployment — it did
-not load the newer agent's state — and a fresh deploy answers health and
-inference.
+`cli.json` still has its bytes, the whole set-aside `state.bak` directory
+is intact, the rolled-back agent answers with no active or previous
+deployment — it did not load the newer agent's state — and a fresh deploy
+answers health and inference.
+
+Intact means byte for byte, file by file: with the services stopped and
+before the move, the harness lists `state/` and digests every file in it,
+and after the baseline install it does the same to `state.bak/` and
+requires the two listings to match name for name and digest for digest. A
+file that changed, that went missing, or that was added is named. It is
+the directory rather than one pathname in it because a host keeps more
+than the agent's `state.json` there: the agent also refreshes
+`state.json.bak`, the copy it falls back to when the primary fails to
+decode, and the observability unit writes `observability-snapshot.json`
+beside them. A removal or an install that emptied, truncated or rewrote
+any of them in place would leave the pathname a regular file, and nothing
+else in the stage reads those files back — the agent check above exists
+to show the older agent did **not** load them — so the digests are what
+make the preservation claim mean anything. A `state/` with no `state.json` in
+it is refused where the digests are taken, before anything is moved or
+removed: there is no deployment state for the rollback to preserve, and
+two directories holding only the rest would compare equal all the way to
+a pass.
 
 No `state.bak` from before the run survives it: install and upgrade each
 delete `/var/lib/tensorplate` while clearing the host, so copy any earlier
