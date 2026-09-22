@@ -1498,6 +1498,9 @@ def tap_trusted():
 if args == ["trust", "--json=v1"]:
     print(json.dumps({"taps": trust["taps"], "formulae": trust["formulae"], "casks": [], "commands": []}))
     sys.exit(0)
+if args == ["tap-info", "--json=v1", TAP]:
+    print(json.dumps(state["tap-info"]))
+    sys.exit(0)
 if args[:2] in (["trust", "--formula"], ["untrust", "--formula"]):
     fault = (root / "trust-fault").read_text().strip() if (root / "trust-fault").exists() else ""
     if fault == "fails":
@@ -1712,6 +1715,66 @@ for function_name, stage, entry in (("install_candidate_clean", "clean-install",
     assert f"{stage}\tpass\t" not in outcome["rows"] and \
         "refusing to load untrusted formulae" in outcome["stages"], outcome
     print(f"macOS formula trust: guard: without the restore before {stage} Homebrew refuses the graph: pass")
+
+# The tap-trust stage refuses a tap on a custom remote. Homebrew keys that
+# tap's formula trust by the remote, not the tap name (Library/Homebrew/
+# trust.rb, item_trust_name), so the restore would re-trust entries the
+# readback never sees and leave the host without the entry trust.
+ON_GITHUB = [{"name": TAP, "remote": "https://github.com/tensorplate/homebrew-tap", "custom_remote": False}]
+LOCAL_CLONE = [dict(ON_GITHUB[0], remote="/Users/operator/src/homebrew-tap", custom_remote=True)]
+NO_REMOTE = [dict(ON_GITHUB[0], remote=None, custom_remote=True)]
+CUSTOM_REMOTE = re.compile(r"^if taps\[0\]\.get\(\"remote\"\).*?\n    \)\n", re.M | re.S)
+ENTRY["one-formula"] = ([], [f"{TAP}/tensorplate-cli"], [])
+
+
+def tap_trust(entry, tap_info, text=source):
+    taps, formulae, _ = ENTRY[entry]
+    arrays = re.search(r"^readonly FORMULAE=\(\n.*?^\)\n", text, re.M | re.S).group(0)
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-tap-trust-") as directory:
+        root = pathlib.Path(directory)
+        (root / "fake-brew.py").write_text(FAKE_BREW)
+        store = {"taps": list(taps), "formulae": sorted(formulae + UNRELATED)}
+        (root / "brew.json").write_text(json.dumps({"trust": store, "installed": [], "tap-info": tap_info}))
+        (root / "probe.sh").write_text(
+            "set -Eeuo pipefail\n" + arrays + function("verify_tap_trust", text) +
+            'brew() { python3 "$TP_ROOT/fake-brew.py" "$@"; }\ntap_name=tensorplate/tap\nverify_tap_trust\n')
+        result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True, text=True,
+                                env=dict(os.environ, TP_ROOT=directory))
+        calls = [json.loads(line) for line in (root / "brew-calls.jsonl").read_text().splitlines()]
+        assert not [call for call in calls if call[0] != "tap-info" and call[:2] != ["trust", "--json=v1"]], calls
+        assert json.loads((root / "brew.json").read_text())["trust"] == store
+        return result
+
+
+REFUSALS = {
+    "custom remote": f"{TAP} uses a custom remote, so Homebrew keys its formula trust by that remote and this "
+                     "harness cannot restore it; run against a tap on its default remote",
+    "missing trust": "formula trust is missing; run `brew trust --formula "
+                     + " ".join(f"{TAP}/{name}" for name in SIX if name != "tensorplate-cli") + "`",
+    "other tap": f"brew tap-info does not describe {TAP}",
+}
+for entry, tap_info, refusal in (
+    ("per-formula", ON_GITHUB, None),
+    ("tap-trusted", ON_GITHUB, None),
+    ("per-formula", NO_REMOTE, None),
+    ("per-formula", LOCAL_CLONE, "custom remote"),
+    ("tap-trusted", LOCAL_CLONE, "custom remote"),
+    ("one-formula", ON_GITHUB, "missing trust"),
+    ("per-formula", [], "other tap"),
+    ("per-formula", [dict(ON_GITHUB[0], name="other/tap")], "other tap"),
+):
+    result = tap_trust(entry, tap_info)
+    if refusal is None:
+        assert result.returncode == 0, (entry, tap_info, result.stderr)
+    else:
+        assert result.returncode != 0 and REFUSALS[refusal] in result.stderr.splitlines(), \
+            (entry, tap_info, result.stderr)
+print("macOS tap trust: a tap on a custom remote is refused before anything changes: pass")
+tap_trust_body = function("verify_tap_trust", source)
+assert CUSTOM_REMOTE.search(tap_trust_body), "verify_tap_trust does not refuse a custom remote"
+without_refusal = source.replace(tap_trust_body, CUSTOM_REMOTE.sub("", tap_trust_body))
+assert tap_trust("per-formula", LOCAL_CLONE, without_refusal).returncode == 0
+print("macOS tap trust: guard: without the refusal a tap on a custom remote passes: pass")
 
 # The snapshot is taken before anything that changes trust.
 lines = source.splitlines()

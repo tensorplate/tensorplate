@@ -700,15 +700,32 @@ print(json.dumps({
 PY
 }
 
+# Also refuses a tap on a custom remote. Homebrew then keys a formula's
+# trust entry by the remote rather than the tap name (Library/Homebrew/
+# trust.rb, item_trust_name), so `brew trust`, `brew install` and
+# `brew uninstall` add and remove entries snapshot_formula_trust and
+# restore_formula_trust cannot see, and the restore could never put the
+# entry trust back. Checked here, before anything changes.
 verify_tap_trust() {
-  trust_json="$(brew trust --json=v1)"
-  python3 - "$tap_name" "$trust_json" "${FORMULAE[@]}" <<'PY'
+  trust_json="$(brew trust --json=v1)" || return 1
+  tap_json="$(brew tap-info --json=v1 "$tap_name")" || return 1
+  python3 - "$tap_name" "$trust_json" "$tap_json" "${FORMULAE[@]}" <<'PY'
 import json
 import sys
 
 tap_name = sys.argv[1].lower()
 trusted = json.loads(sys.argv[2])
-formula_names = sys.argv[3:]
+taps = json.loads(sys.argv[3])
+formula_names = sys.argv[4:]
+if len(taps) != 1 or taps[0].get("name", "").lower() != tap_name:
+    raise SystemExit(f"brew tap-info does not describe {tap_name}")
+# Tap#uses_custom_remote?: a remote that is not the tap's default GitHub
+# one. A tap with no remote keys its trust by name.
+if taps[0].get("remote") and taps[0].get("custom_remote") is not False:
+    raise SystemExit(
+        f"{tap_name} uses a custom remote, so Homebrew keys its formula trust by that remote and "
+        "this harness cannot restore it; run against a tap on its default remote"
+    )
 trusted_taps = {item.lower() for item in trusted.get("taps", [])}
 trusted_formulae = {item.lower() for item in trusted.get("formulae", [])}
 missing = [

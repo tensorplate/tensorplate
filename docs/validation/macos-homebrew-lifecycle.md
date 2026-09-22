@@ -74,6 +74,12 @@ install, before its upgrade and on exit, re-trusting entries an uninstall
 removed and untrusting any the run added. `cleanup.log` lists each change
 made on exit. Trust granted here therefore survives the run.
 
+The stage also refuses a tap on a custom remote, such as one tapped from
+a local clone with `brew tap tensorplate/tap <path>`. Homebrew keys that
+tap's formula trust by the remote rather than by `tensorplate/tap`, so the
+harness could not put the trust back. Run against the tap on its default
+GitHub remote.
+
 On each device, take the unsandboxed network control once before the
 stage needs it:
 
@@ -340,13 +346,12 @@ before continuing. PyTorch and build dependencies may remain installed
 because they can be shared with other formulae; do not remove them
 automatically.
 
-After the run, remove the temporary component trust entries:
-
-```bash
-brew untrust --formula \
-  tensorplate/tap/tensorplate-agent \
-  tensorplate/tap/tensorplate-backend-python-pytorch \
-  tensorplate/tap/tensorplate-cli \
-  tensorplate/tap/tensorplate-observability \
-  tensorplate/tap/tensorplate-serving
-```
+Cleanup restores formula trust last. A run killed with SIGKILL, or a
+cleanup interrupted during its Homebrew restore, therefore leaves formula
+trust as the run's last install or uninstall left it, and the
+`brew uninstall` above removes the component entries again. Afterwards,
+re-run the `brew trust --formula` command from the preflight above,
+compare `brew trust --json=v1` with the trust you had before the run, and
+`brew untrust --formula` only a TensorPlate entry you did not have then.
+Do not untrust the entries the preflight granted: the next run's
+tap-trust stage requires them.

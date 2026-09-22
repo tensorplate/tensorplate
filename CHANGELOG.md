@@ -46,6 +46,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   installed by an interrupted run lost its trust when the stage removed it,
   and Homebrew refuses to load an untrusted dependency.
 
+- The macOS lifecycle harness's tap-trust stage refuses a tap on a custom
+  remote, such as one tapped from a local clone, before anything changes.
+  Homebrew keys that tap's formula trust by the remote rather than by
+  `tensorplate/tap`, so the trust restore would re-trust entries it never
+  reads back: the clean install would fail with the baseline already
+  removed, and the run would leave remote-keyed entries in place of the
+  operator's. The runbook no longer tells the operator to untrust the
+  component formulae after a run, which undid the restore, and says to
+  re-grant that trust when a run is killed, or its cleanup interrupted,
+  before the restore.
+
 - A release candidate's signed `SHA256SUMS` and manifest now name the files
   the release contains. GitHub rewrites `~` to `.` in an uploaded asset's
   name, so `v0.2.1-rc.1` served `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`
