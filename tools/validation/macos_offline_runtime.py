@@ -6,7 +6,8 @@ The harness runs the TensorPlate launchd services, the CLI, the MPS probe
 and a network probe under one sandbox-exec profile. This module renders
 that profile, derives the sandboxed launchd plists, probes the network
 from inside the sandbox, reads sandbox state back from running processes,
-and classifies every result.
+and classifies every result. It also resolves each service's launchd
+label, which every launchd stage of the harness uses.
 
 Every subcommand prints its JSON result, which the harness keeps in the
 local stage log, writes it to --out when given, and exits non-zero naming
@@ -40,10 +41,21 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import xml.parsers.expat
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 MDNS_SOCKET = "/var/run/mDNSResponder"
 PREFLIGHT_DEPLOYMENT = "offline-profile-preflight"
+
+# The launchd labels Homebrew gives a formula's service, its current
+# default first. Homebrew 6.0.22 (commit 963b69f634, "services: default
+# to canonical macOS service labels") made sh.brew.<formula> the default
+# and still recognises homebrew.mxcl.<formula>, the label of a service
+# installed or loaded by an earlier Homebrew: Library/Homebrew/service.rb
+# canonical_plist_name, legacy_plist_name and plist_names. A formula that
+# names its own label (`name macos:` in its service block) gets neither
+# form, and no TensorPlate formula does.
+LABEL_FORMS = ("sh.brew.{}", "homebrew.mxcl.{}")
 
 # Loopback on the two serving ports is the only IP traffic allowed. SBPL
 # `localhost` matches every address configured on the host, whatever the
@@ -364,6 +376,43 @@ def read_profile(path):
 
 
 # --- launchd -----------------------------------------------------------
+
+
+def label_forms(service):
+    """Every launchd label Homebrew may have loaded `service` under."""
+    return [form.format(service) for form in LABEL_FORMS]
+
+
+def service_label(keg, service):
+    """The launchd label Homebrew generated for an installed service.
+
+    The formula installer writes the service definition into the keg as
+    <label>.plist, carrying that Label (formula_installer.rb
+    install_service, formula.rb launchd_service_path, service.rb
+    to_plist). `brew services start` installs the same generated
+    definition as ~/Library/LaunchAgents/<label>.plist and loads it under
+    its Label (services/cli.rb install_service_file, launchctl_load), so
+    under one Homebrew the keg's name, its Label, the LaunchAgents file
+    and the loaded job agree. Exactly one keg plist named for a known
+    form must exist, and its Label must be that name.
+    """
+    present = [label for label in label_forms(service)
+               if os.path.isfile(os.path.join(keg, f"{label}.plist"))]
+    names = " or ".join(f"{label}.plist" for label in label_forms(service))
+    if not present:
+        raise CheckFailed(f"the {service} keg holds no launchd plist named {names}")
+    if len(present) > 1:
+        raise CheckFailed(f"the {service} keg holds both {names}; cannot tell which Homebrew loads")
+    label = present[0]
+    try:
+        with open(os.path.join(keg, f"{label}.plist"), "rb") as handle:
+            document = plistlib.load(handle)
+    except (OSError, ValueError, xml.parsers.expat.ExpatError) as error:
+        raise CheckFailed(f"cannot read {label}.plist in the {service} keg: {error}")
+    found = document.get("Label") if isinstance(document, dict) else None
+    if found != label:
+        raise CheckFailed(f"{label}.plist in the {service} keg has Label {found!r}, expected {label!r}")
+    return label
 
 
 def derive_plist(document, label, program, profile_path):
@@ -1351,6 +1400,8 @@ def main(argv=None):
     command("render-profile", opt("--agent-config", required=True),
             opt("--profile", required=True))
     command("profile-ports", opt("--profile", required=True))
+    command("label-forms", opt("--service", required=True))
+    command("service-label", opt("--keg", required=True), opt("--service", required=True))
     command("derive-plist", opt("--formula-plist", required=True), opt("--label", required=True),
             opt("--program", required=True), opt("--profile", required=True),
             opt("--plist-out", required=True))
@@ -1408,6 +1459,10 @@ def _run(args):
                "serving_port": serving, "candidate_port": candidate}, args.out)
     elif name == "profile-ports":
         print(",".join(str(port) for port in profile_ports(read_profile(args.profile))))
+    elif name == "label-forms":
+        print("\n".join(label_forms(args.service)))
+    elif name == "service-label":
+        print(service_label(args.keg, args.service))
     elif name == "derive-plist":
         read_profile(args.profile)
         with open(args.formula_plist, "rb") as handle:
