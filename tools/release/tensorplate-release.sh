@@ -1062,6 +1062,8 @@ cmd_prepare() {
       "$(declared_protocol_version)" "$(declared_bundle_format_version)"
     printf '  release branch: %s\n' "$RELEASE_BRANCH"
     printf '  changelog heading: ## [%s] - YYYY-MM-DD\n' "$VERSION"
+    printf '  changelog entries: everything under [Unreleased] moves into that\n'
+    printf '                     section, since a tag cut from this commit ships it\n'
     return 0
   fi
 
