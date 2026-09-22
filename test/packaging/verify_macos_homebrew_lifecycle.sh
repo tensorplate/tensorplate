@@ -137,7 +137,7 @@ helpers = "\n".join(function(name) for name in (
     "die", "note", "pass", "run_stage", "stop_candidate_services",
     "formula_is_installed", "linked_formula_version", "remove_candidate_graph",
     "stage_candidate_tap", "record_formula_graph", "install_candidate_clean",
-    "record_artifact_digest",
+    "record_artifact_digest", "restore_formula_trust",
 ))
 script = "\n".join(arrays) + r'''
 set -Eeuo pipefail
@@ -148,6 +148,8 @@ tap_backup="$TP_FAKE_BREW_ROOT/backup"
 stage_results="$evidence_dir/stages.tsv"
 tap_name=tensorplate/tap
 candidate_active=0
+# No trust snapshot: the trust restore is covered on its own below.
+formula_trust_entry=""
 brew() { python3 "$TP_FAKE_BREW_ROOT/fake-brew.py" "$@"; }
 ''' + helpers + "\n" + install_path
 
@@ -589,23 +591,28 @@ PY
 # config, not one left in the append-only agent log by an earlier run.
 # Run the real stage body against a fake Homebrew prefix and launchd.
 # Every case also runs from a context where errexit is suspended, so each
-# failure is shown to come from the stage's own explicit check.
+# failure is shown to come from the stage's own explicit check. launchd
+# holds the job under the label the keg plist carries: Homebrew 7's
+# sh.brew.<formula>, or an older Homebrew's homebrew.mxcl.<formula>.
 python3 - "$harness" <<'PY'
 import os
 import pathlib
+import plistlib
 import re
 import subprocess
 import sys
 import tempfile
 
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+harness = pathlib.Path(sys.argv[1])
+source = harness.read_text(encoding="utf-8")
 
-def function(name):
-    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
+
+def function(name, text=source):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
     assert match, f"missing harness function: {name}"
     return match.group(0)
 
-fake_restart = r'''
+fake_restart = r"""
 import json
 import os
 import pathlib
@@ -620,20 +627,21 @@ except ValueError:
     line = "" if os.environ["TP_MODE"] == "agent-silent" else "config error: agent.json is not valid JSON\n"
 with log.open("a") as handle:
     handle.write(line)
-'''
+"""
 
-helpers = "\n".join(function(name) for name in (
-    "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
-    "exercise_crash_loop",
-))
-stubs = r'''
+stubs = r"""
 set -Eeuo pipefail
 evidence_dir="$TP_ROOT/evidence"
 work_dir="$TP_ROOT/work"
 stage_results="$evidence_dir/stages.tsv"
+offline_helper_path="$TP_HELPER"
+agent_label=""
+observability_label=""
 brew() {
   case "$*" in
     --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
+    "--prefix tensorplate-agent" | "--prefix tensorplate-observability")
+      printf '%s\n' "$TP_ROOT/prefix/opt/$2" ;;
     "services list") printf 'tensorplate-agent started\n' ;;
     "services restart tensorplate-agent") python3 "$TP_ROOT/fake-restart.py" ;;
     *) return 9 ;;
@@ -643,11 +651,60 @@ stat() {
   [[ "$1 $2" == "-f %z" ]] || return 9
   python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$3"
 }
-launchctl() { printf 'state = running\n'; }
+launchctl() {
+  [[ "$*" == "print gui/$(id -u)/${TP_FORM}.tensorplate-agent" ]] || return 113
+  printf 'state = running\n'
+}
 sleep() { :; }
 tensorplate() { printf '{}\n'; }
-'''
+"""
 
+
+def crash_loop(mode, earlier, call, form, text=source):
+    helpers = "\n".join(function(name, text) for name in (
+        "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
+        "offline_helper", "service_label", "resolve_service_labels", "exercise_crash_loop",
+    ))
+    fake_mode = "agent-silent" if mode in ("config-error-earlier-run-only", "agent-silent") else mode
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-crash-loop-") as directory:
+        root = pathlib.Path(directory)
+        for name in ("evidence", "work", "prefix/etc/tensorplate", "prefix/var/log/tensorplate"):
+            (root / name).mkdir(parents=True)
+        # The plist Homebrew generated into each keg, named for its label.
+        for service in ("tensorplate-agent", "tensorplate-observability"):
+            (root / "prefix/opt" / service).mkdir(parents=True)
+            with open(root / "prefix/opt" / service / f"{form}.{service}.plist", "wb") as handle:
+                plistlib.dump({"Label": f"{form}.{service}", "ProgramArguments": [service]}, handle)
+        (root / "prefix/etc/tensorplate/agent.json").write_text(ORIGINAL_CONFIG)
+        if earlier is not None:
+            (root / "prefix/var/log/tensorplate/agent.error.log").write_text(earlier)
+        (root / "fake-restart.py").write_text(fake_restart)
+        (root / "probe.sh").write_text(helpers + stubs + call + "\n")
+        env = dict(os.environ, TP_ROOT=directory, TP_MODE=fake_mode, TP_FORM=form,
+                   TP_HELPER=str(harness.parent / "macos_offline_runtime.py"))
+        result = subprocess.run(["bash", str(root / "probe.sh")], env=env, capture_output=True, text=True)
+        rows_path = root / "evidence/stages.tsv"
+        rows = rows_path.read_text() if rows_path.exists() else ""
+        log_path = root / "evidence/launchd-crash-loop.log"
+        log = log_path.read_text() if log_path.exists() else ""
+        restored = (root / "prefix/etc/tensorplate/agent.json").read_text()
+        return result, rows, log, restored
+
+
+def check(mode, message, result, rows, log, restored, context):
+    if message is None:
+        assert result.returncode == 0, context
+        assert "launchd-crash-loop\tpass\t" in rows, context
+        assert restored == ORIGINAL_CONFIG, context
+    else:
+        assert result.returncode != 0, context
+        assert "launchd-crash-loop\tpass\t" not in rows, context
+        assert f"error: {message}" in log, context
+
+
+ORIGINAL_CONFIG = '{"listen": "agent.sock"}\n'
+CALLS = ("run_stage launchd-crash-loop exercise_crash_loop",
+         "run_stage launchd-crash-loop exercise_crash_loop || true")
 prior_config_error = "config error: agent.json is not valid JSON\n"
 cases = {
     # mode: (earlier-run log content, expected failure message or None)
@@ -659,38 +716,34 @@ cases = {
         None, "cannot size the agent launchd error log before breaking the config"),
 }
 for mode, (earlier, message) in cases.items():
-    fake_mode = "agent-silent" if mode in ("config-error-earlier-run-only", "agent-silent") else mode
-    for call in ("run_stage launchd-crash-loop exercise_crash_loop",
-                 "run_stage launchd-crash-loop exercise_crash_loop || true"):
-        with tempfile.TemporaryDirectory(prefix="tp-homebrew-crash-loop-") as directory:
-            root = pathlib.Path(directory)
-            for name in ("evidence", "work", "prefix/etc/tensorplate",
-                         "prefix/var/log/tensorplate"):
-                (root / name).mkdir(parents=True)
-            original_config = '{"listen": "agent.sock"}\n'
-            (root / "prefix/etc/tensorplate/agent.json").write_text(original_config)
-            if earlier is not None:
-                (root / "prefix/var/log/tensorplate/agent.error.log").write_text(earlier)
-            (root / "fake-restart.py").write_text(fake_restart)
-            (root / "probe.sh").write_text(helpers + stubs + call + "\n")
-            env = dict(os.environ, TP_ROOT=directory, TP_MODE=fake_mode)
-            result = subprocess.run(["bash", str(root / "probe.sh")], env=env,
-                                    capture_output=True, text=True)
-            rows_path = root / "evidence/stages.tsv"
-            rows = rows_path.read_text() if rows_path.exists() else ""
-            log_path = root / "evidence/launchd-crash-loop.log"
-            log = log_path.read_text() if log_path.exists() else ""
-            context = (mode, call, result.returncode, log, result.stderr)
-            if message is None:
-                assert result.returncode == 0, context
-                assert "launchd-crash-loop\tpass\t" in rows, context
-                restored = (root / "prefix/etc/tensorplate/agent.json").read_text()
-                assert restored == original_config, context
-            else:
-                assert result.returncode != 0, context
-                assert "launchd-crash-loop\tpass\t" not in rows, context
-                assert f"error: {message}" in log, context
+    for form in ("sh.brew", "homebrew.mxcl"):
+        for call in CALLS:
+            outcome = crash_loop(mode, earlier, call, form)
+            check(mode, message, *outcome, (mode, form, call, outcome[0].returncode, outcome[2],
+                                             outcome[0].stderr))
     print(f"macOS launchd crash-loop: {mode}: pass")
+
+# A keg plist of neither form fails the stage before it breaks the config.
+for call in CALLS:
+    result, rows, log, restored = crash_loop("config-error-this-run", "", call, "com.example")
+    check("unresolved", "cannot resolve the tensorplate-agent launchd label from its keg",
+          result, rows, log, restored, (call, log))
+    assert restored == ORIGINAL_CONFIG, log
+print("macOS launchd crash-loop: unresolvable label: pass")
+
+# The harness as it was before Homebrew 7: every job named homebrew.mxcl.
+# It must fail the Homebrew 7 world, even with errexit suspended, and
+# still pass where that label is right.
+mutant = source.replace(function("service_label"),
+                        "service_label() {\n  printf 'homebrew.mxcl.%s\\n' \"$1\"\n}\n")
+assert mutant != source
+for call in CALLS:
+    result, rows, log, restored = crash_loop("config-error-this-run", "", call, "sh.brew", mutant)
+    check("hardcoded", "tensorplate-agent is not loaded as homebrew.mxcl.tensorplate-agent after its "
+          "config was broken", result, rows, log, restored, (call, log))
+    check("hardcoded control", None, *crash_loop("config-error-this-run", "", call, "homebrew.mxcl", mutant),
+          call)
+print("macOS launchd crash-loop: guard: a hardcoded homebrew.mxcl label fails under Homebrew 7 labels: pass")
 PY
 
 # status-logs: run the real stage body against a fake Homebrew prefix and
@@ -705,6 +758,7 @@ import io
 import json
 import os
 import pathlib
+import plistlib
 import re
 import subprocess
 import sys
@@ -712,6 +766,7 @@ import tempfile
 
 source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 repo_root = pathlib.Path(sys.argv[2])
+helper = repo_root / "tools/validation/macos_offline_runtime.py"
 
 def function(name):
     match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", source, re.M | re.S)
@@ -964,20 +1019,36 @@ assert (call_line("run_stage deploy-smoke deploy_smoke")
 # either service starts. Fake services append output at start; each prior
 # log has a distinct size or is absent. Compare the real snapshot against
 # metadata observed before executing the stage, including retained events.
+# The fake launchd holds each job under the label its keg plist carries,
+# as `brew services start` loads it: Homebrew 7's sh.brew.<formula>
+# unless the run names an older Homebrew's homebrew.mxcl.<formula>.
 start_services = function("start_services")
-start_script = "\n".join(function(name) for name in (
-    "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
-)) + "\n" + heredoc_function("capture_events_baseline") + "\n" + start_services + r'''
+
+
+def start_script(text=source):
+    def named(name):
+        match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
+        assert match, f"missing harness function: {name}"
+        return match.group(0)
+    return "\n".join(named(name) for name in (
+        "die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
+        "offline_helper", "service_label", "resolve_service_labels",
+    )) + "\n" + heredoc_function("capture_events_baseline") + "\n" + named("start_services") + r'''
 set -Eeuo pipefail
 evidence_dir="$TP_ROOT/evidence"
 work_dir="$TP_ROOT/work"
 stage_results="$evidence_dir/stages.tsv"
+offline_helper_path="$TP_HELPER"
+agent_label=""
+observability_label=""
 agent_error_log_start=unset
 observability_error_log_start=unset
 logs="$TP_ROOT/prefix/var/log/tensorplate"
 brew() {
   case "$*" in
     --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
+    "--prefix tensorplate-agent" | "--prefix tensorplate-observability")
+      printf '%s\n' "$TP_ROOT/prefix/opt/$2" ;;
     "services start tensorplate-agent")
       [[ -s "$work_dir/events-log-baseline.json" ]] || return 9
       printf 'tensorplate-agent listening\n' >>"$logs/agent.error.log" ;;
@@ -996,36 +1067,77 @@ stat() {
     *) return 9 ;;
   esac
 }
-launchctl() { printf 'state = running\n'; }
+launchctl() {
+  case "$*" in
+    "print gui/$(id -u)/${TP_FORM}.tensorplate-agent" | \
+      "print gui/$(id -u)/${TP_FORM}.tensorplate-observability")
+      printf 'state = running\n' ;;
+    *) return 113 ;;
+  esac
+}
 sleep() { :; }
 tensorplate() { printf '{}\n'; }
-run_stage launchd-start start_services
+''' + CALL + r'''
 printf 'offsets %s %s\n' "$agent_error_log_start" "$observability_error_log_start"
 '''
-earlier_sizes = {"agent.error.log": 11, "observability.error.log": 23,
-                 "events.ndjson": 37, "events.1": 53}
-for absent in (None, *earlier_sizes):
+
+
+def launchd_start(absent, form="sh.brew", text=source):
     with tempfile.TemporaryDirectory(prefix="tp-homebrew-launchd-start-") as directory:
         root = pathlib.Path(directory)
         logs = root / "prefix/var/log/tensorplate"
         logs.mkdir(parents=True)
         (root / "evidence").mkdir()
         (root / "work").mkdir()
+        for service in ("tensorplate-agent", "tensorplate-observability"):
+            (root / "prefix/opt" / service).mkdir(parents=True)
+            with open(root / "prefix/opt" / service / f"{form}.{service}.plist", "wb") as handle:
+                plistlib.dump({"Label": f"{form}.{service}", "ProgramArguments": [service]}, handle)
         for name, size in earlier_sizes.items():
             if name != absent:
                 (logs / name).write_text("x" * (size - 1) + "\n")
         expected_baseline = event_baseline(logs)
-        (root / "probe.sh").write_text(start_script)
-        result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True,
-                                text=True, env=dict(os.environ, TP_ROOT=directory))
+        (root / "probe.sh").write_text(start_script(text))
+        result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True, text=True,
+                                env=dict(os.environ, TP_ROOT=directory, TP_FORM=form,
+                                         TP_HELPER=str(helper)))
+        log_path = root / "evidence/launchd-start.log"
+        log = log_path.read_text() if log_path.exists() else ""
+        baseline_path = root / "work/events-log-baseline.json"
+        baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else None
+        return result, log, baseline, expected_baseline
+
+
+CALL = "run_stage launchd-start start_services"
+earlier_sizes = {"agent.error.log": 11, "observability.error.log": 23,
+                 "events.ndjson": 37, "events.1": 53}
+for form in ("sh.brew", "homebrew.mxcl"):
+    for absent in (None, *earlier_sizes):
+        result, log, actual_baseline, expected_baseline = launchd_start(absent, form)
         expected = "offsets " + " ".join(
             str(0 if name == absent else earlier_sizes[name])
             for name in ("agent.error.log", "observability.error.log"))
-        context = (absent, expected, result.returncode, result.stdout, result.stderr)
+        context = (form, absent, expected, result.returncode, result.stdout, result.stderr, log)
         assert result.returncode == 0, context
         assert expected in result.stdout.splitlines(), context
-        actual_baseline = json.loads((root / "work/events-log-baseline.json").read_text())
         assert actual_baseline == expected_baseline, (context, actual_baseline, expected_baseline)
+# The failure the first Homebrew 7 run hit: the harness looked for the
+# job under homebrew.mxcl while `brew services start` had loaded it as
+# sh.brew. A copy with that label hardcoded must fail the Homebrew 7 run
+# and pass where the label is right; the resolved label must also fail
+# closed when the keg holds neither form.
+mutant = source.replace(function("service_label"),
+                        "service_label() {\n  printf 'homebrew.mxcl.%s\\n' \"$1\"\n}\n")
+assert mutant != source
+for form, text, message in (
+    ("sh.brew", mutant, "error: tensorplate-agent is not loaded as homebrew.mxcl.tensorplate-agent, the label "
+                        "its keg plist carries"),
+    ("com.example", source, "error: cannot resolve the tensorplate-agent launchd label from its keg"),
+):
+    result, log, _, _ = launchd_start(None, form, text)
+    assert result.returncode != 0 and message in log.splitlines(), (form, result.returncode, log)
+result, log, _, _ = launchd_start(None, "homebrew.mxcl", mutant)
+assert result.returncode == 0, log
 
 # The formulae decide where launchd writes each service's stderr and the
 # harness reads those paths; neither side can move without the other.
@@ -1122,6 +1234,490 @@ for failing in harness_stages:
     outcome = convert(failing)
     assert outcome != "pass", f"a run that failed in {failing} converts to {outcome}"
 print("macOS runbook mapping covers all eight stages: pass")
+PY
+
+# The harness names no launchd label itself. Homebrew 7 names a service
+# sh.brew.<formula> where an earlier Homebrew named it homebrew.mxcl.<formula>,
+# and a service loaded by that earlier Homebrew keeps the old label, so
+# every label comes from the helper: the keg plist's Label for an
+# installed service, and every form for the paths that run with the keg
+# gone.
+python3 - "$harness" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+named = [number for number, line in enumerate(source.splitlines(), 1)
+         if not line.lstrip().startswith("#") and re.search(r"homebrew\.mxcl|sh\.brew", line)]
+assert not named, f"the harness names a launchd label prefix at lines {named}"
+print("macOS launchd labels: none hardcoded: pass")
+PY
+
+# launchd-restart and uninstall: the real stage bodies against a fake
+# Homebrew and launchd that hold each job under the label its keg plist
+# carries, for Homebrew 7's sh.brew.<formula> and an older Homebrew's
+# homebrew.mxcl.<formula>. Each runs as a bare run_stage call and with
+# errexit suspended, and each guard is shown to fail on a copy of the
+# harness that names one label form itself.
+python3 - "$harness" <<'PY'
+import os
+import pathlib
+import plistlib
+import re
+import subprocess
+import sys
+import tempfile
+
+harness = pathlib.Path(sys.argv[1])
+source = harness.read_text(encoding="utf-8")
+FORMS = ("sh.brew", "homebrew.mxcl")
+SERVICES = ("tensorplate-agent", "tensorplate-observability")
+
+
+def function(name, text=source):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+
+def hardcoded(name, form, text=source):
+    """The harness with one label function naming a single form itself."""
+    return text.replace(function(name, text), f"{name}() {{\n  printf '{form}.%s\\n' \"$1\"\n}}\n")
+
+
+ARRAYS = "".join(re.search(r"^readonly " + name + r"=\(\n.*?^\)\n", source, re.M | re.S).group(0)
+                 for name in ("FORMULAE", "COMPONENT_FORMULAE"))
+COMMON = r"""
+set -Eeuo pipefail
+evidence_dir="$TP_ROOT/evidence"
+work_dir="$TP_ROOT/work"
+stage_results="$evidence_dir/stages.tsv"
+offline_helper_path="$TP_HELPER"
+agent_label=""
+observability_label=""
+candidate_active=1
+sleep() { :; }
+tensorplate() { printf '{}\n'; }
+"""
+
+RESTART_STUBS = r"""
+brew() {
+  case "$*" in
+    "--prefix tensorplate-agent" | "--prefix tensorplate-observability")
+      printf '%s\n' "$TP_ROOT/prefix/opt/$2" ;;
+    "services restart tensorplate-agent" | "services restart tensorplate-observability")
+      fake_pid_file="$TP_ROOT/${3#tensorplate-}.pid"
+      printf '%s\n' "$(($(cat "$fake_pid_file") + 1))" >"$fake_pid_file" ;;
+    "services list") printf 'tensorplate-agent started\ntensorplate-observability started\n' ;;
+    *) return 9 ;;
+  esac
+}
+launchctl() {
+  case "$*" in
+    "print gui/$(id -u)/${TP_FORM}.tensorplate-agent")
+      printf '\tpid = %s\n' "$(cat "$TP_ROOT/agent.pid")" ;;
+    "print gui/$(id -u)/${TP_FORM}.tensorplate-observability")
+      printf '\tpid = %s\n' "$(cat "$TP_ROOT/observability.pid")" ;;
+    *) return 113 ;;
+  esac
+}
+"""
+
+UNINSTALL_STUBS = r"""
+brew() {
+  case "$*" in
+    --prefix) printf '%s\n' "$TP_ROOT/prefix" ;;
+    "services stop "*) return 0 ;;
+    "list --formula --versions "*) return 1 ;;
+    *) return 9 ;;
+  esac
+}
+# TP_LOADED lists the labels launchd still holds; TP_PRINT_STATUS forces
+# launchctl print's status.
+launchctl() {
+  [[ "$1" == print ]] || return 9
+  [[ -z "${TP_PRINT_STATUS:-}" ]] || return "$TP_PRINT_STATUS"
+  case " ${TP_LOADED:-} " in
+    *" ${2##*/} "*) printf 'state = running\n' ;;
+    *) return 113 ;;
+  esac
+}
+"""
+
+STAGE_FUNCTIONS = {
+    "restart": ("die", "note", "pass", "run_stage", "wait_for_service", "wait_for_agent_ready",
+                "offline_helper", "service_label", "resolve_service_labels", "restart_services"),
+    "uninstall": ("die", "note", "pass", "run_stage", "offline_helper", "service_label_forms",
+                  "stop_candidate_services", "formula_is_installed", "remove_candidate_graph",
+                  "uninstall_candidate"),
+}
+
+
+def run(stage, body, form, text=source, env=None, setup=None):
+    stubs = RESTART_STUBS if stage == "restart" else UNINSTALL_STUBS
+    with tempfile.TemporaryDirectory(prefix=f"tp-homebrew-{stage}-") as directory:
+        root = pathlib.Path(directory)
+        for name in ("evidence", "work", "prefix/bin", "home/Library/LaunchAgents"):
+            (root / name).mkdir(parents=True)
+        for service in SERVICES:
+            (root / "prefix/opt" / service).mkdir(parents=True)
+            with open(root / "prefix/opt" / service / f"{form}.{service}.plist", "wb") as handle:
+                plistlib.dump({"Label": f"{form}.{service}", "ProgramArguments": [service]}, handle)
+            (root / f"{service[len('tensorplate-'):]}.pid").write_text("100\n")
+        if setup:
+            setup(root)
+        script = ARRAYS + "\n".join(function(name, text) for name in STAGE_FUNCTIONS[stage])
+        (root / "probe.sh").write_text(script + COMMON + stubs + body + "\n")
+        result = subprocess.run(
+            ["bash", str(root / "probe.sh")], capture_output=True, text=True,
+            env=dict(os.environ, TP_ROOT=directory, TP_FORM=form, HOME=str(root / "home"),
+                     TP_HELPER=str(harness.parent / "macos_offline_runtime.py"), **(env or {})))
+        log_path = root / "evidence" / f"{stage}.log"
+        rows_path = root / "evidence/stages.tsv"
+        return (result, log_path.read_text() if log_path.exists() else "",
+                rows_path.read_text() if rows_path.exists() else "")
+
+
+def check(stage, expected, outcome, context):
+    result, log, rows = outcome
+    context = (context, result.returncode, log, result.stderr)
+    if expected is None:
+        assert result.returncode == 0 and f"{stage}\tpass\t" in rows, context
+    else:
+        assert result.returncode != 0 and f"{stage}\tpass\t" not in rows, context
+        assert expected in log.splitlines(), (expected, context)
+
+
+def must_fail(stage, expected, outcome, context):
+    """The case must not hold on this copy of the harness."""
+    try:
+        check(stage, expected, outcome, context)
+    except AssertionError:
+        return
+    raise AssertionError(f"held on a copy with the guard removed: {context}")
+
+
+CALLS = ("run_stage {0} {1}", "run_stage {0} {1} || true")
+
+# launchd-restart reads each job's pid under its label before and after.
+for call in CALLS:
+    body = call.format("restart", "restart_services")
+    for form in FORMS:
+        check("restart", None, run("restart", body, form), (form, call))
+    # A keg plist that names neither form fails before restarting anything.
+    check("restart", "error: cannot resolve the tensorplate-agent launchd label from its keg",
+          run("restart", body, "com.example"), ("unresolved", call))
+    # The harness before this fix: every job named homebrew.mxcl.
+    mutant = hardcoded("service_label", "homebrew.mxcl")
+    must_fail("restart", None, run("restart", body, "sh.brew", mutant), ("hardcoded homebrew.mxcl", call))
+    check("restart", None, run("restart", body, "homebrew.mxcl", mutant), ("hardcoded control", call))
+print("macOS launchd-restart: both label forms, unresolved label and hardcoded-label guard: pass")
+
+# uninstall: the kegs are gone, so a LaunchAgents plist or a loaded job
+# under either form must fail the stage.
+uninstall_cases = {}
+for form in FORMS:
+    for service in SERVICES:
+        label = f"{form}.{service}"
+        uninstall_cases[f"{label} plist left"] = (
+            form, {}, lambda root, label=label: (root / f"home/Library/LaunchAgents/{label}.plist").write_text(""),
+            f"error: {service} LaunchAgent plist {label}.plist remains after uninstall")
+        uninstall_cases[f"{label} still loaded"] = (
+            form, {"TP_LOADED": label}, None,
+            f"error: {service} launchd job {label} is still loaded after uninstall (launchctl print exited 0)")
+for call in CALLS:
+    body = call.format("uninstall", "uninstall_candidate")
+    check("uninstall", None, run("uninstall", body, "sh.brew"), ("clean", call))
+    check("uninstall", "error: tensorplate-agent launchd job sh.brew.tensorplate-agent is still loaded after "
+          "uninstall (launchctl print exited 5)",
+          run("uninstall", body, "sh.brew", env={"TP_PRINT_STATUS": "5"}), ("launchctl print fails", call))
+    for name, (form, env, setup, expected) in uninstall_cases.items():
+        check("uninstall", expected, run("uninstall", body, "sh.brew", env=env, setup=setup), (name, call))
+        # A copy that knows only the other form misses this leftover.
+        other = FORMS[1 - FORMS.index(form)]
+        must_fail("uninstall", expected,
+                  run("uninstall", body, "sh.brew", hardcoded("service_label_forms", other), env=env, setup=setup),
+                  (name, f"only {other}", call))
+print("macOS uninstall: leftovers under either label form, and single-form guards: pass")
+PY
+
+# Formula trust: `brew uninstall` drops a tap formula's trust entry
+# unless the whole tap is trusted, and `brew install` and `brew upgrade`
+# trust the formula they are named for. Run the harness's own clean
+# install, upgrade, graph removals, cleanup and success-path exit against
+# a fake Homebrew that models both, and require the six formulae's trust
+# to end exactly as it began, with every change reported in cleanup.log.
+python3 - "$harness" <<'PY'
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+harness = pathlib.Path(sys.argv[1])
+source = harness.read_text(encoding="utf-8")
+TAP = "tensorplate/tap"
+SIX = ("tensorplate-agent", "tensorplate-serving", "tensorplate-cli", "tensorplate-observability",
+       "tensorplate-backend-python-pytorch", "tensorplate")
+UNRELATED = ["other/tap/foo"]
+
+
+def function(name, text):
+    match = re.search(r"^" + name + r"\(\) \{\n.*?^\}\n", text, re.M | re.S)
+    assert match, f"missing harness function: {name}"
+    return match.group(0)
+
+
+FAKE_BREW = r"""
+import json
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ["TP_ROOT"])
+state_path = root / "brew.json"
+state = json.loads(state_path.read_text())
+trust = state["trust"]
+args = sys.argv[1:]
+with (root / "brew-calls.jsonl").open("a") as out:
+    out.write(json.dumps(args) + "\n")
+TAP = "tensorplate/tap"
+
+
+def save():
+    state_path.write_text(json.dumps(state))
+
+
+def tap_trusted():
+    return TAP in trust["taps"]
+
+
+if args == ["trust", "--json=v1"]:
+    print(json.dumps({"taps": trust["taps"], "formulae": trust["formulae"], "casks": [], "commands": []}))
+    sys.exit(0)
+if args[:2] in (["trust", "--formula"], ["untrust", "--formula"]):
+    fault = (root / "trust-fault").read_text().strip() if (root / "trust-fault").exists() else ""
+    if fault == "fails":
+        sys.exit(1)
+    if fault != "ignored":
+        for name in args[2:]:
+            if args[0] == "trust" and name not in trust["formulae"]:
+                trust["formulae"] = sorted(trust["formulae"] + [name])
+            if args[0] == "untrust" and name in trust["formulae"]:
+                trust["formulae"].remove(name)
+        save()
+    print(f"{args[0]}: {' '.join(args[2:])}")
+    sys.exit(0)
+if args[:3] == ["list", "--formula", "--versions"]:
+    sys.exit(0 if args[3] in state["installed"] else 1)
+if args[:2] == ["services", "stop"]:
+    sys.exit(0)
+if args[:2] == ["info", "--json=v2"]:
+    print(json.dumps({"formulae": [{"versions": {"stable": "0.2.1"}}]}))
+    sys.exit(0)
+if args[:2] == ["uninstall", "--formula"]:
+    state["installed"].remove(args[2])
+    # Library/Homebrew/cmd/uninstall.rb: unless the whole tap is trusted.
+    if not tap_trusted() and f"{TAP}/{args[2]}" in trust["formulae"]:
+        trust["formulae"].remove(f"{TAP}/{args[2]}")
+    save()
+    sys.exit(0)
+if args[0] in ("install", "upgrade") and args[1:] == ["--formula", f"{TAP}/tensorplate"]:
+    # Homebrew::Trust.trust_fully_qualified_items!, then every formula of
+    # the graph must load, which needs trust (Trust.require_trusted_formula!).
+    if f"{TAP}/tensorplate" not in trust["formulae"]:
+        trust["formulae"] = sorted(trust["formulae"] + [f"{TAP}/tensorplate"])
+    graph = (root / "graph").read_text().split()
+    untrusted = [name for name in graph if not tap_trusted() and f"{TAP}/{name}" not in trust["formulae"]]
+    save()
+    if untrusted:
+        print("Error: refusing to load untrusted formulae: " + " ".join(untrusted), file=sys.stderr)
+        sys.exit(1)
+    state["installed"] = sorted(set(state["installed"]) | set(graph))
+    save()
+    sys.exit(0)
+print(f"unexpected fake brew invocation: {args}", file=sys.stderr)
+sys.exit(9)
+"""
+
+EXIT_RESTORE = re.compile(r"^restore_formula_trust >>.*\n  die .*\n", re.M)
+CLEANUP_RESTORE = '  restore_formula_trust || { [[ "$status" -ne 0 ]] || status=1; }\n'
+GLOBALS = r"""
+set -Eeuo pipefail
+evidence_dir="$TP_ROOT/evidence"
+work_dir="$TP_ROOT/work"
+stage_results="$evidence_dir/stages.tsv"
+tap_name=tensorplate/tap
+tap_repo=""
+baseline_version=""
+candidate_active=0
+agent_config_backup=""
+lifecycle_marker=""
+formula_trust_entry=""
+active_stage=""
+active_stage_log=""
+active_stage_started=""
+brew() { python3 "$TP_ROOT/fake-brew.py" "$@"; }
+stage_candidate_tap() { :; }
+record_formula_graph() { :; }
+verify_packaged_closure() { :; }
+linked_formula_version() { printf '0.2.1\n'; }
+restore_agent_config() { :; }
+restore_offline_supervision() { :; }
+restore_tap() { :; }
+exec 4>&2
+trap 'exit 130' INT
+trap cleanup EXIT
+"""
+
+
+def script(text):
+    """The lifecycle's trust-changing steps in the harness's order, each
+    through the harness's own code; TP_STOP_AFTER fails the run after the
+    named step, so cleanup restores, and otherwise the harness's
+    success-path exit does."""
+    arrays = "".join(re.search(r"^readonly " + name + r"=\(\n.*?^\)\n", text, re.M | re.S).group(0)
+                     for name in ("FORMULAE", "COMPONENT_FORMULAE"))
+    functions = "".join(function(name, text) for name in (
+        "die", "note", "pass", "run_stage", "tell_operator", "formula_is_installed", "stop_candidate_services",
+        "remove_candidate_graph", "snapshot_formula_trust", "formula_trust_changes", "restore_formula_trust",
+        "install_candidate_clean", "upgrade_from_baseline", "cleanup"))
+    exit_restore = EXIT_RESTORE.search(text)
+    candidate = 'printf \'%s\\n\' "${FORMULAE[@]}" >"$TP_ROOT/graph"\n'
+    baseline = "printf 'tensorplate\\n' >\"$TP_ROOT/graph\"\n"
+    steps = (
+        ("entry", ""),
+        ("snapshot", 'snapshot_formula_trust || die "cannot record the formula trust the run starts with"\n'),
+        ("clean-install", candidate + "run_stage clean-install install_candidate_clean\n"),
+        ("uninstall", "run_stage uninstall remove_candidate_graph\n"),
+        ("baseline-restore", baseline + 'brew install --formula "${tap_name}/tensorplate"\n'),
+        ("upgrade", candidate + "run_stage upgrade upgrade_from_baseline\n"),
+        ("rollback", "run_stage rollback remove_candidate_graph\n" + baseline +
+         'brew install --formula "${tap_name}/tensorplate"\n'),
+    )
+    body = "".join(f'{command}[[ "$TP_STOP_AFTER" != {name} ]] || exit 1\n' for name, command in steps)
+    body += '[[ -z "$TP_TRUST_FAULT" ]] || printf \'%s\\n\' "$TP_TRUST_FAULT" >"$TP_ROOT/trust-fault"\n'
+    return arrays + functions + GLOBALS + body + (exit_restore.group(0) if exit_restore else "") + "trap - EXIT\n"
+
+
+ENTRY = {
+    # name: (tap trust, per-formula trust, installed at entry)
+    "per-formula": ([], [f"{TAP}/{name}" for name in SIX], ["tensorplate"]),
+    "tap-trusted": ([TAP], [], ["tensorplate"]),
+    "tap-and-one-formula": ([TAP], [f"{TAP}/tensorplate-cli"], ["tensorplate"]),
+    # A run killed with SIGKILL left the candidate graph installed.
+    "per-formula-graph-installed": ([], [f"{TAP}/{name}" for name in SIX], list(SIX)),
+}
+
+
+def run(entry, stop_after="", text=source, fault=""):
+    taps, formulae, installed = ENTRY[entry]
+    with tempfile.TemporaryDirectory(prefix="tp-homebrew-trust-") as directory:
+        root = pathlib.Path(directory)
+        (root / "evidence").mkdir()
+        (root / "work").mkdir()
+        (root / "fake-brew.py").write_text(FAKE_BREW)
+        store = {"taps": list(taps), "formulae": sorted(formulae + UNRELATED)}
+        (root / "brew.json").write_text(json.dumps({"trust": store, "installed": list(installed)}))
+        (root / "probe.sh").write_text(script(text))
+        result = subprocess.run(["bash", str(root / "probe.sh")], capture_output=True, text=True,
+                                env=dict(os.environ, TP_ROOT=directory, TP_STOP_AFTER=stop_after,
+                                         TP_TRUST_FAULT=fault))
+        cleanup_log = root / "evidence/cleanup.log"
+        return {
+            "result": result, "entry": store, "final": json.loads((root / "brew.json").read_text())["trust"],
+            "calls": [json.loads(line) for line in (root / "brew-calls.jsonl").read_text().splitlines()]
+                     if (root / "brew-calls.jsonl").exists() else [],
+            "log": cleanup_log.read_text() if cleanup_log.exists() else "",
+            "stages": "".join(path.read_text() for path in sorted((root / "evidence").glob("*.log"))),
+            "rows": (root / "evidence/stages.tsv").read_text() if (root / "evidence/stages.tsv").exists() else "",
+        }
+
+
+def check(outcome, changes):
+    context = (outcome["result"].returncode, outcome["result"].stderr[-2000:], outcome["log"],
+               outcome["stages"][-3000:], outcome["final"])
+    assert outcome["final"] == outcome["entry"], ("formula trust did not end as it began", context)
+    lines = outcome["log"].splitlines()
+    for change in changes:
+        assert f"formula trust: {change}" in lines, (change, context)
+    trusted_then = " ".join(sorted(set(outcome["entry"]["formulae"]) - set(UNRELATED),
+                                   key=lambda name: SIX.index(name.split("/")[-1])))
+    assert lines.count(f"formula trust: as at entry, when the per-formula entries were: "
+                       f"{trusted_then or 'none'}") == 1, context
+    assert sum(line.startswith("formula trust: ") for line in lines) == len(changes) + 1, context
+
+
+RETRUSTED = [f"re-trusted {TAP}/{name}, trusted at entry" for name in SIX]
+UNTRUSTED = [f"untrusted {TAP}/tensorplate, not trusted at entry"]
+CASES = {
+    # (entry, step the run fails after, or "" for a run that passes): changes cleanup.log reports
+    ("per-formula", ""): RETRUSTED[:-1],
+    ("per-formula", "uninstall"): RETRUSTED,
+    ("per-formula", "rollback"): RETRUSTED[:-1],
+    ("tap-trusted", ""): UNTRUSTED,
+    ("tap-trusted", "uninstall"): UNTRUSTED,
+    ("tap-and-one-formula", ""): UNTRUSTED,
+    ("per-formula-graph-installed", ""): RETRUSTED[:-1],
+}
+for (entry, stop_after), changes in CASES.items():
+    outcome = run(entry, stop_after)
+    assert outcome["result"].returncode == (1 if stop_after else 0), (entry, stop_after, outcome)
+    check(outcome, changes)
+    print(f"macOS formula trust: {entry}, {'fails after ' + stop_after if stop_after else 'passes'}: pass")
+
+# Before the snapshot nothing has changed, and nothing is restored.
+outcome = run("per-formula", "entry")
+assert outcome["result"].returncode == 1 and outcome["final"] == outcome["entry"], outcome
+assert not [call for call in outcome["calls"] if call[0] in ("trust", "untrust")], outcome["calls"]
+assert "formula trust:" not in outcome["log"], outcome["log"]
+print("macOS formula trust: a run that fails before the snapshot changes nothing: pass")
+
+# A trust change Homebrew refuses, or reports but does not make, fails the
+# run and names the entry trust on the terminal.
+for fault in ("fails", "ignored"):
+    outcome = run("per-formula", fault=fault)
+    message = ("error: TensorPlate formula trust is not as it was at entry, when the per-formula entries "
+               "were: " + " ".join(f"{TAP}/{name}" for name in SIX) + "; compare brew trust --json=v1")
+    assert outcome["result"].returncode == 1, (fault, outcome)
+    assert message in outcome["result"].stderr.splitlines(), (fault, outcome["result"].stderr)
+    print(f"macOS formula trust: a trust change Homebrew {fault}: pass")
+
+
+def must_fail(text, entry, stop_after=""):
+    outcome = run(entry, stop_after, text)
+    try:
+        check(outcome, [])
+    except AssertionError:
+        return outcome
+    raise AssertionError(f"the trust case passed without the guard: {entry} {stop_after}")
+
+
+# Guards: remove each restore and its case fails for that reason.
+without_exit = EXIT_RESTORE.sub("", source.replace(CLEANUP_RESTORE, ""))
+assert without_exit.count("restore_formula_trust") == source.count("restore_formula_trust") - 2
+for entry, stop_after in (("per-formula", ""), ("per-formula", "uninstall"), ("tap-trusted", "")):
+    outcome = must_fail(without_exit, entry, stop_after)
+    assert outcome["final"] != outcome["entry"] and "formula trust:" not in outcome["log"], outcome
+print("macOS formula trust: guard: without the exit restore the run loses or adds trust: pass")
+for function_name, stage, entry in (("install_candidate_clean", "clean-install", "per-formula-graph-installed"),
+                                    ("upgrade_from_baseline", "upgrade", "per-formula")):
+    body = function(function_name, source)
+    call = re.search(r"^  restore_formula_trust \|\| die .*\n", body, re.M)
+    assert call, f"{function_name} does not restore the entry trust"
+    outcome = must_fail(source.replace(body, body.replace(call.group(0), "")), entry)
+    assert f"{stage}\tpass\t" not in outcome["rows"] and \
+        "refusing to load untrusted formulae" in outcome["stages"], outcome
+    print(f"macOS formula trust: guard: without the restore before {stage} Homebrew refuses the graph: pass")
+
+# The snapshot is taken before anything that changes trust.
+lines = source.splitlines()
+snapshot = lines.index('snapshot_formula_trust || die "cannot record the formula trust the run starts with"')
+assert snapshot < lines.index("run_stage tap-trust verify_tap_trust") < \
+    lines.index("run_stage clean-install install_candidate_clean"), "the trust snapshot is taken too late"
 PY
 
 if command -v shellcheck >/dev/null 2>&1; then

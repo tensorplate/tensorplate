@@ -157,9 +157,16 @@ def test_profile():
 # --- launchd -----------------------------------------------------------
 
 
-def formula_document(prefix="/opt/homebrew", service=AGENT):
+def label(service, mode=""):
+    """The label the fake Homebrew gives `service` in a world run in
+    `mode`: Homebrew 7's sh.brew.<formula>, or with legacy-labels the
+    homebrew.mxcl.<formula> an older Homebrew used."""
+    return f"{'homebrew.mxcl' if 'legacy-labels' in mode.split(',') else 'sh.brew'}.{service}"
+
+
+def formula_document(prefix="/opt/homebrew", service=AGENT, label_=None):
     return {
-        "Label": f"homebrew.mxcl.{service}",
+        "Label": label_ or label(service),
         "ProgramArguments": [f"{prefix}/opt/{service}/bin/{service}", "--config",
                              f"{prefix}/etc/tensorplate/agent.json"],
         "RunAtLoad": True, "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 5,
@@ -172,13 +179,20 @@ def test_derive_plist():
     document = formula_document()
     program = document["ProgramArguments"][0]
     profile = "/private/tmp/offline-denial/network-denied.sb"
-    derived = m.derive_plist(document, "homebrew.mxcl.tensorplate-agent", program, profile)
+    derived = m.derive_plist(document, "sh.brew.tensorplate-agent", program, profile)
     assert {key for key in derived if derived[key] != document.get(key)} == {"ProgramArguments"}
+    # A keg an older Homebrew installed derives under its own label, and
+    # the other form is refused rather than silently relabelled.
+    legacy = formula_document(label_="homebrew.mxcl.tensorplate-agent")
+    assert m.derive_plist(legacy, "homebrew.mxcl.tensorplate-agent", program, profile)["Label"] == \
+        "homebrew.mxcl.tensorplate-agent"
+    refused(lambda: m.derive_plist(legacy, "sh.brew.tensorplate-agent", program, profile), "Label")
     assert derived["ProgramArguments"] == ["/usr/bin/sandbox-exec", "-f", profile] + \
         document["ProgramArguments"]
     assert derived["ProgramArguments"] == m.expected_sandboxed_arguments(document, profile)
     for mutate, fragment in (
-        (lambda d: d.update(Label="homebrew.mxcl.other"), "Label"),
+        (lambda d: d.update(Label="sh.brew.other"), "Label"),
+        (lambda d: d.update(Label="homebrew.mxcl.tensorplate-agent"), "Label"),
         (lambda d: d.update(Program=program), "sets Program"),
         (lambda d: d["ProgramArguments"].__setitem__(0, "/usr/local/bin/tensorplate-agent"),
          "ProgramArguments[0]"),
@@ -189,16 +203,16 @@ def test_derive_plist():
     ):
         broken = copy.deepcopy(document)
         mutate(broken)
-        refused(lambda: m.derive_plist(broken, "homebrew.mxcl.tensorplate-agent", program, profile),
+        refused(lambda: m.derive_plist(broken, "sh.brew.tensorplate-agent", program, profile),
                 fragment)
-    refused(lambda: m.derive_plist(document, "homebrew.mxcl.tensorplate-agent", program,
+    refused(lambda: m.derive_plist(document, "sh.brew.tensorplate-agent", program,
                                    "network-denied.sb"), "absolute")
     with tempfile.TemporaryDirectory(prefix="tp-offline-derive-") as directory:
         root = pathlib.Path(directory)
         with open(root / "formula.plist", "wb") as handle:
             plistlib.dump(document, handle)
         base = ["derive-plist", "--formula-plist", str(root / "formula.plist"),
-                "--label", "homebrew.mxcl.tensorplate-agent", "--program", program,
+                "--label", "sh.brew.tensorplate-agent", "--program", program,
                 "--plist-out", str(root / "derived.plist")]
         assert m.main(base + ["--profile", str(root / "missing.sb")]) == 1
         (root / "multi.sb").write_text("(version 1)\n(allow default)")
@@ -218,10 +232,14 @@ def test_launchd_job():
     profile = "/private/var/folders/xx/T/tmp.synthetic/offline-denial/network-denied.sb"
     formula = formula_document()
     expected = m.expected_sandboxed_arguments(formula, profile)
-    derived_path = "/private/var/folders/xx/T/tmp.synthetic/offline-denial/homebrew.mxcl.tensorplate-agent.plist"
-    assert job == {"label": "homebrew.mxcl.tensorplate-agent", "path": derived_path,
+    derived_path = "/private/var/folders/xx/T/tmp.synthetic/offline-denial/sh.brew.tensorplate-agent.plist"
+    assert job == {"label": "sh.brew.tensorplate-agent", "path": derived_path,
                    "program": "/usr/bin/sandbox-exec", "arguments": expected,
                    "pid": 4242, "runs": 1, "runs_sandbox_exec": True}, job
+    # The parser reads the label launchd prints, whichever form it is.
+    legacy = m.parse_launchd_job(text.replace("sh.brew.tensorplate-agent", "homebrew.mxcl.tensorplate-agent"))
+    assert legacy == dict(job, label="homebrew.mxcl.tensorplate-agent",
+                          path=derived_path.replace("sh.brew.", "homebrew.mxcl.")), legacy
     # Cleanup's test for a job it must boot out: either launchd's program or
     # the first argument is sandbox-exec.
     service = "/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent"
@@ -237,7 +255,7 @@ def test_launchd_job():
     cases = {
         "job_arguments": dict(arguments=expected[:-1] + [expected[-1] + "x"]),
         "job_program": dict(program="/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent"),
-        "job_path": dict(path="/Users/operator/Library/LaunchAgents/homebrew.mxcl.tensorplate-agent.plist"),
+        "job_path": dict(path="/Users/operator/Library/LaunchAgents/sh.brew.tensorplate-agent.plist"),
         "job_runs": dict(runs=2),
         "job_pid_unchanged": dict(same_pid_as=4243),
     }
@@ -298,6 +316,60 @@ def test_launchd_job():
             print_path.write_text(document)
             assert m.main(command) == status
     passed("launchctl print parsing and job checks")
+
+
+def test_service_label():
+    assert m.label_forms(AGENT) == ["sh.brew.tensorplate-agent", "homebrew.mxcl.tensorplate-agent"]
+    with tempfile.TemporaryDirectory(prefix="tp-offline-label-") as directory:
+        keg = pathlib.Path(directory)
+
+        def write(name, document):
+            with open(keg / name, "wb") as handle:
+                plistlib.dump(document, handle)
+
+        def clear():
+            for item in keg.iterdir():
+                item.unlink()
+
+        # What Homebrew 7 and an older Homebrew write into the keg.
+        for form in m.label_forms(AGENT):
+            clear()
+            write(f"{form}.plist", formula_document(label_=form))
+            assert m.service_label(str(keg), AGENT) == form
+            assert m.main(["service-label", "--keg", str(keg), "--service", AGENT]) == 0
+        # No plist of either form, including one a formula named itself.
+        clear()
+        write("com.example.tensorplate-agent.plist", formula_document(label_="com.example.tensorplate-agent"))
+        refused(lambda: m.service_label(str(keg), AGENT),
+                "no launchd plist named sh.brew.tensorplate-agent.plist or homebrew.mxcl.tensorplate-agent.plist")
+        assert m.main(["service-label", "--keg", str(keg), "--service", AGENT]) == 1
+        # Both: which one Homebrew loads cannot be told from the keg.
+        for form in m.label_forms(AGENT):
+            write(f"{form}.plist", formula_document(label_=form))
+        refused(lambda: m.service_label(str(keg), AGENT), "holds both")
+        # The file's name and its Label disagree, or the file is not a
+        # launchd definition.
+        for name, content, fragment in (
+            ("sh.brew.tensorplate-agent.plist", formula_document(label_="homebrew.mxcl.tensorplate-agent"),
+             "has Label 'homebrew.mxcl.tensorplate-agent', expected 'sh.brew.tensorplate-agent'"),
+            ("homebrew.mxcl.tensorplate-agent.plist", formula_document(label_="sh.brew.tensorplate-observability"),
+             "expected 'homebrew.mxcl.tensorplate-agent'"),
+            ("sh.brew.tensorplate-agent.plist", ["not", "a", "dictionary"], "has Label None"),
+            ("sh.brew.tensorplate-agent.plist", None, "cannot read sh.brew.tensorplate-agent.plist"),
+            ("sh.brew.tensorplate-agent.plist", b"<?xml version=\"1.0\"?><plist><dict><key>Label",
+             "cannot read sh.brew.tensorplate-agent.plist"),
+        ):
+            clear()
+            if content is None:
+                (keg / name).write_bytes(b"not a plist")
+            elif isinstance(content, bytes):
+                (keg / name).write_bytes(content)
+            else:
+                write(name, content)
+            refused(lambda: m.service_label(str(keg), AGENT), fragment)
+        clear()
+        refused(lambda: m.service_label(str(keg / "missing"), AGENT), "holds no launchd plist")
+    passed("service label resolution from the keg")
 
 
 # --- sandbox readback --------------------------------------------------
@@ -883,8 +955,10 @@ def heredoc_function(source, name):
 
 
 STAGE_FUNCTIONS = (
-    "die", "note", "pass", "run_stage", "offline_helper", "restore_agent_config", "tell_operator",
-    "restore_formula_trust", "purge_offline_job", "restore_offline_supervision", "cleanup",
+    "die", "note", "pass", "run_stage", "offline_helper", "service_label_forms", "service_label",
+    "resolve_service_labels", "label_of", "restore_agent_config", "tell_operator",
+    "formula_trust_changes", "restore_formula_trust", "purge_offline_job", "restore_offline_supervision",
+    "cleanup",
     "wait_for_service", "wait_for_agent_ready", "run_denied", "enter_offline_denial",
     "wait_for_denied_status", "verify_normal_supervision", "verify_offline_runtime",
     "verify_offline_profile",
@@ -900,7 +974,9 @@ baseline_version="${TP_BASELINE_VERSION:-}"
 candidate_active=1
 agent_config="$TP_ROOT/prefix/etc/tensorplate/agent.json"
 agent_config_backup=""
-trust_added=()
+formula_trust_entry=""
+agent_label=""
+observability_label=""
 active_stage=""
 active_stage_log=""
 active_stage_started=""
@@ -992,7 +1068,7 @@ def unix_connect(path):
         if sandboxed():
             raise OSError(errno.EPERM, "Operation not permitted")
         return None
-    if "homebrew.mxcl.tensorplate-agent" not in state()["labels"]:
+    if not any(job["service"] == "tensorplate-agent" for job in state()["labels"].values()):
         raise OSError(errno.ECONNREFUSED, "Connection refused")
     return None
 
@@ -1049,8 +1125,12 @@ def fake(root, *args, mode=""):
 
 def make_world(root, scenario="normal", mode=""):
     """A Homebrew prefix with both services running from their normal
-    LaunchAgents plists, or in another starting state for purge tests."""
+    LaunchAgents plists, or in another starting state for purge tests.
+    Each keg holds the plist the fake Homebrew generates, named for the
+    label it gives the service in this mode."""
     modes = set(mode.split(","))
+    # The world is set up without faults, by the Homebrew the mode names.
+    setup_mode = "legacy-labels" if "legacy-labels" in modes else ""
     for name in ("bin", "evidence", "work/offline-denial", "home/Library/LaunchAgents",
                  "prefix/etc/tensorplate", "prefix/var/log/tensorplate", "prefix/var/run/tensorplate",
                  "prefix/share/tensorplate/platform/rows", "prefix/opt/pytorch/libexec/bin", "bundle"):
@@ -1075,10 +1155,10 @@ def make_world(root, scenario="normal", mode=""):
         "tensorplate-observability primary_source=internal interval=1000ms (earlier run)\n")
     for service in (AGENT, OBSERVABILITY):
         (prefix / "opt" / service).mkdir(parents=True)
-        document = formula_document(str(prefix), service)
+        document = formula_document(str(prefix), service, label(service, mode))
         if "formula-plist-program-key" in modes:
             document["Program"] = document["ProgramArguments"][0]
-        with open(prefix / "opt" / service / f"homebrew.mxcl.{service}.plist", "wb") as handle:
+        with open(prefix / "opt" / service / f"{label(service, mode)}.plist", "wb") as handle:
             plistlib.dump(document, handle)
     # Fake pids start above every OS pid range (macOS 99998, Linux at most
     # 4194304): sandbox_check and ps answer from this table first, so a
@@ -1088,22 +1168,30 @@ def make_world(root, scenario="normal", mode=""):
     if scenario == "empty":
         return
     for service in (OBSERVABILITY, AGENT):
-        fake(root, "brew", "services", "start", service)
+        fake(root, "brew", "services", "start", service, mode=setup_mode)
     if scenario == "normal":
         return
     profile = m.write_profile(str(root / "work/offline-denial/network-denied.sb"),
                               m.render_profile(18080, 18081))
-    sandboxed = {"agent-sandboxed": (AGENT,), "both-sandboxed": (AGENT, OBSERVABILITY)}[scenario]
+    sandboxed = {"agent-sandboxed": (AGENT,), "both-sandboxed": (AGENT, OBSERVABILITY),
+                 "stale-legacy-sandboxed": (AGENT, OBSERVABILITY)}[scenario]
     for service in sandboxed:
-        fake(root, "brew", "services", "stop", "--keep", service)
-        document = formula_document(str(prefix), service)
-        derived = root / "work/offline-denial" / f"homebrew.mxcl.{service}.plist"
+        fake(root, "brew", "services", "stop", "--keep", service, mode=setup_mode)
+        # A run under an older Homebrew left its sandboxed jobs under that
+        # Homebrew's labels, which the keg no longer names.
+        job_label = label(service, "legacy-labels" if scenario == "stale-legacy-sandboxed" else setup_mode)
+        document = formula_document(str(prefix), service, job_label)
+        derived = root / "work/offline-denial" / f"{job_label}.plist"
         with open(derived, "wb") as handle:
-            plistlib.dump(m.derive_plist(document, f"homebrew.mxcl.{service}",
-                                         document["ProgramArguments"][0], profile), handle)
-        fake(root, "brew", "services", "run", service, f"--file={derived}")
+            plistlib.dump(m.derive_plist(document, job_label, document["ProgramArguments"][0], profile),
+                          handle)
+        fake(root, "brew", "services", "run", service, f"--file={derived}", mode=setup_mode)
     if scenario == "agent-sandboxed":
-        fake(root, "brew", "services", "stop", "--keep", OBSERVABILITY)
+        fake(root, "brew", "services", "stop", "--keep", OBSERVABILITY, mode=setup_mode)
+    if "keg-absent" in modes:
+        # Uninstalled since: cleanup cannot read a label from the keg.
+        for service in (AGENT, OBSERVABILITY):
+            shutil.rmtree(prefix / "opt" / service)
 
 
 CASE = threading.local()
@@ -1134,12 +1222,13 @@ def run_world(script, mode="", scenario="normal", extra_env=None, signals=None, 
         os.killpg(process.pid, signal.SIGKILL)
         stdout, stderr = process.communicate()
         raise AssertionError(f"stage run timed out: {mode}\n{stderr[-2000:]}")
-    return World(root, process.returncode, stdout, stderr)
+    return World(root, process.returncode, stdout, stderr, mode)
 
 
 class World:
-    def __init__(self, root, returncode, stdout, stderr):
+    def __init__(self, root, returncode, stdout, stderr, mode=""):
         self.root, self.returncode, self.stdout, self.stderr = root, returncode, stdout, stderr
+        self.mode = mode
         self.state = json.loads((root / "state.json").read_text())
         rows = root / "evidence/stages.tsv"
         self.rows = rows.read_text() if rows.exists() else ""
@@ -1154,10 +1243,17 @@ class World:
         return (f"rc={self.returncode}\n--- stage log\n{self.log[-3000:]}\n--- stderr\n"
                 f"{self.stderr[-3000:]}\n--- rows\n{self.rows}")
 
+    def label(self, service):
+        return label(service, self.mode)
+
     def assert_normal_supervision(self):
+        # The normal jobs, under the label this Homebrew gives them and
+        # under no other.
+        assert sorted(self.state["labels"]) == sorted(self.label(service) for service in (AGENT, OBSERVABILITY)), \
+            (self.state["labels"], self.context())
         for service in (AGENT, OBSERVABILITY):
-            job = self.state["labels"].get(f"homebrew.mxcl.{service}")
-            launch_agent = str(self.root / "home/Library/LaunchAgents" / f"homebrew.mxcl.{service}.plist")
+            job = self.state["labels"].get(self.label(service))
+            launch_agent = str(self.root / "home/Library/LaunchAgents" / f"{self.label(service)}.plist")
             assert job and job["file"] == launch_agent and job["arguments"][0] != "/usr/bin/sandbox-exec", \
                 (service, job, self.context())
         leftovers = [proc for proc in self.state["procs"].values() if proc["sandboxed"]]
@@ -1209,6 +1305,13 @@ def check_clean_run(world):
         assert raw in world.log, raw
     runs = [call for call in world.calls if call["tool"] == "brew" and call["args"][:2] == ["services", "run"]]
     assert [call["args"][2] for call in runs] == [OBSERVABILITY, AGENT], runs
+    # Each sandboxed job ran from a plist derived under the label its keg
+    # carries, and launchd held it under that label.
+    assert [call["args"][3] for call in runs] == [
+        f"--file={world.root}/work/offline-denial/{world.label(service)}.plist"
+        for service in (OBSERVABILITY, AGENT)], runs
+    for service in (AGENT, OBSERVABILITY):
+        assert f"gui/501/{world.label(service)} = {{\n" in world.log, (service, world.context())
 
 
 FAILURE_MODES = {
@@ -1286,7 +1389,7 @@ def check_failure(mode, world, message, restorable):
         world.assert_normal_supervision()
     if mode == "never-first-pid":
         # Thirty bounded startup reads plus cleanup's one inspection.
-        assert world.state["startup_print_reads"][f"homebrew.mxcl.{AGENT}"] == 31, world.context()
+        assert world.state["startup_print_reads"][world.label(AGENT)] == 31, world.context()
     if mode == "start-fails":
         assert "error: normal launchd supervision is not restored; run: brew services start " \
                "tensorplate-observability && brew services start tensorplate-agent" in world.stderr, world.context()
@@ -1316,15 +1419,49 @@ UNSANDBOXED_CALLS = {
 }
 
 
+def hardcoded(name, form):
+    """The harness with one label function replaced by one hardcoded
+    label form, as the harness named every job before it resolved them."""
+    return mutated(function(SOURCE, name), f"{name}() {{\n  printf '{form}.%s\\n' \"$1\"\n}}\n")
+
+
 def stage_cases():
     cases = {"clean run": lambda: check_clean_run(run_world(stage_script()))}
+    # The same stage where an older Homebrew installed and loaded the
+    # services under the legacy label.
+    cases["clean run with legacy labels"] = lambda: check_clean_run(
+        run_world(stage_script(), mode="legacy-labels"))
+    cases["failure run-copies-plist with legacy labels"] = lambda: check_failure(
+        "run-copies-plist", run_world(stage_script(), mode="legacy-labels,run-copies-plist"),
+        "tensorplate-agent is not running as the sandboxed launchd job", True)
+
+    def hardcoded_label():
+        source = hardcoded("service_label", "homebrew.mxcl")
+        check_failure("hardcoded label", run_world(stage_script(source)),
+                      "tensorplate-agent is not loaded before the offline stage", True)
+        # The control: the same copy passes where that label is the right one.
+        check_clean_run(run_world(stage_script(source), mode="legacy-labels"))
+    cases["guard: a hardcoded homebrew.mxcl label fails under Homebrew 7 labels only"] = hardcoded_label
+
+    def unresolvable_label():
+        world = run_world(stage_script(body='rm "$TP_ROOT/prefix/opt/tensorplate-observability/"*.plist\n'
+                                            "run_stage offline-runtime verify_offline_runtime\n"))
+        check_failure("unresolvable label", world,
+                      "cannot resolve the tensorplate-observability launchd label from its keg", True)
+        assert "error: the tensorplate-observability keg holds no launchd plist named " \
+               "sh.brew.tensorplate-observability.plist or homebrew.mxcl.tensorplate-observability.plist" \
+               in world.log, world.context()
+        # Nothing was stopped on the way.
+        assert not [call for call in world.calls if call["tool"] == "brew"
+                    and call["args"][:2] == ["services", "stop"]], world.context()
+    cases["failure precondition no keg plist of a known label"] = unresolvable_label
     for services in ((AGENT,), (OBSERVABILITY,), (AGENT, OBSERVABILITY)):
         def delayed(services=services):
             modes = ",".join(f"delayed-first-pid-{service.rsplit('-', 1)[-1]}" for service in services)
             world = run_world(stage_script(), mode=modes)
             check_clean_run(world)
             for service in services:
-                assert world.state["startup_print_reads"][f"homebrew.mxcl.{service}"] >= 3
+                assert world.state["startup_print_reads"][world.label(service)] >= 3
         cases[f"clean run with delayed first PID for {' and '.join(services)}"] = delayed
     for fault in ("run-rewrites-arguments", "run-copies-plist", "run-sets-program"):
         def wrong_pending(fault=fault):
@@ -1333,7 +1470,7 @@ def stage_cases():
             check_failure(mode, world, "tensorplate-agent is not running as the sandboxed launchd job", True)
             # One stage read, then cleanup's read before bootout: a bad
             # definition must not become acceptable on a later poll.
-            assert world.state["startup_print_reads"][f"homebrew.mxcl.{AGENT}"] == 2, world.context()
+            assert world.state["startup_print_reads"][world.label(AGENT)] == 2, world.context()
             assert not [call for call in world.calls if call["tool"] == "tensorplate"
                         and call["args"][0] == "status"], world.context()
         cases[f"pending first PID refuses {fault} immediately"] = wrong_pending
@@ -1416,55 +1553,89 @@ def stage_cases():
 # --- purge from partial states ----------------------------------------
 
 
+def check_purge(world, scenario, stopped, mode, expected_status, services_booted_out, normal):
+    job_mode = "legacy-labels" if scenario == "stale-legacy-sandboxed" else mode
+    bootouts = [label(service, job_mode) for service in services_booted_out]
+    assert world.returncode == 0, world.context()
+    expected_stopped = stopped if expected_status else "0"
+    assert f"restore status {expected_status} stopped {expected_stopped}" in world.stdout, world.context()
+    assert world.bootouts() == bootouts, (world.bootouts(), bootouts)
+    if normal:
+        world.assert_normal_supervision()
+    elif scenario == "empty" or "keg-absent" in mode:
+        assert not world.state["labels"], world.state
+    starts = [call for call in world.calls
+              if call["tool"] == "brew" and call["args"][:2] == ["services", "start"]]
+    if mode in ("bootout-fails", "bootout-fails-observability"):
+        assert not starts, "normal jobs were started while a sandboxed job stayed loaded"
+        assert re.search(r"remove it with: launchctl bootout gui/\d+/" + re.escape(label(OBSERVABILITY)),
+                         world.stderr), world.context()
+    if mode == "print-unparsable":
+        assert not starts, "normal jobs were started while launchd could not be read"
+        assert re.search(r"error: cannot tell whether gui/\d+/" + re.escape(label(AGENT)) + r" runs under "
+                         r"sandbox-exec", world.stderr), world.context()
+    if mode == "print-error":
+        assert not starts, "normal jobs were started while launchd could not be read"
+        assert re.search(r"error: launchctl print gui/\d+/" + re.escape(label(AGENT)) + r" failed "
+                         r"with status 5", world.stderr), world.context()
+
+
 def purge_cases():
     cases = {}
+    both = [AGENT, OBSERVABILITY]
     direct = ('offline_services_stopped="${TP_STOPPED}"\nstatus=0\n'
               'restore_offline_supervision || status=$?\n'
               'printf "restore status %s stopped %s\\n" "$status" "$offline_services_stopped"\n')
     for scenario, stopped, mode, expected_status, bootouts, normal in (
         ("empty", "0", "", 0, [], False),
         ("empty", "1", "", 0, [], True),
-        ("agent-sandboxed", "1", "", 0, ["homebrew.mxcl.tensorplate-agent"], True),
-        ("both-sandboxed", "1", "", 0, ["homebrew.mxcl.tensorplate-agent",
-                                        "homebrew.mxcl.tensorplate-observability"], True),
-        ("both-sandboxed", "1", "bootout-fails", 1, ["homebrew.mxcl.tensorplate-agent",
-                                                     "homebrew.mxcl.tensorplate-observability"], False),
+        ("agent-sandboxed", "1", "", 0, [AGENT], True),
+        ("both-sandboxed", "1", "", 0, both, True),
+        ("both-sandboxed", "1", "bootout-fails", 1, both, False),
         ("both-sandboxed", "1", "print-error", 1, [], False),
         # launchctl print in a shape the parser does not know.
         ("both-sandboxed", "1", "print-unparsable", 1, [], False),
         # The agent's job goes, observability's stays.
-        ("both-sandboxed", "1", "bootout-fails-observability", 1, ["homebrew.mxcl.tensorplate-agent",
-                                                                   "homebrew.mxcl.tensorplate-observability"], False),
+        ("both-sandboxed", "1", "bootout-fails-observability", 1, both, False),
         ("normal", "0", "", 0, [], True),
         ("normal", "1", "", 0, [], True),
+        # Jobs an older Homebrew loaded, under the labels it gave them.
+        ("both-sandboxed", "1", "legacy-labels", 0, both, True),
+        # Cleanup after the kegs were removed: there is no label to read.
+        ("both-sandboxed", "0", "keg-absent", 0, both, False),
+        ("both-sandboxed", "0", "keg-absent,legacy-labels", 0, both, False),
+        # The keg names this Homebrew's label, but the sandboxed jobs were
+        # left under an older Homebrew's.
+        ("stale-legacy-sandboxed", "1", "", 0, both, True),
     ):
         def case(scenario=scenario, stopped=stopped, mode=mode, expected_status=expected_status,
                  bootouts=bootouts, normal=normal):
             script = stage_script(body=direct)
             world = run_world(script, mode=mode, scenario=scenario, extra_env={"TP_STOPPED": stopped})
-            assert world.returncode == 0, world.context()
-            expected_stopped = stopped if expected_status else "0"
-            assert f"restore status {expected_status} stopped {expected_stopped}" in world.stdout, world.context()
-            assert world.bootouts() == bootouts, (world.bootouts(), bootouts)
-            if normal:
-                world.assert_normal_supervision()
-            elif scenario == "empty":
-                assert not world.state["labels"], world.state
-            starts = [call for call in world.calls
-                      if call["tool"] == "brew" and call["args"][:2] == ["services", "start"]]
-            if mode in ("bootout-fails", "bootout-fails-observability"):
-                assert not starts, "normal jobs were started while a sandboxed job stayed loaded"
-                assert re.search(r"remove it with: launchctl bootout gui/\d+/homebrew.mxcl.tensorplate-observability",
-                                 world.stderr), world.context()
-            if mode == "print-unparsable":
-                assert not starts, "normal jobs were started while launchd could not be read"
-                assert re.search(r"error: cannot tell whether gui/\d+/homebrew.mxcl.tensorplate-agent runs under "
-                                 r"sandbox-exec", world.stderr), world.context()
-            if mode == "print-error":
-                assert not starts, "normal jobs were started while launchd could not be read"
-                assert re.search(r"error: launchctl print gui/\d+/homebrew.mxcl.tensorplate-agent failed "
-                                 r"with status 5", world.stderr), world.context()
+            check_purge(world, scenario, stopped, mode, expected_status, bootouts, normal)
         cases[f"purge {scenario} stopped={stopped} {mode or 'no fault'}"] = case
+
+    # Cleanup that knows only one label form leaves a sandboxed job loaded
+    # under the other; the same copy passes where its one form is right.
+    for form, scenario, control_mode in (
+        ("homebrew.mxcl", "both-sandboxed", "legacy-labels"),
+        ("sh.brew", "stale-legacy-sandboxed", ""),
+    ):
+        def one_form(form=form, scenario=scenario, control_mode=control_mode):
+            source = hardcoded("service_label_forms", form)
+            world = run_world(stage_script(source, body=direct), scenario=scenario, extra_env={"TP_STOPPED": "1"})
+            try:
+                check_purge(world, scenario, "1", "", 0, both, True)
+            except AssertionError:
+                assert [job for job in world.state["labels"].values()
+                        if job["arguments"][0] == "/usr/bin/sandbox-exec"], ("failed for another reason",
+                                                                            world.context())
+            else:
+                raise AssertionError(f"purge passed {scenario} knowing only {form}")
+            world = run_world(stage_script(source, body=direct), mode=control_mode, scenario="both-sandboxed",
+                              extra_env={"TP_STOPPED": "1"})
+            check_purge(world, "both-sandboxed", "1", control_mode, 0, both, True)
+        cases[f"guard: purge that knows only {form} leaves a {scenario} job loaded"] = one_form
 
     def via_cleanup():
         body = 'offline_services_stopped=1\nexit 0\n'
@@ -1682,7 +1853,8 @@ def test_static():
     ), trap_block(SOURCE)
     # cleanup reaches these; die would skip the rest of the restore.
     for name in ("purge_offline_job", "restore_offline_supervision", "wait_for_service",
-                 "offline_helper", "restore_agent_config", "tell_operator"):
+                 "offline_helper", "service_label_forms", "restore_agent_config", "tell_operator",
+                 "formula_trust_changes", "restore_formula_trust"):
         assert not re.search(r"\bdie\b", function(SOURCE, name)), f"{name} calls die"
     cleanup = function(SOURCE, "cleanup")
     assert cleanup.startswith("cleanup() {\n  status=$?\n"), "cleanup must read the exit status first"
@@ -1691,7 +1863,8 @@ def test_static():
     assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("set +e") < cleanup.index(redirect) < \
         cleanup.index("printf '%s\\tfail"), "cleanup must leave the stage log before it reports"
     assert cleanup.index("trap '' INT TERM HUP") < cleanup.index("restore_agent_config") < \
-        cleanup.index("restore_offline_supervision") < cleanup.index("restore_baseline"), cleanup
+        cleanup.index("restore_offline_supervision") < cleanup.index("restore_baseline") < \
+        cleanup.index("restore_formula_trust"), cleanup
     rearm = cleanup.index("trap 'exit 130' INT\n  trap 'exit 143' TERM\n  trap 'exit 129' HUP\n")
     assert cleanup.index("restore_offline_supervision") < rearm < cleanup.index("restore_baseline"), \
         "cleanup ignores signals outside the critical restore"
@@ -1860,7 +2033,7 @@ def main():
     # A handler, unlike SIG_IGN, is reset to the default across exec.
     if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
         signal.signal(signal.SIGINT, signal.default_int_handler)
-    for test in (test_profile, test_derive_plist, test_launchd_job, test_sandbox_readback,
+    for test in (test_profile, test_derive_plist, test_launchd_job, test_service_label, test_sandbox_readback,
                  test_processes_and_listeners, test_classify, test_cli_checks, test_admission,
                  test_static, test_preflight_stage_body):
         if not only or test.__name__ in only:

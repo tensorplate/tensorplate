@@ -10,6 +10,12 @@ lives in $TP_ROOT/state.json; every call is appended to calls.jsonl.
 
 TP_MODE is a comma-separated list of faults to inject. Nothing here
 touches the real host: no launchd job, socket or Homebrew state.
+
+Labels follow Homebrew 7: the keg plist, the LaunchAgents copy and the
+job are named sh.brew.<formula>. TP_MODE legacy-labels models an older
+Homebrew, which named them homebrew.mxcl.<formula>. As launchd does, a
+job takes its label from the Label inside the plist it is loaded from,
+whatever the fake Homebrew would have named it.
 """
 
 import json
@@ -33,15 +39,22 @@ ADMISSION = ("platform admission: row={row} reason=none posture=technical_prereq
 
 
 def label_of(service):
-    return f"homebrew.mxcl.{service}"
+    """The label this fake Homebrew generates for a service."""
+    return f"{'homebrew.mxcl' if 'legacy-labels' in MODES else 'sh.brew'}.{service}"
 
 
 def formula_plist(service):
-    return os.path.join(PREFIX, "opt", service, f"homebrew.mxcl.{service}.plist")
+    return os.path.join(PREFIX, "opt", service, f"{label_of(service)}.plist")
 
 
 def launch_agent(service):
-    return os.path.join(LAUNCH_AGENTS, f"homebrew.mxcl.{service}.plist")
+    return os.path.join(LAUNCH_AGENTS, f"{label_of(service)}.plist")
+
+
+def loaded(state, service):
+    """Every loaded label of a service's jobs, as Homebrew 7 finds them
+    under either form."""
+    return sorted(label for label, job in state["labels"].items() if job["service"] == service)
 
 
 def load_state():
@@ -76,19 +89,21 @@ def denial_active(state):
     return any(job["arguments"][0] == SANDBOX_EXEC for job in state["labels"].values())
 
 
-def new_process(state, args, sandboxed, parent, label):
+def new_process(state, args, sandboxed, parent, label, service=None):
     pid = state["next_pid"]
     state["next_pid"] += 1
     state["procs"][str(pid)] = {
         "args": " ".join(args), "comm": args[0], "sandboxed": sandboxed,
-        "parent": parent, "label": label, "lstart": f"Mon Jan  5 00:00:{pid % 60:02d} 2026",
+        "parent": parent, "label": label, "service": service,
+        "lstart": f"Mon Jan  5 00:00:{pid % 60:02d} 2026",
     }
     return pid
 
 
 def load_job(state, service, path):
     with open(path, "rb") as handle:
-        arguments = plistlib.load(handle)["ProgramArguments"]
+        document = plistlib.load(handle)
+    arguments, label = document["ProgramArguments"], document["Label"]
     sandboxed = arguments[0] == SANDBOX_EXEC
     executed = arguments[3:] if sandboxed else arguments
     if sandboxed and "run-rewrites-arguments" in MODES:
@@ -96,22 +111,21 @@ def load_job(state, service, path):
     # A Program key would make launchd run the service binary directly,
     # outside the sandbox, whatever the arguments say.
     program = executed[0] if sandboxed and "run-sets-program" in MODES else arguments[0]
-    label = label_of(service)
     pid = new_process(state, executed,
                       sandboxed and program == SANDBOX_EXEC and
                       not ("unsandboxed-observability" in MODES and service == OBSERVABILITY),
-                      1, label)
+                      1, label, service)
     runs = 2 if sandboxed and service == AGENT and "crashed-at-start" in MODES else 1
     state["labels"][label] = {"file": path, "arguments": arguments, "program": program, "pid": pid,
-                              "runs": runs}
+                              "runs": runs, "service": service}
     if service == AGENT:
         serving = new_process(
             state, [os.path.join(PREFIX, "opt/tensorplate-serving/libexec/tensorplate-serving"),
-                    "--config", "worker.json"], sandboxed, pid, label)
+                    "--config", "worker.json"], sandboxed, pid, label, service)
         if "no-sidecar" not in MODES:
             new_process(state, [os.path.join(PREFIX, "opt/pytorch/libexec/bin/python"), "-m",
                                 "tensorplate_pytorch_backend", "--socket", "sidecar.sock"],
-                        sandboxed and "unsandboxed-sidecar" not in MODES, serving, label)
+                        sandboxed and "unsandboxed-sidecar" not in MODES, serving, label, service)
         evidence = "unvalidated (admitted on technical prerequisites)" \
             if "admission-unvalidated" in MODES else "validated"
         append_log("agent.error.log", ADMISSION.format(row="macos26-m1pro-16gb", evidence=evidence))
@@ -147,11 +161,12 @@ def fake_brew(args):
         return 9
     action, rest = args[1], args[2:]
     if action == "list":
-        for label in sorted(state["labels"]):
-            print(f"{label[len('homebrew.mxcl.'):]} started")
+        for job in sorted(state["labels"].values(), key=lambda item: item["service"]):
+            print(f"{job['service']} started")
         return 0
     service = next(item for item in rest if not item.startswith("-"))
-    label = label_of(service)
+    labels = loaded(state, service)
+    label = labels[0] if labels else label_of(service)
     job = state["labels"].get(label)
     if action == "info":
         print(json.dumps([{
@@ -162,9 +177,14 @@ def fake_brew(args):
     if action == "stop":
         if "stop-leaves-loaded" not in MODES and not (
                 "stop-leaves-observability-loaded" in MODES and service == OBSERVABILITY):
-            unload_job(state, label)
+            # Homebrew 7 boots out the service under every label it is loaded as.
+            for label in labels:
+                unload_job(state, label)
             if "--keep" not in rest:
-                os.unlink(launch_agent(service))
+                for form in ("sh.brew", "homebrew.mxcl"):
+                    stale = os.path.join(LAUNCH_AGENTS, f"{form}.{service}.plist")
+                    if os.path.exists(stale):
+                        os.unlink(stale)
             if "stop-leaves-process" in MODES and service == AGENT:
                 # A worker launchd no longer tracks, holding no listener.
                 new_process(state, [os.path.join(PREFIX, "opt/tensorplate-serving/libexec/tensorplate-serving"),
@@ -176,7 +196,7 @@ def fake_brew(args):
         if "stop-reloads" in MODES and job is None:
             load_job(state, service, launch_agent(service))
             save_state(state)
-            job = state["labels"][label]
+            job = state["labels"][label_of(service)]
         if job is not None:
             print(f"Service `{service}` already running, use `brew services restart {service}` to restart.")
             return 0
@@ -204,6 +224,7 @@ def fake_brew(args):
             state.get("offline_done") else launch_agent(service)
         load_job(state, service, loaded_from)
         save_state(state)
+        label = loaded(state, service)[0]
         # Like Homebrew, report success after the job is loaded, and exit
         # non-zero when that report cannot be written.
         try:
@@ -249,7 +270,8 @@ def fake_launchctl(args):
             delayed = f"delayed-first-pid-{label.rsplit('-', 1)[-1]}" in MODES and reads[label] <= 2
             pending = delayed or "never-first-pid" in MODES
             crashed = "first-run-exited" in MODES and reads[label] == 1
-            malformed = "pending-malformed-pid" in MODES and label == label_of(AGENT) and reads[label] == 1
+            malformed = "pending-malformed-pid" in MODES and state["labels"][label]["service"] == AGENT \
+                and reads[label] == 1
             if pending or crashed or malformed:
                 job = state["labels"][label]
                 document = document.replace("\tstate = running\n", "\tstate = waiting\n")
@@ -263,7 +285,8 @@ def fake_launchctl(args):
             document = document[:document.rindex("}")]
         print(document, end="")
         return 0
-    if "bootout-fails" in MODES or ("bootout-fails-observability" in MODES and label == label_of(OBSERVABILITY)):
+    if "bootout-fails" in MODES or ("bootout-fails-observability" in MODES and
+                                    state["labels"][label]["service"] == OBSERVABILITY):
         return 5
     if "slow-bootout" in MODES:
         marker("bootout-started")
@@ -290,7 +313,8 @@ def fake_lsof(args):
             print("f9\nPTCP\nn127.0.0.1:18080->127.0.0.1:50000\nTST=ESTABLISHED")
             if "wildcard-listener" in MODES:
                 print("f11\nPTCP\nn*:18081\nTST=LISTEN")
-        if proc and proc["label"] == label_of(OBSERVABILITY) and "observability-wildcard-listener" in MODES:
+        if proc and proc["label"] and proc["service"] == OBSERVABILITY and \
+                "observability-wildcard-listener" in MODES:
             print(f"p{pid}\nf5\nPUDP\nn*:18081")
     return 1
 
@@ -354,7 +378,8 @@ def fake_sandbox_exec(args):
 
 
 def status_document(state):
-    agent_job = state["labels"].get(label_of(AGENT))
+    agent_labels = loaded(state, AGENT)
+    agent_job = state["labels"][agent_labels[0]] if agent_labels else None
     sandboxed = bool(agent_job) and agent_job["arguments"][0] == SANDBOX_EXEC
     ready = not ("never-ready" in MODES and sandboxed)
     return {
@@ -376,7 +401,7 @@ def fake_tensorplate(args):
         print("fake tensorplate: unsandboxed CLI call while the services run under the offline profile",
               file=sys.stderr)
         return 97
-    if label_of(AGENT) not in state["labels"]:
+    if not loaded(state, AGENT):
         print("error: agent unreachable", file=sys.stderr)
         return 3
     command = args[0]
@@ -420,14 +445,15 @@ def fake_tensorplate(args):
         # An echoed response with a failing exit.
         return 1 if "infer-exit-nonzero" in MODES else 0
     if command == "doctor":
+        agent_label = loaded(state, AGENT)[0]
         if "crash-during-doctor" in MODES:
-            job = state["labels"][label_of(AGENT)]
+            job = state["labels"][agent_label]
             job["runs"] += 1
-            job["pid"] = new_process(state, ["agent-restarted"], True, 1, label_of(AGENT))
+            job["pid"] = new_process(state, ["agent-restarted"], True, 1, agent_label, AGENT)
             save_state(state)
         if "rebootstrap-during-doctor" in MODES:
-            path = state["labels"][label_of(AGENT)]["file"]
-            unload_job(state, label_of(AGENT))
+            path = state["labels"][agent_label]["file"]
+            unload_job(state, agent_label)
             load_job(state, AGENT, path)
             save_state(state)
         if "profile-changed" in MODES:

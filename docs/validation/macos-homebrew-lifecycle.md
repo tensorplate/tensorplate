@@ -64,6 +64,16 @@ brew trust --formula \
   tensorplate/tap/tensorplate-serving
 ```
 
+The tap-trust stage requires all six formulae to be trusted, each by name
+or through the whole tap. The run changes those per-formula entries:
+`brew uninstall` removes a tap formula's entry unless the whole tap is
+trusted, and `brew install` and `brew upgrade` add one for the tap formula
+they name. The harness records the six formulae's per-formula entries
+before the tap-trust stage and puts back exactly that set before its clean
+install, before its upgrade and on exit, re-trusting entries an uninstall
+removed and untrusting any the run added. `cleanup.log` lists each change
+made on exit. Trust granted here therefore survives the run.
+
 On each device, take the unsandboxed network control once before the
 stage needs it:
 
@@ -270,10 +280,8 @@ that lifecycle evidence.
 The normal run stops both services, removes the candidate graph, restores the
 historical CLI-only formula, and verifies the original version. Homebrew
 preserves `etc` and `var` content across formula removal, and the run asserts
-that a state marker survives the rollback. Homebrew removes trust entries for
-formulae that disappear during uninstall; the harness re-adds only those
-missing component entries for the later upgrade stage and removes exactly
-the entries it added before exit.
+that a state marker survives the rollback. The formula trust the run
+started with is restored as described under the trust preflight above.
 
 On a failure, or on INT, TERM or HUP, cleanup records the interrupted
 stage as failed. It writes its own output and that of the commands it
@@ -289,23 +297,33 @@ service behind. The Homebrew restore that follows can still be
 interrupted. If the agent config cannot be copied back, cleanup keeps
 the harness's work directory, prints the path of the good copy and fails
 the run. The sandboxed jobs are never copied into
-`~/Library/LaunchAgents`, so a logout or reboot also drops them. If
-cleanup reports that a sandboxed job is still loaded, remove it and start
-the normal jobs:
+`~/Library/LaunchAgents`, so a logout or reboot also drops them.
+
+A job's launchd label depends on the Homebrew that loaded it: current
+Homebrew uses `sh.brew.<formula>`, and a job loaded by an older Homebrew
+keeps `homebrew.mxcl.<formula>`. The harness reads the label from the
+plist Homebrew generated in the formula's keg, and cleanup checks both
+forms. To see which TensorPlate jobs are loaded, and under which label:
 
 ```bash
-launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
-launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
+launchctl list | grep -E '(sh\.brew|homebrew\.mxcl)\.tensorplate-'
+```
+
+If cleanup reports that a sandboxed job is still loaded, its message
+names the job. Boot it out, using the label from that message or from the
+listing, and start the normal jobs:
+
+```bash
+launchctl bootout "gui/$(id -u)/<label>"
 brew services start tensorplate-observability
 brew services start tensorplate-agent
 ```
 
 If the harness is killed with SIGKILL, or is otherwise interrupted
-outside its cleanup path:
+outside its cleanup path, boot out every TensorPlate job the listing
+shows, under whichever label it has, then:
 
 ```bash
-launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-agent"
-launchctl bootout "gui/$(id -u)/homebrew.mxcl.tensorplate-observability"
 brew services stop tensorplate-agent
 brew services stop tensorplate-observability
 brew uninstall tensorplate tensorplate-agent \

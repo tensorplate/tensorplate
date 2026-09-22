@@ -1,6 +1,6 @@
-gui/501/homebrew.mxcl.tensorplate-agent = {
+gui/501/sh.brew.tensorplate-agent = {
 	active count = 1
-	path = /private/var/folders/xx/T/tmp.synthetic/offline-denial/homebrew.mxcl.tensorplate-agent.plist
+	path = /private/var/folders/xx/T/tmp.synthetic/offline-denial/sh.brew.tensorplate-agent.plist
 	type = LaunchAgent
 	state = running
 
@@ -21,7 +21,7 @@ gui/501/homebrew.mxcl.tensorplate-agent = {
 	environment = {
 		PATH => /opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin
 		TP_PLATFORM_REGISTRY_DIR => /opt/homebrew/share/tensorplate/platform
-		XPC_SERVICE_NAME => homebrew.mxcl.tensorplate-agent
+		XPC_SERVICE_NAME => sh.brew.tensorplate-agent
 	}
 
 	domain = gui/501 [100000]
@@ -39,7 +39,7 @@ gui/501/homebrew.mxcl.tensorplate-agent = {
 		type = resource
 		state = active
 		pid = 1
-		name = homebrew.mxcl.tensorplate-agent
+		name = sh.brew.tensorplate-agent
 	}
 
 	endpoints = {

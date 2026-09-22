@@ -19,8 +19,8 @@ Inputs for `test/packaging/verify_macos_offline_runtime.sh`, which tests
 | `probe-udp-any-host-serving-ports.json` | Recorded | The same for UDP. |
 | `probe-tcp-listen-any-address.json` | Recorded | Plus `(allow network-inbound (local tcp "*:*"))`: only the TCP listens on unlisted ports succeed. |
 | `probe-udp-bind-any-address.json` | Recorded | Plus `(allow network-inbound (local udp "*:*"))`: only the UDP bind on an unlisted port succeeds. |
-| `launchctl-print-sandboxed-agent.txt` | Synthetic | The shape of `launchctl print` for the agent job run from the derived plist, with nested blocks that carry their own `pid` and `state` lines. |
-| `fake_host.py` | Test support | The fake Homebrew, launchd, process table and CLI the stage tests run against. |
+| `launchctl-print-sandboxed-agent.txt` | Synthetic | The shape of `launchctl print` for the agent job run from the derived plist, under Homebrew 7's `sh.brew.tensorplate-agent` label, with nested blocks that carry their own `pid` and `state` lines. |
+| `fake_host.py` | Test support | The fake Homebrew, launchd, process table and CLI the stage tests run against. It names jobs, keg plists and LaunchAgents plists as Homebrew 7 does, `sh.brew.<formula>`, or with the `legacy-labels` mode as an older Homebrew did, `homebrew.mxcl.<formula>`. |
 
 The probe recordings were made on an Apple M1 Pro development Mac under
 macOS 26.6 with the helper's own `control` and `probe` code, set up the
