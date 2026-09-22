@@ -97,6 +97,20 @@ means rewriting the branch. CI runs the same scanner with
 `--patterns-only` on every pull request, but it cannot know the
 run's own names — only the local `--literals` scan can.
 
+A name the evidence also carries as ordinary text, such as a host or
+account name that is also a distribution, package, path or product name,
+cannot be listed bare: it would match every line that legitimately holds
+the word. List the forms that identify the machine or its operator
+instead — the shell prompt, `<name>.local`, `hostname:` and `/etc/hosts`
+lines, journal prefixes, `/home/<name>`, `uid=N(<name>)`,
+`sudo: <name> :`, `for <name> from` — and before `git add` read every
+remaining occurrence of the bare name in the bundle, the row file and the
+commit message, and confirm each is that ordinary text. No scan can tell
+them apart, so that reading is the check for such a name. A physical
+device's machine id and serial numbers belong in its literal file too:
+the patterns recognize a machine id or a serial only after its label, so
+a bare value passes both modes.
+
 - Remove authorization headers carrying Basic or Bearer credentials,
   including ones recorded as JSON fields. Encoding a value or field name
   in JSON does not sanitize it; the scan checks decoded fields and values

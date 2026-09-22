@@ -1,0 +1,45 @@
+==> validating the deploy-smoke bundle before deploying it
+{"backend_hint": "tensorrt", "bundle": "tensorplate-trt-identity-vision", "engine_digest": "sha256:b34c4398fe0974e71f742d4ac9e9444a69a34720988f0eab5c755454d7be28c5"}
+==> staging the bundle at /opt/tensorplate-validation/trt-identity for the agent to read
+==> deploying
+==> issuing the identity inference request
+{
+  "command": "infer",
+  "correlation_id": "cli-7453d4f7-d8a4-4f77-bcc6-847f58629cc0",
+  "payload": {
+    "endpoint": "http://127.0.0.1:18080/infer",
+    "endpoint_source": "agent-discovered",
+    "result": {
+      "correlation_id": "cli-7453d4f7-d8a4-4f77-bcc6-847f58629cc0",
+      "outputs": [
+        {
+          "name": "features",
+          "payload_b64": "AAAAAAAAgD8AAABAAABAQAAAgEAAAKBAAADAQAAA4EAAAABBAAAQQQAAIEEAADBBAABAQQAAUEEAAGBBAABwQQAAgEEAAIhBAACQQQAAmEEAAKBBAACoQQAAsEEAALhBAADAQQAAyEEAANBBAADYQQAA4EEAAOhBAADwQQAA+EEAAABCAAAEQgAACEIAAAxCAAAQQgAAFEIAABhCAAAcQgAAIEIAACRCAAAoQgAALEIAADBCAAA0QgAAOEIAADxC",
+          "tensor": {
+            "byte_offset": 0,
+            "byte_size": 192,
+            "dtype": "float32",
+            "layout": "row_major",
+            "shape": [
+              1,
+              3,
+              4,
+              4
+            ]
+          }
+        }
+      ],
+      "request_id": "validation-trt-identity-1",
+      "schema_version": "0.1",
+      "status": "success",
+      "timing": {
+        "execution_latency_ns": 1406437
+      }
+    }
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
+trt_identity_response: ok
+PASS: TensorRT bundle admitted, worker ready, identity inference round-tripped

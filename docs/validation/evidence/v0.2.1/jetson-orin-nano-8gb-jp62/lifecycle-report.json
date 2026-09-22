@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "row_id": "jetson-orin-nano-8gb-jp62",
+  "subject": {
+    "tested_version": "0.2.1",
+    "artifact_digest": "7da14a8b999b20ab99f0c827b87b3f2b43233dd3c69bb20faaff95dd63592628"
+  },
+  "harness": "jetson-lifecycle",
+  "started_at": "2026-09-22T07:51:51Z",
+  "finished_at": "2026-09-22T07:55:20Z",
+  "outcome": "pass",
+  "stages": [
+    {"stage":"install","status":"pass","started_at":"2026-09-22T07:51:51Z","finished_at":"2026-09-22T07:52:43Z","log":"install.log"},
+    {"stage":"deploy-smoke","status":"pass","started_at":"2026-09-22T07:52:43Z","finished_at":"2026-09-22T07:52:44Z","log":"deploy-smoke.log"},
+    {"stage":"status-logs","status":"pass","started_at":"2026-09-22T07:52:44Z","finished_at":"2026-09-22T07:52:44Z","log":"status-logs.log"},
+    {"stage":"restart","status":"pass","started_at":"2026-09-22T07:52:44Z","finished_at":"2026-09-22T07:52:45Z","log":"restart.log"},
+    {"stage":"crash-loop","status":"pass","started_at":"2026-09-22T07:52:45Z","finished_at":"2026-09-22T07:53:15Z","log":"crash-loop.log"},
+    {"stage":"offline","status":"pass","started_at":"2026-09-22T07:53:15Z","finished_at":"2026-09-22T07:53:29Z","log":"offline.log"},
+    {"stage":"upgrade","status":"pass","started_at":"2026-09-22T07:53:29Z","finished_at":"2026-09-22T07:54:42Z","log":"upgrade.log"},
+    {"stage":"rollback","status":"pass","started_at":"2026-09-22T07:54:42Z","finished_at":"2026-09-22T07:55:20Z","log":"rollback.log"}
+  ]
+}

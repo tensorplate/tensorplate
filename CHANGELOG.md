@@ -6,6 +6,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- The Jetson Orin Nano row, `jetson-orin-nano-8gb-jp62`, carries recorded
+  lifecycle evidence for 0.2.1, and its provenance is now `recorded`.
+  `docs/validation/evidence/v0.2.1/jetson-orin-nano-8gb-jp62/` holds a
+  passing `tools/validation/jetson-lifecycle.sh` run against the
+  `v0.2.1-rc.2` artifacts on the in-lab device (JetPack 6.2, L4T r36.5.0):
+  all eight stages, including the upgrade from `v0.1.5` and the rollback
+  to it. Its `subject.artifact_digest` is the SHA-256 of that candidate's
+  signed `SHA256SUMS`. The logs are the recorded ones with two identifiers
+  replaced by their synthetic forms: the operator's home directory and the
+  storage id in the device's apt source URL. It is the first Production
+  row `check-evidence-bundles.sh` reports complete; the other three still
+  block a final tag. The evidence README's scan step now covers a host or
+  account name that is also ordinary evidence text, which a literal file
+  cannot list bare: its identifying forms are listed instead, and every
+  remaining occurrence is read before `git add`. Stage logs under
+  `docs/validation/evidence/` are no longer caught by the repository's
+  `*.log` ignore rule, which left a plain `git add` committing a bundle
+  without the logs its report cites.
+
 ### Fixed
 
 - The macOS Homebrew lifecycle harness names each service's launchd job the

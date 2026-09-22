@@ -1,0 +1,43 @@
+==> breaking the agent config so every start fails
+==> restoring the agent config
+==> issuing the identity inference request
+{
+  "command": "infer",
+  "correlation_id": "cli-6ff9c0e7-6f12-4b77-882a-323ee15a760e",
+  "payload": {
+    "endpoint": "http://127.0.0.1:18080/infer",
+    "endpoint_source": "agent-discovered",
+    "result": {
+      "correlation_id": "cli-6ff9c0e7-6f12-4b77-882a-323ee15a760e",
+      "outputs": [
+        {
+          "name": "features",
+          "payload_b64": "AAAAAAAAgD8AAABAAABAQAAAgEAAAKBAAADAQAAA4EAAAABBAAAQQQAAIEEAADBBAABAQQAAUEEAAGBBAABwQQAAgEEAAIhBAACQQQAAmEEAAKBBAACoQQAAsEEAALhBAADAQQAAyEEAANBBAADYQQAA4EEAAOhBAADwQQAA+EEAAABCAAAEQgAACEIAAAxCAAAQQgAAFEIAABhCAAAcQgAAIEIAACRCAAAoQgAALEIAADBCAAA0QgAAOEIAADxC",
+          "tensor": {
+            "byte_offset": 0,
+            "byte_size": 192,
+            "dtype": "float32",
+            "layout": "row_major",
+            "shape": [
+              1,
+              3,
+              4,
+              4
+            ]
+          }
+        }
+      ],
+      "request_id": "validation-trt-identity-1",
+      "schema_version": "0.1",
+      "status": "success",
+      "timing": {
+        "execution_latency_ns": 993753
+      }
+    }
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
+trt_identity_response: ok
+PASS: agent retried and given up on under a broken config; recovered deployment answered once restored
