@@ -107,6 +107,69 @@ DENIAL_NAMES = (
     "unix_mdnsresponder",
 )
 
+# What a control has to have reported for the sandbox's EPERM on the same
+# operation to mean anything: the operation completed.
+#
+# The sandbox decides on the destination address before the route lookup
+# (see IP_BOUND_IF above), so a control the kernel carried as far as a
+# routing answer got past the point where the sandbox would have refused
+# it. That leaves three shapes a control can legitimately take, one set
+# per operation:
+#
+#   DELIVERED -- the send, bind or listen returned, which `attempt`
+#                records as `ok`, and the child's send completed when the
+#                child ran, exited 0 and printed such an outcome;
+#   ANSWERED  -- a connect the far end answered, which on a loopback port
+#                with nothing listening on it is ECONNREFUSED;
+#   ROUTED    -- a destination pinned to lo0, which lo0 cannot route.
+#                These are the outcomes the recorded probes carry
+#                (test/packaging/fixtures/macos-offline/): IPv4 answers
+#                ENETUNREACH and IPv6 EHOSTUNREACH.
+#
+# Every other outcome is a control that never completed its operation --
+# a socket that could not be pinned, a timeout, a child that exited
+# non-zero or never ran, an exception's name, a name missing from the
+# document, a string this module does not produce -- and a control that
+# never ran the operation cannot show that the sandbox is what stopped
+# the probe. So the controls are checked against these sets rather than
+# against a list of the failures someone thought of.
+DELIVERED = ("ok",)
+ANSWERED = DELIVERED + ("ECONNREFUSED",)
+ROUTED = DELIVERED + ("ENETUNREACH", "EHOSTUNREACH")
+
+# A refusal by policy: what the sandboxed probe must report and the
+# unsandboxed control must not. EPERM from something else on this host --
+# an application firewall, an enclosing sandbox -- would make the
+# sandbox's own EPERM prove nothing.
+REFUSED = ("EPERM",)
+
+# Denied operations addressed off this host, whose sockets are pinned to
+# lo0: their control is answered by the route lookup rather than by
+# anything on the far end. Listed one name at a time rather than matched
+# against the destinations in the names: a substring rule reads a new
+# operation to a destination already listed -- the likely addition --
+# straight into this, the loosest set, which is the excuse-inheritance
+# `completed_outcomes` says cannot happen. Spelling the names out means
+# an operation added later is placed here by hand or not at all.
+OFF_HOST_NAMES = (
+    "tcp_public_v4",
+    "tcp_metadata_link_local_v4",
+    "udp_test_net_v4",
+    "udp_documentation_v6",
+    "tcp_test_net_v4_serving_port",
+    "udp_test_net_v4_serving_port",
+    "tcp_documentation_v6_serving_port",
+    "udp_documentation_v6_serving_port",
+    "tcp_test_net_v4_candidate_port",
+    "udp_test_net_v4_candidate_port",
+    "tcp_documentation_v6_candidate_port",
+    "udp_documentation_v6_candidate_port",
+    "udp_test_net_v4_from_child",
+)
+# The one denied connect to an address lo0 does route: a loopback port
+# with nothing listening on it, which the far end refuses.
+CONNECT_NAMES = ("tcp_loopback_unlisted_port",)
+
 DOCTOR_FINDINGS_OK = (
     "platform_row",
     "platform_profile",
@@ -485,12 +548,48 @@ def read_sandbox_state(pid):
     }
 
 
+# The four properties the readback must have on this host for any
+# sandbox_check result to mean anything, and what an unproved one says.
+# `evidence()` publishes the flags `discrimination_controls` returns
+# verbatim, so each is derived there from the observation that proves it
+# and none is written down as proved: a control that stops being taken
+# reads False and fails the stage, rather than publishing a measured-
+# looking `true` for a check nobody ran.
+READBACK_CONTROLS = {
+    "unsandboxed_process_reads_unsandboxed":
+        "this unsandboxed process reads as sandboxed",
+    "sandboxed_process_reads_network_denied":
+        "a process started under the profile does not read as sandboxed with the network denied",
+    "exited_process_rejected":
+        "a reaped exited process passed the identity check",
+    "unreaped_exited_process_rejected":
+        "an unreaped exited process passed the identity check",
+}
+
+
+def readback_rejects(pid):
+    """Whether the readback refuses to report on `pid` because the process
+    it named is gone. The answer is the observation itself, so a control
+    derived from it cannot report a check that was not made."""
+    try:
+        read_sandbox_state(pid)
+    except ProcessGone:
+        return True
+    return False
+
+
 def discrimination_controls(profile_path, attempts=100):
     """Prove, on this host and now, that the readback tells sandboxed from
     unsandboxed processes and rejects a process that has exited, whether
-    or not its parent has reaped it yet."""
-    if any(read_sandbox_state(os.getpid()).values()):
-        raise CheckFailed("readback control: this unsandboxed process reads as sandboxed")
+    or not its parent has reaped it yet.
+
+    Each flag starts False and is assigned the result of the check that
+    proves it, so deleting or weakening a check leaves its flag False
+    rather than leaving a `True` behind; anything still unproved at the
+    end fails here, before the stage can carry it into the evidence."""
+    proved = dict.fromkeys(READBACK_CONTROLS, False)
+    proved["unsandboxed_process_reads_unsandboxed"] = \
+        not any(read_sandbox_state(os.getpid()).values())
     exited = subprocess.Popen(["/usr/bin/true"])
     try:
         # Not reaped until the finally clause: ps lists it as a zombie.
@@ -501,12 +600,7 @@ def discrimination_controls(profile_path, attempts=100):
             time.sleep(0.05)
         else:
             raise CheckFailed("readback control: the exited process never showed as a zombie")
-        try:
-            read_sandbox_state(exited.pid)
-        except ProcessGone:
-            pass
-        else:
-            raise CheckFailed("readback control: an unreaped exited process passed the identity check")
+        proved["unreaped_exited_process_rejected"] = readback_rejects(exited.pid)
     finally:
         exited.wait()
     sleeper = subprocess.Popen(["sandbox-exec", "-f", profile_path, "/bin/sleep", "60"],
@@ -521,26 +615,20 @@ def discrimination_controls(profile_path, attempts=100):
             time.sleep(0.05)
         else:
             raise CheckFailed("readback control: the sandboxed sleeper never started")
-        if not all(read_sandbox_state(sleeper.pid).values()):
-            raise CheckFailed(
-                "readback control: a process started under the profile does not read as "
-                "sandboxed with the network denied"
-            )
+        proved["sandboxed_process_reads_network_denied"] = \
+            all(read_sandbox_state(sleeper.pid).values())
     finally:
         sleeper.kill()
         sleeper.wait()
-    try:
-        read_sandbox_state(sleeper.pid)
-    except ProcessGone:
-        pass
-    else:
-        raise CheckFailed("readback control: a reaped exited process passed the identity check")
-    return {
-        "unsandboxed_process_reads_unsandboxed": True,
-        "sandboxed_process_reads_network_denied": True,
-        "exited_process_rejected": True,
-        "unreaped_exited_process_rejected": True,
-    }
+    proved["exited_process_rejected"] = readback_rejects(sleeper.pid)
+    # Named in brackets so a test or an operator can tell
+    # `exited_process_rejected` from `unreaped_exited_process_rejected`,
+    # one of which reads as a substring of the other.
+    unproved = [name for name in READBACK_CONTROLS if not proved[name]]
+    if unproved:
+        raise CheckFailed("readback control not proved: " + "; ".join(
+            f"[{name}] {READBACK_CONTROLS[name]}" for name in unproved))
+    return proved
 
 
 def _read_states(required_pids, optional_pids, expect):
@@ -850,14 +938,63 @@ def run_probe(agent_socket, health_url, ports, listen_port=None):
     }
 
 
-def classify(probe, control, expected_deployment, listen_port_checked=False):
+def completed_outcomes(name):
+    """The control outcomes that count as `name` having completed.
+
+    A name this module does not place gets the strictest set, so a denial
+    added later has to be placed deliberately rather than inherit an
+    excuse from a neighbour."""
+    if name in OFF_HOST_NAMES:
+        return ROUTED
+    if name in CONNECT_NAMES:
+        return ANSWERED
+    return DELIVERED
+
+
+def control_failures(control):
+    """Why `control` cannot be the baseline a probe is classified
+    against, whatever that probe turns out to say.
+
+    Checked when the control is taken, before the profile is applied to
+    anything, so a host that cannot provide a baseline fails the stage
+    before it is changed -- and again by `classify`, which never takes a
+    control on trust.
+
+    Two things are asked of every denied operation. It must not have been
+    refused by something else on this host (REFUSED): the stage's claim
+    is that this profile is what refuses. And it must have completed
+    (`completed_outcomes`): the sandbox's EPERM is attributable only to
+    an operation that went through, unsandboxed, a moment earlier. A
+    control that never completed says the operation could not be made
+    here, not that the sandbox stopped it. mDNSResponder is asked for
+    both at once: the stage's claim is that this socket was reachable and
+    the profile's deny is what made it unreachable, so its control must
+    answer outright."""
+    outcomes = control if isinstance(control, dict) else {}
     failures = []
     for name in DENIAL_NAMES:
+        outcome = outcomes.get(name)
         if name == "unix_mdnsresponder":
-            if control.get(name) != "ok":
+            if outcome != "ok":
                 failures.append("control_mdnsresponder_reachable")
-        elif control.get(name) in (None, "EPERM", "pin_failed"):
+        elif outcome in REFUSED:
             failures.append(f"control_not_refused:{name}")
+        elif outcome not in completed_outcomes(name):
+            # Missing, a socket that could not be pinned, a timeout, a
+            # child that failed or never ran, or anything else that is
+            # not an operation that happened.
+            failures.append(f"control_completed:{name}")
+    return failures
+
+
+def classify(probe, control, expected_deployment, listen_port_checked=False):
+    """The probe proves the profile denies the network only against a
+    control that completed the same operations without it. Both halves
+    are required: a control that something else on the host refused, or
+    that never completed its operation, makes the probe's EPERM
+    unattributable (`control_failures`), and a probe that was not refused
+    means the profile did nothing."""
+    failures = control_failures(control)
     denied = probe.get("denied") if isinstance(probe.get("denied"), dict) else {}
     for name in DENIAL_NAMES:
         if denied.get(name) != "EPERM":
@@ -1359,7 +1496,13 @@ def _run(args):
                "serving_listener_in_tree": "serving_listener_in_tree" not in failures},
               args.out, failures, "listener checks")
     elif name == "control":
-        _emit(run_control(args.ports), args.out)
+        # A control is checked as it is taken and filed only if it can be
+        # the baseline its probe is classified against, so a host that
+        # cannot provide one fails the stage before anything is denied. A
+        # probe is filed whatever it says, and classified against its
+        # control later.
+        document = run_control(args.ports)
+        _emit(document, args.out, control_failures(document), "unsandboxed control checks")
     elif name == "probe":
         health_url = args.health_url
         if args.status:

@@ -19,6 +19,7 @@ Run by verify_macos_offline_runtime.sh. Four parts:
 
 import concurrent.futures
 import copy
+import importlib.util
 import errno
 import json
 import os
@@ -52,13 +53,27 @@ def passed(name):
     print(f"macOS offline runtime: {name}: pass")
 
 
-def refused(operation, fragment):
+def refused(operation, *fragments):
+    assert fragments, "a refusal has to be pinned to something"
     try:
         operation()
     except m.CheckFailed as error:
-        assert fragment in str(error), (fragment, str(error))
+        for fragment in fragments:
+            assert fragment in str(error), (fragment, str(error))
         return
-    raise AssertionError(f"not refused: expected {fragment!r}")
+    raise AssertionError(f"not refused: expected {fragments!r}")
+
+
+# The readback controls, written out here rather than read from the
+# module: the flags go into the evidence, so the set of properties the
+# stage claims to have proved is pinned independently of the module that
+# produces them. A control dropped from the module's table would stop
+# being checked and stop being published, which is exactly the shape of
+# failure these names exist to catch.
+READBACK_CONTROL_NAMES = ("unsandboxed_process_reads_unsandboxed",
+                          "sandboxed_process_reads_network_denied",
+                          "exited_process_rejected",
+                          "unreaped_exited_process_rejected")
 
 
 # --- profile -----------------------------------------------------------
@@ -372,27 +387,53 @@ def test_sandbox_readback():
         try:
             controls = with_patches({"sandbox_check": recorded},
                                     lambda: m.discrimination_controls(profile))
-            assert all(controls.values()), controls
+            # Every control is proved, and each flag is the check's own
+            # result: the evidence publishes this dict verbatim, so a
+            # control that stopped being taken must not be able to reach
+            # it as `true`. Compared against the names written out above,
+            # so dropping one from the module's table fails here.
+            assert controls == dict.fromkeys(READBACK_CONTROL_NAMES, True), controls
+            assert tuple(m.READBACK_CONTROLS) == READBACK_CONTROL_NAMES, tuple(m.READBACK_CONTROLS)
             # A primitive that reads every process as sandboxed.
             with_patches({"sandbox_check": lambda pid, op: 1},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[unsandboxed_process_reads_unsandboxed]",
                                          "unsandboxed process reads as sandboxed"))
             # One that cannot see the sandbox at all.
             with_patches({"sandbox_check": lambda pid, op: 0 if pid == os.getpid() else 0},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[sandboxed_process_reads_network_denied]",
                                          "does not read as sandboxed"))
             # An identity check that notices a reaped process but not a
             # zombie.
             with_patches({"sandbox_check": recorded,
                           "process_identity": lambda pid: (m.process_status(pid) or (None, None))[1]},
                          lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[unreaped_exited_process_rejected]",
                                          "unreaped exited process passed the identity check"))
-            # An identity check that never notices an exit.
             real_identity = m.process_identity
+
+            # An identity check that notices a zombie but not a process
+            # that has been reaped: ps lists the zombie and not the
+            # reaped pid, so this one isolates the reaped control, which
+            # the case below fails together with the unreaped one.
+            def reaped_unnoticed(pid):
+                identity = real_identity(pid)
+                if identity is not None:
+                    return identity
+                return None if m.process_status(pid) is not None else "Mon /bin/sleep"
+
+            with_patches({"sandbox_check": recorded, "process_identity": reaped_unnoticed},
+                         lambda: refused(lambda: m.discrimination_controls(profile),
+                                         "[exited_process_rejected]",
+                                         "a reaped exited process passed the identity check"))
+            # An identity check that never notices an exit at all fails
+            # both of the exit controls.
             with_patches({"sandbox_check": recorded,
                           "process_identity": lambda pid: real_identity(pid) or "Mon /bin/sleep"},
                          lambda: refused(lambda: m.discrimination_controls(profile),
-                                         "exited process passed the identity check"))
+                                         "[exited_process_rejected]",
+                                         "[unreaped_exited_process_rejected]"))
 
             live = subprocess.Popen(["sleep", "30"])
             try:
@@ -543,6 +584,57 @@ RECORDED = {
 }
 
 
+# What each operation's control may report and still count as that
+# operation having completed. Written out here rather than taken from the
+# module, so a placement that changes there has to be made again here.
+# The values are the ones the recorded probes carry: a send, bind or
+# listen that returned; the loopback connect the far end refused; and,
+# for the destinations pinned to lo0, the route lookup's answer, which
+# IPv4 reports as ENETUNREACH and IPv6 as EHOSTUNREACH.
+COMPLETED = dict(
+    {name: ("ok", "ENETUNREACH", "EHOSTUNREACH") for name in (
+        "tcp_public_v4", "tcp_metadata_link_local_v4", "udp_test_net_v4",
+        "udp_documentation_v6", "udp_test_net_v4_from_child",
+        *(f"{protocol}_{host}_{role}_port"
+          for protocol in ("tcp", "udp") for host in ("test_net_v4", "documentation_v6")
+          for role in ("serving", "candidate")))},
+    tcp_loopback_unlisted_port=("ok", "ECONNREFUSED"),
+    udp_fe80_1_unlisted_port=("ok",),
+    udp_loopback_unlisted_port=("ok",),
+    tcp_listen_wildcard_unlisted_port=("ok",),
+    tcp_listen_loopback_unlisted_port=("ok",),
+    udp_bind_wildcard_unlisted_port=("ok",),
+    unix_mdnsresponder=("ok",),
+)
+# Outcomes a control can carry that are not its operation completing.
+# Each arises: a socket the pin refused, a connect that waited out its
+# timeout, a child that exited non-zero or never started, an exception
+# `attempt` recorded by name, and -- for the operations that do not bear
+# them -- a routing answer, a refusal by the far end, and the name
+# missing from the document altogether.
+INCOMPLETE = ("pin_failed", "timeout", "child_exit_1", "child_not_run_OSError",
+              "PermissionError", "ENETUNREACH", "EHOSTUNREACH", "ECONNREFUSED", None)
+
+
+def helper_with_extra_denial(name):
+    """A copy of the helper carrying one more denied operation, imported
+    under its own module name. It is how the placement rule is asked what
+    it does with a denial added later, which is the only way to tell a
+    rule that places names by hand from one that derives a placement from
+    the text of the name."""
+    source = (REPO / "tools/validation/macos_offline_runtime.py").read_text(encoding="utf-8")
+    anchor = '    "unix_mdnsresponder",\n)\n'
+    assert source.count(anchor) == 1, "DENIAL_NAMES no longer ends where this expects"
+    patched = source.replace(anchor, f'    "unix_mdnsresponder",\n    "{name}",\n)\n', 1)
+    with tempfile.TemporaryDirectory(prefix="tp-offline-denial-") as directory:
+        path = pathlib.Path(directory) / "macos_offline_runtime_extra_denial.py"
+        path.write_text(patched, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
 def test_classify():
     recorded = {}
     for variant, expected in RECORDED.items():
@@ -561,17 +653,65 @@ def test_classify():
     assert m.classify(in_stage, final["control"], m.PREFLIGHT_DEPLOYMENT) == []
     # The probe and the control run the same operations, one per name.
     assert [name for name, _ in m.denial_operations((18080, 18081))] == list(m.DENIAL_NAMES)
-    # Every operation's control counts: EPERM, or a socket that could not
-    # be pinned, outside the sandbox would make the sandbox's EPERM moot.
+    # Each name's completion set is the one COMPLETED gives it, so a name
+    # that moves between sets -- or a new denial that falls to the
+    # strictest set because nothing placed it -- has to be moved here
+    # too, and the recorded control bears the placement out.
+    assert sorted(COMPLETED) == sorted(m.DENIAL_NAMES), sorted(COMPLETED)
     for name in m.DENIAL_NAMES:
-        for outcome in ("EPERM", "pin_failed"):
-            control = dict(final["control"], **{name: outcome})
+        assert set(m.completed_outcomes(name)) == set(COMPLETED[name]), name
+        assert final["control"][name] in COMPLETED[name], (name, final["control"][name])
+    placed = set(m.OFF_HOST_NAMES) | set(m.CONNECT_NAMES)
+    assert placed <= set(m.DENIAL_NAMES), sorted(placed - set(m.DENIAL_NAMES))
+    # Placement is by name and by hand. Asking `completed_outcomes` about
+    # a name that is not a denial answers DELIVERED whatever the rule is,
+    # so the question has to be put to a helper that really carries the
+    # extra denial: a new operation to a destination already in the
+    # loosest set -- the likely addition -- must still land in the
+    # strictest set, not inherit its neighbour's excuse, and no existing
+    # operation may move because a name was added next to it.
+    added = "udp_test_net_v4_brand_new_port"
+    extra = helper_with_extra_denial(added)
+    assert extra.DENIAL_NAMES == m.DENIAL_NAMES + (added,), extra.DENIAL_NAMES
+    assert extra.completed_outcomes(added) == extra.DELIVERED, extra.completed_outcomes(added)
+    for name in m.DENIAL_NAMES:
+        assert extra.completed_outcomes(name) == m.completed_outcomes(name), name
+    # Every operation's control counts, and counts only if the operation
+    # completed. EPERM outside the sandbox says something else on the
+    # host refuses, which would make the sandbox's EPERM moot; anything
+    # that is not the operation going through -- a socket that could not
+    # be pinned, a connect that waited out its timeout, a child that
+    # failed or never started, an exception recorded by name, a routing
+    # answer for a destination lo0 does route, a refusal from a
+    # destination where nothing can refuse, a name missing from the
+    # document -- is a control that never ran the operation the probe's
+    # EPERM is supposed to be attributable to.
+    for name in m.DENIAL_NAMES:
+        control = dict(final["control"], **{name: "EPERM"})
+        expected = ["control_mdnsresponder_reachable"] if name == "unix_mdnsresponder" else \
+            [f"control_not_refused:{name}"]
+        assert m.classify(in_stage, control, m.PREFLIGHT_DEPLOYMENT) == expected, (name, "EPERM")
+        for outcome in INCOMPLETE:
+            if outcome in COMPLETED[name]:
+                continue
+            control = dict(final["control"])
+            if outcome is None:
+                del control[name]
+            else:
+                control[name] = outcome
             expected = ["control_mdnsresponder_reachable"] if name == "unix_mdnsresponder" else \
-                [f"control_not_refused:{name}"]
+                [f"control_completed:{name}"]
             assert m.classify(in_stage, control, m.PREFLIGHT_DEPLOYMENT) == expected, (name, outcome)
+    # The control the recorded probes carry is a baseline; each of those
+    # documents is classified above with no control failure named.
+    assert m.control_failures(final["control"]) == []
+    assert m.control_failures({}) == [
+        "control_mdnsresponder_reachable" if name == "unix_mdnsresponder"
+        else f"control_completed:{name}" for name in m.DENIAL_NAMES]
+    assert m.control_failures(None) == m.control_failures({})
     for mutate, expected in (
         (lambda probe, control: control.pop("udp_fe80_1_unlisted_port"),
-         ["control_not_refused:udp_fe80_1_unlisted_port"]),
+         ["control_completed:udp_fe80_1_unlisted_port"]),
         (lambda probe, control: control.update(unix_mdnsresponder="EPERM"),
          ["control_mdnsresponder_reachable"]),
         (lambda probe, control: probe["denied"].pop("udp_test_net_v4_from_child"),
@@ -857,12 +997,20 @@ def unix_connect(path):
     return None
 
 
+def child_udp_send():
+    if sandboxed():
+        return "ENETUNREACH" if "probe-leaks" in MODES else "EPERM"
+    # A control child that never sent anything: it exited non-zero
+    # without reaching its send.
+    return "child_exit_1" if "control-child-never-ran" in MODES else "ENETUNREACH"
+
+
 m.sandbox_check = sandbox_check
 m.udp_send = udp_send
 m.tcp_connect = tcp_connect
 m.bind_unlisted_port = bind_unlisted_port
 m.unix_connect = unix_connect
-m.child_udp_send = lambda: "EPERM" if sandboxed() and "probe-leaks" not in MODES else "ENETUNREACH"
+m.child_udp_send = child_udp_send
 m.http_get_json = lambda url: {
     "state": "starting" if "health-not-ready" in MODES else "ready",
     "active_model_id": state()["active"],
@@ -1033,6 +1181,21 @@ def check_clean_run(world):
     assert evidence["process_tree"] == {"processes": 3, "serving_workers": 1, "backend_sidecars": 1,
                                         "all_sandboxed_network_denied": True}, evidence["process_tree"]
     assert set(evidence["probe"]["denied"].values()) == {"EPERM"}, evidence["probe"]
+    # The probe's EPERM is only worth what its control is worth, and the
+    # artifact carries both. The control runs unsandboxed against this
+    # host, so the errno is the host's and not fixed here; what is fixed
+    # is that every denied operation is present and completed.
+    control = evidence["control"]
+    assert sorted(control) == sorted(m.DENIAL_NAMES), sorted(control)
+    for name in m.DENIAL_NAMES:
+        assert control[name] in COMPLETED[name], (name, control[name])
+    # The readback flags as the artifact publishes them, not as
+    # `discrimination_controls` returned them: a flag proved and then
+    # dropped on the way into offline-runtime.json is a claim nobody
+    # reading the evidence gets. Pinned against the names written out
+    # above, so a smaller set or a false flag is red here.
+    assert evidence["readback_controls"] == dict.fromkeys(READBACK_CONTROL_NAMES, True), \
+        evidence["readback_controls"]
     assert evidence["admission"] == {"row": "macos26-m1pro-16gb", "reason": "none", "evidence": "validated"}
     assert evidence["listeners"]["loopback_only"] and evidence["restore"]["no_sandboxed_process_remains"]
     denied = [call for call in world.calls if call["tool"] == "sandbox-exec"]
@@ -1085,8 +1248,9 @@ FAILURE_MODES = {
     "launchagents-drift": ("the tensorplate-agent LaunchAgents plist differs from the formula plist", True),
     "agent-not-ready-after": ("the agent did not answer outside the sandbox after the offline stage", True),
     "agent-config-wildcard-host": ("cannot render the offline profile from the installed agent config", True),
-    "control-refused": ("the offline profile did not refuse the network as required", True),
-    "control-refused-tcp": ("the offline profile did not refuse the network as required", True),
+    "control-refused": ("the unsandboxed network control failed", True),
+    "control-refused-tcp": ("the unsandboxed network control failed", True),
+    "control-child-never-ran": ("the unsandboxed network control failed", True),
     "formula-plist-program-key": ("cannot derive the sandboxed tensorplate-observability launchd plist", True),
     "run-rewrites-arguments": ("tensorplate-agent is not running as the sandboxed launchd job", True),
     "run-copies-plist": ("tensorplate-agent is not running as the sandboxed launchd job", True),
@@ -1638,9 +1802,18 @@ def test_darwin():
         print("macOS offline runtime: real sandbox-exec preflight: skipped (not macOS or no sandbox-exec)")
         return
     with tempfile.TemporaryDirectory(prefix="tp-offline-darwin-") as directory:
-        result, failures = m.preflight(os.path.join(directory, "final"))
-        assert failures == [], (failures, result)
-        assert all(result["readback_controls"].values())
+        # Through the subcommand the harness runs, read back from the file
+        # it writes: offline-profile.json is the evidence, so the readback
+        # flags are pinned there rather than on the function's return. A
+        # failed check exits non-zero and writes nothing.
+        out = pathlib.Path(directory) / "offline-profile.json"
+        run = subprocess.run([sys.executable, str(REPO / "tools/validation/macos_offline_runtime.py"),
+                              "preflight", "--work-dir", os.path.join(directory, "final"),
+                              "--out", str(out)], capture_output=True, text=True, timeout=600)
+        assert run.returncode == 0, (run.returncode, run.stderr[-2000:], run.stdout[-2000:])
+        published = json.loads(out.read_text())
+        assert published["readback_controls"] == dict.fromkeys(READBACK_CONTROL_NAMES, True), \
+            published["readback_controls"]
         for variant, render in MUTANT_PROFILES.items():
             result, failures = m.preflight(os.path.join(directory, variant), render=render)
             assert failures == RECORDED[variant], (variant, failures, result["probe"])
