@@ -412,11 +412,18 @@ nest state inside, or replace, a directory it did not create.
 
 A run with a baseline ends with the baseline installed.
 
-The first reported L4 hardware run passed install, deploy-smoke,
-status-logs and restart using the earlier assertions. The stronger
-journal and post-restart health and inference checks, and the
-crash-loop stage, have not yet been run on hardware; T4
-validation of the current harness remains pending.
+The current harness has now been run end to end on hardware for both
+rows, from the `v0.2.1-rc.3` tag commit: an L4 on `g2-standard-8` and a
+single non-partitioned H100 80GB on `a3-highgpu-1g`. All eight canonical
+stages passed on each, including the crash-loop stage and the stronger
+journal and post-restart health and inference checks that the first
+reported L4 run predates. The bundles are filed under
+[`docs/validation/evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/`](evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/)
+and
+[`docs/validation/evidence/v0.2.1/ubuntu2404-x86-h100-80g-a3hg1/`](evidence/v0.2.1/ubuntu2404-x86-h100-80g-a3hg1/),
+so T4 validation of the current harness is no longer pending for these
+rows. Both runs carried a baseline, so both exercised upgrade and
+rollback rather than reporting them skipped.
 
 Three things it records rather than asserts, because asserting them
 would claim more than the run establishes:
@@ -651,10 +658,17 @@ build toolchain, which a release install would not. Say so when filing
 the evidence.
 
 A Google Deep Learning VM image on Ubuntu 24.04 with the 580 driver
-exists (`pytorch-2-9-cu129-ubuntu-2404-nvidia-580`) and would skip the
-driver install and reboot. It has not been used for this harness yet:
-check that its PyTorch is importable by `/usr/bin/python3`, which the
-backend descriptor uses, before relying on it.
+skips the driver install and reboot. The H100 run recorded for 0.2.1
+used one — `common-cu129-ubuntu-2404-nvidia-580` — and preflight passed
+on it, so on that image PyTorch is importable by `/usr/bin/python3`,
+which the backend descriptor uses. Its apt source list carries the
+image's own cuDNN, package-registry and container repositories, which
+the stock Ubuntu image the L4 run used does not; that is a difference in
+what the log records, not in what the harness asserts. Other images in
+the family, such as `pytorch-2-9-cu129-ubuntu-2404-nvidia-580`, have not
+been used here: preflight checks the interpreter either way and refuses
+a host where the import fails, so let it, rather than assuming the
+family behaves alike.
 
 ## What a failed run is worth
 

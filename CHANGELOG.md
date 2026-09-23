@@ -6,6 +6,69 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- The two Ubuntu cloud rows, `ubuntu2404-x86-l4-g2s8` and
+  `ubuntu2404-x86-h100-80g-a3hg1`, carry recorded lifecycle evidence for
+  0.2.1, and their provenance is now `recorded`.
+  `docs/validation/evidence/v0.2.1/` holds a passing
+  `tools/validation/ubuntu-l4-cloud-lifecycle.sh` run for each, from the
+  `v0.2.1-rc.3` tag commit on disposable GCP instances: an NVIDIA L4 on
+  `g2-standard-8` running the stock Ubuntu 24.04 image, and a single
+  non-partitioned H100 80GB HBM3 on `a3-highgpu-1g` running the Deep
+  Learning VM image, taken as Spot because no on-demand capacity for that
+  shape existed. Both report `outcome: pass` with all eight canonical
+  stages present, passing, and carrying no skip reason. Both name
+  `subject.tested_version` `0.2.1` and the same
+  `subject.artifact_digest`, the SHA-256 of `v0.2.1-rc.3`'s signed
+  `SHA256SUMS`, which each `artifact-digest.txt` names by that released
+  file name. Both ran with `--baseline-assets-dir` against the published
+  `v0.2.1-rc.2` package set, so upgrade and rollback are real: rc.2 to
+  rc.3 and back to rc.2. That is the only amd64 upgrade path this release
+  can record, because 0.1.x published no amd64 runtime packages. With
+  these two, `check-evidence-bundles.sh --version 0.2.1` reports all four
+  Production rows complete, and the release notes' validation status says
+  so.
+
+  Each bundle is the report, the eight stage logs it cites, and the
+  digest. Fourteen of the twenty files are byte-identical to the
+  recording. Two identifier classes are replaced with the evidence
+  README's synthetic forms, both in `install.log`, `upgrade.log` and
+  `rollback.log`: the operator's home directory, in each run, and a
+  cloud project in a resource path, in the H100 run only. That project id
+  belongs to a vendor's public package registry that the image's apt
+  sources name, not to this run, but a reader cannot tell those apart. Ubuntu's regional
+  apt mirror host stays as recorded: it names the region an image booted
+  in, never an instance. The scanner read `needrestart`'s systemd template
+  unit names as email addresses; it now exempts a token only where
+  systemd's own command line puts one: on a line that is that command,
+  after one of the verbs the scanner knows, in argument position. Stock
+  output needs no editing, while an address elsewhere on that line,
+  prose that merely mentions the tool, and a lowercase word standing in
+  for a verb all remain findings. The unit type cannot carry the
+  exemption by itself, because `target` is a delegated top-level domain.
+  `evidence_publication_test.sh` covers each of those, and every rule
+  the exemption rests on fails the suite when removed. The raw runs are retained privately and are not in this
+  repository.
+
+  `docs/validation/cloud-row-runbooks.md` said the current harness had
+  not been run on hardware, so the crash-loop stage and the stronger
+  journal and post-restart checks were still pending, and it left the
+  Deep Learning VM image an open question about its interpreter. Both
+  paragraphs now describe what ran, and the evidence README's apt clause
+  now states one rule for the whole source list rather than a scope that
+  excluded three of the sources these logs keep.
+
+  Two test fixtures built a Planned row out of the committed L4 row and
+  inherited its provenance, so both broke when that row became
+  `recorded` — a Planned row must be `spec_authored`. Each now sets
+  provenance explicitly, alongside the evidence and model-class fields it
+  already normalized. The ignored tag-gate test
+  `production_claims_rest_on_recorded_evidence` passes now that every
+  Production row is recorded; its doc comment and its `#[ignore]` reason
+  both said it was expected to fail, and both now say why it stays
+  ignored anyway.
+
 ## [0.2.1] - 2026-09-21
 
 ### Added

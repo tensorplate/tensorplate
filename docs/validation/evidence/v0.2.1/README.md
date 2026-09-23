@@ -68,7 +68,32 @@ still agree.
 
 Loopback, `0.0.0.0`, the metadata server `169.254.169.254` and
 `metadata.google.internal` are not identifiers and stay as recorded, as
-do the product's per-invocation `cli-`, `tx-` and `deploy-` ids.
+do the product's per-invocation `cli-`, `tx-` and `deploy-` ids. So does
+apt's source list as apt printed it, whoever publishes each entry: a
+distribution mirror, including a cloud image's regional Ubuntu mirror
+host, which names the region an image booted in and never the instance;
+a vendor's apt host, package registry or container repository; and an
+image's own on-disk `file:/var/...` repository, which names a library
+version the image carries and no host. That list is the set of
+repositories the install stage resolved its packages against, so it is
+evidence rather than inventory — unlike the warning described below, apt
+fetched every source on it, and these logs name no package outside
+TensorPlate's own, only counts. The one edit inside it is the
+`projects/<id>` shape, which gets `projects/REDACTED/` whoever owns the
+project: the scanner cannot tell a vendor's public registry from the
+operator's, and neither can a reader. A systemd template unit name has an
+address's shape, and `needrestart` prints several, in the form
+
+```
+systemctl restart getty@tty1.service
+```
+
+The scanner exempts such a name only there: on a line that is itself
+that command, after one of the verbs it knows, in argument position.
+Prose that merely mentions `systemctl` exempts nothing, and neither does
+a word that is lowercase but is not a verb. An address elsewhere on the
+command's own line is still a finding, and the unit type alone can never
+carry the exemption -- `target` is a delegated top-level domain.
 Credentials and planning identifiers have no synthetic form: neither
 belongs in evidence, so remove them.
 

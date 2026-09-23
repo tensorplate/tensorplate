@@ -184,11 +184,12 @@ fn planned_rows_carry_no_claims() {
 
 /// The tag gate: a Production claim must rest on a recorded run.
 ///
-/// **Ignored on purpose, and expected to FAIL when run today.** It fails
-/// while any committed Production row is still `spec_authored`, and a row
-/// stays that way until its evidence is recorded, so this cannot be a
-/// PR-blocking check without blocking every PR. It is a release-prep step
-/// instead — see the pre-tag checklist in `docs/release/runbook.md`.
+/// **Ignored on purpose.** It passes today: every committed Production row
+/// is `recorded`. It fails again the moment a Production row is added or
+/// promoted before its evidence exists, which is the normal way a row is
+/// authored, so it cannot be a PR-blocking check without blocking the PR
+/// that writes the row. It is a release-prep step instead — see the
+/// pre-tag checklist in `docs/release/runbook.md`.
 ///
 /// It exists because the guard below is weaker than it reads.
 /// `production_rows_declare_where_evidence_is_filed` asserts a row DECLARES
@@ -202,7 +203,7 @@ fn planned_rows_carry_no_claims() {
 /// sounds — `is_supported_combination` admits Production AND Preview, so a
 /// Preview row still deploys. It changes what is published, not what runs.
 #[test]
-#[ignore = "run at release prep: fails until Production claims rest on recorded evidence"]
+#[ignore = "run at release prep: fails whenever a Production row is authored or promoted before its evidence exists"]
 fn production_claims_rest_on_recorded_evidence() {
     let mut unbacked = Vec::new();
     for (name, row) in committed_rows() {
@@ -511,8 +512,10 @@ fn support_level_invariants_agree_between_schema_and_decoder() {
         .as_object_mut()
         .expect("object")
         .remove("evidence");
-    // A Planned row makes no model-class claim either.
+    // A Planned row makes no model-class claim either, and is
+    // spec-authored whatever the source row's provenance now says.
     valid_planned["model_class_rows"] = serde_json::json!([]);
+    valid_planned["provenance"] = serde_json::json!("spec_authored");
 
     assert_row_verdicts_agree(vec![
         (

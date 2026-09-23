@@ -1,0 +1,8 @@
+==> restarting both services (agent pid 12620, observability pid 12621)
+==> issuing an inference request
+infer: posting to `http://127.0.0.1:18080/infer` (correlation_id=cli-562d8f18-be5f-46d4-9c0c-08bccbdb0392)
+infer: endpoint=http://127.0.0.1:18080/infer status=success request_id=cloud-lifecycle-smoke-1
+  outputs: 1 tensor(s)
+    - echo_probe shape=[1,4]
+
+PASS: services restarted with new pids; recovered deployment answered health and inference

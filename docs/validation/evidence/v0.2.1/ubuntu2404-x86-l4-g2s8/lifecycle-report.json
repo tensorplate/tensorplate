@@ -1,0 +1,22 @@
+{
+  "schema_version": "0.1",
+  "row_id": "ubuntu2404-x86-l4-g2s8",
+  "subject": {
+    "tested_version": "0.2.1",
+    "artifact_digest": "8009fde3150ecc7df96c52f210560ac9aa79b9d64331b839e488c9ca94d3f48d"
+  },
+  "harness": "ubuntu-l4-cloud-lifecycle",
+  "started_at": "2026-09-23T04:02:00Z",
+  "finished_at": "2026-09-23T04:04:20Z",
+  "outcome": "pass",
+  "stages": [
+    {"stage":"install","status":"pass","started_at":"2026-09-23T04:02:00Z","finished_at":"2026-09-23T04:02:23Z","log":"install.log"},
+    {"stage":"deploy-smoke","status":"pass","started_at":"2026-09-23T04:02:23Z","finished_at":"2026-09-23T04:02:23Z","log":"deploy-smoke.log"},
+    {"stage":"status-logs","status":"pass","started_at":"2026-09-23T04:02:23Z","finished_at":"2026-09-23T04:02:24Z","log":"status-logs.log"},
+    {"stage":"restart","status":"pass","started_at":"2026-09-23T04:02:24Z","finished_at":"2026-09-23T04:02:27Z","log":"restart.log"},
+    {"stage":"crash-loop","status":"pass","started_at":"2026-09-23T04:02:27Z","finished_at":"2026-09-23T04:02:58Z","log":"crash-loop.log"},
+    {"stage":"offline","status":"pass","started_at":"2026-09-23T04:02:58Z","finished_at":"2026-09-23T04:03:18Z","log":"offline.log"},
+    {"stage":"upgrade","status":"pass","started_at":"2026-09-23T04:03:18Z","finished_at":"2026-09-23T04:03:58Z","log":"upgrade.log"},
+    {"stage":"rollback","status":"pass","started_at":"2026-09-23T04:03:58Z","finished_at":"2026-09-23T04:04:20Z","log":"rollback.log"}
+  ]
+}

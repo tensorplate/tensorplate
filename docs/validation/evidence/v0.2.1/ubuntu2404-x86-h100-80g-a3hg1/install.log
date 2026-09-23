@@ -1,0 +1,138 @@
+==> clearing any previous TensorPlate install
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  tensorplate-agent* tensorplate-cli* tensorplate-common*
+  tensorplate-observability* tensorplate-serving*
+0 upgraded, 0 newly installed, 5 to remove and 31 not upgraded.
+After this operation, 8559 kB disk space will be freed.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 88478 files and directories currently installed.)
+Removing tensorplate-agent (0.2.1~rc.3-1) ...
+Removing tensorplate-cli (0.2.1~rc.3-1) ...
+Removing tensorplate-serving (0.2.1~rc.3-1) ...
+Removing tensorplate-observability (0.2.1~rc.3-1) ...
+Removing tensorplate-common (0.2.1~rc.3-1) ...
+dpkg: warning: while removing tensorplate-common, directory '/usr/share/tensorplate' not empty so not removed
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 88411 files and directories currently installed.)
+Purging configuration files for tensorplate-observability (0.2.1~rc.3-1) ...
+Purging configuration files for tensorplate-serving (0.2.1~rc.3-1) ...
+Purging configuration files for tensorplate-agent (0.2.1~rc.3-1) ...
+Purging configuration files for tensorplate-cli (0.2.1~rc.3-1) ...
+==> installing the candidate through the shipped installer
+==> TensorPlate installer v0.2.1-rc.3
+==> cosign not found; downloading pinned cosign-linux-amd64 v3.0.2
+==> downloading https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+ 37  149M   37 55.3M    0     0  84.3M      0  0:00:01 --:--:--  0:00:01 84.3M100  149M  100  149M    0     0   132M      0  0:00:01  0:00:01 --:--:--  199M
+cosign-linux-amd64: OK
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying install.sh with SHA256SUMS
+install.sh: OK
+==> OS validation passed: Ubuntu 24.04 on x86_64 detected
+==> hardware validation passed: x86_64 host with an NVIDIA driver, arch=x86_64
+==> cosign not found; downloading pinned cosign-linux-amd64 v3.0.2
+==> downloading https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0  149M    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0 98  149M   98  147M    0     0   124M      0  0:00:01  0:00:01 --:--:--  148M100  149M  100  149M    0     0   124M      0  0:00:01  0:00:01 --:--:--  149M
+cosign-linux-amd64: OK
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying local artifacts with SHA256SUMS
+tensorplate-v0.2.1-rc.3-artifacts.json: OK
+tensorplate-common_0.2.1.rc.3-1_all.deb: OK
+tensorplate-agent_0.2.1.rc.3-1_amd64.deb: OK
+tensorplate-serving_0.2.1.rc.3-1_amd64.deb: OK
+tensorplate-observability_0.2.1.rc.3-1_amd64.deb: OK
+tensorplate-cli_0.2.1.rc.3-1_amd64.deb: OK
+tensorplate-backend-python-pytorch_0.2.1.rc.3-1_all.deb: OK
+==> updating apt package metadata
+Get:1 file:/var/cudnn-local-repo-ubuntu2404-9.13.0  InRelease [1572 B]
+Get:1 file:/var/cudnn-local-repo-ubuntu2404-9.13.0  InRelease [1572 B]
+Hit:2 http://us-central1.gce.archive.ubuntu.com/ubuntu noble InRelease
+Hit:3 http://us-central1.gce.archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:4 http://us-central1.gce.archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:5 http://packages.cloud.google.com/apt apt-transport-artifact-registry-stable InRelease
+Hit:6 https://us-apt.pkg.dev/projects/REDACTED gpudirect-gib-apt InRelease
+Get:7 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease [1477 B]
+Hit:8 http://security.ubuntu.com/ubuntu noble-security InRelease
+Fetched 1477 B in 0s (3335 B/s)
+Reading package lists...
+W: http://packages.cloud.google.com/apt/dists/apt-transport-artifact-registry-stable/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+W: https://us-apt.pkg.dev/projects/REDACTED/dists/gpudirect-gib-apt/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+==> installing TensorPlate runtime packages with apt --reinstall
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  tensorplate-agent tensorplate-backend-python-pytorch tensorplate-cli
+  tensorplate-common tensorplate-observability tensorplate-serving
+0 upgraded, 6 newly installed, 0 to remove and 31 not upgraded.
+Need to get 0 B/2967 kB of archives.
+After this operation, 8655 kB of additional disk space will be used.
+Get:1 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-common_0.2.1.rc.3-1_all.deb tensorplate-common all 0.2.1~rc.3-1 [11.3 kB]
+Get:2 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-agent_0.2.1.rc.3-1_amd64.deb tensorplate-agent amd64 0.2.1~rc.3-1 [712 kB]
+Get:3 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-observability_0.2.1.rc.3-1_amd64.deb tensorplate-observability amd64 0.2.1~rc.3-1 [374 kB]
+Get:4 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-serving_0.2.1.rc.3-1_amd64.deb tensorplate-serving amd64 0.2.1~rc.3-1 [291 kB]
+Get:5 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-backend-python-pytorch_0.2.1.rc.3-1_all.deb tensorplate-backend-python-pytorch all 0.2.1~rc.3-1 [20.2 kB]
+Get:6 /tmp/tensorplate-install-v0.2.1-rc.3.UpIRj5/tensorplate-cli_0.2.1.rc.3-1_amd64.deb tensorplate-cli amd64 0.2.1~rc.3-1 [1559 kB]
+Selecting previously unselected package tensorplate-common.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 88408 files and directories currently installed.)
+Preparing to unpack .../tensorplate-common_0.2.1.rc.3-1_all.deb ...
+Unpacking tensorplate-common (0.2.1~rc.3-1) ...
+Setting up tensorplate-common (0.2.1~rc.3-1) ...
+Selecting previously unselected package tensorplate-agent.
+(Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 88456 files and directories currently installed.)
+Preparing to unpack .../tensorplate-agent_0.2.1.rc.3-1_amd64.deb ...
+Unpacking tensorplate-agent (0.2.1~rc.3-1) ...
+Selecting previously unselected package tensorplate-observability.
+Preparing to unpack .../tensorplate-observability_0.2.1.rc.3-1_amd64.deb ...
+Unpacking tensorplate-observability (0.2.1~rc.3-1) ...
+Selecting previously unselected package tensorplate-serving.
+Preparing to unpack .../tensorplate-serving_0.2.1.rc.3-1_amd64.deb ...
+Unpacking tensorplate-serving (0.2.1~rc.3-1) ...
+Selecting previously unselected package tensorplate-backend-python-pytorch.
+Preparing to unpack .../tensorplate-backend-python-pytorch_0.2.1.rc.3-1_all.deb ...
+Unpacking tensorplate-backend-python-pytorch (0.2.1~rc.3-1) ...
+Selecting previously unselected package tensorplate-cli.
+Preparing to unpack .../tensorplate-cli_0.2.1.rc.3-1_amd64.deb ...
+Unpacking tensorplate-cli (0.2.1~rc.3-1) ...
+Setting up tensorplate-backend-python-pytorch (0.2.1~rc.3-1) ...
+Setting up tensorplate-observability (0.2.1~rc.3-1) ...
+Created symlink /etc/systemd/system/multi-user.target.wants/tensorplate-observability.service → /usr/lib/systemd/system/tensorplate-observability.service.
+Setting up tensorplate-serving (0.2.1~rc.3-1) ...
+Setting up tensorplate-agent (0.2.1~rc.3-1) ...
+Created symlink /etc/systemd/system/multi-user.target.wants/tensorplate-agent.service → /usr/lib/systemd/system/tensorplate-agent.service.
+Setting up tensorplate-cli (0.2.1~rc.3-1) ...
+
+Running kernel seems to be up-to-date.
+
+Restarting services...
+
+Service restarts being deferred:
+ /etc/needrestart/restart.d/dbus.service
+ systemctl restart getty@tty1.service
+ systemctl restart networkd-dispatcher.service
+ systemctl restart serial-getty@ttyS0.service
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+==> enabling TensorPlate services
+==> waiting for TensorPlate services to become ready
+==> running tensorplate doctor --output json
+==> TensorPlate v0.2.1-rc.3 install complete
+Installed TensorPlate runtime packages from local artifacts at /home/tp-synthetic-operator/tp-evidence/assets-v0.2.1-rc.3.
+Installed optional Python/PyTorch backend package. Install the platform PyTorch stack separately if doctor reports it missing.
+Next: use tensorplate status and tensorplate doctor for operational checks.
+==> enabling the services
+accelerator: 1 accelerator: `NVIDIA H100 80GB HBM3`
+doctor: 30 findings, 0 failing, row ubuntu2404-x86-h100-80g-a3hg1
+PASS: installed, services ready, doctor green, ubuntu2404-x86-h100-80g-a3hg1 resolved by platform_row

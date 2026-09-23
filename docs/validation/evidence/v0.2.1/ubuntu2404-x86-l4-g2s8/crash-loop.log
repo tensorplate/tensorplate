@@ -1,0 +1,9 @@
+==> breaking the agent config so every start fails
+==> restoring the agent config
+==> issuing an inference request
+infer: posting to `http://127.0.0.1:18080/infer` (correlation_id=cli-ee99b890-5aa3-4b83-b4ef-e2686b9753ac)
+infer: endpoint=http://127.0.0.1:18080/infer status=success request_id=cloud-lifecycle-smoke-1
+  outputs: 1 tensor(s)
+    - echo_probe shape=[1,4]
+
+PASS: agent retried and given up on under a broken config; recovered deployment answered once restored
