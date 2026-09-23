@@ -12,8 +12,11 @@ The harness also has a status-logs stage covering status and log output. It
 was added after the 2026-08-17 record, which therefore does not include it.
 That record's offline checks ran doctor, without its agent probe, and an MPS
 check under a sandbox that denied all networking. The offline-runtime stage
-now runs the services themselves with the network denied, and the
-offline-profile preflight stage is new. Neither has a hardware record yet.
+runs the services themselves with the network denied, and the
+offline-profile preflight stage checks that profile before anything is
+installed. Both, and status-logs, were first exercised on hardware by the
+2026-09-22 `v0.2.1-rc.2` run recorded in
+[`evidence/v0.2.1/macos26-m1pro-16gb/`](./evidence/v0.2.1/macos26-m1pro-16gb/).
 The installed-registry stage also proves that live M1 Pro detection selects
 the exact Production row instead of the lower-priority M-series Preview
 fallback, while retaining the fallback's 16 GiB admission ceiling.
@@ -138,10 +141,22 @@ Attach the summary, sanitized transcript, host facts, formula pin, deploy
 input, deploy result, status-logs result, offline-profile result and
 offline-runtime result to the pull request. Keep the
 raw `*.log` files local; the transcript contains only allowlisted structured
-results and excludes operator paths and environment values.
+results and excludes operator paths and environment values. A release
+evidence bundle is the exception: it publishes the stage logs its report
+cites, sanitized under the rules in
+[`evidence/v0.2.1/README.md`](./evidence/v0.2.1/README.md), and the raw run
+stays local.
 
-The current post-hardening Apple M1 Pro evidence is committed as the
-[`curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17.json)
+The current Apple M1 Pro evidence is the release bundle in
+[`evidence/v0.2.1/macos26-m1pro-16gb/`](./evidence/v0.2.1/macos26-m1pro-16gb/):
+a 2026-09-22 run against the `v0.2.1-rc.2` formulae in which all 21 harness
+stages passed, converted to the canonical eight for the release gate. It is
+the record that covers status-logs, offline-profile and offline-runtime. It
+holds the report, the stage logs it cites and the artifact digest; it carries
+no sanitized transcript, which the release bundle format does not include.
+
+The earlier post-hardening record is retained as historical evidence: the
+[`2026-08-17 curated record`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17.json)
 and its
 [`sanitized transcript`](./evidence/macos-homebrew-lifecycle-m1pro-2026-08-17-transcript.json).
 Both were produced from the immutable implementation head recorded in the
@@ -180,9 +195,9 @@ The agent component is not queried because the agent writes no structured
 events. Run the harness with `TENSORPLATE_CLI_CONFIG` unset, since the
 launcher honours an existing value. The raw status and logs output stays
 in the local `status-logs.log`; `status-logs.json` carries only the
-deployment id, counts and pass results. The current status-logs stage,
-including rotation handling, has not yet been validated on hardware; the
-2026-08-17 record predates this stage.
+deployment id, counts and pass results. The status-logs stage, including rotation
+handling, is covered by the 2026-09-22 run; the 2026-08-17 record predates
+the stage.
 
 The offline-runtime stage runs the installed services and CLI with the
 network denied, without touching the Mac's interfaces or the operator
@@ -277,9 +292,9 @@ The profile is weaker than an IP firewall, and these gaps are accepted:
 the run if it stops enforcing the profile or disappears.
 
 The full offline-runtime stage, including launchd startup, restoration and
-the final unchanged-PID and one-run checks, still requires a new M1 Pro
-hardware run. The recorded profile probes and fixture tests do not supply
-that lifecycle evidence.
+the final unchanged-PID and one-run checks, ran on M1 Pro hardware in the
+2026-09-22 run. The profile probes and fixture tests alone would not have
+supplied that lifecycle evidence.
 
 ## Rollback and recovery
 

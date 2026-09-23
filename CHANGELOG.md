@@ -31,6 +31,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   It is the second Production row `check-evidence-bundles.sh` reports
   complete; the two Ubuntu cloud rows still block a final tag.
 
+  The macOS runbook named the 2026-08-17 record as current and described
+  status-logs, offline-profile and offline-runtime as awaiting a hardware
+  run; it now points at this bundle and keeps the older records as
+  historical evidence. `physical-row-runbooks.md` said the same of those
+  two macOS stages, and still called the Jetson harness's hardware run
+  deferred after that row was recorded. Both now describe what ran.
+
 - The Jetson Orin Nano row, `jetson-orin-nano-8gb-jp62`, carries recorded
   lifecycle evidence for 0.2.1, and its provenance is now `recorded`.
   `docs/validation/evidence/v0.2.1/jetson-orin-nano-8gb-jp62/` holds a
