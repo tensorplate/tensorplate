@@ -19,7 +19,7 @@ runtime_version="$("${repo_root}/packaging/version.sh")"
 # the backend admits it, which is what catches a stale upper bound BEFORE
 # packaging/VERSION moves onto the line — at which point the version bracket
 # check catches it too. Update this when the release line moves.
-target_release_line="0.2"
+target_release_line="0.3"
 
 # Validate JSON syntax with python3 (always present in our CI). Values are
 # passed as arguments rather than spliced into the program text.

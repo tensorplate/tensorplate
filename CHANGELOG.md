@@ -6,6 +6,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Changed
+
+- Every version surface moves to `0.3.1`, the first release of the 0.3
+  line: `packaging/VERSION`, the CMake project version, the Cargo
+  workspace and path-dependency versions with `Cargo.lock`, the vcpkg
+  `version-string`, the Python SDK version, the installer's default
+  release and a `0.3.1-1` head stanza in `packaging/debian/changelog`.
+  `develop` carries the next first-release version directly, as it has
+  since the `0.2.1` bump, with no `-dev` suffix. The `python_pytorch`
+  backend descriptor now admits the 0.3 line:
+  `tensorplate_runtime_range.max_exclusive` rises from `0.3.0` to
+  `0.4.0`, and `test/packaging/verify_descriptor.sh` targets release
+  line `0.3`, so its bracket check keeps refusing a runtime version
+  outside the declared range. This is a runtime-version bump only: the
+  protocol and schema versions stay `0.1`, the bundle format version
+  stays `0.1`, no bundle compatibility floor moves, and no dated
+  `[0.3.1]` section or release notes file is opened here.
+  (V030-E01-F01-T04)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added
