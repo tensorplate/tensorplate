@@ -1,0 +1,134 @@
+Trusted formula: tensorplate/tap/tensorplate-agent
+formula trust: re-trusted tensorplate/tap/tensorplate-agent, trusted at entry
+Trusted formula: tensorplate/tap/tensorplate-serving
+formula trust: re-trusted tensorplate/tap/tensorplate-serving, trusted at entry
+Trusted formula: tensorplate/tap/tensorplate-cli
+formula trust: re-trusted tensorplate/tap/tensorplate-cli, trusted at entry
+Trusted formula: tensorplate/tap/tensorplate-observability
+formula trust: re-trusted tensorplate/tap/tensorplate-observability, trusted at entry
+Trusted formula: tensorplate/tap/tensorplate-backend-python-pytorch
+formula trust: re-trusted tensorplate/tap/tensorplate-backend-python-pytorch, trusted at entry
+formula trust: as at entry, when the per-formula entries were: tensorplate/tap/tensorplate-agent tensorplate/tap/tensorplate-serving tensorplate/tap/tensorplate-cli tensorplate/tap/tensorplate-observability tensorplate/tap/tensorplate-backend-python-pytorch tensorplate/tap/tensorplate
+==> Fetching downloads for: tensorplate/tap/tensorplate
+==> Would install 5 dependencies:
+tensorplate/tap/tensorplate-serving                 0.2.1-rc.2
+tensorplate/tap/tensorplate-agent                   0.2.1-rc.2
+tensorplate/tap/tensorplate-backend-python-pytorch  0.2.1-rc.2
+tensorplate/tap/tensorplate-cli                     0.2.1-rc.2
+tensorplate/tap/tensorplate-observability           0.2.1-rc.2
+==> Would upgrade 1 requested outdated package
+tensorplate/tap/tensorplate 0.1.2 -> 0.2.1-rc.2
+✔︎ Formula tensorplate-serving (0.2.1-rc.2)
+==> Upgrading tensorplate/tap/tensorplate
+  0.1.2 -> 0.2.1-rc.2 
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+==> Installing dependencies for tensorplate/tap/tensorplate: tensorplate/tap/tensorplate-serving, tensorplate/tap/tensorplate-agent, tensorplate/tap/tensorplate-backend-python-pytorch, tensorplate/tap/tensorplate-cli and tensorplate/tap/tensorplate-observability
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-serving
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcmake -S . -B build-homebrew -G Ninja -DTP_BUILD_TESTS=OFF -DTP_BUILD_EXAMPL[0m
+[34m==>[0m [1mcmake --build build-homebrew --target tp_serving_worker[0m
+🍺  /opt/homebrew/Cellar/tensorplate-serving/0.2.1-rc.2: 7 files, 1.2MB, built in 11 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-agent
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=agent[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-agent/0.2.1-rc.2: 45 files, 2.2MB, built in 27 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-backend-python-pytorch
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+🍺  /opt/homebrew/Cellar/tensorplate-backend-python-pytorch/0.2.1-rc.2: 22 files, 378.5KB, built in 1 second
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-cli
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=cli[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-cli/0.2.1-rc.2: 10 files, 4.8MB, built in 35 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-observability
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=observability[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-observability/0.2.1-rc.2: 11 files, 1.3MB, built in 24 seconds
+==> Installing tensorplate/tap/tensorplate
+
+This is a Tier 2 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-2
+You can report issues with Tier 2 configurations to Homebrew/* repositories!
+  https://docs.brew.sh/Troubleshooting
+Read the above document before opening any issues or PRs.
+🍺  /opt/homebrew/Cellar/tensorplate/0.2.1-rc.2: 7 files, 322.9KB, built in 1 second
+==> Caveats
+==> tensorplate
+This formula installs the complete TensorPlate appliance. The operator
+command is provided by the tensorplate-cli component formula.
+==> Upgraded 1 requested outdated package
+tensorplate/tap/tensorplate 0.1.2 -> 0.2.1-rc.2

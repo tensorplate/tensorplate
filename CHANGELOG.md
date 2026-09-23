@@ -8,6 +8,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The MacBook Pro M1 Pro row, `macos26-m1pro-16gb`, carries recorded
+  lifecycle evidence for 0.2.1, and its provenance is now `recorded`.
+  `docs/validation/evidence/v0.2.1/macos26-m1pro-16gb/` holds a passing
+  `tools/validation/macos-homebrew-lifecycle.sh` run against the
+  `v0.2.1-rc.2` formulae on the in-lab machine (macOS 26.6.2, Homebrew
+  7.0.6): all 21 harness stages passed, and
+  `tools/validation/lifecycle-report-from-stages.sh` converts them into the
+  canonical eight under the mapping the runbook documents, all passing. Its
+  `subject.artifact_digest` is the SHA-256 of the source archive all six
+  formulae pin to, which is that build-from-source channel's only immutable
+  artifact. The logs are the recorded ones with three identifier classes
+  replaced by their synthetic forms: the operator's home directory, the
+  per-user temporary-directory id in the sandboxed launchd paths, and the
+  per-boot launchd session id in an inherited `SSH_AUTH_SOCK`; the
+  evidence README's table now names the synthetic form for the last two,
+  which are macOS directory ids no scanner pattern recognizes. Homebrew's
+  untrusted-tap warning is removed from the two install logs rather than
+  rewritten: it lists every other tap the machine carries and the formulae
+  installed from them, which a run that touches none of them has no reason
+  to publish. The README now says so, and the retained raw run keeps it.
+  It is the second Production row `check-evidence-bundles.sh` reports
+  complete; the two Ubuntu cloud rows still block a final tag.
+
 - The Jetson Orin Nano row, `jetson-orin-nano-8gb-jp62`, carries recorded
   lifecycle evidence for 0.2.1, and its provenance is now `recorded`.
   `docs/validation/evidence/v0.2.1/jetson-orin-nano-8gb-jp62/` holds a

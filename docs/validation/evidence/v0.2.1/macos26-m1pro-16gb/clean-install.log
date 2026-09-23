@@ -1,0 +1,193 @@
+Warning: `brew deps` is not the actual runtime dependencies because --tree was passed!
+This means dependencies may differ from a formula's declared dependencies.
+Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
+tensorplate/tap/tensorplate
+├── tensorplate-agent
+│   └── tensorplate-serving
+│       └── nlohmann-json
+├── tensorplate-backend-python-pytorch
+│   └── pytorch
+│       ├── abseil
+│       ├── eigen
+│       ├── libuv
+│       ├── libyaml
+│       ├── numpy
+│       │   └── openblas
+│       │       ├── gcc
+│       │       │   ├── gmp
+│       │       │   ├── isl
+│       │       │   │   └── gmp
+│       │       │   ├── libmpc
+│       │       │   │   ├── gmp
+│       │       │   │   └── mpfr
+│       │       │   │       └── gmp
+│       │       │   ├── mpfr
+│       │       │   │   └── gmp
+│       │       │   └── zstd
+│       │       │       ├── lz4
+│       │       │       └── xz
+│       │       └── libomp
+│       ├── onnx
+│       │   ├── abseil
+│       │   └── protobuf
+│       │       └── abseil
+│       ├── openblas
+│       │   ├── gcc
+│       │   │   ├── gmp
+│       │   │   ├── isl
+│       │   │   │   └── gmp
+│       │   │   ├── libmpc
+│       │   │   │   ├── gmp
+│       │   │   │   └── mpfr
+│       │   │   │       └── gmp
+│       │   │   ├── mpfr
+│       │   │   │   └── gmp
+│       │   │   └── zstd
+│       │   │       ├── lz4
+│       │   │       └── xz
+│       │   └── libomp
+│       ├── protobuf
+│       │   └── abseil
+│       ├── pybind11
+│       ├── sleef
+│       └── libomp
+├── tensorplate-cli
+├── tensorplate-observability
+└── tensorplate-serving
+    └── nlohmann-json
+
+tensorplate-agent 0.2.1-rc.2
+tensorplate-serving 0.2.1-rc.2
+tensorplate-cli 0.2.1-rc.2
+tensorplate-observability 0.2.1-rc.2
+tensorplate-backend-python-pytorch 0.2.1-rc.2
+tensorplate 0.2.1-rc.2
+Warning: The following tensorplate configuration files have not been removed!
+If desired, remove them manually with `rm -rf`:
+  /opt/homebrew/etc/tensorplate
+  /opt/homebrew/etc/tensorplate/agent.json
+  /opt/homebrew/etc/tensorplate/cli.json
+  /opt/homebrew/etc/tensorplate/observability.json
+Trusted formula: tensorplate/tap/tensorplate
+formula trust: re-trusted tensorplate/tap/tensorplate, trusted at entry
+formula trust: as at entry, when the per-formula entries were: tensorplate/tap/tensorplate-agent tensorplate/tap/tensorplate-serving tensorplate/tap/tensorplate-cli tensorplate/tap/tensorplate-observability tensorplate/tap/tensorplate-backend-python-pytorch tensorplate/tap/tensorplate
+==> Would install 1 formula:
+tensorplate/tap/tensorplate 0.2.1-rc.2
+==> Fetching downloads for: tensorplate
+==> Would install 5 dependencies for tensorplate:
+tensorplate-serving
+tensorplate-agent
+tensorplate-backend-python-pytorch
+tensorplate-cli
+tensorplate-observability
+✔︎ Formula tensorplate-serving (0.2.1-rc.2)
+==> Installing tensorplate from tensorplate/tap
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+==> Installing dependencies for tensorplate/tap/tensorplate: tensorplate/tap/tensorplate-serving, tensorplate/tap/tensorplate-agent, tensorplate/tap/tensorplate-backend-python-pytorch, tensorplate/tap/tensorplate-cli and tensorplate/tap/tensorplate-observability
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-serving
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcmake -S . -B build-homebrew -G Ninja -DTP_BUILD_TESTS=OFF -DTP_BUILD_EXAMPL[0m
+[34m==>[0m [1mcmake --build build-homebrew --target tp_serving_worker[0m
+🍺  /opt/homebrew/Cellar/tensorplate-serving/0.2.1-rc.2: 7 files, 1.2MB, built in 11 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-agent
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=agent[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-agent/0.2.1-rc.2: 45 files, 2.2MB, built in 28 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-backend-python-pytorch
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+🍺  /opt/homebrew/Cellar/tensorplate-backend-python-pytorch/0.2.1-rc.2: 22 files, 378.5KB, built in 1 second
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-cli
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=cli[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-cli/0.2.1-rc.2: 10 files, 4.8MB, built in 40 seconds
+==> Installing tensorplate/tap/tensorplate dependency: tensorplate/tap/tensorplate-observability
+Warning: Your Xcode (26.5) is outdated.
+Please update to Xcode 26.6 (or delete it).
+Xcode can be updated from the App Store.
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 26.6.
+[34m==>[0m [1mcargo install --path=observability[0m
+[33mWarning:[0m Calling `post_install` is deprecated! Use `post_install_steps` instead.
+🍺  /opt/homebrew/Cellar/tensorplate-observability/0.2.1-rc.2: 11 files, 1.3MB, built in 24 seconds
+==> Installing tensorplate/tap/tensorplate
+
+This is a Tier 2 configuration:
+  https://docs.brew.sh/Support-Tiers#tier-2
+You can report issues with Tier 2 configurations to Homebrew/* repositories!
+  https://docs.brew.sh/Troubleshooting
+Read the above document before opening any issues or PRs.
+🍺  /opt/homebrew/Cellar/tensorplate/0.2.1-rc.2: 7 files, 322.9KB, built in 2 seconds
+==> Caveats
+==> tensorplate
+This formula installs the complete TensorPlate appliance. The operator
+command is provided by the tensorplate-cli component formula.

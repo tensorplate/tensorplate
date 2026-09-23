@@ -1,0 +1,8 @@
+Stopping `tensorplate-agent`... (might take a while)
+==> Successfully stopped `tensorplate-agent` (label: sh.brew.tensorplate-agent)
+==> Successfully started `tensorplate-agent` (label: sh.brew.tensorplate-agent)
+Stopping `tensorplate-observability`... (might take a while)
+==> Successfully stopped `tensorplate-observability` (label: sh.brew.tensorplate-observability)
+==> Successfully started `tensorplate-observability` (label: sh.brew.tensorplate-observability)
+agent 22445 -> 23857
+observability 22564 -> 24000

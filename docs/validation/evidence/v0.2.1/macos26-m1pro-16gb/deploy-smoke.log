@@ -1,0 +1,198 @@
+{
+  "command": "doctor",
+  "correlation_id": null,
+  "payload": {
+    "failing": 0,
+    "findings": [
+      {
+        "id": "cli_version",
+        "message": "tensorplate-cli 0.2.1 (protocol 0.1)",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "profile_mode",
+        "message": "profile `local` mode `local` is supported",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "agent_socket",
+        "message": "agent socket `/opt/homebrew/var/run/tensorplate/agent.sock` exists",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "agent_config_valid",
+        "message": "no agent config at /etc/tensorplate/agent.json",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "id": "host_facts",
+        "message": "host arch=arm64 vendor=apple",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "host_os",
+        "message": "macOS 26 [exact: version 26.6.2, build 25G83]",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "accelerator_facts",
+        "message": "1 accelerator: `Apple M1 Pro`",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "hint": "several rows share this host profile; accelerator identity is needed to name one",
+        "id": "platform_profile",
+        "message": "host matches 2 candidate support row(s): macos26-apple-m-series-preview, macos26-m1pro-16gb",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "platform_row",
+        "message": "resolves to support row `macos26-m1pro-16gb`",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "model_class_rows",
+        "message": "row `macos26-m1pro-16gb` serves chunked_policy (Preview)",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "ros2_health_stub",
+        "message": "observability config absent; ROS 2 health stub configuration not checked",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "core_packages",
+        "message": "dpkg package query is only available on the Linux package target",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "hint": "if this is a Jetson device, install the core packages and re-run tensorplate doctor",
+        "id": "path_layout",
+        "message": "no tensorplate install layout detected (run apt install tensorplate-common to create it)",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "config_files",
+        "message": "no /etc/tensorplate config files present (install the tensorplate-* core packages)",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "config_endpoints",
+        "message": "no installed service configs available for endpoint-locality checks",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "hint": "install tensorplate-serving — the agent supervises this binary; there is no separate systemd unit",
+        "id": "serving_binary_installed",
+        "message": "serving worker binary missing at `/usr/lib/tensorplate/tensorplate-serving`",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "agent_systemd_unit",
+        "message": "systemd not present on this host; agent unit check skipped",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "id": "observability_systemd_unit",
+        "message": "systemd not present on this host; observability unit check skipped",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "id": "serving_systemd_absent",
+        "message": "systemd not present on this host; serving-no-unit check skipped",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "id": "agent_service_state",
+        "message": "tensorplate-agent is started",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "observability_service_state",
+        "message": "tensorplate-observability is started",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "platform_registry",
+        "message": "platform support registry at `/opt/homebrew/share/tensorplate/platform` loaded (30 rows, 26 supported combinations, 4 roadmap targets)",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "python_pytorch_backend",
+        "message": "Python/PyTorch backend descriptor present (package=tensorplate-backend-python-pytorch version=0.1.0-dev0)",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "python_pytorch_runtime",
+        "message": "Python/PyTorch runtime is importable and meets the descriptor's minimum versions",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "cuda_runtime",
+        "message": "skipped: the serving build shipped for this platform has no CUDA path, so no CUDA runtime is required",
+        "severity": "info",
+        "status": "skipped"
+      },
+      {
+        "id": "tensorrt_runtime",
+        "message": "TensorRT not detected; vision-on-TensorRT validation will skip",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "libtorch_runtime",
+        "message": "LibTorch not detected; the LibTorch native adapter is optional in v0.1.0",
+        "severity": "info",
+        "status": "missing"
+      },
+      {
+        "id": "agent_reachable",
+        "message": "agent reachable via `/opt/homebrew/var/run/tensorplate/agent.sock` (correlation_id=cli-1fd77aaa-d1b5-4dae-bff9-ae6fa8e53f39)",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "agent_state",
+        "message": "agent_state=ready",
+        "severity": "info",
+        "status": "ok"
+      },
+      {
+        "id": "active_deployment",
+        "message": "active deployment `macos-offline-deploy-20260922T100322Z` (backend=python_pytorch)",
+        "severity": "info",
+        "status": "ok"
+      }
+    ],
+    "mode": "local",
+    "profile": "local",
+    "total": 30
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
