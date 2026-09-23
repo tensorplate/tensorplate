@@ -525,10 +525,7 @@ fn registry_with_l4_at(support_level: &str) -> PlatformRegistry {
         // A Planned row is spec-authored by the same rule, so the source
         // row's own provenance cannot carry over once that row is
         // recorded.
-        fields.insert(
-            "provenance".to_string(),
-            serde_json::json!("spec_authored"),
-        );
+        fields.insert("provenance".to_string(), serde_json::json!("spec_authored"));
     }
     let rendered = serde_json::to_string(&document).expect("row renders");
     PlatformRegistry::from_documents(
