@@ -2684,7 +2684,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   instance identifiers must be unique and lowercase-hyphenated. Decoding
   from JSON text additionally rejects duplicate object keys; loaders that
   pre-parse into `serde_json::Value` collapse duplicates before any
-  decoder sees them. (V023-E03-F04-T03)
+  decoder sees them. (V030-E03-F04-T03)
 
 - Canonical memory budget line-item vocabulary. The new
   `config/schemas/memory_budget_breakdown.json` defines the eleven
@@ -2708,7 +2708,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   fixtures declare non-zero `per_session_state_bytes` as the foundation for
   streaming-session ledger admission. A Draft-07 validator conformance test
   (dev-only `jsonschema` dependency) keeps the schema document and the Rust
-  mirror verdict-identical. (V023-E03-F04-T01, V023-E03-F04-T02)
+  mirror verdict-identical. (V030-E03-F04-T01, V030-E03-F04-T02)
 
 ### Changed
 
