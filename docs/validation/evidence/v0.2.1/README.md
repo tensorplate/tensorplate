@@ -88,10 +88,12 @@ address's shape, and `needrestart` prints several, in the form
 systemctl restart getty@tty1.service
 ```
 
-The scanner exempts such a name only in that position, as an argument of
-a `systemctl` verb, so stock output needs no editing while an address
-elsewhere on the same line is still a finding. The unit type alone can
-never carry the exemption: `target` is a delegated top-level domain.
+The scanner exempts such a name only there: on a line that is itself
+that command, after one of the verbs it knows, in argument position.
+Prose that merely mentions `systemctl` exempts nothing, and neither does
+a word that is lowercase but is not a verb. An address elsewhere on the
+command's own line is still a finding, and the unit type alone can never
+carry the exemption -- `target` is a delegated top-level domain.
 Credentials and planning identifiers have no synthetic form: neither
 belongs in evidence, so remove them.
 

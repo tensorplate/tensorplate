@@ -41,12 +41,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   apt mirror host stays as recorded: it names the region an image booted
   in, never an instance. The scanner read `needrestart`'s systemd template
   unit names as email addresses; it now exempts a token only where
-  systemd's own command line puts one, as an argument of a `systemctl`
-  verb, so stock output needs no editing while an address elsewhere on
-  that line is still a finding. The unit type cannot carry the exemption
-  by itself, because `target` is a delegated top-level domain, and
-  `evidence_publication_test.sh` covers that case, the argument
-  position, and the verb the position depends on. The raw runs are retained privately and are not in this
+  systemd's own command line puts one: on a line that is that command,
+  after one of the verbs the scanner knows, in argument position. Stock
+  output needs no editing, while an address elsewhere on that line,
+  prose that merely mentions the tool, and a lowercase word standing in
+  for a verb all remain findings. The unit type cannot carry the
+  exemption by itself, because `target` is a delegated top-level domain.
+  `evidence_publication_test.sh` covers each of those, and every rule
+  the exemption rests on fails the suite when removed. The raw runs are retained privately and are not in this
   repository.
 
   `docs/validation/cloud-row-runbooks.md` said the current harness had

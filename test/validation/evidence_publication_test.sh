@@ -647,6 +647,27 @@ new_case
 add_line "systemctl ${account}@$(random_word 8).target"
 expect_finding "a unit-shaped address where a systemctl verb belongs" email "$account"
 
+# The command has to be the line. Prose that merely names the tool is
+# prose, and the word after it is not a verb just because it is lowercase.
+new_case
+add_line "The maintainer of systemctl is ${account}@$(random_word 8).target"
+expect_finding "an address in prose that mentions systemctl" email "$account"
+
+new_case
+add_line "systemctl contact ${account}@$(random_word 8).target"
+expect_finding "an address after a word that is not a systemctl verb" email "$account"
+
+# A real verb inside a sentence is still a sentence: only a line that IS
+# the command exempts anything.
+new_case
+add_line "Ask systemctl restart ${account}@$(random_word 8).target for access"
+expect_finding "an address after a verb in mid-sentence" email "$account"
+
+new_case
+add_line " sudo systemctl try-restart getty@tty1.service"
+check "a sudo-prefixed invocation with a real verb remains publishable" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
+
 new_case
 add_line "restart ${account}@$(random_word 8).service"
 expect_finding "a unit-shaped address with no systemctl invocation" email "$account"

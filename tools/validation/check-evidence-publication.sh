@@ -200,28 +200,40 @@ SYSTEMD_UNIT = re.compile(
     r"[A-Za-z0-9:_.\\-]+@[A-Za-z0-9:_.\\-]+"
     r"\.(?:service|socket|device|mount|automount|swap|target|path|timer"
     r"|slice|scope)\Z")
-SYSTEMCTL = re.compile(r"\bsystemctl\b")
-SYSTEMCTL_VERB = re.compile(r"[a-z][a-z-]*\Z")
+# The command must BE the line, not appear in it: `needrestart` prints
+# `  systemctl restart getty@tty1.service`, while prose mentioning the
+# tool is just prose. Matching the word anywhere let "The maintainer of
+# systemctl is <address>" exempt the address, with `is` read as a verb.
+SYSTEMCTL_COMMAND = re.compile(r"[\s>$#%+|]*(?:sudo\s+)?systemctl\b")
+# The verbs that reach a published log. Any other word is not a verb, so
+# the units after it are not units. Widen this deliberately, by the
+# output that needs it, the way the unit types themselves are listed.
+SYSTEMCTL_VERBS = frozenset((
+    "restart", "start", "stop", "reload", "try-restart",
+    "reload-or-restart", "status", "kill",
+))
 
 
 def systemctl_unit_spans(line):
     """Spans of template unit names given as arguments to `systemctl`."""
+    invocation = SYSTEMCTL_COMMAND.match(line)
+    if invocation is None:
+        return []
     spans = []
-    for invocation in SYSTEMCTL.finditer(line):
-        offset = invocation.end()
-        verb_seen = False
-        for token in re.finditer(r"\S+", line[offset:]):
-            text = token.group(0)
-            if text.startswith("-"):
-                continue
-            if not verb_seen:
-                if not SYSTEMCTL_VERB.match(text):
-                    break
-                verb_seen = True
-                continue
-            if not SYSTEMD_UNIT.match(text):
+    offset = invocation.end()
+    verb_seen = False
+    for token in re.finditer(r"\S+", line[offset:]):
+        text = token.group(0)
+        if text.startswith("-"):
+            continue
+        if not verb_seen:
+            if text not in SYSTEMCTL_VERBS:
                 break
-            spans.append((offset + token.start(), offset + token.end()))
+            verb_seen = True
+            continue
+        if not SYSTEMD_UNIT.match(text):
+            break
+        spans.append((offset + token.start(), offset + token.end()))
     return spans
 
 # As platform/tests/host_identity.rs requires of published GCE fixtures.
