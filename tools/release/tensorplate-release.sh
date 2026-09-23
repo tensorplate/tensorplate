@@ -885,17 +885,38 @@ UNRELEASED = "## [Unreleased]"
 release_prefix = f"## [{version}] - "
 
 
+def fence_run(line):
+    """(character, length) of a fence marker at column 0, or None."""
+    char = line[:1]
+    if char not in ("`", "~"):
+        return None
+    length = len(line) - len(line.lstrip(char))
+    return (char, length) if length >= 3 else None
+
+
 def fenced_lines():
-    """The lines inside a fenced block opened at column 0."""
+    """The lines inside a fenced block opened at column 0.
+
+    A fence is closed only by a run of its own character at least as long
+    as the one that opened it, with nothing but whitespace after it. A
+    shorter run is content: ``` inside a ```` block does not close it, and
+    reading it as a close would put the rest of that block -- headings
+    included -- back in scope.
+    """
     inside = set()
     opened = None
     opened_at = 0
     for i, line in enumerate(lines):
-        marker = line[:3]
+        run = fence_run(line)
         if opened is None:
-            if marker in ("```", "~~~"):
-                opened, opened_at = marker, i
-        elif marker == opened:
+            if run is not None:
+                opened, opened_at = run, i
+        elif (
+            run is not None
+            and run[0] == opened[0]
+            and run[1] >= opened[1]
+            and not line[run[1]:].strip()
+        ):
             opened = None
         else:
             inside.add(i)

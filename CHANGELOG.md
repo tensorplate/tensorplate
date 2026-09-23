@@ -46,7 +46,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `[Unreleased]` is left present and empty, so a second run changes
   nothing. A heading-shaped line inside a fence opened at column 0 is
   quoted text rather than a section, so an entry that shows a changelog's
-  own shape moves intact instead of being filed into the fence. A shape
+  own shape moves intact instead of being filed into the fence. A fence
+  ends only at a run of its own character at least as long as the one that
+  opened it, so a ``` line quoted inside a ```` block does not end it. A shape
   the step does not recognise -- no `[Unreleased]`, a repeated heading, a
   version section that is not the one directly below `[Unreleased]`,
   content ahead of a section's first subsection, or a fence left open --

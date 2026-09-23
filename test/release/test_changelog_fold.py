@@ -332,6 +332,120 @@ class ChangelogFoldTests(unittest.TestCase):
 """,
         )
 
+    def test_a_shorter_run_does_not_close_a_longer_fence(self) -> None:
+        # Comparing three characters reads the inner ``` as the close, so
+        # the rest of the outer block comes back in scope: the quoted
+        # "### Added" becomes a subsection, and the shipping entry is filed
+        # under it, inside the code block, at exit 0 and idempotently.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Added
+
+- A brand new feature.
+
+{DATED}
+
+### Fixed
+
+- An older fix that quotes a fenced changelog:
+
+````markdown
+```text
+### Added
+- quoted
+```
+````
+
+- Another older fix.
+"""
+        )
+        self.assertEqual(
+            folded,
+            PROLOGUE
+            + f"""## [Unreleased]
+
+{DATED}
+
+### Added
+
+- A brand new feature.
+
+### Fixed
+
+- An older fix that quotes a fenced changelog:
+
+````markdown
+```text
+### Added
+- quoted
+```
+````
+
+- Another older fix.
+""",
+        )
+
+    def test_a_fence_closes_only_on_its_own_character(self) -> None:
+        # A ~~~ run inside a ``` block is content, not a close.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Added
+
+- A brand new feature.
+
+{DATED}
+
+### Fixed
+
+- An older fix that quotes two fence styles:
+
+```markdown
+~~~
+### Added
+- quoted
+~~~
+```
+
+- Another older fix.
+"""
+        )
+        self.assertIn("- A brand new feature.\n\n### Fixed", folded)
+        self.assertIn("~~~\n### Added\n- quoted\n~~~\n```\n", folded)
+
+    def test_a_run_carrying_an_info_string_does_not_close_a_fence(self) -> None:
+        # A fence is closed by its run alone. Reading a second opening
+        # line as the close ends the block early and leaves the real
+        # closing run opening one that is never closed, which is refused.
+        folded = self.fold(
+            PROLOGUE
+            + f"""## [Unreleased]
+
+### Added
+
+- A brand new feature.
+
+{DATED}
+
+### Fixed
+
+- An older fix that quotes two opening lines:
+
+````text
+````python
+### Added
+- quoted
+````
+
+- Another older fix.
+"""
+        )
+        self.assertIn("- A brand new feature.\n\n### Fixed", folded)
+        self.assertIn("````text\n````python\n### Added\n- quoted\n````\n", folded)
+
     def test_a_column_0_fence_in_an_entry_moves_with_the_entry(self) -> None:
         # Reading the quoted "### Added" as a block splits one entry across
         # two subsections and leaves the fence unterminated.
