@@ -1,0 +1,1 @@
+The runner reached the registry from @VALUE@.

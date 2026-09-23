@@ -1,0 +1,1 @@
+inet6 @VALUE@/64 scope global dynamic

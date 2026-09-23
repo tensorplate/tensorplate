@@ -1,0 +1,1 @@
+machine type: @VALUE@/zones/us-central1-b/machineTypes/g2-standard-8

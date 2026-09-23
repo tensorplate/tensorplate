@@ -129,7 +129,7 @@ note "3. package closure and the per-architecture agent config"
   die "backend entrypoint missing at /usr/bin/tensorplate-backend-python-pytorch"
 [[ -d "${TP_PLATFORM_REGISTRY_DIR}/rows" ]] ||
   die "platform registry rows missing under ${TP_PLATFORM_REGISTRY_DIR}"
-# PR-10 made the agent config per-architecture; prove the x86_64 variant is the
+# The agent config is per-architecture; prove the x86_64 variant is the
 # one a real install lands, not just the one the build produced.
 grep -q '"device_family": "x86_64"' "$TP_AGENT_CONFIG_PATH" ||
   die "${TP_AGENT_CONFIG_PATH} is not the x86_64 variant"

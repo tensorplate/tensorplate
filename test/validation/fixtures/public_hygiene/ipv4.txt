@@ -1,0 +1,1 @@
+ssh -o StrictHostKeyChecking=no operator@@VALUE@ 'journalctl -u tensorplate-agent -n 50'

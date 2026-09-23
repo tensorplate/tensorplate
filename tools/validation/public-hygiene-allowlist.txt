@@ -1,0 +1,52 @@
+# Accepted findings for tools/validation/check-public-hygiene.sh.
+#
+# The only override the public hygiene scan has, reviewed like code. One
+# entry per line: `<path> <class> <count> <reason>`. The path is exact,
+# from the repository root. The entry accepts up to <count> findings of
+# that class in that file, counting every occurrence, and nothing else,
+# so an added value of the same class in the same file still fails. It
+# bounds how many values are accepted, not which: a value replaced one
+# for one keeps the count, and is left to review of the diff. An entry
+# never applies to commit messages or pull request text, or to a file
+# whose name is itself a finding. A credential finding cannot be accepted
+# at all, nor can a finding only the evidence scanner makes: evidence is
+# sanitized, never excepted. `check-public-hygiene.sh --tree` fails on an entry
+# whose count no longer matches the file.
+#
+# Prefer fixing the value over adding an entry: synthetic forms that pass
+# are listed in docs/validation/evidence/v0.2.1/README.md and in rule 10 of
+# docs/validation/fixture-and-evidence-rules.md.
+
+docs/assets/tensorplate_banner.png binary 1 The README banner image. Its only embedded text is the image editor's XMP history (tool, timestamps, document ids), with no user, host or path.
+
+# Transcribed accelerator fixtures from before the reserved GPU-00000000-...
+# namespace. publication_safe_uuid in platform/tests/accelerator_fixtures.rs
+# admits these six files' UUIDs as a closed legacy set; it also keeps a
+# pair for ubuntu2404-x86-l4-g2s8, whose fixture now uses the synthetic
+# namespace and needs no entry.
+platform/tests/accelerator_fixtures.rs device-uuid 6 The closed legacy set of transcribed synthetic UUIDs the fixture test admits.
+test/platform/accelerator/mig-enabled-a100-40g.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+test/platform/accelerator/ubuntu2404-x86-a100-40g-a2hg1.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+test/platform/accelerator/ubuntu2404-x86-rtxpro6000se-g4s48.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+test/platform/accelerator/ubuntu2404-x86-rtxpro6000we-physical.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+test/platform/accelerator/unsupported-rtx-6000-ada.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+test/platform/accelerator/unsupported-rtx-a6000.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
+
+# A private-range address as the remote host in tests that a non-loopback
+# serving URL or agent address is handled as remote.
+cli/src/commands/infer.rs ipv4 2 A private-range test address as a remote serving URL.
+cli/src/profile.rs ipv4 4 A private-range test address as a remote agent address.
+sdk/python/tests/test_client.py ipv4 4 A private-range test address as a remote serving URL.
+test/packaging/verify_linux_offline_runtime.py ipv4 2 A private-range test address as an off-host serving URL the offline check must refuse.
+
+tools/validation/macos_offline_runtime.py ipv4 1 A public resolver's address as the egress probe target an offline check must fail to reach.
+
+# Synthetic home directories the harness verifiers build, to prove a
+# traceback or path from a checkout under a home directory never reaches
+# evidence; they must not be the synthetic operator the evidence scanner
+# admits.
+test/packaging/verify_jetson_lifecycle.sh home-path 1 A synthetic reviewer home under a temporary directory.
+test/packaging/verify_linux_offline_runtime.py home-path 2 A synthetic reviewer home.
+test/packaging/verify_macos_homebrew_lifecycle.sh home-path 1 A synthetic operator home as a local tap remote.
+test/packaging/verify_macos_offline_runtime.py home-path 1 A synthetic operator home in a launch agent path.
+test/packaging/verify_ubuntu_l4_cloud_lifecycle.sh home-path 2 A synthetic reviewer home under a temporary directory.
