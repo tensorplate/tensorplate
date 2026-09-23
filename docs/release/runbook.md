@@ -88,7 +88,12 @@ they are reviewed together, merged together, and tagged as one commit:
 - `packaging/scripts/install.sh` — the installer's default version.
 - `packaging/debian/changelog` — a new top stanza `tensorplate (X.Y.Z-1)`
   above the previous entries.
-- `CHANGELOG.md` — promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`.
+- `CHANGELOG.md` — open `## [X.Y.Z] - YYYY-MM-DD` under `[Unreleased]`,
+  and move whatever `[Unreleased]` holds into it, leaving `[Unreleased]`
+  empty. The tag is cut from a trunk commit, so everything under
+  `[Unreleased]` at that commit ships in it. Entries merged after an
+  earlier preparation PR therefore make the changelog pending again, and
+  the cut refuses until a further preparation PR folds them in.
 
 `sdk/python/pyproject.toml` keeps its `.dev0` development version; no
 release step rewrites it, because the wheel version is injected at build.
@@ -348,10 +353,12 @@ git rev-parse HEAD           # compare against ${TP_RELEASE_COMMIT}
 
 `git pull` brings the trunk's **head**, which is not necessarily the
 release commit. Any PR that merged between the preparation merge and this
-pull is now HEAD, and nothing downstream will notice: that commit is still
-an ancestor of the trunk, so the ancestry check passes, and `prepare` is
-idempotent, so the metadata gate still reads as final. The tag would land
-on a commit nobody reviewed for this release and CI would publish it.
+pull is now HEAD, and downstream may well not notice: that commit is still
+an ancestor of the trunk, so the ancestry check passes, and unless the
+intervening PR added a `[Unreleased]` entry — which a docs, test, or
+CI-only PR does not — `prepare` finds nothing left to fold, so the
+metadata gate still reads as final. The tag would land on a commit nobody
+reviewed for this release and CI would publish it.
 That is why 3a recorded `TP_RELEASE_COMMIT`. If HEAD is not that commit,
 stand on it — the trunk is never pushed by this procedure, so the reset is
 local only:

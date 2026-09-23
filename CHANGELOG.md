@@ -59,6 +59,34 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- `prepare` now folds `[Unreleased]` into the dated section for the version
+  being prepared, rather than only opening that section the first time it
+  runs. A tag is cut from a trunk commit, so every entry under
+  `[Unreleased]` at that commit ships in that tag; once the heading
+  existed the step did nothing, so this release's own entries -- nine of
+  them, merged after the heading was opened -- stayed under `[Unreleased]`
+  above the `0.2.1` section and shipped filed as unreleased. Nothing caught
+  it: a `prepare` that changes nothing is exactly how
+  `release_metadata_pending`, and so `cut`, reports the metadata final.
+
+  The fold is a pure move. Entries go to the top of the same-named
+  subsection, newest first; a subsection the release section has no block
+  for is opened at its top; entry text, including indented continuation
+  lines and fenced blocks, is carried over byte for byte; and
+  `[Unreleased]` is left present and empty, so a second run changes
+  nothing. A heading-shaped line inside a fence opened at column 0 is
+  quoted text rather than a section, so an entry that shows a changelog's
+  own shape moves intact instead of being filed into the fence. A fence
+  ends only at a run of its own character at least as long as the one that
+  opened it, so a ``` line quoted inside a ```` block does not end it. A shape
+  the step does not recognise -- no `[Unreleased]`, a repeated heading, a
+  version section that is not the one directly below `[Unreleased]`,
+  content ahead of a section's first subsection, or a fence left open --
+  is refused rather than guessed at. `cut` now refuses to tag until a
+  preparation pull request commits the fold, which is what should happen
+  whenever the trunk moved since the last one. Folding this release's own
+  entries is that pull request's job, not this change's.
+
 - The macOS Homebrew lifecycle harness names each service's launchd job the
   way the installed Homebrew does. Homebrew 6.0.22 changed the label and
   keg plist name of a formula's service from `homebrew.mxcl.<formula>` to

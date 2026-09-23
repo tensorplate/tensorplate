@@ -20,6 +20,7 @@ verify_published_release="test/release/test_published_release.py"
 verify_release_asset_names="test/release/test_release_asset_names.py"
 verify_build_source_identity="test/release/test_build_source_identity.py"
 verify_build_configuration="test/release/test_build_configuration.py"
+verify_changelog_fold="test/release/test_changelog_fold.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -71,6 +72,7 @@ python3 "$verify_published_release"
 python3 "$verify_release_asset_names"
 python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
+python3 "$verify_changelog_fold"
 
 # Manifest generation reads each package's control Version with dpkg-deb,
 # and every fixture package below is a control-style text file. This
