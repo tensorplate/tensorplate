@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-21
+
 ### Added
 
 - The MacBook Pro M1 Pro row, `macos26-m1pro-16gb`, carries recorded
@@ -56,189 +58,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/evidence/` are no longer caught by the repository's
   `*.log` ignore rule, which left a plain `git add` committing a bundle
   without the logs its report cites.
-
-### Fixed
-
-- `prepare` now folds `[Unreleased]` into the dated section for the version
-  being prepared, rather than only opening that section the first time it
-  runs. A tag is cut from a trunk commit, so every entry under
-  `[Unreleased]` at that commit ships in that tag; once the heading
-  existed the step did nothing, so this release's own entries -- nine of
-  them, merged after the heading was opened -- stayed under `[Unreleased]`
-  above the `0.2.1` section and shipped filed as unreleased. Nothing caught
-  it: a `prepare` that changes nothing is exactly how
-  `release_metadata_pending`, and so `cut`, reports the metadata final.
-
-  The fold is a pure move. Entries go to the top of the same-named
-  subsection, newest first; a subsection the release section has no block
-  for is opened at its top; entry text, including indented continuation
-  lines and fenced blocks, is carried over byte for byte; and
-  `[Unreleased]` is left present and empty, so a second run changes
-  nothing. A heading-shaped line inside a fence opened at column 0 is
-  quoted text rather than a section, so an entry that shows a changelog's
-  own shape moves intact instead of being filed into the fence. A fence
-  ends only at a run of its own character at least as long as the one that
-  opened it, so a ``` line quoted inside a ```` block does not end it. A shape
-  the step does not recognise -- no `[Unreleased]`, a repeated heading, a
-  version section that is not the one directly below `[Unreleased]`,
-  content ahead of a section's first subsection, or a fence left open --
-  is refused rather than guessed at. `cut` now refuses to tag until a
-  preparation pull request commits the fold, which is what should happen
-  whenever the trunk moved since the last one. Folding this release's own
-  entries is that pull request's job, not this change's.
-
-- The macOS Homebrew lifecycle harness names each service's launchd job the
-  way the installed Homebrew does. Homebrew 6.0.22 changed the label and
-  keg plist name of a formula's service from `homebrew.mxcl.<formula>` to
-  `sh.brew.<formula>`, and the harness hardcoded the old form in every
-  launchd check. The `v0.2.1-rc.2` run on the M1 Pro, under Homebrew 7.0.6,
-  therefore failed at `launchd-start`: `brew services start` loaded
-  `sh.brew.tensorplate-agent` and the harness looked for
-  `homebrew.mxcl.tensorplate-agent`. No stage after it had ever run under
-  the new naming.
-
-  The harness now reads each service's label from the plist Homebrew
-  generated in the formula's keg. That one value names the keg plist, the
-  `~/Library/LaunchAgents` copy `brew services start` installs and the job
-  it loads, and launchd-start, launchd-restart, launchd-crash-loop and
-  offline-runtime all use it; the offline stage derives its sandboxed plist
-  from that keg plist and runs it under the same label. A keg holding a
-  plist of neither form, or of both, fails the stage. Cleanup and the
-  uninstall stage may run with the keg gone and check both forms, since a
-  job loaded by an earlier Homebrew keeps its label. The uninstall stage
-  now also requires that no job under either label is still loaded, which
-  its transcript entry already claimed. The runbook's manual `launchctl
-  bootout` steps say how to find the label instead of naming the old one.
-
-- A completed macOS lifecycle run no longer leaves the host without the
-  formula trust its next preflight requires. `brew uninstall` drops a tap
-  formula's trust entry unless the whole tap is trusted, and the harness
-  uninstalls the candidate graph, so every run that reached the clean
-  install ended with only `tensorplate/tap/tensorplate` trusted, re-added by
-  the baseline install, while the harness untrusted only entries it had
-  added itself. It now records the six formulae's per-formula trust before
-  the tap-trust stage and puts exactly that set back before the clean
-  install, before the upgrade and on exit: it re-trusts what an uninstall
-  removed, untrusts what an install added, adds nothing else and logs each
-  change. The clean install needs this as well: a graph left
-  installed by an interrupted run lost its trust when the stage removed it,
-  and Homebrew refuses to load an untrusted dependency.
-
-- The macOS lifecycle harness's tap-trust stage refuses a tap on a custom
-  remote, such as one tapped from a local clone, before anything changes.
-  Homebrew keys that tap's formula trust by the remote rather than by
-  `tensorplate/tap`, so the trust restore would re-trust entries it never
-  reads back: the clean install would fail with the baseline already
-  removed, and the run would leave remote-keyed entries in place of the
-  operator's. The runbook no longer tells the operator to untrust the
-  component formulae after a run, which undid the restore, and says to
-  re-grant that trust when a run is killed, or its cleanup interrupted,
-  before the restore.
-
-- A release candidate's signed `SHA256SUMS` and manifest now name the files
-  the release contains. GitHub rewrites `~` to `.` in an uploaded asset's
-  name, so `v0.2.1-rc.1` served `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`
-  while both lists named `tensorplate-agent_0.2.1~rc.1-1_arm64.deb`, which
-  was a 404. `install.sh` failed on the first package it downloaded, the
-  Jetson lifecycle harness refused the set, and `sha256sum -c SHA256SUMS`
-  over the published release reported thirteen listed files it could not
-  read. Final releases carry no tilde and were never affected.
-
-  `build-release-artifacts.sh` now stages every package under the name GitHub
-  serves before anything records it, and manifest generation and
-  verification refuse any asset name that still holds a `~`. Only the file
-  name changes. Each package's control Version stays `0.2.1~rc.1-1`, and the
-  manifest records that version, not the published spelling, which sorts
-  above `0.2.1`. Because the published name can no longer tell `.` from
-  `~`, manifest generation reads each package's control Version with
-  `dpkg-deb`, records that, and refuses a package whose control Version is
-  not the one its name stands for; it now needs `dpkg-deb` to run. The
-  Ubuntu cloud lifecycle harness ordered the upgrade path on the manifest's
-  version. It now reads each package's control Version with `dpkg-deb`, as
-  the Jetson harness already did, and both harnesses name a listed package
-  that is missing from the set instead of reporting it as unreadable.
-
-  The release workflow now reads back the asset names a new GitHub Release
-  serves and fails unless they are exactly the names `SHA256SUMS` lists,
-  plus `SHA256SUMS` and its signature bundle. That checks GitHub's actual
-  behaviour rather than the one rewrite the build models, and for a final
-  release it runs while the release is still a draft.
-
-  `v0.2.1-rc.1`'s release and tag are no longer on GitHub. The next
-  candidate is the first one built this way, and the first that can serve
-  as the amd64 upgrade and rollback baseline.
-
-- `jetson-runner-control.sh status` reports the grant the runner actually
-  has. It probed whether the runner account could `sudo apt-get`, which the
-  previous change deliberately removed from the allowance, so a correctly
-  provisioned runner printed `runner_can_sudo_apt_get: no` -- the right state
-  wearing the shape of a failure -- and nothing reported on the wrapper that
-  replaced it. Status now runs a `probe` mode through the wrapper, which is
-  reachable only if the sudoers grant permits that path, and says plainly
-  whether the wrapper is installed at all. An absent wrapper names the
-  remedy, because the way to get one is to re-run `off` and `on` from a
-  checkout new enough to contain it -- which is exactly the mistake that
-  cost two release-workflow runs.
-
-- The self-hosted Jetson release job no longer elevates binaries the runner
-  is not allowed to run. Two separate steps did: the apt drop-in was written
-  with `sudo tee`, and `tools/ci/apt-get.sh` ran `sudo timeout ... apt-get`
-  and `sudo dpkg --configure -a`. The runner's allowance names `apt-get` and
-  `install` only, so each asked for a password nobody can type; the first
-  failed the initial `v0.2.1-rc.1` build and the second would have failed the
-  step after it.
-
-  The drop-in now goes through `install`. The time bound moves into
-  `/usr/local/sbin/tensorplate-apt`, a root-owned wrapper that
-  `jetson-runner-control.sh` installs alongside the sudoers file, and the
-  allowance names the wrapper instead of `apt-get` -- narrower than before,
-  since the wrapper accepts only `update`, `install` and a `configure-pending`
-  mode. The bound has to be apt's direct parent, which is why it could not
-  simply move outside `sudo`; granting `timeout` would have worked and handed
-  the runner account a root shell via `sudo timeout 1 /bin/sh`.
-
-  Re-run `jetson-runner-control.sh off` then `on` to install the wrapper.
-
-- The release workflow's self-hosted Jetson job writes its apt drop-in with a
-  binary the runner is actually allowed to run. `jetson-runner-control.sh`
-  installs a deliberately narrow sudoers allowance -- the runner account gets
-  `NOPASSWD` on `apt-get` and `install`, and nothing else -- while the step
-  used `sudo tee`, the spelling every GitHub-hosted copy of it uses. On the
-  Jetson that asks for a password nobody can type, and the job died with
-  `sudo: a password is required` before any package was built. The step had
-  been written for hosted runners and had never run on this one, so it failed
-  the first `v0.2.1-rc.1` build. It now writes a temporary file and installs
-  it with `install`, rather than widening a grant whose whole purpose is to
-  stay small.
-
-  `test/release/test_build_configuration.py` now derives the granted binaries
-  from the control script's `NOPASSWD` line and fails if the self-hosted job
-  elevates anything outside them. The grant and the workflow live in separate
-  files and nothing bound them, which is why a step could be added to that job
-  without anyone noticing it could not run there.
-
-- The release workflow's amd64 package-closure assertion no longer fails on a
-  package that is correct. `dpkg-deb -c "$deb" | grep -q PATH` exits at the
-  first match, closing the pipe while dpkg-deb's tar still has entries to
-  write; tar dies on SIGPIPE, and under `set -o pipefail` that becomes the
-  pipeline's status even though the match succeeded. The step then reported
-  `tensorplate-serving amd64 package does not ship
-  /usr/lib/tensorplate/tensorplate-serving` and printed, directly beneath it,
-  a listing containing that file. It failed the `v0.2.1-rc.1` build, where the
-  package was correct and every downstream publish job was skipped.
-
-  Both copies of the check now match against a here-string, which has no
-  producer process to signal. Capturing the listing into a variable is not
-  sufficient on its own: piping that variable back into `grep -q` recreates
-  the identical race with the shell as the producer, which is worth stating
-  because it is the obvious fix and it does not work.
-  `test/packaging/verify_arch_package_set.sh` carried the same pipeline and is
-  fixed with it; it had not fired only because its stub-built archive is small
-  enough that tar finishes writing before grep exits.
-
-## [0.2.1] - 2026-09-21
-
-### Added
 
 - The macOS Homebrew lifecycle harness has a status-logs stage, so the
   M1 Pro runbook maps all eight canonical lifecycle stages. After deploy
@@ -838,6 +657,183 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   directory is refused before the build.
 
 ### Fixed
+
+- `prepare` now folds `[Unreleased]` into the dated section for the version
+  being prepared, rather than only opening that section the first time it
+  runs. A tag is cut from a trunk commit, so every entry under
+  `[Unreleased]` at that commit ships in that tag; once the heading
+  existed the step did nothing, so this release's own entries -- nine of
+  them, merged after the heading was opened -- stayed under `[Unreleased]`
+  above the `0.2.1` section and shipped filed as unreleased. Nothing caught
+  it: a `prepare` that changes nothing is exactly how
+  `release_metadata_pending`, and so `cut`, reports the metadata final.
+
+  The fold is a pure move. Entries go to the top of the same-named
+  subsection, newest first; a subsection the release section has no block
+  for is opened at its top; entry text, including indented continuation
+  lines and fenced blocks, is carried over byte for byte; and
+  `[Unreleased]` is left present and empty, so a second run changes
+  nothing. A heading-shaped line inside a fence opened at column 0 is
+  quoted text rather than a section, so an entry that shows a changelog's
+  own shape moves intact instead of being filed into the fence. A fence
+  ends only at a run of its own character at least as long as the one that
+  opened it, so a ``` line quoted inside a ```` block does not end it. A shape
+  the step does not recognise -- no `[Unreleased]`, a repeated heading, a
+  version section that is not the one directly below `[Unreleased]`,
+  content ahead of a section's first subsection, or a fence left open --
+  is refused rather than guessed at. `cut` now refuses to tag until a
+  preparation pull request commits the fold, which is what should happen
+  whenever the trunk moved since the last one. Folding this release's own
+  entries is that pull request's job, not this change's.
+
+- The macOS Homebrew lifecycle harness names each service's launchd job the
+  way the installed Homebrew does. Homebrew 6.0.22 changed the label and
+  keg plist name of a formula's service from `homebrew.mxcl.<formula>` to
+  `sh.brew.<formula>`, and the harness hardcoded the old form in every
+  launchd check. The `v0.2.1-rc.2` run on the M1 Pro, under Homebrew 7.0.6,
+  therefore failed at `launchd-start`: `brew services start` loaded
+  `sh.brew.tensorplate-agent` and the harness looked for
+  `homebrew.mxcl.tensorplate-agent`. No stage after it had ever run under
+  the new naming.
+
+  The harness now reads each service's label from the plist Homebrew
+  generated in the formula's keg. That one value names the keg plist, the
+  `~/Library/LaunchAgents` copy `brew services start` installs and the job
+  it loads, and launchd-start, launchd-restart, launchd-crash-loop and
+  offline-runtime all use it; the offline stage derives its sandboxed plist
+  from that keg plist and runs it under the same label. A keg holding a
+  plist of neither form, or of both, fails the stage. Cleanup and the
+  uninstall stage may run with the keg gone and check both forms, since a
+  job loaded by an earlier Homebrew keeps its label. The uninstall stage
+  now also requires that no job under either label is still loaded, which
+  its transcript entry already claimed. The runbook's manual `launchctl
+  bootout` steps say how to find the label instead of naming the old one.
+
+- A completed macOS lifecycle run no longer leaves the host without the
+  formula trust its next preflight requires. `brew uninstall` drops a tap
+  formula's trust entry unless the whole tap is trusted, and the harness
+  uninstalls the candidate graph, so every run that reached the clean
+  install ended with only `tensorplate/tap/tensorplate` trusted, re-added by
+  the baseline install, while the harness untrusted only entries it had
+  added itself. It now records the six formulae's per-formula trust before
+  the tap-trust stage and puts exactly that set back before the clean
+  install, before the upgrade and on exit: it re-trusts what an uninstall
+  removed, untrusts what an install added, adds nothing else and logs each
+  change. The clean install needs this as well: a graph left
+  installed by an interrupted run lost its trust when the stage removed it,
+  and Homebrew refuses to load an untrusted dependency.
+
+- The macOS lifecycle harness's tap-trust stage refuses a tap on a custom
+  remote, such as one tapped from a local clone, before anything changes.
+  Homebrew keys that tap's formula trust by the remote rather than by
+  `tensorplate/tap`, so the trust restore would re-trust entries it never
+  reads back: the clean install would fail with the baseline already
+  removed, and the run would leave remote-keyed entries in place of the
+  operator's. The runbook no longer tells the operator to untrust the
+  component formulae after a run, which undid the restore, and says to
+  re-grant that trust when a run is killed, or its cleanup interrupted,
+  before the restore.
+
+- A release candidate's signed `SHA256SUMS` and manifest now name the files
+  the release contains. GitHub rewrites `~` to `.` in an uploaded asset's
+  name, so `v0.2.1-rc.1` served `tensorplate-agent_0.2.1.rc.1-1_arm64.deb`
+  while both lists named `tensorplate-agent_0.2.1~rc.1-1_arm64.deb`, which
+  was a 404. `install.sh` failed on the first package it downloaded, the
+  Jetson lifecycle harness refused the set, and `sha256sum -c SHA256SUMS`
+  over the published release reported thirteen listed files it could not
+  read. Final releases carry no tilde and were never affected.
+
+  `build-release-artifacts.sh` now stages every package under the name GitHub
+  serves before anything records it, and manifest generation and
+  verification refuse any asset name that still holds a `~`. Only the file
+  name changes. Each package's control Version stays `0.2.1~rc.1-1`, and the
+  manifest records that version, not the published spelling, which sorts
+  above `0.2.1`. Because the published name can no longer tell `.` from
+  `~`, manifest generation reads each package's control Version with
+  `dpkg-deb`, records that, and refuses a package whose control Version is
+  not the one its name stands for; it now needs `dpkg-deb` to run. The
+  Ubuntu cloud lifecycle harness ordered the upgrade path on the manifest's
+  version. It now reads each package's control Version with `dpkg-deb`, as
+  the Jetson harness already did, and both harnesses name a listed package
+  that is missing from the set instead of reporting it as unreadable.
+
+  The release workflow now reads back the asset names a new GitHub Release
+  serves and fails unless they are exactly the names `SHA256SUMS` lists,
+  plus `SHA256SUMS` and its signature bundle. That checks GitHub's actual
+  behaviour rather than the one rewrite the build models, and for a final
+  release it runs while the release is still a draft.
+
+  `v0.2.1-rc.1`'s release and tag are no longer on GitHub. The next
+  candidate is the first one built this way, and the first that can serve
+  as the amd64 upgrade and rollback baseline.
+
+- `jetson-runner-control.sh status` reports the grant the runner actually
+  has. It probed whether the runner account could `sudo apt-get`, which the
+  previous change deliberately removed from the allowance, so a correctly
+  provisioned runner printed `runner_can_sudo_apt_get: no` -- the right state
+  wearing the shape of a failure -- and nothing reported on the wrapper that
+  replaced it. Status now runs a `probe` mode through the wrapper, which is
+  reachable only if the sudoers grant permits that path, and says plainly
+  whether the wrapper is installed at all. An absent wrapper names the
+  remedy, because the way to get one is to re-run `off` and `on` from a
+  checkout new enough to contain it -- which is exactly the mistake that
+  cost two release-workflow runs.
+
+- The self-hosted Jetson release job no longer elevates binaries the runner
+  is not allowed to run. Two separate steps did: the apt drop-in was written
+  with `sudo tee`, and `tools/ci/apt-get.sh` ran `sudo timeout ... apt-get`
+  and `sudo dpkg --configure -a`. The runner's allowance names `apt-get` and
+  `install` only, so each asked for a password nobody can type; the first
+  failed the initial `v0.2.1-rc.1` build and the second would have failed the
+  step after it.
+
+  The drop-in now goes through `install`. The time bound moves into
+  `/usr/local/sbin/tensorplate-apt`, a root-owned wrapper that
+  `jetson-runner-control.sh` installs alongside the sudoers file, and the
+  allowance names the wrapper instead of `apt-get` -- narrower than before,
+  since the wrapper accepts only `update`, `install` and a `configure-pending`
+  mode. The bound has to be apt's direct parent, which is why it could not
+  simply move outside `sudo`; granting `timeout` would have worked and handed
+  the runner account a root shell via `sudo timeout 1 /bin/sh`.
+
+  Re-run `jetson-runner-control.sh off` then `on` to install the wrapper.
+
+- The release workflow's self-hosted Jetson job writes its apt drop-in with a
+  binary the runner is actually allowed to run. `jetson-runner-control.sh`
+  installs a deliberately narrow sudoers allowance -- the runner account gets
+  `NOPASSWD` on `apt-get` and `install`, and nothing else -- while the step
+  used `sudo tee`, the spelling every GitHub-hosted copy of it uses. On the
+  Jetson that asks for a password nobody can type, and the job died with
+  `sudo: a password is required` before any package was built. The step had
+  been written for hosted runners and had never run on this one, so it failed
+  the first `v0.2.1-rc.1` build. It now writes a temporary file and installs
+  it with `install`, rather than widening a grant whose whole purpose is to
+  stay small.
+
+  `test/release/test_build_configuration.py` now derives the granted binaries
+  from the control script's `NOPASSWD` line and fails if the self-hosted job
+  elevates anything outside them. The grant and the workflow live in separate
+  files and nothing bound them, which is why a step could be added to that job
+  without anyone noticing it could not run there.
+
+- The release workflow's amd64 package-closure assertion no longer fails on a
+  package that is correct. `dpkg-deb -c "$deb" | grep -q PATH` exits at the
+  first match, closing the pipe while dpkg-deb's tar still has entries to
+  write; tar dies on SIGPIPE, and under `set -o pipefail` that becomes the
+  pipeline's status even though the match succeeded. The step then reported
+  `tensorplate-serving amd64 package does not ship
+  /usr/lib/tensorplate/tensorplate-serving` and printed, directly beneath it,
+  a listing containing that file. It failed the `v0.2.1-rc.1` build, where the
+  package was correct and every downstream publish job was skipped.
+
+  Both copies of the check now match against a here-string, which has no
+  producer process to signal. Capturing the listing into a variable is not
+  sufficient on its own: piping that variable back into `grep -q` recreates
+  the identical race with the shell as the producer, which is worth stating
+  because it is the obvious fix and it does not work.
+  `test/packaging/verify_arch_package_set.sh` carried the same pipeline and is
+  fixed with it; it had not fired only because its stub-built archive is small
+  enough that tar finishes writing before grep exits.
 
 - The macOS offline-runtime stage no longer credits an unsandboxed
   control whose network operation never completed. The control is what
