@@ -51,6 +51,44 @@ def key(v):
     core = v.split('-')[0].split('~')[0]
     return tuple(int(p) if p.isdigit() else 0 for p in core.split('.')[:3])
 
+def range_problem(lo, hi, runtime, release_line):
+    """The first reason the range fails the tree, or None."""
+    if key(lo) >= key(hi):
+        return f'tensorplate_runtime_range min {lo} must precede max_exclusive {hi}'
+    if not (key(lo) <= key(runtime) < key(hi)):
+        return (f'packaging/VERSION {runtime} is outside the declared backend runtime '
+                f'range [{lo}, {hi}); bump max_exclusive in lockstep with the release line')
+    line_floor = f'{release_line}.0'
+    if not (key(lo) <= key(line_floor) < key(hi)):
+        return (f'the {release_line} release line is outside the declared backend runtime '
+                f'range [{lo}, {hi}); the backend must admit the line before the runtime '
+                f'version moves onto it')
+    # target_release_line is only meaningful while it names the line the tree
+    # is on or the next one. Once max_exclusive has moved, a line left behind
+    # would pass the check above forever, so refuse one behind packaging/VERSION.
+    if key(runtime)[:2] > key(line_floor)[:2]:
+        return (f'target_release_line {release_line} lags packaging/VERSION {runtime}; '
+                f'update it when the release line moves')
+    return None
+
+# Each refusal is exercised against fixed inputs and must fail for its own
+# reason, so a broken or deleted check fails this script rather than passing
+# silently. The last case is the one the target line exists for: named ahead
+# of the tree before packaging/VERSION moves onto it.
+self_checks = [
+    ('min not below max',      ('0.4.0', '0.4.0', '0.3.1', '0.3'), 'must precede max_exclusive'),
+    ('runtime above the range', ('0.1.0', '0.3.0', '0.3.1', '0.2'), 'packaging/VERSION 0.3.1 is outside'),
+    ('line above the range',    ('0.1.0', '0.4.0', '0.3.1', '0.4'), 'the 0.4 release line is outside'),
+    ('line behind the tree',    ('0.1.0', '0.4.0', '0.3.1', '0.2'), 'target_release_line 0.2 lags'),
+    ('line on the tree',        ('0.1.0', '0.4.0', '0.3.1', '0.3'), None),
+    ('line ahead of the tree',  ('0.1.0', '0.4.0', '0.2.1', '0.3'), None),
+]
+for name, args, expected in self_checks:
+    got = range_problem(*args)
+    if (got is None) != (expected is None) or (expected and expected not in got):
+        print(f'self-check failed: {name}: expected {expected!r}, got {got!r}', file=sys.stderr)
+        sys.exit(1)
+
 rng = d.get('tensorplate_runtime_range')
 if not isinstance(rng, dict):
     print('descriptor must declare tensorplate_runtime_range', file=sys.stderr)
@@ -59,26 +97,12 @@ lo, hi = rng.get('min'), rng.get('max_exclusive')
 if not lo or not hi:
     print('tensorplate_runtime_range needs both min and max_exclusive', file=sys.stderr)
     sys.exit(1)
-if key(lo) >= key(hi):
-    print(f'tensorplate_runtime_range min {lo} must precede max_exclusive {hi}', file=sys.stderr)
+problem = range_problem(lo, hi, runtime, release_line)
+if problem:
+    print(problem, file=sys.stderr)
     sys.exit(1)
-if not (key(lo) <= key(runtime) < key(hi)):
-    print(
-        f'packaging/VERSION {runtime} is outside the declared backend runtime '
-        f'range [{lo}, {hi}); bump max_exclusive in lockstep with the release line',
-        file=sys.stderr,
-    )
-    sys.exit(1)
-line_floor = f'{release_line}.0'
-if not (key(lo) <= key(line_floor) < key(hi)):
-    print(
-        f'the {release_line} release line is outside the declared backend runtime '
-        f'range [{lo}, {hi}); the backend must admit the line before the runtime '
-        f'version moves onto it',
-        file=sys.stderr,
-    )
-    sys.exit(1)
-print('descriptor OK:', d['package_name'], d['package_version'], f'[{lo}, {hi})')
+print('descriptor OK:', d['package_name'], d['package_version'], f'[{lo}, {hi})',
+      f'({len(self_checks)} self-checks)')
 PY
 else
   # Fallback: just check the shape with grep. The range comparison needs a
