@@ -40,10 +40,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   sources name, not to this run, but a reader cannot tell those apart. Ubuntu's regional
   apt mirror host stays as recorded: it names the region an image booted
   in, never an instance. The scanner read `needrestart`'s systemd template
-  unit names, such as `getty@tty1.service`, as email addresses; it now
-  exempts them by unit type, so stock output needs no editing, and
-  `evidence_publication_test.sh` covers both the exemption and its
-  anchoring. The raw runs are retained privately and are not in this
+  unit names as email addresses; it now exempts a token only where
+  systemd's own command line puts one, as an argument of a `systemctl`
+  verb, so stock output needs no editing while an address elsewhere on
+  that line is still a finding. The unit type cannot carry the exemption
+  by itself, because `target` is a delegated top-level domain, and
+  `evidence_publication_test.sh` covers that case, the argument
+  position, and the verb the position depends on. The raw runs are retained privately and are not in this
   repository.
 
   `docs/validation/cloud-row-runbooks.md` said the current harness had

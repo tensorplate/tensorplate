@@ -81,9 +81,17 @@ fetched every source on it, and these logs name no package outside
 TensorPlate's own, only counts. The one edit inside it is the
 `projects/<id>` shape, which gets `projects/REDACTED/` whoever owns the
 project: the scanner cannot tell a vendor's public registry from the
-operator's, and neither can a reader. systemd template unit names such
-as `getty@tty1.service` are not addresses; the scanner exempts them by
-unit type, so stock `needrestart` output needs no editing.
+operator's, and neither can a reader. A systemd template unit name has an
+address's shape, and `needrestart` prints several, in the form
+
+```
+systemctl restart getty@tty1.service
+```
+
+The scanner exempts such a name only in that position, as an argument of
+a `systemctl` verb, so stock output needs no editing while an address
+elsewhere on the same line is still a finding. The unit type alone can
+never carry the exemption: `target` is a delegated top-level domain.
 Credentials and planning identifiers have no synthetic form: neither
 belongs in evidence, so remove them.
 

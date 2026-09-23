@@ -631,6 +631,26 @@ new_case
 add_line "notify ${account}@$(random_word 8).service.example.com"
 expect_finding "an address whose host merely contains a unit type" email "$account"
 
+# `target` is a delegated top-level domain, so a unit type at the end of a
+# host says nothing on its own. Only systemd's own command line exempts a
+# token, and only the argument position within it.
+new_case
+add_line "contact ${account}@$(random_word 8).target"
+expect_finding "an address under a top-level domain that is also a unit type" \
+  email "$account"
+
+new_case
+add_line " systemctl restart getty@tty1.service then mail ${account}@$(random_word 8).target"
+expect_finding "an address after the arguments of a systemctl invocation" email "$account"
+
+new_case
+add_line "systemctl ${account}@$(random_word 8).target"
+expect_finding "a unit-shaped address where a systemctl verb belongs" email "$account"
+
+new_case
+add_line "restart ${account}@$(random_word 8).service"
+expect_finding "a unit-shaped address with no systemctl invocation" email "$account"
+
 project="$(random_word 8)-$((100000 + RANDOM))"
 new_case
 add_line "machine type projects/${project}/zones/us-central1-a/machineTypes/g2-standard-8"

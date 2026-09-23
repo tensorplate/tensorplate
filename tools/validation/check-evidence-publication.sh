@@ -188,13 +188,41 @@ EMAIL = re.compile(
     r"(?![A-Za-z0-9-])")
 EMAIL_DOMAINS = frozenset(("example.com", "example.org", "example.net"))
 # systemd template instance names have an address's shape: needrestart
-# prints `getty@tty1.service` and `serial-getty@ttyS0.service`. A unit
-# type is the last label, and none of them is a top-level domain, so an
-# address cannot end in one. Exempt them rather than editing a stock
-# tool's output out of a published log.
-SYSTEMD_UNIT_SUFFIX = re.compile(
+# prints `systemctl restart getty@tty1.service`. The unit type alone
+# cannot carry the exemption -- `target` is a delegated top-level domain,
+# so `someone@department.target` is both a plausible address and a
+# unit-shaped token. The exemption is therefore positional: a token is a
+# unit only where systemd's own command line puts one, as an argument of
+# a `systemctl` verb. An address anywhere else on that line is still a
+# finding. Widen this the same way if another tool's output needs it --
+# by the context that produces it, never by the suffix.
+SYSTEMD_UNIT = re.compile(
+    r"[A-Za-z0-9:_.\\-]+@[A-Za-z0-9:_.\\-]+"
     r"\.(?:service|socket|device|mount|automount|swap|target|path|timer"
-    r"|slice|scope)$")
+    r"|slice|scope)\Z")
+SYSTEMCTL = re.compile(r"\bsystemctl\b")
+SYSTEMCTL_VERB = re.compile(r"[a-z][a-z-]*\Z")
+
+
+def systemctl_unit_spans(line):
+    """Spans of template unit names given as arguments to `systemctl`."""
+    spans = []
+    for invocation in SYSTEMCTL.finditer(line):
+        offset = invocation.end()
+        verb_seen = False
+        for token in re.finditer(r"\S+", line[offset:]):
+            text = token.group(0)
+            if text.startswith("-"):
+                continue
+            if not verb_seen:
+                if not SYSTEMCTL_VERB.match(text):
+                    break
+                verb_seen = True
+                continue
+            if not SYSTEMD_UNIT.match(text):
+                break
+            spans.append((offset + token.start(), offset + token.end()))
+    return spans
 
 # As platform/tests/host_identity.rs requires of published GCE fixtures.
 CLOUD_PROJECT = re.compile(r"projects/([^/\s\"']+)/")
@@ -334,10 +362,13 @@ def scan_variant(line, literals):
         value = m.group(1).lower()
         if not value.startswith(MAC_DOCUMENTATION_PREFIX) and value not in MAC_ALLOWED:
             add("mac", m.group(1))
+    unit_spans = systemctl_unit_spans(line)
     for m in EMAIL.finditer(line):
-        domain = m.group(1).lower()
-        if domain not in EMAIL_DOMAINS and not SYSTEMD_UNIT_SUFFIX.search(domain):
-            add("email", m.group(0))
+        if m.group(1).lower() in EMAIL_DOMAINS:
+            continue
+        if any(start <= m.start() and m.end() <= end for start, end in unit_spans):
+            continue
+        add("email", m.group(0))
     for m in CLOUD_PROJECT.finditer(line):
         if m.group(1) != CLOUD_PROJECT_ALLOWED:
             add("cloud-project", m.group(1))
