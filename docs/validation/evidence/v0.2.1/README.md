@@ -55,6 +55,7 @@ still agree.
 | `.internal` or `.local` host name | `tp-synthetic-host`, without the suffix |
 | account name in a home path | `/home/tp-synthetic-operator`, `/Users/tp-synthetic-operator` |
 | machine id, boot id, journal directory id | 32 zeros |
+| macOS per-user or per-boot directory id, in `/var/folders/<bucket>/<id>/T` or `/var/run/com.apple.launchd.<id>` | 32 zeros, and `00` for the bucket |
 | GPU or MIG UUID | `GPU-00000000-0000-0000-0000-000000000001` (count up the last group) |
 | any other UUID | `00000000-0000-0000-0000-000000000001` |
 | cloud project in a resource path | `projects/REDACTED/` |
@@ -70,6 +71,14 @@ Loopback, `0.0.0.0`, the metadata server `169.254.169.254` and
 do the product's per-invocation `cli-`, `tx-` and `deploy-` ids.
 Credentials and planning identifiers have no synthetic form: neither
 belongs in evidence, so remove them.
+
+Remove, too, a tool's inventory of what else the machine carries, even
+though it identifies nobody: Homebrew's untrusted-tap warning names every
+other tap the operator has and the formulae installed from them, and a
+run that touches none of them proves nothing with it. Remove the whole
+warning, from its `Warning:` line through the `Tap-Trust` link, rather
+than editing the names inside it. This is the one case where a published
+log is shorter than the recording; the retained raw run is unchanged.
 
 ### Scan before `git add`
 

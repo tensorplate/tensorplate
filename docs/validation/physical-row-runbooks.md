@@ -560,8 +560,9 @@ Prerequisites:
    a `state.bak` the message above just pointed at. Copy anything worth
    keeping elsewhere before re-running.
 
-   A hardware run of this native harness on the Jetson is deferred to
-   release validation; the fixture checks do not replace it.
+   This native harness ran on the Jetson for `v0.2.1-rc.2` on
+   2026-09-22, all eight canonical stages passing; the fixture checks
+   never replaced that run.
 
    The digest this run files is the sha256 of the candidate's
    `SHA256SUMS`, taken in preflight once the asset set has verified and
@@ -683,8 +684,8 @@ run the `launchctl bootout` command it prints;
    the agent component, because the agent writes no structured events.
    `host-facts` stays unmapped: it collects inventory before anything is
    installed and observes neither status nor logs. The status-logs stage,
-   including its rotation checks, still requires a hardware run; the
-   historical evidence predates it.
+   including its rotation checks, ran on hardware in the 2026-09-22
+   `v0.2.1-rc.2` run; the older historical evidence predates it.
 
    `offline-runtime` backs `offline`. Both launchd services, startup
    recovery, a fresh deploy, inference, doctor and the MPS probe run
@@ -701,8 +702,8 @@ run the `launchctl bootout` command it prints;
    so are unix-socket and XPC brokers; `macos-homebrew-lifecycle.md`
    lists them. A wildcard listener on the serving ports is also allowed
    by the profile but fails the stage's loopback-only socket check. The
-   full offline-runtime stage still requires an M1 Pro hardware run;
-   the historical record does not cover it. `offline-profile` stays
+   full offline-runtime stage ran on M1 Pro hardware in that same run;
+   the older historical record does not cover it. `offline-profile` stays
    unmapped. It checks the profile
    against `sandbox-exec` during preflight, before anything is
    installed. The converter keeps each canonical stage's worst status,

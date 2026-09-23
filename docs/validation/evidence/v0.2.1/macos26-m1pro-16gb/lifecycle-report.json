@@ -1,0 +1,70 @@
+{
+  "schema_version": "0.1",
+  "row_id": "macos26-m1pro-16gb",
+  "subject": {
+    "tested_version": "0.2.1",
+    "artifact_digest": "517952e23c0971f8dc1434a2749cf5c361db2ea00cfaac3c62caf18cfa3c1b31"
+  },
+  "harness": "macos-homebrew-lifecycle",
+  "started_at": "2026-09-22T22:01:30Z",
+  "finished_at": "2026-09-22T22:07:29Z",
+  "outcome": "pass",
+  "stages": [
+    {
+      "stage": "install",
+      "status": "pass",
+      "log": "clean-install.log",
+      "started_at": "2026-09-22T22:01:30Z",
+      "finished_at": "2026-09-22T22:03:38Z"
+    },
+    {
+      "stage": "upgrade",
+      "status": "pass",
+      "log": "upgrade.log",
+      "started_at": "2026-09-22T22:05:25Z",
+      "finished_at": "2026-09-22T22:07:19Z"
+    },
+    {
+      "stage": "deploy-smoke",
+      "status": "pass",
+      "log": "deploy-smoke.log",
+      "started_at": "2026-09-22T22:03:55Z",
+      "finished_at": "2026-09-22T22:03:58Z"
+    },
+    {
+      "stage": "status-logs",
+      "status": "pass",
+      "log": "status-logs.log",
+      "started_at": "2026-09-22T22:03:58Z",
+      "finished_at": "2026-09-22T22:03:58Z"
+    },
+    {
+      "stage": "rollback",
+      "status": "pass",
+      "log": "rollback.log",
+      "started_at": "2026-09-22T22:07:19Z",
+      "finished_at": "2026-09-22T22:07:29Z"
+    },
+    {
+      "stage": "restart",
+      "status": "pass",
+      "log": "launchd-restart.log",
+      "started_at": "2026-09-22T22:03:59Z",
+      "finished_at": "2026-09-22T22:04:03Z"
+    },
+    {
+      "stage": "crash-loop",
+      "status": "pass",
+      "log": "launchd-crash-loop.log",
+      "started_at": "2026-09-22T22:04:03Z",
+      "finished_at": "2026-09-22T22:04:24Z"
+    },
+    {
+      "stage": "offline",
+      "status": "pass",
+      "log": "offline-runtime.log",
+      "started_at": "2026-09-22T22:04:24Z",
+      "finished_at": "2026-09-22T22:04:46Z"
+    }
+  ]
+}

@@ -1,0 +1,1368 @@
+{
+  "command": "status",
+  "correlation_id": "cli-50899377-8214-416a-ba9c-395f00b87c5a",
+  "payload": {
+    "agent": {
+      "active": {
+        "backend": "python_pytorch",
+        "bundle_digest": "sha256:5c478c8d9f33ad1e9353c07e6c7bbe0ccf540aad099bb5375f2137a9cd557302",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "deployment_id": "wave-2b-macos-deploy-smoke-20260922T220124Z",
+        "model_class": "custom",
+        "serving_url": "http://127.0.0.1:18081/infer"
+      },
+      "agent_state": "ready",
+      "available": true,
+      "candidate": null,
+      "in_flight_transaction": null,
+      "last_error": null,
+      "platform_telemetry": {
+        "memory": {
+          "accelerator_total_bytes": 17179869184,
+          "effective_budget_bytes": 17179869184,
+          "gate": "load_bearing",
+          "host_total_bytes": 17179869184,
+          "memory_profile": "unified_memory",
+          "row_nominal_capacity_bytes": 17179869184,
+          "shares_one_pool": true
+        },
+        "row_id": "macos26-m1pro-16gb",
+        "validated": true
+      },
+      "previous_active": {
+        "backend": "python_pytorch",
+        "bundle_digest": "sha256:5c478c8d9f33ad1e9353c07e6c7bbe0ccf540aad099bb5375f2137a9cd557302",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "deployment_id": "macos-offline-deploy-20260922T100322Z",
+        "model_class": "custom",
+        "serving_url": null
+      },
+      "quarantined": [],
+      "supervision": null
+    },
+    "agent_response_status": "ok",
+    "severity": "ready"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
+{
+  "command": "logs",
+  "correlation_id": null,
+  "payload": {
+    "entries": [
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3497635583,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6458,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2825958,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3474714458,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 5899417,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3501676959,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 2709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 687792,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3450937959,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3333,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 5679625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3481883291,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6084,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2611334,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3470901792,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5250,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 7021250,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3497452750,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 2625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 761750,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3363822041,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5042,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 4877833,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3480062792,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 1795584,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3463269334,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3375,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2819084,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3501722542,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5209,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 22349084,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3517523042,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2836625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3518049209,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5167,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 24779209,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3526731625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5125,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 927416,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3439973416,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5042,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 3851833,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3501706417,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6083,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 28231833,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3470535166,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3875,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 3031958,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3433044875,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2605625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3490908834,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4833,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 3132791,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3488035333,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6334,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 14060792,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3480114709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4875,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 3108125,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3462289125,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6042,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2032083,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3478576250,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4042,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2579417,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3489999750,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6375,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 5005917,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3478196709,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5417,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2077209,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3481633125,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4708,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 5469417,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3254773917,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 5667,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 2225084,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3262815500,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3625,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 11880291,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3277007333,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4708,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 23312250,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3549835583,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 3208,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 1639875,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3468114708,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 2875,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 5616583,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3327461667,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 6041,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 9052458,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3472423708,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "event": "service.startup",
+        "level": "info",
+        "monotonic_timestamp_ns": 4292,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 0,
+          "previous_state": "ready",
+          "queue_depth": 0,
+          "reason": "serving_degraded",
+          "state": "degraded"
+        },
+        "event": "state.transition",
+        "failure_reason": "worker_not_ready",
+        "level": "warn",
+        "monotonic_timestamp_ns": 29522459,
+        "schema_version": "0.1"
+      },
+      {
+        "component": "observability",
+        "context": {
+          "missed_deadline_rate": 0.0,
+          "missed_heartbeat_count": 3,
+          "previous_state": "degraded",
+          "queue_depth": 0,
+          "reason": "heartbeat_missing",
+          "state": "no_heartbeat"
+        },
+        "event": "state.transition",
+        "failure_reason": "no_heartbeat",
+        "level": "error",
+        "monotonic_timestamp_ns": 3360661750,
+        "schema_version": "0.1"
+      }
+    ],
+    "kind": "file",
+    "malformed": 0,
+    "source": "/opt/homebrew/var/log/tensorplate/events.ndjson"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}

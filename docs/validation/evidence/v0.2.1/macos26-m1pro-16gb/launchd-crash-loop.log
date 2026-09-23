@@ -1,0 +1,126 @@
+gui/501/sh.brew.tensorplate-agent = {
+	active count = 0
+	path = /Users/tp-synthetic-operator/Library/LaunchAgents/sh.brew.tensorplate-agent.plist
+	type = LaunchAgent
+	state = spawn scheduled
+
+	program = /opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent
+	arguments = {
+		/opt/homebrew/opt/tensorplate-agent/bin/tensorplate-agent
+		--config
+		/opt/homebrew/etc/tensorplate/agent.json
+	}
+
+	working directory = /opt/homebrew/var/tensorplate
+
+	stdout path = /opt/homebrew/var/log/tensorplate/agent.log
+	stderr path = /opt/homebrew/var/log/tensorplate/agent.error.log
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.00000000000000000000000000000000/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		TP_BACKEND_DESCRIPTOR_DIR => /opt/homebrew/share/tensorplate/backends
+		TP_PYTHON_PYTORCH_EXECUTABLE => /opt/homebrew/opt/pytorch/libexec/bin/python
+		TP_PLATFORM_REGISTRY_DIR => /opt/homebrew/share/tensorplate/platform
+		PATH => /opt/homebrew/bin:/opt/homebrew/sbin:/usr/bin:/bin:/usr/sbin:/sbin
+		PYTHONPATH => /opt/homebrew/opt/tensorplate-backend-python-pytorch/libexec
+		XPC_SERVICE_NAME => sh.brew.tensorplate-agent
+	}
+
+	domain = gui/501 [100022]
+	asid = 100022
+	minimum runtime = 5
+	exit timeout = 5
+	runs = 3
+	last exit code = 2
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	resource coalition = {
+		ID = 18962
+		type = resource
+		state = active
+		active count = 1
+		name = sh.brew.tensorplate-agent
+	}
+
+	jetsam coalition = {
+		ID = 18963
+		type = jetsam
+		state = active
+		active count = 1
+		name = sh.brew.tensorplate-agent
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+
+	properties = runatload | inferred program
+}
+Stopping `tensorplate-agent`... (might take a while)
+==> Successfully stopped `tensorplate-agent` (label: sh.brew.tensorplate-agent)
+==> Successfully started `tensorplate-agent` (label: sh.brew.tensorplate-agent)
+{
+  "command": "status",
+  "correlation_id": "cli-7f54a86d-9b14-4550-800f-fc8e3cf4facd",
+  "payload": {
+    "agent": {
+      "active": {
+        "backend": "python_pytorch",
+        "bundle_digest": "sha256:5c478c8d9f33ad1e9353c07e6c7bbe0ccf540aad099bb5375f2137a9cd557302",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "deployment_id": "wave-2b-macos-deploy-smoke-20260922T220124Z",
+        "model_class": "custom",
+        "serving_url": "http://127.0.0.1:18080/infer"
+      },
+      "agent_state": "ready",
+      "available": true,
+      "candidate": null,
+      "in_flight_transaction": null,
+      "last_error": null,
+      "platform_telemetry": {
+        "memory": {
+          "accelerator_total_bytes": 17179869184,
+          "effective_budget_bytes": 17179869184,
+          "gate": "load_bearing",
+          "host_total_bytes": 17179869184,
+          "memory_profile": "unified_memory",
+          "row_nominal_capacity_bytes": 17179869184,
+          "shares_one_pool": true
+        },
+        "row_id": "macos26-m1pro-16gb",
+        "validated": true
+      },
+      "previous_active": {
+        "backend": "python_pytorch",
+        "bundle_digest": "sha256:5c478c8d9f33ad1e9353c07e6c7bbe0ccf540aad099bb5375f2137a9cd557302",
+        "bundle_name": "mps-python-pytorch-smoke",
+        "bundle_version": "0.1.0",
+        "deployment_id": "macos-offline-deploy-20260922T100322Z",
+        "model_class": "custom",
+        "serving_url": null
+      },
+      "quarantined": [],
+      "supervision": null
+    },
+    "agent_response_status": "ok",
+    "severity": "ready"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}

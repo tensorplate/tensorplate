@@ -1,0 +1,14 @@
+Warning: The following tensorplate configuration files have not been removed!
+If desired, remove them manually with `rm -rf`:
+  /opt/homebrew/etc/tensorplate
+  /opt/homebrew/etc/tensorplate/agent.json
+  /opt/homebrew/etc/tensorplate/cli.json
+  /opt/homebrew/etc/tensorplate/observability.json
+==> Trusted formula tensorplate/tap/tensorplate
+Warning: tensorplate/tap/tensorplate 0.1.2 is already installed, it's just not linked.
+To link this version, run:
+  brew link tensorplate/tap/tensorplate
+Linking /opt/homebrew/Cellar/tensorplate/0.1.2... 1 symlinks created.
+tensorplate 0.1.2
+protocol: 0.1
+bundle_format: 0.1

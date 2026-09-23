@@ -56,7 +56,7 @@
     }
   },
   "support_level": "Production",
-  "provenance": "spec_authored",
+  "provenance": "recorded",
   "validation_environment": {
     "kind": "physical",
     "identity": "MacBook Pro, Apple M1 Pro 16GB (in lab)"
