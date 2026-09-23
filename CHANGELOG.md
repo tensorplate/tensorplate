@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-23
+
 ### Added
 
 - The two Ubuntu cloud rows, `ubuntu2404-x86-l4-g2s8` and
@@ -68,10 +70,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Production row is recorded; its doc comment and its `#[ignore]` reason
   both said it was expected to fail, and both now say why it stays
   ignored anyway.
-
-## [0.2.1] - 2026-09-21
-
-### Added
 
 - The MacBook Pro M1 Pro row, `macos26-m1pro-16gb`, carries recorded
   lifecycle evidence for 0.2.1, and its provenance is now `recorded`.
