@@ -94,24 +94,26 @@ jobs:
         shell: bash
         run: test/validation/public_hygiene_test.sh
 
-      # Pull request text reaches the scanner only through environment
-      # variables written to files, never through an expression in a shell
-      # line, where it would be code.
+      # The pull request's text is read from the event payload file. It
+      # never appears in an expression in a shell line, where it would be
+      # code, or in a step's env block, which the log prints verbatim and
+      # which would copy a disclosure into a log that outlives an edit.
       - name: Scan the pull request
         shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -Eeuo pipefail
           text="${RUNNER_TEMP}/pull-request"
           mkdir -p "$text"
-          printf '%s\n' "$PR_TITLE" >"${text}/title.txt"
-          printf '%s\n' "$PR_BODY" >"${text}/body.md"
-          printf '%s\n' "$PR_BRANCH" >"${text}/branch.txt"
-          tools/validation/check-public-hygiene.sh --base "$BASE_SHA" \
+          python3 - "$GITHUB_EVENT_PATH" "$text" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              pull = json.load(handle)["pull_request"]
+          for name, value in (("base.txt", pull["base"]["sha"]), ("title.txt", pull["title"]),
+                              ("body.md", pull["body"] or ""), ("branch.txt", pull["head"]["ref"])):
+              with open(os.path.join(sys.argv[2], name), "w", encoding="utf-8") as out:
+                  out.write(value + "\n")
+          PY
+          tools/validation/check-public-hygiene.sh --base "$(cat "${text}/base.txt")" \
             --message "${text}/title.txt" \
             --message "${text}/body.md" \
             --message "${text}/branch.txt"

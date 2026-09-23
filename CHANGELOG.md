@@ -16,9 +16,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   in the range wrote it, merges included, so a value one commit adds and
   a later one removes is still found. It also covers each changed file's
   name, every commit message, author and committer, the branch checked
-  out, and the pull request's title, body and branch name. The job passes
-  those three through environment variables written to files, never
-  through an expression in a shell line. Every file under
+  out, and the pull request's title, body and branch name. The job reads
+  those three from the event payload file: never from an expression in a
+  shell line, where they would be code, and never through a step's
+  environment, which the log prints. Every file under
   `docs/validation/evidence/` and `test/platform/` also goes through
   `check-evidence-publication.sh`, unchanged, name and content.
   Everything is checked against a narrow source policy:
