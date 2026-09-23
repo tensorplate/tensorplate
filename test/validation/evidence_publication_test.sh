@@ -621,6 +621,16 @@ new_case
 add_line "owner ${email}"
 expect_finding "an email address" email "$email"
 
+new_case
+add_line " systemctl restart getty@tty1.service"
+add_line " systemctl restart serial-getty@ttyS0.service"
+check "systemd template unit names remain publishable" "0" \
+  "$(scan "${d}.out" --patterns-only "$d")"
+
+new_case
+add_line "notify ${account}@$(random_word 8).service.example.com"
+expect_finding "an address whose host merely contains a unit type" email "$account"
+
 project="$(random_word 8)-$((100000 + RANDOM))"
 new_case
 add_line "machine type projects/${project}/zones/us-central1-a/machineTypes/g2-standard-8"

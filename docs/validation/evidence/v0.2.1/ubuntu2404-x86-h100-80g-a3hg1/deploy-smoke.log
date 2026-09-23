@@ -1,0 +1,11 @@
+==> validating the deploy-smoke bundle before deploying it
+{"backend_profile": "fixture", "bundle": "x86-fixture-smoke"}
+==> staging the bundle at /opt/tensorplate-validation/x86-fixture-smoke for the agent to read
+==> deploying
+==> issuing an inference request
+infer: posting to `http://127.0.0.1:18080/infer` (correlation_id=cli-ad18c26c-0928-42df-9b37-ec0caea9938b)
+infer: endpoint=http://127.0.0.1:18080/infer status=success request_id=cloud-lifecycle-smoke-1
+  outputs: 1 tensor(s)
+    - echo_probe shape=[1,4]
+
+PASS: bundle admitted, worker ready, inference round-tripped

@@ -187,6 +187,14 @@ EMAIL = re.compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@((?:[A-Za-z0-9-]+\.)+[A-Za-z][A-Za-z0-9-]*)"
     r"(?![A-Za-z0-9-])")
 EMAIL_DOMAINS = frozenset(("example.com", "example.org", "example.net"))
+# systemd template instance names have an address's shape: needrestart
+# prints `getty@tty1.service` and `serial-getty@ttyS0.service`. A unit
+# type is the last label, and none of them is a top-level domain, so an
+# address cannot end in one. Exempt them rather than editing a stock
+# tool's output out of a published log.
+SYSTEMD_UNIT_SUFFIX = re.compile(
+    r"\.(?:service|socket|device|mount|automount|swap|target|path|timer"
+    r"|slice|scope)$")
 
 # As platform/tests/host_identity.rs requires of published GCE fixtures.
 CLOUD_PROJECT = re.compile(r"projects/([^/\s\"']+)/")
@@ -327,7 +335,8 @@ def scan_variant(line, literals):
         if not value.startswith(MAC_DOCUMENTATION_PREFIX) and value not in MAC_ALLOWED:
             add("mac", m.group(1))
     for m in EMAIL.finditer(line):
-        if m.group(1).lower() not in EMAIL_DOMAINS:
+        domain = m.group(1).lower()
+        if domain not in EMAIL_DOMAINS and not SYSTEMD_UNIT_SUFFIX.search(domain):
             add("email", m.group(0))
     for m in CLOUD_PROJECT.finditer(line):
         if m.group(1) != CLOUD_PROJECT_ALLOWED:

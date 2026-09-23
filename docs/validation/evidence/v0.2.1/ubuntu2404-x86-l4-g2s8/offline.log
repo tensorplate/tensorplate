@@ -1,0 +1,620 @@
+==> probing the network with nothing denied, as the control
+{
+  "allowed": {
+    "tcp_loopback_serving_port": "ok",
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok",
+    "unix_agent_socket": "ok"
+  },
+  "denied": {
+    "tcp_gce_metadata": "ok",
+    "tcp_resolver_stub": "ok",
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "ok",
+    "udp_loopback_alias": "ok",
+    "udp_resolver_stub": "ok",
+    "udp_test_net_v4": "ok",
+    "udp_test_net_v4_from_child": "ok"
+  }
+}
+{
+  "allowed": {
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok"
+  },
+  "denied": {
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "ok",
+    "udp_loopback_alias": "ok",
+    "udp_resolver_stub": "ok",
+    "udp_test_net_v4": "ok",
+    "udp_test_net_v4_from_child": "ok"
+  },
+  "unit": "tensorplate-agent.service"
+}
+{
+  "allowed": {
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok"
+  },
+  "denied": {
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "ok",
+    "udp_loopback_alias": "ok",
+    "udp_resolver_stub": "ok",
+    "udp_test_net_v4": "ok",
+    "udp_test_net_v4_from_child": "ok"
+  },
+  "unit": "tensorplate-observability.service"
+}
+{
+  "allowed_prefixes": [
+    "127.0.0.1/32",
+    "::1/128"
+  ],
+  "runtime_drop_in": "10-tensorplate-validation-offline.conf",
+  "unit": "tensorplate-agent.service"
+}
+{
+  "allowed_prefixes": [
+    "127.0.0.1/32",
+    "::1/128"
+  ],
+  "runtime_drop_in": "10-tensorplate-validation-offline.conf",
+  "unit": "tensorplate-observability.service"
+}
+{
+  "allowed_prefixes": [
+    "127.0.0.1/32",
+    "::1/128"
+  ],
+  "denied": true,
+  "persistent_drop_ins_found": 0,
+  "units": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ],
+  "units_restarted": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ]
+}
+==> probing the network from inside each denied service's control group
+{
+  "allowed": {
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok"
+  },
+  "denied": {
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "EPERM",
+    "udp_loopback_alias": "EPERM",
+    "udp_resolver_stub": "EPERM",
+    "udp_test_net_v4": "EPERM",
+    "udp_test_net_v4_from_child": "EPERM"
+  },
+  "unit": "tensorplate-agent.service"
+}
+{
+  "ip_traffic_denied_except_the_two_host_addresses": true,
+  "metadata_operation": "required",
+  "operations_refused_under_the_denial": [
+    "udp_gce_metadata",
+    "udp_loopback_alias",
+    "udp_resolver_stub",
+    "udp_test_net_v4",
+    "udp_test_net_v4_from_child"
+  ],
+  "operations_silenced_under_the_denial": [],
+  "operations_this_host_cannot_send": [
+    "udp_documentation_v6"
+  ],
+  "scope": "unit"
+}
+{
+  "allowed": {
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok"
+  },
+  "denied": {
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "EPERM",
+    "udp_loopback_alias": "EPERM",
+    "udp_resolver_stub": "EPERM",
+    "udp_test_net_v4": "EPERM",
+    "udp_test_net_v4_from_child": "EPERM"
+  },
+  "unit": "tensorplate-observability.service"
+}
+{
+  "ip_traffic_denied_except_the_two_host_addresses": true,
+  "metadata_operation": "required",
+  "operations_refused_under_the_denial": [
+    "udp_gce_metadata",
+    "udp_loopback_alias",
+    "udp_resolver_stub",
+    "udp_test_net_v4",
+    "udp_test_net_v4_from_child"
+  ],
+  "operations_silenced_under_the_denial": [],
+  "operations_this_host_cannot_send": [
+    "udp_documentation_v6"
+  ],
+  "scope": "unit"
+}
+tensorplate-agent.service: captured 6 journal record(s) from the current invocation
+{
+  "machine_type_source": "recorded_gce_metadata",
+  "record": "not_applicable"
+}
+==> querying the control plane from inside a denied transient unit
+{
+  "deployment_id": "cloud-lifecycle-smoke",
+  "status": "pass"
+}
+==> running doctor from inside a denied transient unit
+{
+  "doctor": "pass",
+  "host_os_phrase_forbidden": "(from GCE metadata)",
+  "host_os_phrase_required": "recorded from GCE metadata by tensorplate-agent",
+  "platform_row": "ubuntu2404-x86-l4-g2s8"
+}
+==> deploying a fresh bundle from inside a denied transient unit
+{
+  "deploy": "pass"
+}
+{
+  "deployment_id": "cloud-lifecycle-smoke-offline",
+  "status": "pass"
+}
+==> issuing an inference request from inside a denied transient unit
+{
+  "endpoint": "linux-offline-runtime",
+  "inputs": [
+    {
+      "name": "probe",
+      "payload_b64": "AACAPwAAAEAAAEBAAACAQA==",
+      "tensor": {
+        "dtype": "float32",
+        "layout": "row_major",
+        "shape": [
+          1,
+          4
+        ]
+      }
+    }
+  ],
+  "request_id": "cloud-offline-1",
+  "schema_version": "0.1"
+}
+infer: posting to `http://127.0.0.1:18081/infer` (correlation_id=cli-2103e02a-aed3-4464-b560-1269b6e7818d)
+infer: endpoint=http://127.0.0.1:18081/infer status=success request_id=cloud-offline-1
+  outputs: 1 tensor(s)
+    - echo_probe shape=[1,4]
+
+{
+  "infer": "pass"
+}
+==> probing the network from inside a denied transient unit
+{
+  "allowed": {
+    "tcp_loopback_serving_port": "ok",
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok",
+    "unix_agent_socket": "ok"
+  },
+  "denied": {
+    "tcp_gce_metadata": "timeout",
+    "tcp_resolver_stub": "timeout",
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "EPERM",
+    "udp_loopback_alias": "EPERM",
+    "udp_resolver_stub": "EPERM",
+    "udp_test_net_v4": "EPERM",
+    "udp_test_net_v4_from_child": "EPERM"
+  }
+}
+{
+  "ip_traffic_denied_except_the_two_host_addresses": true,
+  "metadata_operation": "required",
+  "operations_refused_under_the_denial": [
+    "udp_gce_metadata",
+    "udp_loopback_alias",
+    "udp_resolver_stub",
+    "udp_test_net_v4",
+    "udp_test_net_v4_from_child"
+  ],
+  "operations_silenced_under_the_denial": [
+    "tcp_gce_metadata",
+    "tcp_resolver_stub"
+  ],
+  "operations_this_host_cannot_send": [
+    "udp_documentation_v6"
+  ],
+  "scope": "transient"
+}
+==> removing the offline denial drop-ins
+{
+  "denied": false,
+  "drop_ins_removed": 2,
+  "persistent_drop_ins_found": 0,
+  "units": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ],
+  "units_restarted": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ]
+}
+{
+  "classification": {
+    "ip_traffic_denied_except_the_two_host_addresses": true,
+    "metadata_operation": "required",
+    "operations_refused_under_the_denial": [
+      "udp_gce_metadata",
+      "udp_loopback_alias",
+      "udp_resolver_stub",
+      "udp_test_net_v4",
+      "udp_test_net_v4_from_child"
+    ],
+    "operations_silenced_under_the_denial": [
+      "tcp_gce_metadata",
+      "tcp_resolver_stub"
+    ],
+    "operations_this_host_cannot_send": [
+      "udp_documentation_v6"
+    ],
+    "scope": "transient"
+  },
+  "cli_under_denial": {
+    "deploy": "pass",
+    "doctor": "pass",
+    "infer": "pass",
+    "status": "pass",
+    "status_after_deploy": "pass"
+  },
+  "cli_units_probed_before_each_call": {
+    "deploy": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "call": "deploy",
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        }
+      }
+    },
+    "doctor": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "call": "doctor",
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        }
+      }
+    },
+    "infer": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "call": "infer",
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        }
+      }
+    },
+    "status": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "call": "status",
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        }
+      }
+    },
+    "status-after-deploy": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "call": "status-after-deploy",
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        }
+      }
+    }
+  },
+  "control": {
+    "allowed": {
+      "tcp_loopback_serving_port": "ok",
+      "udp_loopback_allowed_v4": "ok",
+      "udp_loopback_allowed_v6": "ok",
+      "unix_agent_socket": "ok"
+    },
+    "denied": {
+      "tcp_gce_metadata": "ok",
+      "tcp_resolver_stub": "ok",
+      "udp_documentation_v6": "ENETUNREACH",
+      "udp_gce_metadata": "ok",
+      "udp_loopback_alias": "ok",
+      "udp_resolver_stub": "ok",
+      "udp_test_net_v4": "ok",
+      "udp_test_net_v4_from_child": "ok"
+    }
+  },
+  "deployment_id": "cloud-lifecycle-smoke-offline",
+  "enforced": true,
+  "identity": {
+    "machine_type_source": "recorded_gce_metadata",
+    "record": "not_applicable"
+  },
+  "mechanism": {
+    "allow": [
+      "127.0.0.1/32",
+      "::1/128"
+    ],
+    "deny": "any",
+    "drop_in_scope": "runtime",
+    "per_unit_drop_in": "10-tensorplate-validation-offline.conf",
+    "resolver_stub_allowed": false
+  },
+  "probe": {
+    "allowed": {
+      "tcp_loopback_serving_port": "ok",
+      "udp_loopback_allowed_v4": "ok",
+      "udp_loopback_allowed_v6": "ok",
+      "unix_agent_socket": "ok"
+    },
+    "denied": {
+      "tcp_gce_metadata": "timeout",
+      "tcp_resolver_stub": "timeout",
+      "udp_documentation_v6": "ENETUNREACH",
+      "udp_gce_metadata": "EPERM",
+      "udp_loopback_alias": "EPERM",
+      "udp_resolver_stub": "EPERM",
+      "udp_test_net_v4": "EPERM",
+      "udp_test_net_v4_from_child": "EPERM"
+    }
+  },
+  "restore": {
+    "drop_ins_removed": 2,
+    "persistent_unit_files_written": 0,
+    "units_restarted_without_the_denial": [
+      "tensorplate-agent.service",
+      "tensorplate-observability.service"
+    ],
+    "units_undenied": [
+      "tensorplate-agent.service",
+      "tensorplate-observability.service"
+    ]
+  },
+  "transient_unit_properties": [
+    "IPAddressDeny=any",
+    "IPAddressAllow=127.0.0.1/32",
+    "IPAddressAllow=::1/128"
+  ],
+  "units_denied": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ],
+  "units_probed_in_their_own_control_group": {
+    "tensorplate-agent.service": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "control": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "ok",
+          "udp_loopback_alias": "ok",
+          "udp_resolver_stub": "ok",
+          "udp_test_net_v4": "ok",
+          "udp_test_net_v4_from_child": "ok"
+        },
+        "unit": "tensorplate-agent.service"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        },
+        "unit": "tensorplate-agent.service"
+      }
+    },
+    "tensorplate-observability.service": {
+      "classification": {
+        "ip_traffic_denied_except_the_two_host_addresses": true,
+        "metadata_operation": "required",
+        "operations_refused_under_the_denial": [
+          "udp_gce_metadata",
+          "udp_loopback_alias",
+          "udp_resolver_stub",
+          "udp_test_net_v4",
+          "udp_test_net_v4_from_child"
+        ],
+        "operations_silenced_under_the_denial": [],
+        "operations_this_host_cannot_send": [
+          "udp_documentation_v6"
+        ],
+        "scope": "unit"
+      },
+      "control": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "ok",
+          "udp_loopback_alias": "ok",
+          "udp_resolver_stub": "ok",
+          "udp_test_net_v4": "ok",
+          "udp_test_net_v4_from_child": "ok"
+        },
+        "unit": "tensorplate-observability.service"
+      },
+      "probe": {
+        "allowed": {
+          "udp_loopback_allowed_v4": "ok",
+          "udp_loopback_allowed_v6": "ok"
+        },
+        "denied": {
+          "udp_documentation_v6": "ENETUNREACH",
+          "udp_gce_metadata": "EPERM",
+          "udp_loopback_alias": "EPERM",
+          "udp_resolver_stub": "EPERM",
+          "udp_test_net_v4": "EPERM",
+          "udp_test_net_v4_from_child": "EPERM"
+        },
+        "unit": "tensorplate-observability.service"
+      }
+    }
+  },
+  "units_restarted_under_the_denial": [
+    "tensorplate-agent.service",
+    "tensorplate-observability.service"
+  ]
+}
+PASS: both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit, inside each service's control group and inside each CLI call's own unit before the call, each against a control that completed the same operations; ubuntu2404-x86-l4-g2s8 resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed

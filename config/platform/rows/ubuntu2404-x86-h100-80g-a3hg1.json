@@ -49,7 +49,7 @@
     }
   },
   "support_level": "Production",
-  "provenance": "spec_authored",
+  "provenance": "recorded",
   "validation_environment": {
     "kind": "cloud_instance",
     "identity": "GCP a3-highgpu-1g (disposable), single GPU, non-partitioned",

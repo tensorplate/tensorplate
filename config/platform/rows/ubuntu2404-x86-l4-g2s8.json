@@ -54,7 +54,7 @@
     }
   },
   "support_level": "Production",
-  "provenance": "spec_authored",
+  "provenance": "recorded",
   "validation_environment": {
     "kind": "cloud_instance",
     "identity": "GCP g2-standard-8 (disposable)",
