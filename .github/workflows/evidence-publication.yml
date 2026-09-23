@@ -13,9 +13,17 @@ name: Evidence publication
 # and instance names live in a private literal file that never reaches
 # CI, so filing evidence still means running the scanner locally with
 # --literals first (docs/validation/evidence/v0.2.1/README.md).
+#
+# The public hygiene job scans everything else a pull request publishes:
+# every file it adds or changes, at every commit, its commit messages and
+# authors, and its title, body and branch name, since squash-merge makes
+# the body a commit message. It runs again when the title or body is
+# edited. The same script is the pre-push check (rule 10 of
+# docs/validation/fixture-and-evidence-rules.md).
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main, develop, 'release/**']
   workflow_dispatch:
@@ -55,3 +63,55 @@ jobs:
       - name: Scan committed evidence
         shell: bash
         run: tools/validation/check-evidence-publication.sh --patterns-only docs/validation/evidence
+
+  public-hygiene:
+    name: public hygiene scan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      # The pull request's own commits, not the merge result: the range
+      # scanned is exactly what the branch published.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Shellcheck the scanner and its test
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --version
+            shellcheck tools/validation/check-public-hygiene.sh \
+              test/validation/public_hygiene_test.sh
+          else
+            echo '::warning::shellcheck is not installed on this runner; lint skipped'
+          fi
+
+      - name: Scanner tests
+        shell: bash
+        run: test/validation/public_hygiene_test.sh
+
+      # Pull request text reaches the scanner only through environment
+      # variables written to files, never through an expression in a shell
+      # line, where it would be code.
+      - name: Scan the pull request
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -Eeuo pipefail
+          text="${RUNNER_TEMP}/pull-request"
+          mkdir -p "$text"
+          printf '%s\n' "$PR_TITLE" >"${text}/title.txt"
+          printf '%s\n' "$PR_BODY" >"${text}/body.md"
+          printf '%s\n' "$PR_BRANCH" >"${text}/branch.txt"
+          tools/validation/check-public-hygiene.sh --base "$BASE_SHA" \
+            --message "${text}/title.txt" \
+            --message "${text}/body.md" \
+            --message "${text}/branch.txt"
