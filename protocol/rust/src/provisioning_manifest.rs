@@ -98,7 +98,7 @@ impl ProvisioningManifest {
             let name = &bundle.name;
             if !is_bundle_name(name) {
                 return invalid(format!(
-                    "bundle name `{name}` must be lowercase letters, digits, `.`, `_` or `-`, starting with a letter or digit"
+                    "bundle name `{name}` must be 1 to 128 lowercase letters, digits, `.`, `_` or `-`, starting with a letter or digit"
                 ));
             }
             if !names.insert(name.as_str()) {
@@ -112,7 +112,7 @@ impl ProvisioningManifest {
                 let path = &file.path;
                 if !is_bundle_path(path) {
                     return invalid(format!(
-                        "bundle `{name}`: `{path}` is not a relative `/`-separated path of plain segments"
+                        "bundle `{name}`: `{path}` is not a relative `/`-separated path of plain segments, at most 512 bytes"
                     ));
                 }
                 if !is_sha256_hex(&file.sha256) {

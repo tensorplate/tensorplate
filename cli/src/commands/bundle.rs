@@ -7,19 +7,25 @@
 // The provisioning manifest is the trust root: it lists every file of the
 // bundle -- its `manifest.json` included -- with the SHA-256 and size each
 // must have. Files are copied into a partial root beside the destination,
-// hashed as they are copied, never through a symbolic link. The partial root
-// must then hold exactly the listed files and pass the same bundle check
-// `tensorplate deploy` makes, and only then is it renamed into place. Any
-// failure removes the partial root, so a failed run leaves nothing a deploy
-// could pick up. A destination that already exists is verified in place and
-// never overwritten.
+// hashed as they are copied, never through a symbolic link below `--from`,
+// and given modes that do not depend on the operator's umask. The partial
+// root must then pass the bundle parser `tensorplate deploy` runs first,
+// and only then is it renamed into place. Any failure removes the partial
+// root, so a failed run never creates a directory a deploy could pick up.
+// A destination that already exists is verified in place and left as it
+// was found, whatever the outcome.
+//
+// The partial root is created exclusively, so two runs for one bundle
+// never share one: the second is refused, as is a run that finds one left
+// by an interrupted run.
 //
 // This runs in the operator's shell, never under the agent's service unit,
 // and reads only a local directory. Fetching from the files' upstream
 // sources is separate work.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -35,25 +41,36 @@ use crate::args::{BundleCommand, ProvisionArgs};
 use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
 
-/// Why provisioning failed. Every variant leaves no deployable directory:
-/// the partial root is removed, and an existing destination is left as it
-/// was found.
+/// Mode of every directory the command creates: the agent reads bundles
+/// through their other bits, and nothing but the operator's user may write.
+const DIR_MODE: u32 = 0o755;
+/// Mode of every file the command creates.
+const FILE_MODE: u32 = 0o644;
+
+/// Why provisioning failed. No variant creates a deployable directory: the
+/// partial root is removed, and an existing destination is left as it was
+/// found.
 #[derive(Debug, thiserror::Error)]
 pub enum ProvisionError {
     #[error("the provisioning manifest {path} cannot be used: {reason}")]
     Manifest { path: PathBuf, reason: String },
     #[error("the provisioning manifest lists no bundle `{name}`{available}")]
     UnknownBundle { name: String, available: String },
-    #[error("{path} is not a directory; the tensorplate-agent package creates it")]
-    ImportDirMissing { path: PathBuf },
+    /// `given` is whether the operator named the directory with `--into`.
+    #[error("{path} is not a directory; a symbolic link to one is not followed")]
+    ImportDirMissing { path: PathBuf, given: bool },
+    #[error(
+        "{path} exists: another run is provisioning this bundle, or an earlier run was interrupted"
+    )]
+    PartialRootExists { path: PathBuf },
     #[error("`{path}` is not in the source directory")]
     SourceMissing { path: String },
-    #[error(
-        "`{path}` is a symbolic link or has one in its path; files are copied only from real files"
-    )]
+    #[error("`{path}` is a symbolic link or has one in its path")]
     SymbolicLink { path: String },
     #[error("`{path}` is not a regular file")]
     NotRegular { path: String },
+    #[error("`{path}` changed between being checked and being opened")]
+    Changed { path: String },
     #[error("`{path}` is {actual} bytes; the provisioning manifest says {expected}")]
     SizeMismatch {
         path: String,
@@ -66,10 +83,10 @@ pub enum ProvisionError {
         expected: String,
         actual: String,
     },
-    #[error("`{path}` is in the bundle directory but not in the provisioning manifest")]
-    UnlistedFile { path: String },
-    #[error("the provisioned files do not form a bundle deploy accepts: {reason}")]
+    #[error("the provisioned files do not form a bundle deploy's bundle parser accepts: {reason}")]
     BundleRejected { reason: String },
+    #[error("{path} already exists and is not this bundle, so it is left as found: {reason}")]
+    DestinationMismatch { path: PathBuf, reason: String },
     #[error("{what}: {detail}")]
     Io { what: String, detail: String },
 }
@@ -82,13 +99,15 @@ impl ProvisionError {
             Self::Manifest { .. } => "manifest_invalid",
             Self::UnknownBundle { .. } => "unknown_bundle",
             Self::ImportDirMissing { .. } => "import_dir_missing",
+            Self::PartialRootExists { .. } => "partial_root_exists",
             Self::SourceMissing { .. } => "source_missing",
             Self::SymbolicLink { .. } => "symbolic_link",
             Self::NotRegular { .. } => "not_regular",
+            Self::Changed { .. } => "changed_during_run",
             Self::SizeMismatch { .. } => "size_mismatch",
             Self::DigestMismatch { .. } => "digest_mismatch",
-            Self::UnlistedFile { .. } => "unlisted_file",
             Self::BundleRejected { .. } => "bundle_rejected",
+            Self::DestinationMismatch { .. } => "destination_mismatch",
             Self::Io { .. } => "io",
         }
     }
@@ -113,15 +132,27 @@ impl From<ProvisionError> for CliError {
             _ => ErrorCode::LoadFailed,
         };
         let hint = match &err {
-            ProvisionError::ImportDirMissing { .. } => {
-                Some("install tensorplate-agent on this host, or pass --into".to_string())
+            ProvisionError::ImportDirMissing { given: false, .. } => Some(
+                "the tensorplate-agent Debian package creates it; install that package, or pass --into"
+                    .to_string(),
+            ),
+            ProvisionError::ImportDirMissing { given: true, .. } => {
+                Some("pass --into a directory that exists".to_string())
             }
-            ProvisionError::UnlistedFile { .. } => Some(
-                "the destination already exists and holds something else; remove it and run again"
+            ProvisionError::PartialRootExists { .. } => Some(
+                "if no other `bundle provision` of this bundle is running, remove it and run again"
+                    .to_string(),
+            ),
+            ProvisionError::SymbolicLink { .. } => Some(
+                "files are read only from real files below --from; copy the file itself there"
                     .to_string(),
             ),
             ProvisionError::SizeMismatch { .. } | ProvisionError::DigestMismatch { .. } => Some(
                 "the source file is not the one the manifest pins; fetch it again from its pinned revision"
+                    .to_string(),
+            ),
+            ProvisionError::DestinationMismatch { .. } => Some(
+                "nothing was changed; once nothing is deployed from it, remove it and run again"
                     .to_string(),
             ),
             _ => None,
@@ -228,44 +259,69 @@ pub fn provision(args: &ProvisionArgs) -> Result<ProvisionReport, ProvisionError
         .clone()
         .unwrap_or_else(|| PathBuf::from(BUNDLE_IMPORT_DIR));
     if !fs::symlink_metadata(&into).is_ok_and(|m| m.is_dir()) {
-        return Err(ProvisionError::ImportDirMissing { path: into });
+        return Err(ProvisionError::ImportDirMissing {
+            path: into,
+            given: args.into.is_some(),
+        });
     }
     let destination = into.join(&bundle.name);
     let bytes = bundle.files.iter().map(|f| f.size).sum();
 
     // An existing destination is verified where it is and never replaced:
     // it may be deployed from already.
-    if fs::symlink_metadata(&destination).is_ok() {
-        verify_directory(&destination, bundle, Hash::EveryFile)?;
-        return Ok(ProvisionReport {
-            name: bundle.name.clone(),
-            path: destination,
-            files: bundle.files.len(),
-            bytes,
-            already_provisioned: true,
-        });
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            verify_existing(&destination, bundle)?;
+            return Ok(ProvisionReport {
+                name: bundle.name.clone(),
+                path: destination,
+                files: bundle.files.len(),
+                bytes,
+                already_provisioned: true,
+            });
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(ProvisionError::io(
+                format!("cannot read {}", destination.display()),
+                &err,
+            ))
+        }
     }
 
-    // A partial root is only ever this command's, left by a run that was
-    // killed; start over from nothing.
+    // Created exclusively: a partial root that exists belongs to another
+    // run, live or interrupted, and is neither used nor removed.
     let partial = into.join(format!(".{}.partial", bundle.name));
-    remove_partial(&partial)?;
-    fs::create_dir(&partial)
-        .map_err(|err| ProvisionError::io(format!("cannot create {}", partial.display()), &err))?;
-    let outcome = fill(&args.from, &partial, bundle).and_then(|()| {
-        fs::rename(&partial, &destination).map_err(|err| {
-            ProvisionError::io(
-                format!(
-                    "cannot move the verified bundle to {}",
-                    destination.display()
-                ),
+    match fs::create_dir(&partial) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            return Err(ProvisionError::PartialRootExists { path: partial })
+        }
+        Err(err) => {
+            return Err(ProvisionError::io(
+                format!("cannot create {}", partial.display()),
                 &err,
-            )
-        })
-    });
+            ))
+        }
+    }
+    let outcome = set_mode(&partial, DIR_MODE)
+        .and_then(|()| fill(&args.from, &partial, bundle))
+        .and_then(|()| {
+            fs::rename(&partial, &destination).map_err(|err| {
+                ProvisionError::io(
+                    format!(
+                        "cannot move the verified bundle to {}",
+                        destination.display()
+                    ),
+                    &err,
+                )
+            })
+        });
     if let Err(err) = outcome {
         // Best effort: the error being reported is the one that matters.
-        let _ = remove_partial(&partial);
+        // The partial root is this run's own directory; std's
+        // remove_dir_all does not follow links inside it.
+        let _ = fs::remove_dir_all(&partial);
         return Err(err);
     }
     Ok(ProvisionReport {
@@ -278,58 +334,70 @@ pub fn provision(args: &ProvisionArgs) -> Result<ProvisionReport, ProvisionError
 }
 
 /// Copy and verify every file into `partial`, then check the whole.
+///
+/// The partial root is this run's own: created exclusively, writable only
+/// by the operator's user, and every file in it created here and hashed as
+/// it was written. Reading them all again would triple the reads of files
+/// that can be gigabytes, since deploy's bundle parser hashes the artifacts
+/// too, so what is left to check is that parser.
 fn fill(from: &Path, partial: &Path, bundle: &ProvisionedBundle) -> Result<(), ProvisionError> {
     for file in &bundle.files {
         copy_verified(from, partial, file)?;
     }
-    // Every file was hashed as it was copied; reading them all again would
-    // triple the reads of files that can be gigabytes, since deploy's check
-    // hashes the artifacts too.
-    verify_directory(partial, bundle, Hash::AlreadyHashed)
-}
-
-/// Whether [`verify_directory`] hashes the files itself.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Hash {
-    /// A directory this run did not write: every file is hashed.
-    EveryFile,
-    /// The partial root this run filled, hashing every file as it copied.
-    AlreadyHashed,
-}
-
-/// The directory holds exactly `bundle`'s files, each with its size and
-/// digest, nothing through a link, and deploy's own bundle check accepts it.
-fn verify_directory(
-    root: &Path,
-    bundle: &ProvisionedBundle,
-    hash: Hash,
-) -> Result<(), ProvisionError> {
-    let mut found = Vec::new();
-    walk(root, root, &mut found)?;
-    for path in &found {
-        if !bundle.files.iter().any(|f| &f.path == path) {
-            return Err(ProvisionError::UnlistedFile { path: path.clone() });
-        }
-    }
-    for file in &bundle.files {
-        let path = checked_path(root, &file.path)?;
-        if hash == Hash::AlreadyHashed {
-            continue;
-        }
-        let digest = hash_file(&path, file)?;
-        if digest != file.sha256 {
-            return Err(ProvisionError::DigestMismatch {
-                path: file.path.clone(),
-                expected: file.sha256.clone(),
-                actual: digest,
-            });
-        }
-    }
-    parse_bundle(root)
+    parse_bundle(partial)
         .map(|_| ())
         .map_err(|err| ProvisionError::BundleRejected {
             reason: err.to_string(),
         })
+}
+
+/// The existing `destination` is exactly `bundle`: a real directory holding
+/// the listed files and nothing else, each with its size and digest, nothing
+/// through a link, and deploy's bundle parser accepts it. Anything else is a
+/// [`ProvisionError::DestinationMismatch`], except a failure to read.
+fn verify_existing(destination: &Path, bundle: &ProvisionedBundle) -> Result<(), ProvisionError> {
+    let mismatch = |reason: String| ProvisionError::DestinationMismatch {
+        path: destination.to_path_buf(),
+        reason,
+    };
+    let in_destination = |err: ProvisionError| match err {
+        ProvisionError::Io { .. } => err,
+        ProvisionError::SourceMissing { path } => mismatch(format!("`{path}` is missing")),
+        other => mismatch(other.to_string()),
+    };
+    let meta = fs::symlink_metadata(destination).map_err(|err| {
+        ProvisionError::io(format!("cannot read {}", destination.display()), &err)
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(mismatch("it is a symbolic link".to_string()));
+    }
+    if !meta.is_dir() {
+        return Err(mismatch("it is not a directory".to_string()));
+    }
+    let mut found = Vec::new();
+    walk(destination, destination, &mut found).map_err(in_destination)?;
+    if let Some(path) = found
+        .iter()
+        .find(|path| !bundle.files.iter().any(|f| &f.path == *path))
+    {
+        return Err(mismatch(format!(
+            "`{path}` is not in the provisioning manifest"
+        )));
+    }
+    for file in &bundle.files {
+        let mut opened = open_listed(destination, file).map_err(in_destination)?;
+        let digest = stream(&mut opened, file, None, destination).map_err(in_destination)?;
+        if digest != file.sha256 {
+            return Err(in_destination(ProvisionError::DigestMismatch {
+                path: file.path.clone(),
+                expected: file.sha256.clone(),
+                actual: digest,
+            }));
+        }
+    }
+    parse_bundle(destination)
+        .map(|_| ())
+        .map_err(|err| mismatch(format!("deploy's bundle parser refuses it: {err}")))
 }
 
 /// Every regular file under `dir`, as a `/`-separated path relative to
@@ -361,9 +429,11 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Provisio
     Ok(())
 }
 
-/// `root` joined with a manifest path, refusing a link at any component.
-fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, ProvisionError> {
+/// `root` joined with a manifest path, refusing a link at any component
+/// below `root`, with the final component's own metadata: a regular file.
+fn checked_path(root: &Path, relative: &str) -> Result<(PathBuf, fs::Metadata), ProvisionError> {
     let mut path = root.to_path_buf();
+    let mut last = None;
     for segment in relative.split('/') {
         path.push(segment);
         match fs::symlink_metadata(&path) {
@@ -372,8 +442,8 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, ProvisionError> 
                     path: relative.to_string(),
                 })
             }
-            Ok(_) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(meta) => last = Some(meta),
+            Err(err) if err.kind() == ErrorKind::NotFound => {
                 return Err(ProvisionError::SourceMissing {
                     path: relative.to_string(),
                 })
@@ -386,30 +456,48 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, ProvisionError> 
             }
         }
     }
-    if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-        return Err(ProvisionError::NotRegular {
+    // Checked before opening: opening a FIFO would block.
+    match last {
+        Some(meta) if meta.is_file() => Ok((path, meta)),
+        _ => Err(ProvisionError::NotRegular {
             path: relative.to_string(),
-        });
+        }),
     }
-    Ok(path)
 }
 
-/// Hash a file already known to be a regular file, checking its size first.
-fn hash_file(path: &Path, file: &ProvisionedFile) -> Result<String, ProvisionError> {
-    let mut source = fs::File::open(path)
+/// Open a listed file below `root`, checked link by link, at the size the
+/// manifest pins.
+fn open_listed(root: &Path, file: &ProvisionedFile) -> Result<fs::File, ProvisionError> {
+    let (path, checked) = checked_path(root, &file.path)?;
+    open_checked(&path, &checked, file)
+}
+
+/// Open `path`, which was `checked` a moment ago, and refuse what was opened
+/// unless it is that same regular file: a link or a device swapped in after
+/// the check is refused rather than read.
+fn open_checked(
+    path: &Path,
+    checked: &fs::Metadata,
+    file: &ProvisionedFile,
+) -> Result<fs::File, ProvisionError> {
+    let opened = fs::File::open(path)
         .map_err(|err| ProvisionError::io(format!("cannot open {}", path.display()), &err))?;
-    let actual = source
+    let meta = opened
         .metadata()
-        .map_err(|err| ProvisionError::io(format!("cannot read {}", path.display()), &err))?
-        .len();
-    if actual != file.size {
+        .map_err(|err| ProvisionError::io(format!("cannot read {}", path.display()), &err))?;
+    if !meta.is_file() || meta.dev() != checked.dev() || meta.ino() != checked.ino() {
+        return Err(ProvisionError::Changed {
+            path: file.path.clone(),
+        });
+    }
+    if meta.len() != file.size {
         return Err(ProvisionError::SizeMismatch {
             path: file.path.clone(),
             expected: file.size,
-            actual,
+            actual: meta.len(),
         });
     }
-    stream(&mut source, None, path)
+    Ok(opened)
 }
 
 /// Copy one listed file from `from` into `partial`, hashing as it goes.
@@ -418,26 +506,17 @@ fn copy_verified(
     partial: &Path,
     file: &ProvisionedFile,
 ) -> Result<(), ProvisionError> {
-    let source_path = checked_path(from, &file.path)?;
-    let mut source = fs::File::open(&source_path).map_err(|err| {
-        ProvisionError::io(format!("cannot open {}", source_path.display()), &err)
-    })?;
-    let actual = source
-        .metadata()
-        .map_err(|err| ProvisionError::io(format!("cannot read {}", source_path.display()), &err))?
-        .len();
-    if actual != file.size {
-        return Err(ProvisionError::SizeMismatch {
-            path: file.path.clone(),
-            expected: file.size,
-            actual,
-        });
-    }
-    let target_path = partial.join(&file.path);
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            ProvisionError::io(format!("cannot create {}", parent.display()), &err)
-        })?;
+    let mut source = open_listed(from, file)?;
+    let mut target_path = partial.to_path_buf();
+    let mut segments = file.path.split('/').peekable();
+    while let Some(segment) = segments.next() {
+        target_path.push(segment);
+        if segments.peek().is_some() && !target_path.is_dir() {
+            fs::create_dir(&target_path).map_err(|err| {
+                ProvisionError::io(format!("cannot create {}", target_path.display()), &err)
+            })?;
+            set_mode(&target_path, DIR_MODE)?;
+        }
     }
     let mut target = fs::OpenOptions::new()
         .write(true)
@@ -446,7 +525,8 @@ fn copy_verified(
         .map_err(|err| {
             ProvisionError::io(format!("cannot create {}", target_path.display()), &err)
         })?;
-    let digest = stream(&mut source, Some(&mut target), &source_path)?;
+    set_mode(&target_path, FILE_MODE)?;
+    let digest = stream(&mut source, file, Some(&mut target), from)?;
     target.sync_all().map_err(|err| {
         ProvisionError::io(format!("cannot write {}", target_path.display()), &err)
     })?;
@@ -460,39 +540,104 @@ fn copy_verified(
     Ok(())
 }
 
-/// Read `source` to its end, writing to `target` when given, and return the
-/// lowercase hex SHA-256 of what was read.
+/// Give a path this command created an exact mode, whatever the umask.
+fn set_mode(path: &Path, mode: u32) -> Result<(), ProvisionError> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|err| {
+        ProvisionError::io(format!("cannot set the mode of {}", path.display()), &err)
+    })
+}
+
+/// Read `source` to its end, but never past one byte more than the manifest
+/// pins, writing to `target` when given, and return the lowercase hex
+/// SHA-256 of what was read. A file that grew or shrank after it was opened
+/// is a size mismatch.
 fn stream(
-    source: &mut fs::File,
+    source: &mut impl Read,
+    file: &ProvisionedFile,
     mut target: Option<&mut fs::File>,
-    path: &Path,
+    root: &Path,
 ) -> Result<String, ProvisionError> {
+    let mut source = source.take(file.size.saturating_add(1));
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
+    let mut read = 0_u64;
+    let what = || root.join(&file.path).display().to_string();
     loop {
         let n = source
             .read(&mut buffer)
-            .map_err(|err| ProvisionError::io(format!("cannot read {}", path.display()), &err))?;
+            .map_err(|err| ProvisionError::io(format!("cannot read {}", what()), &err))?;
         if n == 0 {
             break;
         }
+        read += n as u64;
         hasher.update(&buffer[..n]);
         if let Some(target) = target.as_deref_mut() {
-            target.write_all(&buffer[..n]).map_err(|err| {
-                ProvisionError::io(format!("cannot copy {}", path.display()), &err)
-            })?;
+            target
+                .write_all(&buffer[..n])
+                .map_err(|err| ProvisionError::io(format!("cannot copy {}", what()), &err))?;
         }
+    }
+    if read != file.size {
+        return Err(ProvisionError::SizeMismatch {
+            path: file.path.clone(),
+            expected: file.size,
+            actual: read,
+        });
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Remove a partial root without following a link there.
-fn remove_partial(partial: &Path) -> Result<(), ProvisionError> {
-    match fs::symlink_metadata(partial) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(partial),
-        Ok(_) => fs::remove_file(partial),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => Err(err),
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn listed(path: &str, size: u64) -> ProvisionedFile {
+        ProvisionedFile {
+            path: path.to_string(),
+            sha256: "0".repeat(64),
+            size,
+        }
     }
-    .map_err(|err| ProvisionError::io(format!("cannot remove {}", partial.display()), &err))
+
+    #[test]
+    fn what_is_opened_must_be_the_regular_file_that_was_checked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        fs::write(&a, "same").expect("write");
+        fs::write(&b, "same").expect("write");
+        let checked_a = fs::symlink_metadata(&a).expect("lstat");
+        assert!(open_checked(&a, &checked_a, &listed("a", 4)).is_ok());
+        // Another file at the checked path: a swap after the check.
+        assert!(matches!(
+            open_checked(&b, &checked_a, &listed("a", 4)),
+            Err(ProvisionError::Changed { .. })
+        ));
+        // A device opened in its place, even one checked as itself.
+        let null = Path::new("/dev/null");
+        let checked_null = fs::symlink_metadata(null).expect("lstat");
+        assert!(matches!(
+            open_checked(null, &checked_null, &listed("a", 0)),
+            Err(ProvisionError::Changed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_stream_is_read_no_further_than_one_byte_past_the_pinned_size() {
+        let root = Path::new("/nowhere");
+        // Far longer than pinned; an unbounded read would take all of it.
+        let mut long = std::io::repeat(0).take(1 << 20);
+        match stream(&mut long, &listed("f", 3), None, root) {
+            Err(ProvisionError::SizeMismatch {
+                expected, actual, ..
+            }) => assert_eq!((expected, actual), (3, 4)),
+            other => panic!("expected SizeMismatch, got {other:?}"),
+        }
+        let mut short = std::io::Cursor::new(b"ab".to_vec());
+        assert!(matches!(
+            stream(&mut short, &listed("f", 3), None, root),
+            Err(ProvisionError::SizeMismatch { actual: 2, .. })
+        ));
+    }
 }

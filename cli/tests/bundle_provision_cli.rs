@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // `tensorplate bundle provision` through the binary: argument parsing, the
-// JSON envelope, exit code 12 for a provisioning failure, and the refusal
-// to route it to a device. The outcomes themselves are covered in
-// bundle_provision.rs.
+// JSON envelope, exit code 12 for a provisioning failure, the refusal to
+// route it to a device, and modes that do not depend on the umask it runs
+// under. The outcomes themselves are covered in bundle_provision.rs.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod common;
 
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 
@@ -105,4 +107,76 @@ fn provisioning_is_never_routed_to_a_device_and_needs_a_source() {
         stderr.contains("unknown bundle subcommand `fetch`"),
         "{stderr}"
     );
+}
+
+#[test]
+fn a_usage_error_is_reported_as_the_bundle_command() {
+    // Even when an argument is another command's name.
+    for args in [
+        ["--output", "json", "bundle", "provision", "smolvla-fixture"],
+        ["--output", "json", "bundle", "provision", "deploy"],
+    ] {
+        let (code, _stdout, stderr) = run(&args);
+        assert_eq!(code, 2, "stderr: {stderr}");
+        let envelope: Value = serde_json::from_str(&stderr).expect("one JSON error envelope");
+        assert_eq!(envelope["command"], "bundle", "{args:?}: {stderr}");
+    }
+}
+
+/// Every directory and file under `root`, with its permission bits.
+fn modes(root: &Path) -> Vec<(String, bool, u32)> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(&path).unwrap() {
+                pending.push(entry.unwrap().path());
+            }
+        }
+        out.push((
+            path.display().to_string(),
+            meta.is_dir(),
+            meta.permissions().mode() & 0o7777,
+        ));
+    }
+    out
+}
+
+#[test]
+fn the_provisioned_bundle_is_readable_by_the_agent_and_writable_only_by_its_owner_whatever_the_umask(
+) {
+    // The agent reads a bundle through its other bits. A restrictive umask
+    // must not hide it from the agent, and a permissive one must not open
+    // it to writers.
+    let source = repo("test/models/bundles/v0_1/smolvla_python_pytorch");
+    let manifest = repo("protocol/rust/tests/fixtures/provisioning_manifest.json");
+    for umask in ["077", "000"] {
+        let into = tempfile::tempdir().unwrap();
+        let config = common::write_default_cli_config(Path::new("/nonexistent/agent.sock"));
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("umask {umask}; exec \"$0\" \"$@\""))
+            .arg(env!("CARGO_BIN_EXE_tensorplate"))
+            .args(["bundle", "provision", "smolvla-fixture", "--from"])
+            .arg(&source)
+            .arg("--manifest")
+            .arg(&manifest)
+            .arg("--into")
+            .arg(into.path())
+            .env("TENSORPLATE_CLI_CONFIG", &config.config_path)
+            .output()
+            .expect("run cli");
+        assert!(
+            out.status.success(),
+            "umask {umask}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let provisioned = modes(&into.path().join("smolvla-fixture"));
+        assert_eq!(provisioned.len(), 6, "umask {umask}: {provisioned:?}");
+        for (path, is_dir, mode) in provisioned {
+            let expected = if is_dir { 0o755 } else { 0o644 };
+            assert_eq!(mode, expected, "umask {umask}: {path} is {mode:o}");
+        }
+    }
 }

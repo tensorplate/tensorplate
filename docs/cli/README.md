@@ -20,10 +20,10 @@ Operator command-line interface for one reachable `tensorplate-agent`. Lands in
 The CLI is **a client**. Every mutating operation goes through the
 `tensorplate-agent` control API; the CLI never edits desired-state files,
 launches/restarts workers, or mutates serving-worker process state directly.
-The one thing it writes on the host is a provisioned bundle under
-`/var/lib/tensorplate/bundles/import/`, the operator's staging directory that
-remote deploy already copies into; a deploy from there still goes through
-the agent.
+The exception is `bundle provision`, which writes into this host's bundle
+import directory, `/var/lib/tensorplate/bundles/import/`, without the agent;
+remote deploy already copies into that directory, and a deploy from there
+still goes through the agent.
 
 ## Device access profiles
 

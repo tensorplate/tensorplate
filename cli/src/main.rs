@@ -43,7 +43,7 @@ fn main() -> ExitCode {
 
 fn command_of(argv: &[String]) -> &'static str {
     const COMMANDS: &[&str] = &[
-        "doctor", "deploy", "status", "infer", "logs", "rollback", "device", "version",
+        "doctor", "deploy", "status", "infer", "logs", "rollback", "device", "bundle", "version",
     ];
     for token in argv {
         if let Some(name) = COMMANDS.iter().find(|c| **c == token) {
@@ -345,6 +345,20 @@ mod tests {
         )
         .is_none());
         assert!(blocking_install_fault(&source, &Subcommand::Version).is_none());
+    }
+
+    /// Provisioning reads only the provisioning manifest and a local
+    /// directory, never the CLI config, so a packaged config the loader
+    /// rejects does not stand in its way.
+    #[test]
+    fn bundle_provision_still_runs_on_an_unusable_packaged_config() {
+        let command = Subcommand::Bundle(args::BundleCommand::Provision(args::ProvisionArgs {
+            name: "smolvla-fixture".to_string(),
+            from: std::path::PathBuf::from("/nonexistent"),
+            manifest: None,
+            into: None,
+        }));
+        assert!(blocking_install_fault(&unusable_packaged_config(), &command).is_none());
     }
 
     /// The binary's own wiring: a packaged config the loader rejects is

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/provisioning_manifest.json",
   "title": "TensorPlate provisioning manifest",
-  "description": "The trust root for `tensorplate bundle provision`: every file of every bundle it can provision, with the SHA-256 and size each file must have. Shipped by `tensorplate-cli` at /usr/share/tensorplate/provisioning/manifest.json. A provisioned bundle directory holds exactly these files, one of which is the bundle's own `manifest.json`, and nothing else. Beyond this schema, readers also require unique bundle names, unique file paths within a bundle, and a `manifest.json` file in every bundle.",
+  "description": "The trust root for `tensorplate bundle provision`: every file of every bundle it can provision, with the SHA-256 and size each file must have. The `tensorplate-cli` Debian package ships one at /usr/share/tensorplate/provisioning/manifest.json. A provisioned bundle directory holds exactly these files, one of which is the bundle's own `manifest.json`, and nothing else. Beyond this schema, readers also require unique bundle names, unique file paths within a bundle, no path that is also another path's directory, and a `manifest.json` file in every bundle.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "bundles"],

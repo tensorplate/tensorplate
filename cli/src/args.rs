@@ -182,6 +182,9 @@ Commands:
   logs                Read bounded structured logs.
   rollback            Roll back to the previous active deployment.
   device              Manage the local SSH device registry.
+  bundle provision <name> --from <dir>
+                      Verify a bundle the provisioning manifest lists into
+                      this host's bundle import directory.
   version             Print CLI and protocol versions.
 
 Global flags:

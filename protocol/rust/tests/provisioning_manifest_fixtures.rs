@@ -3,10 +3,10 @@
 // Provisioning manifest fixtures. The committed fixture and the manifest
 // `tensorplate-cli` ships must validate against
 // `protocol/schemas/provisioning_manifest.json` and parse in the Rust
-// reader. Every malformed variant the schema can express must be refused by
-// both; the rules only the reader can state are listed separately, each
-// refused for the reason it is named for, with the schema's acceptance
-// pinned.
+// reader. Each malformed case below is refused by both, and by the reader
+// for the reason it names; the rules only the reader can state are listed
+// separately, each refused for the reason it is named for, with the
+// schema's acceptance pinned.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -118,78 +118,132 @@ fn the_fixture_describes_the_committed_source_bundle_file_for_file() {
     }
 }
 
-#[test]
-fn malformed_manifests_are_refused_by_the_schema_and_the_reader() {
-    let validator = validator();
-    let mut unknown_top = fixture();
-    unknown_top["signed_by"] = json!("someone");
-    let mut unknown_file = fixture();
-    unknown_file["bundles"][0]["files"][0]["url"] = json!("https://example.invalid/x");
-    let mut no_files = fixture();
-    no_files["bundles"][0]["files"] = json!([]);
-    let mut bad_name = fixture();
-    bad_name["bundles"][0]["name"] = json!("SmolVLA");
-    let cases: Vec<(&str, Value)> = vec![
-        ("another schema version", {
-            let mut doc = fixture();
-            doc["schema_version"] = json!("0.2");
-            doc
-        }),
-        ("an unknown top-level field", unknown_top),
-        ("an unknown file field", unknown_file),
-        ("a bundle with no files", no_files),
-        ("an uppercase bundle name", bad_name),
+/// The fixture with `edit` applied.
+fn with(edit: impl Fn(&mut Value)) -> Value {
+    let mut doc = fixture();
+    edit(&mut doc);
+    doc
+}
+
+const NOT_A_PATH: &str = "is not a relative `/`-separated path";
+const NOT_A_DIGEST: &str = "needs a lowercase hex SHA-256";
+
+/// Each malformed manifest, with the reason the reader must give.
+fn malformed_cases() -> Vec<(&'static str, Value, &'static str)> {
+    vec![
+        (
+            "another schema version",
+            with(|doc| doc["schema_version"] = json!("0.2")),
+            "schema_version `0.2`",
+        ),
+        (
+            "an unknown top-level field",
+            with(|doc| doc["signed_by"] = json!("someone")),
+            "unknown field `signed_by`",
+        ),
+        (
+            "an unknown bundle field",
+            with(|doc| doc["bundles"][0]["source"] = json!("https://example.invalid")),
+            "unknown field `source`",
+        ),
+        (
+            "an unknown file field",
+            with(|doc| {
+                doc["bundles"][0]["files"][0]["url"] = json!("https://example.invalid/x");
+            }),
+            "unknown field `url`",
+        ),
+        (
+            "a bundle with no files",
+            with(|doc| doc["bundles"][0]["files"] = json!([])),
+            // An empty list also lacks `manifest.json`; the reader must say which.
+            "lists no files",
+        ),
+        (
+            "an uppercase bundle name",
+            with(|doc| doc["bundles"][0]["name"] = json!("SmolVLA")),
+            "bundle name `SmolVLA`",
+        ),
+        (
+            "a bundle name over 128 characters",
+            with(|doc| doc["bundles"][0]["name"] = json!("a".repeat(129))),
+            "1 to 128",
+        ),
         (
             "an absolute path",
             with_file_field("path", json!("/etc/passwd")),
+            NOT_A_PATH,
         ),
         (
             "a `..` segment",
             with_file_field("path", json!("assets/../../x")),
+            NOT_A_PATH,
         ),
         (
             "a `.` segment",
             with_file_field("path", json!("./manifest.json")),
+            NOT_A_PATH,
         ),
         (
             "an empty segment",
             with_file_field("path", json!("assets//x")),
+            NOT_A_PATH,
         ),
         (
             "a hidden segment",
             with_file_field("path", json!(".cache/x")),
+            NOT_A_PATH,
         ),
-        ("a backslash", with_file_field("path", json!("assets\\x"))),
+        (
+            "a backslash",
+            with_file_field("path", json!("assets\\x")),
+            NOT_A_PATH,
+        ),
+        (
+            "a path over 512 bytes",
+            with_file_field("path", json!(format!("assets/{}", "a".repeat(506)))),
+            "at most 512 bytes",
+        ),
         (
             "an uppercase digest",
             with_file_field("sha256", json!("A".repeat(64))),
+            NOT_A_DIGEST,
         ),
-        ("a short digest", with_file_field("sha256", json!("abc"))),
-        ("a negative size", with_file_field("size", json!(-1))),
-        ("a missing size", {
-            let mut doc = fixture();
-            doc["bundles"][0]["files"][0]
-                .as_object_mut()
-                .expect("object")
-                .remove("size");
-            doc
-        }),
-    ];
-    for (label, doc) in cases {
+        (
+            "a short digest",
+            with_file_field("sha256", json!("abc")),
+            NOT_A_DIGEST,
+        ),
+        (
+            "a negative size",
+            with_file_field("size", json!(-1)),
+            "invalid value: integer `-1`",
+        ),
+        (
+            "a missing size",
+            with(|doc| {
+                doc["bundles"][0]["files"][0]
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("size");
+            }),
+            "missing field `size`",
+        ),
+    ]
+}
+
+#[test]
+fn malformed_manifests_are_refused_by_the_schema_and_the_reader() {
+    let validator = validator();
+    for (label, doc, reason) in malformed_cases() {
         assert!(
             !validator.is_valid(&doc),
             "{label}: the schema must refuse it"
         );
-        assert!(
-            reader_error(&doc).is_some(),
-            "{label}: the reader must refuse it"
-        );
+        let refused =
+            reader_error(&doc).unwrap_or_else(|| panic!("{label}: the reader must refuse it"));
+        assert!(refused.contains(reason), "{label}: {refused}");
     }
-    // An empty list also lacks `manifest.json`; the reader must say which.
-    let mut no_files = fixture();
-    no_files["bundles"][0]["files"] = json!([]);
-    let refused = reader_error(&no_files).expect("refused");
-    assert!(refused.contains("lists no files"), "{refused}");
 }
 
 #[test]
