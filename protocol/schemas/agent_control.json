@@ -115,7 +115,10 @@
             "oom_error",
             "timeout",
             "inference_failed",
-            "internal"
+            "internal",
+            "cancelled",
+            "unavailable",
+            "resource_exhausted"
           ]
         },
         "message": {"type": "string"},
@@ -163,7 +166,10 @@
                 "oom_error",
                 "timeout",
                 "inference_failed",
-                "internal"
+                "internal",
+                "cancelled",
+                "unavailable",
+                "resource_exhausted"
               ]
             },
             "message": {"type": "string"},
@@ -391,7 +397,10 @@
             "oom_error",
             "timeout",
             "inference_failed",
-            "internal"
+            "internal",
+            "cancelled",
+            "unavailable",
+            "resource_exhausted"
           ]
         },
         "last_failure_message": {"type": "string"},
@@ -450,7 +459,10 @@
             "oom_error",
             "timeout",
             "inference_failed",
-            "internal"
+            "internal",
+            "cancelled",
+            "unavailable",
+            "resource_exhausted"
           ]
         },
         "message": {"type": "string"},

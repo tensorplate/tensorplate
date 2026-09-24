@@ -102,7 +102,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ],
       "description": "Typed error code accompanying `worker_not_ready`, `worker_failed`, and `worker_exit` events."
     },
