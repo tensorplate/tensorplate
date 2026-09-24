@@ -567,6 +567,12 @@ struct HttpServer::Impl {
       if (pr == 0) {
         continue;
       }
+      // stop() may have begun while poll waited. Accept nothing more: where
+      // shutdown() does not wake poll (a listening socket on macOS), a
+      // connection that arrives in that window would otherwise be accepted.
+      if (stopping.load()) {
+        break;
+      }
       sockaddr_storage ss{};
       socklen_t slen = sizeof(ss);
       int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&ss), &slen);
@@ -688,14 +694,20 @@ void HttpServer::stop() {
     return;
   }
   impl_->stopping.store(true);
-  // Close listen socket to unblock accept_loop.
+  // On Linux, shutdown() wakes accept_loop's poll at once; elsewhere (macOS
+  // refuses it for a listening socket) the loop sees `stopping` within its
+  // 200 ms poll timeout. Close the socket only after that thread has exited:
+  // it still reads listen_fd, and a descriptor closed under it could be
+  // reused by an unrelated open before its next poll.
   if (impl_->listen_fd >= 0) {
     ::shutdown(impl_->listen_fd, SHUT_RDWR);
-    ::close(impl_->listen_fd);
-    impl_->listen_fd = -1;
   }
   if (impl_->accept_thread.joinable()) {
     impl_->accept_thread.join();
+  }
+  if (impl_->listen_fd >= 0) {
+    ::close(impl_->listen_fd);
+    impl_->listen_fd = -1;
   }
   // Wake workers, drain remaining connections without dispatch.
   {
