@@ -20,9 +20,10 @@ use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
     is_valid_deployment_id, ControlRequest, ControlResponse, DeployRequest, DeployStatus,
-    ResponseStatus,
+    ResponseStatus, SetOperation, FEATURE_SET_OPERATION_ADD,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::MemberState;
 
 use crate::args::DeployArgs;
 use crate::client::AgentClient;
@@ -68,11 +69,20 @@ pub fn run<W: Write, E: Write>(
         .cloned()
         .collect::<std::collections::BTreeMap<_, _>>();
     let canonical_bundle = canonicalize(&args.bundle_path)?;
+    if args.set_operation == SetOperation::Add {
+        crate::commands::member::require_control_feature(
+            client,
+            FEATURE_SET_OPERATION_ADD,
+            "`--set-operation add`",
+        )?;
+    }
     let deploy_payload = DeployRequest {
         bundle_path: canonical_bundle.display().to_string(),
         deployment_id: deployment_id.clone(),
         expected_bundle_digest: args.expected_digest.clone(),
         labels,
+        set_operation: args.set_operation,
+        ..DeployRequest::default()
     };
     let request = ControlRequest::deploy(Some(correlation.clone()), deploy_payload);
     renderer.info(
@@ -118,6 +128,7 @@ pub fn run<W: Write, E: Write>(
         renderer,
         stderr,
         &correlation,
+        &deployment_id,
         initial_status,
     )?;
     let payload = build_payload(&response, transaction_id.as_deref(), Some(&final_status));
@@ -203,6 +214,7 @@ fn wait_for_terminal(
     renderer: &Renderer,
     stderr: &mut dyn Write,
     correlation: &str,
+    deployment_id: &str,
     initial: Option<DeployStatus>,
 ) -> CliResult<DeployStatus> {
     if let Some(s) = initial.as_ref() {
@@ -240,6 +252,34 @@ fn wait_for_terminal(
             }
             if latest.phase.is_terminal() {
                 return Ok(latest);
+            }
+        } else if let Some(set) = status_resp
+            .agent_status
+            .as_ref()
+            .and_then(|s| s.resident_set.as_ref())
+        {
+            // No in-flight transaction and a committed resident set: the
+            // deploy landed when its member serves. `active` names another
+            // member, or none, whenever the set has more than one.
+            if let Some(member) = set.members.iter().find(|member| {
+                member.deployment_id == deployment_id && member.state == MemberState::Serving
+            }) {
+                renderer.info(
+                    stderr,
+                    &format!(
+                        "deploy: member `{}` serving at generation {}",
+                        member.deployment_id, member.generation
+                    ),
+                )?;
+                return Ok(DeployStatus {
+                    phase: DeployState::Active,
+                    transaction_id: None,
+                    deployment_id: Some(member.deployment_id.clone()),
+                    bundle_digest: Some(member.bundle_digest.clone()),
+                    started_monotonic_ns: None,
+                    last_transition_monotonic_ns: None,
+                    failure: None,
+                });
             }
         } else {
             // No in-flight transaction. The deploy either landed Active
@@ -437,6 +477,7 @@ mod tests {
 
     fn deploy_args(bundle: PathBuf, wait: bool) -> DeployArgs {
         DeployArgs {
+            set_operation: tensorplate_protocol::agent_control::SetOperation::Replace,
             bundle_path: bundle,
             deployment_id: Some("d-1".into()),
             expected_digest: None,
@@ -476,6 +517,8 @@ mod tests {
             serving_url: None,
         };
         let agent_status = AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Ready,
             active: Some(active),
             previous_active: None,
@@ -582,6 +625,8 @@ mod tests {
         };
         let warm = ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: None,
                 previous_active: None,

@@ -76,6 +76,7 @@ fn full_deploy_then_status_then_rollback_over_uds() {
                 deployment_id: "d1".into(),
                 expected_bundle_digest: None,
                 labels: Default::default(),
+                ..DeployRequest::default()
             },
         ),
     );
@@ -91,6 +92,7 @@ fn full_deploy_then_status_then_rollback_over_uds() {
                 deployment_id: "d2".into(),
                 expected_bundle_digest: None,
                 labels: Default::default(),
+                ..DeployRequest::default()
             },
         ),
     );
@@ -165,6 +167,7 @@ fn deploy_with_missing_bundle_returns_typed_error() {
                 deployment_id: "d-missing".into(),
                 expected_bundle_digest: None,
                 labels: Default::default(),
+                ..DeployRequest::default()
             },
         ),
     );

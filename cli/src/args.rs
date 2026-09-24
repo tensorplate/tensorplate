@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use tensorplate_protocol::agent_control::SetOperation;
+
 use crate::error::{CliError, CliResult};
 
 /// Output mode requested on the command line. Each subcommand honours
@@ -58,6 +60,8 @@ pub enum Subcommand {
     Doctor(DoctorArgs),
     Deploy(DeployArgs),
     Rollback(RollbackArgs),
+    Undeploy(MemberArgs),
+    Recover(MemberArgs),
     Status(StatusArgs),
     Infer(InferArgs),
     Logs(LogsArgs),
@@ -82,10 +86,21 @@ pub struct DeployArgs {
     pub wait: bool,
     pub wait_timeout_ms: u64,
     pub labels: Vec<(String, String)>,
+    /// `replace` unless `--set-operation add` is given.
+    pub set_operation: SetOperation,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RollbackArgs {
+    pub reason: Option<String>,
+    /// The member to roll back; absent means the singleton rollback.
+    pub deployment_id: Option<String>,
+}
+
+/// Arguments of `undeploy` and `recover`: the member they act on.
+#[derive(Clone, Debug, Default)]
+pub struct MemberArgs {
+    pub deployment_id: String,
     pub reason: Option<String>,
 }
 
@@ -181,6 +196,8 @@ Commands:
   infer               Send a single inference request to the active deployment.
   logs                Read bounded structured logs.
   rollback            Roll back to the previous active deployment.
+  undeploy            Retire one resident-set member.
+  recover             Return a quarantined resident-set member to service.
   device              Manage the local SSH device registry.
   bundle provision <name> --from <dir>
                       Verify a bundle the provisioning manifest lists into
@@ -242,6 +259,8 @@ pub fn parse(argv: &[String]) -> CliResult<ParseOutcome> {
         "doctor" => Subcommand::Doctor(parse_doctor(rest, &mut global)?),
         "deploy" => Subcommand::Deploy(parse_deploy(rest, &mut global)?),
         "rollback" => Subcommand::Rollback(parse_rollback(rest, &mut global)?),
+        "undeploy" => Subcommand::Undeploy(parse_member(rest, &mut global, "undeploy")?),
+        "recover" => Subcommand::Recover(parse_member(rest, &mut global, "recover")?),
         "status" => Subcommand::Status(parse_status(rest, &mut global)?),
         "infer" => Subcommand::Infer(parse_infer(rest, &mut global)?),
         "logs" => Subcommand::Logs(parse_logs(rest, &mut global)?),
@@ -437,6 +456,7 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
     let mut wait = true;
     let mut wait_timeout_ms = 120_000;
     let mut labels = Vec::new();
+    let mut set_operation = SetOperation::Replace;
     let mut i = 0;
     while i < rest.len() {
         if parse_global_flag(rest, &mut i, global, true)? {
@@ -461,9 +481,20 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
                     .ok_or_else(|| CliError::Usage("--label requires <key>=<value>".into()))?;
                 labels.push((k.to_string(), val.to_string()));
             }
+            "--set-operation" => {
+                set_operation = match require_value(rest, &mut i, a)?.as_str() {
+                    "replace" => SetOperation::Replace,
+                    "add" => SetOperation::Add,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "--set-operation must be `replace` or `add`, got `{other}`"
+                        )))
+                    }
+                };
+            }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>]"
+                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>] [--set-operation <replace|add>]"
                         .into(),
                 ));
             }
@@ -490,6 +521,7 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
         wait,
         wait_timeout_ms,
         labels,
+        set_operation,
     })
 }
 
@@ -503,8 +535,11 @@ fn parse_rollback(rest: &[String], global: &mut GlobalArgs) -> CliResult<Rollbac
         let a = &rest[i];
         match a.as_str() {
             "--reason" => args.reason = Some(require_value(rest, &mut i, a)?),
+            "--deployment-id" => args.deployment_id = Some(require_value(rest, &mut i, a)?),
             "-h" | "--help" => {
-                return Err(CliError::Usage("rollback [--reason <text>]".into()));
+                return Err(CliError::Usage(
+                    "rollback [--reason <text>] [--deployment-id <id>]".into(),
+                ));
             }
             other => {
                 return Err(CliError::Usage(format!(
@@ -514,6 +549,38 @@ fn parse_rollback(rest: &[String], global: &mut GlobalArgs) -> CliResult<Rollbac
         }
     }
     Ok(args)
+}
+
+fn parse_member(rest: &[String], global: &mut GlobalArgs, command: &str) -> CliResult<MemberArgs> {
+    let mut deployment_id = None;
+    let mut reason = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        let a = &rest[i];
+        match a.as_str() {
+            "--deployment-id" => deployment_id = Some(require_value(rest, &mut i, a)?),
+            "--reason" => reason = Some(require_value(rest, &mut i, a)?),
+            "-h" | "--help" => {
+                return Err(CliError::Usage(format!(
+                    "{command} --deployment-id <id> [--reason <text>]"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `{command}`: {other}"
+                )))
+            }
+        }
+    }
+    let deployment_id = deployment_id
+        .ok_or_else(|| CliError::Usage(format!("{command} requires --deployment-id <id>")))?;
+    Ok(MemberArgs {
+        deployment_id,
+        reason,
+    })
 }
 
 fn parse_status(rest: &[String], global: &mut GlobalArgs) -> CliResult<StatusArgs> {

@@ -101,7 +101,9 @@ fn hint_for(code: tensorplate_protocol::ErrorCode, context: Option<&str>) -> Opt
         E::LoadFailed => Some("inspect agent logs and re-stage the bundle"),
         E::NotReady => Some("wait for the in-flight transaction to settle"),
         E::ShapeMismatch => Some("re-check the model contract against the request"),
-        E::Unsupported => Some("the backend or capability is not enabled on this device"),
+        E::Unsupported => {
+            Some("the operation, backend or capability is not supported by this agent or device")
+        }
         E::OomError => Some("free device memory or reduce the bundle's memory estimate"),
         E::Timeout => Some("re-run with `--timeout-ms <ms>` or inspect agent logs"),
         E::InferenceFailed => Some("inspect the serving worker logs for backend-specific detail"),

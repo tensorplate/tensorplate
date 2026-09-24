@@ -14,10 +14,11 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
-    AgentRunState, AgentStatus, ControlRequest, ControlResponse, DeploymentSummary,
-    QuarantineSummary, SupervisionStatusSummary,
+    AgentRunState, AgentStatus, ContactState, ControlRequest, ControlResponse, DeploymentSummary,
+    QuarantineSummary, ResidentSetStatus, SupervisionStatusSummary,
 };
 use tensorplate_protocol::supervision_event::{SupervisionAgentState, SupervisionServingState};
+use tensorplate_protocol::{AdmissionMode, MemberState};
 
 use crate::args::StatusArgs;
 use crate::client::AgentClient;
@@ -173,7 +174,52 @@ fn agent_block(status: Option<&AgentStatus>) -> Value {
         // maintaining a second CLI representation of the wire enums.
         fields.insert("platform_telemetry".into(), json!(telemetry));
     }
+    if let (Value::Object(fields), Some(set)) = (&mut block, status.resident_set.as_ref()) {
+        // Present only when the agent reports a committed set, so the
+        // output of a singleton agent is unchanged.
+        fields.insert("resident_set".into(), json!(set));
+    }
     block
+}
+
+/// One line for the set, then one per member in committed order.
+fn resident_set_lines(set: &ResidentSetStatus) -> String {
+    let mut out = format!(
+        "resident_set: set_id={} revision={} members={}\n",
+        set.set_id,
+        set.revision,
+        set.members.len()
+    );
+    for member in &set.members {
+        out.push_str(&format!(
+            "  member: deployment_id={} generation={} state={} admission={} sessions={}",
+            member.deployment_id,
+            member.generation,
+            match member.state {
+                MemberState::Serving => "serving",
+                MemberState::Quarantined => "quarantined",
+            },
+            match member.admission_mode {
+                AdmissionMode::Production => "production",
+                AdmissionMode::Qualification => "qualification (unqualified)",
+            },
+            member.quota.session_count,
+        ));
+        if let Some(endpoint) = member.unary_endpoint.as_deref() {
+            out.push_str(&format!(" unary={endpoint}"));
+        }
+        if let Some(endpoint) = member.stream_endpoint.as_deref() {
+            out.push_str(&format!(" stream={endpoint}"));
+        }
+        if let Some(contact) = member.contact {
+            out.push_str(match contact {
+                ContactState::InContact => " contact=in_contact",
+                ContactState::OutOfContact => " contact=out_of_contact",
+            });
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn summary_block(d: &DeploymentSummary) -> Value {
@@ -297,6 +343,15 @@ fn severity_of(
         if !status.quarantined.is_empty() {
             severity = severity.max(Severity::Degraded);
         }
+        let member_degraded = status.resident_set.as_ref().is_some_and(|set| {
+            set.members.iter().any(|member| {
+                member.state == MemberState::Quarantined
+                    || member.contact == Some(ContactState::OutOfContact)
+            })
+        });
+        if member_degraded {
+            severity = severity.max(Severity::Degraded);
+        }
     } else {
         severity = severity.max(Severity::Degraded);
     }
@@ -377,6 +432,9 @@ fn render_human(
                 "previous_active: deployment_id={} bundle_digest={}\n",
                 prev.deployment_id, prev.bundle_digest
             ));
+        }
+        if let Some(set) = status.resident_set.as_ref() {
+            out.push_str(&resident_set_lines(set));
         }
         if let Some(in_flight) = status.in_flight_transaction.as_ref() {
             out.push_str(&format!(
@@ -641,6 +699,8 @@ mod tests {
 
     fn agent_status_with_active() -> AgentStatus {
         AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Ready,
             active: Some(DeploymentSummary {
                 deployment_id: "d-1".into(),

@@ -44,6 +44,8 @@ pub mod remote;
 
 use std::io::Write;
 
+use tensorplate_protocol::agent_control::ControlOp;
+
 pub use args::{GlobalArgs, OutputMode, ParsedArgs, Subcommand};
 pub use client::{AgentClient, MockAgentClient, NetAgentClient, ServingClient};
 pub use config::{
@@ -228,6 +230,32 @@ where
             let profile = resolve_profile()?;
             let client = client_factory(&profile)?;
             commands::rollback::run(&renderer, &profile, &*client, &opts, stdout, stderr)
+        }
+        Subcommand::Undeploy(opts) => {
+            let profile = resolve_profile()?;
+            let client = client_factory(&profile)?;
+            commands::member::run(
+                &renderer,
+                &profile,
+                &*client,
+                ControlOp::Undeploy,
+                &opts,
+                stdout,
+                stderr,
+            )
+        }
+        Subcommand::Recover(opts) => {
+            let profile = resolve_profile()?;
+            let client = client_factory(&profile)?;
+            commands::member::run(
+                &renderer,
+                &profile,
+                &*client,
+                ControlOp::Recover,
+                &opts,
+                stdout,
+                stderr,
+            )
         }
         Subcommand::Status(opts) => {
             let profile = resolve_profile()?;

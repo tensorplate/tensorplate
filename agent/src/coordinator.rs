@@ -29,8 +29,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::agent_control::{
-    is_valid_deployment_id, AgentRunState, AgentStatus, DeployFailureSummary, DeployStatus,
-    DeploymentSummary, QuarantineSummary, ResponseError, SupervisionStatusSummary,
+    is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, DeployFailureSummary,
+    DeployStatus, DeploymentSummary, QuarantineSummary, ResidentSetStatus, ResponseError,
+    SupervisionStatusSummary,
 };
 use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, TransactionRecord};
 use tensorplate_protocol::deploy_transaction::DeployState;
@@ -621,23 +622,20 @@ impl Coordinator {
         {
             agent_state = AgentRunState::Degraded;
         }
-        let to_summary = |d: &DeploymentRecord| DeploymentSummary {
-            deployment_id: d.deployment_id.clone(),
-            bundle_digest: d.bundle_digest.clone(),
-            bundle_name: Some(d.bundle_name.clone()),
-            bundle_version: Some(d.bundle_version.clone()),
-            backend_hint: Some(d.backend_hint.clone()),
-            model_class: Some(d.model_class.clone()),
-            staged_path: Some(d.staged_path.clone()),
-            promoted_monotonic_ns: d.promoted_monotonic_ns,
-            serving_url: None,
-        };
-        let mut active = s.active.as_ref().map(to_summary);
+        let mut active = s.active.as_ref().map(deployment_summary);
         if let Some(summary) = active.as_mut() {
             summary.serving_url = self.worker.active_serving_url()?;
         }
-        let previous = s.previous_active.as_ref().map(to_summary);
-        let candidate = s.candidate.as_ref().map(to_summary);
+        let mut previous = s.previous_active.as_ref().map(deployment_summary);
+        // Beside a durable resident set the singleton slots are empty; a
+        // size-1 set projects into them for clients that read only `active`.
+        let resident_set = s.resident_set.as_ref().map(|set| {
+            if active.is_none() && previous.is_none() {
+                (active, previous) = singleton_slots(set);
+            }
+            ResidentSetStatus::from_committed(set)
+        });
+        let candidate = s.candidate.as_ref().map(deployment_summary);
         let in_flight = s.in_flight_transaction.as_ref().map(|t| DeployStatus {
             phase: t.phase,
             transaction_id: Some(t.transaction_id.clone()),
@@ -691,6 +689,10 @@ impl Coordinator {
             }
         });
         Ok(AgentStatus {
+            resident_set,
+            // This agent executes neither `set_operation` `add` nor a member
+            // rollback, so it lists no control feature.
+            control_features: Vec::new(),
             agent_state,
             active,
             previous_active: previous,
@@ -830,6 +832,22 @@ fn merge_agent_state(base: AgentRunState, supervision: SupervisionAgentState) ->
             }
         }
         SupervisionAgentState::Ready | SupervisionAgentState::Unknown => base,
+    }
+}
+
+/// The status summary of a singleton deployment record, without a serving
+/// URL.
+fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
+    DeploymentSummary {
+        deployment_id: d.deployment_id.clone(),
+        bundle_digest: d.bundle_digest.clone(),
+        bundle_name: Some(d.bundle_name.clone()),
+        bundle_version: Some(d.bundle_version.clone()),
+        backend_hint: Some(d.backend_hint.clone()),
+        model_class: Some(d.model_class.clone()),
+        staged_path: Some(d.staged_path.clone()),
+        promoted_monotonic_ns: d.promoted_monotonic_ns,
+        serving_url: None,
     }
 }
 

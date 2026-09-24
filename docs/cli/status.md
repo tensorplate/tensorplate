@@ -13,7 +13,9 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   quarantine entries, last error, and the optional matched-row platform
   telemetry projection. Startup memory facts are present for accelerator
   rows; signal outcomes appear only when a live collector snapshot was
-  supplied.
+  supplied. When the agent reports a committed resident set, human output
+  adds one line per member and JSON adds the agent's `resident_set` block;
+  both are absent otherwise, so a singleton agent's output is unchanged.
 - **Observability snapshot** (optional): when `--observability-snapshot
   <path>` is supplied, the CLI reads the V01-E10 status snapshot at that
   path (schema: [`protocol/schemas/observability_status.json`](../../protocol/schemas/observability_status.json))
@@ -33,7 +35,8 @@ ready < degraded < no_heartbeat < crash_loop < failed
 ```
 
 The CLI picks the highest severity across agent state, supervision state,
-and observability state. Crash-loop is surfaced explicitly because the
+resident-set members (a quarantined or out-of-contact member is at least
+`degraded`), and observability state. Crash-loop is surfaced explicitly because the
 supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
 
 ## Accelerator placement
@@ -93,7 +96,22 @@ worker from its actual state.
       "memory": { "memory_profile": "discrete_gpu", … }
     },
     "quarantined": [],
-    "last_error": null
+    "last_error": null,
+    "resident_set": {                 // present only with a committed set
+      "set_id": "…",
+      "revision": 3,
+      "members": [
+        {
+          "deployment_id": "speech-tts",
+          "generation": 5,
+          "bundle_digest": "sha256:…",
+          "state": "serving",
+          "admission_mode": "production",
+          "quota": { "session_count": 1, "domain_bytes": { … } },
+          "stream_endpoint": "127.0.0.1:18105"
+        }
+      ]
+    }
   },
   "observability": {
     "available": true,

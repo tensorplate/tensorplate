@@ -27,6 +27,8 @@ use tensorplate_protocol::ErrorCode;
 
 fn ready_status_response() -> ControlResponse {
     let status = AgentStatus {
+        resident_set: None,
+        control_features: Vec::new(),
         agent_state: AgentRunState::Ready,
         active: Some(DeploymentSummary {
             deployment_id: "d-1".into(),

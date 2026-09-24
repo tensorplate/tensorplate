@@ -10,6 +10,7 @@ pub mod device;
 pub mod doctor;
 pub mod infer;
 pub mod logs;
+pub mod member;
 pub mod rollback;
 pub mod status;
 pub mod version;

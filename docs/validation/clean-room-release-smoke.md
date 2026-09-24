@@ -256,7 +256,7 @@ here.
 When a previous deployment exists:
 
 ```bash
-tensorplate rollback --deployment-id <previous-deployment-id>
+tensorplate rollback
 tensorplate status --output json | tee "/tmp/tensorplate-${TP_TAG}-rollback-status.json"
 ```
 

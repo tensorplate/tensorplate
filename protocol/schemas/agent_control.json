@@ -20,13 +20,25 @@
         },
         "op": {
           "type": "string",
-          "enum": ["deploy", "status", "rollback", "health", "version"],
-          "description": "Operation discriminator."
+          "enum": ["deploy", "status", "rollback", "health", "version", "undeploy", "recover"],
+          "description": "Operation discriminator. `undeploy` retires one resident-set member and `recover` returns a quarantined member to service; both name the member in their payload."
         },
         "deploy": {"$ref": "#/definitions/DeployRequest"},
         "rollback": {"$ref": "#/definitions/RollbackRequest"},
-        "status": {"$ref": "#/definitions/StatusRequest"}
-      }
+        "status": {"$ref": "#/definitions/StatusRequest"},
+        "undeploy": {"$ref": "#/definitions/MemberRequest"},
+        "recover": {"$ref": "#/definitions/MemberRequest"}
+      },
+      "allOf": [
+        {"if": {"properties": {"op": {"const": "deploy"}}, "required": ["op"]}, "then": {"required": ["deploy"]}},
+        {"if": {"properties": {"op": {"const": "undeploy"}}, "required": ["op"]}, "then": {"required": ["undeploy"]}},
+        {"if": {"properties": {"op": {"const": "recover"}}, "required": ["op"]}, "then": {"required": ["recover"]}},
+        {"if": {"required": ["deploy"]}, "then": {"properties": {"op": {"const": "deploy"}}}},
+        {"if": {"required": ["rollback"]}, "then": {"properties": {"op": {"const": "rollback"}}}},
+        {"if": {"required": ["status"]}, "then": {"properties": {"op": {"const": "status"}}}},
+        {"if": {"required": ["undeploy"]}, "then": {"properties": {"op": {"const": "undeploy"}}}},
+        {"if": {"required": ["recover"]}, "then": {"properties": {"op": {"const": "recover"}}}}
+      ]
     },
     "DeployRequest": {
       "type": "object",
@@ -39,12 +51,8 @@
           "description": "Absolute path to the bundle directory on the local device. The agent verifies the manifest before any worker interaction."
         },
         "deployment_id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128,
-          "pattern": "^[A-Za-z0-9._-]+$",
-          "not": {"enum": [".", ".."]},
-          "description": "Operator-supplied identifier for this deployment intent. It must be one filesystem-safe path segment and is reused by `status`, `rollback`, and CLI display."
+          "$ref": "#/definitions/DeploymentId",
+          "description": "Operator-supplied identifier for this deployment intent, and the stable name of the resident-set member it deploys. It is reused by `status`, `rollback`, `undeploy`, `recover` and CLI display."
         },
         "expected_bundle_digest": {
           "type": "string",
@@ -55,8 +63,39 @@
           "type": "object",
           "additionalProperties": {"type": "string"},
           "description": "Operator labels copied into the desired-state record for observability/status filtering."
+        },
+        "set_operation": {
+          "type": "string",
+          "enum": ["replace", "add"],
+          "default": "replace",
+          "description": "`replace` (the default, and what an absent field means) deploys `deployment_id` in place of the current deployment: today's singleton semantics, and a new generation of that member in a resident set. `add` admits an additional member beside the committed set. In a set of more than one member, `replace` must name a current member. Writers omit the field for `replace`."
+        },
+        "admission_mode": {
+          "type": "string",
+          "enum": ["production", "qualification"],
+          "description": "Operator-only. `production` (what an absent field means) admits the member under its validated session counts. `qualification` admits a structurally valid bundle under the explicit `test_count` instead and records it as unqualified. Refused on every speech client path."
+        },
+        "test_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Operator-only. The member's session count in qualification mode; required with `admission_mode` `qualification` and refused without it."
+        },
+        "evidence_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+          "description": "Operator-only. The approved evidence reference an ordinary (production) activation of a qualified configuration uses; refused in qualification mode."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"admission_mode": {"const": "qualification"}}, "required": ["admission_mode"]},
+          "then": {"required": ["test_count"], "not": {"required": ["evidence_ref"]}},
+          "else": {"not": {"required": ["test_count"]}}
+        }
+      ]
     },
     "RollbackRequest": {
       "type": "object",
@@ -65,8 +104,33 @@
         "reason": {
           "type": "string",
           "description": "Operator-supplied reason persisted with the rollback transaction."
+        },
+        "deployment_id": {
+          "$ref": "#/definitions/DeploymentId",
+          "description": "The member to roll back to its retained previous generation. Required when the resident set has more than one member; absent means the singleton rollback."
         }
       }
+    },
+    "MemberRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id"],
+      "description": "Payload of `undeploy` and `recover`: the member they act on.",
+      "properties": {
+        "deployment_id": {"$ref": "#/definitions/DeploymentId"},
+        "reason": {
+          "type": "string",
+          "description": "Operator-supplied reason persisted with the transaction."
+        }
+      }
+    },
+    "DeploymentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "not": {"enum": [".", ".."]},
+      "description": "One filesystem-safe path segment: the stable name of a deployment and of the resident-set member it becomes."
     },
     "StatusRequest": {
       "type": "object",
@@ -334,7 +398,102 @@
           }
         },
         "supervision": {"$ref": "#/definitions/SupervisionStatus"},
-        "platform_telemetry": {"$ref": "#/definitions/PlatformTelemetryStatus"}
+        "platform_telemetry": {"$ref": "#/definitions/PlatformTelemetryStatus"},
+        "resident_set": {"$ref": "#/definitions/ResidentSetStatus"},
+        "control_features": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "description": "Control operations this agent executes beyond the singleton deploy and rollback. A client sends a request that depends on one only when the agent lists it, because an agent that predates a request field ignores it: `set_operation_add` (`deploy` with `set_operation` `add`) and `member_rollback` (`rollback` naming a `deployment_id`). Absent means none. Readers ignore names they do not know."
+        }
+      }
+    },
+    "ResidentSetStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["set_id", "revision", "members"],
+      "description": "The committed resident set, one entry per member in committed order. Present only when the agent's durable state records a set. When the set has exactly one member and it is serving, the singleton `active` (and `previous_active`, from its retained generation) describe the same member, so clients that read only `active` keep working; with more members `active` is absent.",
+      "properties": {
+        "set_id": {"type": "string", "minLength": 1},
+        "revision": {"$ref": "#/definitions/StateCounter"},
+        "members": {"type": "array", "items": {"$ref": "#/definitions/MemberStatus"}}
+      }
+    },
+    "MemberStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "generation", "bundle_digest", "state", "admission_mode", "quota"],
+      "description": "One resident-set member at its committed generation. Fields whose source does not exist yet are absent: `stream_api_version` until the stream endpoint lands, `effective_quota` and `contact` until the agent polls the member's worker over the runtime control channel, and `staged_bytes` until staging is keyed by generation.",
+      "properties": {
+        "deployment_id": {"$ref": "#/definitions/DeploymentId"},
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "bundle_digest": {"$ref": "#/definitions/Digest"},
+        "state": {
+          "type": "string",
+          "enum": ["serving", "quarantined"],
+          "description": "`quarantined` members hold their generation for `recover` or `undeploy` and serve nothing."
+        },
+        "admission_mode": {
+          "type": "string",
+          "enum": ["production", "qualification"],
+          "description": "`qualification` members are unqualified: admitted under an operator test count, never a support claim."
+        },
+        "quota": {
+          "$ref": "#/definitions/MemberQuota",
+          "description": "The session quota committed for the member."
+        },
+        "unary_endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the member serves unary requests, from the committed endpoint map; absent for a stream-only or quarantined member."
+        },
+        "stream_endpoint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the member serves streams, from the committed endpoint map; absent for a unary-only or quarantined member."
+        },
+        "stream_api_version": {"type": "string", "minLength": 1},
+        "effective_quota": {
+          "$ref": "#/definitions/MemberQuota",
+          "description": "The quota the member's worker reports in force; it may be lower than `quota`."
+        },
+        "staged_bytes": {"$ref": "#/definitions/QuotaBytes"},
+        "contact": {
+          "type": "string",
+          "enum": ["in_contact", "out_of_contact"],
+          "description": "Whether the agent's polls of the member's worker are being answered."
+        }
+      }
+    },
+    "StateCounter": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "Digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+    "QuotaBytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "MemberQuota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_count", "domain_bytes"],
+      "description": "Session quota the agent assigned to the member: the concurrent session count and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
+      "properties": {
+        "session_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "domain_bytes": {"$ref": "#/definitions/DomainQuotaBytes"}
+      },
+      "if": {"properties": {"session_count": {"minimum": 1}}},
+      "then": {"properties": {"domain_bytes": {"minProperties": 1}}}
+    },
+    "DomainQuotaBytes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Session quota bytes per budget domain. `shared_pool` (unified memory) never appears beside `guest_ram` or `device_vram` (discrete accelerator).",
+      "properties": {
+        "shared_pool": {"$ref": "#/definitions/QuotaBytes"},
+        "guest_ram": {"$ref": "#/definitions/QuotaBytes"},
+        "device_vram": {"$ref": "#/definitions/QuotaBytes"}
+      },
+      "not": {
+        "anyOf": [
+          {"required": ["shared_pool", "guest_ram"]},
+          {"required": ["shared_pool", "device_vram"]}
+        ]
       }
     },
     "SupervisionStatus": {
@@ -424,7 +583,7 @@
         "serving_url": {
           "type": "string",
           "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]+(/.*)?$",
-          "description": "Loopback data-plane URL for the active worker. Present only for the active deployment when the agent owns a concrete serving process."
+          "description": "Loopback data-plane URL for the active worker. Present only for the active deployment: when the agent owns a concrete serving process, or, for a resident set whose only member serves, the `/infer` URL of the member's committed unary endpoint."
         }
       }
     },

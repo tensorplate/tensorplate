@@ -158,6 +158,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   until the agent restarts, while status reports the agent `failed` with a
   `last_error` saying so; a write that fails before that rename leaves the
   state and the store as they were. (V030-E03-F01-T03)
+
+- The agent now refuses a control request that carries a field it does not
+  know, a payload that belongs to another operation, or an explicit `null`,
+  with `config_invalid`, instead of ignoring it. Every request earlier CLIs
+  and the SDK send is unchanged and still accepted.
+  `docs/architecture/protocol.md` states the rule for request additions to
+  the control API under protocol `0.1`. The CLI's `unsupported` hint now
+  covers operations as well as backends. The quickstart, post-release and
+  clean-room guides no longer show `rollback --deployment-id`, which the
+  CLI never accepted and which now names a member.
+
 ### Added
 
 - Three error codes are appended to the shared error taxonomy:
@@ -461,6 +472,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   that keeps these additions on protocol `0.1`. FIFO order, the in-flight
   gate (still logical), the cancel contract, `/health` and the existing
   `/metrics` gauges and counters are unchanged. (V030-E04-F03-T02)
+
+- The agent control API gains the resident-set mutation shapes: the
+  `undeploy` and `recover` operations, each naming a member;
+  `deploy.set_operation` (`replace`, the default and what an absent field
+  means, or `add`); the operator-only deploy fields `admission_mode`
+  (`production` or `qualification`), `test_count` and `evidence_ref`; and
+  `rollback.deployment_id`. The agent executes no set mutation yet:
+  `undeploy`, `recover`, `add`, qualification admission, an `evidence_ref`
+  and a rollback naming a member are each answered with a typed
+  `unsupported` error before any transaction starts, as is any deploy or
+  rollback while the durable state records a resident set, so nothing is
+  staged and the agent does not become busy. An explicit `replace` or
+  `production` is the default and runs as before. `replace` naming a
+  non-member, or a rollback naming nobody, in a set of more than one member
+  is refused with `config_invalid`, ahead of those refusals. Status gains
+  `resident_set`, listing each member's generation, digest, state,
+  admission mode, committed quota and endpoints. The member's stream API
+  version, effective quota, staged bytes and contact state stay absent
+  until their sources exist. A set whose only member is serving also fills
+  `active` and `previous_active`. Status also gains `control_features`,
+  which lists nothing yet. The CLI gains `undeploy`, `recover`,
+  `deploy --set-operation` and `rollback --deployment-id`, and renders the
+  resident set in `status`. It sends `add` or a member rollback only to an
+  agent that lists the matching control feature, because an older agent
+  would ignore the field and act on the rest of the request. A default
+  deploy, and the responses to it, are byte-for-byte what they were; a
+  golden exchange recorded before the change pins them.
+  (V030-E03-F01-T05, V030-E03-F01-T03)
+
 
 ## [0.2.1] - 2026-09-23
 

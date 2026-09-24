@@ -111,7 +111,53 @@ escape hatch).
 }
 ```
 
-Supported ops: `deploy`, `status`, `rollback`, `health`, `version`.
+Supported ops: `deploy`, `status`, `rollback`, `health`, `version`,
+`undeploy` and `recover`. Each payload belongs to its op: `deploy` requires
+`deploy`; `undeploy` and `recover` require a member payload
+(`{"deployment_id": ..., "reason": ...}`); `rollback` and `status` take an
+optional payload; `health` and `version` take none. The agent refuses a
+request carrying a field it does not know, a payload that belongs to
+another op, or an explicit `null`, with `config_invalid`, so a field a later
+client adds is refused rather than ignored.
+
+### Set mutation
+
+The resident set (the deployments kept loaded together, each a member at a
+deployment generation) is changed through the same operations:
+
+- `deploy.set_operation` is `replace` (the default, and what an absent field
+  means) or `add`. `replace` keeps the singleton semantics; in a resident
+  set it deploys a new generation of the named member, and in a set of more
+  than one member it must name a current member. `add` admits an additional
+  member.
+- `rollback.deployment_id` names the member to roll back to its retained
+  previous generation. It is required when the set has more than one member.
+- `undeploy` retires a member; `recover` returns a quarantined member to
+  service (`undeploy` removes it instead).
+- Operator-only deploy fields: `admission_mode` (`production`, the default,
+  or `qualification`, which admits an unqualified member under the explicit
+  `test_count`, required with it and refused without it) and `evidence_ref`
+  (the approved evidence reference of an ordinary activation, refused in
+  qualification mode). Speech clients do not send them: the SDK sends only
+  the status query, which refuses them at decode, and the serving worker's
+  unary endpoint takes no admission field.
+
+This agent executes none of these yet. `undeploy`, `recover`, `add`,
+qualification admission, an `evidence_ref`, a rollback naming a member, and
+any deploy or rollback while the durable state records a resident set are
+answered with a typed `unsupported` error before any transaction starts, so
+nothing is staged and the agent does not become busy. The two requests the
+contract always refuses (`replace` naming a non-member, and a rollback naming
+nobody, in a set of more than one member) are refused with `config_invalid`
+first.
+
+`agent_status.control_features` lists what the agent executes beyond the
+singleton deploy and rollback: `set_operation_add` and `member_rollback`.
+This agent lists neither. An agent that predates `set_operation` or
+`rollback.deployment_id` ignores them and would act on the rest of the
+request, so a client sends `add` or a member rollback only to an agent that
+lists the matching feature; the CLI checks before sending and otherwise
+refuses locally with `unsupported`.
 
 ### Response shape
 
@@ -138,6 +184,20 @@ stable signal names; applicable omissions are explicit `unavailable`
 outcomes, while an absent snapshot omits the `signals` field.
 Context-only failures degrade agent status without blocking deployment;
 load-bearing failures do both.
+
+When the durable state records a resident set, `agent_status.resident_set`
+lists it: `set_id`, `revision`, and one entry per member in committed order
+with its `deployment_id`, `generation`, `bundle_digest`, `state` (`serving`
+or `quarantined`), `admission_mode`, committed `quota`, and its unary and
+stream endpoints from the committed endpoint map. `stream_api_version`,
+`effective_quota` (the quota the member's worker reports in force),
+`staged_bytes` and `contact` (`in_contact` or `out_of_contact`) stay absent
+until their sources exist. Beside a resident set the durable singleton slots
+are empty; a set whose only member is serving projects that member into
+`active` (with `serving_url`, the `/infer` URL of its unary endpoint when
+that endpoint is a loopback HTTP origin) and its retained generation into
+`previous_active`, so clients that read only `active` keep working. A set
+of any other shape fills neither, and clients read `resident_set`.
 
 ## Durable state store (V01-E08-F02)
 
@@ -310,7 +370,9 @@ just because they appeared in the original request order.
 
 Every control API payload carries `schema_version` const-fixed to `0.1`.
 The agent rejects unknown schema versions on the control API with the typed
-`Unsupported` error code.
+`Unsupported` error code. The set-mutation fields and operations are
+additive under `0.1`; [`protocol.md`](protocol.md#versioning) states how
+agents that predate them are kept from misreading them.
 
 The on-disk state file has its own version track
 (`protocol/schemas/agent_state.json`). State version `0.1` is the singleton

@@ -127,6 +127,23 @@ fn resolve_serving_endpoint(
         .as_ref()
         .and_then(|s| s.active.as_ref());
     let Some(active) = active else {
+        let members = response
+            .agent_status
+            .as_ref()
+            .and_then(|s| s.resident_set.as_ref())
+            .map_or(0, |set| set.members.len());
+        if members > 0 {
+            // A set of more than one member has no single active deployment
+            // to discover; the operator names the member's endpoint.
+            return Err(CliError::Unavailable {
+                message: format!(
+                    "the agent serves a resident set of {members} members and no single active deployment"
+                ),
+                hint: Some(
+                    "pass `--serving-url` with the unary endpoint of the member to query (listed by `tensorplate status`)".into(),
+                ),
+            });
+        }
         return Err(CliError::Unavailable {
             message: "no active deployment; deploy a bundle before running `infer`".into(),
             hint: Some("run `tensorplate deploy <bundle>` and wait for status=active".into()),
@@ -485,6 +502,8 @@ mod tests {
         // Agent status with no active deployment.
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: None,
                 previous_active: None,
@@ -555,6 +574,8 @@ mod tests {
         let client = MockAgentClient::new();
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
@@ -591,6 +612,8 @@ mod tests {
         let client = MockAgentClient::new();
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
