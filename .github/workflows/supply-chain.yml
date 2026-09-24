@@ -126,13 +126,48 @@ jobs:
           python -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["bomFormat"], d["specVersion"], len(d.get("components", [])), "components")' \
             "sbom/${{ matrix.artifact }}.cdx.json"
 
+      # What is audited is the package's runtime dependency closure: what
+      # pip freeze lists in the clean environment (pip itself, which the
+      # environment only uses to install, is not listed), less the package.
+      # Both packages declare no runtime dependency today, so the closure is
+      # empty and a clean result would prove nothing about the scanner; the
+      # positive control first requires it to report a pin with published
+      # advisories.
       - name: pip-audit, with the recorded dispositions
         run: |
           python -m pip install --quiet -r tools/release/requirements.txt
           python tools/release/check-vulnerability-dispositions.py --pip-audit-args >"${RUNNER_TEMP}/pip-audit-args"
           mapfile -t ignore <"${RUNNER_TEMP}/pip-audit-args"
-          PIPAPI_PYTHON_LOCATION="${RUNNER_TEMP}/target/bin/python" \
-            "${RUNNER_TEMP}/scanners/bin/pip-audit" --progress-spinner off "${ignore[@]}"
+          audit=("${RUNNER_TEMP}/scanners/bin/pip-audit" --progress-spinner off --no-deps --disable-pip)
+
+          printf 'pip==25.0.1\n' >"${RUNNER_TEMP}/control.txt"
+          status=0
+          "${audit[@]}" -r "${RUNNER_TEMP}/control.txt" >"${RUNNER_TEMP}/control.out" 2>&1 || status=$?
+          if [ "$status" -ne 1 ] || ! grep -Eq 'PYSEC-|GHSA-' "${RUNNER_TEMP}/control.out"; then
+            cat "${RUNNER_TEMP}/control.out"
+            echo "positive control failed (exit ${status}): pip-audit did not report pip 25.0.1's published advisories" >&2
+            exit 1
+          fi
+          echo "positive control: pip-audit reports pip 25.0.1's published advisories"
+
+          "${RUNNER_TEMP}/target/bin/python" -m pip freeze >"${RUNNER_TEMP}/freeze.txt"
+          python - "${{ matrix.package }}/pyproject.toml" "${RUNNER_TEMP}/freeze.txt" "${RUNNER_TEMP}/closure.txt" <<'PY'
+          import pathlib, re, sys, tomllib
+          def norm(name):
+              return re.sub(r"[-_.]+", "-", name).lower()
+          own = norm(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["project"]["name"])
+          lines = [line.strip() for line in pathlib.Path(sys.argv[2]).read_text().splitlines() if line.strip()]
+          closure = [line for line in lines if norm(re.split(r"[=<>!~ @;\[]", line)[0]) != own]
+          if len(closure) == len(lines):
+              sys.exit(f"{own} is not in the environment it was installed into")
+          pathlib.Path(sys.argv[3]).write_text("".join(line + "\n" for line in closure))
+          print(f"{own}: {len(closure)} third-party runtime dependencies")
+          PY
+          if [ -s "${RUNNER_TEMP}/closure.txt" ]; then
+            "${audit[@]}" -r "${RUNNER_TEMP}/closure.txt" "${ignore[@]}"
+          else
+            echo "nothing to audit: the package has no third-party runtime dependency"
+          fi
 
       - name: Upload the SBOM
         uses: actions/upload-artifact@v4
