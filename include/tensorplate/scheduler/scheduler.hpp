@@ -51,8 +51,11 @@ class BufferManager;
 /// Configuration for any InferScheduler implementation. Validated by
 /// the factory; invalid values surface as Error::Code::ConfigInvalid.
 struct SchedulerConfig {
-  /// Stable, low-cardinality policy key. v0.1.0 supports "fifo".
-  /// Unknown values are rejected by the factory.
+  /// Stable, low-cardinality policy key. Only "fifo" is registered. The
+  /// config schema also lists "session_round_robin", a reserved key that no
+  /// scheduler is registered under (see docs/architecture/scheduler.md).
+  /// The factory rejects a key that is not registered with
+  /// Error::Code::Unsupported.
   std::string policy = "fifo";
 
   /// Maximum number of admitted-but-undispatched requests retained in
@@ -60,10 +63,12 @@ struct SchedulerConfig {
   /// Error::Code::OOMError (overload). Must be > 0.
   std::size_t queue_capacity = 64;
 
-  /// Maximum number of concurrently in-flight requests (dispatched but
-  /// not yet completed). Must be > 0. v0.1.0 defaults to 1 to reflect
-  /// the single-session serving model; the scheduler does not assume
-  /// any particular concurrency model above this number.
+  /// Maximum number of dispatched requests that count toward the
+  /// in-flight limit at once. Must be > 0. The limit counts
+  /// SchedulerMetrics::in_flight_logical: a request stops counting when it
+  /// completes or is cancelled in flight, although a request cancelled in
+  /// flight may still be executing. Defaults to 1; the scheduler does not
+  /// assume any particular concurrency model above this number.
   std::size_t in_flight_capacity = 1;
 
   /// Deadline-margin: the scheduler rejects new admission whose
@@ -199,6 +204,22 @@ class SchedulerEventSink {
 /// Snapshot of scheduler counters and aggregates. Cheap to capture
 /// (single mutex acquisition in the canonical implementation); safe
 /// to share. The snapshot never carries pointers to scheduler state.
+/// protocol/schemas/scheduler_metrics.json names the same fields for JSON
+/// readers, with durations as `*_ns` integers and severities as strings.
+///
+/// In-flight accounting. A request is dispatched when next() returns it,
+/// and is then counted
+///   - logically while its outcome is still open to the caller: until
+///     on_completion() for it or an accepted cancel() of it;
+///   - physically while the executor may still hold resources for it:
+///     until the executor reports it released. In this interface the
+///     executor reports release by calling on_completion(), which next()
+///     requires for every request it returns, including one cancelled in
+///     flight.
+/// A request cancelled in flight, by cancel() or shutdown(), therefore
+/// leaves the logical count at once and stays in the physical count, and
+/// in in_flight_physical_cancelled, until its on_completion(). A queued
+/// request enters neither count.
 struct SchedulerMetrics {
   /// Policy label echoed back from the scheduler config.
   std::string policy;
@@ -207,10 +228,21 @@ struct SchedulerMetrics {
   std::size_t queue_depth = 0;
   /// Largest queue depth observed since scheduler construction.
   std::size_t queue_depth_high_water = 0;
-  /// Current dispatched-but-not-completed count.
+  /// Logical in-flight count under its protocol 0.1 name: always equal to
+  /// in_flight_logical, and kept with this meaning.
   std::size_t in_flight = 0;
-  /// Largest in-flight count observed since scheduler construction.
+  /// Largest logical in-flight count observed since scheduler construction.
   std::size_t in_flight_high_water = 0;
+  /// Dispatched requests whose outcome is still open to the caller.
+  std::size_t in_flight_logical = 0;
+  /// Dispatched requests the executor has not yet reported released. Never
+  /// less than in_flight_logical + in_flight_physical_cancelled.
+  std::size_t in_flight_physical = 0;
+  /// Requests cancelled after dispatch that the executor has not yet
+  /// reported released: counted physically, no longer logically.
+  std::size_t in_flight_physical_cancelled = 0;
+  /// Largest physical in-flight count observed since scheduler construction.
+  std::size_t in_flight_physical_high_water = 0;
 
   /// Monotonic counters.
   std::uint64_t admitted_total = 0;

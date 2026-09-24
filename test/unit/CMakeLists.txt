@@ -35,6 +35,7 @@ add_executable(tp_test_unit
   scheduler_cancellation_test.cpp
   scheduler_metrics_test.cpp
   scheduler_pressure_test.cpp
+  scheduler_in_flight_test.cpp
   scheduler_schema_test.cpp
   # V01-E07: serving worker.
   serving_config_test.cpp
