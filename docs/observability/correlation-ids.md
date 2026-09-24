@@ -12,11 +12,11 @@ string of `[A-Za-z0-9_-]{1,64}` bytes. Rust mirror:
 
 ## Identifier kinds
 
-| Identifier        | Producer                                | Carrier                                                                                       |
-| ----------------- | --------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `request_id`      | Serving ingress (per inference request) | Serving HTTP envelope, scheduler events, adapter events, sidecar IPC, logs, metric exemplars. |
-| `transaction_id`  | Agent (per deploy transaction)          | Agent transaction journal, worker control requests, rollback events, logs.                    |
-| `correlation_id`  | Operator / agent / serving (free join)  | Logs, metrics exemplars, typed errors, status snapshot, doctor findings.                      |
+| Identifier       | Producer                                | Carrier                                                                                          |
+| ---------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `request_id`     | Serving ingress (per inference request) | Serving HTTP envelope, scheduler events, adapter events, sidecar IPC, logs, metric exemplars.    |
+| `transaction_id` | Agent (per deploy transaction)          | Agent transaction journal, worker control requests and responses, rollback events, logs.         |
+| `correlation_id` | Operator / agent / serving (free join)  | Logs, metrics exemplars, typed errors, status snapshot, doctor findings, runtime control frames. |
 
 All three share the same lexical policy so consumers can validate them
 with one helper
@@ -32,9 +32,10 @@ same value. `transaction_id` there names the committing deploy
 transaction for `admission_fence`, `activate` and `retire`, and is the
 literal `runtime` for `quota_assign`, `ledger_status` and
 `pressure_directive`, which belong to no transaction. Each request gets its
-own `correlation_id`; a request the agent repeats keeps the id it was
-first sent with, and the worker applies an id at most once, answering a
-repeat with the outcome of the first application.
+own `correlation_id`. The agent repeats only the latest request it sent on
+a channel, with the id it was first sent with; the worker keeps the id and
+outcome of the latest request it applied and answers a repeat from that
+record instead of applying it again.
 
 ## Generation
 

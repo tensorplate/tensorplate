@@ -23,7 +23,7 @@ use tensorplate_protocol::{
     decode_with_version_check, encode_frame, DecodeError, ErrorCode, LedgerStatus, MemberQuota,
     MemberRef, PressureDirective, PressureLevel, WorkerControlFrameError, WorkerControlRequest,
     WorkerControlResponse, WorkerControlResponseError, WorkerError, WorkerOp, WorkerStatusOutcome,
-    WORKER_CONTROL_MAX_FRAME_BYTES, WORKER_CONTROL_MAX_LEDGER_SESSIONS,
+    MAX_MEMBER_SESSIONS, WORKER_CONTROL_MAX_FRAME_BYTES, WORKER_CONTROL_MAX_LEDGER_SESSIONS,
 };
 
 const FRAME_FILES: [&str; 8] = [
@@ -368,6 +368,13 @@ fn schema_enums_match_the_mirror() {
         defs["PressureDirective"]["properties"]["level"]["enum"],
         spellings(&all_levels())
     );
+    for op in all_ops() {
+        assert_eq!(
+            op.to_string(),
+            spelling(op),
+            "WorkerOp's Display is its wire spelling"
+        );
+    }
 }
 
 #[test]
@@ -464,6 +471,11 @@ fn the_documented_bounds_are_the_constants() {
         schema["definitions"]["PressureDirective"]["properties"]["count"]["maximum"],
         bound
     );
+    assert_eq!(
+        schema["definitions"]["MemberQuota"]["properties"]["session_count"]["maximum"],
+        json!(MAX_MEMBER_SESSIONS)
+    );
+    assert_eq!(WORKER_CONTROL_MAX_LEDGER_SESSIONS, MAX_MEMBER_SESSIONS);
 }
 
 // ---- Frame bounds -------------------------------------------------------
@@ -541,21 +553,21 @@ fn request_constructors_build_the_golden_frames() {
         ),
         WorkerControlRequest::activate(FENCE_TX, "ctl-000012", m5.clone()),
     ];
-    let golden = golden_lines(false);
-    assert_eq!(
-        built.len(),
-        golden.len(),
-        "one constructor call per golden request"
-    );
-    for request in built {
-        let frame =
+    let built: BTreeSet<String> = built
+        .into_iter()
+        .map(|request| {
             String::from_utf8(encode_frame(&request.with_timeout_ms(1_000)).expect("encode"))
-                .expect("utf8");
-        assert!(
-            golden.iter().any(|g| format!("{g}\n") == frame),
-            "no golden frame matches the constructor's {frame}"
-        );
-    }
+                .expect("utf8")
+        })
+        .collect();
+    let golden: BTreeSet<String> = golden_lines(false)
+        .into_iter()
+        .map(|g| format!("{g}\n"))
+        .collect();
+    assert_eq!(
+        built, golden,
+        "the constructors rebuild exactly the golden requests"
+    );
 }
 
 #[test]
@@ -635,22 +647,21 @@ fn response_constructors_build_the_golden_answers() {
         )
         .with_error(WorkerError::new(
             ErrorCode::NotReady,
-            "the member has not finished warming",
+            "still warming: 1/2 engines loaded\n\"decoder\" pending (café)",
         )),
     ];
-    let golden = golden_lines(true);
+    let built: BTreeSet<String> = built
+        .into_iter()
+        .map(|response| String::from_utf8(encode_frame(&response).expect("encode")).expect("utf8"))
+        .collect();
+    let golden: BTreeSet<String> = golden_lines(true)
+        .into_iter()
+        .map(|g| format!("{g}\n"))
+        .collect();
     assert_eq!(
-        built.len(),
-        golden.len(),
-        "one constructor call per golden response"
+        built, golden,
+        "the constructors rebuild exactly the golden answers"
     );
-    for response in built {
-        let frame = String::from_utf8(encode_frame(&response).expect("encode")).expect("utf8");
-        assert!(
-            golden.iter().any(|g| format!("{g}\n") == frame),
-            "no golden frame matches the constructor's {frame}"
-        );
-    }
 }
 
 #[test]
@@ -767,6 +778,7 @@ const LEDGER_OK: (&str, usize) = ("worker_control_ledger_status.jsonl", 1);
 const PRESSURE_REQ: (&str, usize) = ("worker_control_pressure_directive.jsonl", 0);
 const TERMINATE_REQ: (&str, usize) = ("worker_control_pressure_directive.jsonl", 2);
 const ERROR_ANSWER: (&str, usize) = ("worker_control_error.jsonl", 1);
+const MISMATCH_ANSWER: (&str, usize) = ("worker_control_member_mismatch.jsonl", 1);
 
 /// Requests: ids, member and envelope.
 #[allow(clippy::too_many_lines)]
@@ -923,14 +935,14 @@ fn request_payload_refusals() -> Vec<Refusal> {
             LEDGER_REQ,
             |v| v["quota"] = json!({"session_count": 0, "domain_bytes": {}}),
             "/op",
-            "`quota` does not belong on op `LedgerStatus`",
+            "`quota` does not belong on op `ledger_status`",
         ),
         refusal(
             "a quota_assign without its quota",
             QUOTA_REQ,
             |v| remove(v, "quota"),
             "",
-            "`quota` does not belong on op `QuotaAssign`",
+            "runtime op `quota_assign` requires `quota`",
         ),
         refusal(
             "a quota mixing shared_pool with guest_ram",
@@ -951,7 +963,7 @@ fn request_payload_refusals() -> Vec<Refusal> {
             PRESSURE_REQ,
             |v| remove(v, "pressure"),
             "",
-            "`pressure` does not belong on op `PressureDirective`",
+            "runtime op `pressure_directive` requires `pressure`",
         ),
         refusal(
             "a pressure without a level",
@@ -965,7 +977,7 @@ fn request_payload_refusals() -> Vec<Refusal> {
             LEDGER_REQ,
             |v| v["pressure"] = json!({"level": "normal"}),
             "/op",
-            "`pressure` does not belong on op `LedgerStatus`",
+            "`pressure` does not belong on op `ledger_status`",
         ),
         refusal(
             "an unknown pressure field",
@@ -1014,7 +1026,7 @@ fn request_payload_refusals() -> Vec<Refusal> {
             RETIRE_REQ,
             |v| remove(v, "drain_timeout_ms"),
             "",
-            "`drain_timeout_ms` does not belong on op `Retire`",
+            "runtime op `retire` requires `drain_timeout_ms`",
         ),
         refusal(
             "a zero drain timeout",
@@ -1028,7 +1040,7 @@ fn request_payload_refusals() -> Vec<Refusal> {
             ACTIVATE_REQ,
             |v| v["drain_timeout_ms"] = json!(1),
             "/op",
-            "`drain_timeout_ms` does not belong on op `Activate`",
+            "`drain_timeout_ms` does not belong on op `activate`",
         ),
     ]
 }
@@ -1140,11 +1152,64 @@ fn response_envelope_refusals() -> Vec<Refusal> {
             "invalid type: sequence, expected a JSON object",
         ),
         refusal(
-            "a null ready flag",
+            "a null ready flag on a legacy answer",
             FENCE_OK,
-            |v| v["ready"] = Value::Null,
+            |v| {
+                remove(v, "op");
+                remove(v, "member");
+                v["ready"] = Value::Null;
+            },
             "/ready",
             "invalid type: null",
+        ),
+        refusal(
+            "a ready flag on a runtime answer",
+            FENCE_OK,
+            |v| v["ready"] = json!(true),
+            "",
+            "belong only on a legacy response",
+        ),
+        refusal(
+            "an active deployment id on a runtime answer",
+            FENCE_OK,
+            |v| v["active_deployment_id"] = json!("speech-tts"),
+            "",
+            "belong only on a legacy response",
+        ),
+        refusal(
+            "a candidate deployment id on a runtime answer",
+            FENCE_OK,
+            |v| v["candidate_deployment_id"] = json!("speech-tts"),
+            "",
+            "belong only on a legacy response",
+        ),
+        refusal(
+            "an error on an ok answer",
+            FENCE_OK,
+            |v| v["error"] = json!({"code": "internal", "message": "x"}),
+            "",
+            "must not carry an error",
+        ),
+        refusal(
+            "an error on a member_mismatch answer",
+            MISMATCH_ANSWER,
+            |v| v["error"] = json!({"code": "internal", "message": "x"}),
+            "",
+            "must not carry an error",
+        ),
+        refusal(
+            "a failed answer without its error",
+            ERROR_ANSWER,
+            |v| remove(v, "error"),
+            "",
+            "must carry its error",
+        ),
+        refusal(
+            "a timeout answer without its error",
+            FENCE_OK,
+            |v| v["status"] = json!("timeout"),
+            "",
+            "must carry its error",
         ),
     ]
 }
@@ -1163,7 +1228,10 @@ fn response_payload_refusals() -> Vec<Refusal> {
         refusal(
             "a ledger on an error answer",
             LEDGER_OK,
-            |v| v["status"] = json!("error"),
+            |v| {
+                v["status"] = json!("error");
+                v["error"] = json!({"code": "internal", "message": "x"});
+            },
             "/status",
             "`ledger` does not belong on this response",
         ),
@@ -1229,6 +1297,13 @@ fn response_payload_refusals() -> Vec<Refusal> {
             |v| v["quota"]["domain_bytes"]["shared_pool"] = json!(1),
             "/quota/domain_bytes",
             "must not combine shared_pool",
+        ),
+        refusal(
+            "an answered quota past the session bound",
+            ACTIVATE_OK,
+            |v| v["quota"]["session_count"] = json!(2_049),
+            "/quota/session_count",
+            "session_count 2049 exceeds the 2048 sessions",
         ),
     ]
 }

@@ -985,6 +985,13 @@ fn refused_by_both() -> Vec<Refusal> {
             "invalid type: null",
         ),
         refusal(
+            "a session count past the member bound",
+            TWO_MEMBER,
+            |v| *at(v, &format!("{M0Q}/session_count")) = json!(2_049),
+            "/resident_set/members/0/quota/session_count",
+            "session_count 2049 exceeds the 2048 sessions",
+        ),
+        refusal(
             "a session count past u32",
             TWO_MEMBER,
             |v| *at(v, &format!("{M0Q}/session_count")) = json!(4_294_967_296_u64),

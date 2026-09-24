@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/worker_control.json",
   "title": "TensorPlate Agent -> Serving Worker Control Contract (V01-E08-F05)",
-  "description": "Versioned local control messages between the V01-E08 agent and the V01-E07 serving worker.\n\nLegacy operations (`prepare`, `capacity_check`, `warm`, `promote`, `active_status`, `unload`): v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. They document the JSON shape of that trait and are never sent over the runtime control channel.\n\nRuntime operations (`admission_fence`, `activate`, `retire`, `quota_assign`, `ledger_status`, `pressure_directive`) travel over the runtime control channel: a connected `AF_UNIX` stream socket pair the agent creates at spawn, whose other end the worker inherits as a descriptor, so there is no filesystem path and the peer is the agent by construction. A frame is one compact JSON document (no insignificant whitespace, keys in the order the golden frames `protocol/rust/tests/fixtures/worker_control_*.jsonl` use) followed by a single newline, at most 65536 bytes including the newline; a reader treats a longer line as a protocol error and closes the channel. A ledger reports at most 2048 sessions, so the largest legal frame (2048 twenty-digit admission timestamps plus the envelope) stays under that limit. The agent sends one request per frame; the worker answers each with one response frame carrying the same `correlation_id`. Every runtime request names the `member` (deployment and generation) it is for and every runtime response names the member that answered, so a request for another generation is answered `member_mismatch`. `transaction_id` is the committing transaction for `admission_fence`, `activate` and `retire`, and the literal `runtime` for `quota_assign`, `ledger_status` and `pressure_directive`; on runtime frames both ids follow the shared `[A-Za-z0-9_-]{1,64}` policy.\n\nIdempotency: each request on a channel has its own `correlation_id`, and a request the agent repeats (for example after its deadline passed) is sent again with the same one. The worker applies a `correlation_id` at most once and answers a repeat with the outcome of the first application, so a repeated `terminate_newest` cancels no further sessions and a repeated `retire` does not restart the drain its first application started.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
+  "description": "Versioned local control messages between the V01-E08 agent and the V01-E07 serving worker.\n\nLegacy operations (`prepare`, `capacity_check`, `warm`, `promote`, `active_status`, `unload`): v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. They document the JSON shape of that trait and are never sent over the runtime control channel.\n\nRuntime operations (`admission_fence`, `activate`, `retire`, `quota_assign`, `ledger_status`, `pressure_directive`) travel over the runtime control channel: a connected `AF_UNIX` stream socket pair the agent creates at spawn, whose other end the worker inherits as a descriptor, so there is no filesystem path and the peer is the agent by construction. A frame is one compact JSON document (no insignificant whitespace; keys in the order the golden frames `protocol/rust/tests/fixtures/worker_control_*.jsonl` use; strings in UTF-8 that escape only `\\\"`, `\\\\` and control characters, using `\\b`, `\\f`, `\\n`, `\\r` and `\\t` where they apply and lowercase `\\u00xx` otherwise; integers in plain decimal) followed by a single newline, at most 65536 bytes including the newline; a reader treats a longer line as a protocol error and closes the channel. A ledger reports at most 2048 sessions, so the largest `ok` `ledger_status` answer (2048 twenty-digit admission timestamps plus the envelope) stays under that limit; a writer keeps every frame within it, shortening an error message if it must. The agent sends one request per frame; the worker answers each with one response frame carrying the same `correlation_id`. Every runtime request names the `member` (deployment and generation) it is for and every runtime response names the member that answered, so a request for another generation is answered `member_mismatch`. `transaction_id` is the committing transaction for `admission_fence`, `activate` and `retire`, and the literal `runtime` for `quota_assign`, `ledger_status` and `pressure_directive`; on runtime frames both ids follow the shared `[A-Za-z0-9_-]{1,64}` policy.\n\nIdempotency: each request on a channel has its own `correlation_id`. The agent repeats a request (for example after its deadline passed) with the same `correlation_id`, and only while it is the latest request the agent has sent on that channel. The worker keeps the `correlation_id` and outcome of the latest request it applied and answers a repeat of it with that outcome instead of applying it again, so a repeated `terminate_newest` cancels no further sessions and a repeated `retire` does not restart the drain its first application started. Any other `correlation_id` is a new request, so the worker keeps one such record per channel.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
   "oneOf": [
     {"$ref": "#/definitions/Request"},
     {"$ref": "#/definitions/Response"}
@@ -64,11 +64,6 @@
           "then": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"]}}}
         },
         {"if": {"properties": {"op": {"const": "quota_assign"}}, "required": ["op"]}, "then": {"required": ["quota"]}},
-        {
-          "$comment": "A member's ledger reports at most 2048 sessions, so no quota may admit more.",
-          "if": {"properties": {"op": {"const": "quota_assign"}}, "required": ["op"]},
-          "then": {"properties": {"quota": {"properties": {"session_count": {"maximum": 2048}}}}}
-        },
         {"if": {"required": ["quota"]}, "then": {"properties": {"op": {"const": "quota_assign"}}}},
         {"if": {"properties": {"op": {"const": "pressure_directive"}}, "required": ["op"]}, "then": {"required": ["pressure"]}},
         {"if": {"required": ["pressure"]}, "then": {"properties": {"op": {"const": "pressure_directive"}}}},
@@ -116,9 +111,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["session_count", "domain_bytes"],
-      "description": "Session quota the agent assigned to the member: the concurrent session count and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
+      "description": "Session quota the agent assigned to the member: the concurrent session count (at most 2048, the most sessions one member's ledger reports) and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
       "properties": {
-        "session_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "session_count": {"type": "integer", "minimum": 0, "maximum": 2048},
         "domain_bytes": {"$ref": "#/definitions/DomainQuotaBytes"}
       },
       "if": {"properties": {"session_count": {"minimum": 1}}},
@@ -252,6 +247,20 @@
           "$comment": "An ok activate or quota_assign answer publishes the quota now in force.",
           "if": {"properties": {"op": {"enum": ["activate", "quota_assign"]}, "status": {"const": "ok"}}, "required": ["op", "status"]},
           "then": {"required": ["quota"]}
+        },
+        {
+          "$comment": "The legacy stage fields never appear on a runtime answer.",
+          "if": {"required": ["op"]},
+          "then": {"not": {"anyOf": [{"required": ["ready"]}, {"required": ["active_deployment_id"]}, {"required": ["candidate_deployment_id"]}]}}
+        },
+        {
+          "$comment": "A runtime answer carries an error exactly when it failed.",
+          "if": {"properties": {"status": {"enum": ["ok", "member_mismatch"]}}, "required": ["op", "status"]},
+          "then": {"not": {"required": ["error"]}}
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["error", "not_ready", "timeout", "unsupported"]}}, "required": ["op", "status"]},
+          "then": {"required": ["error"]}
         }
       ]
     }

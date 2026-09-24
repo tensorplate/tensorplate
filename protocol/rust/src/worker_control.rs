@@ -8,9 +8,10 @@
 // (`admission_fence` .. `pressure_directive`) are the messages the agent and
 // the serving worker exchange over that channel: one compact JSON frame per
 // line, each request answered by one response with the same
-// `correlation_id`. A request the agent repeats keeps its
-// `correlation_id`, and the worker applies each one at most once, answering
-// a repeat with the first outcome; that is what makes every runtime
+// `correlation_id`. The agent repeats only the latest request it sent on a
+// channel, with the same `correlation_id`; the worker keeps the id and
+// outcome of the latest request it applied and answers a repeat from that
+// record instead of applying it again. That is what makes every runtime
 // operation idempotent. The golden frames under
 // `protocol/rust/tests/fixtures/worker_control_*.jsonl` pin the byte-exact
 // encoding every implementation of the channel produces.
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_control::is_valid_deployment_id;
 use crate::correlation_id::validate_correlation_id;
 use crate::error::ErrorCode;
-use crate::member_quota::MemberQuota;
+use crate::member_quota::{MemberQuota, MAX_MEMBER_SESSIONS};
 use crate::resident_set::MAX_STATE_COUNTER;
 use crate::serde_shape::{deserialize_some, deserialize_some_map_only};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
@@ -30,11 +31,11 @@ use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 /// channel; [`encode_frame`] refuses to write one.
 pub const WORKER_CONTROL_MAX_FRAME_BYTES: usize = 65_536;
 
-/// Most sessions a member's ledger reports, and so the largest session
-/// ceiling a quota may assign over the channel. The largest legal ledger
-/// frame (this many twenty-digit timestamps plus the envelope) stays under
+/// Most sessions a member's ledger reports: [`MAX_MEMBER_SESSIONS`], the
+/// most any quota assigns. The largest `ok` ledger answer (this many
+/// twenty-digit timestamps plus the envelope) stays under
 /// [`WORKER_CONTROL_MAX_FRAME_BYTES`].
-pub const WORKER_CONTROL_MAX_LEDGER_SESSIONS: u32 = 2_048;
+pub const WORKER_CONTROL_MAX_LEDGER_SESSIONS: u32 = MAX_MEMBER_SESSIONS;
 
 /// `transaction_id` of the runtime operations that belong to no deploy
 /// transaction: `quota_assign`, `ledger_status` and `pressure_directive`.
@@ -94,6 +95,31 @@ impl WorkerOp {
     pub fn is_transactional(self) -> bool {
         matches!(self, Self::AdmissionFence | Self::Activate | Self::Retire)
     }
+
+    /// The operation's wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::CapacityCheck => "capacity_check",
+            Self::Warm => "warm",
+            Self::Promote => "promote",
+            Self::ActiveStatus => "active_status",
+            Self::Unload => "unload",
+            Self::AdmissionFence => "admission_fence",
+            Self::Activate => "activate",
+            Self::Retire => "retire",
+            Self::QuotaAssign => "quota_assign",
+            Self::LedgerStatus => "ledger_status",
+            Self::PressureDirective => "pressure_directive",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkerOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A resident-set member: one deployment at one generation.
@@ -113,19 +139,20 @@ impl MemberRef {
         }
     }
 
-    fn validate(&self) -> Result<(), WorkerControlRequestError> {
+    /// The reason this member reference is invalid, if it is.
+    fn problem(&self) -> Option<String> {
         if !is_valid_deployment_id(&self.deployment_id) {
-            return Err(WorkerControlRequestError::InvalidMember(
+            return Some(
                 "deployment_id must be one filesystem-safe path segment of 1-128 bytes".into(),
-            ));
+            );
         }
         if !(1..=MAX_STATE_COUNTER).contains(&self.generation) {
-            return Err(WorkerControlRequestError::InvalidMember(format!(
+            return Some(format!(
                 "generation {} is outside [1, 2^53)",
                 self.generation
-            )));
+            ));
         }
-        Ok(())
+        None
     }
 }
 
@@ -478,13 +505,16 @@ impl WorkerControlRequest {
             .as_deref()
             .ok_or(WorkerControlRequestError::MissingCorrelationId(self.op))?;
         validate_correlation_id(correlation_id)
-            .map_err(|e| WorkerControlRequestError::InvalidCorrelationId(e.to_string()))?;
+            .map_err(|_| WorkerControlRequestError::InvalidId("correlation_id"))?;
         validate_correlation_id(&self.transaction_id)
-            .map_err(|e| WorkerControlRequestError::InvalidTransactionId(e.to_string()))?;
-        self.member
+            .map_err(|_| WorkerControlRequestError::InvalidId("transaction_id"))?;
+        let member = self
+            .member
             .as_ref()
-            .ok_or(WorkerControlRequestError::MissingMember(self.op))?
-            .validate()?;
+            .ok_or(WorkerControlRequestError::MissingMember(self.op))?;
+        if let Some(problem) = member.problem() {
+            return Err(WorkerControlRequestError::InvalidMember(problem));
+        }
         if self.candidate.is_some() || self.candidate_deployment_id.is_some() {
             return Err(WorkerControlRequestError::CandidateOnRuntimeOp(self.op));
         }
@@ -505,20 +535,20 @@ impl WorkerControlRequest {
             ),
         ];
         for (field, present, owner) in payloads {
-            if present != (self.op == owner) {
-                return Err(WorkerControlRequestError::PayloadMismatch { op: self.op, field });
+            match (present, self.op == owner) {
+                (false, true) => {
+                    return Err(WorkerControlRequestError::MissingPayload { op: self.op, field })
+                }
+                (true, false) => {
+                    return Err(WorkerControlRequestError::MisplacedPayload { op: self.op, field })
+                }
+                _ => {}
             }
         }
         if let Some(quota) = self.quota.as_ref() {
             quota
                 .validate()
                 .map_err(|e| WorkerControlRequestError::InvalidQuota(e.to_string()))?;
-            if quota.session_count > WORKER_CONTROL_MAX_LEDGER_SESSIONS {
-                return Err(WorkerControlRequestError::InvalidQuota(format!(
-                    "session_count {} exceeds the {WORKER_CONTROL_MAX_LEDGER_SESSIONS} sessions a ledger reports",
-                    quota.session_count
-                )));
-            }
         }
         if let Some(pressure) = self.pressure {
             pressure.validate()?;
@@ -534,28 +564,28 @@ impl WorkerControlRequest {
 pub enum WorkerControlRequestError {
     #[error("worker control request transaction_id must be non-empty")]
     EmptyTransactionId,
-    #[error("worker control op `{0:?}` requires a candidate payload")]
+    #[error("worker control op `{0}` requires a candidate payload")]
     MissingCandidate(WorkerOp),
-    #[error("legacy worker control op `{0:?}` carries a runtime-operation field")]
+    #[error("legacy worker control op `{0}` carries a runtime-operation field")]
     RuntimeFieldOnLegacyOp(WorkerOp),
-    #[error("runtime op `{0:?}` requires a correlation_id")]
+    #[error("runtime op `{0}` requires a correlation_id")]
     MissingCorrelationId(WorkerOp),
-    #[error("runtime op correlation_id is invalid: {0}")]
-    InvalidCorrelationId(String),
-    #[error("runtime op transaction_id is invalid: {0}")]
-    InvalidTransactionId(String),
+    #[error("runtime op {0} is invalid: it must be 1-64 bytes of [A-Za-z0-9_-]")]
+    InvalidId(&'static str),
     #[error("timeout_ms must be at least 1")]
     ZeroTimeout,
-    #[error("runtime op `{0:?}` requires a member")]
+    #[error("runtime op `{0}` requires a member")]
     MissingMember(WorkerOp),
     #[error("member is invalid: {0}")]
     InvalidMember(String),
-    #[error("runtime op `{0:?}` must not carry a candidate")]
+    #[error("runtime op `{0}` must not carry a candidate")]
     CandidateOnRuntimeOp(WorkerOp),
-    #[error("runtime op `{0:?}` has the wrong transaction_id: fence, activate and retire name their deploy transaction; quota_assign, ledger_status and pressure_directive use `runtime`")]
+    #[error("runtime op `{0}` has the wrong transaction_id: fence, activate and retire name their deploy transaction; quota_assign, ledger_status and pressure_directive use `runtime`")]
     WrongTransactionId(WorkerOp),
-    #[error("`{field}` does not belong on op `{op:?}` (or is missing from it)")]
-    PayloadMismatch { op: WorkerOp, field: &'static str },
+    #[error("runtime op `{op}` requires `{field}`")]
+    MissingPayload { op: WorkerOp, field: &'static str },
+    #[error("`{field}` does not belong on op `{op}`")]
+    MisplacedPayload { op: WorkerOp, field: &'static str },
     #[error("quota is invalid: {0}")]
     InvalidQuota(String),
     #[error("pressure directive is invalid: {0}")]
@@ -843,9 +873,8 @@ impl WorkerControlResponse {
                 .transaction_id
                 .as_deref()
                 .ok_or(WorkerControlResponseError::MissingEcho("transaction_id"))?;
-            validate_correlation_id(transaction_id).map_err(|e| {
-                WorkerControlResponseError::InvalidEcho(format!("transaction_id: {e}"))
-            })?;
+            validate_correlation_id(transaction_id)
+                .map_err(|_| WorkerControlResponseError::InvalidEcho("transaction_id"))?;
             if op.is_transactional() == (transaction_id == RUNTIME_TRANSACTION_ID) {
                 return Err(WorkerControlResponseError::WrongTransactionId(op));
             }
@@ -853,14 +882,30 @@ impl WorkerControlResponse {
                 .correlation_id
                 .as_deref()
                 .ok_or(WorkerControlResponseError::MissingEcho("correlation_id"))?;
-            validate_correlation_id(correlation_id).map_err(|e| {
-                WorkerControlResponseError::InvalidEcho(format!("correlation_id: {e}"))
-            })?;
-            self.member
+            validate_correlation_id(correlation_id)
+                .map_err(|_| WorkerControlResponseError::InvalidEcho("correlation_id"))?;
+            let member = self
+                .member
                 .as_ref()
-                .ok_or(WorkerControlResponseError::MissingMember)?
-                .validate()
-                .map_err(|e| WorkerControlResponseError::InvalidMember(e.to_string()))?;
+                .ok_or(WorkerControlResponseError::MissingMember)?;
+            if let Some(problem) = member.problem() {
+                return Err(WorkerControlResponseError::InvalidMember(problem));
+            }
+            if self.ready.is_some()
+                || self.active_deployment_id.is_some()
+                || self.candidate_deployment_id.is_some()
+            {
+                return Err(WorkerControlResponseError::LegacyFieldOnRuntimeResponse);
+            }
+            let failed = !matches!(
+                self.status,
+                WorkerStatusOutcome::Ok | WorkerStatusOutcome::MemberMismatch
+            );
+            match (failed, self.error.is_some()) {
+                (true, false) => return Err(WorkerControlResponseError::MissingError),
+                (false, true) => return Err(WorkerControlResponseError::UnexpectedError),
+                _ => {}
+            }
         } else if self.member.is_some()
             || self.ledger.is_some()
             || self.quota.is_some()
@@ -894,12 +939,12 @@ impl WorkerControlResponse {
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum WorkerControlResponseError {
-    #[error("a response may name only a runtime op, not `{0:?}`")]
+    #[error("a response may name only a runtime op, not `{0}`")]
     LegacyOp(WorkerOp),
     #[error("a runtime response must echo `{0}`")]
     MissingEcho(&'static str),
-    #[error("a runtime response echo is invalid: {0}")]
-    InvalidEcho(String),
+    #[error("a runtime response echo is invalid: {0} must be 1-64 bytes of [A-Za-z0-9_-]")]
+    InvalidEcho(&'static str),
     #[error("a runtime response must name the member that answered")]
     MissingMember,
     #[error("the answering member is invalid: {0}")]
@@ -908,8 +953,18 @@ pub enum WorkerControlResponseError {
     MissingQuota,
     #[error("the response does not answer the request: {0}")]
     NotAnAnswer(&'static str),
-    #[error("runtime response `{0:?}` has the wrong transaction_id")]
+    #[error("runtime response `{0}` has the wrong transaction_id")]
     WrongTransactionId(WorkerOp),
+    #[error(
+        "ready, active_deployment_id and candidate_deployment_id belong only on a legacy response"
+    )]
+    LegacyFieldOnRuntimeResponse,
+    #[error(
+        "a failed runtime answer (error, not_ready, timeout or unsupported) must carry its error"
+    )]
+    MissingError,
+    #[error("an ok or member_mismatch answer must not carry an error")]
+    UnexpectedError,
     #[error("member, ledger, quota and member_mismatch belong only on a runtime response")]
     RuntimeFieldWithoutOp,
     #[error("an ok ledger_status response must carry the ledger")]

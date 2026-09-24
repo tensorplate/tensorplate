@@ -15,6 +15,12 @@ use crate::json_numbers::deserialize_some_safe_bytes;
 use crate::platform_memory_profile::BudgetDomainName;
 use crate::serde_shape::deserialize_map_only;
 
+/// Most concurrent sessions one member's quota may assign. A member's
+/// session ledger reports every session it holds, one admission timestamp
+/// for each reserved or active session, and this bound keeps the largest
+/// ledger answer on the runtime control channel inside one frame.
+pub const MAX_MEMBER_SESSIONS: u32 = 2_048;
+
 /// Per-domain session quota bytes, keyed by budget domain name.
 ///
 /// The keys are the [`BudgetDomainName`] spellings. A discrete-GPU host
@@ -74,11 +80,11 @@ impl DomainQuotaBytes {
 /// per-domain bytes that back it.
 ///
 /// `session_count` is the number of concurrent logical sessions assigned to
-/// the member; a worker's own ceiling may only lower it. For a member
-/// admitted in qualification mode it records the operator's test count for
-/// the member. A member that serves no logical sessions (a vision or VLA
-/// deployment) carries zero sessions and no domain bytes. A positive count
-/// always names the domains that back it.
+/// the member, at most [`MAX_MEMBER_SESSIONS`]; a worker's own ceiling may
+/// only lower it. For a member admitted in qualification mode it records
+/// the operator's test count for the member. A member that serves no
+/// logical sessions (a vision or VLA deployment) carries zero sessions and
+/// no domain bytes. A positive count always names the domains that back it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberQuota {
@@ -95,6 +101,9 @@ impl MemberQuota {
     /// Returns [`MemberQuotaError`] naming the violated rule.
     pub fn validate(&self) -> Result<(), MemberQuotaError> {
         self.domain_bytes.validate()?;
+        if self.session_count > MAX_MEMBER_SESSIONS {
+            return Err(MemberQuotaError::TooManySessions(self.session_count));
+        }
         if self.session_count > 0 && self.domain_bytes.is_empty() {
             return Err(MemberQuotaError::SessionsWithoutDomainBytes);
         }
@@ -108,6 +117,10 @@ pub enum MemberQuotaError {
     SharedPoolWithDiscreteDomain,
     #[error("quota.session_count is positive but quota.domain_bytes names no domain")]
     SessionsWithoutDomainBytes,
+    #[error(
+        "quota.session_count {0} exceeds the {MAX_MEMBER_SESSIONS} sessions one member may hold"
+    )]
+    TooManySessions(u32),
 }
 
 #[cfg(test)]
