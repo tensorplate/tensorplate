@@ -1132,4 +1132,87 @@ JSON
   echo "evidence gate enforces on final releases only, and never waives a checker that did not run"
 )
 
+# --- schema version metadata walk, against crafted schema trees -----------
+#
+# The sandbox cut above runs check_version_files over the real schemas, so it
+# is the positive control. This lifts the same walk out of the driver and
+# runs it over a copy of the schemas with one fault at a time: a document on
+# its own version track may list versions only at its root, and every other
+# schema stays pinned to the protocol version.
+(
+  walk="$(awk '/^  if python3 - "\$protocol" <<.PY.$/ { on = 1; next } on && /^PY$/ { exit } on' "$script")"
+  [[ "$walk" == *'state_tracks = {"protocol/schemas/agent_state.json"}'* ]] || {
+    echo "FAIL: could not lift the schema version walk out of $script" >&2; exit 1; }
+  protocol_version="$(sed -n 's/^pub const PROTOCOL_VERSION: &str = "\(.*\)";$/\1/p' protocol/rust/src/lib.rs)"
+  [[ -n "$protocol_version" ]] || { echo "FAIL: PROTOCOL_VERSION not found" >&2; exit 1; }
+  tree="$tmp/schema-walk"
+
+  reset_tree() {
+    rm -rf "$tree"
+    mkdir -p "$tree/config/schemas" "$tree/protocol/schemas"
+    cp config/schemas/*.json "$tree/config/schemas/"
+    cp protocol/schemas/*.json "$tree/protocol/schemas/"
+  }
+  mutate() {
+    python3 - "$tree/$1" "$2" <<'PY'
+import json
+import sys
+
+path, edit = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as handle:
+    d = json.load(handle)
+exec(edit)
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(d, handle)
+PY
+  }
+  expect_walk() {
+    local what="$1" want="$2" needle="${3:-}" out status=0
+    out="$(cd "$tree" && python3 -c "$walk" "$protocol_version" 2>&1)" || status=$?
+    if [[ "$want" == pass ]]; then
+      [[ $status -eq 0 ]] || { echo "FAIL: schema walk: ${what}: ${out}" >&2; exit 1; }
+    elif [[ $status -eq 0 || "$out" != *"$needle"* ]]; then
+      echo "FAIL: schema walk: ${what}: expected a failure naming '${needle}', got status ${status}: ${out}" >&2
+      exit 1
+    fi
+  }
+
+  reset_tree
+  expect_walk "the repository's schemas" pass
+
+  mutate protocol/schemas/agent_state.json 'd["properties"]["schema_version"] = {"type": "string", "const": "0.1"}'
+  expect_walk "a state-track root without its version list" fail \
+    "protocol/schemas/agent_state.json: root schema_version must be a non-empty enum"
+  reset_tree
+  mutate protocol/schemas/agent_state.json 'd["properties"]["schema_version"]["enum"] = []'
+  expect_walk "a state-track root with an empty version list" fail \
+    "protocol/schemas/agent_state.json: root schema_version must be a non-empty enum"
+  reset_tree
+  mutate protocol/schemas/agent_state.json 'd["properties"]["schema_version"]["const"] = "0.1"'
+  expect_walk "a state-track root that also pins one version" fail \
+    "protocol/schemas/agent_state.json: root schema_version must be a non-empty enum"
+  reset_tree
+  mutate protocol/schemas/agent_state.json 'd["properties"]["schema_version"]["enum"] = ["0.1", 0.2]'
+  expect_walk "a state-track root listing a non-string version" fail \
+    "protocol/schemas/agent_state.json: root schema_version must be a non-empty enum"
+  reset_tree
+  mutate protocol/schemas/agent_state.json 'd["allOf"][0]["if"]["properties"]["schema_version"]["const"] = "0.9"'
+  expect_walk "a state-track branch naming a version the root does not list" fail \
+    "protocol/schemas/agent_state.json: schema_version const '0.9' is outside the file's versions"
+  reset_tree
+  mutate protocol/schemas/agent_state.json 'd["allOf"][0]["if"]["properties"]["schema_version"] = {"enum": ["0.1", "0.2"]}'
+  expect_walk "a state-track branch listing versions" fail \
+    "protocol/schemas/agent_state.json: only the root schema_version may list versions"
+  reset_tree
+  mutate protocol/schemas/deploy_transaction.json 'd["properties"]["schema_version"] = {"type": "string", "enum": ["0.1", "0.2"]}'
+  expect_walk "a schema outside the state-track list listing versions" fail \
+    "protocol/schemas/deploy_transaction.json: schema_version const None is not '${protocol_version}'"
+  reset_tree
+  mutate protocol/schemas/deploy_transaction.json 'd["properties"]["schema_version"] = {"type": "string", "const": "0.2"}'
+  expect_walk "a schema outside the state-track list at another version" fail \
+    "protocol/schemas/deploy_transaction.json: schema_version const '0.2' is not '${protocol_version}'"
+
+  echo "schema version walk admits a version list only on state-track documents"
+)
+
 printf 'release script checks green\n'

@@ -495,6 +495,11 @@ import pathlib
 import sys
 
 expected = sys.argv[1]
+# Documents with their own version track: the file's root `schema_version`
+# lists the versions its readers accept, and every other `schema_version`
+# constraint in the file must name one of them. The versions themselves are
+# pinned by that document's Rust mirror and its tests, not here.
+state_tracks = {"protocol/schemas/agent_state.json"}
 bad = []
 for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pathlib.Path("protocol/schemas").glob("*.json"))):
     data = json.loads(path.read_text())
@@ -507,14 +512,34 @@ for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pa
         if isinstance(obj, dict):
             for key, value in obj.items():
                 if key == "schema_version" and isinstance(value, dict):
-                    found.append(value.get("const"))
+                    found.append(value)
                 walk(value)
         elif isinstance(obj, list):
             for item in obj:
                 walk(item)
 
     walk(data)
-    for observed in found:
+    if path.as_posix() in state_tracks:
+        root = data.get("properties", {}).get("schema_version")
+        track = root.get("enum") if isinstance(root, dict) else None
+        if (
+            not isinstance(track, list)
+            or not track
+            or not all(isinstance(v, str) for v in track)
+            or "const" in root
+        ):
+            bad.append(f"{path}: root schema_version must be a non-empty enum of version strings")
+            continue
+        for constraint in found:
+            if constraint is root:
+                continue
+            if "enum" in constraint:
+                bad.append(f"{path}: only the root schema_version may list versions, found {constraint['enum']!r}")
+            elif constraint.get("const") not in track:
+                bad.append(f"{path}: schema_version const {constraint.get('const')!r} is outside the file's versions {track!r}")
+        continue
+    for constraint in found:
+        observed = constraint.get("const")
         if observed != expected:
             bad.append(f"{path}: schema_version const {observed!r} is not {expected!r}")
 
