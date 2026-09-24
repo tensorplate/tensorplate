@@ -23,7 +23,7 @@
 // [`crate::probe`].
 
 use serde::{Deserialize, Serialize};
-use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{
@@ -31,6 +31,7 @@ use crate::detect::{
     nvidia_display_devices, HostSources,
 };
 use crate::error::PlatformProbeError;
+use crate::instance_binding::{check_live_instance, InstanceBinding};
 
 /// What every unestablished-identity error opens with.
 const CONTEXT: &str =
@@ -289,7 +290,7 @@ impl MachineTypeRecord {
 }
 
 /// A lowercase UUID as Linux exposes it, excluding the all-zero sentinel.
-fn is_boot_id(id: &str) -> bool {
+pub(crate) fn is_boot_id(id: &str) -> bool {
     id.len() == 36
         && id != "00000000-0000-0000-0000-000000000000"
         && id.bytes().enumerate().all(|(i, b)| {
@@ -321,17 +322,21 @@ fn is_pci_id(id: &str) -> bool {
 ///
 /// 1. A live metadata answer wins, and any record is ignored. An answer
 ///    that is not a machine-type resource name is uninterpretable, not
-///    absent.
+///    absent. An instance binding naming another instance than the live
+///    instance-id answer fails detection (see [`crate::instance_binding`]).
 /// 2. A host whose firmware does not say it is a Compute Engine instance has
 ///    no machine type, and any record is ignored.
 /// 3. A Compute Engine instance without a live answer uses the recorded
-///    machine type only if the record parses and every fact it is bound to
-///    matches exactly.
+///    machine type only if the record parses, every fact it is bound to
+///    matches exactly, and an instance binding written in this boot agrees
+///    with it.
 ///
 /// # Errors
 ///
 /// [`PlatformProbeError::Unrecognized`] for a live answer that is not a
-/// machine-type resource name, and [`PlatformProbeError::IdentityUnestablished`] for every
+/// machine-type resource name or instance id,
+/// [`PlatformProbeError::InstanceChanged`] for a binding from another
+/// instance, and [`PlatformProbeError::IdentityUnestablished`] for every
 /// other Compute Engine case without one. Never `Ok(None)` on Compute
 /// Engine: an instance reporting no machine type is admitted as an
 /// unvalidated shape rather than refused.
@@ -341,15 +346,16 @@ pub fn establish_machine_type(
     if let Some(body) = sources.gce_machine_type.as_deref() {
         // The body is not echoed: it carries the project number, and it is
         // whatever the peer sent.
-        return machine_type_from_metadata(body)
-            .map(|machine_type| Some((machine_type, MachineTypeSource::GceMetadata)))
-            .ok_or_else(|| PlatformProbeError::Unrecognized {
+        let machine_type =
+            machine_type_from_metadata(body).ok_or_else(|| PlatformProbeError::Unrecognized {
                 source_name: "GCE metadata service".to_string(),
                 detail: "the machine-type answer is not \
                          `projects/<project>/machineTypes/<machine-type>` with a canonical \
                          machine type"
                     .to_string(),
-            });
+            })?;
+        check_live_instance(sources)?;
+        return Ok(Some((machine_type, MachineTypeSource::GceMetadata)));
     }
     if !sources
         .dmi_product_name
@@ -392,6 +398,23 @@ pub fn establish_machine_type(
              tensorplate-agent once while the metadata service is reachable to record it again",
             record.machine_type
         )));
+    }
+    if let Some(binding) = sources.instance_binding.as_deref() {
+        let unbound = |detail: String| PlatformProbeError::IdentityUnestablished {
+            source_name: INSTANCE_BINDING_PATH.to_string(),
+            detail: format!(
+                "{CONTEXT}, and {detail}; start tensorplate-agent once while the metadata \
+                 service is reachable to record both again"
+            ),
+        };
+        let binding = InstanceBinding::parse(binding)
+            .map_err(|reason| unbound(format!("the instance binding is unusable: {reason}")))?;
+        // A binding from an earlier boot says nothing about this one.
+        if binding.boot_id == live.boot_id {
+            if let Some(disagreement) = binding.disagreement(&record, body) {
+                return Err(unbound(disagreement));
+            }
+        }
     }
     Ok(Some((
         record.machine_type,

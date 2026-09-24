@@ -32,6 +32,7 @@ pub mod capability;
 pub mod detect;
 pub mod error;
 pub mod identity;
+pub mod instance_binding;
 pub mod machine_type_record;
 pub mod matrix;
 pub mod memory_telemetry;
@@ -58,6 +59,7 @@ pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
     HostIdentity, HostProbe,
 };
+pub use instance_binding::{InstanceBinding, INSTANCE_BINDING_SCHEMA_VERSION};
 pub use machine_type_record::{MachineTypeRecord, MachineTypeSource, RecordWrite};
 pub use matrix::render_support_matrix;
 pub use memory_telemetry::PlatformMemoryTelemetry;

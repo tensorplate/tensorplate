@@ -1,0 +1,10 @@
+{
+  "schema_version": 2,
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "machine_type": "g2-standard-8",
+  "logical_cpus": 8,
+  "mem_total_bytes": 33649020928,
+  "nvidia_display_devices": [
+    "0x10de:0x27b8"
+  ]
+}

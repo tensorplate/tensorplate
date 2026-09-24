@@ -97,10 +97,22 @@ pub enum PlatformProbeError {
     ///
     /// Today this is a Compute Engine instance whose metadata service could
     /// not be reached and whose recorded machine type is missing, unusable,
-    /// or bound to local facts that have changed. Reporting that instance
+    /// bound to local facts that have changed, or contradicted by the
+    /// instance binding written in the same boot. Reporting that instance
     /// with no machine type would admit it as an unvalidated shape.
     #[error("platform identity could not be established from `{source_name}`: {detail}")]
     IdentityUnestablished { source_name: String, detail: String },
+
+    /// The metadata service answers for a different Compute Engine instance
+    /// from the one this host's identity was recorded on: the disk was moved
+    /// to, or cloned into, another instance.
+    ///
+    /// Another attempt cannot settle it, and a later answer does not heal
+    /// it. Reprovisioning is explicit: delete the instance binding and the
+    /// machine-type record, then start `tensorplate-agent` while the
+    /// metadata service is reachable.
+    #[error("platform identity in `{source_name}` belongs to another instance: {detail}")]
+    InstanceChanged { source_name: String, detail: String },
 }
 
 impl From<PlatformProbeError> for ProtocolError {
@@ -112,7 +124,8 @@ impl From<PlatformProbeError> for ProtocolError {
             // because a source was unreadable or because the readable ones do
             // not establish an identity without guessing.
             PlatformProbeError::Unreadable { .. }
-            | PlatformProbeError::IdentityUnestablished { .. } => ErrorCode::Internal,
+            | PlatformProbeError::IdentityUnestablished { .. }
+            | PlatformProbeError::InstanceChanged { .. } => ErrorCode::Internal,
         };
         ProtocolError::new(code, "platform detection failed").with_context(value.to_string())
     }

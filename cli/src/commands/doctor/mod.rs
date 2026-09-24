@@ -16,7 +16,7 @@ use serde_json::json;
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, ControlRequest, ResponseStatus, SupervisionStatusSummary,
 };
-use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 use tensorplate_protocol::supervision_event::SupervisionServingState;
 
 use tensorplate_platform::{
@@ -227,6 +227,16 @@ const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reac
 /// with the service reachable, which records the machine type again.
 const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change";
 
+/// What to do when the instance binding is read on every Compute Engine
+/// start, reachable or not, and this user cannot read it. It lives in the
+/// identity directory, which only root and the `tensorplate` group can enter.
+const BINDING_UNREADABLE_HINT: &str = "the instance binding tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/identity";
+
+/// What to do when the metadata service answers for another instance than
+/// the one this host's identity was recorded on. Starting the agent again
+/// does not heal it: reprovisioning is explicit.
+const INSTANCE_CHANGED_HINT: &str = "this disk was moved to, or cloned into, another Compute Engine instance — to reprovision the host as this instance, stop tensorplate-agent, delete /var/lib/tensorplate/identity/instance-binding.json and /var/lib/tensorplate/state/machine-type.json, and start tensorplate-agent while the metadata service is reachable";
+
 /// Detection state consumed by the pure host-section renderer.
 ///
 /// Host detection and accelerator detection are deliberately represented
@@ -279,6 +289,11 @@ pub fn render_host_section(
                 {
                     RECORD_UNREADABLE_HINT
                 }
+                PlatformProbeError::Unreadable { source_name, .. }
+                    if source_name.ends_with(INSTANCE_BINDING_PATH) =>
+                {
+                    BINDING_UNREADABLE_HINT
+                }
                 PlatformProbeError::Unreadable { .. } => {
                     "a detection source could not be read — re-run as a user that can read /etc and /proc"
                 }
@@ -286,6 +301,7 @@ pub fn render_host_section(
                     "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"
                 }
                 PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT,
+                PlatformProbeError::InstanceChanged { .. } => INSTANCE_CHANGED_HINT,
             };
             return vec![
                 Finding::warn(
@@ -650,6 +666,7 @@ fn render_platform_row(resolution: PlatformResolution<'_>) -> Finding {
                     "the accelerator source answered but this release could not interpret it; attach `tensorplate doctor --output json` rather than reinstalling the driver"
                         .into(),
                 PlatformProbeError::IdentityUnestablished { .. } => IDENTITY_UNESTABLISHED_HINT.into(),
+                PlatformProbeError::InstanceChanged { .. } => INSTANCE_CHANGED_HINT.into(),
             }),
         ),
         PlatformResolution::HostDetectionFailed => Finding::skipped(

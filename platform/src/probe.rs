@@ -197,6 +197,8 @@ impl SystemHostProbe {
             dmi_product_name,
             gce_machine_type,
             machine_type_record,
+            gce_instance_id: None,
+            instance_binding: None,
             proc_meminfo: self.read("/proc/meminfo")?,
             pci_devices: self.pci_devices()?,
         })
@@ -1905,7 +1907,8 @@ mod tests {
                 assert!(detail.contains("boom"), "carries stderr: {detail}");
             }
             other @ (PlatformProbeError::Unrecognized { .. }
-            | PlatformProbeError::IdentityUnestablished { .. }) => {
+            | PlatformProbeError::IdentityUnestablished { .. }
+            | PlatformProbeError::InstanceChanged { .. }) => {
                 panic!("expected Unreadable, got {other:?}")
             }
         }
@@ -1955,7 +1958,8 @@ mod tests {
                     assert!(detail.contains("PATH"), "says why: {detail}");
                 }
                 other @ (PlatformProbeError::Unrecognized { .. }
-                | PlatformProbeError::IdentityUnestablished { .. }) => {
+                | PlatformProbeError::IdentityUnestablished { .. }
+                | PlatformProbeError::InstanceChanged { .. }) => {
                     panic!("expected Unreadable, got {other:?}")
                 }
             }

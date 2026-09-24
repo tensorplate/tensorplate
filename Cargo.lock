@@ -695,6 +695,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tensorplate-protocol",
  "thiserror",

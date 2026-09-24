@@ -101,6 +101,16 @@ pub struct HostSources {
     /// is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_type_record: Option<String>,
+    /// Body of the GCE metadata instance-id response: the instance id in
+    /// decimal. Asked only after the machine-type query answered, within the
+    /// same budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gce_instance_id: Option<String>,
+    /// The instance binding `tensorplate-agent` wrote beside an earlier live
+    /// answer (see [`crate::instance_binding`]). Read on every Compute Engine
+    /// instance, reachable or not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_binding: Option<String>,
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
     /// Jetson's module capacity is told from its sibling's.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -442,6 +452,20 @@ pub fn machine_type_from_metadata(body: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The instance id in a GCE metadata instance-id answer: a decimal `u64`
+/// with no sign, padding or leading zero.
+///
+/// Anything else is `None`. The id is compared as text, so a second spelling
+/// of the same number would read as another instance.
+#[must_use]
+pub fn instance_id_from_metadata(body: &str) -> Option<String> {
+    let id = body.trim();
+    id.parse::<u64>()
+        .ok()
+        .filter(|value| value.to_string() == id)
+        .map(|_| id.to_string())
 }
 
 /// Whether a DMI product name is the one Compute Engine firmware reports.

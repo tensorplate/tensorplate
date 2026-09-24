@@ -965,6 +965,8 @@ mod tests {
             dmi_product_name: text("dmi_product_name"),
             gce_machine_type: text("gce_machine_type"),
             machine_type_record: None,
+            gce_instance_id: None,
+            instance_binding: None,
             // Synthetic boot identity supplements the recorded hardware facts.
             boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
             proc_meminfo: text("proc_meminfo"),

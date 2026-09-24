@@ -63,6 +63,8 @@ fn sources_of(fixture: &Value) -> HostSources {
         dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
         machine_type_record: text("machine_type_record"),
+        gce_instance_id: text("gce_instance_id"),
+        instance_binding: text("instance_binding"),
         boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
@@ -72,6 +74,8 @@ fn sources_of(fixture: &Value) -> HostSources {
 const REDACTED_GCE_PROJECT: &str = "REDACTED";
 const LEGACY_SYNTHETIC_GCE_PROJECT: &str = "928311501586";
 const SYNTHETIC_UUID_PREFIX: &str = "GPU-00000000-0000-0000-0000-";
+/// The one Compute Engine instance id a published fixture may carry.
+const SYNTHETIC_GCE_INSTANCE_ID: &str = "1234567890123456789";
 
 #[test]
 fn published_host_fixtures_do_not_carry_live_identifiers() {
@@ -95,6 +99,26 @@ fn published_host_fixtures_do_not_carry_live_identifiers() {
                 project == REDACTED_GCE_PROJECT || legacy_l4,
                 "{name}: public fixture contains an unapproved GCP project identifier; \
                  use projects/REDACTED and retain the raw value privately"
+            );
+        }
+
+        // A recording carries the instance id twice: the live answer and the
+        // binding the agent wrote. Both must be the reserved synthetic id.
+        if let Some(answer) = fixture["sources"]["gce_instance_id"].as_str() {
+            assert_eq!(
+                answer.trim(),
+                SYNTHETIC_GCE_INSTANCE_ID,
+                "{name}: public fixture contains a live-looking GCE instance id; \
+                 use {SYNTHETIC_GCE_INSTANCE_ID} and retain the raw value privately"
+            );
+        }
+        if let Some(binding) = fixture["sources"]["instance_binding"].as_str() {
+            let binding: Value = serde_json::from_str(binding)
+                .unwrap_or_else(|_| panic!("{name}: the recorded binding is not JSON"));
+            assert_eq!(
+                binding["instance_id"].as_str(),
+                Some(SYNTHETIC_GCE_INSTANCE_ID),
+                "{name}: public fixture's instance binding carries a live-looking instance id"
             );
         }
 
