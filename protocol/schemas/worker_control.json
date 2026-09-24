@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/worker_control.json",
   "title": "TensorPlate Agent -> Serving Worker Control Contract (V01-E08-F05)",
-  "description": "Versioned local control messages the V01-E08 agent uses to prepare, warm, promote, inspect, and unload a candidate deployment on the V01-E07 serving worker. v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. This schema documents the JSON shape used when the contract is serialized across the agent <-> worker process boundary so a future cross-process control transport (e.g. an authenticated worker control socket) can reuse the same field names.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
+  "description": "Versioned local control messages between the V01-E08 agent and the V01-E07 serving worker.\n\nLegacy operations (`prepare`, `capacity_check`, `warm`, `promote`, `active_status`, `unload`): v0.1.0 uses a typed in-process trait inside `tensorplate-agent` so the agent can target either (a) the real worker — by spawning it with a worker config that points at the staged bundle and polling its HTTP `/health` for readiness — or (b) a mock implementation for tests. They document the JSON shape of that trait and are never sent over the runtime control channel.\n\nRuntime operations (`admission_fence`, `activate`, `retire`, `quota_assign`, `ledger_status`, `pressure_directive`) travel over the runtime control channel: a connected `AF_UNIX` stream socket pair the agent creates at spawn, whose other end the worker inherits as a descriptor, so there is no filesystem path and the peer is the agent by construction. A frame is one compact JSON document (no insignificant whitespace, keys in the order the golden frames `protocol/rust/tests/fixtures/worker_control_*.jsonl` use) followed by a single newline, at most 65536 bytes including the newline; a reader treats a longer line as a protocol error and closes the channel. A ledger reports at most 2048 sessions, so the largest legal frame (2048 twenty-digit admission timestamps plus the envelope) stays under that limit. The agent sends one request per frame; the worker answers each with one response frame carrying the same `correlation_id`. Every runtime request names the `member` (deployment and generation) it is for and every runtime response names the member that answered, so a request for another generation is answered `member_mismatch`. `transaction_id` is the committing transaction for `admission_fence`, `activate` and `retire`, and the literal `runtime` for `quota_assign`, `ledger_status` and `pressure_directive`; on runtime frames both ids follow the shared `[A-Za-z0-9_-]{1,64}` policy.\n\nIdempotency: each request on a channel has its own `correlation_id`, and a request the agent repeats (for example after its deadline passed) is sent again with the same one. The worker applies a `correlation_id` at most once and answers a repeat with the outcome of the first application, so a repeated `terminate_newest` cancels no further sessions and a repeated `retire` does not restart the drain its first application started.\n\nThe agent is the only mutator of the worker's active deployment. The CLI never speaks this contract.",
   "oneOf": [
     {"$ref": "#/definitions/Request"},
     {"$ref": "#/definitions/Response"}
@@ -19,17 +19,128 @@
         "candidate_deployment_id": {"type": "string"},
         "op": {
           "type": "string",
-          "enum": ["prepare", "capacity_check", "warm", "promote", "active_status", "unload"],
-          "description": "Stage in the agent's prepare/warm/promote sequence. v0.1.0 collapses prepare+load into a single `prepare` call; `warm` is the readiness/health probe; `promote` switches the worker's active deployment after `warm` succeeds; `unload` releases the previous active when policy requires it."
+          "enum": ["prepare", "capacity_check", "warm", "promote", "active_status", "unload", "admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"],
+          "description": "Operation. Legacy stages of the agent's prepare/warm/promote sequence: v0.1.0 collapses prepare+load into a single `prepare` call; `warm` is the readiness/health probe; `promote` switches the worker's active deployment after `warm` succeeds; `unload` releases the previous active when policy requires it. Runtime operations: `admission_fence` stops the member admitting new sessions and is acknowledged before the agent commits a set revision; `activate` opens admission under the member's assigned quota and answers with the quota in force; `retire` starts the member's retirement drain; `quota_assign` sets the member's session quota; `ledger_status` reports the member's session ledger; `pressure_directive` applies a memory pressure level."
         },
+        "member": {"$ref": "#/definitions/MemberRef"},
         "candidate": {"$ref": "#/definitions/CandidateRef"},
+        "quota": {"$ref": "#/definitions/MemberQuota"},
+        "pressure": {"$ref": "#/definitions/PressureDirective"},
+        "drain_timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long a retiring member lets its existing sessions finish before they are cancelled."
+        },
         "timeout_ms": {
           "type": "integer",
           "minimum": 1,
           "description": "Bounded operation timeout enforced by the agent's worker client."
         }
+      },
+      "allOf": [
+        {
+          "$comment": "Runtime operations name their member and carry a correlation id; they never carry a candidate.",
+          "if": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"]}}, "required": ["op"]},
+          "then": {"required": ["correlation_id", "member"]}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"]}}, "required": ["op"]},
+          "then": {"properties": {"correlation_id": {"pattern": "^[A-Za-z0-9_-]{1,64}$"}, "transaction_id": {"pattern": "^[A-Za-z0-9_-]{1,64}$"}}}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"]}}, "required": ["op"]},
+          "then": {"not": {"anyOf": [{"required": ["candidate"]}, {"required": ["candidate_deployment_id"]}]}}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire"]}}, "required": ["op"]},
+          "then": {"properties": {"transaction_id": {"not": {"const": "runtime"}}}}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["quota_assign", "ledger_status", "pressure_directive"]}}, "required": ["op"]},
+          "then": {"properties": {"transaction_id": {"const": "runtime"}}}
+        },
+        {
+          "if": {"required": ["member"]},
+          "then": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"]}}}
+        },
+        {"if": {"properties": {"op": {"const": "quota_assign"}}, "required": ["op"]}, "then": {"required": ["quota"]}},
+        {
+          "$comment": "A member's ledger reports at most 2048 sessions, so no quota may admit more.",
+          "if": {"properties": {"op": {"const": "quota_assign"}}, "required": ["op"]},
+          "then": {"properties": {"quota": {"properties": {"session_count": {"maximum": 2048}}}}}
+        },
+        {"if": {"required": ["quota"]}, "then": {"properties": {"op": {"const": "quota_assign"}}}},
+        {"if": {"properties": {"op": {"const": "pressure_directive"}}, "required": ["op"]}, "then": {"required": ["pressure"]}},
+        {"if": {"required": ["pressure"]}, "then": {"properties": {"op": {"const": "pressure_directive"}}}},
+        {"if": {"properties": {"op": {"const": "retire"}}, "required": ["op"]}, "then": {"required": ["drain_timeout_ms"]}},
+        {"if": {"required": ["drain_timeout_ms"]}, "then": {"properties": {"op": {"const": "retire"}}}}
+      ]
+    },
+    "MemberRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "generation"],
+      "description": "A resident-set member: one deployment at one generation.",
+      "properties": {
+        "deployment_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$", "not": {"enum": [".", ".."]}},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       }
     },
+    "PressureDirective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level"],
+      "description": "Memory pressure level the agent directs a member to apply. `normal` reports that no pressure applies and changes nothing. `shed_admission` stops admitting new sessions and drops droppable diagnostics. `terminate_newest` cancels the member's `count` newest admitted sessions. `resume` lifts `shed_admission`. Pressure levels never lift an `admission_fence` or undo a `retire`.",
+      "properties": {
+        "level": {"type": "string", "enum": ["normal", "shed_admission", "terminate_newest", "resume"]},
+        "count": {"type": "integer", "minimum": 1, "maximum": 2048}
+      },
+      "if": {"properties": {"level": {"const": "terminate_newest"}}},
+      "then": {"required": ["count"]},
+      "else": {"not": {"required": ["count"]}}
+    },
+    "LedgerStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reserved", "active", "closing", "ceiling", "admission_monotonic_ns"],
+      "description": "A member's session ledger. `reserved` sessions hold a quota reservation and are opening; `active` sessions are admitted and running; `closing` sessions are ending but hold their reservation until physical release. Together they never exceed `ceiling`, the member's session ceiling, which is at most 2048. `admission_monotonic_ns` lists, oldest first, the host monotonic-clock time at which each reserved or active session was admitted, so the agent can order the newest admitted sessions across members. Rules the decoder enforces beyond this schema: one timestamp per reserved or active session, in non-decreasing order (equal times are allowed), and reserved + active + closing <= ceiling.",
+      "properties": {
+        "reserved": {"type": "integer", "minimum": 0, "maximum": 2048},
+        "active": {"type": "integer", "minimum": 0, "maximum": 2048},
+        "closing": {"type": "integer", "minimum": 0, "maximum": 2048},
+        "ceiling": {"type": "integer", "minimum": 0, "maximum": 2048},
+        "admission_monotonic_ns": {"type": "array", "maxItems": 2048, "items": {"type": "integer", "minimum": 0}}
+      }
+    },
+    "MemberQuota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_count", "domain_bytes"],
+      "description": "Session quota the agent assigned to the member: the concurrent session count and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
+      "properties": {
+        "session_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "domain_bytes": {"$ref": "#/definitions/DomainQuotaBytes"}
+      },
+      "if": {"properties": {"session_count": {"minimum": 1}}},
+      "then": {"properties": {"domain_bytes": {"minProperties": 1}}}
+    },
+    "DomainQuotaBytes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Session quota bytes per budget domain. `shared_pool` (unified memory) never appears beside `guest_ram` or `device_vram` (discrete accelerator).",
+      "properties": {
+        "shared_pool": {"$ref": "#/definitions/QuotaBytes"},
+        "guest_ram": {"$ref": "#/definitions/QuotaBytes"},
+        "device_vram": {"$ref": "#/definitions/QuotaBytes"}
+      },
+      "not": {
+        "anyOf": [
+          {"required": ["shared_pool", "guest_ram"]},
+          {"required": ["shared_pool", "device_vram"]}
+        ]
+      }
+    },
+    "QuotaBytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
     "CandidateRef": {
       "type": "object",
       "additionalProperties": false,
@@ -53,10 +164,16 @@
         "schema_version": {"type": "string", "const": "0.1"},
         "transaction_id": {"type": "string"},
         "correlation_id": {"type": "string"},
+        "op": {
+          "type": "string",
+          "enum": ["admission_fence", "activate", "retire", "quota_assign", "ledger_status", "pressure_directive"],
+          "description": "The runtime operation this response answers. Absent on legacy responses."
+        },
+        "member": {"$ref": "#/definitions/MemberRef"},
         "status": {
           "type": "string",
-          "enum": ["ok", "error", "not_ready", "timeout", "unsupported"],
-          "description": "Outcome discriminator. `not_ready` is returned by `warm` while the candidate is still loading. `unsupported` maps to declared-but-unavailable backend or capability."
+          "enum": ["ok", "error", "not_ready", "timeout", "unsupported", "member_mismatch"],
+          "description": "Outcome discriminator. `not_ready` is returned by `warm` while the candidate is still loading. `unsupported` maps to declared-but-unavailable backend or capability. `member_mismatch` answers a runtime request whose `member` is not the member this worker serves; the response's `member` names the one it does."
         },
         "active_deployment_id": {
           "type": "string",
@@ -70,6 +187,8 @@
           "type": "boolean",
           "description": "True when the worker reports the candidate (or current active, for `active_status`) as ready to serve."
         },
+        "ledger": {"$ref": "#/definitions/LedgerStatus"},
+        "quota": {"$ref": "#/definitions/MemberQuota"},
         "error": {
           "type": "object",
           "additionalProperties": false,
@@ -96,7 +215,45 @@
             "context": {"type": "string"}
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "$comment": "A runtime response names its operation, echoes the request's transaction and correlation ids, and names the member that answered.",
+          "if": {"required": ["op"]},
+          "then": {"required": ["transaction_id", "correlation_id", "member"]}
+        },
+        {
+          "if": {"required": ["op"]},
+          "then": {"properties": {"correlation_id": {"pattern": "^[A-Za-z0-9_-]{1,64}$"}, "transaction_id": {"pattern": "^[A-Za-z0-9_-]{1,64}$"}}}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["admission_fence", "activate", "retire"]}}, "required": ["op"]},
+          "then": {"properties": {"transaction_id": {"not": {"const": "runtime"}}}}
+        },
+        {
+          "if": {"properties": {"op": {"enum": ["quota_assign", "ledger_status", "pressure_directive"]}}, "required": ["op"]},
+          "then": {"properties": {"transaction_id": {"const": "runtime"}}}
+        },
+        {"if": {"required": ["member"]}, "then": {"required": ["op"]}},
+        {"if": {"properties": {"status": {"const": "member_mismatch"}}, "required": ["status"]}, "then": {"required": ["op"]}},
+        {
+          "if": {"properties": {"op": {"const": "ledger_status"}, "status": {"const": "ok"}}, "required": ["op", "status"]},
+          "then": {"required": ["ledger"]}
+        },
+        {
+          "if": {"required": ["ledger"]},
+          "then": {"required": ["op"], "properties": {"op": {"const": "ledger_status"}, "status": {"const": "ok"}}}
+        },
+        {
+          "if": {"required": ["quota"]},
+          "then": {"required": ["op"], "properties": {"op": {"enum": ["activate", "quota_assign"]}, "status": {"const": "ok"}}}
+        },
+        {
+          "$comment": "An ok activate or quota_assign answer publishes the quota now in force.",
+          "if": {"properties": {"op": {"enum": ["activate", "quota_assign"]}, "status": {"const": "ok"}}, "required": ["op", "status"]},
+          "then": {"required": ["quota"]}
+        }
+      ]
     }
   }
 }

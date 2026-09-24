@@ -1,0 +1,8 @@
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000006","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"pressure":{"level":"shed_admission"},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000006","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"status":"ok"}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000007","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"pressure":{"level":"terminate_newest","count":1},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000007","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"status":"ok"}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000009","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"pressure":{"level":"normal"},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000009","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"status":"ok"}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000010","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"pressure":{"level":"resume"},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000010","op":"pressure_directive","member":{"deployment_id":"speech-tts","generation":5},"status":"ok"}
