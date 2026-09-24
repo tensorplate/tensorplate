@@ -24,6 +24,18 @@ with one helper
 The agent control API, CLI, serving HTTP envelope, and sidecar IPC all
 treat the field as a value carried on the request, not global state.
 
+[`worker_control.json`](../../protocol/schemas/worker_control.json)
+defines the messages of the runtime control channel between the agent and
+a serving worker; nothing opens that channel yet. On it, every request
+carries a `correlation_id` and the response that answers it echoes the
+same value. `transaction_id` there names the committing deploy
+transaction for `admission_fence`, `activate` and `retire`, and is the
+literal `runtime` for `quota_assign`, `ledger_status` and
+`pressure_directive`, which belong to no transaction. Each request gets its
+own `correlation_id`; a request the agent repeats keeps the id it was
+first sent with, and the worker applies an id at most once, answering a
+repeat with the outcome of the first application.
+
 ## Generation
 
 When neither the CLI nor an upstream caller supplies a value,

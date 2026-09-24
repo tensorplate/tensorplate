@@ -227,6 +227,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `agent_state_0_2_two_member_set.json`. The release driver's schema version
   check admits a list of versions only on documents with their own version
   track, and only at the schema's root. (V030-E03-F01-T03)
+- `protocol/schemas/worker_control.json` gains the runtime control
+  channel's six operations and their payloads, with a Rust mirror and
+  golden frames. `admission_fence`, `activate` and `retire` name the
+  committing deploy transaction; `quota_assign` (the member's session
+  quota, the same shape the state file records), `ledger_status` (reserved,
+  active, closing and ceiling counts, at most 2048 sessions, plus the
+  admission time of each reserved or active session) and
+  `pressure_directive` (`normal`, `shed_admission`, `terminate_newest` with
+  a count, `resume`) use the literal transaction id `runtime`. Every
+  runtime request carries a correlation id and names the member
+  (deployment and generation) it is for; every response echoes both ids
+  and names the member that answered, and a request for another generation
+  is answered with the new `member_mismatch` status. An `ok` answer to
+  `activate` or `quota_assign` carries the quota in force. Both ids follow
+  the shared `[A-Za-z0-9_-]{1,64}` policy on runtime frames. A repeated
+  request keeps its correlation id, and the worker applies each id at most
+  once. Frames are compact JSON, one per line, at most 65536 bytes; the
+  golden frames under `protocol/rust/tests/fixtures/worker_control_*.jsonl`
+  pin the exact bytes for other implementations of the channel. The legacy
+  operations stay in the schema and are never sent over the channel.
+  Nothing sends or answers these operations yet. Additive inside protocol
+  0.1; version constants unchanged. (V030-E04-F01-T04)
 - `tools/validation/check-public-hygiene.sh` scans what a push or a pull
   request publishes for values a public repository must never carry, and
   a second job in `.github/workflows/evidence-publication.yml` runs it on
