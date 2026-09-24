@@ -36,12 +36,41 @@
     },
     "policy": {
       "type": "string",
-      "enum": ["fifo"]
+      "enum": ["fifo", "session_round_robin"],
+      "description": "Policy key echoed from the scheduler config. Same enum as config/schemas/scheduler.json, where 'session_round_robin' is reserved: no scheduler is registered under it."
     },
     "queue_depth": {"type": "integer", "minimum": 0},
     "queue_depth_high_water": {"type": "integer", "minimum": 0},
-    "in_flight": {"type": "integer", "minimum": 0},
-    "in_flight_high_water": {"type": "integer", "minimum": 0},
+    "in_flight": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Logical in-flight count under its protocol 0.1 name, kept with this meaning: dispatched requests whose outcome is still open to the caller. A request cancelled while executing leaves this count when the cancellation is accepted. Always equal to in_flight_logical."
+    },
+    "in_flight_high_water": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Largest logical in-flight count observed since scheduler construction."
+    },
+    "in_flight_logical": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Dispatched requests whose outcome is still open to the caller. Optional: a writer without it omits the property, never writes null."
+    },
+    "in_flight_physical": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Dispatched requests the executor has not yet reported released, including requests cancelled while executing. Never less than in_flight_logical + in_flight_physical_cancelled. Queued requests are never counted. Optional: a writer without it omits the property, never writes null."
+    },
+    "in_flight_physical_cancelled": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Requests cancelled after dispatch that the executor has not yet reported released: counted in in_flight_physical, not in in_flight_logical. Optional: a writer without it omits the property, never writes null."
+    },
+    "in_flight_physical_high_water": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Largest in_flight_physical observed since scheduler construction. Optional: a writer without it omits the property, never writes null."
+    },
     "admitted_total": {"type": "integer", "minimum": 0},
     "admission_rejected_overload": {"type": "integer", "minimum": 0},
     "admission_rejected_deadline": {"type": "integer", "minimum": 0},

@@ -42,8 +42,8 @@
     },
     "policy": {
       "type": "string",
-      "enum": ["fifo"],
-      "description": "Stable scheduler policy label echoed on every event."
+      "enum": ["fifo", "session_round_robin"],
+      "description": "Stable scheduler policy label echoed on every event. Same enum as config/schemas/scheduler.json, where 'session_round_robin' is reserved: no scheduler is registered under it."
     },
     "error_code": {
       "type": "string",

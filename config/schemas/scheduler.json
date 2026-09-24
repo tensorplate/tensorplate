@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/scheduler.json",
   "title": "TensorPlate Scheduler Config",
-  "description": "Runtime configuration consumed by the serving worker to construct an InferScheduler. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerConfig.\n\nv0.1.0 supports the 'fifo' policy. Unknown policy strings are rejected with Error::Code::Unsupported. All durations are monotonic; wall-clock time is never consulted.",
+  "description": "Runtime configuration consumed by the serving worker to construct an InferScheduler. Mirrors include/tensorplate/scheduler/scheduler.hpp::SchedulerConfig.\n\nOnly the 'fifo' policy is registered; 'session_round_robin' is reserved. A policy string that no scheduler is registered under, reserved or not, is rejected with Error::Code::Unsupported when the serving worker builds its scheduler, and the worker does not start. All durations are monotonic; wall-clock time is never consulted.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "policy"],
@@ -13,8 +13,8 @@
     },
     "policy": {
       "type": "string",
-      "enum": ["fifo"],
-      "description": "Stable scheduler policy key. v0.1.0 supports only 'fifo'."
+      "enum": ["fifo", "session_round_robin"],
+      "description": "Stable scheduler policy key. 'fifo' dispatches admitted requests in arrival order. 'session_round_robin' is reserved for a policy that dispatches round-robin across the session keys of queued requests, first-in first-out within one key; no scheduler is registered under it. The same enum is copied into protocol/schemas/scheduler_metrics.json and protocol/schemas/scheduler_event.json, which echo the key."
     },
     "queue_capacity": {
       "type": "integer",
@@ -26,7 +26,7 @@
       "type": "integer",
       "minimum": 1,
       "default": 1,
-      "description": "Maximum concurrent in-flight requests. Defaults to 1 to reflect the single-session serving model."
+      "description": "Maximum number of dispatched requests that count toward the in-flight limit at once. SchedulerConfig::in_flight_capacity in include/tensorplate/scheduler/scheduler.hpp says which dispatched requests count."
     },
     "deadline_margin_ms": {
       "type": "integer",
