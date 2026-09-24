@@ -98,6 +98,12 @@ const ERROR_CODE_COPIES: [&str; 18] = [
     "worker_status.json#/properties/last_error_code/enum",
 ];
 
+/// Schema locations that pin a legacy vocabulary on purpose: a strict prefix
+/// of the error codes, frozen at what agents through 0.2.x decode. They are
+/// not copies of the live enum and never gain an appended value.
+const FROZEN_ERROR_CODE_PREFIXES: [&str; 1] =
+    ["agent_state.json#/definitions/LegacyErrorRecord/properties/code/enum"];
+
 fn error_code_names() -> Vec<Value> {
     strings(ErrorCode::ALL.map(|c| c.as_str().to_owned()))
 }
@@ -106,6 +112,7 @@ fn error_code_names() -> Vec<Value> {
 fn every_inline_error_code_enum_matches_error_code_all() {
     let expected = error_code_names();
     let mut copies = Vec::new();
+    let mut frozen = Vec::new();
     for path in schema_files() {
         let schema = load(&path);
         let mut found = Vec::new();
@@ -113,20 +120,38 @@ fn every_inline_error_code_enum_matches_error_code_all() {
         let name = path.file_name().expect("file name").to_string_lossy();
         for (pointer, items) in found {
             // An error-code copy is any enum holding one of the original
-            // names; it must hold every name, in order, and nothing else.
+            // names; it must hold every name, in order, and nothing else,
+            // unless it is a pinned legacy vocabulary, which holds a strict
+            // prefix of the names on purpose and is listed as such.
             if items.iter().any(|v| v == "inference_failed") {
+                let location = format!("{name}#{pointer}");
+                if FROZEN_ERROR_CODE_PREFIXES.contains(&location.as_str()) {
+                    let pinned: &[Value] = items;
+                    assert!(
+                        pinned.len() < expected.len() && expected.starts_with(pinned),
+                        "{name}{pointer} pins a legacy vocabulary and must be a strict prefix of ErrorCode::ALL"
+                    );
+                    frozen.push(location);
+                    continue;
+                }
                 assert_eq!(
                     items, &expected,
                     "{name}{pointer} does not match ErrorCode::ALL in order"
                 );
-                copies.push(format!("{name}#{pointer}"));
+                copies.push(location);
             }
         }
     }
-    // The walk found exactly the known copies: none vanished, so none
-    // escaped the check above, and a new one is added to the list.
+    // The walk found exactly the known copies and pinned vocabularies: none
+    // vanished, so none escaped the checks above, and a new one is added to
+    // its list.
     copies.sort();
     assert_eq!(copies, ERROR_CODE_COPIES, "error-code enum copies moved");
+    frozen.sort();
+    assert_eq!(
+        frozen, FROZEN_ERROR_CODE_PREFIXES,
+        "pinned legacy vocabularies moved"
+    );
 }
 
 #[test]

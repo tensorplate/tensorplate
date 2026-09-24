@@ -434,6 +434,10 @@ fn error_code_is_legacy(code: ErrorCode) -> bool {
         | ErrorCode::Timeout
         | ErrorCode::InferenceFailed
         | ErrorCode::Internal => true,
+        // Appended under protocol 0.1 after the 0.2.1 state writer shipped: no
+        // agent through 0.2.x decodes them, so a state that records one is
+        // "0.2" content (the schema's LegacyErrorRecord keeps the nine above).
+        ErrorCode::Cancelled | ErrorCode::Unavailable | ErrorCode::ResourceExhausted => false,
     }
 }
 

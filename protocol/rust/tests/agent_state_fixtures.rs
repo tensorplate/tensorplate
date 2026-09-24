@@ -1301,7 +1301,10 @@ fn all_error_codes() -> Vec<ErrorCode> {
             | ErrorCode::OomError
             | ErrorCode::Timeout
             | ErrorCode::InferenceFailed
-            | ErrorCode::Internal => {}
+            | ErrorCode::Internal
+            | ErrorCode::Cancelled
+            | ErrorCode::Unavailable
+            | ErrorCode::ResourceExhausted => {}
         }
     }
     let all = vec![
@@ -1314,6 +1317,9 @@ fn all_error_codes() -> Vec<ErrorCode> {
         ErrorCode::Timeout,
         ErrorCode::InferenceFailed,
         ErrorCode::Internal,
+        ErrorCode::Cancelled,
+        ErrorCode::Unavailable,
+        ErrorCode::ResourceExhausted,
     ];
     all.iter().copied().for_each(exhaustive);
     all
@@ -1421,13 +1427,19 @@ fn the_0_1_vocabulary_pins_match_the_decoders_classification() {
     let kinds = all_kinds();
     assert_eq!(pinned_kinds, spelled(&kinds));
 
-    // Every pinned list is also what the shared record definitions allow,
-    // so today the pins change nothing a 0.1 file may carry.
-    assert_eq!(
-        pinned_codes,
-        *defs["ErrorRecord"]["properties"]["code"]["enum"]
-            .as_array()
-            .expect("error record codes")
+    // Every pinned list is allowed by the shared record definitions. The
+    // shared error record admits every code; the pinned list is the prefix
+    // agents through 0.2.x decode, and the codes appended after the 0.2.1
+    // state writer shipped (cancelled, unavailable, resource_exhausted) are
+    // "0.2" content, so a 0.1 file may carry only the pinned nine.
+    let shared_codes = defs["ErrorRecord"]["properties"]["code"]["enum"]
+        .as_array()
+        .expect("error record codes")
+        .clone();
+    assert_eq!(shared_codes, spelled(&codes));
+    assert!(
+        shared_codes.starts_with(&pinned_codes),
+        "the pinned 0.1 codes must be a prefix of the shared error record's codes"
     );
     assert_eq!(
         pinned_phases,
