@@ -25,7 +25,7 @@ use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RE
 use crate::detect::{
     identify, instance_id_from_metadata, is_compute_engine, HostReport, HostSources,
 };
-use crate::error::PlatformProbeError;
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME};
 use crate::identity::{HostIdentity, HostProbe};
 use crate::instance_binding::InstanceBinding;
 use crate::machine_type_record::{MachineTypeRecord, RecordWrite};
@@ -72,9 +72,13 @@ type GceSources = (
 
 /// What a metadata answer that is neither a result nor a documented
 /// transient status says about the host, for the error that reports it.
-const BROKEN_ANSWER: &str = "something other than the metadata server may be answering for \
-    169.254.169.254:80, such as a proxy or a custom route; let this host reach the metadata \
-    server directly, then start tensorplate-agent again";
+/// The 403 causes are Google's, from its metadata server troubleshooting
+/// page; that page also says a proxy can intercept the VM's queries.
+const BROKEN_ANSWER: &str = "the answer came from the metadata server itself, which Google \
+    documents answering 403 for an endpoint disabled by project or instance settings or a \
+    request that fails its security checks, or from something answering in its place for \
+    169.254.169.254:80, such as a proxy or a custom route; check those settings and let this \
+    host reach the metadata server directly, then start tensorplate-agent again";
 
 /// What asking for the instance id came to.
 #[derive(Debug, Eq, PartialEq)]
@@ -343,9 +347,10 @@ impl SystemHostProbe {
     ///
     /// Only a service that gave no answer lets the record be read: nothing
     /// came back within the budget, the connection was refused, or the
-    /// service said it is temporarily unavailable (HTTP 429 or 503, which
-    /// Google documents while the metadata server boots or the host is under
-    /// maintenance). A service that sent anything else, closed, or reset,
+    /// service answered one of the two statuses Google documents as
+    /// transient (HTTP 503 while the metadata server boots or migrates or
+    /// the host is under maintenance, and HTTP 429 when an endpoint rate
+    /// limits). A service that sent anything else, closed, or reset,
     /// but did not answer with a machine type, is a broken source and stays
     /// one: falling back there would let a record outvote the authority that
     /// just answered. A record that is absent is `None` here;
@@ -369,7 +374,7 @@ impl SystemHostProbe {
                 )?,
             )),
             Err(failure) => Err(PlatformProbeError::Unreadable {
-                source_name: "GCE metadata service".to_string(),
+                source_name: GCE_METADATA_SOURCE_NAME.to_string(),
                 detail: format!(
                     "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms); {BROKEN_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
@@ -379,14 +384,17 @@ impl SystemHostProbe {
     }
 
     /// Every Compute Engine source: `(live machine type, machine-type
-    /// record, live instance id, instance binding)`.
+    /// record, live instance id, instance binding, why the service gave no
+    /// answer)`.
     ///
-    /// A service that answers the machine type and then does not answer the
-    /// instance id within its own budget makes this a start without a live
-    /// answer, exactly as if the first query had gone unanswered: the record
-    /// is read, and detection uses it only in the boot it was taken in. With
-    /// no record for this boot, detection fails in the step the agent's
-    /// retry loop retries, rather than as a broken source it never retries.
+    /// A service that answers the machine type and then gives no answer to
+    /// the instance-id query -- nothing within its own budget, a refused
+    /// connection, or a transient status -- makes this a start without a
+    /// live answer, exactly as if the first query had gone unanswered: the
+    /// record is read, and detection uses it only in the boot it was taken
+    /// in. With no record for this boot, detection fails in the step the
+    /// agent's retry loop retries, rather than as a broken source it never
+    /// retries.
     fn gce_sources(
         &self,
         dmi_product_name: Option<&str>,
@@ -479,7 +487,7 @@ impl SystemHostProbe {
                 binding: read_identity_file(&path, INSTANCE_BINDING_NAME)?,
             }),
             Err(failure) => Err(PlatformProbeError::Unreadable {
-                source_name: "GCE metadata service".to_string(),
+                source_name: GCE_METADATA_SOURCE_NAME.to_string(),
                 detail: format!(
                     "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms); {BROKEN_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
@@ -935,12 +943,11 @@ enum MetadataFailure {
     /// nothing at all came back before the budget ran out.
     Timeout,
     /// The connection was actively refused: something on this host or its
-    /// route rejects 169.254.169.254:80, which the metadata server never
-    /// does.
+    /// route rejected the connection to 169.254.169.254:80.
     Refused,
-    /// The service answered HTTP 429 or 503, which Google documents while
-    /// the metadata server boots or the host is under maintenance. Carries
-    /// the status code.
+    /// The service answered one of the two statuses Google documents as
+    /// transient, HTTP 429 or 503, with a status line and header block this
+    /// client would accept on a result. Carries the status code.
     Transient(u16),
     /// The service was reached -- it sent something, closed, or reset --
     /// but did not answer with a machine type.
@@ -973,6 +980,18 @@ impl std::fmt::Display for MetadataFailure {
     }
 }
 
+/// What a failed connect to the metadata service came to: refused only when
+/// the connection was actively refused. Every other failure -- a timeout,
+/// an unreachable network, an address this host cannot use -- is a service
+/// that was not reached.
+fn connect_failure(kind: ErrorKind) -> MetadataFailure {
+    if kind == ErrorKind::ConnectionRefused {
+        MetadataFailure::Refused
+    } else {
+        MetadataFailure::Timeout
+    }
+}
+
 /// One bounded HTTP/1.0 GET against the metadata service.
 ///
 /// Hand-rolled rather than pulling in an HTTP client: this is a single
@@ -988,13 +1007,8 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     let socket = addr
         .parse()
         .map_err(|_| MetadataFailure::Answered(format!("`{addr}` is not an address")))?;
-    let mut stream = std::net::TcpStream::connect_timeout(&socket, budget).map_err(|err| {
-        if err.kind() == ErrorKind::ConnectionRefused {
-            MetadataFailure::Refused
-        } else {
-            MetadataFailure::Timeout
-        }
-    })?;
+    let mut stream = std::net::TcpStream::connect_timeout(&socket, budget)
+        .map_err(|err| connect_failure(err.kind()))?;
 
     let left = remaining(deadline).ok_or(MetadataFailure::Timeout)?;
     stream.set_write_timeout(Some(left)).ok();
@@ -1076,11 +1090,16 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     let code = status_fields.next();
     let well_formed = matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
         && !status.bytes().any(|byte| byte.is_ascii_control());
+    // The header block is held to the rules a result is, before any
+    // status is believed: a transient status is only the service speaking
+    // when the whole head is one this client would accept on a 200.
+    let framing = content_length(head);
     // The two statuses Google documents as transient. Anything else that is
     // not 200 is an answer, and a broken one.
+    let speaking = well_formed && framing.is_ok();
     match code {
-        Some("429") if well_formed => return Err(MetadataFailure::Transient(429)),
-        Some("503") if well_formed => return Err(MetadataFailure::Transient(503)),
+        Some("429") if speaking => return Err(MetadataFailure::Transient(429)),
+        Some("503") if speaking => return Err(MetadataFailure::Transient(503)),
         _ => {}
     }
     if !well_formed || code != Some("200") {
@@ -1094,7 +1113,7 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     // A length-framed body must match its one valid declared length. An
     // unframed body is complete only at an orderly close, never merely
     // because the deadline expired after a plausible resource name.
-    match content_length(head).map_err(|()| incomplete())? {
+    match framing.map_err(|()| incomplete())? {
         Some(declared) if body.len() == declared => {}
         None if reached_eof => {}
         Some(_) | None => return Err(incomplete()),
@@ -1433,9 +1452,17 @@ mod tests {
                 "metadata service answered `HTTP/1.0 404`".to_string(),
             ))
         }) {
-            Err(PlatformProbeError::Unreadable { detail, .. }) => {
+            Err(PlatformProbeError::Unreadable {
+                source_name,
+                detail,
+            }) => {
+                assert_eq!(source_name, GCE_METADATA_SOURCE_NAME);
                 assert!(detail.contains(METADATA_INSTANCE_ID_PATH), "{detail}");
                 assert!(detail.contains("404"), "{detail}");
+                assert!(
+                    detail.contains("such as a proxy or a custom route"),
+                    "the broken-answer remedy: {detail}"
+                );
             }
             other => panic!("an answer that is not an id is a broken source: {other:?}"),
         }
@@ -2147,6 +2174,21 @@ mod tests {
                 "HTTP/1.1 503 Service\x01Unavailable\r\nContent-Length: 0\r\n\r\n",
                 None,
             ),
+            (
+                "HTTP/1.1 429 Too\x01Many Requests\r\nContent-Length: 0\r\n\r\n",
+                None,
+            ),
+            ("HTTP/2 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n", None),
+            // Nor is a head this client would refuse on a result: framing
+            // it cannot decode, or a header line that is not a header.
+            (
+                "HTTP/1.1 503 Service Unavailable\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+                None,
+            ),
+            (
+                "HTTP/1.1 429 Too Many Requests\r\nnot a header\r\n\r\n",
+                None,
+            ),
         ] {
             let addr = serve_once(reply, Duration::ZERO);
             let failure = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
@@ -2156,14 +2198,33 @@ mod tests {
     }
 
     #[test]
+    fn only_a_refused_connect_is_named_as_refused() {
+        assert!(matches!(
+            connect_failure(ErrorKind::ConnectionRefused),
+            MetadataFailure::Refused
+        ));
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::AddrNotAvailable,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                matches!(connect_failure(kind), MetadataFailure::Timeout),
+                "{kind:?} is a service that was not reached"
+            );
+        }
+    }
+
+    #[test]
     fn a_refused_connection_is_unanswered_and_named_as_refused() {
-        // A port whose listener is gone: nothing accepts, and the kernel
-        // refuses the connect.
-        let addr = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            listener.local_addr().expect("addr").to_string()
-        };
-        let failure = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+        // Port 1 sits below every ephemeral range, so unlike a port freed by
+        // a dropped listener, no concurrently running test is ever handed
+        // it, and nothing on a build host listens there: Linux and macOS
+        // both refuse the connect.
+        let failure = query_metadata("127.0.0.1:1", METADATA_PATH, Duration::from_millis(500))
             .expect_err("nothing is listening");
         assert_eq!(failure.unanswered(), Some("refused"), "{failure:?}");
     }

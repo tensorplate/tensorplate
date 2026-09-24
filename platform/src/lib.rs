@@ -54,7 +54,7 @@ pub use detect::{
     nvidia_display_devices, nvidia_pci_functions, ExactHostFacts, HostReport, HostSources,
     L4tRelease, PlatformReport,
 };
-pub use error::{PlatformProbeError, PlatformRegistryError};
+pub use error::{PlatformProbeError, PlatformRegistryError, GCE_METADATA_SOURCE_NAME};
 pub use identity::{
     AcceleratorIdentity, AcceleratorProbe, DetectedArchitecture, DetectedPlatform, DetectedVendor,
     HostIdentity, HostProbe,

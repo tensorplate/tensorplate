@@ -30,7 +30,7 @@ use crate::detect::{
     is_compute_engine, logical_cpu_count, machine_type_from_metadata, mem_total_from_meminfo,
     nvidia_display_devices, HostSources,
 };
-use crate::error::PlatformProbeError;
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME};
 use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
 /// What every unestablished-identity error opens with when the sources do
@@ -39,16 +39,25 @@ const CONTEXT: &str =
     "host reports as a Compute Engine instance and the metadata service could not be reached";
 
 /// What every unestablished-identity error opens with: an instance without
-/// a live answer, and the cause class of that -- transient unavailability,
-/// blocked access, or not reached -- with what the operator can do about it.
+/// a live answer, and the cause class of the last attempt -- transient
+/// unavailability, blocked access, or not reached -- with what the operator
+/// can do about it. What the two statuses mean is Google's, from its
+/// metadata server troubleshooting page; a status that does not pass may
+/// come from something else answering in the server's place.
 fn context(sources: &HostSources) -> String {
     match sources.gce_metadata_unanswered.as_deref() {
-        Some(token @ ("http-429" | "http-503")) => format!(
-            "host reports as a Compute Engine instance and its metadata service answered HTTP {} \
-             (transient unavailability: Google documents this while the metadata server boots or \
-             the host is under maintenance, and it passes on its own)",
-            &token["http-".len()..]
-        ),
+        Some("http-503") => "host reports as a Compute Engine instance and its metadata service \
+             answered HTTP 503 (transient unavailability: Google documents 503 while the \
+             metadata server boots or migrates or the host is under maintenance, and says it \
+             resolves within a few seconds; if it persists, something other than the metadata \
+             server may be answering for 169.254.169.254:80, such as a proxy or a custom route)"
+            .to_string(),
+        Some("http-429") => "host reports as a Compute Engine instance and its metadata service \
+             answered HTTP 429 (transient unavailability: Google documents 429 as an endpoint's \
+             rate limiting, and says to retry after a few seconds; if it persists, something \
+             other than the metadata server may be answering for 169.254.169.254:80, such as a \
+             proxy or a custom route)"
+            .to_string(),
         Some("refused") => "host reports as a Compute Engine instance and connections to its \
              metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
              rule, a proxy or custom routing on this host rejects them; allow that address and \
@@ -380,7 +389,7 @@ pub fn establish_machine_type(
         // whatever the peer sent.
         let machine_type =
             machine_type_from_metadata(body).ok_or_else(|| PlatformProbeError::Unrecognized {
-                source_name: "GCE metadata service".to_string(),
+                source_name: GCE_METADATA_SOURCE_NAME.to_string(),
                 detail: "the machine-type answer is not \
                          `projects/<project>/machineTypes/<machine-type>` with a canonical \
                          machine type"

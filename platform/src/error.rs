@@ -67,6 +67,10 @@ impl PlatformRegistryError {
     }
 }
 
+/// The `source_name` of every detection error about what the metadata
+/// service answered, for `tensorplate doctor` to choose its hint by.
+pub const GCE_METADATA_SOURCE_NAME: &str = "GCE metadata service";
+
 /// Why platform detection failed.
 ///
 /// Kept separate from [`PlatformRegistryError`] because the two are

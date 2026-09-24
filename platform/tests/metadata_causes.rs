@@ -43,13 +43,15 @@ fn without_a_record_the_error_names_the_cause_class_and_its_remedy() {
     for (unanswered, class, remedy) in [
         (
             Some("http-503"),
-            "answered HTTP 503 (transient unavailability",
-            "it passes on its own",
+            "answered HTTP 503 (transient unavailability: Google documents 503 while the \
+             metadata server boots",
+            "if it persists, something other than the metadata server may be answering",
         ),
         (
             Some("http-429"),
-            "answered HTTP 429 (transient unavailability",
-            "it passes on its own",
+            "answered HTTP 429 (transient unavailability: Google documents 429 as an endpoint's \
+             rate limiting",
+            "if it persists, something other than the metadata server may be answering",
         ),
         (
             Some("refused"),
@@ -81,18 +83,73 @@ fn without_a_record_the_error_names_the_cause_class_and_its_remedy() {
     }
 }
 
-#[test]
-fn a_same_boot_record_stands_in_whatever_the_cause() {
+/// The record a live answer on the committed L4 host writes.
+fn l4_record() -> String {
     let live = HostSources {
         gce_machine_type: Some("projects/REDACTED/machineTypes/g2-standard-8".to_string()),
         machine_type_record: None,
         ..unanswered_l4(None, None)
     };
-    let record = MachineTypeRecord::for_live_sources(&live)
+    MachineTypeRecord::for_live_sources(&live)
         .expect("facts are readable")
         .expect("a live answer records")
         .to_json()
-        .expect("serializes");
+        .expect("serializes")
+}
+
+#[test]
+fn with_a_record_that_cannot_stand_in_the_error_still_opens_with_the_cause_class() {
+    let record = l4_record();
+    let mut other_shape: Value = serde_json::from_str(&record).expect("parses");
+    other_shape["logical_cpus"] = (other_shape["logical_cpus"].as_u64().expect("count") + 1).into();
+    let refused = |record: String| unanswered_l4(Some("refused"), Some(record));
+    for (label, sources, reason) in [
+        (
+            "unusable",
+            refused("not a record".to_string()),
+            "the recorded machine type is unusable",
+        ),
+        (
+            "unchecked",
+            HostSources {
+                boot_id: None,
+                ..refused(record.clone())
+            },
+            "cannot be checked against this host",
+        ),
+        (
+            "stale",
+            refused(other_shape.to_string()),
+            "no longer describes this host",
+        ),
+        (
+            "unbound",
+            HostSources {
+                instance_binding: Some("not a binding".to_string()),
+                ..refused(record.clone())
+            },
+            "the instance binding is unusable",
+        ),
+    ] {
+        match identify(&sources) {
+            Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
+                assert!(
+                    detail.starts_with(
+                        "host reports as a Compute Engine instance and connections to its \
+                         metadata service at 169.254.169.254:80 were refused (blocked access"
+                    ),
+                    "{label}: {detail}"
+                );
+                assert!(detail.contains(reason), "{label}: {detail}");
+            }
+            other => panic!("{label}: expected IdentityUnestablished, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_same_boot_record_stands_in_whatever_the_cause() {
+    let record = l4_record();
     for unanswered in ["http-503", "http-429", "refused", "timeout"] {
         let report = identify(&unanswered_l4(Some(unanswered), Some(record.clone())))
             .unwrap_or_else(|e| panic!("{unanswered}: {e}"));

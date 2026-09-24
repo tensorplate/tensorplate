@@ -110,17 +110,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stays `0.1`, no bundle compatibility floor moves, and no dated
   `[0.3.1]` section or release notes file is opened here.
   (V030-E01-F01-T04)
-- On a Compute Engine instance, the metadata service answering HTTP 429 or
-  503, which Google documents while the metadata server boots or the host
-  is under maintenance, and a refused connection now count as no answer,
-  like a query that times out. With a record for the current boot the
-  start uses it; without one, detection fails in the step the agent's
-  start-up retry repeats over its existing 20 s window, where before a
-  429 or 503 was a broken source that was never retried. Any other answer
-  is still refused at once. When detection fails without an answer, the
-  error names the cause class, transient unavailability, blocked access
-  or not reached, and what to do about it, and `tensorplate doctor`'s hint
-  covers all three. This is the reboot boundary: after a reboot the agent
+- On a Compute Engine instance, the metadata service answering HTTP 503 or
+  429, the two statuses Google documents as transient (503 while the
+  metadata server boots or migrates or the host is under maintenance, 429
+  for an endpoint's rate limiting), now counts as no answer, as a query
+  that times out or a refused connection already did. A 429 or 503 counts
+  only with a header block the agent would accept on a result. With a
+  record for the current boot the start uses it; without one, detection
+  fails in the step the agent's start-up retry repeats over its existing
+  20 s window, where before a 429 or 503 was a broken source that was
+  never retried. Any other answer still fails detection at once; its error
+  and `tensorplate doctor`'s hint now say it came from the metadata server
+  or from something answering in its place, and what to check. When
+  detection fails without an answer, the error names the cause class of
+  the last attempt, transient unavailability, blocked access (a refused
+  connection, now named apart from a timeout) or not reached, and what to
+  do about it, and `tensorplate doctor`'s hint covers all three. This is
+  the reboot boundary: after a reboot the agent
   must reach the metadata service once before denied-egress operation
   resumes. (V030-E01-F01-T03)
 - The documented rollback in `docs/install/lifecycle.md` restores

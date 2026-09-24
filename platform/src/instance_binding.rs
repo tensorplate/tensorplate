@@ -42,7 +42,7 @@ use tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH;
 use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{instance_id_from_metadata, HostSources};
-use crate::error::PlatformProbeError;
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME};
 use crate::machine_type_record::{is_boot_id, MachineTypeRecord};
 
 /// The only binding layout this release reads or writes. A rollback
@@ -185,7 +185,7 @@ pub fn check_live_instance(
     };
     let live =
         instance_id_from_metadata(answer).ok_or_else(|| PlatformProbeError::Unrecognized {
-            source_name: "GCE metadata service".to_string(),
+            source_name: GCE_METADATA_SOURCE_NAME.to_string(),
             detail: "the instance-id answer is not a decimal instance id".to_string(),
         })?;
     let Some(binding) = sources

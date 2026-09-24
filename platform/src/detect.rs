@@ -114,8 +114,9 @@ pub struct HostSources {
     /// Why a Compute Engine instance has no live metadata answer this
     /// start: `timeout` (nothing came back within the budget), `refused`
     /// (the connection was refused), `http-429` or `http-503` (the service
-    /// said it is temporarily unavailable). `None` when there is a live
-    /// answer or the host is not an instance.
+    /// answered a status Google documents as transient). Names the last
+    /// query that went unanswered. `None` when there is a live answer or the
+    /// host is not an instance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gce_metadata_unanswered: Option<String>,
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
