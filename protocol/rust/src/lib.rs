@@ -143,8 +143,10 @@ pub use supervision_event::{
 };
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
 pub use worker_control::{
-    CandidateRef, WorkerControlRequest, WorkerControlRequestError, WorkerControlResponse,
-    WorkerError, WorkerOp, WorkerStatusOutcome,
+    encode_frame, CandidateRef, LedgerStatus, MemberRef, PressureDirective, PressureLevel,
+    WorkerControlFrameError, WorkerControlRequest, WorkerControlRequestError,
+    WorkerControlResponse, WorkerControlResponseError, WorkerError, WorkerOp, WorkerStatusOutcome,
+    RUNTIME_TRANSACTION_ID, WORKER_CONTROL_MAX_FRAME_BYTES, WORKER_CONTROL_MAX_LEDGER_SESSIONS,
 };
 pub use worker_status::{ComponentState, WorkerStatus, WorkerStatusError};
 
