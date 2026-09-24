@@ -39,6 +39,8 @@ pub enum ExitCode {
     DoctorFindings = 10,
     /// `tensorplate infer` failed for a typed serving reason.
     InferenceFailed = 11,
+    /// `tensorplate bundle provision` could not provision a verified bundle.
+    ProvisionFailed = 12,
 }
 
 impl ExitCode {
@@ -62,6 +64,7 @@ impl ExitCode {
             6 => Self::Unavailable,
             10 => Self::DoctorFindings,
             11 => Self::InferenceFailed,
+            12 => Self::ProvisionFailed,
             _ => Self::Failure,
         }
     }
@@ -128,6 +131,16 @@ pub enum CliError {
     #[error("internal cli error: {0}")]
     Internal(String),
 
+    /// `tensorplate bundle provision` refused or failed; `code` is the
+    /// provisioning failure's stable token, surfaced as the JSON context.
+    #[error("bundle provisioning failed: {message}")]
+    Provision {
+        code: &'static str,
+        protocol: ErrorCode,
+        message: String,
+        hint: Option<String>,
+    },
+
     /// A device-routed remote command already emitted its own output. This
     /// carries the remote exit code so the local process mirrors it, and is
     /// rendered as nothing (the remote already reported).
@@ -149,6 +162,7 @@ impl CliError {
             CliError::Busy { .. } => ExitCode::Busy,
             CliError::DoctorFindings { .. } => ExitCode::DoctorFindings,
             CliError::Inference { .. } => ExitCode::InferenceFailed,
+            CliError::Provision { .. } => ExitCode::ProvisionFailed,
             CliError::RemoteExit { code } => *code,
             CliError::Io(_) | CliError::Serialization(_) | CliError::Internal(_) => {
                 ExitCode::Failure
@@ -176,6 +190,7 @@ impl CliError {
             }
             CliError::Transport { .. } | CliError::Timeout { .. } => ErrorCode::Timeout,
             CliError::Agent { code, .. } | CliError::Inference { code, .. } => *code,
+            CliError::Provision { protocol, .. } => *protocol,
             CliError::Busy { .. } => ErrorCode::NotReady,
             CliError::Io(_)
             | CliError::Serialization(_)
@@ -194,7 +209,8 @@ impl CliError {
             | CliError::Busy { hint }
             | CliError::Unavailable { hint, .. }
             | CliError::Timeout { hint, .. }
-            | CliError::Inference { hint, .. } => hint.as_deref(),
+            | CliError::Inference { hint, .. }
+            | CliError::Provision { hint, .. } => hint.as_deref(),
             CliError::UnsupportedProfile { .. } => {
                 Some("v0.1.0 supports `local` and `url` profile modes; use a different profile")
             }
@@ -210,6 +226,7 @@ impl CliError {
     pub fn context(&self) -> Option<&str> {
         match self {
             CliError::Agent { context, .. } => context.as_deref(),
+            CliError::Provision { code, .. } => Some(code),
             _ => None,
         }
     }

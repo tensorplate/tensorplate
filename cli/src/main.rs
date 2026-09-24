@@ -179,7 +179,9 @@ fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning:
 }
 
 /// Raise an unusable packaged conffile as the config error it is, except
-/// for the two commands that exist to diagnose exactly that.
+/// for the two commands that exist to diagnose exactly that, and `bundle`,
+/// which reads no profile: it provisions from a local directory into this
+/// host's import directory and never talks to the agent.
 ///
 /// `doctor` is what the docs tell an operator to run when an install
 /// misbehaves, and it reports the loader's rejection as a failing
@@ -193,7 +195,10 @@ fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning:
 /// configured profile, so for those the fault stays fatal.
 fn blocking_install_fault(source: &ConfigSource, command: &Subcommand) -> Option<CliError> {
     let fault = source.install_fault()?;
-    if matches!(command, Subcommand::Doctor(_) | Subcommand::Version) {
+    if matches!(
+        command,
+        Subcommand::Doctor(_) | Subcommand::Version | Subcommand::Bundle(_)
+    ) {
         return None;
     }
     Some(CliError::Config(fault.to_string()))
@@ -208,6 +213,7 @@ fn command_label(command: &Subcommand) -> &'static str {
         Subcommand::Infer(_) => "infer",
         Subcommand::Logs(_) => "logs",
         Subcommand::Device(_) => "device",
+        Subcommand::Bundle(_) => "bundle",
         Subcommand::Version => "version",
     }
 }
