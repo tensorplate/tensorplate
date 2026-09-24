@@ -401,10 +401,10 @@ fn verify_existing(destination: &Path, bundle: &ProvisionedBundle) -> Result<(),
 }
 
 /// Every regular file under `dir`, as a `/`-separated path relative to
-/// `root`, each name exactly as the file system holds it: a backslash is
-/// part of a name here, never a separator, so a name no manifest path can
-/// spell stays unlisted. A link or anything but a file or directory is
-/// refused.
+/// `root`. A backslash is part of a name here, never a separator, and a
+/// name that is not UTF-8 is converted lossily; either way a name the
+/// manifest path grammar cannot spell stays unlisted. A link or anything
+/// but a file or directory is refused.
 fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), ProvisionError> {
     let entries = fs::read_dir(dir)
         .map_err(|err| ProvisionError::io(format!("cannot list {}", dir.display()), &err))?;
@@ -476,8 +476,8 @@ fn open_listed(root: &Path, file: &ProvisionedFile) -> Result<fs::File, Provisio
 }
 
 /// Open `path`, which was `checked` a moment ago, and refuse what was opened
-/// unless it is that same regular file: a link, a FIFO or a device swapped
-/// in after the check is refused rather than read.
+/// unless it is that same regular file: a FIFO, a device, a final link, or
+/// a path now leading to any other file is refused rather than read.
 ///
 /// The open neither follows a final link nor blocks, so a FIFO swapped in
 /// is opened at once and refused by the descriptor check instead of
@@ -687,6 +687,23 @@ mod tests {
         assert!(matches!(
             open_checked(&path, &checked, &listed("f", 3)),
             Err(ProvisionError::Changed { .. })
+        ));
+    }
+
+    #[test]
+    fn the_checked_file_failing_to_open_is_an_io_failure_not_a_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f");
+        fs::write(&path, "abc").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let checked = fs::symlink_metadata(&path).expect("lstat");
+        if fs::File::open(&path).is_ok() {
+            // Root reads it anyway: there is no failure to classify here.
+            return;
+        }
+        assert!(matches!(
+            open_checked(&path, &checked, &listed("f", 3)),
+            Err(ProvisionError::Io { .. })
         ));
     }
 
