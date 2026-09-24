@@ -983,6 +983,7 @@ mod tests {
             machine_type_record: None,
             gce_instance_id: None,
             instance_binding: None,
+            gce_metadata_unanswered: None,
             // Synthetic boot identity supplements the recorded hardware facts.
             boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
             proc_meminfo: text("proc_meminfo"),
@@ -1073,6 +1074,25 @@ mod tests {
             bound,
             "an offline start never rewrites the binding"
         );
+    }
+
+    #[test]
+    fn a_transient_or_refused_metadata_answer_without_a_record_is_retried() {
+        // What the probe hands identify when the service answered 429 or 503,
+        // or refused the connection, on a boot with no record yet: the
+        // failure the retry loop retries, never a broken source it gives up on.
+        for unanswered in ["http-503", "http-429", "refused", "timeout"] {
+            let sources = HostSources {
+                gce_machine_type: None,
+                gce_metadata_unanswered: Some(unanswered.to_string()),
+                ..l4_live_sources()
+            };
+            let err = identify_platform(&sources).expect_err("no record for this boot");
+            assert!(
+                is_retryable(&ObservationFailure::Identify(err)),
+                "{unanswered}"
+            );
+        }
     }
 
     #[test]

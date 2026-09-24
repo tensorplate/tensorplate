@@ -55,6 +55,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         machine_type_record: text("machine_type_record"),
         gce_instance_id: text("gce_instance_id"),
         instance_binding: text("instance_binding"),
+        gce_metadata_unanswered: text("gce_metadata_unanswered"),
         boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
@@ -1032,6 +1033,12 @@ fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
         hint.contains("start tensorplate-agent once while the metadata service is reachable"),
         "the hint names the fix: {hint}"
     );
+    for cause in [
+        "a transient 429 or 503 passes on its own",
+        "allowed to reach 169.254.169.254:80",
+    ] {
+        assert!(hint.contains(cause), "the hint covers every cause class: {hint}");
+    }
     assert!(
         !hint.contains("re-run as a user"),
         "nothing here is a permission problem: {hint}"

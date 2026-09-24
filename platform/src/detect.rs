@@ -111,6 +111,13 @@ pub struct HostSources {
     /// instance, reachable or not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_binding: Option<String>,
+    /// Why a Compute Engine instance has no live metadata answer this
+    /// start: `timeout` (nothing came back within the budget), `refused`
+    /// (the connection was refused), `http-429` or `http-503` (the service
+    /// said it is temporarily unavailable). `None` when there is a live
+    /// answer or the host is not an instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gce_metadata_unanswered: Option<String>,
     /// `/proc/meminfo`. Read for its `MemTotal` line, which is how a
     /// Jetson's module capacity is told from its sibling's.
     #[serde(skip_serializing_if = "Option::is_none")]

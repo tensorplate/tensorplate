@@ -225,7 +225,7 @@ const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reac
 /// type without the metadata service. Neither re-running as another user nor
 /// attaching output helps: the fix is one agent start in the current boot
 /// with the service reachable, which records the machine type again.
-const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start is refused for a different machine type, reprovision as its message says";
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service, and the message above names why it gave no answer — a transient 429 or 503 passes on its own; blocked access needs this host allowed to reach 169.254.169.254:80 past any firewall rule, proxy or custom route — then start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start is refused for a different machine type, reprovision as its message says";
 
 /// What to do when the instance binding is read on every Compute Engine
 /// start, reachable or not, and this user cannot read it. It lives in the

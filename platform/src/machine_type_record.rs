@@ -33,9 +33,34 @@ use crate::detect::{
 use crate::error::PlatformProbeError;
 use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
-/// What every unestablished-identity error opens with.
+/// What every unestablished-identity error opens with when the sources do
+/// not say why the metadata service gave no answer.
 const CONTEXT: &str =
     "host reports as a Compute Engine instance and the metadata service could not be reached";
+
+/// What every unestablished-identity error opens with: an instance without
+/// a live answer, and the cause class of that -- transient unavailability,
+/// blocked access, or not reached -- with what the operator can do about it.
+fn context(sources: &HostSources) -> String {
+    match sources.gce_metadata_unanswered.as_deref() {
+        Some(token @ ("http-429" | "http-503")) => format!(
+            "host reports as a Compute Engine instance and its metadata service answered HTTP {} \
+             (transient unavailability: Google documents this while the metadata server boots or \
+             the host is under maintenance, and it passes on its own)",
+            &token["http-".len()..]
+        ),
+        Some("refused") => "host reports as a Compute Engine instance and connections to its \
+             metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
+             rule, a proxy or custom routing on this host rejects them; allow that address and \
+             port for tensorplate-agent)"
+            .to_string(),
+        Some("timeout") => "host reports as a Compute Engine instance and nothing answered from \
+             its metadata service within the budget (not reached: the network may not be up \
+             yet, or a firewall rule, a proxy or custom routing drops the traffic)"
+            .to_string(),
+        _ => CONTEXT.to_string(),
+    }
+}
 
 /// The only record layout this release reads or writes.
 pub const MACHINE_TYPE_RECORD_SCHEMA_VERSION: u32 = 2;
@@ -372,11 +397,12 @@ pub fn establish_machine_type(
         return Ok(None);
     }
 
+    let context = context(sources);
     let Some(body) = sources.machine_type_record.as_deref() else {
         return Err(PlatformProbeError::IdentityUnestablished {
             source_name: MACHINE_TYPE_RECORD_PATH.to_string(),
             detail: format!(
-                "{CONTEXT}, and no machine type has been recorded on this host; \
+                "{context}, and no machine type has been recorded on this host; \
                  start tensorplate-agent once while the metadata service is reachable"
             ),
         });
@@ -387,20 +413,20 @@ pub fn establish_machine_type(
     };
     let record = MachineTypeRecord::parse(body).map_err(|reason| {
         unestablished(format!(
-            "{CONTEXT}, and the recorded machine type is unusable: {reason}; \
+            "{context}, and the recorded machine type is unusable: {reason}; \
              start tensorplate-agent once while the metadata service is reachable to record it again"
         ))
     })?;
     let live = LocalShapeFacts::from_sources(sources).map_err(|fact| {
         unestablished(format!(
-            "{CONTEXT}, and the recorded machine type `{}` cannot be checked against this host \
+            "{context}, and the recorded machine type `{}` cannot be checked against this host \
              because {fact} is unavailable",
             record.machine_type
         ))
     })?;
     if let Some(difference) = record.first_difference(&live) {
         return Err(unestablished(format!(
-            "{CONTEXT}, and the recorded machine type `{}` no longer describes this host: \
+            "{context}, and the recorded machine type `{}` no longer describes this host: \
              {difference}; start tensorplate-agent once while the metadata service is reachable \
              to record it again (a stopped instance can be given a different machine type; if \
              it was, that start refuses and says how to reprovision)",
@@ -411,7 +437,7 @@ pub fn establish_machine_type(
         let unbound = |detail: String| PlatformProbeError::IdentityUnestablished {
             source_name: INSTANCE_BINDING_PATH.to_string(),
             detail: format!(
-                "{CONTEXT}, and {detail}; start tensorplate-agent once while the metadata \
+                "{context}, and {detail}; start tensorplate-agent once while the metadata \
                  service is reachable to record both again"
             ),
         };

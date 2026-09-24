@@ -60,13 +60,21 @@ const MACHINE_TYPE_RECORD_NAME: &str = "the machine-type record";
 const INSTANCE_BINDING_NAME: &str = "the instance binding";
 
 /// `(live machine type, machine-type record, live instance id, instance
-/// binding)`, as [`SystemHostProbe::gce_sources`] gathers them.
+/// binding, why the service gave no answer)`, as
+/// [`SystemHostProbe::gce_sources`] gathers them.
 type GceSources = (
     Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
+
+/// What a metadata answer that is neither a result nor a documented
+/// transient status says about the host, for the error that reports it.
+const BROKEN_ANSWER: &str = "something other than the metadata server may be answering for \
+    169.254.169.254:80, such as a proxy or a custom route; let this host reach the metadata \
+    server directly, then start tensorplate-agent again";
 
 /// What asking for the instance id came to.
 #[derive(Debug, Eq, PartialEq)]
@@ -163,15 +171,20 @@ impl SystemHostProbe {
         // already identified itself as a Jetson, so it is only asked for
         // there — and a Jetson that cannot answer it is broken.
         let jetson = commands && cfg!(target_os = "linux") && nv_tegra_release.is_some();
-        let (gce_machine_type, machine_type_record, gce_instance_id, instance_binding) = if commands
-        {
+        let (
+            gce_machine_type,
+            machine_type_record,
+            gce_instance_id,
+            instance_binding,
+            gce_metadata_unanswered,
+        ) = if commands {
             self.gce_sources(
                 dmi_product_name.as_deref(),
                 || query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT),
                 || query_metadata(METADATA_ADDR, METADATA_INSTANCE_ID_PATH, METADATA_TIMEOUT),
             )?
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         Ok(HostSources {
@@ -236,6 +249,7 @@ impl SystemHostProbe {
             machine_type_record,
             gce_instance_id,
             instance_binding,
+            gce_metadata_unanswered,
             proc_meminfo: self.read("/proc/meminfo")?,
             pci_devices: self.pci_devices()?,
         })
@@ -327,12 +341,14 @@ impl SystemHostProbe {
     /// declares none — and must never pay a network timeout to find that
     /// out.
     ///
-    /// Only a service that could not be reached — the connect or the request
-    /// failed, or nothing at all came back within the budget — lets the
-    /// record be read. A service that sent anything, closed, or reset, but
-    /// did not answer with a machine type, is a broken source and stays one:
-    /// falling back there would let a record outvote the authority that just
-    /// answered. A record that is absent is `None` here;
+    /// Only a service that gave no answer lets the record be read: nothing
+    /// came back within the budget, the connection was refused, or the
+    /// service said it is temporarily unavailable (HTTP 429 or 503, which
+    /// Google documents while the metadata server boots or the host is under
+    /// maintenance). A service that sent anything else, closed, or reset,
+    /// but did not answer with a machine type, is a broken source and stays
+    /// one: falling back there would let a record outvote the authority that
+    /// just answered. A record that is absent is `None` here;
     /// [`crate::detect::identify`] turns that into an error, because an
     /// instance with no machine type is admitted as an unvalidated shape.
     fn machine_type_sources(
@@ -345,17 +361,17 @@ impl SystemHostProbe {
         }
         match query() {
             Ok(body) => Ok((Some(body), None)),
-            Err(MetadataFailure::Timeout) => Ok((
+            Err(failure) if failure.unanswered().is_some() => Ok((
                 None,
                 read_identity_file(
                     &self.path(MACHINE_TYPE_RECORD_PATH),
                     MACHINE_TYPE_RECORD_NAME,
                 )?,
             )),
-            Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
+            Err(failure) => Err(PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
-                    "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms)",
+                    "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms); {BROKEN_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
                 ),
             }),
@@ -377,13 +393,26 @@ impl SystemHostProbe {
         machine_type_query: impl FnOnce() -> Result<String, MetadataFailure>,
         instance_id_query: impl FnOnce() -> Result<String, MetadataFailure>,
     ) -> Result<GceSources, PlatformProbeError> {
-        let (machine_type, record) =
-            self.machine_type_sources(dmi_product_name, machine_type_query)?;
-        match self.instance_sources(dmi_product_name, machine_type.is_some(), instance_id_query)? {
+        // Which way the service failed to answer, for detection to name.
+        let mut unanswered = None;
+        let (machine_type, record) = self.machine_type_sources(dmi_product_name, || {
+            machine_type_query().map_err(|failure| {
+                unanswered = failure.unanswered();
+                failure
+            })
+        })?;
+        let instance = self.instance_sources(dmi_product_name, machine_type.is_some(), || {
+            instance_id_query().map_err(|failure| {
+                unanswered = failure.unanswered();
+                failure
+            })
+        })?;
+        let unanswered = unanswered.map(str::to_string);
+        match instance {
             InstanceSources::Answered {
                 instance_id,
                 binding,
-            } => Ok((machine_type, record, instance_id, binding)),
+            } => Ok((machine_type, record, instance_id, binding, unanswered)),
             InstanceSources::Unanswered { binding } => Ok((
                 None,
                 read_identity_file(
@@ -392,6 +421,7 @@ impl SystemHostProbe {
                 )?,
                 None,
                 binding,
+                unanswered,
             )),
         }
     }
@@ -445,13 +475,13 @@ impl SystemHostProbe {
             }),
             // Read again strictly: this start now has no live answer, and
             // without one an unusable binding is refused.
-            Err(MetadataFailure::Timeout) => Ok(InstanceSources::Unanswered {
+            Err(failure) if failure.unanswered().is_some() => Ok(InstanceSources::Unanswered {
                 binding: read_identity_file(&path, INSTANCE_BINDING_NAME)?,
             }),
-            Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
+            Err(failure) => Err(PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
-                    "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms)",
+                    "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms); {BROKEN_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
                 ),
             }),
@@ -904,15 +934,40 @@ enum MetadataFailure {
     /// The service was not reached: the connect or the request failed, or
     /// nothing at all came back before the budget ran out.
     Timeout,
+    /// The connection was actively refused: something on this host or its
+    /// route rejects 169.254.169.254:80, which the metadata server never
+    /// does.
+    Refused,
+    /// The service answered HTTP 429 or 503, which Google documents while
+    /// the metadata server boots or the host is under maintenance. Carries
+    /// the status code.
+    Transient(u16),
     /// The service was reached -- it sent something, closed, or reset --
     /// but did not answer with a machine type.
     Answered(String),
+}
+
+impl MetadataFailure {
+    /// The [`HostSources::gce_metadata_unanswered`] token for a failure
+    /// that leaves this start without a live answer, as if the service had
+    /// not been asked, or `None` for an answer that is a broken source.
+    fn unanswered(&self) -> Option<&'static str> {
+        match self {
+            Self::Timeout => Some("timeout"),
+            Self::Refused => Some("refused"),
+            Self::Transient(429) => Some("http-429"),
+            Self::Transient(_) => Some("http-503"),
+            Self::Answered(_) => None,
+        }
+    }
 }
 
 impl std::fmt::Display for MetadataFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Timeout => write!(f, "no answer within the budget"),
+            Self::Refused => write!(f, "connection refused"),
+            Self::Transient(code) => write!(f, "metadata service answered HTTP {code}"),
             Self::Answered(detail) => write!(f, "{detail}"),
         }
     }
@@ -933,8 +988,13 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     let socket = addr
         .parse()
         .map_err(|_| MetadataFailure::Answered(format!("`{addr}` is not an address")))?;
-    let mut stream = std::net::TcpStream::connect_timeout(&socket, budget)
-        .map_err(|_| MetadataFailure::Timeout)?;
+    let mut stream = std::net::TcpStream::connect_timeout(&socket, budget).map_err(|err| {
+        if err.kind() == ErrorKind::ConnectionRefused {
+            MetadataFailure::Refused
+        } else {
+            MetadataFailure::Timeout
+        }
+    })?;
 
     let left = remaining(deadline).ok_or(MetadataFailure::Timeout)?;
     stream.set_write_timeout(Some(left)).ok();
@@ -1014,10 +1074,16 @@ fn query_metadata(addr: &str, path: &str, budget: Duration) -> Result<String, Me
     let mut status_fields = status.split(' ');
     let version = status_fields.next();
     let code = status_fields.next();
-    if !matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
-        || code != Some("200")
-        || status.bytes().any(|byte| byte.is_ascii_control())
-    {
+    let well_formed = matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
+        && !status.bytes().any(|byte| byte.is_ascii_control());
+    // The two statuses Google documents as transient. Anything else that is
+    // not 200 is an answer, and a broken one.
+    match code {
+        Some("429") if well_formed => return Err(MetadataFailure::Transient(429)),
+        Some("503") if well_formed => return Err(MetadataFailure::Transient(503)),
+        _ => {}
+    }
+    if !well_formed || code != Some("200") {
         // One journal line: whatever the peer put in its status line is
         // escaped rather than printed.
         return Err(MetadataFailure::Answered(format!(
@@ -1397,7 +1463,8 @@ mod tests {
                 None,
                 Some("recorded body".to_string()),
                 None,
-                Some("bound".to_string())
+                Some("bound".to_string()),
+                Some("timeout".to_string())
             )
         );
         assert_eq!(
@@ -1412,7 +1479,8 @@ mod tests {
                 Some("projects/REDACTED/machineTypes/g2-standard-8".to_string()),
                 None,
                 Some("1234567890123456789".to_string()),
-                Some("bound".to_string())
+                Some("bound".to_string()),
+                None
             ),
             "both answered: the record is never read"
         );
@@ -1428,7 +1496,8 @@ mod tests {
                 None,
                 Some("recorded body".to_string()),
                 None,
-                Some("bound".to_string())
+                Some("bound".to_string()),
+                Some("timeout".to_string())
             ),
             "the machine type unanswered: the instance id is never asked"
         );
@@ -1980,7 +2049,10 @@ mod tests {
         let started = std::time::Instant::now();
         let result = query_metadata("127.0.0.1:0", METADATA_PATH, Duration::from_millis(100));
         assert!(
-            matches!(result, Err(MetadataFailure::Timeout)),
+            matches!(
+                result,
+                Err(MetadataFailure::Timeout | MetadataFailure::Refused)
+            ),
             "nothing answered: {result:?}"
         );
         assert!(
@@ -2017,6 +2089,220 @@ mod tests {
         addr
     }
 
+    /// A loopback stand-in for the metadata service: every machine-type
+    /// request takes the next reply from `machine_type` (the last one
+    /// repeats), and every instance-id request gets `instance_id`.
+    fn serve_metadata(machine_type: Vec<&'static str>, instance_id: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            let mut served = 0;
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { continue };
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 256];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut chunk) {
+                        Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let reply = if request.starts_with(&format!("GET {METADATA_INSTANCE_ID_PATH} ")) {
+                    instance_id
+                } else {
+                    let reply = machine_type[served.min(machine_type.len() - 1)];
+                    served += 1;
+                    reply
+                };
+                let _ = socket.write_all(reply.as_bytes());
+                let _ = socket.flush();
+            }
+        });
+        addr
+    }
+
+    const UNAVAILABLE_503: &str = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+    const TOO_MANY_429: &str = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
+    const FORBIDDEN_403: &str = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+    const MACHINE_TYPE_200: &str =
+        "HTTP/1.1 200 OK\r\nContent-Length: 44\r\n\r\nprojects/REDACTED/machineTypes/g2-standard-8";
+    const INSTANCE_ID_200: &str =
+        "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n1234567890123456789";
+
+    #[test]
+    fn only_the_documented_transient_statuses_leave_a_start_unanswered() {
+        for (reply, expected) in [
+            (UNAVAILABLE_503, Some("http-503")),
+            (TOO_MANY_429, Some("http-429")),
+            (FORBIDDEN_403, None),
+            (
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                None,
+            ),
+            // A status line with a control character in it is not the
+            // service speaking, whatever code it names.
+            (
+                "HTTP/1.1 503 Service\x01Unavailable\r\nContent-Length: 0\r\n\r\n",
+                None,
+            ),
+        ] {
+            let addr = serve_once(reply, Duration::ZERO);
+            let failure = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+                .expect_err("no machine type");
+            assert_eq!(failure.unanswered(), expected, "{reply:?}: {failure:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_is_unanswered_and_named_as_refused() {
+        // A port whose listener is gone: nothing accepts, and the kernel
+        // refuses the connect.
+        let addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").to_string()
+        };
+        let failure = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+            .expect_err("nothing is listening");
+        assert_eq!(failure.unanswered(), Some("refused"), "{failure:?}");
+    }
+
+    #[test]
+    fn a_transient_answer_reads_the_record_and_a_forbidden_one_is_a_broken_source() {
+        let root = staged_identity_root();
+        std::fs::write(staged_record(&root), "recorded body").expect("stage a record");
+        let probe = SystemHostProbe::with_root(root.path());
+        let query = |addr: String, path: &'static str| {
+            move || query_metadata(&addr, path, Duration::from_millis(500))
+        };
+        let addr = serve_metadata(vec![UNAVAILABLE_503], INSTANCE_ID_200);
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    query(addr.clone(), METADATA_PATH),
+                    query(addr, METADATA_INSTANCE_ID_PATH)
+                )
+                .expect("a transient answer is not an error"),
+            (
+                None,
+                Some("recorded body".to_string()),
+                None,
+                None,
+                Some("http-503".to_string())
+            )
+        );
+        let addr = serve_metadata(vec![MACHINE_TYPE_200], UNAVAILABLE_503);
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    query(addr.clone(), METADATA_PATH),
+                    query(addr, METADATA_INSTANCE_ID_PATH)
+                )
+                .expect("a transient instance-id answer is not an error"),
+            (
+                None,
+                Some("recorded body".to_string()),
+                None,
+                None,
+                Some("http-503".to_string())
+            ),
+            "a transient instance-id answer drops the live machine type too"
+        );
+        let addr = serve_metadata(vec![FORBIDDEN_403], INSTANCE_ID_200);
+        match probe.gce_sources(
+            GCE,
+            query(addr.clone(), METADATA_PATH),
+            query(addr, METADATA_INSTANCE_ID_PATH),
+        ) {
+            Err(PlatformProbeError::Unreadable { detail, .. }) => {
+                assert!(detail.contains("403"), "{detail}");
+                assert!(
+                    detail.contains("such as a proxy or a custom route"),
+                    "{detail}"
+                );
+            }
+            other => panic!("a 403 is a broken source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_service_that_answers_503_twice_is_retried_into_a_live_answer() {
+        // The reboot case: no record for this boot, and a metadata server
+        // still starting. Each attempt is what one start of the agent's
+        // retry loop does -- gather, then identify -- against a stand-in
+        // that answers 503, 503, then the machine type.
+        let host: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../test/platform/host_identity/ubuntu2404-x86-l4-g2s8.json"
+            ))
+            .expect("host fixture"),
+        )
+        .expect("host fixture parses");
+        let text = |key: &str| host["sources"][key].as_str().map(str::to_string);
+        let root = staged_identity_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        let addr = serve_metadata(
+            vec![UNAVAILABLE_503, UNAVAILABLE_503, MACHINE_TYPE_200],
+            INSTANCE_ID_200,
+        );
+        let mut outcomes = Vec::new();
+        for _ in 0..3 {
+            let (
+                gce_machine_type,
+                machine_type_record,
+                gce_instance_id,
+                instance_binding,
+                gce_metadata_unanswered,
+            ) = probe
+                .gce_sources(
+                    GCE,
+                    || query_metadata(&addr, METADATA_PATH, Duration::from_millis(500)),
+                    || query_metadata(&addr, METADATA_INSTANCE_ID_PATH, Duration::from_millis(500)),
+                )
+                .expect("gathered");
+            let sources = HostSources {
+                uname_machine: text("uname_machine"),
+                os_release: text("os_release"),
+                cpuinfo: text("cpuinfo"),
+                proc_meminfo: text("proc_meminfo"),
+                pci_devices: text("pci_devices"),
+                dmi_product_name: GCE.map(str::to_string),
+                boot_id: Some("00000000-0000-4000-8000-000000000001\n".to_string()),
+                gce_machine_type,
+                machine_type_record,
+                gce_instance_id,
+                instance_binding,
+                gce_metadata_unanswered,
+                ..HostSources::default()
+            };
+            outcomes.push(identify(&sources));
+        }
+        for outcome in &outcomes[..2] {
+            match outcome {
+                Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
+                    assert!(
+                        detail.contains("answered HTTP 503 (transient unavailability"),
+                        "{detail}"
+                    );
+                }
+                other => panic!("a 503 without a record is the retried failure: {other:?}"),
+            }
+        }
+        assert_eq!(
+            outcomes[2]
+                .as_ref()
+                .expect("the third attempt is answered")
+                .identity
+                .machine_type
+                .as_deref(),
+            Some("g2-standard-8")
+        );
+    }
+
     /// A GCE-looking probe whose record is valid for `live_gce_sources`, so
     /// any fallback to it would succeed.
     fn staged_valid_record_root() -> tempfile::TempDir {
@@ -2039,9 +2325,14 @@ mod tests {
         // listener, no concurrently running test can end up answering it.
         let addr = "127.0.0.1:0";
         let result = query_metadata(addr, METADATA_PATH, Duration::from_millis(500));
+        // Linux refuses a connect to port 0 and macOS calls the address
+        // unavailable: either way, no answer.
         assert!(
-            matches!(result, Err(MetadataFailure::Timeout)),
-            "a refused connect is unreachable: {result:?}"
+            matches!(
+                result,
+                Err(MetadataFailure::Timeout | MetadataFailure::Refused)
+            ),
+            "a failed connect is unanswered: {result:?}"
         );
         let root = staged_valid_record_root();
         assert!(
