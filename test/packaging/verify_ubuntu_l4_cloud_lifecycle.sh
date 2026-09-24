@@ -3616,6 +3616,13 @@ check "  the report does not certify the failed recovery" fail \
 last_sudo_line() {
   grep -nF -- "$1" "${appliance}/sudo.log" | tail -n1 | cut -d: -f1
 }
+# The number of the first sudo.log line after line $1 that contains $2, or
+# nothing: no anchor, or no such line.
+sudo_after_line() {
+  [[ -n "$1" ]] || return 0
+  tail -n "+$(($1 + 1))" "${appliance}/sudo.log" | grep -nF -- "$2" | head -n1 |
+    awk -F: -v base="$1" '{print $1 + base}'
+}
 # Whether any sudo.log line after line $1 contains $2. A missing anchor
 # line answers `missing`, so a check can never pass for want of one.
 sudo_after() {
@@ -3770,9 +3777,13 @@ check "  the rollback restores the machine-type record after the set-aside and b
      [[ -n "$restore_record_line" && -n "$mv_line" && -n "$last_baseline_install" &&
         "$restore_record_line" -gt "$mv_line" && "$restore_record_line" -lt "$last_baseline_install" ]] &&
        echo yes || echo no)"
-check "  and the restored record is the one set aside" yes \
-  "$(cmp -s "${appliance}/varlib/state/machine-type.json" "${appliance}/varlib/state.bak/machine-type.json" &&
-     echo yes || echo no)"
+# And the restored copy is digested there, before the baseline's agent can
+# start and rewrite it: after that, on a host online in the same boot, a
+# lost record and a restored one read the same.
+check "  and the restored copy is compared before the baseline install" yes \
+  "$(digest_line="$(sudo_after_line "$restore_record_line" 'sha256sum /var/lib/tensorplate/state/machine-type.json')"
+     [[ -n "$digest_line" && -n "$last_baseline_install" && "$digest_line" -lt "$last_baseline_install" ]] &&
+       echo yes || echo no)"
 check "  and the candidate's instance binding outlives the rollback" yes \
   "$(cmp -s "${appliance}/varlib/identity/instance-binding.json" <(printf '{"schema_version":1,"fixture":"instance binding"}\n') &&
      echo yes || echo no)"
@@ -3830,12 +3841,13 @@ check "  listed and digested with the services stopped and before the move" \
          uniq | tr '\n' ' ' | sed 's/ $//'; fi)"
 # Every file, not just the one the harness would have known to look for.
 check "  and the saved copy is read back after the baseline install, file by file" \
-  "yes yes yes yes" \
-  "$(printf '%s %s %s %s' \
+  "yes yes yes yes yes" \
+  "$(printf '%s %s %s %s %s' \
      "$(sudo_after "$last_baseline_install" 'ls -A /var/lib/tensorplate/state.bak')" \
      "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/state.json')" \
      "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/state.json.bak')" \
-     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/observability-snapshot.json')")"
+     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/observability-snapshot.json')" \
+     "$(sudo_after "$last_baseline_install" 'sha256sum /var/lib/tensorplate/state.bak/machine-type.json')")"
 # And never by existence: `test -f` on a pathname is what this stage used
 # to credit the rollback with, and it passes on a file truncated to
 # nothing.

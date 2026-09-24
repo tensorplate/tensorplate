@@ -2077,10 +2077,16 @@ capture_identity_digests() {
   fi
 }
 
-# Whether the record still holds the bytes captured before the stage moved
-# anything. Any start in this boot rewrites exactly those bytes, whichever
-# release it is, so a difference means the record was lost, moved or laid
-# out anew -- `when` says where that happened.
+# Whether the record holds the bytes captured before the stage moved
+# anything -- `when` says where it did not.
+#
+# What that shows depends on the network. These stages run online, and any
+# start in this boot rewrites exactly those bytes, whichever release it is:
+# after an agent has started, a match shows that release writes the same
+# layout, not that the file itself survived, because a lost record is
+# rewritten identically. Only the restore's check, made before the baseline
+# starts, shows the rollback put the record back. Under denied egress,
+# where nothing rewrites it, the same checks would show survival.
 check_record_kept() {
   local when="$1" now
   now="$(privileged_sha256 "$MACHINE_TYPE_RECORD")" || return
@@ -2171,7 +2177,7 @@ stage_upgrade() {
   install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" "$ALLOW_UNSIGNED" || return
   step "services ready after the upgrade" await_services_ready || return
   check_installed_versions to after-upgrade || return
-  step "the machine-type record survives the upgrade byte for byte" \
+  step "the machine-type record is byte-identical across the upgrade" \
     check_record_kept "across the upgrade" || return
   step "the candidate bound the record to this instance" \
     sudo test -f "$INSTANCE_BINDING" || return
@@ -2266,7 +2272,7 @@ stage_rollback() {
   step "services ready after the rollback" await_services_ready || return
   check_installed_versions from after-rollback || return
   check_operator_config_kept "the rollback" || return
-  step "the baseline kept the restored machine-type record" \
+  step "the machine-type record is byte-identical once the baseline is up" \
     check_record_kept "when the baseline started" || return
   step "the rollback left the instance binding alone" check_binding_kept || return
   step "the set-aside state is preserved, file by file" check_state_preserved || return
