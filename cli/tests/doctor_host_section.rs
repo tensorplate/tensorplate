@@ -967,11 +967,10 @@ fn another_instance_and_an_unreadable_binding_each_get_their_own_fix() {
         assert_eq!(facts.status, FindingStatus::Warning);
         let hint = facts.hint.as_deref().expect("a hint");
         assert!(hint.contains(fix), "the hint names the fix: {hint}");
-        assert!(
-            !format!("{} {hint}", facts.message).contains("123456789012345679"),
-            "no instance id is quoted: {}",
-            facts.message
-        );
+        let said = format!("{} {hint}", facts.message);
+        for id in ["1234567890123456789", "1234567890123456790"] {
+            assert!(!said.contains(id), "no instance id is quoted: {said}");
+        }
     }
 }
 

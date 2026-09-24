@@ -1414,6 +1414,22 @@ mod tests {
             ),
             "both answered: the record is never read"
         );
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    || Err(MetadataFailure::Timeout),
+                    || panic!("an unreachable service was asked for the instance id"),
+                )
+                .expect("no error"),
+            (
+                None,
+                Some("recorded body".to_string()),
+                None,
+                Some("bound".to_string())
+            ),
+            "the machine type unanswered: the instance id is never asked"
+        );
     }
 
     #[test]

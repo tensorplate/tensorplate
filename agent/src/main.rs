@@ -1094,10 +1094,12 @@ mod tests {
             "{err:?}"
         );
         let said = err.to_string();
-        assert!(
-            !said.contains("123456789012345678"),
-            "the refusal names no instance id: {said}"
-        );
+        for id in ["1234567890123456789", "1234567890123456790"] {
+            assert!(
+                !said.contains(id),
+                "the refusal names no instance id: {said}"
+            );
+        }
         assert!(log.is_empty(), "nothing is recorded or logged here");
         assert_eq!(std::fs::read(&record).expect("kept"), written);
         assert_eq!(std::fs::read(&binding).expect("kept"), bound);

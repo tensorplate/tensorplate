@@ -5,7 +5,8 @@
 //
 // `fixtures/identity/machine-type-record-v2.json` is what this release's
 // writer produces for the committed L4 host fixture on a synthetic boot, and
-// the record reader and writer are the ones v0.2.1 shipped. So the byte
+// the record's layout, parser and serializer are the ones v0.2.1 shipped (the
+// file I/O around them is shared with the binding now). So the byte
 // comparison below is the compatibility claim: the record a rollback
 // restores is one the predecessor reads, and one this release still writes
 // the same way. `instance-binding-v1.json` binds that record to a synthetic
