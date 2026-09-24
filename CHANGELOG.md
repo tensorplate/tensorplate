@@ -16,13 +16,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   database. For each Python package (`sdk/python`,
   `backends/python_pytorch`) it installs the package into a clean
   environment, uploads a CycloneDX SBOM of it as a workflow artifact, and
-  audits it with `pip-audit`. A known vulnerability is accepted only
+  audits its runtime dependency closure with `pip-audit`, after a positive
+  control that requires the scanner to report a pin with published
+  advisories. A known vulnerability is accepted only
   through `tools/release/vulnerability-dispositions.json`, whose entries
   carry a reason and a review date at most 180 days out;
   `tools/release/check-vulnerability-dispositions.py` refuses an expired
-  entry and keeps the cargo entries equal to `deny.toml`'s ignore list. The
-  file starts empty. `SECURITY.md` and `docs/release/artifacts.md` describe
-  the checks; an SBOM attached to each release remains on the roadmap.
+  entry and keeps the cargo entries equal to `deny.toml`'s ignore list. Its
+  one entry records RUSTSEC-2026-0009 in `time` as not affected: only
+  `jsonschema` reaches `time`, and it never parses RFC 2822. `SECURITY.md`
+  and `docs/release/artifacts.md` describe the checks; an SBOM attached to
+  each release remains on the roadmap. (V030-E01-F03-T01)
+
+### Security
+
+- `anyhow` 1.0.102 -> 1.0.103 (RUSTSEC-2026-0190: `Error::downcast_mut`
+  was unsound after `Error::context`) and `url` 2.5.0 -> 2.5.4, which
+  brings `idna` 0.5.0 -> 1.1.0 (RUSTSEC-2024-0421: Punycode labels that
+  decode to no non-ASCII compared equal to ASCII host names). `idna_adapter`
+  is pinned at 1.1.0 so the whole graph still builds with the workspace's
+  Rust 1.78. Both were found by the new cargo-deny check's first run.
   (V030-E01-F03-T01)
 
 ## [0.2.1] - 2026-09-23

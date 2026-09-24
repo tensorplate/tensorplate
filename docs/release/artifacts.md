@@ -301,7 +301,7 @@ any change here), and on demand. It uses no secrets.
 | --- | --- | --- |
 | `vulnerability dispositions` | the disposition file and its checker's tests | `tools/release/vulnerability-dispositions.json` |
 | `cargo-deny` | licenses, wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
-| `SBOM and audit` | a CycloneDX JSON SBOM of each Python package installed into a clean environment, uploaded as a workflow artifact, and a `pip-audit` run over that environment | the PyPI entries of the disposition file |
+| `SBOM and audit` | a CycloneDX JSON SBOM of each Python package installed into a clean environment, uploaded as a workflow artifact, and a `pip-audit` run over the package's runtime dependency closure in that environment, after a positive control that requires it to report a pin with published advisories | the PyPI entries of the disposition file |
 
 cargo-deny runs as a prebuilt binary whose version and SHA-256 are pinned
 in the workflow; `cyclonedx-bom` and `pip-audit` are pinned by version and
@@ -325,6 +325,12 @@ of lasting forever. A `cargo` entry must also appear in `deny.toml`'s
 `[advisories] ignore` list, which is what cargo-deny reads; the checker
 refuses the two lists when they differ in either direction. `pypi` entries
 become `pip-audit --ignore-vuln` arguments.
+
+The file's first entry is RUSTSEC-2026-0009 in `time`, recorded as not
+affected: `time` is reached only through `jsonschema` 0.17.1, which parses
+dates and RFC 3339 date-times, never the RFC 2822 format the advisory
+concerns, and the fixed `time` needs a newer compiler than the workspace
+pins. It is due for review by 2026-12-23.
 
 Not covered yet: native dependencies of the C++ runtime, the contents of
 the Debian packages as built, and an SBOM attached to each release.
