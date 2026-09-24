@@ -33,9 +33,33 @@ pub enum ErrorCode {
     InferenceFailed,
     /// Unexpected internal error; usually a bug.
     Internal,
+    /// Operation was cancelled at the caller's request.
+    Cancelled,
+    /// A backend process or worker the operation needs is unavailable,
+    /// was reset, or is shutting down.
+    Unavailable,
+    /// A bounded quota, credit, or capacity limit was exhausted.
+    ResourceExhausted,
 }
 
 impl ErrorCode {
+    /// Every code in declaration order, which is the C++ numeric order and
+    /// the order of the `code` enum in `protocol/schemas/error.json`.
+    pub const ALL: [Self; 12] = [
+        Self::ConfigInvalid,
+        Self::LoadFailed,
+        Self::NotReady,
+        Self::ShapeMismatch,
+        Self::Unsupported,
+        Self::OomError,
+        Self::Timeout,
+        Self::InferenceFailed,
+        Self::Internal,
+        Self::Cancelled,
+        Self::Unavailable,
+        Self::ResourceExhausted,
+    ];
+
     /// Stable serialized name (snake_case). Matches the C++
     /// `tensorplate::to_string(Error::Code)`.
     #[must_use]
@@ -50,6 +74,9 @@ impl ErrorCode {
             Self::Timeout => "timeout",
             Self::InferenceFailed => "inference_failed",
             Self::Internal => "internal",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+            Self::ResourceExhausted => "resource_exhausted",
         }
     }
 }
@@ -106,18 +133,41 @@ mod tests {
     use super::{ErrorCode, ProtocolError, SCHEMA_VERSION};
 
     #[test]
+    fn all_lists_every_code_once_in_declaration_order() {
+        use serde::de::value::{Error as ValueError, U32Deserializer};
+        use serde::Deserialize;
+
+        // serde's derived Deserialize also accepts a variant index, so it
+        // knows every variant: ALL must match it at each index and end where
+        // the enum ends, or a code added to the enum alone is never checked.
+        let by_index = |index: usize| {
+            let index = u32::try_from(index).expect("index fits in u32");
+            ErrorCode::deserialize(U32Deserializer::<ValueError>::new(index))
+        };
+        for (index, code) in ErrorCode::ALL.into_iter().enumerate() {
+            assert_eq!(
+                code as usize, index,
+                "{code} is out of place in ErrorCode::ALL"
+            );
+            assert_eq!(by_index(index).expect("variant index"), code);
+        }
+        assert!(
+            by_index(ErrorCode::ALL.len()).is_err(),
+            "ErrorCode has a variant that ErrorCode::ALL does not list"
+        );
+    }
+
+    #[test]
+    fn appended_codes_keep_their_wire_names() {
+        assert_eq!(ErrorCode::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorCode::Unavailable.as_str(), "unavailable");
+        assert_eq!(ErrorCode::ResourceExhausted.as_str(), "resource_exhausted");
+        assert!(serde_json::from_str::<ErrorCode>("\"canceled\"").is_err());
+    }
+
+    #[test]
     fn code_round_trip_via_json() {
-        for code in [
-            ErrorCode::ConfigInvalid,
-            ErrorCode::LoadFailed,
-            ErrorCode::NotReady,
-            ErrorCode::ShapeMismatch,
-            ErrorCode::Unsupported,
-            ErrorCode::OomError,
-            ErrorCode::Timeout,
-            ErrorCode::InferenceFailed,
-            ErrorCode::Internal,
-        ] {
+        for code in ErrorCode::ALL {
             let json = serde_json::to_string(&code).expect("serialize");
             let back: ErrorCode = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(code, back, "round-trip mismatch for {code}");

@@ -71,6 +71,27 @@ compatibility here is the deployed serde-reader contract. Retire this
 exception when per-schema minor-version negotiation replaces the global
 exact-equality check.
 
+A second narrow pre-1.0 exception covers the shared closed enums: a value
+may be appended under `0.1` to the error-code enum (`error.json` and every
+schema that inlines a copy of it) and to the `reason` and `category` enums
+of `failure_reason.json`. Existing values are never renamed, removed,
+reordered or given a new meaning, and every schema copy and every language
+mirror (C++ `Error::Code`, the Rust `ErrorCode`, `FailureReason` and
+`FailureCategory`, the Python sidecar's `ERR_*` constants and the SDK's
+`ErrorCode`) moves in the same change;
+`protocol/rust/tests/schema_enum_drift.rs`, `test/unit/error_test.cpp` and a
+test in each Python package fail if one does not. An appended value is safe
+only while nothing sends it to a reader that predates it. The Rust readers
+(agent, CLI, observability) decode these enums into closed types and reject
+a value they do not know; the C++ adapter maps an unknown sidecar error code
+to `internal`; the Python SDK reports an unknown code as
+`ErrorCode.INTERNAL` (and an unknown health `last_error_code` as `None`).
+Mixed versions are supported: the component packages only recommend one
+another, and a CLI or SDK can run on another host against a device of a
+different release. The change that first emits an appended value must
+therefore keep it away from readers that may predate it, or negotiate first.
+Retire this exception with the first.
+
 The agent's durable state file (`agent_state.json`) is the one document
 with its own version track, because it is read by nothing but the agent
 that wrote it and must stay safe across agent upgrades and downgrades: an

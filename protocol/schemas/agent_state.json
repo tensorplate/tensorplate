@@ -286,7 +286,10 @@
             "oom_error",
             "timeout",
             "inference_failed",
-            "internal"
+            "internal",
+            "cancelled",
+            "unavailable",
+            "resource_exhausted"
           ]
         },
         "message": {"type": "string"},

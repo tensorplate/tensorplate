@@ -67,6 +67,21 @@ value objects mirror the same fields and use stable string mappings
 declared in runtime translation units; C++ JSON round trips start once
 the V01-E07 / V01-E05 bindings land.
 
+## Shared enums
+
+The error-code enum in `error.json` is copied inline into most schemas
+that carry a code (a few `$ref` it instead). Append a new code at the end,
+in C++ `Error::Code` numeric order, to `error.json` and to every copy in
+the same change, together with the language mirrors;
+`protocol/rust/tests/schema_enum_drift.rs` fails on any copy that differs
+from `ErrorCode::ALL`. The failure `reason`, `category` and `severity`
+enums exist only in `failure_reason.json` and are held to the Rust
+taxonomy by the same test. Appending to these enums keeps
+`schema_version` at `0.1` only under the narrow exception, and with the
+reader constraints, that
+[`docs/architecture/protocol.md`](../../docs/architecture/protocol.md#versioning)
+records.
+
 ## Adding a new payload
 
 1. Add `protocol/schemas/<name>.json` with `schema_version`

@@ -58,20 +58,26 @@ ERR_OOM_ERROR: Final[str] = "oom_error"
 ERR_TIMEOUT: Final[str] = "timeout"
 ERR_INFERENCE_FAILED: Final[str] = "inference_failed"
 ERR_INTERNAL: Final[str] = "internal"
+ERR_CANCELLED: Final[str] = "cancelled"
+ERR_UNAVAILABLE: Final[str] = "unavailable"
+ERR_RESOURCE_EXHAUSTED: Final[str] = "resource_exhausted"
 
 # Vendor-neutral platform reason carried by a runtime capability record.
 REASON_ACCELERATOR_RUNTIME_UNAVAILABLE: Final[str] = "accelerator_runtime_unavailable"
 
 
 __all__ = [
+    "ERR_CANCELLED",
     "ERR_CONFIG_INVALID",
     "ERR_INFERENCE_FAILED",
     "ERR_INTERNAL",
     "ERR_LOAD_FAILED",
     "ERR_NOT_READY",
     "ERR_OOM_ERROR",
+    "ERR_RESOURCE_EXHAUSTED",
     "ERR_SHAPE_MISMATCH",
     "ERR_TIMEOUT",
+    "ERR_UNAVAILABLE",
     "ERR_UNSUPPORTED",
     "KIND_CANCEL",
     "KIND_CANCEL_RESPONSE",

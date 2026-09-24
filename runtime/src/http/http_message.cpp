@@ -82,6 +82,8 @@ std::string_view http_reason(int status) noexcept {
       return "Unprocessable Entity";
     case 429:
       return "Too Many Requests";
+    case 499:
+      return "Client Closed Request";
     case 500:
       return "Internal Server Error";
     case 501:

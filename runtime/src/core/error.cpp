@@ -6,49 +6,71 @@
 
 #include "tensorplate/core/error.hpp"
 
-#include <array>
-#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
-#include <utility>
 
 namespace tensorplate {
 
 namespace {
 
-// Stable wire-format names. Order matches Error::Code enumeration; updates
-// here must keep `protocol/schemas/error.json` and
-// `protocol/rust/src/error.rs` in lockstep.
-constexpr std::array<std::pair<Error::Code, std::string_view>, 9> kCodeNames = {{
-    {Error::Code::ConfigInvalid, "config_invalid"},
-    {Error::Code::LoadFailed, "load_failed"},
-    {Error::Code::NotReady, "not_ready"},
-    {Error::Code::ShapeMismatch, "shape_mismatch"},
-    {Error::Code::Unsupported, "unsupported"},
-    {Error::Code::OOMError, "oom_error"},
-    {Error::Code::Timeout, "timeout"},
-    {Error::Code::InferenceFailed, "inference_failed"},
-    {Error::Code::Internal, "internal"},
-}};
+// Stable wire-format names; `protocol/schemas/error.json` lists them in this
+// numeric order and `protocol/rust/src/error.rs` mirrors them. No default:
+// -Wswitch makes a code appended to Error::Code without a name here a build
+// error. An empty result means the value is not an enumerator.
+constexpr std::string_view name_of(Error::Code code) noexcept {
+  switch (code) {
+    case Error::Code::ConfigInvalid:
+      return "config_invalid";
+    case Error::Code::LoadFailed:
+      return "load_failed";
+    case Error::Code::NotReady:
+      return "not_ready";
+    case Error::Code::ShapeMismatch:
+      return "shape_mismatch";
+    case Error::Code::Unsupported:
+      return "unsupported";
+    case Error::Code::OOMError:
+      return "oom_error";
+    case Error::Code::Timeout:
+      return "timeout";
+    case Error::Code::InferenceFailed:
+      return "inference_failed";
+    case Error::Code::Internal:
+      return "internal";
+    case Error::Code::Cancelled:
+      return "cancelled";
+    case Error::Code::Unavailable:
+      return "unavailable";
+    case Error::Code::ResourceExhausted:
+      return "resource_exhausted";
+  }
+  return {};
+}
 
 }  // namespace
 
 std::string_view to_string(Error::Code code) noexcept {
-  for (const auto& [c, name] : kCodeNames) {
-    if (c == code) {
-      return name;
-    }
-  }
-  return "internal";
+  const std::string_view name = name_of(code);
+  return name.empty() ? std::string_view{"internal"} : name;
 }
 
 std::optional<Error::Code> error_code_from_string(std::string_view name) noexcept {
-  for (const auto& [c, candidate] : kCodeNames) {
+  if (name.empty()) {
+    return std::nullopt;
+  }
+  // Codes are dense from 0 (values only ever append), so the first value
+  // without a name ends the search.
+  for (std::uint32_t value = 0;; ++value) {
+    const auto code = static_cast<Error::Code>(value);
+    const std::string_view candidate = name_of(code);
+    if (candidate.empty()) {
+      return std::nullopt;
+    }
     if (candidate == name) {
-      return c;
+      return code;
     }
   }
-  return std::nullopt;
 }
 
 std::string format(const Error& err) {
