@@ -59,6 +59,8 @@ set(_tp_runtime_sources
   src/serving/pipeline.cpp
   src/serving/router.cpp
   src/serving/worker.cpp
+  # Logical-session lifecycle: a pure state machine with no timers or I/O.
+  src/serving/session/state_machine.cpp
 )
 
 if(TP_ENABLE_TENSORRT)
