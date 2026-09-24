@@ -63,6 +63,26 @@ TEST(ServingMetrics, RecordsRejectionsByCode) {
   EXPECT_EQ(s.requests_rejected_malformed, 1U);
 }
 
+TEST(ServingMetrics, RecordsAppendedCodesInTheirCounters) {
+  ServingMetrics m;
+  m.record_rejection(Error::Code::ResourceExhausted);
+  auto s = m.snapshot();
+  EXPECT_EQ(s.requests_rejected_overload, 1U);
+  EXPECT_EQ(s.requests_failed, 0U);
+
+  m.record_rejection(Error::Code::Unavailable);
+  s = m.snapshot();
+  EXPECT_EQ(s.requests_failed, 1U);
+  EXPECT_EQ(s.requests_rejected_stopping, 0U);
+
+  // A cancelled request is a typed failure here; requests_cancelled is fed
+  // by the scheduler's Cancelled event, so this must not touch it.
+  m.record_rejection(Error::Code::Cancelled);
+  s = m.snapshot();
+  EXPECT_EQ(s.requests_failed, 2U);
+  EXPECT_EQ(s.requests_cancelled, 0U);
+}
+
 TEST(ServingMetrics, LatencyHistogramAndPrometheusRender) {
   ServingMetrics m;
   MetricsLabels labels{"e", "vision", "model", "mock"};

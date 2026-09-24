@@ -106,6 +106,9 @@ fn hint_for(code: tensorplate_protocol::ErrorCode, context: Option<&str>) -> Opt
         E::Timeout => Some("re-run with `--timeout-ms <ms>` or inspect agent logs"),
         E::InferenceFailed => Some("inspect the serving worker logs for backend-specific detail"),
         E::Internal => Some("file a bug with the correlation id from the response"),
+        E::Cancelled => Some("the operation was cancelled before it completed; re-run it"),
+        E::Unavailable => Some("the serving worker is unavailable; check `tensorplate status`"),
+        E::ResourceExhausted => Some("a capacity limit was reached; retry once load drops"),
     };
     base.map(|hint| match context {
         Some(ctx) if !ctx.is_empty() => format!("{hint} (context: {ctx})"),

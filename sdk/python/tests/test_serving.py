@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from tensorplate.errors import (
+    ErrorCode,
     ProtocolError,
     ServingError,
     TransportError,
@@ -196,6 +197,53 @@ def test_infer_failure_maps_to_serving_error(server: _CannedServer) -> None:
         _client(server).infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
     assert excinfo.value.code.value == "shape_mismatch"
     assert excinfo.value.request_id == "r"
+
+
+@pytest.mark.parametrize(
+    ("http_status", "wire_code", "expected"),
+    [
+        (499, "cancelled", ErrorCode.CANCELLED),
+        (503, "unavailable", ErrorCode.UNAVAILABLE),
+        (429, "resource_exhausted", ErrorCode.RESOURCE_EXHAUSTED),
+        # A code this SDK does not know yet degrades to INTERNAL.
+        (500, "not_a_code", ErrorCode.INTERNAL),
+    ],
+)
+def test_infer_failure_maps_each_wire_code(
+    server: _CannedServer, http_status: int, wire_code: str, expected: ErrorCode
+) -> None:
+    server.routes[("POST", "/infer")] = (
+        http_status,
+        {
+            "schema_version": "0.1",
+            "request_id": "r",
+            "status": "failure",
+            "error": {"schema_version": "0.1", "code": wire_code, "message": "m"},
+        },
+    )
+    with pytest.raises(ServingError) as excinfo:
+        _client(server).infer("m", [ServingClient.tensor_input("x", b"\x00", DType.UINT8, (1,))])
+    assert excinfo.value.code is expected
+
+
+@pytest.mark.parametrize(
+    ("wire_code", "expected"),
+    [("resource_exhausted", ErrorCode.RESOURCE_EXHAUSTED), ("not_a_code", None)],
+)
+def test_health_last_error_code_parses_each_wire_code(
+    server: _CannedServer, wire_code: str, expected: ErrorCode | None
+) -> None:
+    server.routes[("GET", "/health")] = (
+        503,
+        {
+            "schema_version": "0.1",
+            "state": "failed",
+            "endpoint": "x",
+            "backend": "trt",
+            "last_error_code": wire_code,
+        },
+    )
+    assert _client(server).health().last_error_code is expected
 
 
 def test_infer_rejects_unsupported_schema_version(server: _CannedServer) -> None:

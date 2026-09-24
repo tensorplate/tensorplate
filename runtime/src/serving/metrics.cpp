@@ -49,27 +49,36 @@ void ServingMetrics::set_labels(MetricsLabels labels) {
 }
 
 void ServingMetrics::record_rejection(Error::Code code) noexcept {
+  // No default: -Wswitch makes a newly appended Error::Code a build error
+  // here until it is given a counter.
   switch (code) {
     case Error::Code::ConfigInvalid:
     case Error::Code::ShapeMismatch:
       increment_rejected_malformed();
-      break;
+      return;
     case Error::Code::Unsupported:
       increment_rejected_unsupported();
-      break;
+      return;
     case Error::Code::OOMError:
+    case Error::Code::ResourceExhausted:
       increment_rejected_overload();
-      break;
+      return;
     case Error::Code::Timeout:
       increment_rejected_deadline();
-      break;
+      return;
     case Error::Code::NotReady:
       increment_rejected_stopping();
-      break;
-    default:
-      increment_requests_failed();
+      return;
+    case Error::Code::LoadFailed:
+    case Error::Code::InferenceFailed:
+    case Error::Code::Internal:
+    // A cancelled request is counted here, not in requests_cancelled: the
+    // scheduler's Cancelled event already increments that counter.
+    case Error::Code::Cancelled:
+    case Error::Code::Unavailable:
       break;
   }
+  increment_requests_failed();
 }
 
 void ServingMetrics::record_buffer_accounting(std::size_t in_use_bytes, std::size_t active_count,
@@ -190,7 +199,7 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
                  "Requests rejected before buffer allocation for exceeding the size cap.",
                  snap.requests_rejected_oversize, labels);
   render_counter(oss, "tensorplate_serving_rejected_overload",
-                 "Requests rejected by scheduler admission due to queue/in-flight overload.",
+                 "Requests rejected for overload or an exhausted capacity, quota or credit limit.",
                  snap.requests_rejected_overload, labels);
   render_counter(oss, "tensorplate_serving_rejected_deadline",
                  "Requests rejected by scheduler admission for deadline infeasibility.",

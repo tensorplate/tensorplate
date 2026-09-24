@@ -386,21 +386,10 @@ fn render_human(parsed: &Value, endpoint: &EndpointResolution) -> String {
     out
 }
 
+/// Parse a wire error code through the protocol enum's own serde names, so
+/// every code the protocol crate knows is recognised.
 fn parse_error_code(code: &str) -> Option<tensorplate_protocol::ErrorCode> {
-    use tensorplate_protocol::ErrorCode as E;
-    let v = match code {
-        "config_invalid" => E::ConfigInvalid,
-        "load_failed" => E::LoadFailed,
-        "not_ready" => E::NotReady,
-        "shape_mismatch" => E::ShapeMismatch,
-        "unsupported" => E::Unsupported,
-        "oom_error" => E::OomError,
-        "timeout" => E::Timeout,
-        "inference_failed" => E::InferenceFailed,
-        "internal" => E::Internal,
-        _ => return None,
-    };
-    Some(v)
+    serde_json::from_value(Value::String(code.to_owned())).ok()
 }
 
 #[cfg(test)]
@@ -418,6 +407,15 @@ mod tests {
         clippy::redundant_clone,
         clippy::redundant_closure_for_method_calls
     )]
+
+    #[test]
+    fn parse_error_code_knows_every_protocol_code() {
+        for code in tensorplate_protocol::ErrorCode::ALL {
+            assert_eq!(parse_error_code(code.as_str()), Some(code));
+        }
+        assert_eq!(parse_error_code("canceled"), None);
+        assert_eq!(parse_error_code(""), None);
+    }
 
     use super::*;
     use crate::args::OutputMode;
