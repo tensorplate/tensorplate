@@ -198,27 +198,38 @@ pub fn check_live_instance(
     if binding.instance_id != live {
         return Err(PlatformProbeError::InstanceChanged {
             source_name: INSTANCE_BINDING_PATH.to_string(),
-            detail: "the metadata service answers for a different Compute Engine instance than \
-                     the one this host's identity was recorded on; the disk was moved or cloned"
-                .to_string(),
+            detail: format!(
+                "the metadata service answers for a different Compute Engine instance than the \
+                 one this host's identity was recorded on; the disk was moved or cloned; \
+                 {REPROVISION}"
+            ),
         });
     }
     if binding.machine_type != live_machine_type {
         return Err(machine_type_changed(&format!(
             "the metadata service answers machine type `{live_machine_type}` for the instance \
-             this host's identity was recorded on as `{}`",
+             this host's identity was recorded on as `{}`; the instance was given a different \
+             machine type",
             binding.machine_type
         )));
     }
     Ok(())
 }
 
-/// The refusal for an instance given another machine type, with `what`
-/// saying which two machine types disagree.
+/// The explicit reprovisioning both identity refusals end with: the
+/// journal line that reports them is all an operator may read.
+pub(crate) const REPROVISION: &str = "to reprovision the host, stop tensorplate-agent, delete \
+    /var/lib/tensorplate/identity/instance-binding.json and \
+    /var/lib/tensorplate/state/machine-type.json, and start it while the metadata service is \
+    reachable";
+
+/// The refusal for a binding on another machine type, with `what` saying
+/// which two machine types disagree and why, followed by the reprovisioning
+/// steps.
 pub(crate) fn machine_type_changed(what: &str) -> PlatformProbeError {
     PlatformProbeError::MachineTypeChanged {
         source_name: INSTANCE_BINDING_PATH.to_string(),
-        detail: format!("{what}; the instance was given a different machine type"),
+        detail: format!("{what}; {REPROVISION}"),
     }
 }
 

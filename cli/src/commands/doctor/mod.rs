@@ -225,7 +225,7 @@ const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reac
 /// type without the metadata service. Neither re-running as another user nor
 /// attaching output helps: the fix is one agent start in the current boot
 /// with the service reachable, which records the machine type again.
-const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start reports a different machine type, reprovision as its hint says";
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start is refused for a different machine type, reprovision as its message says";
 
 /// What to do when the instance binding is read on every Compute Engine
 /// start, reachable or not, and this user cannot read it. It lives in the
@@ -240,7 +240,7 @@ const INSTANCE_CHANGED_HINT: &str = "this disk was moved to, or cloned into, ano
 /// What to do when the instance this host's identity was recorded on was
 /// given another machine type. Starting the agent again does not heal it:
 /// reprovisioning is explicit, as for a moved disk.
-const MACHINE_TYPE_CHANGED_HINT: &str = "this Compute Engine instance was given a different machine type since its identity was recorded — to reprovision the host on its new machine type, stop tensorplate-agent, delete /var/lib/tensorplate/identity/instance-binding.json and /var/lib/tensorplate/state/machine-type.json, and start tensorplate-agent while the metadata service is reachable";
+const MACHINE_TYPE_CHANGED_HINT: &str = "this Compute Engine instance was given a different machine type since its identity was recorded, or, offline, the disk may have moved to an instance of that type — to reprovision the host on its new machine type, stop tensorplate-agent, delete /var/lib/tensorplate/identity/instance-binding.json and /var/lib/tensorplate/state/machine-type.json, and start tensorplate-agent while the metadata service is reachable";
 
 /// Detection state consumed by the pure host-section renderer.
 ///

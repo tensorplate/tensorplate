@@ -424,11 +424,15 @@ pub fn establish_machine_type(
         } else if binding.machine_type != record.machine_type {
             // The record is from this boot and the binding from an earlier
             // one: only a record written without this release -- by the
-            // 0.2.1 agent after a rollback -- can name another machine type,
-            // and the online start that follows would refuse the same way.
+            // 0.2.1 agent after a rollback -- can name another machine type.
+            // Offline there is no instance id to tell a resize from a moved
+            // disk; the online start that follows refuses either way, with
+            // MachineTypeChanged or InstanceChanged, and both reprovision
+            // alike.
             return Err(machine_type_changed(&format!(
-                "the machine type recorded in this boot is `{}` for the instance this host's \
-                 identity was recorded on as `{}`",
+                "the machine type recorded in this boot is `{}`, and this host's identity was \
+                 recorded on `{}`; the instance was given a different machine type, or the disk \
+                 was moved to an instance of that type",
                 record.machine_type, binding.machine_type
             )));
         }

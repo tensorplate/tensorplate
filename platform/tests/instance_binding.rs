@@ -25,7 +25,7 @@ use tensorplate_platform::{
     identify, HostSources, InstanceBinding, MachineTypeRecord, MachineTypeSource,
     PlatformProbeError,
 };
-use tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH;
+use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 
 const RECORD: &str = "tests/fixtures/identity/machine-type-record-v2.json";
 const BINDING: &str = "tests/fixtures/identity/instance-binding-v1.json";
@@ -204,6 +204,19 @@ fn malformed_bindings_are_refused() {
     }
 }
 
+/// `detail` ends with the reprovisioning steps, naming both identity files:
+/// the journal line that reports a refusal is all an operator may read.
+fn assert_reprovisions(label: &str, detail: &str) {
+    for step in [
+        "stop tensorplate-agent",
+        INSTANCE_BINDING_PATH,
+        MACHINE_TYPE_RECORD_PATH,
+        "start it while the metadata service is reachable",
+    ] {
+        assert!(detail.contains(step), "{label}: says `{step}`: {detail}");
+    }
+}
+
 /// A binding naming this instance on `machine_type`, from `boot`.
 fn binding_on(machine_type: &str, boot: &str) -> String {
     binding_with("boot_id", json!(boot)).replace("g2-standard-8", machine_type)
@@ -231,6 +244,7 @@ fn assert_machine_type_changed(
         detail.contains("`g2-standard-8`") && detail.contains("`g2-standard-4`"),
         "{label}: names both machine types: {detail}"
     );
+    assert_reprovisions(label, &detail);
     assert!(
         said.contains("was recorded on another machine type"),
         "{label}: {said}"
@@ -310,10 +324,14 @@ fn without_the_service_a_binding_from_this_boot_must_agree_with_the_record() {
         instance_binding: Some(binding_on("g2-standard-4", ANOTHER_BOOT)),
         ..offline_l4()
     };
-    assert_machine_type_changed(
-        "an earlier boot on another machine type",
-        detected(&resized),
-    );
+    let result = detected(&resized);
+    if let Err(PlatformProbeError::MachineTypeChanged { detail, .. }) = &result {
+        assert!(
+            detail.contains("or the disk was moved"),
+            "offline, a resize cannot be told from a moved disk: {detail}"
+        );
+    }
+    assert_machine_type_changed("an earlier boot on another machine type", result);
 }
 
 #[test]
@@ -350,6 +368,7 @@ fn with_the_service_answering_another_instance_or_machine_type_is_refused() {
     match detected(&moved) {
         Err(err @ PlatformProbeError::InstanceChanged { .. }) => {
             let said = err.to_string();
+            assert_reprovisions("another instance", &said);
             assert!(said.contains(INSTANCE_BINDING_PATH), "{said}");
             assert!(
                 !said.contains(SYNTHETIC_INSTANCE_ID) && !said.contains(ANOTHER_INSTANCE_ID),

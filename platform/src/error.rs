@@ -118,7 +118,8 @@ pub enum PlatformProbeError {
     /// machine type than the instance binding records: it was stopped and
     /// given a different machine type. Online, the live answer names it;
     /// offline, the machine-type record written in this boot does, against
-    /// a binding from an earlier boot.
+    /// a binding from an earlier boot, and a moved disk cannot be told
+    /// apart from a resize there.
     ///
     /// Another attempt cannot settle it, and a later answer does not heal
     /// it. Reprovisioning is explicit, as for [`Self::InstanceChanged`]:
