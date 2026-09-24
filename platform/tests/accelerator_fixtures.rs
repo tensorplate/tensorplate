@@ -302,7 +302,7 @@ fn a_card_whose_framebuffer_differs_from_its_row_still_matches() {
 
 #[test]
 fn detection_records_the_facts_an_evidence_run_needs() {
-    // PR-14 commits these as row facts, so losing one silently would be
+    // Evidence runs commit these as row facts, so losing one silently would be
     // discovered on a GCP instance rather than here.
     for (name, text) in fixtures() {
         let report = identify_accelerator(&sources(&text))
