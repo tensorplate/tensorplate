@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <optional>
@@ -152,6 +153,114 @@ TEST(LogicalSessionMachine, EveryRefusedCellIsTypedAndInert) {
       EXPECT_NE(result.error().message.find(std::string{to_string(spec.state)}), std::string::npos);
       EXPECT_NE(result.error().message.find(std::string{to_string(event)}), std::string::npos);
       EXPECT_EQ(machine, before);
+    }
+  }
+}
+
+std::string_view abbreviation(Config config) {
+  switch (config) {
+    case Config::Opening:
+      return "O";
+    case Config::Active:
+      return "A";
+    case Config::FinalizingAfterFinalize:
+      return "FF";
+    case Config::FinalizingAfterEndpoint:
+      return "FE";
+    case Config::DrainingWorking:
+      return "DW";
+    case Config::DrainingReleasing:
+      return "DR";
+    case Config::CancelRequested:
+      return "CR";
+    case Config::Closed:
+      return "CL";
+    case Config::FailedHolding:
+      return "FH";
+    case Config::FailedReleased:
+      return "FR";
+  }
+  return "?";
+}
+
+std::string_view abbreviation(Fx effect) {
+  switch (effect) {
+    case Fx::SuppressOutput:
+      return "Sup";
+    case Fx::EmitCancelAccepted:
+      return "Ack";
+    case Fx::RequestCleanup:
+      return "Cln";
+    case Fx::EmitReady:
+      return "Rdy";
+    case Fx::AcceptInput:
+      return "In";
+    case Fx::EmitReply:
+      return "Rep";
+    case Fx::StartFinalize:
+      return "Fin";
+    case Fx::StartDrain:
+      return "Drn";
+    case Fx::ReleaseSlot:
+      return "Rel";
+    case Fx::EmitTerminal:
+      return "Term";
+  }
+  return "?";
+}
+
+/// The docs rendering of a cell: X, or the target ("=" when unchanged)
+/// followed by the effects in execution order.
+std::string rendered(Config from, const fx::Cell& cell) {
+  if (!cell.legal) {
+    return "X";
+  }
+  std::string out{cell.to == from ? "=" : abbreviation(cell.to)};
+  cell.effects.for_each([&](Fx effect) {
+    out += ' ';
+    out += abbreviation(effect);
+  });
+  return out;
+}
+
+TEST(LogicalSessionMachine, DocumentedTableMatchesTheFixture) {
+  std::ifstream in(std::string{TP_SOURCE_DIR} + "/docs/architecture/serving-worker.md");
+  ASSERT_TRUE(in.is_open());
+  std::vector<std::vector<std::string>> rows;
+  for (std::string line; std::getline(in, line);) {
+    std::vector<std::string> cells;
+    std::size_t start = 0;
+    while ((start = line.find('|', start)) != std::string::npos) {
+      const std::size_t end = line.find('|', start + 1);
+      if (end == std::string::npos) {
+        break;
+      }
+      std::string text = line.substr(start + 1, end - start - 1);
+      const auto first = text.find_first_not_of(' ');
+      const auto last = text.find_last_not_of(' ');
+      cells.push_back(first == std::string::npos ? "" : text.substr(first, last - first + 1));
+      start = end;
+    }
+    if (cells.size() == fx::kEventCount + 1) {
+      rows.push_back(cells);
+    }
+  }
+  // The header row plus one row per configuration; the separator row is
+  // skipped below.
+  std::vector<std::vector<std::string>> body;
+  for (const auto& cells : rows) {
+    if (cells.front() != "" && cells.front() != "---") {
+      body.push_back(cells);
+    }
+  }
+  ASSERT_EQ(body.size(), fx::kConfigCount);
+  for (std::size_t i = 0; i < fx::kConfigCount; ++i) {
+    const Config config = fx::kConfigs.at(i).config;
+    ASSERT_EQ(body.at(i).front(), abbreviation(config));
+    for (std::size_t j = 0; j < fx::kEventCount; ++j) {
+      const Ev event = fx::kEvents.at(j);
+      EXPECT_EQ(body.at(i).at(j + 1), rendered(config, fx::cell(config, event)))
+          << abbreviation(config) << " + " << to_string(event);
     }
   }
 }
