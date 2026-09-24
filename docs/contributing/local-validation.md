@@ -73,6 +73,31 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
 ```
 
+## Public hygiene (before every push)
+
+The repository is public and a push is permanent, so the scan
+`.github/workflows/evidence-publication.yml` runs on every pull request
+also runs before every push. It covers the commits the push would publish
+and the branch checked out, plus the pull request title and body you are
+about to submit. The tree scan and the scanner's test follow it:
+
+```bash
+tools/validation/check-public-hygiene.sh --base origin/develop --local \
+  --message pr-title.txt --message pr-body.md
+tools/validation/check-public-hygiene.sh --tree
+test/validation/public_hygiene_test.sh
+```
+
+`--local` adds this machine's user name, host name and gcloud project as
+literals the scan must not find; add `--literals FILE` for a private
+literal file kept outside the repository. The tree scan fails when a
+change leaves an allowlist count wrong, for example by replacing a test
+value an entry accepted. The test takes about two minutes. CI runs it on
+every pull request, so running it locally matters most when the scanner,
+its fixtures, its allowlist or a file the allowlist names changes. Rule 10
+of [`fixture-and-evidence-rules.md`](../validation/fixture-and-evidence-rules.md)
+says what is checked and how to resolve a finding.
+
 ## One-shot script equivalent
 
 The above can be wrapped in a script per developer preference; it is
