@@ -78,6 +78,16 @@ if ! grep -q 'rmdir /var/lib/tensorplate /etc/tensorplate' "${debian}/tensorplat
   echo "FAIL: tensorplate-agent.postrm purge must remove empty install roots" >&2
   fail=1
 fi
+# Purge removes durable state; remove keeps it. The identity directory is
+# durable state kept apart from state/ so the documented rollback's
+# set-aside does not move it, and purge must clear it with the rest.
+purge_block="$(sed -n '/^    purge)$/,/^        ;;$/p' "${debian}/tensorplate-agent.postrm")"
+for dir in /var/lib/tensorplate/state /var/lib/tensorplate/identity; do
+  if ! printf '%s\n' "$purge_block" | grep -Eq "(^|[[:space:]])${dir}([[:space:]]|$)"; then
+    echo "FAIL: tensorplate-agent.postrm purge must remove ${dir}" >&2
+    fail=1
+  fi
+done
 
 # Conffile assertions: configs under /etc are auto-managed by
 # debhelper as conffiles. Do not duplicate those entries via explicit
