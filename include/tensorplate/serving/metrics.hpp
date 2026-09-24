@@ -28,12 +28,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "tensorplate/core/error.hpp"
 
 namespace tensorplate {
+
+struct SchedulerMetrics;
 
 /// Latency bucket boundaries (milliseconds). The trailing +Inf bucket
 /// is implicit.
@@ -106,9 +109,20 @@ struct ServingMetricsSnapshot {
   std::uint64_t buffer_active_count = 0;
   std::uint64_t buffer_high_water_bytes = 0;
 
-  // Scheduler snapshot mirrored for the serving exporter.
+  // Scheduler snapshot mirrored for the serving exporter. The scheduler
+  // fields of one snapshot always come from the same capture.
   std::uint64_t scheduler_queue_depth = 0;
+  /// Logical in-flight count (SchedulerMetrics::in_flight). Both renderers
+  /// export it twice: as `scheduler_in_flight`, its protocol 0.1 name, and
+  /// as `scheduler_in_flight_logical`.
   std::uint64_t scheduler_in_flight = 0;
+  /// Physical in-flight count and the cancelled requests it still holds
+  /// (SchedulerMetrics::in_flight_physical and in_flight_physical_cancelled).
+  /// Absent until a capture from a `SchedulerMetrics` records them, and
+  /// again after a five-value capture, which carries neither; the renderers
+  /// then omit both gauges rather than report 0.
+  std::optional<std::uint64_t> scheduler_in_flight_physical;
+  std::optional<std::uint64_t> scheduler_in_flight_physical_cancelled;
   std::uint64_t scheduler_admitted_total = 0;
   std::uint64_t scheduler_completed_success = 0;
   std::uint64_t scheduler_completed_failure = 0;
@@ -170,7 +184,14 @@ class ServingMetrics {
   void record_buffer_accounting(std::size_t in_use_bytes, std::size_t active_count,
                                 std::size_t high_water_bytes) noexcept;
 
-  /// Capture scheduler-side counters from `SchedulerMetrics`.
+  /// Capture scheduler-side counters from a `SchedulerMetrics` snapshot:
+  /// queue depth, the logical, physical and cancelled-but-unreleased
+  /// in-flight counts, and the admitted and completed totals.
+  void record_scheduler_accounting(const SchedulerMetrics& scheduler) noexcept;
+
+  /// Capture the five scheduler values named. They include no physical
+  /// count, so the snapshot reports the physical counts as absent until the
+  /// `SchedulerMetrics` overload records them again.
   void record_scheduler_accounting(std::size_t queue_depth, std::size_t in_flight,
                                    std::uint64_t admitted_total, std::uint64_t completed_success,
                                    std::uint64_t completed_failure) noexcept;
@@ -202,11 +223,19 @@ class ServingMetrics {
   std::atomic<std::uint64_t> buffer_in_use_bytes_{0};
   std::atomic<std::uint64_t> buffer_active_count_{0};
   std::atomic<std::uint64_t> buffer_high_water_bytes_{0};
-  std::atomic<std::uint64_t> scheduler_queue_depth_{0};
-  std::atomic<std::uint64_t> scheduler_in_flight_{0};
-  std::atomic<std::uint64_t> scheduler_admitted_total_{0};
-  std::atomic<std::uint64_t> scheduler_completed_success_{0};
-  std::atomic<std::uint64_t> scheduler_completed_failure_{0};
+  // The last scheduler capture, written and read as a whole under
+  // scheduler_mutex_ so that one snapshot never mixes two captures.
+  struct SchedulerCapture {
+    std::uint64_t queue_depth = 0;
+    std::uint64_t in_flight = 0;
+    std::optional<std::uint64_t> in_flight_physical;
+    std::optional<std::uint64_t> in_flight_physical_cancelled;
+    std::uint64_t admitted_total = 0;
+    std::uint64_t completed_success = 0;
+    std::uint64_t completed_failure = 0;
+  };
+  mutable std::mutex scheduler_mutex_;
+  SchedulerCapture scheduler_;
 
   LatencyHistogram ingress_;
   LatencyHistogram queue_wait_;

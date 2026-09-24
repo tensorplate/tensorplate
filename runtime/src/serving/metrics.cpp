@@ -11,6 +11,8 @@
 #include <string>
 #include <utility>
 
+#include "tensorplate/scheduler/scheduler.hpp"
+
 namespace tensorplate {
 
 void LatencyHistogram::observe_ms(double ms) {
@@ -88,15 +90,29 @@ void ServingMetrics::record_buffer_accounting(std::size_t in_use_bytes, std::siz
   buffer_high_water_bytes_.store(high_water_bytes);
 }
 
+void ServingMetrics::record_scheduler_accounting(const SchedulerMetrics& scheduler) noexcept {
+  const std::lock_guard<std::mutex> g(scheduler_mutex_);
+  scheduler_.queue_depth = scheduler.queue_depth;
+  scheduler_.in_flight = scheduler.in_flight;
+  scheduler_.in_flight_physical = scheduler.in_flight_physical;
+  scheduler_.in_flight_physical_cancelled = scheduler.in_flight_physical_cancelled;
+  scheduler_.admitted_total = scheduler.admitted_total;
+  scheduler_.completed_success = scheduler.completed_success;
+  scheduler_.completed_failure = scheduler.completed_failure;
+}
+
 void ServingMetrics::record_scheduler_accounting(std::size_t queue_depth, std::size_t in_flight,
                                                  std::uint64_t admitted_total,
                                                  std::uint64_t completed_success,
                                                  std::uint64_t completed_failure) noexcept {
-  scheduler_queue_depth_.store(queue_depth);
-  scheduler_in_flight_.store(in_flight);
-  scheduler_admitted_total_.store(admitted_total);
-  scheduler_completed_success_.store(completed_success);
-  scheduler_completed_failure_.store(completed_failure);
+  const std::lock_guard<std::mutex> g(scheduler_mutex_);
+  scheduler_.queue_depth = queue_depth;
+  scheduler_.in_flight = in_flight;
+  scheduler_.in_flight_physical.reset();
+  scheduler_.in_flight_physical_cancelled.reset();
+  scheduler_.admitted_total = admitted_total;
+  scheduler_.completed_success = completed_success;
+  scheduler_.completed_failure = completed_failure;
 }
 
 ServingMetricsSnapshot ServingMetrics::snapshot() const {
@@ -126,11 +142,16 @@ ServingMetricsSnapshot ServingMetrics::snapshot() const {
   out.buffer_in_use_bytes = buffer_in_use_bytes_.load();
   out.buffer_active_count = buffer_active_count_.load();
   out.buffer_high_water_bytes = buffer_high_water_bytes_.load();
-  out.scheduler_queue_depth = scheduler_queue_depth_.load();
-  out.scheduler_in_flight = scheduler_in_flight_.load();
-  out.scheduler_admitted_total = scheduler_admitted_total_.load();
-  out.scheduler_completed_success = scheduler_completed_success_.load();
-  out.scheduler_completed_failure = scheduler_completed_failure_.load();
+  {
+    const std::lock_guard<std::mutex> g(scheduler_mutex_);
+    out.scheduler_queue_depth = scheduler_.queue_depth;
+    out.scheduler_in_flight = scheduler_.in_flight;
+    out.scheduler_in_flight_physical = scheduler_.in_flight_physical;
+    out.scheduler_in_flight_physical_cancelled = scheduler_.in_flight_physical_cancelled;
+    out.scheduler_admitted_total = scheduler_.admitted_total;
+    out.scheduler_completed_success = scheduler_.completed_success;
+    out.scheduler_completed_failure = scheduler_.completed_failure;
+  }
   out.ingress_latency = ingress_.snapshot();
   out.queue_wait = queue_wait_.snapshot();
   out.execution_latency = execution_.snapshot();
@@ -242,6 +263,19 @@ std::string render_prometheus_text(const ServingMetricsSnapshot& snap) {
                snap.scheduler_queue_depth, labels);
   render_gauge(oss, "tensorplate_serving_scheduler_in_flight", "Scheduler in-flight count.",
                snap.scheduler_in_flight, labels);
+  render_gauge(oss, "tensorplate_serving_scheduler_in_flight_logical",
+               "Scheduler dispatched requests whose outcome is still open.",
+               snap.scheduler_in_flight, labels);
+  if (snap.scheduler_in_flight_physical.has_value()) {
+    render_gauge(oss, "tensorplate_serving_scheduler_in_flight_physical",
+                 "Scheduler dispatched requests the executor has not yet reported released.",
+                 *snap.scheduler_in_flight_physical, labels);
+  }
+  if (snap.scheduler_in_flight_physical_cancelled.has_value()) {
+    render_gauge(oss, "tensorplate_serving_scheduler_in_flight_physical_cancelled",
+                 "Scheduler requests cancelled after dispatch and not yet reported released.",
+                 *snap.scheduler_in_flight_physical_cancelled, labels);
+  }
   render_counter(oss, "tensorplate_serving_scheduler_admitted_total",
                  "Scheduler admitted requests since process start.", snap.scheduler_admitted_total,
                  labels);
@@ -301,7 +335,15 @@ std::string render_metrics_json(const ServingMetricsSnapshot& snap) {
       {"buffer_high_water_bytes", snap.buffer_high_water_bytes},
       {"scheduler_queue_depth", snap.scheduler_queue_depth},
       {"scheduler_in_flight", snap.scheduler_in_flight},
+      {"scheduler_in_flight_logical", snap.scheduler_in_flight},
   };
+  if (snap.scheduler_in_flight_physical.has_value()) {
+    j["gauges"]["scheduler_in_flight_physical"] = *snap.scheduler_in_flight_physical;
+  }
+  if (snap.scheduler_in_flight_physical_cancelled.has_value()) {
+    j["gauges"]["scheduler_in_flight_physical_cancelled"] =
+        *snap.scheduler_in_flight_physical_cancelled;
+  }
   auto histogram_to_json = [](const LatencyHistogramSnapshot& h) {
     nlohmann::json out;
     out["sum_ms"] = h.sum_ms;

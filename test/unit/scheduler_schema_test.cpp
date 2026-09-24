@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Holds the scheduler's C++ types to the schemas that describe them:
-// SchedulerMetrics to protocol/schemas/scheduler_metrics.json, the named
-// gauges of protocol/schemas/serving_metrics.json to the open map they belong
-// to, and the three schema copies of the scheduler policy enum to each other and to
+// SchedulerMetrics to protocol/schemas/scheduler_metrics.json, the serving
+// exporter's in-flight gauges to protocol/schemas/serving_metrics.json, and
+// the three schema copies of the scheduler policy enum to each other and to
 // the policy registry. Nothing serializes SchedulerMetrics at runtime, so the
 // serializer below exists only to compare the struct with its schema.
 
@@ -21,6 +21,7 @@
 
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
+#include "tensorplate/serving/metrics.hpp"
 
 #include "fake_scheduler_clock.hpp"
 #include "scheduler_fixtures.hpp"
@@ -308,6 +309,32 @@ TEST(ServingMetricsSchema, NamedGaugesAcceptWhatTheOpenMapAccepts) {
     rule.erase("description");
     EXPECT_EQ(rule, gauges.at("additionalProperties")) << item.key();
   }
+}
+
+TEST(ServingMetricsSchema, RendererEmitsExactlyTheNamedInFlightGauges) {
+  const auto named = keys(load("protocol/schemas/serving_metrics.json")
+                              .at("/properties/gauges/properties"_json_pointer));
+  SchedulerMetrics scheduler;
+  scheduler.queue_depth = 4;
+  scheduler.in_flight = 1;
+  scheduler.in_flight_logical = 1;
+  scheduler.in_flight_physical = 3;
+  scheduler.in_flight_physical_cancelled = 2;
+  ServingMetrics serving;
+  serving.record_scheduler_accounting(scheduler);
+  const auto rendered = json::parse(render_metrics_json(serving.snapshot())).at("gauges");
+
+  std::set<std::string> in_flight_gauges;
+  for (const auto& item : rendered.items()) {
+    if (item.key().starts_with("scheduler_in_flight")) {
+      in_flight_gauges.insert(item.key());
+    }
+  }
+  EXPECT_EQ(in_flight_gauges, named);
+  EXPECT_EQ(rendered.at("scheduler_in_flight"), 1);
+  EXPECT_EQ(rendered.at("scheduler_in_flight_logical"), 1);
+  EXPECT_EQ(rendered.at("scheduler_in_flight_physical"), 3);
+  EXPECT_EQ(rendered.at("scheduler_in_flight_physical_cancelled"), 2);
 }
 
 }  // namespace
