@@ -7,6 +7,10 @@
   "additionalProperties": false,
   "required": ["schema_version", "backend_name", "package_name", "package_version"],
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional pointer to this schema, for editors. Readers ignore it."
+    },
     "schema_version": {"type": "string", "const": "0.1"},
     "backend_name": {
       "type": "string",
@@ -121,6 +125,55 @@
               "calibration",
               "auxiliary"
             ]
+          }
+        }
+      }
+    },
+    "runner_profiles": {
+      "type": "array",
+      "description": "Runner profiles this backend package set has installed, each in its own interpreter environment. The launcher starts a profile's sidecar with that profile's `interpreter` and `library_search_paths`, and doctor reports the same entry. Optional: a descriptor without it declares no runner profiles, and `python.interpreter` keeps serving the backend's other models. Beyond this schema, readers also require unique `id`s, normalized paths, and `interpreter` and every `library_search_paths` entry inside `environment_root`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "interpreter", "environment_root", "packages", "compute_types"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+            "description": "Installed runner profile identity that a deployment selects (e.g. `faster_whisper`, `kokoro`)."
+          },
+          "interpreter": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "Absolute path to the Python interpreter the profile's sidecar runs under."
+          },
+          "environment_root": {
+            "type": "string",
+            "pattern": "^/",
+            "description": "Absolute path to the root of the profile's installed environment."
+          },
+          "library_search_paths": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^/"},
+            "description": "Absolute directories the launcher adds to the sidecar's shared-library search path, for libraries loaded by name at run time."
+          },
+          "packages": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1},
+            "description": "OS packages that install this profile."
+          },
+          "compute_types": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["float32", "float16", "bfloat16", "int8", "int8_float32", "int8_float16", "int8_bfloat16", "int16"]
+            },
+            "description": "Compute types this installed profile can load a model with."
           }
         }
       }
