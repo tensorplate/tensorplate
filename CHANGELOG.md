@@ -45,6 +45,84 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   a typed failure's code through the protocol enum instead of its own
   copy of the list. `protocol.md` documents the narrow exception that lets these enums
   grow under protocol `0.1`. (V030-E04-F01-T01)
+- `tools/validation/check-public-hygiene.sh` scans what a push or a pull
+  request publishes for values a public repository must never carry, and
+  a second job in `.github/workflows/evidence-publication.yml` runs it on
+  every pull request, and again when the title or body is edited. It reads
+  the change as committed. That covers every changed file as each commit
+  in the range wrote it, merges included, so a value one commit adds and
+  a later one removes is still found. It also covers each changed file's
+  name, every commit message, author and committer, the branch checked
+  out, and the pull request's title, body and branch name. The job reads
+  those three from the event payload file: never from an expression in a
+  shell line, where they would be code, and never through a step's
+  environment, which the log prints. Every file under
+  `docs/validation/evidence/` and `test/platform/` also goes through
+  `check-evidence-publication.sh`, unchanged, name and content.
+  Everything is checked against a narrow source policy:
+  - private keys, a kubeconfig's embedded key, and documented token
+    prefixes (GitHub, Google, AWS, PyPI, Anthropic, Hugging Face, NVIDIA
+    NGC, and HTTP Bearer or Basic credentials); a keyed credential is
+    found with its value on a later line than its key too, as
+    pretty-printed JSON and YAML block scalars write it, and past a YAML
+    anchor, tag or comment
+  - Google service accounts, and `projects/<number>` paths and keyed
+    project numbers of six or more digits
+  - home directories in POSIX, Windows, encoded and JSON-escaped forms,
+    other than the synthetic operator's and the GitHub runner's
+  - device UUIDs outside the all-zero namespace
+  - IP addresses outside the loopback, unspecified, "this network" and
+    documentation ranges, the metadata address and macOS's `fe80::1`,
+    judged by value in any spelling: an IPv4-mapped address as its IPv4
+    address, any other address with a dotted quad as IPv6
+  - references to private planning material, as shapes only
+
+  Lines are scanned as written, with escapes and terminal control
+  sequences blanked, and with escapes decoded. A binary file is a finding
+  whose printable text is still checked for the long shapes, and a
+  submodule is a finding. The evidence scanner's host, journal, UUID,
+  serial, e-mail, MAC, machine-id, cloud-project and planning classes
+  stay out of the source policy, because negative tests, synthetic
+  identities and the scanners' own patterns carry them. Five such files
+  the evidence scanner rejects are the policy's positive fixtures. Like
+  the evidence scanner, the new scanner never prints a matched value,
+  masks a path either tier flags, and exits 0, 1 or 2. `--local` adds the
+  machine's user name, host name and gcloud project as literals for the
+  pre-push run, and is no verdict if gcloud does not answer.
+  `--literals FILE` adds the operator's private literal file.
+  A path that is not plain and relative, such as a tree entry named `..`,
+  is no verdict. `tools/validation/public-hygiene-allowlist.txt` is the
+  only override. Each entry is an exact path, a class, a count and a
+  reason, and accepts up to that many findings of that class in that
+  file, counting every occurrence. The count bounds how many values are
+  accepted, not which ones. An entry never covers commit or pull request
+  text, a credential, a finding only the evidence scanner makes, or any
+  file under an evidence path, in any letter case: evidence is
+  sanitized, not excepted, and the evidence scanner reports one finding
+  per line, class and length, so a value only it decodes could not be
+  counted against an entry. Values seen in different scan variants of a
+  line count separately. `--tree` fails when a count is wrong. Its 12
+  entries are the baseline's:
+  - the closed legacy set of transcribed accelerator UUIDs in
+    `platform/tests/accelerator_fixtures.rs`
+  - private-range and public addresses in tests
+  - synthetic home directories in harness verifiers
+  - the README banner image
+
+  The six transcribed accelerator fixtures whose device UUIDs predated
+  the all-zero namespace now use it, so no evidence file needs an
+  allowlist entry. Two test comments that cited private ledger labels are
+  reworded.
+  `test/validation/public_hygiene_test.sh` drives the scanner in
+  throwaway repositories. Every alternative of every shape is generated
+  at run time, from one context fixture per shape under
+  `test/validation/fixtures/public_hygiene/`, so no committed file
+  carries one. Each fixture's context must pass with a synthetic word in
+  the value's place. The test also asserts that the repository tree
+  passes with every count exact. Rule 10 of
+  `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
+  `docs/contributing/local-validation.md` make the scan the step before
+  every push. (V030-E06-F02-T01)
 
 ## [0.2.1] - 2026-09-23
 

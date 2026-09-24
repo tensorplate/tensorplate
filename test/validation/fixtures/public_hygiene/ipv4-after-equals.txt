@@ -1,0 +1,1 @@
+tensorplate infer --host=@VALUE@ --port 8080
