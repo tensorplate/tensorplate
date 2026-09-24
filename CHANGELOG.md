@@ -107,7 +107,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
   `docs/contributing/local-validation.md` make the scan the step before
   every push. (V030-E06-F02-T01)
-
 - `tensorplate bundle provision <name> --from <dir>` puts a bundle that the
   provisioning manifest lists into `/var/lib/tensorplate/bundles/import/<name>/`,
   verified file by file. The provisioning manifest (schema
