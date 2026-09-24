@@ -406,9 +406,10 @@ impl SystemHostProbe {
     ///
     /// With a live machine type, a binding path that holds something that
     /// is not a binding -- a directory, a link, an oversized file -- is read
-    /// as no binding: the live answers are the authority, and this start's
-    /// writer replaces the file or reports that it cannot. Without one it is
-    /// refused, as an unusable machine-type record is.
+    /// as no binding: there is no instance or machine type in it to check
+    /// the live answers against, and this start's writer replaces the file
+    /// or reports that it cannot. Without one it is refused, as an unusable
+    /// machine-type record is.
     ///
     /// A service that answered the machine type and then answers the
     /// instance-id query with anything but an id is a broken source, like
@@ -1464,7 +1465,7 @@ mod tests {
         assert_eq!(
             probe
                 .instance_sources(GCE, true, || Ok("1234567890123456789".to_string()))
-                .expect("online, the live answers are the authority"),
+                .expect("online, a path holding no binding is read as none"),
             InstanceSources::Answered {
                 instance_id: Some("1234567890123456789".to_string()),
                 binding: None
@@ -2354,7 +2355,8 @@ mod tests {
             }
             other @ (PlatformProbeError::Unrecognized { .. }
             | PlatformProbeError::IdentityUnestablished { .. }
-            | PlatformProbeError::InstanceChanged { .. }) => {
+            | PlatformProbeError::InstanceChanged { .. }
+            | PlatformProbeError::MachineTypeChanged { .. }) => {
                 panic!("expected Unreadable, got {other:?}")
             }
         }
@@ -2405,7 +2407,8 @@ mod tests {
                 }
                 other @ (PlatformProbeError::Unrecognized { .. }
                 | PlatformProbeError::IdentityUnestablished { .. }
-                | PlatformProbeError::InstanceChanged { .. }) => {
+                | PlatformProbeError::InstanceChanged { .. }
+                | PlatformProbeError::MachineTypeChanged { .. }) => {
                     panic!("expected Unreadable, got {other:?}")
                 }
             }

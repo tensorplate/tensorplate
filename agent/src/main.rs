@@ -702,8 +702,10 @@ fn detection_seconds(duration: Duration) -> String {
 /// and then the instance binding, and say them on `log` as the `platform
 /// identity:` and `platform instance binding:` lines.
 ///
-/// Both are refreshed on every start where the metadata service answered,
-/// and never from a machine type that was itself read from the record. A
+/// Both are refreshed on every start where the metadata service answered
+/// and detection did not refuse the binding, and never from a machine type
+/// that was itself read from the record. Detection runs first, so a start
+/// refused for another instance or another machine type writes neither. A
 /// failed write is reported, not fatal: this start has its identity. The
 /// binding has a line of its own so the identity line keeps the exact shape
 /// the offline lifecycle stage parses, and it never carries the instance id.
@@ -1108,6 +1110,42 @@ mod tests {
     }
 
     #[test]
+    fn a_live_answer_naming_another_machine_type_is_refused_and_records_nothing() {
+        // The same instance, stopped and given another machine type: the
+        // live answer changes, the instance id does not.
+        let (root, record, binding) = staged_identity_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        identify_and_record(&probe, &l4_live_sources(), &mut Vec::new()).expect("detects");
+        let written = std::fs::read(&record).expect("recorded");
+        let bound = std::fs::read(&binding).expect("bound");
+
+        let live = l4_live_sources();
+        let resized = HostSources {
+            gce_machine_type: live
+                .gce_machine_type
+                .as_deref()
+                .map(|answer| answer.replace("g2-standard-8", "g2-standard-4")),
+            instance_binding: Some(String::from_utf8(bound.clone()).expect("utf-8")),
+            ..live
+        };
+        let mut log = Vec::new();
+        let err = identify_and_record(&probe, &resized, &mut log)
+            .expect_err("a binding on another machine type fails detection");
+        assert!(
+            matches!(err, PlatformProbeError::MachineTypeChanged { .. }),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains("1234567890123456789"),
+            "the refusal names no instance id: {err}"
+        );
+        assert!(log.is_empty(), "nothing is recorded or logged here");
+        assert_eq!(std::fs::read(&record).expect("kept"), written);
+        assert_eq!(std::fs::read(&binding).expect("kept"), bound);
+        assert!(!is_retryable(&ObservationFailure::Identify(err)));
+    }
+
+    #[test]
     fn a_detection_failure_is_said_on_its_own_line_and_refuses_deploys() {
         let err = PlatformProbeError::IdentityUnestablished {
             source_name: MACHINE_TYPE_RECORD_PATH.to_string(),
@@ -1460,6 +1498,14 @@ mod tests {
             PlatformProbeError::Unrecognized {
                 source_name: "GCE metadata service".to_string(),
                 detail: "not a machine-type resource name".to_string(),
+            },
+            PlatformProbeError::InstanceChanged {
+                source_name: "instance binding".to_string(),
+                detail: "another instance".to_string(),
+            },
+            PlatformProbeError::MachineTypeChanged {
+                source_name: "instance binding".to_string(),
+                detail: "another machine type".to_string(),
             },
         ] {
             let rendered = other.to_string();

@@ -13,18 +13,22 @@
 //
 // - With the metadata service answering, a binding that names another
 //   instance fails detection: the disk moved to, or was cloned into, another
-//   instance, and this host is not the one its identity was recorded on.
-//   Reprovisioning is explicit: delete both records and start the agent
-//   while the service is reachable. A binding this release cannot parse is
-//   replaced on that start instead, because the live answers are the
-//   authority and a binding carries nothing a live answer does not.
+//   instance, and this host is not the one its identity was recorded on. So
+//   does a binding that names this instance on another machine type than
+//   the live answer, whatever boot it is from: the instance was stopped and
+//   given a different machine type. Either way reprovisioning is explicit:
+//   delete both records and start the agent while the service is
+//   reachable. A binding this release cannot parse has no instance or
+//   machine type to compare, so it is treated as absent and replaced on
+//   that start.
 // - With the service unreachable, a binding written in this boot must agree
 //   with the machine-type record detection is about to use -- the same
 //   machine type, and a digest of exactly those bytes -- or detection fails.
-//   A binding from an earlier boot says nothing about this one. Without a
-//   binding for this boot the record alone decides, as it did before the
-//   binding existed: an agent upgraded from 0.2.1 under denied egress runs
-//   that way until its first start that reaches the service.
+//   A binding from an earlier boot must still name the record's machine
+//   type, or the instance was given another one and detection fails as it
+//   would online. Without a binding the record alone decides, as it did
+//   before the binding existed: an agent upgraded from 0.2.1 under denied
+//   egress runs that way until its first start that reaches the service.
 //
 // The instance id is never logged and never quoted in an error. Evidence
 // captured from the agent's journal and from doctor's output is published.
@@ -153,19 +157,29 @@ impl InstanceBinding {
     }
 }
 
-/// Refuse a live answer from another instance.
+/// Refuse a live answer from another instance, or for this instance on
+/// another machine type than `live_machine_type`, the bare machine type the
+/// live answer names.
 ///
 /// Called only with a live machine-type answer in hand. Passes when there is
 /// no instance-id answer to compare -- the probe never produces one without
 /// the other, so that is a fixture without the source -- when there is no
 /// binding, and when the binding cannot be parsed: that start replaces it.
+/// The binding's boot does not matter: a machine type changes only across a
+/// stop and a start, so a binding from before the change is always from an
+/// earlier boot.
 ///
 /// # Errors
 ///
 /// [`PlatformProbeError::Unrecognized`] for an instance-id answer that is not
-/// a decimal id, and [`PlatformProbeError::InstanceChanged`] when the binding
-/// names a different instance. Neither quotes an id.
-pub fn check_live_instance(sources: &HostSources) -> Result<(), PlatformProbeError> {
+/// a decimal id, [`PlatformProbeError::InstanceChanged`] when the binding
+/// names a different instance, and
+/// [`PlatformProbeError::MachineTypeChanged`] when it names this instance
+/// on another machine type. None quotes an id.
+pub fn check_live_instance(
+    sources: &HostSources,
+    live_machine_type: &str,
+) -> Result<(), PlatformProbeError> {
     let Some(answer) = sources.gce_instance_id.as_deref() else {
         return Ok(());
     };
@@ -189,7 +203,23 @@ pub fn check_live_instance(sources: &HostSources) -> Result<(), PlatformProbeErr
                 .to_string(),
         });
     }
+    if binding.machine_type != live_machine_type {
+        return Err(machine_type_changed(&format!(
+            "the metadata service answers machine type `{live_machine_type}` for the instance \
+             this host's identity was recorded on as `{}`",
+            binding.machine_type
+        )));
+    }
     Ok(())
+}
+
+/// The refusal for an instance given another machine type, with `what`
+/// saying which two machine types disagree.
+pub(crate) fn machine_type_changed(what: &str) -> PlatformProbeError {
+    PlatformProbeError::MachineTypeChanged {
+        source_name: INSTANCE_BINDING_PATH.to_string(),
+        detail: format!("{what}; the instance was given a different machine type"),
+    }
 }
 
 /// Lowercase hex SHA-256 of `bytes`.

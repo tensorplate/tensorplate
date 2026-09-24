@@ -91,13 +91,19 @@ The episode then closes with exactly one of three lines:
 The remedy for an exhausted or stopped detection is unchanged: restart
 `tensorplate-agent` once with the metadata service reachable.
 
-One detection failure has a different remedy. `platform identity in
+Two detection failures have a different remedy. `platform identity in
 `/var/lib/tensorplate/identity/instance-binding.json` belongs to another
 instance` means the metadata service answers for a different Compute
 Engine instance from the one this host's identity was recorded on: the disk
-was moved to, or cloned into, another instance. No attempt retries it and a
-restart does not clear it. To reprovision the host as this instance, stop
-`tensorplate-agent`, delete that file and
+was moved to, or cloned into, another instance. `platform identity in
+`/var/lib/tensorplate/identity/instance-binding.json` was recorded on
+another machine type` means this instance was stopped and given a
+different machine type; the message names both. Without the metadata
+service it is reported only when the machine-type record from this boot
+names another machine type than an older binding. No attempt retries
+either one and a restart does not clear it: after a machine-type change,
+the online restart the paragraph above prescribes meets this refusal. To
+reprovision the host, stop `tensorplate-agent`, delete that file and
 `/var/lib/tensorplate/state/machine-type.json`, and start it with the
 metadata service reachable; `tensorplate doctor` says the same.
 

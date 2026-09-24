@@ -122,7 +122,11 @@ to restore `state.bak` (manually verify the schema_version of each journal
 first) or to redeploy from a known-good bundle. The machine-type record is
 the one file it gets back straight away, in the layout it reads.
 `/var/lib/tensorplate/identity/` is not set aside and not needed: releases
-up to 0.2.1 do not read it, and a later upgrade finds it where it was.
+up to 0.2.1 do not read it, and a later upgrade finds it where it was. The
+older agent does not update it either, so if the instance is given a
+different machine type before that upgrade, the upgraded agent refuses the
+binding; reprovision by stopping `tensorplate-agent`, deleting both
+identity files and starting it with the metadata service reachable.
 
 `<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
 `test/packaging/apt-lifecycle-e2e.sh` asserts with `dpkg` that the downgrade

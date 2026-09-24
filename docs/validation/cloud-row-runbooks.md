@@ -304,10 +304,13 @@ id, and the SHA-256 of the record bytes it wrote. It never logs the
 instance id; its journal line is `platform instance binding: written`,
 `unchanged` or `not_applicable`, among others. With the service answering, a binding
 that names another instance fails detection, because the disk was moved
-to or cloned into another instance; reprovision by stopping the agent,
-deleting both files and starting it with the service reachable. With the
-service unreachable, a binding written in the same boot must agree with
-the record. Upgrade requires the record the baseline wrote to be
+to or cloned into another instance, and so does one that names this
+instance on another machine type than the live answer, because the
+instance was given a different machine type; neither start writes either
+file. Reprovision by stopping the agent, deleting both files and starting
+it with the service reachable. With the service unreachable, a binding
+written in the same boot must agree with the record, and one from an
+earlier boot must name the record's machine type. Upgrade requires the record the baseline wrote to be
 byte-identical after the candidate starts and the binding to exist;
 rollback restores the record from `state.bak` before the baseline
 installs, as the documented procedure does, compares the restored copy

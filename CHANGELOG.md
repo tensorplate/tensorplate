@@ -124,20 +124,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - On a Compute Engine instance, `tensorplate-agent` now records which
   instance its machine-type record was taken on. Every start where the
   metadata service answers also asks it for the instance id, with a 250 ms
-  budget of its own, and writes `/var/lib/tensorplate/identity/instance-binding.json`:
+  budget of its own, and, unless detection refuses the binding, writes
+  `/var/lib/tensorplate/identity/instance-binding.json`:
   the instance id, the machine type and the kernel boot ID, with the SHA-256
   of the `machine-type.json` bytes written in that start. The machine-type
   record itself is unchanged, still schema 2 at its old path, because the
   0.2.1 agent a rollback reinstates reads it there and rejects fields it does
   not know. With the service answering, a binding that names another
-  instance fails detection with the new `InstanceChanged` error, which is
-  not retried: the disk was moved to or cloned into another instance, and
-  reprovisioning is explicit, by deleting both files and starting the agent
-  with the service reachable. With the service unreachable, a binding written
-  in the same boot must name the record's machine type and digest its exact
-  bytes, or detection fails; a binding from an earlier boot is ignored, a
-  binding that cannot be parsed at all fails detection, and without one the
-  record alone decides, as before. A service that answers
+  instance fails detection with the new `InstanceChanged` error: the disk
+  was moved to or cloned into another instance. A binding that names this
+  instance on another machine type than the live answer, whatever boot it
+  is from, fails with the new `MachineTypeChanged` error: the instance was
+  stopped and given a different machine type. Neither is retried, neither
+  start writes either file, and reprovisioning is explicit, by deleting
+  both files and starting the agent with the service reachable. With the
+  service unreachable, a binding written in the same boot must name the
+  record's machine type and digest its exact bytes, or detection fails; a
+  binding from an earlier boot must name the record's machine type, or
+  detection fails with `MachineTypeChanged`; a binding that cannot be
+  parsed at all fails detection; and without one the record alone decides,
+  as before. A service that answers
   the machine type and then not the instance id makes that start one
   without a live answer: the same-boot record decides, and without one the
   start fails in the step the agent retries. A binding that cannot be parsed,

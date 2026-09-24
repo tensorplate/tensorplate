@@ -113,6 +113,19 @@ pub enum PlatformProbeError {
     /// metadata service is reachable.
     #[error("platform identity in `{source_name}` belongs to another instance: {detail}")]
     InstanceChanged { source_name: String, detail: String },
+
+    /// The instance this host's identity was recorded on now has another
+    /// machine type than the instance binding records: it was stopped and
+    /// given a different machine type. Online, the live answer names it;
+    /// offline, the machine-type record written in this boot does, against
+    /// a binding from an earlier boot.
+    ///
+    /// Another attempt cannot settle it, and a later answer does not heal
+    /// it. Reprovisioning is explicit, as for [`Self::InstanceChanged`]:
+    /// delete the instance binding and the machine-type record, then start
+    /// `tensorplate-agent` while the metadata service is reachable.
+    #[error("platform identity in `{source_name}` was recorded on another machine type: {detail}")]
+    MachineTypeChanged { source_name: String, detail: String },
 }
 
 impl From<PlatformProbeError> for ProtocolError {
@@ -125,7 +138,8 @@ impl From<PlatformProbeError> for ProtocolError {
             // not establish an identity without guessing.
             PlatformProbeError::Unreadable { .. }
             | PlatformProbeError::IdentityUnestablished { .. }
-            | PlatformProbeError::InstanceChanged { .. } => ErrorCode::Internal,
+            | PlatformProbeError::InstanceChanged { .. }
+            | PlatformProbeError::MachineTypeChanged { .. } => ErrorCode::Internal,
         };
         ProtocolError::new(code, "platform detection failed").with_context(value.to_string())
     }

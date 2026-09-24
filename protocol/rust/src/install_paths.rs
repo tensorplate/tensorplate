@@ -98,8 +98,8 @@ pub const IDENTITY_DIR: &str = "/var/lib/tensorplate/identity";
 /// `tensorplate-agent` recorded from live metadata answers, with the SHA-256
 /// of the machine-type record it wrote in the same start.
 ///
-/// Written by the agent on every start where the metadata service answered,
-/// never by the installer. Kept out of the machine-type record because the
+/// Written by the agent on every start where the metadata service answered
+/// and detection did not refuse the binding, never by the installer. Kept out of the machine-type record because the
 /// 0.2.1 agent a rollback reinstates reads that record and rejects fields it
 /// does not know; it never reads this file.
 pub const INSTANCE_BINDING_PATH: &str = "/var/lib/tensorplate/identity/instance-binding.json";

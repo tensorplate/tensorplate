@@ -204,13 +204,50 @@ fn malformed_bindings_are_refused() {
     }
 }
 
+/// A binding naming this instance on `machine_type`, from `boot`.
+fn binding_on(machine_type: &str, boot: &str) -> String {
+    binding_with("boot_id", json!(boot)).replace("g2-standard-8", machine_type)
+}
+
+/// `result` is the machine-type refusal, naming both machine types and no
+/// instance id.
+fn assert_machine_type_changed(
+    label: &str,
+    result: Result<(String, MachineTypeSource), PlatformProbeError>,
+) {
+    let Err(err) = result else {
+        panic!("{label}: expected MachineTypeChanged, got {result:?}")
+    };
+    let said = err.to_string();
+    let PlatformProbeError::MachineTypeChanged {
+        source_name,
+        detail,
+    } = err
+    else {
+        panic!("{label}: expected MachineTypeChanged, got {err:?}")
+    };
+    assert_eq!(source_name, INSTANCE_BINDING_PATH, "{label}");
+    assert!(
+        detail.contains("`g2-standard-8`") && detail.contains("`g2-standard-4`"),
+        "{label}: names both machine types: {detail}"
+    );
+    assert!(
+        said.contains("was recorded on another machine type"),
+        "{label}: {said}"
+    );
+    assert!(
+        !said.contains(SYNTHETIC_INSTANCE_ID) && !said.contains(ANOTHER_INSTANCE_ID),
+        "{label}: no instance id is echoed: {said}"
+    );
+}
+
 #[test]
 fn without_the_service_a_binding_from_this_boot_must_agree_with_the_record() {
     let accepted = [
         ("the binding written with the record", read(BINDING)),
         (
-            "a binding from an earlier boot, whatever it names",
-            binding_with("boot_id", json!(ANOTHER_BOOT)).replace("g2-standard-8", "g2-standard-4"),
+            "a binding from an earlier boot naming the record's machine type",
+            binding_on("g2-standard-8", ANOTHER_BOOT),
         ),
     ];
     for (label, binding) in accepted {
@@ -265,18 +302,26 @@ fn without_the_service_a_binding_from_this_boot_must_agree_with_the_record() {
             other => panic!("{label}: expected IdentityUnestablished, got {other:?}"),
         }
     }
+
+    // A binding from an earlier boot on another machine type: only a record
+    // the 0.2.1 agent wrote after a rollback and a resize gets here, and the
+    // online start would refuse the same way.
+    let resized = HostSources {
+        instance_binding: Some(binding_on("g2-standard-4", ANOTHER_BOOT)),
+        ..offline_l4()
+    };
+    assert_machine_type_changed(
+        "an earlier boot on another machine type",
+        detected(&resized),
+    );
 }
 
 #[test]
-fn with_the_service_answering_only_another_instance_is_refused() {
+fn with_the_service_answering_another_instance_or_machine_type_is_refused() {
     let live = ("g2-standard-8".to_string(), MachineTypeSource::GceMetadata);
     let accepted = [
         ("no binding yet", None),
         ("the binding for this instance", Some(read(BINDING))),
-        (
-            "this instance on another machine type, after a resize",
-            Some(binding_with("machine_type", json!("g2-standard-4"))),
-        ),
         (
             "a binding from an earlier boot of this instance",
             Some(binding_with("boot_id", json!(ANOTHER_BOOT))),
@@ -322,6 +367,36 @@ fn with_the_service_answering_only_another_instance_is_refused() {
         detected(&moved_across_a_boot),
         Err(PlatformProbeError::InstanceChanged { .. })
     ));
+    // Another instance and another machine type: the disk moved, which is
+    // what the operator has to know first.
+    let moved_and_resized = HostSources {
+        instance_binding: Some(binding_on("g2-standard-4", ANOTHER_BOOT)),
+        ..online_l4(ANOTHER_INSTANCE_ID)
+    };
+    assert!(matches!(
+        detected(&moved_and_resized),
+        Err(PlatformProbeError::InstanceChanged { .. })
+    ));
+
+    // This instance on another machine type: refused before anything is
+    // written, from this boot and from an earlier one. A resize takes a stop
+    // and a start, so the earlier boot is the case that happens.
+    for (label, binding) in [
+        (
+            "this boot on another machine type",
+            binding_on("g2-standard-4", BOOT),
+        ),
+        (
+            "an earlier boot on another machine type, after a resize",
+            binding_on("g2-standard-4", ANOTHER_BOOT),
+        ),
+    ] {
+        let sources = HostSources {
+            instance_binding: Some(binding),
+            ..online_l4(SYNTHETIC_INSTANCE_ID)
+        };
+        assert_machine_type_changed(label, detected(&sources));
+    }
 
     for answer in ["", "0x1f", "01234", "-1", "instance-1"] {
         let sources = HostSources {
