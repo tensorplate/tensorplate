@@ -25,14 +25,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Everything is checked against a narrow source policy:
   - private keys, a kubeconfig's embedded key, and documented token
     prefixes (GitHub, Google, AWS, PyPI, Anthropic, Hugging Face, NVIDIA
-    NGC, and HTTP Bearer or Basic credentials)
+    NGC, and HTTP Bearer or Basic credentials); a keyed credential is
+    found with its value on a later line than its key too, as
+    pretty-printed JSON and YAML block scalars write it, and past a YAML
+    anchor, tag or comment
   - Google service accounts, and `projects/<number>` paths and keyed
     project numbers of six or more digits
   - home directories in POSIX, Windows, encoded and JSON-escaped forms,
     other than the synthetic operator's and the GitHub runner's
   - device UUIDs outside the all-zero namespace
   - IP addresses outside the loopback, unspecified, "this network" and
-    documentation ranges, the metadata address and macOS's `fe80::1`
+    documentation ranges, the metadata address and macOS's `fe80::1`,
+    judged by value in any spelling: an IPv4-mapped address as its IPv4
+    address, any other address with a dotted quad as IPv6
   - references to private planning material, as shapes only
 
   Lines are scanned as written, with escapes and terminal control
@@ -54,16 +59,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   reason, and accepts up to that many findings of that class in that
   file, counting every occurrence. The count bounds how many values are
   accepted, not which ones. An entry never covers commit or pull request
-  text, a credential, or a finding only the evidence scanner makes, and
-  `--tree` fails when a count is wrong. Its 18
+  text, a credential, a finding only the evidence scanner makes, or any
+  file under an evidence path, in any letter case: evidence is
+  sanitized, not excepted, and the evidence scanner reports one finding
+  per line, class and length, so a value only it decodes could not be
+  counted against an entry. Values seen in different scan variants of a
+  line count separately. `--tree` fails when a count is wrong. Its 12
   entries are the baseline's:
-  - six transcribed accelerator fixtures, and the test that keeps them a
-    closed set, whose UUIDs predate the all-zero namespace
+  - the closed legacy set of transcribed accelerator UUIDs in
+    `platform/tests/accelerator_fixtures.rs`
   - private-range and public addresses in tests
   - synthetic home directories in harness verifiers
   - the README banner image
 
-  Two test comments that cited private ledger labels are reworded.
+  The six transcribed accelerator fixtures whose device UUIDs predated
+  the all-zero namespace now use it, so no evidence file needs an
+  allowlist entry. Two test comments that cited private ledger labels are
+  reworded.
   `test/validation/public_hygiene_test.sh` drives the scanner in
   throwaway repositories. Every alternative of every shape is generated
   at run time, from one context fixture per shape under

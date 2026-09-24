@@ -5,8 +5,10 @@
 
 Each `*.txt` file other than `passing.txt` is one disclosure shape in a
 context it could realistically appear in, with `@VALUE@` where the
-disclosed value goes. The file name selects the class and the values: the
-test generates one value for every alternative the shape has (each key
+disclosed value goes. A generated value writes `@NL@` for a line break,
+for the shapes whose key and value are on different lines. The file name
+selects the class and the values: the test generates one value for every
+alternative the shape has (each key
 armour, each token prefix, each label number, each escape form) and
 fresh random payload characters on every run. It commits every expansion
 to a throwaway repository, scans once, and requires each one to be

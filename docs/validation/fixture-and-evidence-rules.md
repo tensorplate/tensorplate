@@ -94,21 +94,28 @@ not style.
     given. It works in two tiers:
 
     - **Evidence**: recorded evidence and fixtures of real machines,
-      under `docs/validation/evidence/` and `test/platform/`, go through
-      `check-evidence-publication.sh` as rule 3 describes: patterns only in
-      CI, and with the private literal file when `--literals FILE` is
-      given. They go through the source policy as well. Every platform row's evidence location is
-      under one of these, or under an ignored build path such as `dist/`
-      that is never committed.
+      under `docs/validation/evidence/` and `test/platform/` in any letter
+      case, go through `check-evidence-publication.sh` as rule 3
+      describes: patterns only in CI, and with the private literal file
+      when `--literals FILE` is given. They go through the source policy
+      as well, and a symlink standing in for one of these directories is
+      a finding. Every platform row's evidence location is under one of
+      these, or under an ignored build path such as `dist/` that is never
+      committed.
     - **Source**: every file, and all commit and pull request text, is
       checked against a narrow set of shapes that never belong in public
-      source. These are private keys and documented token prefixes, cloud
-      service accounts, `projects/<number>` paths and keyed project
-      numbers of six or more digits, and home directories other than the
-      synthetic operator's and the GitHub runner's. They also cover device
+      source. These are private keys, documented token prefixes, and a
+      kubeconfig key or HTTP credential after its key, on the key's line
+      or a later one (pretty-printed JSON, a YAML block scalar, with any
+      YAML anchor, tag or comment between); cloud service accounts,
+      `projects/<number>` paths and keyed project numbers of six or more
+      digits; and home directories other than the synthetic operator's
+      and the GitHub runner's. They also cover device
       UUIDs outside the all-zero namespace and IP addresses outside the
       loopback, unspecified, "this network" and documentation ranges (the
-      metadata address and macOS's `fe80::1` also pass), and private
+      metadata address and macOS's `fe80::1` also pass), judged by value:
+      an IPv4-mapped address is its IPv4 address however it is written,
+      and any other address with a dotted quad is IPv6. Last come private
       planning references, as shapes only. A four-part version reads as
       an address unless a pip pin, Debian revision or wheel name makes it
       a version. The evidence scanner's host, journal, UUID, serial,
@@ -141,8 +148,10 @@ not style.
     one exact path, class, count and reason per line. It accepts up to that
     many findings of that class in that file, counting every occurrence,
     never commit or pull request text, never a credential, and never a
-    finding only the evidence scanner makes, since evidence is sanitized
-    rather than excepted. A count
+    file under an evidence path or a finding only the evidence scanner
+    makes, since evidence is sanitized rather than excepted. The evidence
+    scanner reports one finding per line, class and length, so a value
+    only it decodes could not be counted against an entry. A count
     bounds how many values are accepted, not which: a value replaced one
     for one keeps the count and is left to review of the diff.
     `test/validation/public_hygiene_test.sh` asserts that the tree passes

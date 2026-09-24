@@ -22,6 +22,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 scanner="${repo_root}/tools/validation/check-public-hygiene.sh"
 evidence_scanner="${repo_root}/tools/validation/check-evidence-publication.sh"
 fixtures="${repo_root}/test/validation/fixtures/public_hygiene"
+allowlist=tools/validation/public-hygiene-allowlist.txt
 failures=0
 case_count=0
 r=""
@@ -106,7 +107,9 @@ commit() {
   g commit -q -m "${1:-Change}" || die "commit failed"
 }
 
-# expand <fixture> <value> <out>: the fixture with @VALUE@ replaced.
+# expand <fixture> <value> <out>: the fixture with @VALUE@ replaced. An
+# @NL@ in the value is a line break, since a generator prints one value
+# per line.
 expand() {
   python3 - "$1" "$2" "$3" <<'PY' || die "could not expand $1"
 import sys
@@ -114,8 +117,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     text = handle.read()
 if "@VALUE@" not in text:
     sys.exit("no @VALUE@ placeholder")
-with open(sys.argv[3], "w", encoding="utf-8") as handle:
-    handle.write(text.replace("@VALUE@", sys.argv[2]))
+with open(sys.argv[3], "w", encoding="utf-8", newline="") as handle:
+    handle.write(text.replace("@VALUE@", sys.argv[2].replace("@NL@", "\n")))
 PY
 }
 
@@ -257,10 +260,34 @@ fixture_values() {
       done
       printf -- '-----BEGIN %s-----\tPRIVATE KEY\n' "PGP PRIVATE KEY BLOCK"
       ;;
-    credential-kubeconfig-client-key | credential-kubeconfig-client-key-json)
-      for key in 'client-key-data: ' '"client-key-data": "' 'client-key-data: "' '\"client-key-data\": \"'; do
+    credential-kubeconfig-client-key)
+      # On the key's line, and after it: a YAML block scalar, or a plain
+      # scalar continued on the next line, past a blank one too.
+      for key in 'client-key-data: ' '"client-key-data": "' 'client-key-data: "' '\"client-key-data\": \"' \
+        'client-key-data: |@NL@      ' 'client-key-data: >-@NL@      ' 'client-key-data: |2+@NL@      ' \
+        'client-key-data:@NL@      ' 'client-key-data:@NL@@NL@      ' $'client-key-data:\e[0m@NL@      ' \
+        'client-key-data: | # base64 PEM@NL@      ' 'client-key-data: &key |@NL@      ' \
+        'client-key-data: !!binary |@NL@      ' 'client-key-data:@NL@      # rotated@NL@      ' \
+        'client-key-data: &key '; do
         token="$(random_from "$base64_chars" 96)"
         printf '%s%s\t%s\n' "$key" "$token" "$token"
+      done
+      ;;
+    credential-kubeconfig-client-key-json)
+      # Pretty-printed, the value on a later line than its key; escaped
+      # inside a string, the line break an escape; and a carriage return
+      # between key and value.
+      for key in 'client-key-data: ' '"client-key-data": "' 'client-key-data: "' '\"client-key-data\": \"' \
+        '"client-key-data":@NL@          "' '"client-key-data"@NL@          :@NL@          "' \
+        $'"client-key-data":\r"'; do
+        token="$(random_from "$base64_chars" 96)"
+        printf '%s%s\t%s\n' "$key" "$token" "$token"
+      done
+      # The value starts with an escaped slash, so only the variant that
+      # decodes both escapes joins key and value.
+      for key in '\"client-key-data\":\n          \"' '\"client-key-data\":\u000a          \"'; do
+        token="$(random_from "$base64_chars" 96)"
+        printf '%sLS0t\\/%s\t%s\n' "$key" "$token" "$token"
       done
       ;;
     credential-github-token)
@@ -285,6 +312,15 @@ fixture_values() {
     credential-authorization-header)
       for key in 'Authorization: Bearer ' 'Authorization: Basic ' 'Proxy-Authorization: Bearer ' \
         'authorization: bearer ' 'Authorization=Bearer ' '"Authorization": "Bearer '; do
+        token="$(random_from "$alnum" 40)"
+        printf '%s%s\t%s\n' "$key" "$token" "$token"
+      done
+      ;;
+    credential-authorization-header-multiline)
+      for key in 'Authorization: >-@NL@      Bearer ' 'Authorization: |@NL@      Basic ' \
+        'Authorization:@NL@      Bearer ' 'Authorization: Bearer@NL@      ' \
+        '"Proxy-Authorization":@NL@      "Bearer ' 'authorization:@NL@  bearer ' \
+        'Authorization: >- # from the vault@NL@      Bearer '; do
         token="$(random_from "$alnum" 40)"
         printf '%s%s\t%s\n' "$key" "$token" "$token"
       done
@@ -435,6 +471,21 @@ while IFS=$'\t' read -r n name class secret; do
     "$(grep -qE "^matrix/${n}\.txt:[0-9]+: ${class}( |$)" "$out" && echo yes || echo no)"
   check "  without printing the value" "no" "$(printed "$secret" "$out")"
 done <"$matrix_rows"
+
+# A keyed credential is one finding, on its key's line, whether its value
+# is on that line or a later one.
+key_value="$(random_from "$base64_chars" 96)"
+new_case
+put notes/kubeconfig.json "{"$'\n'"  \"users\": [{"$'\n'"    \"client-key-data\":"$'\n'"      \"${key_value}\""$'\n'"  }]"$'\n'"}"
+commit
+expect_finding "a kubeconfig key whose value is on the next line" credential "$key_value" --base base
+check "  reported once, on the key's line" "notes/kubeconfig.json:3: credential" \
+  "$(grep -oE '^notes/kubeconfig.json:[0-9]+: credential' "${r}.out" | tr '\n' ' ' | sed 's/ $//')"
+new_case
+put notes/kubeconfig.yaml "    client-key-data: ${key_value}"
+commit
+expect_finding "a kubeconfig key and value on one line" credential "$key_value" --base base
+check "  reported once" "1" "$(grep -c ': credential' "${r}.out" || :)"
 
 # --- Where a value can hide besides a file's lines.
 ip="10.$(random_octet).$(random_octet).$(random_octet)"
@@ -657,11 +708,186 @@ commit
 expect_finding "a zero-padded address in a platform fixture" ipv6 "" --base base
 check "  reported once, though both tiers find it" "1" "$(grep -c ': ipv6' "${r}.out" || :)"
 
+# Assembled, so this file holds no address.
+mapped_prefix="::$(printf ffff)"
+new_case
+put test/platform/rec/net.txt "peer ${mapped_prefix}:10.$(random_octet).$(random_octet).$(random_octet) up"
+commit
+expect_finding "an IPv4-mapped address in a platform fixture" ipv4 "" --base base
+check "  reported once, though both tiers find it" "1" "$(grep -c ': ipv4' "${r}.out" || :)"
+
 new_case
 put test/platform/accelerator/new-card.txt "NVIDIA L4, 23034, 580.173.02, GPU-$(random_uuid), [N/A]"
 commit
 expect_finding "a device UUID in a platform fixture" device-uuid "" --base base
 check "  reported once, though both tiers find it" "1" "$(grep -c ': device-uuid' "${r}.out" || :)"
+
+new_case
+put test/platform/accelerator/new-card.txt "NVIDIA L4, 23034, 580.173.02, GPU-00000000-0000-0000-0000-000000000009, [N/A]"
+commit
+check "a synthetic device UUID in a platform fixture passes" "0" "$(scan "${r}.out" --base base)"
+
+# The evidence scanner reports one finding per line, class and length, so
+# a second value only it decodes (here a UUID spelled as a byte array)
+# would count as the first. No allowlist entry may name an evidence file:
+# the entry is no verdict, and the file's findings stand without it.
+plain_uuid="$(random_uuid)"
+encoded_uuid="$(random_uuid)"
+byte_array="$(python3 -c 'import sys; print(list(("GPU-" + sys.argv[1]).encode()))' "$encoded_uuid")"
+for evidence_file in test/platform/accelerator/card.json docs/validation/evidence/v9.9.9/synthetic-row/card.json; do
+  new_case
+  put "$evidence_file" "{\"uuid\": \"GPU-${plain_uuid}\", \"raw\": ${byte_array}}"
+  put "$allowlist" "${evidence_file} device-uuid 1 One UUID."
+  commit
+  check "an allowlist entry for an evidence file is no verdict (${evidence_file%%/*})" "2" \
+    "$(scan "${r}.out" --base base)"
+  check "  and says why" "yes" "$(has "names a file under an evidence path" "${r}.out")"
+  g rm -q "$allowlist" || die "git rm failed"
+  commit "Drop the entry"
+  expect_finding "  without it, a plain and a decoded UUID on one line" device-uuid "$encoded_uuid" --base base
+  check "  without printing the other" "no" "$(printed "$plain_uuid" "${r}.out")"
+done
+
+# An evidence path differs from its prefix only in case on a
+# case-insensitive disk, so it is evidence too.
+new_case
+put test/Platform/accelerator/card.json "{\"uuid\": \"GPU-${plain_uuid}\", \"raw\": ${byte_array}}"
+put "$allowlist" "test/Platform/accelerator/card.json device-uuid 1 One UUID."
+commit
+check "an allowlist entry for an evidence file in another case is no verdict" "2" "$(scan "${r}.out" --base base)"
+
+# A symlink standing in for an evidence directory, or one above it, would
+# move evidence out of the evidence tier.
+for link in test/platform test; do
+  new_case
+  put fixtures/platform/accelerator/card.txt "NVIDIA L4, 23034, 580.173.02, GPU-00000000-0000-0000-0000-000000000009, [N/A]"
+  mkdir -p "$(dirname "${r}/${link}")" || die "mkdir failed"
+  ln -s "$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' \
+    "${r}/fixtures/platform" "${r}/${link}")" "${r}/${link}" || die "ln failed"
+  g add "$link" || die "git add failed"
+  commit
+  expect_finding "a symlink at ${link}" symlink "" --base base
+done
+
+# An address is judged by its value, not its spelling: mixed notation
+# (a dotted quad for the last 32 bits), with and without compression,
+# and all hex. Only an IPv4-mapped address takes the IPv4 rules, as
+# ipv4, whichever way it is written; any other address in mixed notation
+# is one IPv6 finding, and its dotted quad is not an IPv4 address too.
+# spellings <kind>: one address of that kind, randomized, in each form.
+# Built from integers, so this file holds no address.
+spellings() {
+  python3 - "$1" <<'PY'
+import ipaddress, secrets, sys
+r16, r24 = secrets.randbits(16), secrets.randbits(24)
+mapped = 0xffff << 32
+value = {
+    "unique-local, loopback tail": (0xfd42 << 112) | (r16 << 96) | (127 << 24) | 1,
+    "unique-local, private tail": (0xfd42 << 112) | (r16 << 96) | (10 << 24) | r24,
+    "global, public tail": (0x26001900 << 96) | (r16 << 80) | (34 << 24) | r24,
+    "NAT64, public tail": (0x64ff9b << 96) | (34 << 24) | r24,
+    "IPv4-compatible loopback": (127 << 24) | 1,
+    "mapped private": mapped | (10 << 24) | r24,
+    "mapped public": mapped | (34 << 24) | r24,
+    "mapped loopback": mapped | (127 << 24) | 1,
+    "mapped metadata": mapped | (169 << 24) | (254 << 16) | (169 << 8) | 254,
+    "mapped documentation": mapped | (192 << 24) | (2 << 8) | 9,
+    "documentation, documentation tail": (0x20010db8 << 96) | (192 << 24) | (2 << 8) | 1,
+    "documentation, private tail": (0x20010db8 << 96) | (10 << 24) | r24,
+}[sys.argv[1]]
+groups = ["%x" % ((value >> (112 - 16 * i)) & 0xffff) for i in range(8)]
+
+
+def compress(groups, tail=""):
+    best, i = (0, 0), 0
+    while i < len(groups):
+        j = i
+        while j < len(groups) and groups[j] == "0":
+            j += 1
+        if j - i >= 2 and j - i > best[1] - best[0]:
+            best = (i, j)
+        i = max(j, i + 1)
+    parts = groups + ([tail] if tail else [])
+    if best == (0, 0):
+        return ":".join(parts)
+    head, rest = ":".join(groups[:best[0]]), ":".join(parts[best[1]:])
+    return head + "::" + rest
+
+
+dotted = str(ipaddress.IPv4Address(value & 0xffffffff))
+for spelling in (compress(groups[:6], dotted), ":".join(groups[:6] + [dotted]),
+                 ":".join(groups), compress(groups)):
+    if ipaddress.IPv6Address(spelling) != ipaddress.IPv6Address(value):
+        sys.exit("a spelling does not denote the address")
+    print(spelling)
+PY
+}
+while IFS='|' read -r kind expected; do
+  spelled="$(spellings "$kind")" || die "could not spell ${kind}"
+  while IFS= read -r spelling; do
+    new_case
+    put notes/a.txt "peer ${spelling} up"
+    commit
+    status="$(scan "${r}.out" --base base)"
+    found="$({ grep -oE ': ipv[46] ' "${r}.out" || :; } | tr -d ': ' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+    check "${kind} written ${spelling}" "$expected" "$(printf '%s %s' "$status" "$found" | sed 's/ $//')"
+    if [[ "$status" != 0 ]]; then
+      check "  without printing it" "no" "$(printed "$spelling" "${r}.out")"
+    fi
+  done <<<"$spelled"
+done <<'EOF'
+unique-local, loopback tail|1 ipv6
+unique-local, private tail|1 ipv6
+global, public tail|1 ipv6
+NAT64, public tail|1 ipv6
+IPv4-compatible loopback|1 ipv6
+mapped private|1 ipv4
+mapped public|1 ipv4
+mapped loopback|0
+mapped metadata|0
+mapped documentation|0
+documentation, documentation tail|0
+documentation, private tail|0
+EOF
+
+# Where the IPV6 pattern cannot start a run (after an escape, a control
+# sequence or a colon), the quad still ends the address: one finding, of
+# the address's class. And after a mapped address, `-1` is no Debian
+# revision: its dotted and hex spellings agree.
+tab_escape='\t'
+for kind_expected in "unique-local, private tail|1 ipv6" "documentation, private tail|0"; do
+  kind="${kind_expected%%|*}"
+  address="$(spellings "$kind" | head -n 1)" || die "could not spell ${kind}"
+  for prefix in "$tab_escape" '\e[1m' $'\e[1m' 'peer:'; do
+    new_case
+    put notes/a.txt "peer ${prefix}${address} up"
+    commit
+    status="$(scan "${r}.out" --base base)"
+    found="$({ grep -oE ': ipv[46] ' "${r}.out" || :; } | tr -d ': ' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+    check "${kind} after $(printf '%q' "$prefix")" "${kind_expected#*|}" \
+      "$(printf '%s %s' "$status" "$found" | sed 's/ $//')"
+  done
+done
+while IFS= read -r spelling; do
+  new_case
+  put notes/a.txt "peer ${spelling}-1 up"
+  commit
+  status="$(scan "${r}.out" --base base)"
+  found="$({ grep -oE ': ipv[46] ' "${r}.out" || :; } | tr -d ': ' | tr '\n' ' ' | sed 's/ $//')"
+  check "mapped private written ${spelling} before -1" "1 ipv4" "$(printf '%s %s' "$status" "$found")"
+done < <(spellings "mapped private")
+
+# The dotted quad is bounded as an IPv4 address is: a fifth group or a
+# word after it makes it no address, after a colon-hex run as on its own.
+ula="fd42:$(random_hex 2)"
+quad="10.$(random_octet).$(random_octet).$(random_octet)"
+for spec in "a fifth group|${quad}.$(random_octet)" "a word|${quad}$(random_word 3)"; do
+  new_case
+  put notes/a.txt "build ${spec#*|} and ${ula}::${spec#*|}"
+  commit
+  check "a dotted quad followed by ${spec%%|*} is no address, alone or in mixed notation" "0" \
+    "$(scan "${r}.out" --base base)"
+done
 
 run_id="$(random_uuid)"
 new_case
@@ -870,7 +1096,6 @@ case "$lowered" in
 esac
 
 # --- The allowlist.
-allowlist=tools/validation/public-hygiene-allowlist.txt
 
 new_case
 put notes/a.txt "peer ${ip}"
@@ -900,6 +1125,19 @@ commit
 expect_finding "a second address of the same length on an allowlisted line" ipv4 "$same_length_ip" \
   --base base
 check "  reports both" "2" "$(grep -c '^notes/a.txt:1: ipv4' "${r}.out" || :)"
+
+# Two values of one length, one seen only as written and the other only
+# with its escapes decoded, are two findings, not one per variant.
+while :; do
+  hidden_octets="$(random_octet).$(random_octet).$(random_octet)"
+  [[ ${#hidden_octets} -eq $((${#ip} - 3)) && "10.${hidden_octets}" != "$ip" ]] && break
+done
+new_case
+put notes/a.py "URLS = [\"http://${ip}\\x41\", \"http://10\\x2e${hidden_octets}\"]"
+put "$allowlist" "notes/a.py ipv4 1 A synthetic peer address."
+commit
+expect_finding "a second address only its decoded escapes reveal" ipv4 "10.${hidden_octets}" --base base
+check "  reports both" "2" "$(grep -c '^notes/a.py:1: ipv4' "${r}.out" || :)"
 
 # A value several scan variants find (the line holds an escape, but not
 # next to the value) is one finding, not one per variant.

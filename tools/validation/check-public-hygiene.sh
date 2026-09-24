@@ -47,7 +47,8 @@
 # its printable runs are still checked for the long shapes (BINARY_CLASSES
 # below); a submodule is a finding. A
 # symlink is scanned by its target, and under an evidence prefix it is a
-# finding, as the evidence scanner rules.
+# finding, as the evidence scanner rules, as is one that stands in for an
+# evidence directory or a directory above one.
 #
 # The one override is tools/validation/public-hygiene-allowlist.txt, read
 # as committed at HEAD and reviewed like code: one `path class count
@@ -56,8 +57,9 @@
 # and nothing else; a version with more reports them all. It bounds how
 # many values are accepted, not which. It never applies to commit or
 # message text or to a file whose name is itself a finding, and neither a
-# credential finding nor one only the evidence scanner makes can be
-# allowlisted: evidence is sanitized (rule 3), never excepted. --tree reports an entry
+# credential finding, nor one only the evidence scanner makes, nor any
+# finding in a file under an evidence prefix can be allowlisted: evidence
+# is sanitized (rule 3), never excepted. --tree reports an entry
 # whose count no longer matches the file at HEAD as stale. A path that is
 # not plain and relative (an entry named `..`, which git plumbing can
 # write) is no verdict.
@@ -111,6 +113,7 @@ scan_status=0
 python3 - "$script_dir" "$@" <<'PY' || scan_status=$?
 # Keep this compatible with Python 3.9: that is /usr/bin/python3 on the
 # macOS hosts changes are pushed from.
+import bisect
 import getpass
 import ipaddress
 import os
@@ -136,7 +139,8 @@ ALLOWLIST_PATH = "tools/validation/public-hygiene-allowlist.txt"
 # Recorded lifecycle evidence, and recorded or transcribed fixtures of
 # real machines. Every platform row's evidence.location is under one of
 # these or under a git-ignored build path that is never committed;
-# test/validation/public_hygiene_test.sh asserts it.
+# test/validation/public_hygiene_test.sh asserts it. Matched in any
+# letter case.
 EVIDENCE_PREFIXES = ("docs/validation/evidence/", "test/platform/")
 
 SYNTHETIC_OPERATOR = "tp-synthetic-operator"
@@ -155,15 +159,12 @@ MODE_FILES = ("100644", "100755")
 DIFF_OPTIONS = ["--raw", "-z", "--no-renames", "--no-abbrev", "--diff-filter=d",
                 "--ignore-submodules=none"]
 
-# Private keys in PEM and PGP armour and a kubeconfig's embedded key, and
-# token prefixes their issuers document: GitHub classic and fine-grained
-# tokens, Google OAuth access tokens, API keys and OAuth client secrets,
-# AWS access key ids, PyPI, Anthropic, Hugging Face and NVIDIA NGC tokens.
-# An HTTP credential needs no prefix, only a value long enough not to be
-# a placeholder word.
+# Private keys in PEM and PGP armour, and token prefixes their issuers
+# document: GitHub classic and fine-grained tokens, Google OAuth access
+# tokens, API keys and OAuth client secrets, AWS access key ids, PyPI,
+# Anthropic, Hugging Face and NVIDIA NGC tokens.
 CREDENTIAL = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
-    r"|(?<![A-Za-z0-9_-])client-key-data\\*[\"']?[ \t]*:[ \t]*\\*[\"']?[A-Za-z0-9+/]{20,}"
     r"|(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}"
     r"|(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}"
     r"|(?<![A-Za-z0-9_.])ya29\.[A-Za-z0-9_-]{20,}"
@@ -174,10 +175,31 @@ CREDENTIAL = re.compile(
     r"|(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{20,}"
     r"|(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{30,}"
     r"|(?<![A-Za-z0-9_-])nvapi-[A-Za-z0-9_-]{40,}")
-AUTH_CREDENTIAL = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:Proxy-)?Authorization\\*[\"']?[ \t]*[:=][ \t]*"
-    r"\\*[\"']?[ \t]*(?:Bearer|Basic)[ \t]+[A-Za-z0-9._~+/-]{16,}=*",
-    re.IGNORECASE)
+
+
+def keyed_credential(space):
+    """A kubeconfig's embedded key and an HTTP credential: a value after
+    its key, with `space` between the parts. An HTTP credential needs no
+    prefix, only a value long enough not to be a placeholder word. Between
+    key and value YAML allows node properties (`&anchor`, `!!binary`), a
+    block scalar header (`|`, `>-`, `|2`) and comments. A client-key-data
+    "value" followed by a colon on its line is the next mapping key."""
+    parts = {"s": space}
+    parts["between"] = (r"(?:[&!][^\s,]*%(s)s+)*(?:[|>][0-9+-]{0,2}(?![^\s#]))?"
+                        r"(?:%(s)s*#[^\n]*)*") % parts
+    return re.compile(
+        (r"(?<![A-Za-z0-9_-])client-key-data\\*[\"']?%(s)s*:%(s)s*%(between)s%(s)s*"
+         r"\\*[\"']?%(s)s*[A-Za-z0-9+/]{20,}(?![A-Za-z0-9+/]*[^\S\n]*:)"
+         r"|(?<![A-Za-z0-9_-])(?i:(?:Proxy-)?Authorization)\\*[\"']?%(s)s*[:=]%(s)s*%(between)s%(s)s*"
+         r"\\*[\"']?%(s)s*(?i:Bearer|Basic)%(s)s+[A-Za-z0-9._~+/-]{16,}=*") % parts)
+
+
+KEYED_CREDENTIAL = keyed_credential(r"[ \t]")
+# Pretty-printed JSON puts a value on the line after its key, and a YAML
+# block scalar always does. Lines are split before the per-line shapes
+# run, so the keyed forms are matched across the whole text as well, with
+# any white space between the parts, as a finding on the key's line.
+KEYED_CREDENTIAL_ACROSS_LINES = keyed_credential(r"\s")
 
 SERVICE_ACCOUNT = re.compile(
     r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)*gserviceaccount\.com(?![A-Za-z0-9-])",
@@ -265,7 +287,9 @@ NEVER_ALLOWED = frozenset(("credential",))
 CONTROL = re.compile(r"(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))\[[0-?]*[ -/]*[@-~]")
 TEXT_ESCAPE = re.compile(r"\\(?:u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[0-7]{1,3}|\S)")
 # And an escaped separator hides a path: `\/Users\/<name>` is a home path.
-DECODABLE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(/))")
+# An escaped line break separates a key from its value as a real one does.
+DECODABLE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(/)|([nrt]))")
+ESCAPED_BREAKS = {"n": "\n", "r": "\r", "t": "\t"}
 # The printable runs of a binary file, as `strings` would show them. In
 # compressed data, short shapes (addresses, planning labels, short
 # literals) occur by chance, so a run is checked for the long, specific
@@ -300,9 +324,10 @@ def ipv6_address(line, start):
 
     The run is an address as written, or one followed by `:` and the text
     after it (`: refused`), or by `:<port>` when unbracketed. A run that
-    goes on into a dotted quad is an IPv4-mapped form the IPv4 rules
-    judge; one that goes on into a word is an identifier (`x86_64::_mm`);
-    one longer than any address (a fingerprint, a dump) parses as nothing.
+    goes on into a dotted quad is mixed notation, judged from its quad
+    (mixed_before); one that goes on into a word is an identifier
+    (`x86_64::_mm`); one longer than any address (a fingerprint, a dump)
+    parses as nothing.
     """
     end = start
     while end < len(line) and line[end] in HEX_COLON:
@@ -320,19 +345,38 @@ def ipv6_address(line, start):
         candidates.append(head)
     for candidate in candidates:
         try:
-            return ipaddress.ip_address(candidate), candidate
+            return ipaddress.IPv6Address(candidate), candidate
+        except ValueError:
+            pass
+    return None
+
+
+def mixed_before(line, start, end):
+    """(address, written) for the IPv6 address in mixed notation whose
+    dotted quad is line[start:end], or None: the longest colon-hex run
+    before the quad that parses with it. The notation does not make an
+    address IPv4-mapped, only its value does."""
+    if start == 0 or line[start - 1] != ":":
+        return None
+    first = start - 1
+    while first > 0 and line[first - 1] in HEX_COLON:
+        first -= 1
+    for begin in range(first, start - 1):
+        try:
+            return ipaddress.IPv6Address(line[begin:end]), line[begin:end]
         except ValueError:
             pass
     return None
 
 
 def scan_variant(line, literals):
+    """(class, length, value) for each finding on one variant of a line."""
     found = []
 
     def add(cls, value):
-        found.append((cls, len(value)))
+        found.append((cls, len(value), value))
 
-    for pattern in (CREDENTIAL, AUTH_CREDENTIAL):
+    for pattern in (CREDENTIAL, KEYED_CREDENTIAL):
         for m in pattern.finditer(line):
             add("credential", m.group(0))
     for m in SERVICE_ACCOUNT.finditer(line):
@@ -349,8 +393,35 @@ def scan_variant(line, literals):
     for m in DEVICE_UUID.finditer(line):
         if not m.group(1).startswith(ZERO_UUID_PREFIX):
             add("device-uuid", m.group(1))
+    # An address is judged by its value, never by its spelling. One that is
+    # IPv4-mapped is its IPv4 address, reported as ipv4 whichever way it is
+    # written; any other is IPv6. A dotted quad that ends an IPv6 address
+    # is part of it, not an IPv4 address of its own, and no package
+    # version either. The quad is found wherever IPV4 finds one, including
+    # where IPV6 starts no run: after a word, a colon or an escape
+    # (`peer:2001:db8::192.0.2.1`, `\e2001:db8::192.0.2.1`).
+    def judge(address, written, quad):
+        mapped = address.ipv4_mapped
+        if mapped is not None:
+            if str(mapped) not in IPV4_ALLOWED and not allowed_address(mapped):
+                add("ipv4", quad or written)
+        elif address not in IPV6_ALLOWED and not allowed_address(address):
+            # The written form, as the evidence scanner measures it, so a
+            # value both tiers find is one finding where they agree on it.
+            add("ipv6", written)
+
+    for m in IPV6.finditer(line):
+        if SUBSCRIPT.search(line, 0, m.start()):
+            continue
+        parsed = ipv6_address(line, m.start())
+        if parsed is not None:
+            judge(parsed[0], parsed[1], None)
     for m in IPV4.finditer(line):
         value = m.group(1)
+        mixed = mixed_before(line, m.start(1), m.end(1))
+        if mixed is not None:
+            judge(mixed[0], mixed[1], value)
+            continue
         if value in IPV4_ALLOWED or is_version(line, m.start(1), m.end(1)):
             continue
         try:
@@ -359,21 +430,13 @@ def scan_variant(line, literals):
             continue
         if not allowed_address(address):
             add("ipv4", value)
-    for m in IPV6.finditer(line):
-        if SUBSCRIPT.search(line, 0, m.start()):
-            continue
-        parsed = ipv6_address(line, m.start())
-        if parsed is not None and parsed[0] not in IPV6_ALLOWED and not allowed_address(parsed[0]):
-            # The written form, as the evidence scanner measures it, so a
-            # value both tiers find is one finding.
-            add("ipv6", parsed[1])
     for m in PRIVATE_REPOSITORY.finditer(line):
         add("private-repository", m.group(0))
     for m in PRIVATE_LABEL.finditer(line):
         add("private-label", m.group(0))
     for cls, pattern, length in literals:
-        for _ in pattern.finditer(line):
-            found.append((cls, length))
+        for m in pattern.finditer(line):
+            found.append((cls, length, m.group(0).lower()))
     return found
 
 
@@ -381,6 +444,8 @@ def decode_escapes(line):
     def decoded(m):
         if m.group(3):
             return "/"
+        if m.group(4):
+            return ESCAPED_BREAKS[m.group(4)]
         return chr(int(m.group(1) or m.group(2), 16))
     return CONTROL.sub("", DECODABLE.sub(decoded, line))
 
@@ -388,25 +453,62 @@ def decode_escapes(line):
 def scan_line(line, literals):
     """Counter of (class, matched length) on one line: as written, with
     escapes and control sequences blanked, and with escapes decoded. A
-    value every variant finds counts once; two values count twice."""
+    value every variant finds counts once; two values count twice, even
+    when one variant finds each: the variants are merged by the value
+    matched, which is never printed."""
     variants = {line}
     if "\\" in line or "\x1b" in line:
         variants.add(TEXT_ESCAPE.sub(" ", CONTROL.sub("", line)))
         variants.add(TEXT_ESCAPE.sub(" ", CONTROL.sub(" ", line)))
         variants.add(decode_escapes(line))
+    values = Counter()
+    for variant in variants:
+        values |= Counter(scan_variant(variant, literals))
+    found = Counter()
+    for (cls, length, _), count in values.items():
+        found[(cls, length)] += count
+    return found
+
+
+# scan_line's variants, other than the line as written.
+LINE_VARIANTS = (
+    lambda line: TEXT_ESCAPE.sub(" ", CONTROL.sub("", line)),
+    lambda line: TEXT_ESCAPE.sub(" ", CONTROL.sub(" ", line)),
+    decode_escapes,
+)
+
+
+def keyed_across_lines(lines):
+    """Counter of (line, class, length) for the keyed credentials in the
+    whole text, in each variant scan_line reads, on the line each key is
+    on. A decoded escape can itself be the line break. A match within one
+    line is the finding scan_line makes, with the same key, so the union
+    in scan_text keeps it once."""
+    variants = [lines]
+    if any("\\" in line or "\x1b" in line for line in lines):
+        variants.extend([variant(line) for line in lines] for variant in LINE_VARIANTS)
     found = Counter()
     for variant in variants:
-        found |= Counter(scan_variant(variant, literals))
+        starts, offset = [], 0
+        for line in variant:
+            starts.append(offset)
+            offset += len(line) + 1
+        here = Counter()
+        for m in KEYED_CREDENTIAL_ACROSS_LINES.finditer("\n".join(variant)):
+            here[(bisect.bisect_right(starts, m.start()), "credential", len(m.group(0)))] += 1
+        found |= here
     return found
 
 
 def scan_text(text, literals):
-    """Counter of (line, class, length) over every line of text."""
+    """Counter of (line, class, length) over every line of text, and the
+    keyed credentials that span lines."""
     found = Counter()
-    for number, line in enumerate(text.split("\n"), 1):
+    lines = text.split("\n")
+    for number, line in enumerate(lines, 1):
         for (cls, length), count in scan_line(line, literals).items():
             found[(number, cls, length)] = count
-    return found
+    return found | keyed_across_lines(lines)
 
 
 def run(args, root, data=None):
@@ -584,6 +686,14 @@ def load_allowlist(data):
             # made publishable by sanitizing it (rule 3), never by exception.
             fault("allowlist line %d: an evidence-only %s finding is sanitized, "
                   "never allowlisted" % (number, cls))
+        if is_evidence(path):
+            # Evidence is sanitized (rule 3), never excepted. And the
+            # evidence scanner reports one finding per line, class and
+            # length, so a value only it decodes (a byte array, a JSON
+            # escape) beside one the source policy finds would not be
+            # counted against the entry.
+            fault("allowlist line %d names a file under an evidence path, which is "
+                  "sanitized, never allowlisted" % number)
         if not count.isdigit() or int(count) < 1:
             fault("allowlist line %d needs a count of one or more" % number)
         if (path, cls) in entries:
@@ -661,7 +771,16 @@ def evidence_findings(scanner, root_dir, literal_file):
 
 
 def is_evidence(path):
-    return path.startswith(EVIDENCE_PREFIXES)
+    # Case-insensitively: a checkout on a case-insensitive disk, as on
+    # macOS, puts test/Platform/x in test/platform/.
+    return path.lower().startswith(EVIDENCE_PREFIXES)
+
+
+def holds_evidence(path):
+    """Whether path is under an evidence prefix or is one of the
+    directories above one: a symlink there moves evidence elsewhere."""
+    folded = path.lower() + "/"
+    return is_evidence(path) or any(prefix.startswith(folded) for prefix in EVIDENCE_PREFIXES)
 
 
 def listing(root):
@@ -776,6 +895,10 @@ def main(argv):
     # becomes a ref only when printed, once every name finding is known: a
     # path either tier flags is never printed. The two tiers can report the
     # same finding on evidence, so a key keeps the larger count, not a sum.
+    # Where they class or measure a value differently (the source policy
+    # judges a mixed-notation or IPv4-mapped IPv6 address by value), it
+    # prints once per tier; evidence is never allowlisted, so only the
+    # count printed differs.
     results = Counter()
 
     def add(key, count=1):
@@ -803,7 +926,7 @@ def main(argv):
         if mode == MODE_SUBMODULE:
             report(0, "submodule", None)
             continue
-        if mode == MODE_SYMLINK and is_evidence(path):
+        if mode == MODE_SYMLINK and holds_evidence(path):
             report(0, "symlink", None)
         try:
             if b"\0" in data:

@@ -9,9 +9,10 @@
 # for one keeps the count, and is left to review of the diff. An entry
 # never applies to commit messages or pull request text, or to a file
 # whose name is itself a finding. A credential finding cannot be accepted
-# at all, nor can a finding only the evidence scanner makes: evidence is
-# sanitized, never excepted. `check-public-hygiene.sh --tree` fails on an entry
-# whose count no longer matches the file.
+# at all, nor can a finding only the evidence scanner makes, nor any file
+# under an evidence path (docs/validation/evidence/, test/platform/):
+# evidence is sanitized, never excepted. `check-public-hygiene.sh --tree`
+# fails on an entry whose count no longer matches the file.
 #
 # Prefer fixing the value over adding an entry: synthetic forms that pass
 # are listed in docs/validation/evidence/v0.2.1/README.md and in rule 10 of
