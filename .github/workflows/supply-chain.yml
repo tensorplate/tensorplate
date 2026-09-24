@@ -1,0 +1,142 @@
+name: Supply chain
+
+# License policy, dependency sources and known vulnerabilities for the Rust
+# workspace (cargo-deny), and a CycloneDX SBOM plus a vulnerability audit
+# for each Python package (cyclonedx-py, pip-audit). Accepted
+# vulnerabilities live in tools/release/vulnerability-dispositions.json;
+# see docs/release/artifacts.md, "Supply-chain checks".
+#
+# No secrets and nothing paid: every job runs on a hosted runner with a
+# read-only token. The weekly schedule is there because advisories are
+# published without any change to this repository.
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A prebuilt, checksum-pinned binary: cargo-deny 0.20.2 declares
+  # rust-version 1.88 and edition 2024, and the workspace toolchain is
+  # pinned to 1.78, so it cannot be built here from source.
+  CARGO_DENY_VERSION: '0.20.2'
+  CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
+  CYCLONEDX_BOM_VERSION: '7.4.0'
+  PIP_AUDIT_VERSION: '2.10.1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_ROOT_USER_ACTION: ignore
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  dispositions:
+    name: vulnerability dispositions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install release tooling requirements
+        run: python -m pip install -r tools/release/requirements.txt
+
+      - name: Disposition checker tests
+        run: python test/release/test_vulnerability_dispositions.py
+
+      - name: Every disposition is current and agrees with deny.toml
+        run: python tools/release/check-vulnerability-dispositions.py
+
+  cargo-deny:
+    name: cargo-deny (licenses, bans, sources, advisories)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo --version
+
+      - name: Install cargo-deny ${{ env.CARGO_DENY_VERSION }}
+        run: |
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${name}.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          printf '%s  %s\n' "${CARGO_DENY_SHA256}" "${RUNNER_TEMP}/${name}.tar.gz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/${name}.tar.gz" -C "${RUNNER_TEMP}/bin" --strip-components=1 "${name}/cargo-deny"
+          echo "${RUNNER_TEMP}/bin" >>"$GITHUB_PATH"
+
+      - name: cargo deny check
+        run: |
+          cargo deny --version
+          cargo deny --locked check advisories bans licenses sources
+
+  python:
+    name: SBOM and audit (${{ matrix.package }})
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: sdk/python
+            artifact: tensorplate-sdk-python
+          - package: backends/python_pytorch
+            artifact: tensorplate-backend-python-pytorch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the scanners in their own environment
+        run: |
+          python -m venv "${RUNNER_TEMP}/scanners"
+          "${RUNNER_TEMP}/scanners/bin/python" -m pip install --quiet \
+            "cyclonedx-bom==${CYCLONEDX_BOM_VERSION}" "pip-audit==${PIP_AUDIT_VERSION}"
+
+      - name: Install ${{ matrix.package }} into a clean environment
+        run: |
+          python -m venv "${RUNNER_TEMP}/target"
+          "${RUNNER_TEMP}/target/bin/python" -m pip install --quiet "./${{ matrix.package }}"
+
+      - name: CycloneDX SBOM
+        run: |
+          mkdir -p sbom
+          "${RUNNER_TEMP}/scanners/bin/cyclonedx-py" environment \
+            --pyproject "${{ matrix.package }}/pyproject.toml" \
+            --output-reproducible \
+            --output-format JSON \
+            -o "sbom/${{ matrix.artifact }}.cdx.json" \
+            "${RUNNER_TEMP}/target/bin/python"
+          python -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["bomFormat"], d["specVersion"], len(d.get("components", [])), "components")' \
+            "sbom/${{ matrix.artifact }}.cdx.json"
+
+      - name: pip-audit, with the recorded dispositions
+        run: |
+          python -m pip install --quiet -r tools/release/requirements.txt
+          python tools/release/check-vulnerability-dispositions.py --pip-audit-args >"${RUNNER_TEMP}/pip-audit-args"
+          mapfile -t ignore <"${RUNNER_TEMP}/pip-audit-args"
+          PIPAPI_PYTHON_LOCATION="${RUNNER_TEMP}/target/bin/python" \
+            "${RUNNER_TEMP}/scanners/bin/pip-audit" --progress-spinner off "${ignore[@]}"
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.artifact }}
+          path: sbom/${{ matrix.artifact }}.cdx.json
+          if-no-files-found: error
