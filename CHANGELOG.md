@@ -6,6 +6,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- The backend descriptor schema (`protocol/schemas/backend_descriptor.json`)
+  gains an optional `runner_profiles` list. Each entry names an installed
+  runner profile, the absolute interpreter and environment root its sidecar
+  runs under, optional library directories the launcher adds to the
+  sidecar's search path, the packages that install it, and the compute
+  types it can load, from a closed list with no `auto`. The Rust reader
+  also refuses what the schema cannot state: a repeated profile id, a path
+  with a `.` or `..` segment, and an interpreter or library directory
+  outside the environment root. A platform row's `backend_packages` entry
+  gains optional per-runner-profile package lists, with the same schema and
+  decoder agreement. Both changes are additive inside schema 0.1, and no
+  version constant moves. No shipped descriptor or committed platform row
+  declares a runner profile yet, and admission is unchanged. New fixture
+  tests require the schema and the Rust decoder to agree on the committed
+  descriptors and on every malformed variant. Checking the shipped
+  `python_pytorch` descriptor this way showed that its `$schema` key had
+  never been allowed by its own schema, so the schema now declares it.
+  (V030-E01-F01-T04)
+
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
