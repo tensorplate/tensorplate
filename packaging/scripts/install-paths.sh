@@ -74,6 +74,7 @@ ensure_config_file() {
 ensure_dir "${TP_ETC_DIR}"               "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_STATE_DIR}"             "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_STATE_INNER_DIR}"       "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
+ensure_dir "${TP_IDENTITY_DIR}"          "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_BUNDLE_STAGING_DIR}"    "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_BUNDLE_ACTIVE_DIR}"     "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"
 ensure_dir "${TP_BUNDLE_PREVIOUS_DIR}"   "${TP_DIR_MODE}" "${TP_SYSTEM_GROUP}"

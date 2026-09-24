@@ -14,6 +14,7 @@ set -e
 case "$1" in
     purge)
         rm -rf /var/lib/tensorplate/state \
+               /var/lib/tensorplate/identity \
                /var/lib/tensorplate/bundles \
                /var/lib/tensorplate/worker-configs \
                /var/log/tensorplate \
