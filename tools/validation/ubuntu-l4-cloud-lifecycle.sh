@@ -48,13 +48,17 @@
 #                 an operator edit to /etc/tensorplate/cli.json, the
 #                 candidate's installer upgrades every package in place:
 #                 the services come back on new pids through the installer
-#                 alone, the edit survives, doctor is green, and the
-#                 deployment re-warms from the baseline's durable state
+#                 alone, the edit survives, doctor is green, the
+#                 deployment re-warms from the baseline's durable state,
+#                 the baseline's machine-type record is byte-identical
+#                 after it, and the candidate has bound it to the instance
 #   rollback      the documented procedure -- stop, set state aside as
-#                 state.bak, remove (not purge) every TensorPlate package,
-#                 install the baseline fresh -- returns exactly the
-#                 baseline set, keeps the operator edit and the set-aside
-#                 state, starts with no active deployment, and deploys and
+#                 state.bak, restore the machine-type record from it,
+#                 remove (not purge) every TensorPlate package, install the
+#                 baseline fresh -- returns exactly the baseline set, keeps
+#                 the operator edit and the set-aside state, keeps the
+#                 machine-type record and the instance binding byte for
+#                 byte, starts with no active deployment, and deploys and
 #                 serves again
 # The six stages above are always about a clean candidate install, and a
 # run with a baseline leaves the baseline installed when it finishes.
@@ -151,6 +155,15 @@ OPERATOR_CONFIG_SHA256=""
 # the GCE metadata service answered. The offline stage's identity rests on
 # it; see the offline section below.
 readonly MACHINE_TYPE_RECORD="${STATE_DIR}/machine-type.json"
+# The instance binding the candidate agent writes beside that record: the
+# instance id, machine type and boot the record was taken on. It lives
+# outside the state directory the rollback sets aside, and the baseline
+# agent never reads it.
+readonly INSTANCE_BINDING="/var/lib/tensorplate/identity/instance-binding.json"
+# Their digests, taken where the stage that moves them begins and compared
+# where it ends.
+MACHINE_TYPE_RECORD_SHA256=""
+INSTANCE_BINDING_SHA256=""
 # The offline mechanism, shared with the Jetson harness: the drop-in text,
 # the denied transient unit's properties, the probe and the
 # classification. Named for the mechanism rather than for a row so both
@@ -2057,6 +2070,49 @@ check_state_preserved() {
   return 1
 }
 
+capture_identity_digests() {
+  MACHINE_TYPE_RECORD_SHA256="$(privileged_sha256 "$MACHINE_TYPE_RECORD")" || return
+  if (($# > 0)); then
+    INSTANCE_BINDING_SHA256="$(privileged_sha256 "$INSTANCE_BINDING")" || return
+  fi
+}
+
+# Whether the record still holds the bytes captured before the stage moved
+# anything. Any start in this boot rewrites exactly those bytes, whichever
+# release it is, so a difference means the record was lost, moved or laid
+# out anew -- `when` says where that happened.
+check_record_kept() {
+  local when="$1" now
+  now="$(privileged_sha256 "$MACHINE_TYPE_RECORD")" || return
+  if [[ "$now" != "$MACHINE_TYPE_RECORD_SHA256" ]]; then
+    printf 'the machine-type record %s changed %s: sha256 was %s, now %s\n' \
+      "$MACHINE_TYPE_RECORD" "$when" "$MACHINE_TYPE_RECORD_SHA256" "$now" >&2
+    return 1
+  fi
+}
+
+check_binding_kept() {
+  local now
+  now="$(privileged_sha256 "$INSTANCE_BINDING")" || return
+  if [[ "$now" != "$INSTANCE_BINDING_SHA256" ]]; then
+    printf 'the rollback did not keep the instance binding %s: sha256 was %s, now %s\n' \
+      "$INSTANCE_BINDING" "$INSTANCE_BINDING_SHA256" "$now" >&2
+    return 1
+  fi
+}
+
+# The documented rollback puts the machine-type record back before the
+# baseline starts (docs/install/lifecycle.md). The baseline agent reads it
+# at this path in this layout, and a baseline started with the metadata
+# service denied has nothing else to establish its machine type from. The
+# state directory is recreated the way the installer lays it out; the
+# baseline's installer normalizes it again.
+restore_machine_type_record() {
+  sudo install -d -o tensorplate -g tensorplate -m 0750 "$STATE_DIR" || return
+  sudo cp -p "${STATE_ASIDE_DIR}/machine-type.json" "$MACHINE_TYPE_RECORD" || return
+  check_record_kept "in the restore"
+}
+
 # Doctor on the baseline is filed, not asserted. install.sh already
 # refuses a critical finding, and the baseline's own deploy and inference
 # are what show it is a working place to move from or return to. Asserting
@@ -2092,6 +2148,9 @@ stage_upgrade() {
   step "baseline services ready" await_services_ready || return
   check_installed_versions from baseline || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-baseline.json" || return
+  # The baseline agent recorded the machine type on its online start. The
+  # upgrade must leave that record where the candidate reads it.
+  step "digest the baseline's machine-type record" capture_identity_digests || return
 
   note "deploying on the baseline"
   deploy_bundle "${EVIDENCE_DIR}/upgrade-baseline-deploy.json" || return
@@ -2112,6 +2171,10 @@ stage_upgrade() {
   install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" "$ALLOW_UNSIGNED" || return
   step "services ready after the upgrade" await_services_ready || return
   check_installed_versions to after-upgrade || return
+  step "the machine-type record survives the upgrade byte for byte" \
+    check_record_kept "across the upgrade" || return
+  step "the candidate bound the record to this instance" \
+    sudo test -f "$INSTANCE_BINDING" || return
   after="$(unit_pids)" || return
   if [[ "${after% *}" == "${before% *}" ]]; then
     printf 'agent MainPID %s did not change across the upgrade\n' "${after% *}" >&2
@@ -2131,7 +2194,7 @@ stage_upgrade() {
   # baseline recorded in durable state.
   step "surviving deployment round trip" check_worker_round_trip \
     "${EVIDENCE_DIR}/status-after-upgrade.json" "${EVIDENCE_DIR}/upgrade-result.json" || return
-  pass "upgraded in place with new pids; operator edit kept; doctor green; the baseline's deployment answered on the candidate"
+  pass "upgraded in place with new pids; operator edit kept; doctor green; machine-type record kept and bound; the baseline's deployment answered on the candidate"
 }
 
 # Removal leaves each package holding only its conffiles, never purged:
@@ -2177,7 +2240,10 @@ stage_rollback() {
   # carry across, and before anything moves or removes it -- after the
   # move there is no original left to compare the saved copy with.
   step "digest the durable state before setting it aside" capture_state_manifest || return
+  step "digest the machine-type record and the instance binding" \
+    capture_identity_digests binding || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+  step "restore the machine-type record for the baseline" restore_machine_type_record || return
 
   # Every installed TensorPlate package, not a fixed list: the backend
   # only Recommends the agent, so a list without it leaves it at the
@@ -2200,6 +2266,9 @@ stage_rollback() {
   step "services ready after the rollback" await_services_ready || return
   check_installed_versions from after-rollback || return
   check_operator_config_kept "the rollback" || return
+  step "the baseline kept the restored machine-type record" \
+    check_record_kept "when the baseline started" || return
+  step "the rollback left the instance binding alone" check_binding_kept || return
   step "the set-aside state is preserved, file by file" check_state_preserved || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
 
@@ -2220,7 +2289,7 @@ PY
 
   note "deploying on the rolled-back version"
   deploy_bundle "${EVIDENCE_DIR}/rollback-result.json" || return
-  pass "rolled back to the baseline; operator edit kept; state set aside unchanged and not loaded; deploy and inference answered"
+  pass "rolled back to the baseline; operator edit kept; state set aside unchanged and not loaded; machine-type record restored and instance binding kept; deploy and inference answered"
 }
 
 # --- run ---------------------------------------------------------------
@@ -2265,11 +2334,10 @@ main() {
   lifecycle_stage restart stage_restart
   lifecycle_stage crash-loop stage_crash_loop
   # Before upgrade, and it has to be: upgrade's clean baseline install
-  # deletes /var/lib/tensorplate and with it the boot-bound machine-type
-  # record, and the baseline release never wrote one. Offline detection
-  # would then have nothing to resolve the row from -- not because the
-  # candidate cannot do it, but because the stage ordering took its
-  # evidence away.
+  # deletes /var/lib/tensorplate and with it the candidate's boot-bound
+  # machine-type record. Offline detection after it would rest on the
+  # record the baseline wrote, which is evidence about the baseline, not
+  # about the candidate this stage certifies.
   lifecycle_stage offline stage_offline
 
   # After crash-loop, so every stage above is about a clean candidate

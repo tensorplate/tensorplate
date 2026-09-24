@@ -82,6 +82,13 @@ sudo systemctl stop tensorplate-agent tensorplate-observability
 # state.bak already exists from an earlier rollback, move that elsewhere
 # first: mv would otherwise put state inside it.
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
+# On a Compute Engine instance, put the machine-type record back: the older
+# agent reads it at this path, and without it an older agent started with
+# the metadata service unreachable cannot establish its machine type.
+if sudo test -f /var/lib/tensorplate/state.bak/machine-type.json; then
+  sudo install -d -o tensorplate -g tensorplate -m 0750 /var/lib/tensorplate/state
+  sudo cp -p /var/lib/tensorplate/state.bak/machine-type.json /var/lib/tensorplate/state/machine-type.json
+fi
 # `remove`, not `purge`: this keeps /etc/tensorplate and /var/lib/tensorplate.
 sudo apt remove -y $(dpkg-query -W -f='${binary:Package} ${db:Status-Status}\n' 'tensorplate*' |
   awk '$1 != "tensorplate-apt-source" && $2 != "not-installed" && $2 != "config-files" {print $1}')
@@ -112,7 +119,10 @@ Leave out `tensorplate-backend-python-pytorch` if it was not installed.
 
 The older agent will report "no active deployment" until you decide whether
 to restore `state.bak` (manually verify the schema_version of each journal
-first) or to redeploy from a known-good bundle.
+first) or to redeploy from a known-good bundle. The machine-type record is
+the one file it gets back straight away, in the layout it reads.
+`/var/lib/tensorplate/identity/` is not set aside and not needed: releases
+up to 0.2.1 do not read it, and a later upgrade finds it where it was.
 
 `<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
 `test/packaging/apt-lifecycle-e2e.sh` asserts with `dpkg` that the downgrade

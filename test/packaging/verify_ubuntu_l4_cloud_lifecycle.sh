@@ -346,6 +346,9 @@ RUNTIME = (
     "tensorplate-observability", "tensorplate-cli", "tensorplate-backend-python-pytorch",
 )
 PACKAGED_CLI_CONFIG = '{"fixture": "packaged cli config"}\n'
+# What the sudo stub's agent starts write too, byte for byte.
+FAKE_MACHINE_TYPE_RECORD = '{"schema_version":2,"machine_type":"g2-standard-8"}\n'
+FAKE_INSTANCE_BINDING = '{"schema_version":1,"fixture":"instance binding"}\n'
 
 # Debian version ordering as dpkg implements it (lib/dpkg/version.c and
 # parsehelp.c), so the harness is ordered here the way a host orders it:
@@ -560,6 +563,27 @@ def install(db, directory):
         '{"fixture": "observability snapshot", "schema_version": "0.1"}\n')
     if mode == "upgrade-loses-deployment" and phase == "upgraded":
         shutil.rmtree(varlib / "state")
+        (varlib / "state").mkdir()
+
+    # The agent install.sh brings up is online, so it records the machine
+    # type: every release this harness moves between does, in the same
+    # bytes on the same boot, exactly as the sudo stub's agent starts do.
+    # Only the candidate's installer lays out the identity directory, and
+    # only its agent binds the record to the instance there; the baseline
+    # never touches it. The modes below break each of those in turn.
+    record = varlib / "state" / "machine-type.json"
+    if mode != "offline-no-machine-type-record":
+        record.write_text(FAKE_MACHINE_TYPE_RECORD)
+    if (mode == "upgrade-rewrites-record" and phase == "upgraded") \
+            or (mode == "rollback-baseline-rewrites-record" and phase == "rolled-back"):
+        record.write_text('{"schema_version":3,"machine_type":"g2-standard-8"}\n')
+    binding = varlib / "identity" / "instance-binding.json"
+    if phase in ("candidate", "upgraded"):
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        if not (mode == "upgrade-no-binding" and phase == "upgraded"):
+            binding.write_text(FAKE_INSTANCE_BINDING)
+    if mode == "rollback-touches-binding" and phase == "rolled-back":
+        binding.write_text('{"fixture": "rewritten by the baseline"}\n')
     # A real run has deleted /var/lib/tensorplate by now, so this plants
     # the directory where only the rollback's own refusal can catch it.
     if mode == "rollback-state-aside-exists" and phase == "upgraded":
@@ -587,7 +611,14 @@ def install(db, directory):
     # corrupt primary recoverable.
     aside = varlib / "state.bak"
     if phase == "rolled-back":
-        if mode == "rollback-empties-backup":
+        # Gone outright by the time it is read back. Destroyed here rather
+        # than in the move, because the rollback restores the machine-type
+        # record out of the set-aside copy first; a move that lost it would
+        # stop the stage at that restore instead of at the read-back this
+        # mode is about.
+        if mode == "rollback-state-not-preserved":
+            shutil.rmtree(aside)
+        elif mode == "rollback-empties-backup":
             (aside / "state.json").write_text("")
         # A genuine prefix of what the agent wrote, and -- below --
         # different bytes at exactly the same length: neither a size nor
@@ -1562,6 +1593,14 @@ esac
 # /var/lib/tensorplate straight after, so only the rollback's stop shows.
 case "$*" in
   *"systemctl stop tensorplate-agent"*)
+    # The BSD-format sha256sum starts with the rollback's stop, so the
+    # upgrade's own read of the machine-type record still passes and the
+    # first read this mode breaks is the manifest's. A stop from
+    # clear_install is followed by the wipe of /var/lib/tensorplate, which
+    # takes the marker with it; only the rollback's stop leaves one.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ] && [ -d "${TP_FAKE_VARLIB}" ]; then
+      : >"${TP_FAKE_VARLIB}/.fixture-services-stopped"
+    fi
     if [ "${TP_FAKE_MODE:-ok}" = rollback-state-file-missing ]; then
       rm -f "${TP_FAKE_VARLIB}/state/state.json"
     fi
@@ -1625,6 +1664,26 @@ esac
 case "$*" in
   "test -f "*"/machine-type.json")
     [ -f "${TP_FAKE_VARLIB}/state/machine-type.json" ]
+    exit
+    ;;
+  "test -f /var/lib/tensorplate/identity/instance-binding.json")
+    [ -f "${TP_FAKE_VARLIB}/identity/instance-binding.json" ]
+    exit
+    ;;
+  # The rollback's restore, done for real in the fixture: the state
+  # directory recreated, and the record copied back from the set-aside
+  # state, so the digest the harness takes next reads what was copied.
+  "install -d -o tensorplate -g tensorplate -m 0750 /var/lib/tensorplate/state")
+    mkdir -p "${TP_FAKE_VARLIB}/state"
+    exit
+    ;;
+  "cp -p /var/lib/tensorplate/state.bak/machine-type.json /var/lib/tensorplate/state/machine-type.json")
+    # A copy that lands different bytes under the right name.
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-restore-garbles-record ]; then
+      printf '{"schema_version":2}\n' >"${TP_FAKE_VARLIB}/state/machine-type.json"
+      exit
+    fi
+    cp -p "${TP_FAKE_VARLIB}/state.bak/machine-type.json" "${TP_FAKE_VARLIB}/state/machine-type.json"
     exit
     ;;
   # The deploy-smoke bundle staging, done for real in the fixture's
@@ -1749,7 +1808,8 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" |
     # A sha256sum that prints BSD's format instead of GNU's: every file
     # then reads as the same leading field, so a digest taken from it
     # would make any two files compare equal.
-    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ]; then
+    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ] \
+       && [ -f "${TP_FAKE_VARLIB}/.fixture-services-stopped" ]; then
       printf 'SHA256 (%s) = %s\n' "$2" "$digest"
       exit 0
     fi
@@ -1766,7 +1826,6 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" |
     fi
     case "${TP_FAKE_MODE:-ok}" in
       rollback-keeps-state) cp -R "$source_dir" "$target_dir" ;;
-      rollback-state-not-preserved) rm -rf "$source_dir" ;;
       *) mv "$source_dir" "$target_dir" ;;
     esac
     exit
@@ -3691,6 +3750,9 @@ remove_line="$(sudo_line 'apt-get remove' || true)"
 aside_state_fixture="{\"active\":\"${deployment_id}\"}"
 aside_agent_bak_fixture="$aside_state_fixture"
 aside_snapshot_fixture='{"fixture": "observability snapshot", "schema_version": "0.1"}'
+# And the machine-type record the candidate's agent wrote, which the
+# rollback also copies back out.
+aside_record_fixture='{"schema_version":2,"machine_type":"g2-standard-8"}'
 check "  the candidate is purged before the baseline is installed" yes \
   "$(purge="$(last_sudo_line 'apt-get purge')"
      [[ -n "$purge" && -n "$first_baseline_install" && "$purge" -lt "$first_baseline_install" ]] && echo yes || echo no)"
@@ -3700,6 +3762,20 @@ check "  and removes the backend with the rest of the set" yes \
   "$(sed -n "${remove_line:-0}p" "${appliance}/sudo.log" | tr ' ' '\n' | grep -qx 'tensorplate-backend-python-pytorch' && echo yes || echo no)"
 check "  and never purges after the last candidate install" no \
   "$(sudo_after "$last_candidate_install" 'apt-get purge')"
+# The documented rollback puts the machine-type record back after setting
+# state aside and before the baseline's installer starts its agent.
+restore_record_line="$(sudo_line 'cp -p /var/lib/tensorplate/state.bak/machine-type.json' || true)"
+check "  the rollback restores the machine-type record after the set-aside and before the baseline install" yes \
+  "$(mv_line="$(sudo_line 'mv -T /var/lib/tensorplate/state ' || true)"
+     [[ -n "$restore_record_line" && -n "$mv_line" && -n "$last_baseline_install" &&
+        "$restore_record_line" -gt "$mv_line" && "$restore_record_line" -lt "$last_baseline_install" ]] &&
+       echo yes || echo no)"
+check "  and the restored record is the one set aside" yes \
+  "$(cmp -s "${appliance}/varlib/state/machine-type.json" "${appliance}/varlib/state.bak/machine-type.json" &&
+     echo yes || echo no)"
+check "  and the candidate's instance binding outlives the rollback" yes \
+  "$(cmp -s "${appliance}/varlib/identity/instance-binding.json" <(printf '{"schema_version":1,"fixture":"instance binding"}\n') &&
+     echo yes || echo no)"
 # Every privileged systemctl call once the baseline is installed, as a
 # whole: only the rollback's stop may be there. Matching verbs instead
 # would let restart, try-restart, `--now enable` or a systemctl inside
@@ -3725,22 +3801,26 @@ check "  the candidate's state is set aside, not deleted" yes \
 # to, and the observability unit's snapshot all live there, and a check
 # on one pathname would leave the other two unguarded.
 check "  the set-aside state is the whole directory, not one file" \
-  "observability-snapshot.json state.json state.json.bak" \
+  "machine-type.json observability-snapshot.json state.json state.json.bak" \
   "$(python3 -c 'import os, sys; print(" ".join(sorted(os.listdir(sys.argv[1]))))' \
     "${appliance}/varlib/state.bak")"
 check "  and every file that was set aside survived with its bytes" \
-  "${aside_state_fixture}|${aside_agent_bak_fixture}|${aside_snapshot_fixture}" \
+  "${aside_state_fixture}|${aside_agent_bak_fixture}|${aside_snapshot_fixture}|${aside_record_fixture}" \
   "$(cd "${appliance}/varlib/state.bak" 2>/dev/null &&
-     printf '%s|%s|%s' "$(cat state.json 2>/dev/null || echo missing)" \
+     printf '%s|%s|%s|%s' "$(cat state.json 2>/dev/null || echo missing)" \
        "$(cat state.json.bak 2>/dev/null || echo missing)" \
-       "$(cat observability-snapshot.json 2>/dev/null || echo missing)")"
+       "$(cat observability-snapshot.json 2>/dev/null || echo missing)" \
+       "$(cat machine-type.json 2>/dev/null || echo missing)")"
 # The digests the preservation check compares against are only worth
 # anything if they were taken from the stopped agent's own copies, before
 # the move left no original to compare with. Consecutive reads of the
 # same directory collapse to one token, so this says what happened in
-# what order without pinning how many files the directory holds.
+# what order without pinning how many files the directory holds. The
+# machine-type record is read on its own at each end: after the upgrade,
+# to show it survived, and after the move, to show the restored copy is
+# the one set aside.
 check "  listed and digested with the services stopped and before the move" \
-  "systemctl-stop ls-state sha256sum-state mv" \
+  "sha256sum-state systemctl-stop ls-state sha256sum-state mv sha256sum-state" \
   "$(if [[ -z "$last_candidate_install" ]]; then echo missing; else
        tail -n "+$((last_candidate_install + 1))" "${appliance}/sudo.log" |
          sed -n -e 's/^systemctl stop tensorplate-agent tensorplate-observability$/systemctl-stop/p' \
@@ -3856,6 +3936,8 @@ for case in \
   "upgrade-wrong-row::platform_row is warning" \
   "upgrade-doctor-recorded::host_os does not show live detection from GCE metadata" \
   "upgrade-loses-deployment::worker round-trip checks failed" \
+  "upgrade-rewrites-record::the machine-type record /var/lib/tensorplate/state/machine-type.json changed across the upgrade: sha256 was" \
+  "upgrade-no-binding::step failed (exit 1): the candidate bound the record to this instance" \
   "ok:set-rc1/install.sh:step failed (exit 9): install.sh" \
   "ok:>>:step failed (exit 9): operator edit"; do
   mode="${case%%:*}"
@@ -3913,6 +3995,10 @@ for case in \
   "rollback-keeps-previous::the rolled-back agent reports previous_active" \
   "rollback-agent-unavailable::the agent is not available after the rollback" \
   "rollback-infer-garbled::worker round-trip checks failed" \
+  "rollback-restore-garbles-record::the machine-type record /var/lib/tensorplate/state/machine-type.json changed in the restore: sha256 was" \
+  "rollback-baseline-rewrites-record::the machine-type record /var/lib/tensorplate/state/machine-type.json changed when the baseline started: sha256 was" \
+  "rollback-touches-binding::the rollback did not keep the instance binding /var/lib/tensorplate/identity/instance-binding.json: sha256 was" \
+  "ok:cp -p /var/lib/tensorplate/state.bak/machine-type.json:step failed (exit 9): restore the machine-type record for the baseline" \
   "ok:systemctl stop:step failed (exit 9): stop the services" \
   "ok:sha256sum /var/lib/tensorplate/state/state.json:step failed (exit 9): digest the durable state before setting it aside" \
   "ok:mv -T:step failed (exit 9): set durable state aside" \
@@ -4099,10 +4185,10 @@ for case in \
       # credit the rollback with preserving state it never read. The file
       # named is the first entry of the state directory in the order the
       # manifest reads it, C-sorted, not whichever name the harness
-      # happens to care about.
+      # happens to care about: the machine-type record, which sorts first.
       check "  and names the file it could not digest" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
-           'could not compute a sha256 of /var/lib/tensorplate/state/observability-snapshot.json')"
+           'could not compute a sha256 of /var/lib/tensorplate/state/machine-type.json')"
       check "  with nothing set aside or removed" "no no" \
         "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
            printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
