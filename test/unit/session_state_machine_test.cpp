@@ -64,8 +64,8 @@ void expect_refused(LogicalSessionMachine& machine, Ev event) {
   const LogicalSessionMachine before = machine;
   auto result = machine.apply(event);
   ASSERT_FALSE(result.has_value()) << "accepted " << to_string(event);
-  EXPECT_EQ(result.error().code, fx::kRefusalCode);
-  EXPECT_EQ(result.error().context, std::string{fx::kRefusalReason});
+  EXPECT_EQ(result.error().code, fx::refusal(event).code);
+  EXPECT_EQ(result.error().context, std::string{fx::refusal(event).reason});
   EXPECT_EQ(machine, before);
 }
 
@@ -148,8 +148,8 @@ TEST(LogicalSessionMachine, EveryRefusedCellIsTypedAndInert) {
       const LogicalSessionMachine before = machine;
       auto result = machine.apply(event);
       ASSERT_FALSE(result.has_value());
-      EXPECT_EQ(result.error().code, fx::kRefusalCode);
-      EXPECT_EQ(result.error().context, std::string{fx::kRefusalReason});
+      EXPECT_EQ(result.error().code, fx::refusal(event).code);
+      EXPECT_EQ(result.error().context, std::string{fx::refusal(event).reason});
       EXPECT_NE(result.error().message.find(std::string{to_string(spec.state)}), std::string::npos);
       EXPECT_NE(result.error().message.find(std::string{to_string(event)}), std::string::npos);
       EXPECT_EQ(machine, before);
@@ -245,13 +245,20 @@ TEST(LogicalSessionMachine, DocumentedTableMatchesTheFixture) {
       rows.push_back(cells);
     }
   }
-  // The header row plus one row per configuration; the separator row is
-  // skipped below.
+  // One header row (first cell empty) naming the event columns, a separator
+  // row, then one row per configuration.
+  std::vector<std::vector<std::string>> headers;
   std::vector<std::vector<std::string>> body;
   for (const auto& cells : rows) {
-    if (cells.front() != "" && cells.front() != "---") {
+    if (cells.front().empty()) {
+      headers.push_back(cells);
+    } else if (cells.front() != "---") {
       body.push_back(cells);
     }
+  }
+  ASSERT_EQ(headers.size(), 1U);
+  for (std::size_t j = 0; j < fx::kEventCount; ++j) {
+    EXPECT_EQ(headers.front().at(j + 1), to_string(fx::kEvents.at(j))) << "column " << j + 1;
   }
   ASSERT_EQ(body.size(), fx::kConfigCount);
   for (std::size_t i = 0; i < fx::kConfigCount; ++i) {
@@ -312,10 +319,26 @@ TEST(LogicalSessionMachine, ReachableSpaceIsTheFixtureAndKeepsInvariants) {
     EXPECT_TRUE(is_terminal(ending.state()));
     EXPECT_FALSE(ending.holds_reservation());
 
+    // A client Cancel after Ready, while the outcome is open, is acknowledged.
+    const std::uint32_t outcome_fixed = bit(Fx::SuppressOutput) | bit(Fx::EmitTerminal);
+    if ((node.seen & bit(Fx::EmitReady)) != 0U && (node.seen & outcome_fixed) == 0U) {
+      LogicalSessionMachine cancelled = node.machine;
+      auto result = cancelled.apply(Ev::Cancel);
+      ASSERT_TRUE(result.has_value());
+      EXPECT_TRUE(result.value().contains(Fx::EmitCancelAccepted)) << "cancel not acknowledged";
+    }
+
     for (const Ev event : fx::kEvents) {
       SCOPED_TRACE(std::string{fx::spec(*config).name} + " + " + std::string{to_string(event)});
       LogicalSessionMachine next = node.machine;
       auto result = next.apply(event);
+      // While draining, the client's input, Finalize, half-close and probes,
+      // and a further drain, race the drain and must never be refused.
+      if (node.machine.state() == St::Draining &&
+          (event == Ev::Data || event == Ev::Finalize || event == Ev::HalfClose ||
+           event == Ev::Ping || event == Ev::StatusRequest || event == Ev::Drain)) {
+        EXPECT_TRUE(result.has_value()) << "a racing event refused while draining";
+      }
       if (!result.has_value()) {
         EXPECT_EQ(next, node.machine);
         continue;
@@ -331,12 +354,16 @@ TEST(LogicalSessionMachine, ReachableSpaceIsTheFixtureAndKeepsInvariants) {
       }
       if ((effects & bit(Fx::ReleaseSlot)) != 0U) {
         EXPECT_NE(node.seen & bit(Fx::RequestCleanup), 0U) << "release before cleanup";
+        EXPECT_EQ(event, Ev::ReleaseAcknowledged) << "release before physical release";
+      }
+      if ((node.seen & bit(Fx::StartDrain)) != 0U) {
+        EXPECT_EQ(effects & bit(Fx::AcceptInput), 0U) << "input accepted after a drain began";
       }
       if ((effects & kAfterReadyOnly) != 0U) {
         EXPECT_NE(node.seen & bit(Fx::EmitReady), 0U) << "client output before Ready";
       }
       if (was_terminal) {
-        EXPECT_TRUE(is_terminal(next.state())) << "left a terminal state";
+        EXPECT_EQ(next.state(), node.machine.state()) << "a terminal outcome changed";
       }
       queue.push_back({next, node.seen | effects});
     }
@@ -562,10 +589,15 @@ TEST(LogicalSessionNames, EventAndEffectNamesAreStable) {
       EXPECT_TRUE(std::regex_match(std::string{name}, snake)) << name;
     }
   }
-  EXPECT_EQ(to_string(Ev::HalfClose), "half_close");
-  EXPECT_EQ(to_string(Ev::ReleaseAcknowledged), "release_acknowledged");
-  EXPECT_EQ(to_string(Fx::EmitCancelAccepted), "emit_cancel_accepted");
-  EXPECT_EQ(to_string(Fx::EmitTerminal), "emit_terminal");
+  EXPECT_EQ(events,
+            (std::vector<std::string_view>{
+                "open", "data", "finalize", "cancel", "half_close", "ping", "status_request",
+                "admitted", "automatic_endpoint", "finalize_completed", "drain_completed", "drain",
+                "abort", "fail", "backend_reset", "release_acknowledged"}));
+  EXPECT_EQ(effects, (std::vector<std::string_view>{"suppress_output", "emit_cancel_accepted",
+                                                    "request_cleanup", "emit_ready", "accept_input",
+                                                    "emit_reply", "start_finalize", "start_drain",
+                                                    "release_slot", "emit_terminal"}));
   EXPECT_EQ(to_string(static_cast<Ev>(200)), "unknown");
   EXPECT_EQ(to_string(static_cast<Fx>(200)), "unknown");
 }

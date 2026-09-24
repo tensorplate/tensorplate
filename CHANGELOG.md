@@ -379,8 +379,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   a pure state machine with no timers, queues, threads or I/O, and the
   bounded `LogicalSessionStatus` a session reports. It binds a session to
   its deployment generation at open, refuses a stale or absent generation,
-  and refuses every event its state does not permit with `not_ready` and a
-  stable reason, changing nothing. It writes exactly one terminal outcome,
+  and refuses every event its state does not permit, changing nothing:
+  `not_ready` for a client's protocol violation, `internal` for an owner
+  report its state cannot receive. It writes exactly one terminal outcome,
   keeps a session's reservation until the backend acknowledges physical
   release, and acknowledges a client Cancel separately from cleanup. The
   complete transition table is a test fixture

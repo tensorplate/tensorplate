@@ -81,9 +81,9 @@ enum class LogicalSessionState : std::uint8_t {
 }
 
 /// Something that happened to a logical session. Open through StatusRequest
-/// arrive on the client stream; the rest come from the session's owner:
-/// admission, the processing pipeline and backend, timers, pressure policies
-/// and worker control.
+/// arrive on the client stream (client events); the rest are reports from the
+/// session's owner: admission, the processing pipeline and backend, timers,
+/// pressure policies and worker control.
 enum class LogicalSessionEvent : std::uint8_t {
   /// (`open`) An Open on a stream whose session already exists. Always refused.
   Open = 0,
@@ -107,6 +107,8 @@ enum class LogicalSessionEvent : std::uint8_t {
   /// reported as this event.
   AutomaticEndpoint = 8,
   /// (`finalize_completed`) Every finalization the session owed has completed.
+  /// Applied before the message that completes the client's Finalize is
+  /// published, so the client's next input finds the session active.
   FinalizeCompleted = 9,
   /// (`drain_completed`) Every item accepted before the drain began has
   /// completed and its output was delivered.
@@ -145,9 +147,11 @@ enum class LogicalSessionEffect : std::uint8_t {
   /// (`suppress_output`) Stop publishing task output and discard unsent task
   /// output now. Lifecycle messages are unaffected. At most once per session.
   SuppressOutput = 0,
-  /// (`emit_cancel_accepted`) Send CancelAccepted. Only after Ready and at
-  /// most once per session; a Cancel that arrives before Ready ends the
-  /// session without an acknowledgement.
+  /// (`emit_cancel_accepted`) Send CancelAccepted. Only after Ready, while
+  /// the session's outcome is still open, and at most once per session. A
+  /// Cancel before Ready ends the session without an acknowledgement; a
+  /// Cancel after a worker abort or a failure is answered by the terminal
+  /// outcome alone.
   EmitCancelAccepted = 1,
   /// (`request_cleanup`) Ask the backend to release everything it holds for
   /// the session, cancelling unfinished work, and apply ReleaseAcknowledged
@@ -216,7 +220,8 @@ class LogicalSessionEffects {
  private:
   static constexpr std::uint32_t kBitCount = 32;
   static constexpr std::uint32_t bit(LogicalSessionEffect effect) noexcept {
-    return std::uint32_t{1} << static_cast<std::uint32_t>(effect);
+    const auto value = static_cast<std::uint32_t>(effect);
+    return value < kBitCount ? std::uint32_t{1} << value : 0U;
   }
   std::uint32_t bits_ = 0;
 };
@@ -248,19 +253,23 @@ class LogicalSessionMachine {
   ///   - Error::Code::NotReady with context "stale_generation" if
   ///     requested_generation differs from serving_generation, zero (an absent
   ///     field) included.
-  ///   After an error no session exists: nothing is reserved and no Ready or
-  ///   terminal effect is owed; the caller ends the stream with the error.
+  ///   After an error no session exists and no Ready or terminal effect is
+  ///   owed: the owner returns the slot it took before calling open() and
+  ///   ends the stream with the error.
   [[nodiscard]] static Result<LogicalSessionMachine> open(std::uint64_t serving_generation,
                                                           std::uint64_t requested_generation);
 
   /// Applies one event.
   ///
   /// @return the effects to carry out, possibly none (publish nothing and
-  ///   release any payload the event carried), or Error::Code::NotReady with
-  ///   context "illegal_transition" when the current state does not permit
-  ///   the event. A refused event changes nothing. The owner then ends the
-  ///   session by applying Fail with the refusal as its cause; Fail is ignored
-  ///   once the outcome is fixed, so doing this is always safe.
+  ///   release any payload the event carried), or a refusal when the current
+  ///   state does not permit the event: Error::Code::NotReady with context
+  ///   "illegal_transition" for a client event (a protocol violation), and
+  ///   Error::Code::Internal with context "unexpected_report" for an owner
+  ///   report (a defect in the owner). A refused event changes nothing. The
+  ///   owner then ends the session by applying Fail with the refusal as its
+  ///   cause; Fail is ignored once the outcome is fixed, so doing this is
+  ///   always safe.
   [[nodiscard]] Result<LogicalSessionEffects> apply(LogicalSessionEvent event);
 
   /// Checks the generation carried by a later client message or backend

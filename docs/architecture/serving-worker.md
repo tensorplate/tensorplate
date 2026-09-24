@@ -245,8 +245,8 @@ work in progress, DR draining with release requested, CR
 failed and released. Effects: Rdy `emit_ready`, In `accept_input`, Rep
 `emit_reply`, Fin `start_finalize`, Drn `start_drain`, Cln
 `request_cleanup`, Sup `suppress_output`, Ack `emit_cancel_accepted`,
-Rel `release_slot`, Term `emit_terminal`. `=` stays with no effect;
-`X` refuses.
+Rel `release_slot`, Term `emit_terminal`. `=` stays in the same
+configuration, followed by its effects if any; `X` refuses.
 
 | | open | data | finalize | cancel | half_close | ping | status_request | admitted | automatic_endpoint | finalize_completed | drain_completed | drain | abort | fail | backend_reset | release_acknowledged |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -263,28 +263,34 @@ Rel `release_slot`, Term `emit_terminal`. `=` stays with no effect;
 
 Rules the table encodes:
 
-- **Refusals.** A refused event returns `not_ready` with context
-  `illegal_transition` and changes nothing. A client message the state
-  does not permit is a protocol violation, and so is a client request
-  after the outcome is fixed. An owner report its producer cannot emit
-  in that state is a defect. The owner answers a refusal by applying
-  `fail` with the refusal as its cause; `fail` is ignored once
-  cancellation or a terminal outcome has fixed the result, so doing so
-  is always safe.
+- **Refusals.** A refused event changes nothing. A client message the
+  state does not permit, including a client request after the outcome is
+  fixed, is a protocol violation: `not_ready` with context
+  `illegal_transition`. An owner report that its producer cannot emit in
+  that state is a defect in the owner: `internal` with context
+  `unexpected_report`. The owner answers a refusal by applying `fail`
+  with the refusal as its cause; `fail` is ignored once cancellation or a
+  terminal outcome has fixed the result, so doing so is always safe.
 - **Accepted without effect.** Events that can legitimately arrive late
-  or race a state change: a repeated cancel, half-close, drain, abort or
-  fail; input or a Finalize racing a drain; late pipeline reports after
-  cancellation; a duplicate release acknowledgement.
+  or race a state change, for example: a repeated cancel, half-close,
+  drain, abort or fail, or a Finalize repeated while finalizing; input or
+  a Finalize racing a drain; late pipeline reports after cancellation or
+  failure; a duplicate release acknowledgement.
+- **Finalization.** The owner applies `finalize_completed` before it
+  publishes the message that completes the client's Finalize, so the
+  client's next input finds the session active.
 - **Exactly one terminal outcome.** `emit_terminal` is produced once per
   session. `closed` writes it after physical release; `failed` writes it
   on entry and keeps its reservation until release is acknowledged.
   Nothing leaves `closed` or `failed`, and no task output follows
   `suppress_output`.
 - **Cancellation is not cleanup.** `emit_cancel_accepted` answers a
-  client Cancel after Ready at once; the reservation is returned
-  (`release_slot`) only after the backend acknowledges physical release.
-  A Cancel before Ready ends the session without an acknowledgement. A
-  backend reset while cancellation waits for release fails the session.
+  client Cancel after Ready, while the outcome is still open, at once;
+  the reservation is returned (`release_slot`) only after the backend
+  acknowledges physical release. A Cancel before Ready ends the session
+  without an acknowledgement, and a Cancel after a worker abort or a
+  failure is answered by the terminal outcome alone. A backend reset
+  while cancellation waits for release fails the session.
 - **Generation binding.** `LogicalSessionMachine::open` binds a session
   to the worker's generation and refuses a mismatched or absent
   generation (`not_ready`, `stale_generation`); a worker without a
@@ -305,6 +311,7 @@ How sessions end, and the code their terminal outcome carries:
 | Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |
 | Stale generation in a later message | `fail` | `failed` | `not_ready` (`stale_generation`) |
 | Protocol violation | `fail` | `failed` | `not_ready` (`illegal_transition`) |
+| Owner report the state does not permit (a defect) | `fail` | `failed` | `internal` (`unexpected_report`) |
 
 The reason strings are the failure reasons in
 [`failure-reasons.md`](../observability/failure-reasons.md) where one

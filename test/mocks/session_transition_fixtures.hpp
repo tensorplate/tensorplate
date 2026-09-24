@@ -3,8 +3,10 @@
 // Normative transition table of tensorplate::serving::LogicalSessionMachine.
 //
 // Every (configuration, event) cell is spelled out: the configuration and the
-// exact effect set an accepted event must produce, or X for a refusal
-// (Error::Code::NotReady, context "illegal_transition", machine unchanged).
+// exact effect set an accepted event must produce, or X for a refusal that
+// leaves the machine unchanged. A refused client event is a protocol
+// violation (Error::Code::NotReady, context "illegal_transition"); a refused
+// owner report is a defect (Error::Code::Internal, "unexpected_report").
 // A configuration is a public state refined by what changes the events it
 // accepts; each is reached by replaying its path on
 // LogicalSessionMachine::open(kGeneration, kGeneration).
@@ -37,8 +39,6 @@ using Fx = serving::LogicalSessionEffect;
 
 inline constexpr std::uint64_t kGeneration = 7;
 inline constexpr std::uint64_t kMaxGeneration = std::numeric_limits<std::uint64_t>::max();
-inline constexpr Error::Code kRefusalCode = Error::Code::NotReady;
-inline constexpr std::string_view kRefusalReason = "illegal_transition";
 inline constexpr std::string_view kStaleReason = "stale_generation";
 inline constexpr std::string_view kInvalidGenerationReason = "invalid_generation";
 inline constexpr std::size_t kConfigCount = 10;
@@ -118,6 +118,28 @@ inline const std::array<ConfigSpec, kConfigCount> kConfigs{{
      false,
      true},
 }};
+
+/// The error a refused event carries, by who sends the event.
+struct Refusal {
+  Error::Code code;
+  std::string_view reason;
+};
+inline constexpr Refusal kClientRefusal{Error::Code::NotReady, "illegal_transition"};
+inline constexpr Refusal kOwnerRefusal{Error::Code::Internal, "unexpected_report"};
+
+/// Events that arrive on the client stream; every other event is an owner
+/// report.
+inline constexpr std::array<Ev, 7> kClientEvents{
+    Ev::Open, Ev::Data, Ev::Finalize, Ev::Cancel, Ev::HalfClose, Ev::Ping, Ev::StatusRequest};
+
+constexpr Refusal refusal(Ev event) noexcept {
+  for (const Ev client : kClientEvents) {
+    if (client == event) {
+      return kClientRefusal;
+    }
+  }
+  return kOwnerRefusal;
+}
 
 /// Column order of kTable.
 inline constexpr std::array<Ev, kEventCount> kEvents{Ev::Open,

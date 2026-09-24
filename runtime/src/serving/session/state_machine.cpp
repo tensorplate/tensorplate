@@ -107,7 +107,35 @@ constexpr std::string_view name_of(LogicalSessionEffect effect) noexcept {
   return {};
 }
 
+/// Client events arrive on the stream, so refusing one is the client's
+/// protocol violation. Every other event is the owner's report, so refusing
+/// one is a defect in the owner.
+constexpr bool is_client_event(LogicalSessionEvent event) noexcept {
+  switch (event) {
+    case LogicalSessionEvent::Open:
+    case LogicalSessionEvent::Data:
+    case LogicalSessionEvent::Finalize:
+    case LogicalSessionEvent::Cancel:
+    case LogicalSessionEvent::HalfClose:
+    case LogicalSessionEvent::Ping:
+    case LogicalSessionEvent::StatusRequest:
+      return true;
+    case LogicalSessionEvent::Admitted:
+    case LogicalSessionEvent::AutomaticEndpoint:
+    case LogicalSessionEvent::FinalizeCompleted:
+    case LogicalSessionEvent::DrainCompleted:
+    case LogicalSessionEvent::Drain:
+    case LogicalSessionEvent::Abort:
+    case LogicalSessionEvent::Fail:
+    case LogicalSessionEvent::BackendReset:
+    case LogicalSessionEvent::ReleaseAcknowledged:
+      return false;
+  }
+  return false;
+}
+
 constexpr std::string_view kIllegalTransition = "illegal_transition";
+constexpr std::string_view kUnexpectedReport = "unexpected_report";
 constexpr std::string_view kStaleGeneration = "stale_generation";
 constexpr std::string_view kInvalidGeneration = "invalid_generation";
 constexpr std::string_view kUsageExceedsLimit = "usage_exceeds_limit";
@@ -370,10 +398,16 @@ Result<LogicalSessionMachine> LogicalSessionMachine::open(std::uint64_t serving_
 Result<LogicalSessionEffects> LogicalSessionMachine::apply(LogicalSessionEvent event) {
   const Rules::Next step = Rules::next(phase_, event);
   if (!step.has_value()) {
-    return unexpected(Error::make(Error::Code::NotReady,
-                                  "logical session in state '" + std::string{to_string(state())} +
-                                      "' refuses event '" + std::string{to_string(event)} + "'",
-                                  std::string{kIllegalTransition}));
+    const std::string where = "logical session in state '" + std::string{to_string(state())} + "'";
+    if (is_client_event(event)) {
+      return unexpected(Error::make(
+          Error::Code::NotReady, where + " refuses event '" + std::string{to_string(event)} + "'",
+          std::string{kIllegalTransition}));
+    }
+    return unexpected(
+        Error::make(Error::Code::Internal,
+                    where + " did not expect report '" + std::string{to_string(event)} + "'",
+                    std::string{kUnexpectedReport}));
   }
   phase_ = step->to;
   return step->effects;
