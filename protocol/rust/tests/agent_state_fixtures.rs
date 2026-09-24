@@ -290,8 +290,9 @@ fn member_and_retained_generation_properties_match_the_mirror() {
     );
 }
 
-/// Every [`BudgetDomainName`]; the match fails to compile when a variant is
-/// added, so this list cannot silently fall behind.
+/// Every [`BudgetDomainName`]. Adding a variant fails to compile here until
+/// the match handles it; the list beside the match must gain it too (the
+/// schema comparison below then fails until the schema does).
 fn all_domains() -> [BudgetDomainName; 3] {
     fn exhaustive(domain: BudgetDomainName) {
         match domain {
@@ -806,6 +807,13 @@ fn refused_by_both() -> Vec<Refusal> {
             "byte values must be integers",
         ),
         refusal(
+            "domain bytes as an array",
+            TWO_MEMBER,
+            |v| *at(v, &format!("{M0Q}/domain_bytes")) = json!([1, 2]),
+            "/resident_set/members/0/quota/domain_bytes",
+            "invalid type: sequence, expected a JSON object",
+        ),
+        refusal(
             "a null quota domain",
             TWO_MEMBER,
             |v| *at(v, &format!("{M0Q}/domain_bytes/guest_ram")) = Value::Null,
@@ -899,13 +907,16 @@ fn documents_both_refuse() {
             decoder,
         } = case;
         let doc = edited(base, edit);
-        let paths: Vec<String> = match validator().validate(&doc) {
-            Ok(()) => Vec::new(),
+        let paths: BTreeSet<String> = match validator().validate(&doc) {
+            Ok(()) => BTreeSet::new(),
             Err(errors) => errors.map(|e| e.instance_path.to_string()).collect(),
         };
-        assert!(
-            paths.iter().any(|p| p == schema_at),
-            "{label}: the schema reported no error at `{schema_at}` (errors at {paths:?})"
+        // Exactly one location: a case that breaks two rules could pass
+        // for the one it does not name.
+        assert_eq!(
+            paths,
+            BTreeSet::from([schema_at.to_string()]),
+            "{label}: the schema's errors are not all at `{schema_at}`"
         );
         match decode(&doc) {
             Ok(_) => panic!("{label}: the decoder accepted it"),
@@ -1112,8 +1123,9 @@ fn documented_divergences() {
     }
 }
 
-/// Every error code, phase and transaction kind; the matches fail to
-/// compile when a variant is added, so the lists cannot fall behind.
+/// Every error code, phase and transaction kind. Adding a variant fails to
+/// compile in these matches until they handle it; the lists beside them
+/// must gain it too.
 fn all_error_codes() -> Vec<ErrorCode> {
     fn exhaustive(code: ErrorCode) {
         match code {

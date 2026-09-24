@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::json_numbers::deserialize_some_safe_bytes;
 use crate::platform_memory_profile::BudgetDomainName;
+use crate::serde_shape::deserialize_map_only;
 
 /// Per-domain session quota bytes, keyed by budget domain name.
 ///
@@ -82,6 +83,7 @@ impl DomainQuotaBytes {
 #[serde(deny_unknown_fields)]
 pub struct MemberQuota {
     pub session_count: u32,
+    #[serde(deserialize_with = "deserialize_map_only")]
     pub domain_bytes: DomainQuotaBytes,
 }
 
@@ -192,6 +194,8 @@ mod tests {
             r#"{"session_count":-1,"domain_bytes":{}}"#,
             r#"{"session_count":4294967296,"domain_bytes":{}}"#,
             r#"{"domain_bytes":{}}"#,
+            r#"{"session_count":0,"domain_bytes":[]}"#,
+            r#"{"session_count":1,"domain_bytes":[1,2,3]}"#,
         ] {
             assert!(
                 serde_json::from_str::<MemberQuota>(raw).is_err(),
