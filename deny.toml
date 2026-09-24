@@ -14,7 +14,9 @@ all-features = true
 # tools/release/check-vulnerability-dispositions.py refuses the two lists
 # when they differ.
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0009", reason = "not affected; see tools/release/vulnerability-dispositions.json" },
+]
 
 [licenses]
 # Every dependency today is satisfiable under these. A new license is a
