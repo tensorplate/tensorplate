@@ -38,9 +38,11 @@ provisions nothing until the model bundles are pinned.
 4. Copies each listed file from `--from` into the partial root, hashing it
    as it is copied. A file reached through a symbolic link, at any
    component of its path below `--from`, is refused, even when its bytes
-   are right. A file is opened only after its path was checked, and what
-   was opened must be that same regular file. Nothing is read past the
-   size the manifest pins.
+   are right. A file is opened only after its path was checked, without
+   following a final link and without blocking, and what was opened must
+   be that same regular file: a link, FIFO or device swapped in meanwhile
+   is refused, not read or waited on. Nothing is read past the size the
+   manifest pins.
 5. Requires the partial root to pass the bundle parser `tensorplate
    deploy` runs first, then renames it to `<into>/<name>`. Deploy's other
    checks, against the device and the agent's configuration, still apply

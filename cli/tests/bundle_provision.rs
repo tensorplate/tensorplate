@@ -375,6 +375,19 @@ fn an_existing_destination_that_is_not_this_bundle_is_refused_and_left_as_found(
             "`pipe` is not a regular file",
         ),
         (
+            // One file whose name holds a backslash, beside the listed
+            // nested file it would spell if the backslash were a separator.
+            "a name with a backslash",
+            damaged_destination(|dest| {
+                fs::copy(
+                    dest.join("assets/tokenizer.json"),
+                    dest.join("assets\\tokenizer.json"),
+                )
+                .unwrap();
+            }),
+            "`assets\\tokenizer.json` is not in the provisioning manifest",
+        ),
+        (
             "a link to a whole, correct bundle",
             {
                 let into = import_dir();

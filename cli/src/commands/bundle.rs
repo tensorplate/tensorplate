@@ -25,7 +25,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
@@ -401,7 +401,10 @@ fn verify_existing(destination: &Path, bundle: &ProvisionedBundle) -> Result<(),
 }
 
 /// Every regular file under `dir`, as a `/`-separated path relative to
-/// `root`. A link or anything but a file or directory is refused.
+/// `root`, each name exactly as the file system holds it: a backslash is
+/// part of a name here, never a separator, so a name no manifest path can
+/// spell stays unlisted. A link or anything but a file or directory is
+/// refused.
 fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), ProvisionError> {
     let entries = fs::read_dir(dir)
         .map_err(|err| ProvisionError::io(format!("cannot list {}", dir.display()), &err))?;
@@ -411,7 +414,7 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Provisio
         let path = entry.path();
         let relative = path
             .strip_prefix(root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let kind = entry
             .file_type()
@@ -473,15 +476,37 @@ fn open_listed(root: &Path, file: &ProvisionedFile) -> Result<fs::File, Provisio
 }
 
 /// Open `path`, which was `checked` a moment ago, and refuse what was opened
-/// unless it is that same regular file: a link or a device swapped in after
-/// the check is refused rather than read.
+/// unless it is that same regular file: a link, a FIFO or a device swapped
+/// in after the check is refused rather than read.
+///
+/// The open neither follows a final link nor blocks, so a FIFO swapped in
+/// is opened at once and refused by the descriptor check instead of
+/// waiting for a writer. Non-blocking mode does not change reads of a
+/// regular file.
 fn open_checked(
     path: &Path,
     checked: &fs::Metadata,
     file: &ProvisionedFile,
 ) -> Result<fs::File, ProvisionError> {
-    let opened = fs::File::open(path)
-        .map_err(|err| ProvisionError::io(format!("cannot open {}", path.display()), &err))?;
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| {
+            // A path that no longer holds the checked file -- a link now
+            // refused by O_NOFOLLOW, a socket, nothing -- changed under the
+            // run; the checked file failing to open is an I/O failure.
+            let unchanged = fs::symlink_metadata(path).is_ok_and(|now| {
+                now.is_file() && now.dev() == checked.dev() && now.ino() == checked.ino()
+            });
+            if unchanged {
+                ProvisionError::io(format!("cannot open {}", path.display()), &err)
+            } else {
+                ProvisionError::Changed {
+                    path: file.path.clone(),
+                }
+            }
+        })?;
     let meta = opened
         .metadata()
         .map_err(|err| ProvisionError::io(format!("cannot read {}", path.display()), &err))?;
@@ -619,6 +644,48 @@ mod tests {
         let checked_null = fs::symlink_metadata(null).expect("lstat");
         assert!(matches!(
             open_checked(null, &checked_null, &listed("a", 0)),
+            Err(ProvisionError::Changed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_fifo_swapped_in_after_the_check_is_refused_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f");
+        fs::write(&path, "abc").expect("write");
+        let checked = fs::symlink_metadata(&path).expect("lstat");
+        fs::remove_file(&path).expect("remove");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+        // A blocking open would wait for a writer forever: bound the wait.
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(open_checked(&path, &checked, &listed("f", 3)).err());
+        });
+        match outcome
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening the FIFO blocked")
+        {
+            Some(ProvisionError::Changed { .. }) => {}
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_link_swapped_in_after_the_check_is_refused_even_to_the_checked_file() {
+        // The link leads to the very inode that was checked, so only
+        // refusing to follow it tells the swap apart.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (path, moved) = (dir.path().join("f"), dir.path().join("moved"));
+        fs::write(&path, "abc").expect("write");
+        let checked = fs::symlink_metadata(&path).expect("lstat");
+        fs::rename(&path, &moved).expect("rename");
+        std::os::unix::fs::symlink(&moved, &path).expect("symlink");
+        assert!(matches!(
+            open_checked(&path, &checked, &listed("f", 3)),
             Err(ProvisionError::Changed { .. })
         ));
     }

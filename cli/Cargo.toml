@@ -30,6 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
+# Open flags for `bundle provision`: no-follow and non-blocking opens.
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
