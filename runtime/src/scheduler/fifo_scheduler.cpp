@@ -266,7 +266,8 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
                                 request.model_id(),
                                 request.estimate(),
                                 now_tp,
-                                request.priority()};
+                                request.priority(),
+                                request.session_key()};
       queue_.push_back(std::move(accepted));
       ++metrics_.admitted_total;
       metrics_.queue_depth = queue_.size();

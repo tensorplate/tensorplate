@@ -263,4 +263,31 @@ TEST(SchedulerFifo, CompletionAfterCapacityFreesQueueSlot) {
   EXPECT_EQ(second->request_id(), "b");
 }
 
+TEST(SchedulerFifo, DispatchReturnsTheAdmittedPriorityAndSessionKey) {
+  SchedulerHarness h{/*queue=*/2, /*in_flight=*/1};
+  constexpr SchedulerRequest::SessionKey kKey = 0xfedc'ba98'7654'3210U;
+  ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+      make_infer_request("a"), "mock", "model", {}, h.clock->now(), /*priority=*/7, kKey}));
+  const auto dispatched = h.scheduler->next();
+  ASSERT_TRUE(dispatched.has_value());
+  EXPECT_EQ(dispatched->priority(), 7);
+  EXPECT_EQ(dispatched->session_key(), kKey);
+}
+
+TEST(SchedulerFifo, DispatchOrderIgnoresSessionKeys) {
+  SchedulerHarness h{/*queue=*/4, /*in_flight=*/4};
+  const std::vector<std::pair<const char*, SchedulerRequest::SessionKey>> admitted{
+      {"a", 2}, {"b", 0}, {"c", 2}, {"d", 1}};
+  for (const auto& [id, key] : admitted) {
+    ASSERT_TRUE(h.scheduler->admit(SchedulerRequest{
+        make_infer_request(id), "mock", "model", {}, h.clock->now(), /*priority=*/0, key}));
+  }
+  for (const auto& [id, key] : admitted) {
+    const auto dispatched = h.scheduler->next();
+    ASSERT_TRUE(dispatched.has_value());
+    EXPECT_EQ(dispatched->request_id(), id);
+    EXPECT_EQ(dispatched->session_key(), key);
+  }
+}
+
 }  // namespace

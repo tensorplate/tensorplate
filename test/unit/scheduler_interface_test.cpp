@@ -13,8 +13,12 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/scheduler/factory.hpp"
@@ -208,6 +212,25 @@ TEST(SchedulerRequest, EnvelopePreservesIdentity) {
   ASSERT_TRUE(envelope.estimate().estimated_service_time.has_value());
   EXPECT_EQ(*envelope.estimate().estimated_service_time,
             std::chrono::duration_cast<SchedulerClock::Duration>(std::chrono::milliseconds{3}));
+}
+
+TEST(SchedulerRequest, SessionKeyDefaultsToNoneAndKeepsAll64Bits) {
+  static_assert(std::is_same_v<SchedulerRequest::SessionKey, std::uint64_t>);
+  FakeSchedulerClock clock;
+  const SchedulerRequest plain{make_infer_request("a"), "mock", "model", {}, clock.now()};
+  EXPECT_EQ(plain.session_key(), 0U);
+  const SchedulerRequest prioritised{make_infer_request("b"), "mock", "model", {}, clock.now(), 7};
+  EXPECT_EQ(prioritised.session_key(), 0U);
+
+  const auto keyed = [&clock](const char* id, SchedulerRequest::SessionKey key) {
+    return SchedulerRequest{make_infer_request(id), "mock", "model", {}, clock.now(), 0, key};
+  };
+  constexpr auto kMax = std::numeric_limits<SchedulerRequest::SessionKey>::max();
+  SchedulerRequest max_key = keyed("c", kMax);
+  EXPECT_EQ(max_key.session_key(), kMax);
+  const SchedulerRequest moved{std::move(max_key)};
+  EXPECT_EQ(moved.session_key(), kMax);
+  EXPECT_EQ(keyed("d", 0x8000'0000'0000'0001U).session_key(), 0x8000'0000'0000'0001U);
 }
 
 }  // namespace
