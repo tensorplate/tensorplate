@@ -390,6 +390,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   which a test holds to the fixture. Nothing in the worker creates logical
   sessions yet. (V030-E04-F01-T01)
 
+- Backends can run typed jobs beside the tensor lifecycle.
+  `job_request.hpp`, `job_result.hpp` and `job_event.hpp` add
+  `JobRequest` (an `stt_decode`, `tts_synthesis` or `vad_frames` job
+  with one PCM-window, text or voice-activity-frame payload and its
+  language, voice and speed), `JobResult` (a transcript that may be
+  empty, synthesized PCM with its clipped-sample count, or per-frame
+  speech probabilities), `JobEvent`, and `JobEventSequence`, which checks
+  one job's events against their order and its progress limit.
+  `BoundedJobBridge` submits and cancels jobs, releases a session's
+  backend state and reports health. A registry entry provides it through
+  the optional `BackendEntry::session_with_bridge_factory`, and
+  `create_session_with_bridge` reports `unsupported`
+  (`job_bridge_unsupported`) for an entry without one. `ExecutionSession`
+  and existing registrations are unchanged.
+  `protocol/fixtures/job_seam.json` holds the ceilings, names and test
+  vectors. No backend implements the bridge yet. (V030-E04-F03-T03)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added

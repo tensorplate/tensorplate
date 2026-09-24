@@ -14,6 +14,9 @@ Public C++ headers for the TensorPlate runtime.
 - Includes core value objects (`InferRequest`, `InferResult`, `BufferRef`,
   `TensorView`, `Result<T>`, `Error`) and the `ExecutionSession`
   Non-Virtual Interface in later milestones.
+- Includes the typed job value objects (`JobRequest`, `JobResult`,
+  `JobEvent`, `JobEventSequence`) and the optional `BoundedJobBridge` a
+  backend entry pairs with its session.
 - Includes runtime version constants (`version.hpp`) introduced under V01-E01-F06.
   This file is **generated** from `version.hpp.in` by CMake's `configure_file()`
   and lives under the build directory. Do not edit a generated copy.

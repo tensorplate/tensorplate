@@ -86,6 +86,141 @@ to exercise. The flags are OFF by default in V01-E05-F01; each
 subsequent feature flips its own flag on once its adapter implementation
 lands.
 
+## Sessions with a job bridge
+
+Some backends run work that does not fit `ExecutionSession::infer`: synthesis
+input is text, a decode of silence legitimately returns an empty transcript,
+and neither is a tensor. Such a backend runs **typed jobs** through a
+`BoundedJobBridge`
+([`bounded_job_bridge.hpp`](../../include/tensorplate/backend/bounded_job_bridge.hpp))
+beside its session. The session's public methods, its `do_*` hooks,
+`infer_async` and `AsyncInferHandle` are unchanged, and jobs never use them.
+No concrete bridge, JSON codec, capability flag or dispatch strategy is part
+of this interface; each backend and the serving layer supply their own.
+
+### Registration
+
+| `BackendEntry` field           | Required | Purpose                                             |
+| ------------------------------ | -------- | --------------------------------------------------- |
+| `factory`                      | yes      | Builds a session; every deployment without jobs.    |
+| `session_with_bridge_factory`  | no       | Builds a session and its bridge in one call.        |
+
+`create_session_with_bridge(name, hooks)` calls the entry's
+`session_with_bridge_factory` outside the registry mutex and returns a
+`SessionWithBridge{session, bridge}`. Each call builds a new pair; the bridge
+serves only that session, and nothing looks a bridge up or downcasts a
+session. `create_session` never builds a bridge. Existing three-field
+`BackendEntry{name, capability, factory}` initializations compile unchanged.
+
+| Situation                                              | Error code    | Context                  |
+| ------------------------------------------------------ | ------------- | ------------------------ |
+| Backend not registered                                 | `unsupported` | none                     |
+| Entry has no `session_with_bridge_factory`             | `unsupported` | `job_bridge_unsupported` |
+| Factory error                                          | unchanged     | unchanged                |
+| Factory succeeded without a session or without a bridge | `internal`   | `null_session`, `null_bridge` |
+
+### Jobs
+
+| Job class       | Payload       | Options                       | Result             |
+| --------------- | ------------- | ----------------------------- | ------------------ |
+| `stt_decode`    | `AudioFrames` | `language`                    | `TranscriptResult` |
+| `tts_synthesis` | `TextSegment` | `language`, `voice`, `speed_milli` | `AudioChunkResult` |
+| `vad_frames`    | `VadFrames`   | none                          | `VadResult`        |
+
+Every request carries a `JobIdentity`: the submitter's `job_id`, the serving
+layer's opaque `session_key` for the logical session, and the deployment
+`generation`, all nonzero; every event echoes it. PCM rides in a `PcmWindow`
+(a byte window of a `BufferRef`), 16 kHz mono PCM16 in and 24 kHz mono PCM16
+out; telephony input is decoded and resampled by the serving layer before a
+job exists. `VadFrames` state is kept per session key and utterance: a new
+`utterance_id` resets it and `release_session` discards it.
+
+A job's events follow one order:
+
+```text
+[accepted] (progress | cancel_acknowledged)* (completed | failed) released
+```
+
+`progress` carries a result fragment of the job's kind and a
+`progress_sequence` of 1, 2, 3, ... up to the request's `progress_limit`.
+Fragments are increments; `completed` carries the rest. A deployment that
+expects no progress submits every job with `progress_limit` 0, so any
+progress from its backend is a fault. `released` means the backend physically released the
+job: input buffers and reservations are reusable only then.
+`JobEventSequence` checks one job's events and refuses a violation with
+`inference_failed` and a stable reason; bridges run it on every event before
+delivery and end the job with the refusal instead of delivering it.
+
+### Bridge guarantees
+
+- `submit`, `cancel`, `release_session` and `health` never call or wait for
+  the session lifecycle. An implementation serializes bridge work against its
+  own load, prime and unload.
+- Callbacks are serialized, never run on a thread that is inside a bridge
+  method, and may arrive before the `submit`, `cancel` or
+  `release_session` that caused them returns; register a job before
+  submitting it, and note a cancellation before requesting it when
+  checking events again. A callback may call `submit`, `cancel` and
+  `release_session`.
+- Every submitted job gets exactly one terminal event, also on reset or
+  unload (`failed`, `unavailable`). `released` follows only after actual
+  release or a confirmed process reap; an unconfirmed reap leaves the job
+  unreleased and its reservations held.
+- `release_session` cancels the session's jobs and discards its backend
+  state; `on_session_released` follows the `released` of each of its jobs,
+  at most once, and never while one of them is unreleased. Repeating the
+  call, before or after the acknowledgement, changes nothing.
+- When the session object is destroyed, every job without a terminal event
+  gets `failed`, confirmed releases are delivered, and then no callback
+  runs.
+- The bridge fixes no executor width, queue depth, fairness or deadline and
+  has no per-token call. A backend may admit one job per lane, or several
+  whose progress interleaves through the same sink.
+
+| Method            | Error code / context |
+| ----------------- | -------------------- |
+| `set_event_sink`  | `config_invalid` / `event_sink_null`, `event_sink_already_set` |
+| `submit`          | `not_ready` / `event_sink_missing`, `backend_not_ready`, `session_releasing`; `unavailable` / `backend_unavailable`; `unsupported` / `job_class_unsupported`, `job_not_permitted`; `config_invalid` / `duplicate_job_id`; `resource_exhausted` / `job_capacity_exhausted` |
+| `cancel`          | `not_ready` / `unknown_job` |
+| `release_session` | `config_invalid` / `session_key_zero`, `generation_zero`; `not_ready` / `event_sink_missing`; `unavailable` / `backend_unavailable` |
+| `health`          | `not_ready` / `backend_not_ready`; `unavailable` / `backend_unavailable`; `timeout` / `health_timeout` |
+
+### Limits
+
+Frozen ceilings live in the headers; a backend or deployment may admit less.
+
+| Ceiling | Value | Source |
+| ------- | ----- | ------ |
+| `AudioFrames` window | 960,000 B | 30 s maximum utterance at 16 kHz PCM16 |
+| `TextSegment` | 4,096 B | one text segment |
+| `VadFrames` frames (K) | 32 | 32 x 512-sample frames; a 320 ms network frame yields at most 10 |
+| `VadFrames` window | 32,768 B | 32 frames of 512 samples at PCM16 |
+| Transcript text, and word texts together | 8,192 B each | one job's transcript |
+| Transcript tokens | 448 | per-decode token limit; words never outnumber tokens |
+| `AudioChunkResult` window | 1,440,000 B | 30 s per synthesized segment at 24 kHz PCM16 |
+| VAD probabilities | 32 | one per frame |
+| `progress_limit` | 1,500 | 20 ms chunks of a 30 s segment, the last in `completed` |
+| Language tag / voice id | 16 B / 64 B | `en`, `ar`, `en-US`; `af_heart` |
+| `failed` message / context | 512 B each | failure detail bound |
+
+Per deployment, not in any header: `progress_limit` per job, the streaming
+decode window, the VAD frame shape and K actually used, the permitted languages, voices and speeds, admission
+width and queue depths, job and health deadlines, and model limits such as
+the phoneme count, which a backend reports as `failed`.
+
+### Cross-language vectors
+
+[`protocol/fixtures/job_seam.json`](../../protocol/fixtures/job_seam.json)
+holds the ceilings, the stable names, every validation reason, construction
+vectors and per-job event traces. `test/unit/job_value_objects_test.cpp`
+replays all of them. Another implementation of these objects, such as a
+future sidecar job message set, replays every vector whose `scope` is `all`
+and holds its own bounds to `limits`. A change to a ceiling, name or rule
+edits the header and the vectors in the same commit. There is no
+`protocol/schemas/job_*.json`: no process exchanges these objects as
+standalone JSON, and a socket transport carries PCM as frame payload bytes,
+not as buffer handles.
+
 ## Non-goals
 
 V01-E05-F01 explicitly does *not* implement:
