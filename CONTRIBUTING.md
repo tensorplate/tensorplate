@@ -257,6 +257,9 @@ constants in the same PR:
 - Public C++ interface under `include/tensorplate/` (runtime version).
 - New, removed, or renamed runtime error codes (runtime version).
 - Cross-process schemas under `protocol/schemas/` (protocol + schema version).
+  The agent's durable state file, `protocol/schemas/agent_state.json`, is
+  the exception: it has its own state version, which moves with its Rust
+  mirror (see `docs/architecture/protocol.md`).
 - Config schemas under `config/schemas/` (schema version).
 - Bundle format layout or manifest fields (bundle format version).
 - Feature flags introduced or graduated (runtime version, plus a flag note).

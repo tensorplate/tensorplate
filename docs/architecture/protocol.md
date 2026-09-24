@@ -71,6 +71,21 @@ compatibility here is the deployed serde-reader contract. Retire this
 exception when per-schema minor-version negotiation replaces the global
 exact-equality check.
 
+The agent's durable state file (`agent_state.json`) is the one document
+with its own version track, because it is read by nothing but the agent
+that wrote it and must stay safe across agent upgrades and downgrades: an
+agent reads every state version it knows and refuses a newer one.
+Its `schema_version` is a state version: `"0.1"` is the singleton layout
+every agent through 0.2.x reads, and `"0.2"` adds the deployment generation
+counter and the resident set. The agent decodes it with
+`tensorplate_protocol::decode_agent_state`, which accepts exactly those
+versions and rejects any other with the same typed unsupported-version
+error; `decode_with_version_check` and every other payload stay at the
+protocol version. The agent writes the oldest state version whose readers
+decode the file without loss, so an agent that never allocates a generation
+keeps writing `"0.1"`, and an older agent meeting a `"0.2"` file refuses it
+rather than misreading it.
+
 ## Bindings
 
 Bindings are **hand-written**, not code-generated, in v0.1.0.
