@@ -303,6 +303,21 @@ happen post-merge from a clean trunk release commit and tag.
 
 ## Pull Request Expectations
 
+This repository is public, a push is permanent, and a pull request's body
+becomes its squash-merge commit message. Before every push, scan what the
+push would publish, including the title and body you will submit, and the
+tree as committed:
+
+```bash
+tools/validation/check-public-hygiene.sh --base origin/develop --local \
+  --message pr-title.txt --message pr-body.md
+tools/validation/check-public-hygiene.sh --tree
+```
+
+CI runs the same scan on every pull request. Rule 10 of the
+[fixture and evidence rules](docs/validation/fixture-and-evidence-rules.md)
+says what it checks and how to resolve a finding.
+
 Every PR should include:
 
 - Linked issue.

@@ -1,0 +1,30 @@
+# Synthetic and public forms the source policy accepts. Each sits beside a
+# shape that fails in another fixture in this directory.
+
+loopback http://127.0.0.1:8080 http://[::1]:8080 0.0.0.0:9090 [::]:9091
+documentation 192.0.2.10 198.51.100.7 203.0.113.9 2001:db8::10
+this network 0.1.0.1
+metadata http://169.254.169.254/computeMetadata/v1/ and fe80::1 on lo0
+versions tensorrt==10.3.0.30 10.3.0.30-1+cuda12.6 tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
+slices given[::2] given[1::2]
+mapped ::ffff:7f00:1 ::ffff:a9fe:a9fe 0:0:0:0:0:ffff:127.0.0.1 2001:db8::192.0.2.1 2001:db8::c000:201
+not addresses ::ffff:127.0.0.1:52144 std::arch::x86_64::_mm256_fmadd_ps use core::arch::x86_64::fade; use cafe::bad_idea;
+fingerprint SHA256 Fingerprint=AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD
+homes /home/tp-synthetic-operator/evidence /Users/tp-synthetic-operator /Users/Shared
+runner /home/runner/work/tensorplate and the runner home, /home/runner.
+encoded /tmp/-Users-Shared-workspace /tmp/-Users-tp-synthetic-operator-workspace /tmp/-home-tp-synthetic-operator-src C:\Users\tp-synthetic-operator\AppData "\/Users\/tp-synthetic-operator\/src"
+placeholders /home/$USER /home/<name> /home/.config ~/.config
+devices GPU-00000000-0000-0000-0000-000000000001 MIG-00000000-0000-0000-0000-000000000002
+projects projects/1/zones/us-central1-a projects/REDACTED/zones/us-central1-b projects/12345/
+labels PR-1234 HW-Z123 HW-12 0xC01 D01X XM1 C1 PR-
+options useradd --home-dir /var/lib/tensorplate --no-create-home, work-from-home-office
+credentials Authorization: Bearer $TOKEN, Authorization: Basic <token>, ghp_short
+headers -----BEGIN PUBLIC KEY----- -----BEGIN CERTIFICATE-----
+kubeconfig client-key-data: |
+  <base64 of the key, kept out of the repository>
+kubeconfig client-key-data:
+    clientKeyDataFromEnvironment: true
+request "Authorization":
+  "Bearer ${TOKEN}"
+accounts ops@example.com tp-synthetic@example.com
+internals of the scheduler, runtime internals

@@ -1,0 +1,1 @@
+curl -g "http://[@VALUE@]:8080/v1/status"
