@@ -83,10 +83,19 @@ The episode then closes with exactly one of three lines:
 - `platform detection stopped: attempts=... elapsed=... budget=... error=...`
   followed by `platform detection failed: ...` — an attempt failed for a
   reason another attempt cannot settle, so the retry ended early with
-  most of its budget unspent. The usual cause is a metadata service that
-  has started answering but is not yet serving machine types, which is
-  deliberately not retried: something answering on an unauthenticated
-  link-local address with the wrong content is not treated as flaky.
+  most of its budget unspent. The usual cause is something answering on
+  169.254.169.254:80 with content that is not a machine type, such as a
+  proxy's `403`: an answer is not treated as flaky. The two statuses Google
+  documents as transient, `429` and `503` (while the metadata server boots
+  or the host is under maintenance), are retried like a service that did
+  not answer at all.
+
+When detection fails, the message names the cause class: transient
+unavailability (the service answered `429` or `503` for the whole window),
+blocked access (the connection was refused, or something other than the
+metadata server answered) or not reached (nothing answered in time: the
+network was not up yet, or a firewall rule, proxy or custom route drops
+the traffic), with what to do about it.
 
 The remedy for an exhausted or stopped detection is unchanged: restart
 `tensorplate-agent` once with the metadata service reachable.

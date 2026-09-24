@@ -380,6 +380,16 @@ attempt cannot settle and the retry ended early. None of these lines
 appears on a host that answers first time, and none appears off Compute
 Engine at all.
 
+Retried alike: nothing answering in time, a refused connection, and the
+`429` and `503` Google documents while the metadata server boots or the
+host is under maintenance. With a record for the current boot the start
+uses it and does not retry; without one it retries. Any other answer is
+not retried. When the window ends without an answer, the error names the
+cause class and the remedy: transient unavailability, blocked access or
+not reached. This is the reboot boundary the release states: after a
+reboot the agent must reach the metadata service once, within this
+window or on a later restart, before denied-egress operation resumes.
+
 This narrows the window rather than removing it. A host whose network is
 denied for longer than the budget, or denied outright, still has no
 record for that boot and still fails detection, so the procedure above is
