@@ -77,10 +77,11 @@ so installing the older packages over the newer ones is rejected even with
 
 Follow the commands under "Downgrade and rollback" in
 [`docs/install/lifecycle.md`](../install/lifecycle.md): stop both services,
-move durable state aside to `state.bak`, remove every installed TensorPlate
-package except `tensorplate-apt-source` — including `tensorplate-common` and
-`tensorplate-backend-python-pytorch` — and install the previous release
-fresh. That section also covers what happens to the set-aside state.
+move durable state aside to `state.bak`, copy the Compute Engine
+machine-type record back out of it when there is one, remove every installed
+TensorPlate package except `tensorplate-apt-source` — including
+`tensorplate-common` and `tensorplate-backend-python-pytorch` — and install
+the previous release fresh. That section also covers what happens to the set-aside state.
 
 Deployment rollback uses the CLI path from
 [`docs/cli/deploy-rollback.md`](../cli/deploy-rollback.md):

@@ -385,11 +385,14 @@ over the running baseline. It passes when:
 - doctor is green and resolves the row, as in install;
 - the deployment made on the baseline answers health and inference on
   the candidate without being deployed again, re-warmed from the
-  baseline's durable state within the installer's own readiness wait.
+  baseline's durable state within the installer's own readiness wait;
+- the machine-type record the baseline wrote is byte-identical once the
+  candidate is up, and the candidate has written the instance binding.
 
 **rollback** follows the procedure in
 [`docs/install/lifecycle.md`](../install/lifecycle.md). It stops both
-services, moves durable state aside to `state.bak`, and removes — never
+services, moves durable state aside to `state.bak`, copies the
+machine-type record back into a fresh `state/`, and removes — never
 purges — every installed TensorPlate package except
 `tensorplate-apt-source`. Every package, because any newer one left
 behind makes the older installer's `apt-get -y` a refused downgrade.
@@ -398,9 +401,11 @@ requires that no TensorPlate package other than `tensorplate-apt-source`
 is still installed and that the agent's conffiles were kept.
 It passes when exactly the baseline's packages are installed, the edited
 `cli.json` still has its bytes, the whole set-aside `state.bak` directory
-is intact, the rolled-back agent answers with no active or previous
-deployment — it did not load the newer agent's state — and a fresh deploy
-answers health and inference.
+is intact, the restored machine-type record and the instance binding are
+byte-identical to their copies taken with the services stopped, the
+rolled-back agent answers with no active or previous deployment — it did
+not load the newer agent's state — and a fresh deploy answers health and
+inference.
 
 Intact means byte for byte, file by file: with the services stopped and
 before the move, the harness lists `state/` and digests every file in it,

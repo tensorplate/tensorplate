@@ -123,8 +123,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   every push. (V030-E06-F02-T01)
 - On a Compute Engine instance, `tensorplate-agent` now records which
   instance its machine-type record was taken on. Every start where the
-  metadata service answers also asks it for the instance id, inside the same
-  250 ms budget, and writes `/var/lib/tensorplate/identity/instance-binding.json`:
+  metadata service answers also asks it for the instance id, with a 250 ms
+  budget of its own, and writes `/var/lib/tensorplate/identity/instance-binding.json`:
   the instance id, the machine type and the kernel boot ID, with the SHA-256
   of the `machine-type.json` bytes written in that start. The machine-type
   record itself is unchanged, still schema 2 at its old path, because the
@@ -136,8 +136,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   with the service reachable. With the service unreachable, a binding written
   in the same boot must name the record's machine type and digest its exact
   bytes, or detection fails; a binding from an earlier boot is ignored, and
-  without one the record alone decides, as before. A binding that cannot be
-  parsed is replaced on the next start that reaches the service. The
+  without one the record alone decides, as before. A service that answers
+  the machine type and then not the instance id makes that start one
+  without a live answer: the same-boot record decides, and without one the
+  start fails in the step the agent retries. A binding that cannot be parsed,
+  or a binding path holding a directory, a link or an oversized file, is
+  replaced on the next start that reaches the service, or reported on that
+  start's journal line when it cannot be. The
   instance id is never logged or echoed in an error: the journal gets a
   separate `platform instance binding:` line, and the `platform identity:`
   line keeps its shape. The installer creates `/var/lib/tensorplate/identity/`;

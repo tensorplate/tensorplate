@@ -170,6 +170,8 @@ In addition to everything `remove` does, purge runs the postrm in
   but every OS reboot requires an online agent start to refresh the record.
   Copying a boot disk to another instance does not carry its cached identity
   into the new boot. Offline cold boot remains outside this feature.
+- `/var/lib/tensorplate/identity/`, the instance binding that says which
+  Compute Engine instance the machine type was recorded on.
 - `/var/lib/tensorplate/bundles/`
 - `/var/lib/tensorplate/worker-configs/`
 - `/var/log/tensorplate/`
