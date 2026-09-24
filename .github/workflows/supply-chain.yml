@@ -109,10 +109,14 @@ jobs:
           "${RUNNER_TEMP}/scanners/bin/python" -m pip install --quiet \
             "cyclonedx-bom==${CYCLONEDX_BOM_VERSION}" "pip-audit==${PIP_AUDIT_VERSION}"
 
+      # Created without pip and installed into from outside, so the
+      # environment holds the package and its runtime dependencies and
+      # nothing that only installs them.
       - name: Install ${{ matrix.package }} into a clean environment
         run: |
-          python -m venv "${RUNNER_TEMP}/target"
-          "${RUNNER_TEMP}/target/bin/python" -m pip install --quiet "./${{ matrix.package }}"
+          python -m venv --without-pip "${RUNNER_TEMP}/target"
+          python -m pip --python "${RUNNER_TEMP}/target/bin/python" install --quiet "./${{ matrix.package }}"
+          python -m pip --python "${RUNNER_TEMP}/target/bin/python" list
 
       - name: CycloneDX SBOM
         run: |
@@ -123,12 +127,17 @@ jobs:
             --output-format JSON \
             -o "sbom/${{ matrix.artifact }}.cdx.json" \
             "${RUNNER_TEMP}/target/bin/python"
-          python -c 'import json, sys; d = json.load(open(sys.argv[1])); print(d["bomFormat"], d["specVersion"], len(d.get("components", [])), "components")' \
-            "sbom/${{ matrix.artifact }}.cdx.json"
+          python - "sbom/${{ matrix.artifact }}.cdx.json" <<'PY'
+          import json, sys
+          bom = json.load(open(sys.argv[1]))
+          root = bom.get("metadata", {}).get("component", {})
+          components = bom.get("components", [])
+          print(bom["bomFormat"], bom["specVersion"], "for", root.get("name"), root.get("version"))
+          print(len(components), "components:", ", ".join(f"{c.get('name')} {c.get('version')}" for c in components) or "none")
+          PY
 
       # What is audited is the package's runtime dependency closure: what
-      # pip freeze lists in the clean environment (pip itself, which the
-      # environment only uses to install, is not listed), less the package.
+      # pip freeze lists in the clean environment, less the package.
       # Both packages declare no runtime dependency today, so the closure is
       # empty and a clean result would prove nothing about the scanner; the
       # positive control first requires it to report a pin with published
@@ -150,7 +159,7 @@ jobs:
           fi
           echo "positive control: pip-audit reports pip 25.0.1's published advisories"
 
-          "${RUNNER_TEMP}/target/bin/python" -m pip freeze >"${RUNNER_TEMP}/freeze.txt"
+          python -m pip --python "${RUNNER_TEMP}/target/bin/python" freeze >"${RUNNER_TEMP}/freeze.txt"
           python - "${{ matrix.package }}/pyproject.toml" "${RUNNER_TEMP}/freeze.txt" "${RUNNER_TEMP}/closure.txt" <<'PY'
           import pathlib, re, sys, tomllib
           def norm(name):
