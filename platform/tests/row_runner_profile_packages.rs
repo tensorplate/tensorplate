@@ -3,8 +3,8 @@
 // Per-runner-profile package lists on a platform row's `backend_packages`.
 // No committed row declares one yet; these cases take the committed L4 row,
 // add lists to its `python_pytorch` backend path in memory, and require the
-// row schema and the Rust decoder to agree. The one rule only the decoder
-// can state is listed separately with the schema's verdict pinned.
+// row schema and the Rust decoder to agree. The rules only the decoder can
+// state are listed separately with the schema's verdict pinned.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -104,13 +104,32 @@ fn per_profile_package_lists_validate_against_the_row_schema() {
 
 #[test]
 fn committed_rows_declare_no_per_profile_lists() {
-    // No package installs a speech runner profile yet; a row that required
-    // one would refuse every deployment on that path.
-    let row = PlatformSupportRow::from_json(&read(L4_ROW)).expect("L4 row decodes");
-    assert!(row
-        .backend_packages()
-        .iter()
-        .all(|set| set.runner_profiles.is_empty()));
+    // No package installs a speech runner profile yet, so no committed row
+    // requires one.
+    let dir = repo_path("config/platform/rows");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("rows directory") {
+        let path = entry.expect("row entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("row reads");
+        let row = PlatformSupportRow::from_json(&body)
+            .unwrap_or_else(|e| panic!("{} decodes: {e}", path.display()));
+        assert!(
+            row.backend_packages()
+                .iter()
+                .all(|set| set.runner_profiles.is_empty()),
+            "{} declares a per-runner-profile package list",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no committed row was read from {}",
+        dir.display()
+    );
 }
 
 #[test]
@@ -140,6 +159,7 @@ fn malformed_per_profile_package_lists_are_refused_by_the_schema_and_the_decoder
             json!([{"runner_profile": "kokoro", "packages": ["a"], "channel": "apt"}]),
         ),
         ("null", Value::Null),
+        ("an entry written as an array", json!([["kokoro", ["a"]]])),
     ];
     for (label, lists) in cases {
         let row = l4_row_with(lists);
@@ -155,15 +175,41 @@ fn malformed_per_profile_package_lists_are_refused_by_the_schema_and_the_decoder
 }
 
 #[test]
-fn a_profile_listed_twice_on_one_path_is_refused_by_the_decoder() {
+fn rules_only_the_decoder_can_state_are_enforced_by_it() {
+    // The schema accepts each of these; the decoder refuses them, and for
+    // the reason named.
     let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
-    let row = l4_row_with(json!([
-        {"runner_profile": "kokoro", "packages": ["a"]},
-        {"runner_profile": "kokoro", "packages": ["b"]}
-    ]));
-    assert!(
-        validator.is_valid(&row),
-        "the schema cannot see duplicate profiles, so the decoder is the only guard"
-    );
-    assert!(decodes(&row).is_none(), "the decoder must refuse it");
+    let cases = [
+        (
+            "a profile listed twice on one path",
+            json!([
+                {"runner_profile": "kokoro", "packages": ["a"]},
+                {"runner_profile": "kokoro", "packages": ["b"]}
+            ]),
+            "must not list a runner profile twice",
+        ),
+        (
+            "a blank-only package name",
+            json!([{"runner_profile": "kokoro", "packages": [" "]}]),
+            "at least one non-empty package",
+        ),
+    ];
+    for (label, lists, reason) in cases {
+        let row = l4_row_with(lists);
+        assert!(
+            validator.is_valid(&row),
+            "{label}: the schema accepts it, so the decoder is the only guard"
+        );
+        let refused =
+            PlatformSupportRow::from_json(&serde_json::to_string(&row).expect("serialize"))
+                .err()
+                .map_or_else(
+                    || panic!("{label}: the decoder must refuse it"),
+                    |e| e.to_string(),
+                );
+        assert!(
+            refused.contains(reason),
+            "{label}: refused for another reason: {refused}"
+        );
+    }
 }

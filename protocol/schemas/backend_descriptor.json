@@ -131,7 +131,7 @@
     },
     "runner_profiles": {
       "type": "array",
-      "description": "Runner profiles this backend package set has installed, each in its own interpreter environment. The launcher starts a profile's sidecar with that profile's `interpreter` and `library_search_paths`, and doctor reports the same entry. Optional: a descriptor without it declares no runner profiles, and `python.interpreter` keeps serving the backend's other models. Beyond this schema, readers also require unique `id`s, normalized paths, and `interpreter` and every `library_search_paths` entry inside `environment_root`.",
+      "description": "Runner profiles this backend package set has installed: the interpreter environment each profile's sidecar runs in, apart from `python.interpreter`. Profiles may share one environment. Optional: a descriptor without it declares no runner profiles, and `python.interpreter` keeps serving the backend's other models. Beyond this schema, readers also require unique `id`s, paths with no `.` or `..` segment, `interpreter` and every `library_search_paths` entry inside `environment_root`, and package names that are not blank.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -156,7 +156,7 @@
             "type": "array",
             "uniqueItems": true,
             "items": {"type": "string", "pattern": "^/"},
-            "description": "Absolute directories the launcher adds to the sidecar's shared-library search path, for libraries loaded by name at run time."
+            "description": "Absolute directories for the sidecar's shared-library search path, for libraries loaded by name at run time."
           },
           "packages": {
             "type": "array",

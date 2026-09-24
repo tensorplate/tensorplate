@@ -34,11 +34,11 @@ The descriptor is intentionally a separate file so doctor probes do not
 have to walk arbitrary Python environments to discover the backend. Its
 schema is `protocol/schemas/backend_descriptor.json`.
 
-The schema also allows a `runner_profiles` list: installed runner profiles
-that each run in their own interpreter environment, with the environment's
-root, any library directories the launcher must add to the sidecar's
-search path, the packages that install the profile and the compute types it
-can load. A descriptor without the list declares no runner profiles, and
+The schema also allows a `runner_profiles` list: installed runner profiles,
+each naming the interpreter environment its sidecar runs in, apart from
+`python.interpreter` (profiles may share one), with the environment's root,
+any library directories for the sidecar's shared-library search path, the
+packages that install the profile and the compute types it can load. A descriptor without the list declares no runner profiles, and
 `python.interpreter` keeps serving every model. No package published so far
 declares one.
 

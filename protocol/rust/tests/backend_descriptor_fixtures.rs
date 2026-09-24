@@ -57,11 +57,17 @@ fn with_profile_field(profile: usize, field: &str, value: Option<Value>) -> Valu
 }
 
 fn rust_accepts(instance: &Value) -> bool {
+    reader_error(instance).is_none()
+}
+
+/// Why the reader refuses `instance`, or `None` when it accepts it.
+fn reader_error(instance: &Value) -> Option<String> {
     BackendDescriptor::parse_with_path(
         &serde_json::to_string(instance).expect("serialize"),
         Path::new(FIXTURE),
     )
-    .is_ok()
+    .err()
+    .map(|err| err.to_string())
 }
 
 #[test]
@@ -116,17 +122,16 @@ fn the_fixture_declares_a_faster_whisper_and_a_kokoro_profile() {
 
 #[test]
 fn the_shipped_descriptor_declares_no_runner_profile() {
-    // No package installs a speech runner profile yet; a descriptor that
-    // declared one would have doctor report an environment that is absent.
+    // No package installs a speech runner profile yet, so the shipped
+    // descriptor must not declare one.
     let d = BackendDescriptor::parse_with_path(&read(SHIPPED), Path::new(SHIPPED)).expect("parses");
     assert!(d.runner_profiles.is_empty());
 }
 
-#[test]
-fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
-    let validator =
-        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
-    let cases: Vec<(&str, Value)> = vec![
+/// Malformed variants of the fixture that the schema and the reader both
+/// refuse.
+fn malformed_cases() -> Vec<(&'static str, Value)> {
+    vec![
         (
             "relative interpreter",
             with_profile_field(0, "interpreter", Some(json!("bin/python"))),
@@ -154,6 +159,10 @@ fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
         (
             "auto is not a compute type",
             with_profile_field(0, "compute_types", Some(json!(["auto"]))),
+        ),
+        (
+            "a compute type in map form",
+            with_profile_field(0, "compute_types", Some(json!([{"float16": null}]))),
         ),
         (
             "empty compute types",
@@ -213,7 +222,14 @@ fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
             ]);
             doc
         }),
-    ];
+    ]
+}
+
+#[test]
+fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
+    let validator =
+        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
+    let cases = malformed_cases();
     for (label, instance) in cases {
         assert!(
             !validator.is_valid(&instance),
@@ -226,25 +242,29 @@ fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
     }
 }
 
-#[test]
-fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
-    // The schema accepts each of these; the reader refuses them. Pinning
-    // the schema's verdict keeps the list honest if the schema grows a rule.
-    let validator =
-        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
-    let cases: Vec<(&str, Value)> = vec![
-        ("duplicate profile id", {
-            let mut doc = fixture();
-            doc["runner_profiles"][1]["id"] = json!("faster_whisper");
-            doc
-        }),
+/// Variants the schema accepts and the reader refuses, each with the reason
+/// the reader must give.
+fn reader_only_cases() -> Vec<(&'static str, Value, &'static str)> {
+    let outside_root = "must sit inside `environment_root`";
+    let mut cases = vec![
+        (
+            "duplicate profile id",
+            {
+                let mut doc = fixture();
+                doc["runner_profiles"][1]["id"] = json!("faster_whisper");
+                doc
+            },
+            "is declared more than once",
+        ),
         (
             "interpreter outside the environment root",
             with_profile_field(0, "interpreter", Some(json!("/usr/bin/python3"))),
+            outside_root,
         ),
         (
             "interpreter equal to the environment root",
             with_profile_field(0, "interpreter", Some(json!(ROOT))),
+            outside_root,
         ),
         (
             "interpreter escaping the root through `..`",
@@ -253,6 +273,7 @@ fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
                 "interpreter",
                 Some(json!(format!("{ROOT}/../../../bin/python3"))),
             ),
+            "`interpreter` must be an absolute path",
         ),
         (
             "interpreter with a `.` component",
@@ -261,7 +282,41 @@ fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
                 "interpreter",
                 Some(json!(format!("{ROOT}/./bin/python"))),
             ),
+            "`interpreter` must be an absolute path",
         ),
+        (
+            "environment root with a `.` component",
+            with_profile_field(
+                0,
+                "environment_root",
+                Some(json!("/usr/lib/tensorplate/./speech-runtime")),
+            ),
+            "`environment_root` must be an absolute path",
+        ),
+        (
+            "environment root with a `..` component, interpreter to match",
+            {
+                let escaped = "/usr/lib/tensorplate/../tensorplate/speech-runtime";
+                let mut doc = with_profile_field(0, "environment_root", Some(json!(escaped)));
+                doc["runner_profiles"][0]["interpreter"] = json!(format!("{escaped}/bin/python"));
+                doc
+            },
+            "`environment_root` must be an absolute path",
+        ),
+        (
+            "blank-only package name",
+            with_profile_field(1, "packages", Some(json!([" "]))),
+            "must name at least one non-empty package",
+        ),
+    ];
+    cases.extend(library_path_cases());
+    cases
+}
+
+/// The reader-only cases for `library_search_paths`.
+fn library_path_cases() -> Vec<(&'static str, Value, &'static str)> {
+    let segment = "must be an absolute path with no `.` or `..` components";
+    vec![
         (
             "library search path outside the environment root",
             with_profile_field(
@@ -269,28 +324,59 @@ fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
                 "library_search_paths",
                 Some(json!(["/usr/lib/x86_64-linux-gnu"])),
             ),
+            "must sit inside `environment_root`",
         ),
         (
-            "environment root with a `..` component",
+            "library search path escaping the root through `..`",
             with_profile_field(
                 0,
-                "environment_root",
-                Some(json!("/usr/lib/tensorplate/../tensorplate/speech-runtime")),
+                "library_search_paths",
+                Some(json!([format!(
+                    "{ROOT}/../../../../usr/lib/x86_64-linux-gnu"
+                )])),
             ),
+            segment,
         ),
         (
-            "blank-only package name",
-            with_profile_field(1, "packages", Some(json!([" "]))),
+            "library search path with a `.` component",
+            with_profile_field(
+                0,
+                "library_search_paths",
+                Some(json!([format!("{ROOT}/./lib")])),
+            ),
+            segment,
         ),
-    ];
-    for (label, instance) in cases {
+        (
+            "library search path repeated with a trailing slash",
+            with_profile_field(
+                0,
+                "library_search_paths",
+                Some(json!([format!("{ROOT}/lib"), format!("{ROOT}/lib/")])),
+            ),
+            "`library_search_paths` repeats",
+        ),
+    ]
+}
+
+#[test]
+fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
+    // The schema accepts each of these; the reader refuses them, and for the
+    // reason named. Pinning the schema's verdict keeps the list honest if
+    // the schema grows a rule; pinning the reason keeps each case on the
+    // rule it is named for, not on a neighbour that happens to refuse it.
+    let validator =
+        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
+    let cases = reader_only_cases();
+    for (label, instance, reason) in cases {
         assert!(
             validator.is_valid(&instance),
             "{label}: the schema accepts it, so the reader is the only guard"
         );
+        let refused =
+            reader_error(&instance).unwrap_or_else(|| panic!("{label}: the reader must refuse it"));
         assert!(
-            !rust_accepts(&instance),
-            "{label}: the reader must refuse it"
+            refused.contains(reason),
+            "{label}: refused for another reason: {refused}"
         );
     }
 }

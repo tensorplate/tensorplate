@@ -46,9 +46,10 @@ pub struct BackendDescriptor {
     pub capabilities: Option<BackendCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
-    /// Installed runner profiles, each in its own interpreter environment.
-    /// Empty when the descriptor declares none; `python` then describes the
-    /// only interpreter the backend uses.
+    /// Installed runner profiles: the interpreter environment each profile's
+    /// sidecar runs in, apart from `python`'s. Profiles may share one
+    /// environment. Empty when the descriptor declares none; `python` then
+    /// describes the only interpreter the backend uses.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -164,8 +165,13 @@ pub struct BackendCapabilities {
 /// Compute types a runner profile can load a model with. `auto` is
 /// deliberately absent: a profile states what it supports, and selection
 /// never substitutes one silently.
+///
+/// `try_from` pins decoding to the plain string form, as for
+/// [`crate::platform_memory_profile::PlatformMemoryProfileName`]: the
+/// derived `Deserialize` would also accept the map form
+/// (`{"float16": null}`), which the schema refuses.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", try_from = "String")]
 pub enum ComputeType {
     Float32,
     Float16,
@@ -177,8 +183,26 @@ pub enum ComputeType {
     Int16,
 }
 
-/// One installed runner profile: the environment the launcher starts the
-/// profile's sidecar in and the packages that install it.
+impl TryFrom<String> for ComputeType {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "float32" => Ok(Self::Float32),
+            "float16" => Ok(Self::Float16),
+            "bfloat16" => Ok(Self::Bfloat16),
+            "int8" => Ok(Self::Int8),
+            "int8_float32" => Ok(Self::Int8Float32),
+            "int8_float16" => Ok(Self::Int8Float16),
+            "int8_bfloat16" => Ok(Self::Int8Bfloat16),
+            "int16" => Ok(Self::Int16),
+            other => Err(format!("unknown compute type `{other}`")),
+        }
+    }
+}
+
+/// One installed runner profile: the environment its sidecar runs in and
+/// the packages that install it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerProfile {
@@ -188,8 +212,8 @@ pub struct RunnerProfile {
     pub interpreter: String,
     /// Absolute root of the profile's installed environment.
     pub environment_root: String,
-    /// Absolute directories inside `environment_root` the launcher adds
-    /// to the sidecar's shared-library search path.
+    /// Absolute directories inside `environment_root` for the sidecar's
+    /// shared-library search path, for libraries loaded by name at run time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_search_paths: Vec<String>,
     /// OS packages that install this profile.
@@ -365,9 +389,10 @@ impl BackendDescriptor {
 }
 
 impl RunnerProfile {
-    /// The rules the schema cannot state: paths are absolute and
-    /// normalized, the interpreter and every library search path sit
-    /// inside the environment root, and no list repeats an entry.
+    /// The rules the schema cannot state: paths carry no `.` or `..`
+    /// segment, the interpreter and every library search path sit inside
+    /// the environment root, no path list repeats an entry, and no package
+    /// name is blank.
     fn check(&self) -> Result<(), String> {
         let id = &self.id;
         if !is_canonical_snake_identifier(id) {
