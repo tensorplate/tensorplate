@@ -19,18 +19,12 @@
 
 docs/assets/tensorplate_banner.png binary 1 The README banner image. Its only embedded text is the image editor's XMP history (tool, timestamps, document ids), with no user, host or path.
 
-# Transcribed accelerator fixtures from before the reserved GPU-00000000-...
-# namespace. publication_safe_uuid in platform/tests/accelerator_fixtures.rs
-# admits these six files' UUIDs as a closed legacy set; it also keeps a
-# pair for ubuntu2404-x86-l4-g2s8, whose fixture now uses the synthetic
-# namespace and needs no entry.
+# publication_safe_uuid in platform/tests/accelerator_fixtures.rs keeps,
+# as a closed legacy set, the UUIDs transcribed accelerator fixtures
+# carried before the reserved GPU-00000000-... namespace. Every fixture
+# now uses that namespace; the set is a source file's test data, not
+# evidence.
 platform/tests/accelerator_fixtures.rs device-uuid 6 The closed legacy set of transcribed synthetic UUIDs the fixture test admits.
-test/platform/accelerator/mig-enabled-a100-40g.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
-test/platform/accelerator/ubuntu2404-x86-a100-40g-a2hg1.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
-test/platform/accelerator/ubuntu2404-x86-rtxpro6000se-g4s48.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
-test/platform/accelerator/ubuntu2404-x86-rtxpro6000we-physical.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
-test/platform/accelerator/unsupported-rtx-6000-ada.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
-test/platform/accelerator/unsupported-rtx-a6000.txt device-uuid 1 Transcribed fixture; its UUID is in the closed legacy set.
 
 # A private-range address as the remote host in tests that a non-loopback
 # serving URL or agent address is handled as remote.
