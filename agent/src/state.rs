@@ -32,9 +32,11 @@
 // `rename(2)` is atomic on POSIX filesystems, so a crash mid-write leaves
 // each file either whole and old or whole and new. The reader prefers the
 // primary whenever it decodes and consults the backup only when the primary
-// is missing, empty or damaged; a primary refused for its state version is
+// is missing, empty or damaged. A primary refused for its state version is
 // never replaced by the backup, because that backup belongs to an older
-// state the newer file superseded.
+// state the newer file superseded; nor is a primary that cannot be read at
+// all, because after a failed backup-first write the backup can hold a
+// state whose write returned an error.
 //
 // State updates are serialized through an in-process `Mutex`; the agent
 // has exactly one active control thread mutating state, but the mutex
@@ -101,14 +103,16 @@ fn write_order(state: &AgentState) -> [WriteStep; 2] {
 impl StateStore {
     /// Open the store rooted at `state_dir`. The directory is created if
     /// missing. The primary file is read first; the backup is consulted
-    /// when the primary is missing or empty, or fails to decode for any
-    /// reason other than an unsupported state version. With neither file
-    /// present (or both empty) the store starts from [`AgentState::fresh`].
+    /// when the primary is missing or empty, or is read but fails to decode
+    /// for any reason other than an unsupported state version. With neither
+    /// file present (or both empty) the store starts from
+    /// [`AgentState::fresh`].
     ///
     /// A primary that does not decode and has no usable backup is an
     /// explicit corruption error, so the agent does not silently overwrite
     /// operator data; so is a primary at a state version this build does
-    /// not read, whatever the backup holds.
+    /// not read, whatever the backup holds. A primary that cannot be read
+    /// at all is an I/O error, and the backup is not consulted.
     ///
     /// # Errors
     ///
@@ -127,7 +131,7 @@ impl StateStore {
                 Ok(None) => AgentState::fresh(),
                 Err(backup_err) => return Err(backup_err.into()),
             },
-            Err(primary_err) if primary_err.is_version_refusal() => return Err(primary_err.into()),
+            Err(primary_err) if !primary_err.allows_backup() => return Err(primary_err.into()),
             Err(primary_err) => match load_one(&backup) {
                 Ok(Some(s)) => s,
                 _ => return Err(primary_err.into()),
@@ -450,16 +454,21 @@ enum LoadFailure {
 }
 
 impl LoadFailure {
-    /// A file at a state version this build does not read. Such a file
-    /// supersedes any backup beside it, so the backup is not consulted.
-    fn is_version_refusal(&self) -> bool {
-        matches!(
-            self,
-            Self::Decode {
+    /// Whether the backup may stand in for the primary that failed this
+    /// way. It may for a damaged primary. It may not for a primary at a
+    /// state version this build does not read, which supersedes any backup
+    /// beside it, nor for one that could not be read at all: after a failed
+    /// backup-first write the backup can hold a state whose write returned
+    /// an error, and only real damage to the primary should expose it.
+    fn allows_backup(&self) -> bool {
+        match self {
+            Self::Io(_)
+            | Self::Decode {
                 error: DecodeError::UnsupportedSchemaVersion { .. },
                 ..
-            }
-        )
+            } => false,
+            Self::Decode { .. } => true,
+        }
     }
 }
 
@@ -1265,5 +1274,18 @@ mod tests {
         let s = decode_agent_state(&String::from_utf8(written).expect("utf8")).expect("decode");
         assert_eq!(s.schema_version, AGENT_STATE_SCHEMA_VERSION_LEGACY);
         assert!(s.last_error.is_none());
+    }
+
+    #[test]
+    fn a_primary_that_cannot_be_read_is_not_replaced_by_the_backup() {
+        let td = TempDir::new().expect("td");
+        let legacy = fixture(LEGACY_FIXTURE);
+        write_pair(td.path(), None, Some(&legacy));
+        // Reading a directory fails with an I/O error, not a decode error.
+        fs::create_dir(td.path().join("state.json")).expect("mkdir");
+        match StateStore::open(td.path()).expect_err("refused") {
+            super::AgentError::Io(_) => {}
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 }

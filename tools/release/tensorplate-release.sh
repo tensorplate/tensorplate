@@ -511,7 +511,7 @@ for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pa
     def walk(obj):
         if isinstance(obj, dict):
             for key, value in obj.items():
-                if key == "schema_version" and isinstance(value, dict):
+                if key == "schema_version":
                     found.append(value)
                 walk(value)
         elif isinstance(obj, list):
@@ -519,6 +519,11 @@ for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pa
                 walk(item)
 
     walk(data)
+    # A boolean schema such as `true` accepts every version string.
+    for constraint in found:
+        if not isinstance(constraint, dict):
+            bad.append(f"{path}: schema_version must be an object schema, found {constraint!r}")
+    found = [constraint for constraint in found if isinstance(constraint, dict)]
     if path.as_posix() in state_tracks:
         root = data.get("properties", {}).get("schema_version")
         track = root.get("enum") if isinstance(root, dict) else None

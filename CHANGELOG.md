@@ -41,10 +41,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Changed
 
 - The agent no longer falls back to `state.json.bak` when `state.json` is
-  refused for an unsupported state version: a newer state file supersedes an
+  refused for an unsupported state version (a newer state file supersedes an
   older backup, so the agent exits with `CorruptState` instead of starting
-  on the stale backup. A damaged, empty or missing `state.json` still falls
-  back as before. On Linux, the directory sync between the two renames of a
+  on the stale backup) or cannot be read at all (an I/O error now stops the
+  agent). A damaged, empty or missing `state.json` still falls back as
+  before. On Linux, the directory sync between the two renames of a
   `0.2` state write must now succeed. (V030-E03-F01-T03)
 
 ## [0.2.1] - 2026-09-23

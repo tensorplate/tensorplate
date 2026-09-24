@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_control::is_valid_deployment_id;
+use crate::agent_control::{is_valid_deployment_id, looks_like_digest};
 use crate::json_numbers::MAX_SAFE_BYTES;
 use crate::member_quota::{MemberQuota, MemberQuotaError};
 use crate::serde_shape::{
@@ -349,7 +349,7 @@ fn validate_generation_record(
         return Err(ResidentSetError::DuplicateGeneration(record.generation));
     }
     for (field, digest) in record.digests {
-        if !is_digest(digest) {
+        if !looks_like_digest(digest) {
             return Err(ResidentSetError::InvalidDigest {
                 deployment_id: record.deployment_id.to_owned(),
                 field,
@@ -368,18 +368,6 @@ fn validate_generation_record(
             deployment_id: record.deployment_id.to_owned(),
             source,
         })
-}
-
-/// The repository's digest form: `algo:hex`, lowercase algorithm name.
-fn is_digest(value: &str) -> bool {
-    value.split_once(':').is_some_and(|(algo, hex)| {
-        !algo.is_empty()
-            && algo
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            && !hex.is_empty()
-            && hex.bytes().all(|b| b.is_ascii_hexdigit())
-    })
 }
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]

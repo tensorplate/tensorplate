@@ -147,7 +147,8 @@ The store persists exactly two files in the agent's state directory:
 - `state.json.bak` — the same bytes, written by every mutation. Consulted
   when `state.json` is missing, empty or fails to decode — but never when
   `state.json` is refused for its state version, because a newer file
-  supersedes whatever older backup sits beside it. After a failed 0.2
+  supersedes whatever older backup sits beside it, and never when
+  `state.json` cannot be read at all (an I/O error stops the agent). After a failed 0.2
   write the backup may hold the state that write attempted until the next
   write succeeds; it is read only if `state.json` is missing or damaged.
 
@@ -315,7 +316,7 @@ agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
 error and exits instead of misreading it; nothing migrates a state file
 backwards, and a downgrade sets the state directory aside instead. The
 current agent refuses an unknown state version the same way, and a `0.2`
-file with a top-level or resident-set field it does not know.
+file with any field it does not know.
 
 The durable state file is read only by the agent. The CLI (V01-E11) and
 observability (V01-E10) read the status the agent projects from it, and the

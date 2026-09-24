@@ -1204,6 +1204,14 @@ PY
   expect_walk "a state-track branch listing versions" fail \
     "protocol/schemas/agent_state.json: only the root schema_version may list versions"
   reset_tree
+  mutate protocol/schemas/agent_state.json 'd["allOf"][0]["if"]["properties"]["schema_version"] = True'
+  expect_walk "a state-track branch accepting any version" fail \
+    "protocol/schemas/agent_state.json: schema_version must be an object schema, found True"
+  reset_tree
+  mutate protocol/schemas/deploy_transaction.json 'd["properties"]["schema_version"] = True'
+  expect_walk "a schema accepting any version" fail \
+    "protocol/schemas/deploy_transaction.json: schema_version must be an object schema, found True"
+  reset_tree
   mutate protocol/schemas/deploy_transaction.json 'd["properties"]["schema_version"] = {"type": "string", "enum": ["0.1", "0.2"]}'
   expect_walk "a schema outside the state-track list listing versions" fail \
     "protocol/schemas/deploy_transaction.json: schema_version const None is not '${protocol_version}'"

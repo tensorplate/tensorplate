@@ -12,11 +12,12 @@
 // generation counter and the resident set. Both are decoded by
 // [`decode_agent_state`], not by the protocol-wide
 // [`crate::decode_with_version_check`], whose `SCHEMA_VERSION` stays "0.1"
-// for every other payload and does not move these versions. A writer stamps the oldest version whose readers
-// decode the state without loss ([`AgentState::required_schema_version`]),
-// so an agent that never allocates a generation keeps writing files an
-// older agent reads, and one that has is refused by an older agent with
-// its typed unsupported-version error instead of being misread.
+// for every other payload and does not move these versions. A writer stamps
+// the oldest version whose readers decode the state without loss
+// ([`AgentState::required_schema_version`]), so an agent that never
+// allocates a generation keeps writing files an older agent reads, and one
+// that has is refused by an older agent with its typed unsupported-version
+// error instead of being misread.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,12 +44,13 @@ pub const AGENT_STATE_SCHEMA_VERSIONS: [&str; 2] = [
     AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET,
 ];
 
+/// [`AGENT_STATE_SCHEMA_VERSIONS`] as the decoder's errors name them.
 const AGENT_STATE_SCHEMA_VERSIONS_DISPLAY: &str = "0.1 or 0.2";
 
 /// Top-level keys of a state file. A "0.2" file with any other top-level
-/// key is refused: an older 0.2 reader would otherwise drop a field it does
-/// not know on its next write. "0.1" files keep the lenient reading every
-/// earlier agent applied.
+/// key, or any other key in one of the records below, is refused: an older
+/// 0.2 reader would otherwise drop a field it does not know on its next
+/// write. "0.1" files keep the lenient reading every earlier agent applied.
 pub const AGENT_STATE_ROOT_KEYS: [&str; 10] = [
     "schema_version",
     "store_version",
@@ -60,6 +62,49 @@ pub const AGENT_STATE_ROOT_KEYS: [&str; 10] = [
     "quarantined",
     "next_generation",
     "resident_set",
+];
+
+/// Keys of the records a "0.2" file shares with the singleton layout. The
+/// resident-set records refuse unknown keys through serde; these records
+/// keep serde's leniency for "0.1" files, so [`decode_agent_state`] checks
+/// them by name in a "0.2" file.
+pub const DEPLOYMENT_RECORD_KEYS: [&str; 9] = [
+    "deployment_id",
+    "bundle_digest",
+    "bundle_name",
+    "bundle_version",
+    "backend_hint",
+    "model_class",
+    "staged_path",
+    "promoted_monotonic_ns",
+    "labels",
+];
+
+/// See [`DEPLOYMENT_RECORD_KEYS`].
+pub const TRANSACTION_RECORD_KEYS: [&str; 10] = [
+    "transaction_id",
+    "deployment_id",
+    "phase",
+    "kind",
+    "bundle_digest",
+    "bundle_path",
+    "correlation_id",
+    "started_monotonic_ns",
+    "last_transition_monotonic_ns",
+    "failure",
+];
+
+/// See [`DEPLOYMENT_RECORD_KEYS`].
+pub const ERROR_RECORD_KEYS: [&str; 4] = ["code", "message", "recoverable", "context"];
+
+/// See [`DEPLOYMENT_RECORD_KEYS`].
+pub const QUARANTINE_RECORD_KEYS: [&str; 6] = [
+    "transaction_id",
+    "deployment_id",
+    "bundle_digest",
+    "phase",
+    "error",
+    "quarantined_monotonic_ns",
 ];
 
 /// Stored kind of in-flight transaction. Both deploy and rollback walk
@@ -413,7 +458,10 @@ fn transaction_kind_is_legacy(kind: TransactionKind) -> bool {
 pub enum AgentStateError {
     #[error("AgentState.store_version must be >= 1")]
     InvalidStoreVersion,
-    #[error("unsupported state schema_version `{0}` (expected `0.1` or `0.2`)")]
+    #[error(
+        "unsupported state schema_version `{0}` (expected `{}`)",
+        AGENT_STATE_SCHEMA_VERSIONS_DISPLAY
+    )]
     UnsupportedStateVersion(String),
     #[error(
         "a state stamped schema_version 0.1 carries content an agent through 0.2.x cannot read (the generation counter, a resident set, or a newer error code, phase or transaction kind)"
@@ -421,6 +469,8 @@ pub enum AgentStateError {
     LegacyVersionCarriesNewContent,
     #[error("unknown top-level field `{0}` in a schema_version 0.2 state")]
     UnknownRootField(String),
+    #[error("unknown field `{field}` in `{record}` of a schema_version 0.2 state")]
+    UnknownRecordField { record: String, field: String },
     #[error("next_generation {0} is outside [1, 2^53)")]
     NextGenerationOutOfRange(u64),
     #[error("resident_set requires next_generation")]
@@ -455,11 +505,66 @@ impl ValidatePayload for AgentState {
     }
 }
 
+/// The first key, in the records a "0.2" file shares with the singleton
+/// layout, that this reader does not know, as `(record, key)`. Values that
+/// are not objects are left for the structural decode to refuse.
+fn first_unknown_record_field(root: &serde_json::Value) -> Option<(String, String)> {
+    fn unknown(value: &serde_json::Value, allowed: &[&str]) -> Option<String> {
+        value
+            .as_object()?
+            .keys()
+            .find(|key| !allowed.contains(&key.as_str()))
+            .cloned()
+    }
+    let mut records: Vec<(String, &serde_json::Value, &[&str])> = Vec::new();
+    for slot in ["active", "previous_active", "candidate"] {
+        if let Some(record) = root.get(slot) {
+            records.push((slot.to_string(), record, &DEPLOYMENT_RECORD_KEYS));
+        }
+    }
+    if let Some(tx) = root.get("in_flight_transaction") {
+        records.push(("in_flight_transaction".into(), tx, &TRANSACTION_RECORD_KEYS));
+        if let Some(failure) = tx.get("failure") {
+            records.push((
+                "in_flight_transaction.failure".into(),
+                failure,
+                &ERROR_RECORD_KEYS,
+            ));
+        }
+    }
+    if let Some(error) = root.get("last_error") {
+        records.push(("last_error".into(), error, &ERROR_RECORD_KEYS));
+    }
+    if let Some(quarantined) = root
+        .get("quarantined")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (index, record) in quarantined.iter().enumerate() {
+            records.push((
+                format!("quarantined[{index}]"),
+                record,
+                &QUARANTINE_RECORD_KEYS,
+            ));
+            if let Some(error) = record.get("error") {
+                records.push((
+                    format!("quarantined[{index}].error"),
+                    error,
+                    &ERROR_RECORD_KEYS,
+                ));
+            }
+        }
+    }
+    records
+        .into_iter()
+        .find_map(|(name, value, allowed)| unknown(value, allowed).map(|key| (name, key)))
+}
+
 /// Decode a durable state file.
 ///
 /// Accepts state `schema_version` "0.1" and "0.2"; any other version is
 /// [`DecodeError::UnsupportedSchemaVersion`] before the body is read. A
-/// "0.2" file with an unknown top-level field is refused. Structural
+/// "0.2" file with an unknown field, at the top level or in any record, is
+/// refused. Structural
 /// decoding reads the raw text, so a key repeated inside a record is an
 /// error rather than a silent last-wins.
 ///
@@ -489,6 +594,11 @@ pub fn decode_agent_state(raw: &str) -> Result<AgentState, DecodeError> {
         }) {
             return Err(DecodeError::InvalidPayload(
                 AgentStateError::UnknownRootField(unknown.clone()).to_string(),
+            ));
+        }
+        if let Some((record, field)) = first_unknown_record_field(&value) {
+            return Err(DecodeError::InvalidPayload(
+                AgentStateError::UnknownRecordField { record, field }.to_string(),
             ));
         }
     }
@@ -971,5 +1081,56 @@ mod tests {
         next_set.members.push(sample_member("stt", 3));
         next_set.endpoint_map.push(endpoint("stt", 3));
         assert_eq!(emptied.validate_successor(&refilled), Ok(()));
+    }
+
+    #[test]
+    fn the_version_display_names_every_accepted_version() {
+        assert_eq!(
+            super::AGENT_STATE_SCHEMA_VERSIONS.join(" or "),
+            super::AGENT_STATE_SCHEMA_VERSIONS_DISPLAY
+        );
+    }
+
+    #[test]
+    fn to_retained_carries_every_field_a_member_shares_with_it() {
+        let mut member = sample_member("tts", 2);
+        member.promoted_monotonic_ns = Some(7);
+        member.labels.insert("team".into(), "speech".into());
+        let mut expected = serde_json::to_value(&member).expect("member");
+        let object = expected.as_object_mut().expect("object");
+        object.remove("state");
+        object.remove("previous");
+        assert_eq!(
+            serde_json::to_value(member.to_retained()).expect("retained"),
+            expected
+        );
+    }
+
+    #[test]
+    fn unknown_record_fields_are_refused_at_0_2_and_ignored_at_0_1() {
+        let mut s = AgentState::fresh();
+        s.schema_version = AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET.into();
+        s.next_generation = Some(1);
+        s.last_error = Some(ErrorRecord::new(ErrorCode::Internal, "x"));
+        let mut value = serde_json::to_value(&s).expect("value");
+        value["last_error"]["later"] = serde_json::json!(true);
+        match decode_agent_state(&value.to_string()).expect_err("refused") {
+            DecodeError::InvalidPayload(message) => assert_eq!(
+                message,
+                AgentStateError::UnknownRecordField {
+                    record: "last_error".into(),
+                    field: "later".into()
+                }
+                .to_string()
+            ),
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+        let mut legacy = serde_json::to_value(AgentState {
+            last_error: Some(ErrorRecord::new(ErrorCode::Internal, "x")),
+            ..AgentState::fresh()
+        })
+        .expect("value");
+        legacy["last_error"]["later"] = serde_json::json!(true);
+        decode_agent_state(&legacy.to_string()).expect("0.1 stays lenient");
     }
 }

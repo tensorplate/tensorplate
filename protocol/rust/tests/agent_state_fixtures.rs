@@ -33,7 +33,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
-use tensorplate_protocol::agent_state::AGENT_STATE_ROOT_KEYS;
+use tensorplate_protocol::agent_state::{
+    AGENT_STATE_ROOT_KEYS, DEPLOYMENT_RECORD_KEYS, ERROR_RECORD_KEYS, QUARANTINE_RECORD_KEYS,
+    TRANSACTION_RECORD_KEYS,
+};
 use tensorplate_protocol::{
     decode_agent_state, decode_with_version_check, AdmissionMode, AgentState, BudgetDomainName,
     DecodeError, DeployState, DomainQuotaBytes, ErrorCode, MemberState, ResidentMember,
@@ -206,6 +209,25 @@ fn root_properties_match_the_decoders_key_list() {
         .map(|k| (*k).to_string())
         .collect();
     assert_eq!(keys(&schema["properties"]), expected);
+}
+
+#[test]
+fn shared_record_key_lists_match_the_schema() {
+    let schema = schema_document();
+    let defs = &schema["definitions"];
+    for (definition, list) in [
+        ("DeploymentRecord", &DEPLOYMENT_RECORD_KEYS[..]),
+        ("TransactionRecord", &TRANSACTION_RECORD_KEYS[..]),
+        ("ErrorRecord", &ERROR_RECORD_KEYS[..]),
+        ("QuarantineRecord", &QUARANTINE_RECORD_KEYS[..]),
+    ] {
+        let expected: BTreeSet<String> = list.iter().map(|k| (*k).to_string()).collect();
+        assert_eq!(
+            keys(&defs[definition]["properties"]),
+            expected,
+            "{definition}: the decoder's key list differs from the schema"
+        );
+    }
 }
 
 #[test]
@@ -469,6 +491,62 @@ fn refused_by_both() -> Vec<Refusal> {
             |v| v["later"] = json!(true),
             "",
             "unknown top-level field `later`",
+        ),
+        refusal(
+            "an unknown last_error field at 0.2",
+            RESTORE,
+            |v| v["last_error"]["later"] = json!(1),
+            "/last_error",
+            "unknown field `later` in `last_error`",
+        ),
+        refusal(
+            "an unknown quarantine field at 0.2",
+            RESTORE,
+            |v| v["quarantined"][0]["later"] = json!(1),
+            "/quarantined/0",
+            "unknown field `later` in `quarantined[0]`",
+        ),
+        refusal(
+            "an unknown quarantine error field at 0.2",
+            RESTORE,
+            |v| v["quarantined"][0]["error"]["later"] = json!(1),
+            "/quarantined/0/error",
+            "unknown field `later` in `quarantined[0].error`",
+        ),
+        refusal(
+            "an unknown in-flight transaction field at 0.2",
+            RESTORE,
+            |v| {
+                v["in_flight_transaction"] = json!({
+                    "transaction_id": "tx-1", "deployment_id": "vision-v2", "phase": "received",
+                    "kind": "deploy", "later": 1
+                });
+            },
+            "/in_flight_transaction",
+            "unknown field `later` in `in_flight_transaction`",
+        ),
+        refusal(
+            "an unknown transaction failure field at 0.2",
+            RESTORE,
+            |v| {
+                v["in_flight_transaction"] = json!({
+                    "transaction_id": "tx-1", "deployment_id": "vision-v2", "phase": "failed",
+                    "kind": "deploy", "failure": {"code": "internal", "message": "x", "later": 1}
+                });
+            },
+            "/in_flight_transaction/failure",
+            "unknown field `later` in `in_flight_transaction.failure`",
+        ),
+        refusal(
+            "an unknown singleton field in a 0.2 state without a set",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                v["active"] = load_value(LEGACY)["active"].clone();
+                v["active"]["later"] = json!(1);
+            },
+            "/active",
+            "unknown field `later` in `active`",
         ),
         refusal(
             "a null resident set",
@@ -1017,13 +1095,21 @@ fn documented_divergences() {
     ));
 
     // A 0.1 file keeps the lenient reading every earlier agent applied: an
-    // unknown field is ignored by the decoder, refused by the schema.
-    let doc = edited(LEGACY, |v| v["later"] = json!(true));
-    assert!(!schema_errors(&doc).is_empty());
-    assert_eq!(
-        decode(&doc).expect("lenient"),
-        decode_agent_state(&load(LEGACY)).expect("legacy")
-    );
+    // unknown field, at the top level or in a record, is ignored by the
+    // decoder and refused by the schema.
+    let edits: [Edit; 3] = [
+        |v| v["later"] = json!(true),
+        |v| v["last_error"]["later"] = json!(true),
+        |v| v["quarantined"][0]["error"]["later"] = json!(true),
+    ];
+    for edit in edits {
+        let doc = edited(LEGACY, edit);
+        assert!(!schema_errors(&doc).is_empty());
+        assert_eq!(
+            decode(&doc).expect("lenient"),
+            decode_agent_state(&load(LEGACY)).expect("legacy")
+        );
+    }
 }
 
 /// Every error code, phase and transaction kind; the matches fail to
