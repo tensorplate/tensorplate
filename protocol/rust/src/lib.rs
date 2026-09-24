@@ -50,6 +50,7 @@ pub mod memory_budget;
 pub mod metric_event;
 pub mod model_spec;
 pub mod platform_memory_profile;
+pub mod provisioning_manifest;
 pub mod python_pytorch_ipc;
 pub mod serde_shape;
 pub mod supervision_event;
