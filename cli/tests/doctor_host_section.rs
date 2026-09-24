@@ -1037,7 +1037,10 @@ fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
         "a transient 429 or 503 passes on its own",
         "allowed to reach 169.254.169.254:80",
     ] {
-        assert!(hint.contains(cause), "the hint covers every cause class: {hint}");
+        assert!(
+            hint.contains(cause),
+            "the hint covers every cause class: {hint}"
+        );
     }
     assert!(
         !hint.contains("re-run as a user"),
