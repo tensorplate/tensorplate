@@ -60,7 +60,8 @@ listed so a future recording knows exactly what claim it replaces.
 | `ubuntu2404-x86-rtxpro6000se-g4s96.txt`, `...-g4s192.txt`, `...-g4s384.txt` | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | The G4 fixture's line repeated for two, four and eight devices, varying only the UUID. The G4 half of the first-run recording was never captured, so these are **not recorded** either. |
 | `multi-gpu-three-l4.txt` | `NVIDIA L4` | The L4 row's recorded line, repeated for three devices with synthetic UUIDs. **Not a recording.** Three devices exercise an unclaimed count in the committed registry. This replaces the two-device refusal fixture because `g2-standard-24` now has a row for two L4s. |
 
-UUIDs in these fixtures are synthetic. Driver versions are plausible for
+UUIDs in these fixtures are synthetic, in the reserved all-zero
+`GPU-00000000-0000-0000-0000-` namespace. Driver versions are plausible for
 the generation and are not asserted on. Transcribed framebuffer sizes are
 unverified; the L4 derivatives retain the recorded single-device reading.
 
