@@ -135,8 +135,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   reprovisioning is explicit, by deleting both files and starting the agent
   with the service reachable. With the service unreachable, a binding written
   in the same boot must name the record's machine type and digest its exact
-  bytes, or detection fails; a binding from an earlier boot is ignored, and
-  without one the record alone decides, as before. A service that answers
+  bytes, or detection fails; a binding from an earlier boot is ignored, a
+  binding that cannot be parsed at all fails detection, and without one the
+  record alone decides, as before. A service that answers
   the machine type and then not the instance id makes that start one
   without a live answer: the same-boot record decides, and without one the
   start fails in the step the agent retries. A binding that cannot be parsed,

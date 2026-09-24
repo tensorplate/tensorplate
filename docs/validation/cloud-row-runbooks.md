@@ -310,8 +310,14 @@ service unreachable, a binding written in the same boot must agree with
 the record. Upgrade requires the record the baseline wrote to be
 byte-identical after the candidate starts and the binding to exist;
 rollback restores the record from `state.bak` before the baseline
-installs, as the documented procedure does, and requires it and the
-binding to be byte-identical once the baseline is up.
+installs, as the documented procedure does, compares the restored copy
+with the one taken while the services were stopped, and requires the
+record and the binding to be byte-identical once the baseline is up.
+Because these stages run online and every start in the same boot rewrites
+exactly the record's bytes, the checks made after an agent starts show
+that each release writes the same layout, not that the file survived; the
+comparison right after the restore, before any agent starts, is the one
+that shows the rollback put the record back.
 
 **Because the record is bound to the boot, offline cold boot is not
 supported.** After a reboot the agent must start once with the metadata
