@@ -407,6 +407,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `protocol/fixtures/job_seam.json` holds the ceilings, names and test
   vectors. No backend implements the bridge yet. (V030-E04-F03-T03)
 
+- The scheduler interface names logical sessions and counts in-flight work
+  two ways, without changing dispatch. `SchedulerRequest` takes an optional
+  trailing `session_key` (`SchedulerRequest::SessionKey`, a 64-bit key of
+  the logical session, 0 for none; never a scheduler event field or a
+  metric label), which the FIFO scheduler keeps from `admit()` to `next()`
+  and does not read. `SchedulerMetrics` adds `in_flight_logical`
+  (dispatched requests whose outcome is still open), `in_flight_physical`
+  (dispatched requests the executor has not yet reported released through
+  `on_completion`), `in_flight_physical_cancelled` and
+  `in_flight_physical_high_water`; `in_flight` keeps its name and its
+  logical meaning. After an in-flight cancel the logical count drops at once
+  and the physical count only at the request's `on_completion`. `/metrics`
+  adds the `scheduler_in_flight_logical`, `scheduler_in_flight_physical` and
+  `scheduler_in_flight_physical_cancelled` gauges beside
+  `scheduler_in_flight`, and `ServingMetrics` gains a
+  `record_scheduler_accounting(const SchedulerMetrics&)` overload; after a
+  capture through the five-value overload, which carries no physical count,
+  the two physical gauges are omitted rather than reported as 0. The
+  scheduler policy enum in `config/schemas/scheduler.json`,
+  `scheduler_metrics.json` and `scheduler_event.json` gains the reserved key
+  `session_round_robin`; no scheduler is registered under it, so a serving
+  worker configured with it does not start. The new `scheduler_metrics.json`
+  properties are optional, `serving_metrics.json` names the in-flight
+  gauges, a C++ test holds the enum copies, `SchedulerMetrics` and those
+  gauges to their schemas, and `protocol.md` documents the narrow exception
+  that keeps these additions on protocol `0.1`. FIFO order, the in-flight
+  gate (still logical), the cancel contract, `/health` and the existing
+  `/metrics` gauges and counters are unchanged. (V030-E04-F03-T02)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added
