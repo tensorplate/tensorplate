@@ -299,19 +299,29 @@ any change here), and on demand. It uses no secrets.
 
 | Job | What it checks | Policy |
 | --- | --- | --- |
-| `vulnerability dispositions` | the disposition file and its checker's tests | `tools/release/vulnerability-dispositions.json` |
-| `cargo-deny` | licenses, wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
-| `SBOM and audit` | a CycloneDX JSON SBOM of each Python package installed into a clean environment, uploaded as a workflow artifact, and a `pip-audit` run over the package's runtime dependency closure in that environment, after a positive control that requires it to report a pin with published advisories | the PyPI entries of the disposition file |
+| `vulnerability dispositions` | the disposition file and its checker's tests; the two scanner jobs below also run the checker first | `tools/release/vulnerability-dispositions.json` |
+| `cargo-deny` | licenses of normal and build dependencies (cargo-deny does not license-check crates reached only through dev-dependencies), wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
+| `SBOM and audit` (`sdk/python`, `sdk/python[vision]`, `backends/python_pytorch`) | a CycloneDX JSON SBOM of the package installed into a clean environment without pip, uploaded as a workflow artifact, and a `pip-audit` run over the package's runtime dependency closure in that environment, after a positive control that requires it to report a pin with published advisories | the PyPI entries of the disposition file |
 
 cargo-deny runs as a prebuilt binary whose version and SHA-256 are pinned
-in the workflow; `cyclonedx-bom` and `pip-audit` are pinned by version and
+in the workflow. `cyclonedx-bom` and `pip-audit` are pinned by version and
 installed in an environment of their own, so their dependencies are never
-part of what is audited.
+part of what is audited; those dependencies are not pinned, and the job log
+lists what they resolved to. The workflow's actions are pinned by commit
+SHA, as in the release workflows.
 
 **License policy.** `deny.toml` allows `Apache-2.0`, `MIT` and
 `Unicode-3.0`, which every Rust dependency satisfies today. A dependency
 that needs another license fails the check; allowing it is a reviewed
 change to `deny.toml`.
+
+**The 1.78 toolchain.** The workspace builds with Rust 1.78, and Cargo's
+resolver there does not consider a crate's declared `rust-version`. A
+`cargo update` can therefore pick a release that no longer builds:
+`idna_adapter` is held at 1.1.0 in `Cargo.lock`, the unicode-rs back end,
+because the resolver would otherwise take 1.2.2, whose ICU4X 2 dependencies
+declare Rust 1.86 (1.2.1 declares 1.82). cargo-deny does not catch that;
+the Rust workflow's build does.
 
 **Accepting a vulnerability.** A known vulnerability is accepted only
 through `tools/release/vulnerability-dispositions.json`, whose schema is
@@ -321,7 +331,9 @@ package, a decision (`not_affected`, `accepted` or `fix_pending`), the
 reason, the date decided and a `review_by` date at most 180 days later.
 `tools/release/check-vulnerability-dispositions.py` refuses an entry past
 its `review_by` date, so an expired acceptance turns the check red instead
-of lasting forever. A `cargo` entry must also appear in `deny.toml`'s
+of lasting forever. The dispositions job and both scanner jobs run it, the
+cargo-deny job first of all, because `deny.toml`'s ignore list has no dates
+and cargo-deny would otherwise keep honouring an expired entry. A `cargo` entry must also appear in `deny.toml`'s
 `[advisories] ignore` list, which is what cargo-deny reads; the checker
 refuses the two lists when they differ in either direction. `pypi` entries
 become `pip-audit --ignore-vuln` arguments.
@@ -332,8 +344,12 @@ dates and RFC 3339 date-times, never the RFC 2822 format the advisory
 concerns, and the fixed `time` needs a newer compiler than the workspace
 pins. It is due for review by 2026-12-23.
 
-Not covered yet: native dependencies of the C++ runtime, the contents of
-the Debian packages as built, and an SBOM attached to each release.
+Not covered yet: native dependencies of the C++ runtime; an SBOM of the
+Rust workspace (cargo-deny checks policy, it lists nothing); the PyTorch
+backend's model stack (`torch`, `transformers`, `lerobot`, `numpy`), which
+it imports only when a model loads and does not declare as dependencies;
+the contents of the Debian packages as built; and an SBOM attached to each
+release.
 
 ## Signing and Provenance
 

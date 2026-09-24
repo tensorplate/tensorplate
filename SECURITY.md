@@ -77,8 +77,9 @@ gh attestation verify tensorplate-agent_0.1.0-1_arm64.deb \
 
 Every pull request, every push to `main` and `develop`, and a weekly
 scheduled run check the Rust workspace's licenses, dependency sources and
-known vulnerabilities with `cargo-deny`, and produce a CycloneDX SBOM and a
-`pip-audit` report for each Python package; see
+known vulnerabilities with `cargo-deny`, and produce a CycloneDX SBOM of each
+Python package (the SDK with and without its `vision` extra) and audit its
+runtime dependencies with `pip-audit`; see
 [Supply-chain checks](docs/release/artifacts.md#supply-chain-checks). Those
 SBOMs are workflow artifacts, not release assets: an SBOM attached to a
 release and attested with `actions/attest-sbom` is still on the roadmap.
