@@ -148,16 +148,20 @@ fn component_state_value(state: ComponentState) -> f64 {
     }
 }
 
-fn failure_reason_for_error_code(code: ErrorCode) -> FailureReason {
+/// The failure reason an error code alone implies, if any. `cancelled` is
+/// not a failure, and `unavailable` / `resource_exhausted` each cover several
+/// reasons, so a producer that knows which one reports the reason itself.
+fn failure_reason_for_error_code(code: ErrorCode) -> Option<FailureReason> {
     match code {
-        ErrorCode::ConfigInvalid => FailureReason::ConfigInvalid,
-        ErrorCode::LoadFailed => FailureReason::BackendUnavailable,
-        ErrorCode::NotReady => FailureReason::WorkerNotReady,
-        ErrorCode::ShapeMismatch => FailureReason::ShapeMismatch,
-        ErrorCode::Unsupported => FailureReason::BackendUnsupportedCapability,
-        ErrorCode::OomError => FailureReason::Oom,
-        ErrorCode::Timeout => FailureReason::Timeout,
-        ErrorCode::InferenceFailed | ErrorCode::Internal => FailureReason::Internal,
+        ErrorCode::ConfigInvalid => Some(FailureReason::ConfigInvalid),
+        ErrorCode::LoadFailed => Some(FailureReason::BackendUnavailable),
+        ErrorCode::NotReady => Some(FailureReason::WorkerNotReady),
+        ErrorCode::ShapeMismatch => Some(FailureReason::ShapeMismatch),
+        ErrorCode::Unsupported => Some(FailureReason::BackendUnsupportedCapability),
+        ErrorCode::OomError => Some(FailureReason::Oom),
+        ErrorCode::Timeout => Some(FailureReason::Timeout),
+        ErrorCode::InferenceFailed | ErrorCode::Internal => Some(FailureReason::Internal),
+        ErrorCode::Cancelled | ErrorCode::Unavailable | ErrorCode::ResourceExhausted => None,
     }
 }
 
@@ -170,11 +174,14 @@ fn failure_reason_for_safe_event(event: &SafeStateEvent) -> Option<FailureReason
         SafeStateReason::ServingFailed => Some(
             event
                 .last_error_code
-                .map_or(FailureReason::Internal, failure_reason_for_error_code),
+                .and_then(failure_reason_for_error_code)
+                .unwrap_or(FailureReason::Internal),
         ),
         SafeStateReason::ServingDegraded => Some(FailureReason::WorkerNotReady),
         SafeStateReason::Transition | SafeStateReason::Periodic | SafeStateReason::Recovery => {
-            event.last_error_code.map(failure_reason_for_error_code)
+            event
+                .last_error_code
+                .and_then(failure_reason_for_error_code)
         }
     }
 }
@@ -385,7 +392,7 @@ impl Service {
                         event.backend = Some(input.backend.clone());
                     }
                     event.error_code = input.error_code;
-                    event.failure_reason = input.error_code.map(failure_reason_for_error_code);
+                    event.failure_reason = input.error_code.and_then(failure_reason_for_error_code);
                 });
     }
 
@@ -702,6 +709,36 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tensorplate_protocol::HealthEvent;
+
+    #[test]
+    fn error_codes_imply_a_reason_that_carries_the_same_code() {
+        use super::failure_reason_for_error_code;
+        use tensorplate_protocol::error::ErrorCode;
+        use tensorplate_protocol::FailureReason;
+        for code in ErrorCode::ALL {
+            match (code, failure_reason_for_error_code(code)) {
+                // Pre-existing lossy arm: inference_failed alone does not
+                // identify sidecar_malformed_response (the one reason that
+                // carries it), so it maps to internal.
+                (ErrorCode::InferenceFailed, reason) => {
+                    assert_eq!(reason, Some(FailureReason::Internal));
+                }
+                // Each of these covers several reasons (or, for a cancel,
+                // none), so the code alone implies no reason.
+                (
+                    ErrorCode::Cancelled | ErrorCode::Unavailable | ErrorCode::ResourceExhausted,
+                    r,
+                ) => {
+                    assert_eq!(r, None, "{code}");
+                }
+                (_, reason) => assert_eq!(
+                    reason.map(FailureReason::error_code),
+                    Some(code),
+                    "{code} -> {reason:?}"
+                ),
+            }
+        }
+    }
 
     fn fast_policy() -> HeartbeatPolicy {
         HeartbeatPolicy {

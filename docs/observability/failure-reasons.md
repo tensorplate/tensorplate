@@ -33,6 +33,33 @@ Rust mirror: [`protocol::failure_reason`](../../protocol/rust/src/failure_reason
 | `no_heartbeat`                  | heartbeat   | critical  | yes       | `not_ready`       |
 | `permission_denied`             | permission  | critical  | no        | `unsupported`     |
 | `internal`                      | internal    | critical  | no        | `internal`        |
+| `input_credit_exceeded`         | session     | error     | no        | `resource_exhausted` |
+| `slow_consumer`                 | session     | warning   | no        | `resource_exhausted` |
+| `backend_reset`                 | sidecar     | error     | yes       | `unavailable`     |
+| `deployment_retired`            | supervision | warning   | yes       | `unavailable`     |
+| `worker_shutdown`               | supervision | warning   | yes       | `unavailable`     |
+
+The last five reasons describe how a streaming session ends: the client
+sent input beyond its credit, left output undelivered past the no-progress
+limit, or lost the backend process, deployment generation or worker that
+served it. They are defined ahead of the streaming serving mode that emits
+them. No reason maps to `cancelled`: a requested cancellation is not a
+failure.
+
+## Categories
+
+| Category      | Groups failures of                                              |
+| ------------- | --------------------------------------------------------------- |
+| `config`      | runtime or agent configuration                                  |
+| `bundle`      | bundle manifest and artifact integrity                          |
+| `platform`    | the host runtime or hardware                                    |
+| `backend`     | a backend adapter or its execution                              |
+| `sidecar`     | the Python/PyTorch sidecar process                              |
+| `supervision` | serving worker lifecycle                                        |
+| `heartbeat`   | observability heartbeats                                        |
+| `permission`  | operating system permission                                     |
+| `internal`    | an unexpected internal error                                    |
+| `session`     | one streaming session's own traffic (input credit, output progress) |
 
 The taxonomy is union-stable: post-v0.1.0 additions append rather than
 rename. Each reason carries an optional bounded `detail` string

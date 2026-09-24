@@ -44,7 +44,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ]
     },
     "last_event_sequence": {"type": "integer", "minimum": 0},

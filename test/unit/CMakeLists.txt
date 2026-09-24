@@ -40,6 +40,7 @@ add_executable(tp_test_unit
   serving_pipeline_test.cpp
   serving_health_metrics_test.cpp
   serving_async_store_test.cpp
+  serving_error_status_test.cpp
 )
 
 target_include_directories(tp_test_unit
@@ -54,6 +55,9 @@ target_link_libraries(tp_test_unit
     tp::runtime
     GTest::gtest_main
 )
+
+# Lets schema drift tests read protocol/schemas/ from the source tree.
+target_compile_definitions(tp_test_unit PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 target_compile_features(tp_test_unit PRIVATE cxx_std_20)
 
