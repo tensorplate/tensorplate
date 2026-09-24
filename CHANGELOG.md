@@ -6,6 +6,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
+  tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
+  AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
+  `TP_ENABLE_SANITIZERS`, and the `cmake.sanitizer_options` T1 test holds
+  that refusal and checks each option alone is accepted. The C++ workflow
+  gains a `tsan` leg that runs the T1, T2 and T3 labels; it is not yet a
+  required check. `test/README.md` records what is not instrumented.
+  (V030-E04-F03-T02)
+
+### Fixed
+
+- `HttpServer::stop()` closed the listening socket while the accept
+  thread could still be polling it, a data race ThreadSanitizer reports
+  in 25 of the 47 T2 tests. The socket is now closed only after that
+  thread exits, so its descriptor cannot be reused under a live poll, and
+  the thread accepts no connection once `stop()` has begun.
+  (V030-E04-F03-T02)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added
