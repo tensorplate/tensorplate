@@ -404,7 +404,8 @@ type Observation = (PlatformReport, ObservedStack, Option<PlatformProbeError>);
 ///
 /// The two steps raise the same error VARIANT and mean different things.
 /// `sources()` raises `IdentityUnestablished` only from `unusable_record`:
-/// the machine-type record is a directory, a symlinked path, or oversized.
+/// the machine-type record or the instance binding is a directory, a
+/// symlinked path, or oversized.
 /// That is a tamper signal, it is deterministic, and retrying it would let
 /// a later live answer overwrite the record without the signal ever being
 /// reported. `identify` raises it only from `establish_machine_type`: this
@@ -697,13 +698,15 @@ fn detection_seconds(duration: Duration) -> String {
     format!("{:.1}s", duration.as_secs_f64())
 }
 
-/// Identify the platform from `sources`, refresh the machine-type record,
-/// and say both on `log` as the `platform identity:` line.
+/// Identify the platform from `sources`, refresh the machine-type record
+/// and then the instance binding, and say them on `log` as the `platform
+/// identity:` and `platform instance binding:` lines.
 ///
-/// The record is refreshed on every start where the metadata service
-/// answered, and never from a machine type that was itself read from the
-/// record. A failed write is reported, not fatal: this start has its
-/// identity.
+/// Both are refreshed on every start where the metadata service answered,
+/// and never from a machine type that was itself read from the record. A
+/// failed write is reported, not fatal: this start has its identity. The
+/// binding has a line of its own so the identity line keeps the exact shape
+/// the offline lifecycle stage parses, and it never carries the instance id.
 fn identify_and_record(
     probe: &SystemHostProbe,
     sources: &HostSources,
@@ -721,6 +724,8 @@ fn identify_and_record(
             &record,
         )
     );
+    let binding = probe.write_instance_binding(sources);
+    let _ = writeln!(log, "{}", instance_binding_line(&binding));
     Ok(report)
 }
 
@@ -750,6 +755,15 @@ fn platform_identity_line(
         machine_type.unwrap_or("none"),
         source.map_or("none", MachineTypeSource::as_str)
     )
+}
+
+/// The `platform instance binding:` start-up line: what recording the
+/// instance binding did, in the tokens the identity line uses for the record.
+fn instance_binding_line(binding: &Result<RecordWrite, PlatformProbeError>) -> String {
+    match binding {
+        Ok(write) => format!("platform instance binding: {write}"),
+        Err(err) => format!("platform instance binding: failed ({err})"),
+    }
 }
 
 fn load_runtime_config(
@@ -920,7 +934,7 @@ mod tests {
         identify_accelerator, identify_platform, AcceleratorSources, HostSources,
         MachineTypeSource, PlatformProbeError, PlatformRegistry, RecordWrite, SystemHostProbe,
     };
-    use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+    use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 
     /// The L4 row, the Production cloud exemplar every recovery case here
     /// settles on.
@@ -975,22 +989,35 @@ mod tests {
     }
 
     /// The recorded g2-standard-8 L4 host, as a start with the metadata
-    /// service reachable gathers it.
+    /// service reachable gathers it. The instance id is synthetic.
     fn l4_live_sources() -> HostSources {
         HostSources {
             dmi_product_name: Some("Google Compute Engine\n".to_string()),
+            gce_instance_id: Some("1234567890123456789\n".to_string()),
             ..host_sources(L4_ROW)
         }
     }
 
-    #[test]
-    fn a_start_with_a_live_answer_records_it_and_an_offline_start_uses_it() {
+    /// A staged root with the state and identity directories the installer
+    /// creates, and the two record paths under it.
+    fn staged_identity_root() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temporary = std::env::temp_dir().canonicalize().expect("temporary root");
         let root = tempfile::tempdir_in(temporary).expect("tempdir");
         let record = root
             .path()
             .join(MACHINE_TYPE_RECORD_PATH.trim_start_matches('/'));
-        std::fs::create_dir_all(record.parent().expect("parent")).expect("stage state/");
+        let binding = root
+            .path()
+            .join(INSTANCE_BINDING_PATH.trim_start_matches('/'));
+        for file in [&record, &binding] {
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("stage the directory");
+        }
+        (root, record, binding)
+    }
+
+    #[test]
+    fn a_start_with_a_live_answer_records_it_and_an_offline_start_uses_it() {
+        let (root, record, binding) = staged_identity_root();
         let probe = SystemHostProbe::with_root(root.path());
         let live = l4_live_sources();
 
@@ -1002,20 +1029,25 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(log).expect("utf-8"),
-            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=written\n"
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=written\n\
+             platform instance binding: written\n"
         );
         let written = std::fs::read(&record).expect("the start recorded the machine type");
+        let bound = std::fs::read(&binding).expect("the start recorded the instance");
 
         let mut log = Vec::new();
         identify_and_record(&probe, &live, &mut log).expect("detects");
         assert_eq!(
             String::from_utf8(log).expect("utf-8"),
-            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged\n"
+            "platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged\n\
+             platform instance binding: unchanged\n"
         );
 
         let offline = HostSources {
             gce_machine_type: None,
+            gce_instance_id: None,
             machine_type_record: Some(String::from_utf8(written.clone()).expect("utf-8")),
+            instance_binding: Some(String::from_utf8(bound.clone()).expect("utf-8")),
             ..live
         };
         let mut log = Vec::new();
@@ -1027,13 +1059,50 @@ mod tests {
         assert_eq!(
             String::from_utf8(log).expect("utf-8"),
             "platform identity: machine_type=g2-standard-8 source=recorded_gce_metadata \
-             record=not_applicable\n"
+             record=not_applicable\nplatform instance binding: not_applicable\n"
         );
         assert_eq!(
             std::fs::read(&record).expect("still there"),
             written,
             "an offline start never rewrites the record"
         );
+        assert_eq!(
+            std::fs::read(&binding).expect("still there"),
+            bound,
+            "an offline start never rewrites the binding"
+        );
+    }
+
+    #[test]
+    fn a_live_answer_from_another_instance_is_refused_and_records_nothing() {
+        let (root, record, binding) = staged_identity_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        identify_and_record(&probe, &l4_live_sources(), &mut Vec::new()).expect("detects");
+        let written = std::fs::read(&record).expect("recorded");
+        let bound = std::fs::read(&binding).expect("bound");
+
+        let moved = HostSources {
+            gce_instance_id: Some("1234567890123456790\n".to_string()),
+            instance_binding: Some(String::from_utf8(bound.clone()).expect("utf-8")),
+            ..l4_live_sources()
+        };
+        let mut log = Vec::new();
+        let err = identify_and_record(&probe, &moved, &mut log)
+            .expect_err("a binding from another instance fails detection");
+        assert!(
+            matches!(err, PlatformProbeError::InstanceChanged { .. }),
+            "{err:?}"
+        );
+        let said = err.to_string();
+        assert!(
+            !said.contains("123456789012345678"),
+            "the refusal names no instance id: {said}"
+        );
+        assert!(log.is_empty(), "nothing is recorded or logged here");
+        assert_eq!(std::fs::read(&record).expect("kept"), written);
+        assert_eq!(std::fs::read(&binding).expect("kept"), bound);
+        // Deterministic: another attempt in the same start cannot settle it.
+        assert!(!is_retryable(&ObservationFailure::Identify(err)));
     }
 
     #[test]

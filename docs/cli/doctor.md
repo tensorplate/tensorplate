@@ -95,7 +95,12 @@ scripts can grep on `id` strings.
   boot ID consistently with a canonical synthetic UUID such as
   `00000000-0000-0000-0000-000000000001`. Preserve whether the two values
   match; a sanitized fixture exercises that comparison, not real boot
-  continuity.
+  continuity. A Compute Engine recording also carries the instance id, in
+  `gce_instance_id` and inside `instance_binding`: replace both with
+  `1234567890123456789`, give the binding the record's sanitized boot ID,
+  and recompute its `machine_type_record_sha256` over the sanitized record
+  bytes. A committed fixture carrying any other instance id fails the
+  host-identity tests.
   Record-first: all raw accelerator rows are preserved, including on
   unsupported machines such as a multi-GPU host or one with an unknown
   SKU. A readable multi-GPU answer is interpreted and refused for its
