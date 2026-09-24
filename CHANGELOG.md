@@ -6,6 +6,46 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Three error codes are appended to the shared error taxonomy:
+  `cancelled` (the caller asked for the operation to stop),
+  `unavailable` (a backend process or worker the operation needs is
+  unavailable, was reset or is shutting down) and `resource_exhausted`
+  (a bounded quota, credit or capacity limit was reached). They are C++
+  `Error::Code` values 9, 10 and 11; no existing value moves. The Rust
+  `ErrorCode`, the Python SDK's `ErrorCode`, the Python sidecar's `ERR_*`
+  constants, `error.json` and all 17 schema copies of the code enum carry
+  them. The router answers them with HTTP 499 (Client Closed Request),
+  503 and 429, and serving metrics count `resource_exhausted` as an
+  overload rejection and the other two as failed requests. Nothing emits
+  them yet: the sidecar still reports a cancelled request as `timeout`.
+  A serving worker that predates them reports an unknown sidecar code as
+  `internal`, and an SDK that predates them reports an unknown code as
+  `ErrorCode.INTERNAL`. (V030-E04-F01-T01)
+
+- Five failure reasons describe how a streaming session ends, with a new
+  `session` failure category: `input_credit_exceeded` and
+  `slow_consumer` (category `session`, code `resource_exhausted`, not
+  retryable), `backend_reset` (category `sidecar`), and
+  `deployment_retired` and `worker_shutdown` (category `supervision`), all
+  three with code `unavailable` and retryable. Observability derives no
+  reason from the three new codes alone; a `serving_failed` state change
+  whose last error code has no reason is reported as `internal`, as one
+  with no code already was. (V030-E04-F01-T01)
+
+- The shared enums are checked across languages. A Rust test holds every
+  schema copy of the error-code enum, the `failure_reason.json` enums and
+  the reason table in `docs/observability/failure-reasons.md` to the Rust
+  taxonomy; a C++ test holds the `Error::Code` names to `error.json`; each
+  Python package holds its constants to `error.json`; and the C++ name
+  mapping, the router's status mapping and the metrics mapping are
+  switches over every code, so under the CI warning flags a new code fails
+  the build until it is named and mapped. `tensorplate infer` now parses
+  a typed failure's code through the protocol enum instead of its own
+  copy of the list. `protocol.md` documents the narrow exception that lets these enums
+  grow under protocol `0.1`. (V030-E04-F01-T01)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added

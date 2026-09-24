@@ -17,3 +17,10 @@ release validation harness and shell scripts may assert on these.
 
 New CLI errors must extend this table rather than re-use a code that already
 means something different.
+
+Exit codes follow the CLI error class, not the protocol error code in the
+JSON envelope's `error.code`. A typed agent error exits `3` and a typed
+inference failure exits `11` whatever its code, including `cancelled`,
+`unavailable` and `resource_exhausted`. Exit `6` and the envelope status
+`unavailable` mean structural unavailability only; they are not the
+protocol error code `unavailable`.
