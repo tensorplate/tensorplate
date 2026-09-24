@@ -155,9 +155,202 @@ std::string_view to_string(LogicalSessionEffect effect) noexcept {
   return name.empty() ? std::string_view{"unknown"} : name;
 }
 
-/// The transition rules land with the machine; until then nothing is accepted.
+/// The transition rules, grouped by what produced the event.
 struct LogicalSessionMachine::Rules {
-  static void next() noexcept {}
+  using Event = LogicalSessionEvent;
+  using Effect = LogicalSessionEffect;
+
+  struct Step {
+    Phase to;
+    LogicalSessionEffects effects;
+  };
+  using Next = std::optional<Step>;
+
+  static constexpr Step stay(Phase phase, LogicalSessionEffects effects = {}) noexcept {
+    return Step{phase, effects};
+  }
+
+  /// Cancellation or a terminal outcome has fixed the result.
+  static constexpr bool outcome_fixed(Phase phase) noexcept {
+    return phase == Phase::CancelRequested || phase == Phase::Closed ||
+           phase == Phase::FailedHolding || phase == Phase::FailedReleased;
+  }
+  static constexpr bool finalizing(Phase phase) noexcept {
+    return phase == Phase::FinalizingAfterFinalize || phase == Phase::FinalizingAfterEndpoint;
+  }
+  static constexpr bool draining(Phase phase) noexcept {
+    return phase == Phase::DrainingWorking || phase == Phase::DrainingReleasing;
+  }
+  /// Ready was sent and the outcome is still open.
+  static constexpr bool serving(Phase phase) noexcept {
+    return phase == Phase::Active || finalizing(phase) || draining(phase);
+  }
+  static constexpr bool accepts_input(Phase phase) noexcept {
+    return phase == Phase::Active || phase == Phase::FinalizingAfterEndpoint;
+  }
+  /// Cleanup was requested while the outcome is still open.
+  static constexpr bool cleanup_requested(Phase phase) noexcept {
+    return phase == Phase::DrainingReleasing;
+  }
+
+  static Next next(Phase phase, Event event) noexcept {
+    switch (event) {
+      case Event::Open:
+      case Event::Data:
+      case Event::Finalize:
+      case Event::Ping:
+      case Event::StatusRequest:
+        return on_client_request(phase, event);
+      case Event::HalfClose:
+      case Event::Drain:
+        return on_drain_request(phase, event);
+      case Event::Admitted:
+      case Event::AutomaticEndpoint:
+      case Event::FinalizeCompleted:
+      case Event::DrainCompleted:
+        return on_progress(phase, event);
+      case Event::Cancel:
+      case Event::Abort:
+      case Event::Fail:
+      case Event::BackendReset:
+        return on_termination(phase, event);
+      case Event::ReleaseAcknowledged:
+        return on_release(phase);
+    }
+    return std::nullopt;
+  }
+
+  /// Open, Data, Finalize, Ping and StatusRequest from the client.
+  static Next on_client_request(Phase phase, Event event) noexcept {
+    // A second Open, and anything before Ready or after the outcome is fixed,
+    // is a protocol violation.
+    if (event == Event::Open || !serving(phase)) {
+      return std::nullopt;
+    }
+    if (event == Event::Ping || event == Event::StatusRequest) {
+      return stay(phase, {Effect::EmitReply});
+    }
+    if (draining(phase)) {
+      // Input racing a drain is not taken; accepted work still completes.
+      return stay(phase);
+    }
+    if (event == Event::Data) {
+      if (!accepts_input(phase)) {
+        return std::nullopt;  // after a client Finalize, until completion
+      }
+      return stay(phase, {Effect::AcceptInput});
+    }
+    // Finalize: a repeat while a client finalization is running changes
+    // nothing; after an automatic endpoint it takes over the finalization.
+    if (phase == Phase::FinalizingAfterFinalize) {
+      return stay(phase);
+    }
+    return Step{Phase::FinalizingAfterFinalize, {Effect::StartFinalize}};
+  }
+
+  /// HalfClose from the client, Drain from the worker.
+  static Next on_drain_request(Phase phase, Event event) noexcept {
+    if (phase == Phase::Opening) {
+      // No session exists for the client yet: a half-close is a protocol
+      // violation, and a drain cancels.
+      if (event == Event::HalfClose) {
+        return std::nullopt;
+      }
+      return Step{Phase::CancelRequested, {Effect::SuppressOutput, Effect::RequestCleanup}};
+    }
+    if (draining(phase) || outcome_fixed(phase)) {
+      return stay(phase);  // the first drain wins; nothing changes after the outcome
+    }
+    return Step{Phase::DrainingWorking, {Effect::StartDrain}};
+  }
+
+  /// Admitted, AutomaticEndpoint, FinalizeCompleted and DrainCompleted from
+  /// admission and the processing pipeline.
+  static Next on_progress(Phase phase, Event event) noexcept {
+    if (outcome_fixed(phase)) {
+      return stay(phase);  // a late report
+    }
+    switch (event) {
+      case Event::Admitted:
+        if (phase != Phase::Opening) {
+          return std::nullopt;
+        }
+        return Step{Phase::Active, {Effect::EmitReady}};
+      case Event::AutomaticEndpoint:
+        if (phase == Phase::Active) {
+          return Step{Phase::FinalizingAfterEndpoint, {Effect::StartFinalize}};
+        }
+        if (finalizing(phase) || phase == Phase::DrainingWorking) {
+          return stay(phase, {Effect::StartFinalize});
+        }
+        return std::nullopt;
+      case Event::FinalizeCompleted:
+        if (finalizing(phase)) {
+          return Step{Phase::Active, {}};
+        }
+        if (phase == Phase::DrainingWorking) {
+          return stay(phase);
+        }
+        return std::nullopt;
+      case Event::DrainCompleted:
+        if (phase != Phase::DrainingWorking) {
+          return std::nullopt;
+        }
+        return Step{Phase::DrainingReleasing, {Effect::RequestCleanup}};
+      default:
+        return std::nullopt;
+    }
+  }
+
+  /// Cancel from the client; Abort, Fail and BackendReset from the owner.
+  static Next on_termination(Phase phase, Event event) noexcept {
+    if (phase == Phase::CancelRequested && event == Event::BackendReset) {
+      return Step{Phase::FailedHolding, {Effect::EmitTerminal}};
+    }
+    if (outcome_fixed(phase)) {
+      return stay(phase);
+    }
+    const bool cleaned = cleanup_requested(phase);
+    if (event == Event::Fail || event == Event::BackendReset) {
+      return Step{Phase::FailedHolding,
+                  cleaned ? LogicalSessionEffects{Effect::SuppressOutput, Effect::EmitTerminal}
+                          : LogicalSessionEffects{Effect::SuppressOutput, Effect::RequestCleanup,
+                                                  Effect::EmitTerminal}};
+    }
+    // Cancel and Abort: CancelAccepted answers only a client Cancel after Ready.
+    const bool acknowledge = event == Event::Cancel && serving(phase);
+    if (acknowledge) {
+      return Step{Phase::CancelRequested,
+                  cleaned
+                      ? LogicalSessionEffects{Effect::SuppressOutput, Effect::EmitCancelAccepted}
+                      : LogicalSessionEffects{Effect::SuppressOutput, Effect::EmitCancelAccepted,
+                                              Effect::RequestCleanup}};
+    }
+    return Step{Phase::CancelRequested,
+                cleaned ? LogicalSessionEffects{Effect::SuppressOutput}
+                        : LogicalSessionEffects{Effect::SuppressOutput, Effect::RequestCleanup}};
+  }
+
+  /// ReleaseAcknowledged from the backend.
+  static Next on_release(Phase phase) noexcept {
+    switch (phase) {
+      case Phase::DrainingReleasing:
+      case Phase::CancelRequested:
+        return Step{Phase::Closed, {Effect::ReleaseSlot, Effect::EmitTerminal}};
+      case Phase::FailedHolding:
+        return Step{Phase::FailedReleased, {Effect::ReleaseSlot}};
+      case Phase::Closed:
+      case Phase::FailedReleased:
+        return stay(phase);  // a duplicate acknowledgement
+      case Phase::Opening:
+      case Phase::Active:
+      case Phase::FinalizingAfterFinalize:
+      case Phase::FinalizingAfterEndpoint:
+      case Phase::DrainingWorking:
+        return std::nullopt;  // nothing was asked to be released
+    }
+    return std::nullopt;
+  }
 };
 
 Result<LogicalSessionMachine> LogicalSessionMachine::open(std::uint64_t serving_generation,
@@ -175,12 +368,15 @@ Result<LogicalSessionMachine> LogicalSessionMachine::open(std::uint64_t serving_
 }
 
 Result<LogicalSessionEffects> LogicalSessionMachine::apply(LogicalSessionEvent event) {
-  // Placeholder until the transition rules land: every event is refused.
-  (void)Rules::next;
-  return unexpected(Error::make(Error::Code::NotReady,
-                                "logical session in state '" + std::string{to_string(state())} +
-                                    "' refuses event '" + std::string{to_string(event)} + "'",
-                                std::string{kIllegalTransition}));
+  const Rules::Next step = Rules::next(phase_, event);
+  if (!step.has_value()) {
+    return unexpected(Error::make(Error::Code::NotReady,
+                                  "logical session in state '" + std::string{to_string(state())} +
+                                      "' refuses event '" + std::string{to_string(event)} + "'",
+                                  std::string{kIllegalTransition}));
+  }
+  phase_ = step->to;
+  return step->effects;
 }
 
 Result<void> LogicalSessionMachine::check_generation(std::uint64_t generation) const {
