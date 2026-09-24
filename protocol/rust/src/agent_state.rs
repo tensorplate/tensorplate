@@ -67,7 +67,7 @@ pub const AGENT_STATE_ROOT_KEYS: [&str; 10] = [
 /// Keys of the records a "0.2" file shares with the singleton layout. The
 /// resident-set records refuse unknown keys through serde; these records
 /// keep serde's leniency for "0.1" files, so [`decode_agent_state`] checks
-/// them by name in a "0.2" file.
+/// them by name in a "0.2" file, after requiring each to be a JSON object.
 pub const DEPLOYMENT_RECORD_KEYS: [&str; 9] = [
     "deployment_id",
     "bundle_digest",
@@ -291,9 +291,13 @@ impl AgentState {
     /// Hand out the next deployment generation and advance the counter.
     ///
     /// Within one state file the counter never returns a value twice. The
-    /// result is also at least `floor`, so a caller that knows of
+    /// result is also at least `floor`, the lowest generation the caller
+    /// accepts; `floor` itself may be returned. A caller that knows of
     /// generations recorded outside this file (staged roots left by an
-    /// earlier state directory) keeps them from being issued again. Call it
+    /// earlier state directory) passes one more than the highest of them,
+    /// `highest.saturating_add(1)`, so none is issued again; a floor past
+    /// the counter's range is [`AgentStateError::GenerationCounterExhausted`].
+    /// Call it
     /// inside the state store's update closure: the counter then advances
     /// in the same atomic write that records what the generation is used
     /// for, and a generation is never returned for a write that did not
@@ -471,6 +475,8 @@ pub enum AgentStateError {
     UnknownRootField(String),
     #[error("unknown field `{field}` in `{record}` of a schema_version 0.2 state")]
     UnknownRecordField { record: String, field: String },
+    #[error("`{0}` of a schema_version 0.2 state must be a JSON object")]
+    RecordNotAnObject(String),
     #[error("next_generation {0} is outside [1, 2^53)")]
     NextGenerationOutOfRange(u64),
     #[error("resident_set requires next_generation")]
@@ -505,17 +511,12 @@ impl ValidatePayload for AgentState {
     }
 }
 
-/// The first key, in the records a "0.2" file shares with the singleton
-/// layout, that this reader does not know, as `(record, key)`. Values that
-/// are not objects are left for the structural decode to refuse.
-fn first_unknown_record_field(root: &serde_json::Value) -> Option<(String, String)> {
-    fn unknown(value: &serde_json::Value, allowed: &[&str]) -> Option<String> {
-        value
-            .as_object()?
-            .keys()
-            .find(|key| !allowed.contains(&key.as_str()))
-            .cloned()
-    }
+/// The first problem, in the records a "0.2" file shares with the singleton
+/// layout, that the serde structs would not refuse on their own: a record
+/// that is not a JSON object (serde would read an array in field order, or
+/// a `null` as an absent record, and the nested records of an array could
+/// not be checked by name), or a key this reader does not know.
+fn first_shared_record_problem(root: &serde_json::Value) -> Option<AgentStateError> {
     let mut records: Vec<(String, &serde_json::Value, &[&str])> = Vec::new();
     for slot in ["active", "previous_active", "candidate"] {
         if let Some(record) = root.get(slot) {
@@ -554,17 +555,26 @@ fn first_unknown_record_field(root: &serde_json::Value) -> Option<(String, Strin
             }
         }
     }
-    records
-        .into_iter()
-        .find_map(|(name, value, allowed)| unknown(value, allowed).map(|key| (name, key)))
+    records.into_iter().find_map(|(record, value, allowed)| {
+        let Some(object) = value.as_object() else {
+            return Some(AgentStateError::RecordNotAnObject(record));
+        };
+        object
+            .keys()
+            .find(|key| !allowed.contains(&key.as_str()))
+            .map(|field| AgentStateError::UnknownRecordField {
+                record,
+                field: field.clone(),
+            })
+    })
 }
 
 /// Decode a durable state file.
 ///
 /// Accepts state `schema_version` "0.1" and "0.2"; any other version is
 /// [`DecodeError::UnsupportedSchemaVersion`] before the body is read. A
-/// "0.2" file with an unknown field, at the top level or in any record, is
-/// refused. Structural
+/// "0.2" file with an unknown field, at the top level or in any record, or
+/// with a record that is not a JSON object, is refused. Structural
 /// decoding reads the raw text, so a key repeated inside a record is an
 /// error rather than a silent last-wins.
 ///
@@ -596,10 +606,8 @@ pub fn decode_agent_state(raw: &str) -> Result<AgentState, DecodeError> {
                 AgentStateError::UnknownRootField(unknown.clone()).to_string(),
             ));
         }
-        if let Some((record, field)) = first_unknown_record_field(&value) {
-            return Err(DecodeError::InvalidPayload(
-                AgentStateError::UnknownRecordField { record, field }.to_string(),
-            ));
+        if let Some(problem) = first_shared_record_problem(&value) {
+            return Err(DecodeError::InvalidPayload(problem.to_string()));
         }
     }
     let parsed: AgentState = serde_json::from_str(raw)?;
@@ -811,6 +819,37 @@ mod tests {
             s.required_schema_version(),
             AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET
         );
+    }
+
+    #[test]
+    fn a_floor_one_above_the_highest_known_generation_never_reissues_it() {
+        // The floor is inclusive: a caller passes one more than the highest
+        // generation recorded elsewhere.
+        let highest_elsewhere: u64 = 10;
+        let mut s = AgentState::fresh();
+        assert_eq!(
+            s.allocate_generation(highest_elsewhere.saturating_add(1)),
+            Ok(11)
+        );
+        // The last generation the counter issues is MAX_STATE_COUNTER - 1;
+        // none remains above it.
+        let mut s = AgentState::fresh();
+        assert_eq!(
+            s.allocate_generation((MAX_STATE_COUNTER - 2).saturating_add(1)),
+            Ok(MAX_STATE_COUNTER - 1)
+        );
+        for highest in [MAX_STATE_COUNTER - 1, MAX_STATE_COUNTER, u64::MAX] {
+            let mut s = AgentState::fresh();
+            assert_eq!(
+                s.allocate_generation(highest.saturating_add(1)),
+                Err(AgentStateError::GenerationCounterExhausted),
+                "highest {highest}"
+            );
+            assert_eq!(
+                s.next_generation, None,
+                "a refused allocation changes nothing"
+            );
+        }
     }
 
     #[test]
@@ -1132,5 +1171,33 @@ mod tests {
         .expect("value");
         legacy["last_error"]["later"] = serde_json::json!(true);
         decode_agent_state(&legacy.to_string()).expect("0.1 stays lenient");
+    }
+
+    #[test]
+    fn array_form_shared_records_are_refused_at_0_2_and_read_at_0_1() {
+        // An array-form transaction whose last element is the failure record
+        // carrying a field this reader does not know: read in field order,
+        // the unknown field would be dropped on the next write.
+        let hidden = r#"{"schema_version":"0.2","store_version":1,"next_generation":1,"in_flight_transaction":["tx","d","received","deploy",null,null,null,null,null,{"code":"internal","message":"x","future":true}]}"#;
+        match decode_agent_state(hidden).expect_err("refused") {
+            DecodeError::InvalidPayload(message) => assert_eq!(
+                message,
+                AgentStateError::RecordNotAnObject("in_flight_transaction".into()).to_string()
+            ),
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+        let quarantine = r#"{"schema_version":"0.2","store_version":1,"next_generation":1,"quarantined":[["tx","d",null,"received",{"code":"internal","message":"x","future":true},null]]}"#;
+        match decode_agent_state(quarantine).expect_err("refused") {
+            DecodeError::InvalidPayload(message) => assert_eq!(
+                message,
+                AgentStateError::RecordNotAnObject("quarantined[0]".into()).to_string()
+            ),
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+        // A 0.1 file keeps the reading every earlier agent applied.
+        let legacy = hidden
+            .replace("\"0.2\"", "\"0.1\"")
+            .replace(",\"next_generation\":1", "");
+        decode_agent_state(&legacy).expect("0.1 reads the array form as before");
     }
 }

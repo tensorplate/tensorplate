@@ -20,14 +20,25 @@
 //          primary. An older agent falls back to the backup when the
 //          primary does not decode, so a 0.2 primary must never sit beside
 //          a 0.1 backup. And while the primary decodes it is what the next
-//          start reads, so with the primary renamed last an error means the
-//          write did not commit. (When the store opened on a missing, empty
-//          or damaged primary, the backup is what the next start reads, and
-//          a write that fails after the backup rename is visible there.)
-//      The parent directory is synced after each rename. Between the two
-//      renames of a 0.2 write that sync must succeed where the platform
-//      supports it (Linux); elsewhere, and after the last rename, it is
-//      best-effort.
+//          start reads, so with the primary renamed last a write that fails
+//          before that rename has not committed.
+//      The parent directory is synced after each rename. For a 0.2 write
+//      both syncs must succeed where the platform supports it (Linux): the
+//      first so the backup rename is durable before the primary changes,
+//      the last so a state the store acknowledged, and any generation it
+//      handed out, survives power loss. Elsewhere, and for a legacy write,
+//      the syncs are best-effort, as in every earlier release.
+//   4. Commits at one rename: the one that makes the new state what the
+//      next start reads. That is the primary's for a legacy write and while
+//      the primary decodes; it is the backup's when a later-version write
+//      renames the backup first over a primary that does not decode (it was
+//      missing, empty or damaged when the store opened, and no write has
+//      succeeded since). A write that fails at or after its commit rename (a
+//      later step, or a required sync) leaves the next start reading either
+//      state, and this process cannot tell which: it returns
+//      `StateIndeterminate` and the store refuses every later write, so
+//      nothing continues from memory that may be stale. Status reports the
+//      agent failed; the agent re-reads the durable state on restart.
 //
 // `rename(2)` is atomic on POSIX filesystems, so a crash mid-write leaves
 // each file either whole and old or whole and new. The reader prefers the
@@ -48,6 +59,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tensorplate_protocol::agent_state::{
@@ -73,13 +85,22 @@ pub struct StateStore {
     primary: PathBuf,
     backup: PathBuf,
     inner: Mutex<AgentState>,
+    /// Whether the next start reads the primary: it decoded when the store
+    /// opened, or a write has since succeeded. Otherwise the next start
+    /// reads the backup.
+    primary_is_read: AtomicBool,
+    /// Set when a write fails at or after its commit rename; every later
+    /// write is then refused.
+    indeterminate: AtomicBool,
     /// Test-only fault injection: the write step index at which the next
     /// write stops with an I/O error (see `write_state_files`).
     #[cfg(test)]
     fail_at_step: std::sync::atomic::AtomicUsize,
-    /// Test-only fault injection: every directory sync fails.
+    /// Test-only fault injection: the directory syncs of a write from this
+    /// index on fail (0 is the sync after the first rename, 1 after the
+    /// second).
     #[cfg(test)]
-    fail_dir_sync: std::sync::atomic::AtomicBool,
+    fail_dir_sync_from: std::sync::atomic::AtomicUsize,
 }
 
 /// One file of the pair, written as temp file + `fsync` + rename.
@@ -87,6 +108,17 @@ pub struct StateStore {
 enum WriteStep {
     Primary,
     Backup,
+}
+
+/// Write `bytes` to a fresh `path` and `fsync` it.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f: File = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// Order in which a state of the given version is written. See the module
@@ -124,16 +156,16 @@ impl StateStore {
         fs::create_dir_all(&state_dir)?;
         let primary = state_dir.join("state.json");
         let backup = state_dir.join("state.json.bak");
-        let inner = match load_one(&primary) {
-            Ok(Some(s)) => s,
+        let (inner, primary_is_read) = match load_one(&primary) {
+            Ok(Some(s)) => (s, true),
             Ok(None) => match load_one(&backup) {
-                Ok(Some(s)) => s,
-                Ok(None) => AgentState::fresh(),
+                Ok(Some(s)) => (s, false),
+                Ok(None) => (AgentState::fresh(), false),
                 Err(backup_err) => return Err(backup_err.into()),
             },
             Err(primary_err) if !primary_err.allows_backup() => return Err(primary_err.into()),
             Err(primary_err) => match load_one(&backup) {
-                Ok(Some(s)) => s,
+                Ok(Some(s)) => (s, false),
                 _ => return Err(primary_err.into()),
             },
         };
@@ -142,11 +174,20 @@ impl StateStore {
             primary,
             backup,
             inner: Mutex::new(inner),
+            primary_is_read: AtomicBool::new(primary_is_read),
+            indeterminate: AtomicBool::new(false),
             #[cfg(test)]
             fail_at_step: std::sync::atomic::AtomicUsize::new(usize::MAX),
             #[cfg(test)]
-            fail_dir_sync: std::sync::atomic::AtomicBool::new(false),
+            fail_dir_sync_from: std::sync::atomic::AtomicUsize::new(usize::MAX),
         })
+    }
+
+    /// Whether a write failed at or after its commit rename, so the store
+    /// refuses every later write until it is reopened.
+    #[must_use]
+    pub fn is_indeterminate(&self) -> bool {
+        self.indeterminate.load(Ordering::SeqCst)
     }
 
     /// Path of the durable directory the store is rooted at.
@@ -181,7 +222,9 @@ impl StateStore {
     /// the generation counter, remove or rename the resident set, change it
     /// without advancing its revision, or not read back unchanged; plus
     /// [`AgentError::Io`] / [`AgentError::Serialization`] from the write
-    /// path.
+    /// path before its commit rename. A write that fails at or after its
+    /// commit rename returns [`AgentError::StateIndeterminate`], and so
+    /// does every later call, before anything is written.
     pub fn update<F, T>(&self, update: F) -> AgentResult<T>
     where
         F: FnOnce(&mut AgentState) -> AgentResult<T>,
@@ -190,6 +233,11 @@ impl StateStore {
             .inner
             .lock()
             .map_err(|e| AgentError::Internal(format!("state mutex poisoned: {e}")))?;
+        if self.indeterminate.load(Ordering::SeqCst) {
+            return Err(AgentError::StateIndeterminate(
+                "an earlier write failed at or after its commit rename".into(),
+            ));
+        }
         let mut next = guard.clone();
         let outcome = update(&mut next)?;
         next.store_version = next.store_version.saturating_add(1);
@@ -199,50 +247,66 @@ impl StateStore {
             .map_err(|e| AgentError::Internal(format!("state update refused: {e}")))?;
         let encoded = encode_checked(&next)?;
         self.write_state_files(&encoded, write_order(&next))?;
+        self.primary_is_read.store(true, Ordering::SeqCst);
         *guard = next;
         Ok(outcome)
     }
 
     /// Write `encoded` to both files in `order`. See the module comment.
     fn write_state_files(&self, encoded: &[u8], order: [WriteStep; 2]) -> AgentResult<()> {
+        let backup_first = order[0] == WriteStep::Backup;
+        let syncs_required = backup_first && cfg!(target_os = "linux");
+        let commit = if backup_first && !self.primary_is_read.load(Ordering::SeqCst) {
+            WriteStep::Backup
+        } else {
+            WriteStep::Primary
+        };
+        let mut committed = false;
         for (index, step) in order.into_iter().enumerate() {
             let (target, tmp) = match step {
                 WriteStep::Primary => (&self.primary, self.primary.with_extension("json.tmp")),
                 WriteStep::Backup => (&self.backup, self.backup.with_extension("bak.tmp")),
             };
-            self.inject_failure(2 * index)?;
-            {
-                let mut f: File = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&tmp)?;
-                f.write_all(encoded)?;
-                f.sync_all()?;
-            }
-            self.inject_failure(2 * index + 1)?;
-            fs::rename(&tmp, target)?;
-            // Where the order matters (between the two renames of a
-            // backup-first write) a failed sync is an error on Linux;
-            // elsewhere, and after the last rename, it is best-effort.
-            let synced = self.sync_state_dir();
-            let before_last_rename = index + 1 < order.len();
-            if before_last_rename && step == WriteStep::Backup && cfg!(target_os = "linux") {
-                synced?;
+            self.inject_failure(2 * index)
+                .map_err(|e| self.failed(committed, e))?;
+            write_synced(&tmp, encoded).map_err(|e| self.failed(committed, e.into()))?;
+            self.inject_failure(2 * index + 1)
+                .map_err(|e| self.failed(committed, e))?;
+            fs::rename(&tmp, target).map_err(|e| self.failed(committed, e.into()))?;
+            committed |= step == commit;
+            if let Err(err) = self.sync_state_dir(index) {
+                if syncs_required {
+                    return Err(self.failed(committed, err.into()));
+                }
             }
         }
         Ok(())
     }
 
+    /// The error a failed write returns. Once its commit rename is done,
+    /// the next start reads either the new state or the one before it, and
+    /// this process cannot tell which, so the store refuses later writes.
+    fn failed(&self, committed: bool, err: AgentError) -> AgentError {
+        if committed {
+            self.indeterminate.store(true, Ordering::SeqCst);
+            AgentError::StateIndeterminate(err.to_string())
+        } else {
+            err
+        }
+    }
+
     /// Sync the state directory so a completed rename survives power loss.
-    fn sync_state_dir(&self) -> std::io::Result<()> {
+    /// `index` is the rename it follows (0 or 1).
+    fn sync_state_dir(&self, index: usize) -> std::io::Result<()> {
         #[cfg(test)]
-        if self.fail_dir_sync.load(std::sync::atomic::Ordering::SeqCst) {
+        if index >= self.fail_dir_sync_from.load(Ordering::SeqCst) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "injected directory sync failure",
             ));
         }
+        #[cfg(not(test))]
+        let _ = index;
         File::open(&self.state_dir).and_then(|d| d.sync_all())
     }
 
@@ -1023,7 +1087,8 @@ mod tests {
     // `write_state_files`: 0 before the first temp file, 1 after it, 2 after
     // the first rename, 3 after the second temp file), from each starting
     // pair of files, optionally followed by another write on the same store
-    // (the error-and-continue path). Then the process "dies": the store is
+    // (the error-and-continue path, which a write that failed after its
+    // commit rename must refuse). Then the process "dies": the store is
     // dropped and both readers open the directory.
 
     #[derive(Clone, Copy, Debug)]
@@ -1087,8 +1152,13 @@ mod tests {
         let mut acceptable = vec![store.snapshot().expect("snap")];
         let mut issued: Vec<u64> = Vec::new();
         let mut last_ok = true;
+        let mut refusing = false;
         for (step, (write, fail_at)) in writes.iter().enumerate() {
             let memory = store.snapshot().expect("snap");
+            let disk = (
+                read(td.path(), "state.json"),
+                read(td.path(), "state.json.bak"),
+            );
             // What the next start reads while this write is in progress:
             // the primary when it decodes, else the backup.
             let primary_decodes = read(td.path(), "state.json")
@@ -1098,6 +1168,10 @@ mod tests {
                 .fail_at_step
                 .store(fail_at.unwrap_or(usize::MAX), Ordering::SeqCst);
             let result = store.update(|s| Ok(change(s, *write, step)));
+            if refusing {
+                assert_refused_untouched(&label, result, &store, td.path(), &memory, &disk);
+                continue;
+            }
             match (result, fail_at) {
                 (Ok(generation), None) => {
                     issued.extend(generation);
@@ -1115,15 +1189,23 @@ mod tests {
                         memory,
                         "{label}: memory moved"
                     );
-                    // A failed write may be visible after a crash only where
-                    // the design says it can be: a legacy write renames the
-                    // primary first, and a later-version write is readable
-                    // early only when the next start reads the backup.
+                    // A failed write is visible after a crash exactly when
+                    // it failed after its commit rename: the first rename
+                    // for a legacy write (the primary) or while the next
+                    // start reads the backup, else the second, which these
+                    // points never pass. Such a failure is indeterminate.
                     let attempt = attempted(&memory, *write, step);
-                    if attempt.schema_version == AGENT_STATE_SCHEMA_VERSION_LEGACY
-                        || !primary_decodes
-                    {
+                    let commits_first = attempt.schema_version == AGENT_STATE_SCHEMA_VERSION_LEGACY
+                        || !primary_decodes;
+                    let indeterminate = commits_first && *point >= 2;
+                    assert_eq!(
+                        matches!(err, super::AgentError::StateIndeterminate(_)),
+                        indeterminate,
+                        "{label}: failure at step {point}: {err}"
+                    );
+                    if indeterminate {
                         acceptable.push(attempt);
+                        refusing = true;
                     }
                     last_ok = false;
                 }
@@ -1131,8 +1213,43 @@ mod tests {
             }
         }
         drop(store);
+        check_restart(&label, td.path(), &acceptable, &issued);
+        if last_ok {
+            for tmp in ["state.json.tmp", "state.json.bak.tmp"] {
+                assert!(!td.path().join(tmp).exists(), "{label}: {tmp} left behind");
+            }
+        }
+    }
 
-        let new = StateStore::open(td.path())
+    /// After a write whose outcome is indeterminate, every write is refused
+    /// before anything is written.
+    fn assert_refused_untouched(
+        label: &str,
+        result: AgentResult<Option<u64>>,
+        store: &StateStore,
+        dir: &Path,
+        memory: &AgentState,
+        disk: &(Option<Vec<u8>>, Option<Vec<u8>>),
+    ) {
+        match result {
+            Err(super::AgentError::StateIndeterminate(message)) => {
+                assert!(message.contains("earlier write"), "{label}: {message}");
+            }
+            other => panic!("{label}: expected a refusal, got {other:?}"),
+        }
+        assert_eq!(&store.snapshot().expect("snap"), memory, "{label}");
+        assert_eq!(
+            &(read(dir, "state.json"), read(dir, "state.json.bak")),
+            disk,
+            "{label}: a refused write touched the files"
+        );
+    }
+
+    /// The process died: both readers open `dir`. What they read must be a
+    /// committed or an attempted state, the same one, and never at or below
+    /// a generation the store returned.
+    fn check_restart(label: &str, dir: &Path, acceptable: &[AgentState], issued: &[u64]) {
+        let new = StateStore::open(dir)
             .unwrap_or_else(|e| panic!("{label}: reopen {e}"))
             .snapshot()
             .expect("snap");
@@ -1145,7 +1262,7 @@ mod tests {
             issued.iter().all(|g| *g < counter),
             "{label}: counter {counter} would reissue one of {issued:?}"
         );
-        match v021_reader::open(td.path()) {
+        match v021_reader::open(dir) {
             Ok(old) => {
                 assert_eq!(
                     new.schema_version, AGENT_STATE_SCHEMA_VERSION_LEGACY,
@@ -1162,23 +1279,18 @@ mod tests {
                 "{label}: 0.2.1 refused a 0.1 state: {message}"
             ),
         }
-        if let Some(primary) = read(td.path(), "state.json") {
+        if let Some(primary) = read(dir, "state.json") {
             let primary = String::from_utf8(primary).expect("utf8");
             if decode_agent_state(&primary)
                 .is_ok_and(|s| s.schema_version == AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET)
             {
-                let backup = read(td.path(), "state.json.bak")
+                let backup = read(dir, "state.json.bak")
                     .map(|b| String::from_utf8(b).expect("utf8"))
                     .unwrap_or_default();
                 assert!(
                     v021_reader::decode(&backup).is_err(),
                     "{label}: a 0.2 primary sits beside a backup 0.2.1 can read"
                 );
-            }
-        }
-        if last_ok {
-            for tmp in ["state.json.tmp", "state.json.bak.tmp"] {
-                assert!(!td.path().join(tmp).exists(), "{label}: {tmp} left behind");
             }
         }
     }
@@ -1198,6 +1310,7 @@ mod tests {
             None,
             Some((Write::Allocate, None)),
             Some((Write::Touch, Some(2))),
+            Some((Write::Allocate, Some(2))),
         ];
         let mut scenarios = 0;
         for start in starts {
@@ -1212,7 +1325,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(scenarios, 180);
+        assert_eq!(scenarios, 240);
     }
 
     #[test]
@@ -1243,7 +1356,7 @@ mod tests {
         let legacy = fixture(LEGACY_FIXTURE);
         write_pair(td.path(), Some(&legacy), Some(&legacy));
         let store = StateStore::open(td.path()).expect("open");
-        store.fail_dir_sync.store(true, Ordering::SeqCst);
+        store.fail_dir_sync_from.store(0, Ordering::SeqCst);
         let err = store
             .update(|s| Ok(s.allocate_generation(0)))
             .expect_err("the sync after the backup rename must succeed");
@@ -1259,6 +1372,10 @@ mod tests {
             store.snapshot().expect("snap"),
             decode_agent_state(&legacy).expect("legacy")
         );
+        // The primary was never renamed, so nothing is indeterminate: the
+        // next write goes through.
+        store.fail_dir_sync_from.store(usize::MAX, Ordering::SeqCst);
+        store.update(allocate).expect("the store keeps writing");
     }
 
     #[test]
@@ -1267,13 +1384,239 @@ mod tests {
         let legacy = fixture(LEGACY_FIXTURE);
         write_pair(td.path(), Some(&legacy), Some(&legacy));
         let store = StateStore::open(td.path()).expect("open");
-        store.fail_dir_sync.store(true, Ordering::SeqCst);
+        store.fail_dir_sync_from.store(0, Ordering::SeqCst);
         store.set_last_error(None).expect("best-effort sync");
         let written = read(td.path(), "state.json").expect("primary");
         assert_eq!(read(td.path(), "state.json.bak"), Some(written.clone()));
         let s = decode_agent_state(&String::from_utf8(written).expect("utf8")).expect("decode");
         assert_eq!(s.schema_version, AGENT_STATE_SCHEMA_VERSION_LEGACY);
         assert!(s.last_error.is_none());
+    }
+
+    fn allocate(s: &mut AgentState) -> AgentResult<u64> {
+        s.allocate_generation(0)
+            .map_err(|e| AgentError::Internal(e.to_string()))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_failed_final_sync_never_lets_a_returned_generation_be_reissued() {
+        // A 0.2 write whose primary rename is done but not synced: power
+        // loss may keep the rename or drop it. Neither outcome may hand out
+        // a generation the store already returned.
+        for rename_survives in [true, false] {
+            let label = format!("rename survives: {rename_survives}");
+            let td = TempDir::new().expect("td");
+            let restore = fixture(RESTORE_FIXTURE);
+            write_pair(td.path(), Some(&restore), Some(&restore));
+            let store = StateStore::open(td.path()).expect("open");
+            let mut returned = vec![store.update(allocate).expect("first")];
+            let primary_before = read(td.path(), "state.json").expect("primary");
+
+            store.fail_dir_sync_from.store(1, Ordering::SeqCst);
+            let err = store.update(allocate).expect_err("the final sync failed");
+            assert!(
+                matches!(err, super::AgentError::StateIndeterminate(_)),
+                "{label}: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("injected directory sync failure"),
+                "{label}: {err}"
+            );
+            // Nothing continues from memory that may be stale.
+            store.fail_dir_sync_from.store(usize::MAX, Ordering::SeqCst);
+            let disk = (
+                read(td.path(), "state.json"),
+                read(td.path(), "state.json.bak"),
+            );
+            assert!(
+                matches!(
+                    store.update(allocate),
+                    Err(super::AgentError::StateIndeterminate(_))
+                ),
+                "{label}: a later write was not refused"
+            );
+            assert_eq!(
+                (
+                    read(td.path(), "state.json"),
+                    read(td.path(), "state.json.bak")
+                ),
+                disk,
+                "{label}"
+            );
+            drop(store);
+
+            if !rename_survives {
+                // The backup rename was synced; the primary's was not.
+                fs::write(td.path().join("state.json"), &primary_before).expect("revert");
+            }
+            let store = StateStore::open(td.path()).expect("reopen");
+            returned.push(store.update(allocate).expect("after restart"));
+            let unique: std::collections::BTreeSet<u64> = returned.iter().copied().collect();
+            assert_eq!(
+                unique.len(),
+                returned.len(),
+                "{label}: a returned generation was reissued: {returned:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_after_the_backup_rename_is_indeterminate_when_the_backup_is_read() {
+        // With no primary, the next start reads the backup, so a 0.2 write
+        // commits when its backup is renamed.
+        let td = TempDir::new().expect("td");
+        let legacy = fixture(LEGACY_FIXTURE);
+        write_pair(td.path(), None, Some(&legacy));
+        let store = StateStore::open(td.path()).expect("open");
+        store.fail_at_step.store(2, Ordering::SeqCst);
+        let err = store.update(allocate).expect_err("stopped");
+        assert!(
+            matches!(err, super::AgentError::StateIndeterminate(_)),
+            "{err:?}"
+        );
+        store.fail_at_step.store(usize::MAX, Ordering::SeqCst);
+        assert!(matches!(
+            store.set_last_error(None),
+            Err(super::AgentError::StateIndeterminate(_))
+        ));
+        drop(store);
+        // What a restart reads is the attempted state.
+        let reopened = StateStore::open(td.path()).expect("reopen");
+        assert_eq!(reopened.snapshot().expect("snap").next_generation, Some(2));
+    }
+
+    #[test]
+    fn a_legacy_write_that_fails_after_its_primary_rename_is_indeterminate() {
+        let td = TempDir::new().expect("td");
+        let legacy = fixture(LEGACY_FIXTURE);
+        write_pair(td.path(), Some(&legacy), Some(&legacy));
+        let store = StateStore::open(td.path()).expect("open");
+        store.fail_at_step.store(2, Ordering::SeqCst);
+        let err = store
+            .set_last_error(Some(ErrorRecord::new(ErrorCode::Internal, "attempt")))
+            .expect_err("stopped");
+        assert!(
+            matches!(err, super::AgentError::StateIndeterminate(_)),
+            "{err:?}"
+        );
+        store.fail_at_step.store(usize::MAX, Ordering::SeqCst);
+        assert!(matches!(
+            store.set_last_error(None),
+            Err(super::AgentError::StateIndeterminate(_))
+        ));
+        drop(store);
+        let reopened = StateStore::open(td.path()).expect("reopen");
+        assert_eq!(
+            reopened
+                .snapshot()
+                .expect("snap")
+                .last_error
+                .map(|e| e.message),
+            Some("attempt".to_string())
+        );
+    }
+
+    #[test]
+    fn a_failure_before_the_commit_rename_does_not_stop_later_writes() {
+        // A 0.2 write over a decodable primary commits at its last rename:
+        // stopped after the backup rename, it changed nothing a restart
+        // reads, and the store keeps writing.
+        let td = TempDir::new().expect("td");
+        let restore = fixture(RESTORE_FIXTURE);
+        write_pair(td.path(), Some(&restore), Some(&restore));
+        let store = StateStore::open(td.path()).expect("open");
+        store.fail_at_step.store(2, Ordering::SeqCst);
+        let err = store.update(allocate).expect_err("stopped");
+        assert!(matches!(err, super::AgentError::Io(_)), "{err:?}");
+        store.fail_at_step.store(usize::MAX, Ordering::SeqCst);
+        store.update(allocate).expect("the store keeps writing");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn either_failed_sync_of_a_write_committed_at_the_backup_is_indeterminate() {
+        // No primary: a 0.2 write commits at its backup rename, so a failed
+        // sync after it, or after the primary rename, is indeterminate.
+        for from in [0, 1] {
+            let td = TempDir::new().expect("td");
+            write_pair(td.path(), None, Some(&fixture(LEGACY_FIXTURE)));
+            let store = StateStore::open(td.path()).expect("open");
+            store.fail_dir_sync_from.store(from, Ordering::SeqCst);
+            let err = store.update(allocate).expect_err("sync failed");
+            assert!(
+                matches!(err, super::AgentError::StateIndeterminate(_)),
+                "sync {from}: {err:?}"
+            );
+            store.fail_dir_sync_from.store(usize::MAX, Ordering::SeqCst);
+            assert!(
+                store.is_indeterminate() && store.update(allocate).is_err(),
+                "sync {from}: later writes are refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_before_the_commit_rename_keeps_the_backup_as_the_commit_point() {
+        // A write that failed before any rename leaves the primary missing,
+        // so the next write still commits at its backup rename.
+        let td = TempDir::new().expect("td");
+        write_pair(td.path(), None, Some(&fixture(LEGACY_FIXTURE)));
+        let store = StateStore::open(td.path()).expect("open");
+        store.fail_at_step.store(1, Ordering::SeqCst);
+        let first = store.update(allocate).expect_err("stopped before a rename");
+        assert!(matches!(first, super::AgentError::Io(_)), "{first:?}");
+        store.fail_at_step.store(2, Ordering::SeqCst);
+        let second = store
+            .update(allocate)
+            .expect_err("stopped after the backup rename");
+        assert!(
+            matches!(second, super::AgentError::StateIndeterminate(_)),
+            "{second:?}"
+        );
+    }
+
+    #[test]
+    fn real_io_failures_after_the_commit_rename_are_indeterminate() {
+        // The primary's temp file cannot be created, after a backup commit.
+        let td = TempDir::new().expect("td");
+        write_pair(td.path(), None, Some(&fixture(LEGACY_FIXTURE)));
+        let store = StateStore::open(td.path()).expect("open");
+        fs::create_dir(td.path().join("state.json.tmp")).expect("mkdir");
+        let err = store.update(allocate).expect_err("temp file refused");
+        assert!(
+            matches!(err, super::AgentError::StateIndeterminate(_)),
+            "{err:?}"
+        );
+
+        // The primary rename fails, after a backup commit.
+        let td = TempDir::new().expect("td");
+        write_pair(td.path(), None, Some(&fixture(LEGACY_FIXTURE)));
+        let store = StateStore::open(td.path()).expect("open");
+        fs::create_dir(td.path().join("state.json")).expect("mkdir");
+        let err = store.update(allocate).expect_err("rename refused");
+        assert!(
+            matches!(err, super::AgentError::StateIndeterminate(_)),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_rename_is_not_indeterminate() {
+        // Over a decodable primary the commit is the primary rename: when
+        // the rename itself fails, nothing committed and the store keeps
+        // writing.
+        let td = TempDir::new().expect("td");
+        let restore = fixture(RESTORE_FIXTURE);
+        write_pair(td.path(), Some(&restore), Some(&restore));
+        let store = StateStore::open(td.path()).expect("open");
+        fs::remove_file(td.path().join("state.json")).expect("rm");
+        fs::create_dir(td.path().join("state.json")).expect("mkdir");
+        let err = store.update(allocate).expect_err("rename refused");
+        assert!(matches!(err, super::AgentError::Io(_)), "{err:?}");
+        assert!(!store.is_indeterminate());
+        fs::remove_dir(td.path().join("state.json")).expect("rmdir");
+        store.update(allocate).expect("the store keeps writing");
     }
 
     #[test]

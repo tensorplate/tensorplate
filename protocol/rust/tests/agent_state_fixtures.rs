@@ -550,6 +550,170 @@ fn refused_by_both() -> Vec<Refusal> {
             "unknown field `later` in `active`",
         ),
         refusal(
+            "an array-form transaction hiding a failure field at 0.2",
+            RESTORE,
+            |v| {
+                v["in_flight_transaction"] = json!([
+                    "tx-1", "vision-v2", "received", "deploy", null, null, null, null, null,
+                    {"code": "internal", "message": "x", "later": 1}
+                ]);
+            },
+            "/in_flight_transaction",
+            "`in_flight_transaction` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form transaction failure at 0.2",
+            RESTORE,
+            |v| {
+                v["in_flight_transaction"] = json!({
+                    "transaction_id": "tx-1", "deployment_id": "vision-v2", "phase": "failed",
+                    "kind": "deploy", "failure": ["internal", "x", null, false]
+                });
+            },
+            "/in_flight_transaction/failure",
+            "`in_flight_transaction.failure` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form quarantine entry at 0.2",
+            RESTORE,
+            |v| {
+                let entry = v["quarantined"][0].clone();
+                v["quarantined"][0] = json!([
+                    entry["transaction_id"],
+                    entry["deployment_id"],
+                    entry["bundle_digest"],
+                    entry["phase"],
+                    entry["error"],
+                    entry["quarantined_monotonic_ns"]
+                ]);
+            },
+            "/quarantined/0",
+            "`quarantined[0]` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form quarantine error at 0.2",
+            RESTORE,
+            |v| v["quarantined"][0]["error"] = json!(["internal", "x", null]),
+            "/quarantined/0/error",
+            "`quarantined[0].error` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form last_error at 0.2",
+            RESTORE,
+            |v| v["last_error"] = json!(["internal", "x", null]),
+            "/last_error",
+            "`last_error` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "a null last_error at 0.2",
+            RESTORE,
+            |v| v["last_error"] = Value::Null,
+            "/last_error",
+            "`last_error` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form singleton slot in a 0.2 state without a set",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                let active = load_value(LEGACY)["active"].clone();
+                v["active"] = json!([
+                    active["deployment_id"],
+                    active["bundle_digest"],
+                    active["bundle_name"],
+                    active["bundle_version"],
+                    active["backend_hint"],
+                    active["model_class"],
+                    active["staged_path"]
+                ]);
+            },
+            "/active",
+            "`active` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "a null in-flight transaction at 0.2",
+            RESTORE,
+            |v| v["in_flight_transaction"] = Value::Null,
+            "/in_flight_transaction",
+            "`in_flight_transaction` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "a null transaction failure at 0.2",
+            RESTORE,
+            |v| {
+                v["in_flight_transaction"] = json!({
+                    "transaction_id": "tx-1", "deployment_id": "vision-v2", "phase": "failed",
+                    "kind": "deploy", "failure": null
+                });
+            },
+            "/in_flight_transaction/failure",
+            "`in_flight_transaction.failure` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "a null previous_active slot at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                v["previous_active"] = Value::Null;
+            },
+            "/previous_active",
+            "`previous_active` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form previous_active slot at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                let active = load_value(LEGACY)["active"].clone();
+                v["previous_active"] = json!([active["deployment_id"], active["bundle_digest"]]);
+            },
+            "/previous_active",
+            "`previous_active` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an unknown previous_active field at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                v["previous_active"] = load_value(LEGACY)["active"].clone();
+                v["previous_active"]["later"] = json!(1);
+            },
+            "/previous_active",
+            "unknown field `later` in `previous_active`",
+        ),
+        refusal(
+            "a null candidate slot at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                v["candidate"] = Value::Null;
+            },
+            "/candidate",
+            "`candidate` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an array-form candidate slot at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                let active = load_value(LEGACY)["active"].clone();
+                v["candidate"] = json!([active["deployment_id"], active["bundle_digest"]]);
+            },
+            "/candidate",
+            "`candidate` of a schema_version 0.2 state must be a JSON object",
+        ),
+        refusal(
+            "an unknown candidate field at 0.2",
+            RESTORE,
+            |v| {
+                remove(v, "", "resident_set");
+                v["candidate"] = load_value(LEGACY)["active"].clone();
+                v["candidate"]["later"] = json!(1);
+            },
+            "/candidate",
+            "unknown field `later` in `candidate`",
+        ),
+        refusal(
             "a null resident set",
             TWO_MEMBER,
             |v| v["resident_set"] = Value::Null,

@@ -36,6 +36,7 @@ use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, Trans
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::supervision_event::SupervisionAgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
+use tensorplate_protocol::ErrorCode;
 
 use std::collections::BTreeMap;
 
@@ -584,12 +585,29 @@ impl Coordinator {
         })
     }
 
-    /// Project a [`AgentStatus`] suitable for the control API.
+    /// Project the durable state and the supervisor onto [`AgentStatus`].
+    /// A store that refuses writes after a write with an unknown outcome
+    /// reports the agent failed: nothing can change until it restarts, and
+    /// its durable `last_error` cannot record why.
     ///
     /// # Errors
     ///
     /// Propagates errors from the underlying state store.
     pub fn status(&self) -> AgentResult<AgentStatus> {
+        let mut status = self.durable_status()?;
+        if self.store.is_indeterminate() {
+            status.agent_state = AgentRunState::Failed;
+            status.last_error = Some(ResponseError::new(
+                ErrorCode::Internal,
+                "a durable state write ended with an unknown outcome; the agent refuses state changes until it restarts",
+            ));
+        }
+        Ok(status)
+    }
+
+    /// The status the durable state and the supervisor describe, before
+    /// [`Self::status`] accounts for a store that refuses writes.
+    fn durable_status(&self) -> AgentResult<AgentStatus> {
         let s = self.store.snapshot()?;
         let mut agent_state = if s.last_error.is_some() {
             AgentRunState::Degraded

@@ -45,8 +45,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   older backup, so the agent exits with `CorruptState` instead of starting
   on the stale backup) or cannot be read at all (an I/O error now stops the
   agent). A damaged, empty or missing `state.json` still falls back as
-  before. On Linux, the directory sync between the two renames of a
-  `0.2` state write must now succeed. (V030-E03-F01-T03)
+  before. On Linux, both directory syncs of a `0.2` state write must now
+  succeed. A state write that fails at or after the rename that commits it
+  (the one that makes it what the next start reads) returns the new
+  `StateIndeterminate` error, and the store then refuses every later write
+  until the agent restarts, while status reports the agent `failed` with a
+  `last_error` saying so; a write that fails before that rename leaves the
+  state and the store as they were. (V030-E03-F01-T03)
 
 ## [0.2.1] - 2026-09-23
 

@@ -168,10 +168,22 @@ Every mutation:
    the backup first and `state.json` last: an agent through 0.2.x falls back
    to the backup when `state.json` does not decode, so a 0.2 `state.json`
    must never sit beside a 0.1 backup; and with `state.json` renamed last, a
-   failed write has not committed — provided `state.json` decoded when the
-   store opened, since otherwise the next start reads the backup. The
-   directory sync between those two renames must succeed on Linux;
-   elsewhere, and after the last rename, it is best-effort.
+   write that fails before that rename has not committed while `state.json`
+   decodes. For a 0.2
+   write both directory syncs must succeed on Linux, so a state the store
+   acknowledged, and any generation it handed out, survives power loss;
+   elsewhere, and for a 0.1 write, the syncs are best-effort.
+5. Commits at the rename that makes the new state what the next start
+   reads: `state.json`'s for a 0.1 write and while `state.json` decodes;
+   the backup's when a 0.2 write renames the backup first over a
+   `state.json` that does not decode (missing, empty or damaged when the
+   store opened, and no write has succeeded since). A write that fails at
+   or after that rename, including a required directory sync, may or may
+   not be what the next start reads: it returns `StateIndeterminate`, and
+   the store refuses every later write until the agent restarts and
+   re-reads the durable state, so nothing is written from memory that may
+   be stale. Until then status reports `agent_state` `failed` with a
+   `last_error` saying so.
 
 The store assumes it is the directory's only writer; the mutex serializes
 writers inside one agent process, and nothing stops a second agent process.
@@ -305,8 +317,10 @@ The on-disk state file has its own version track
 layout every agent through 0.2.x reads. State version `0.2` adds the
 deployment generation counter (`next_generation`, never removed or lowered,
 so the agent never hands out the same generation twice from one state
-file; a caller that knows of generations recorded elsewhere, such as staged
-roots left by an earlier state directory, passes the highest as a floor)
+file; the allocator takes an inclusive floor, and a caller that knows of
+generations recorded elsewhere, such as staged roots left by an earlier
+state directory, passes one more than the highest of them, getting the
+typed exhausted-counter error when no generation remains above it)
 and the resident set (members at their generations, retained
 previous generations, and the committed endpoint map; the singleton
 `active`, `previous_active` and `candidate` slots are absent beside it). The
