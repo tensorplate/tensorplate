@@ -2,14 +2,16 @@
 //
 // Per-runner-profile package lists on a platform row's `backend_packages`.
 // No committed row declares one yet; these cases take the committed L4 row,
-// add lists to its `python_pytorch` backend path in memory, and check the
-// row schema's verdict.
+// add lists to its `python_pytorch` backend path in memory, and require the
+// row schema and the Rust decoder to agree. The one rule only the decoder
+// can state is listed separately with the schema's verdict pinned.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
+use tensorplate_platform::PlatformSupportRow;
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -46,6 +48,10 @@ fn l4_row_with(runner_profiles: Value) -> Value {
     row
 }
 
+fn decodes(row: &Value) -> Option<PlatformSupportRow> {
+    PlatformSupportRow::from_json(&serde_json::to_string(row).expect("serialize")).ok()
+}
+
 fn two_profiles() -> Value {
     json!([
         {
@@ -73,14 +79,42 @@ fn two_profiles() -> Value {
 #[test]
 fn per_profile_package_lists_validate_against_the_row_schema() {
     let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
+    let row = l4_row_with(two_profiles());
     assert!(
-        validator.is_valid(&l4_row_with(two_profiles())),
+        validator.is_valid(&row),
         "a row with per-profile package lists must validate"
     );
+    let decoded = decodes(&row).expect("a row with per-profile package lists must decode");
+    let set = decoded
+        .backend_packages()
+        .iter()
+        .find(|s| s.backend_path == "python_pytorch")
+        .expect("python_pytorch backend path");
+    let profiles: Vec<&str> = set
+        .runner_profiles
+        .iter()
+        .map(|p| p.runner_profile.as_str())
+        .collect();
+    assert_eq!(profiles, ["faster_whisper", "kokoro"]);
+    // Round-trips through the same validated path.
+    let again = PlatformSupportRow::from_json(&serde_json::to_string(&decoded).expect("serialize"))
+        .expect("re-decode");
+    assert_eq!(decoded, again);
 }
 
 #[test]
-fn malformed_per_profile_package_lists_fail_the_row_schema() {
+fn committed_rows_declare_no_per_profile_lists() {
+    // No package installs a speech runner profile yet; a row that required
+    // one would refuse every deployment on that path.
+    let row = PlatformSupportRow::from_json(&read(L4_ROW)).expect("L4 row decodes");
+    assert!(row
+        .backend_packages()
+        .iter()
+        .all(|set| set.runner_profiles.is_empty()));
+}
+
+#[test]
+fn malformed_per_profile_package_lists_are_refused_by_the_schema_and_the_decoder() {
     let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
     let cases: Vec<(&str, Value)> = vec![
         (
@@ -108,9 +142,28 @@ fn malformed_per_profile_package_lists_fail_the_row_schema() {
         ("null", Value::Null),
     ];
     for (label, lists) in cases {
+        let row = l4_row_with(lists);
         assert!(
-            !validator.is_valid(&l4_row_with(lists)),
-            "{label}: the row schema must reject it"
+            !validator.is_valid(&row),
+            "{label}: the row schema must refuse it"
+        );
+        assert!(
+            decodes(&row).is_none(),
+            "{label}: the decoder must refuse it"
         );
     }
+}
+
+#[test]
+fn a_profile_listed_twice_on_one_path_is_refused_by_the_decoder() {
+    let validator = jsonschema::JSONSchema::compile(&row_schema()).expect("row schema compiles");
+    let row = l4_row_with(json!([
+        {"runner_profile": "kokoro", "packages": ["a"]},
+        {"runner_profile": "kokoro", "packages": ["b"]}
+    ]));
+    assert!(
+        validator.is_valid(&row),
+        "the schema cannot see duplicate profiles, so the decoder is the only guard"
+    );
+    assert!(decodes(&row).is_none(), "the decoder must refuse it");
 }

@@ -2,14 +2,17 @@
 //
 // Backend descriptor fixtures. The committed descriptor with runner
 // profiles and the descriptor shipped in `packaging/backend-metadata/` must
-// validate against `protocol/schemas/backend_descriptor.json`, and each
-// malformed variant of the fixture must fail it.
+// validate against `protocol/schemas/backend_descriptor.json` and parse in
+// the Rust mirror. Every malformed variant of the fixture must be refused by
+// both; the rules only the Rust reader can state are listed separately with
+// the schema's verdict pinned, so a change on either side shows up here.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use tensorplate_protocol::backend_descriptor::{BackendDescriptor, ComputeType};
 
 fn repo_path(relative: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -29,6 +32,7 @@ fn schema_document() -> Value {
 
 const FIXTURE: &str = "protocol/rust/tests/fixtures/backend_descriptor_runner_profiles.json";
 const SHIPPED: &str = "packaging/backend-metadata/python_pytorch.json";
+const ROOT: &str = "/usr/lib/tensorplate/speech-runtime";
 
 fn fixture() -> Value {
     serde_json::from_str(&read(FIXTURE)).expect("fixture parses as JSON")
@@ -52,8 +56,16 @@ fn with_profile_field(profile: usize, field: &str, value: Option<Value>) -> Valu
     doc
 }
 
+fn rust_accepts(instance: &Value) -> bool {
+    BackendDescriptor::parse_with_path(
+        &serde_json::to_string(instance).expect("serialize"),
+        Path::new(FIXTURE),
+    )
+    .is_ok()
+}
+
 #[test]
-fn committed_descriptors_validate_against_the_schema() {
+fn committed_descriptors_validate_and_parse() {
     let validator =
         jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
     for relative in [FIXTURE, SHIPPED] {
@@ -62,23 +74,56 @@ fn committed_descriptors_validate_against_the_schema() {
             validator.is_valid(&instance),
             "{relative} must validate against the backend descriptor schema"
         );
+        let parsed = BackendDescriptor::parse_with_path(&read(relative), &repo_path(relative))
+            .unwrap_or_else(|e| panic!("{relative} must parse: {e}"));
+        let again = BackendDescriptor::parse_with_path(
+            &serde_json::to_string(&parsed).expect("serialize"),
+            &repo_path(relative),
+        )
+        .expect("re-parse");
+        assert_eq!(parsed, again, "{relative} must round-trip");
     }
 }
 
 #[test]
 fn the_fixture_declares_a_faster_whisper_and_a_kokoro_profile() {
-    let doc = fixture();
-    let ids: Vec<&str> = doc["runner_profiles"]
-        .as_array()
-        .expect("runner_profiles is an array")
-        .iter()
-        .map(|p| p["id"].as_str().expect("id is a string"))
-        .collect();
+    let d = BackendDescriptor::parse_with_path(&read(FIXTURE), Path::new(FIXTURE)).expect("parses");
+    let ids: Vec<&str> = d.runner_profiles.iter().map(|p| p.id.as_str()).collect();
     assert_eq!(ids, ["faster_whisper", "kokoro"]);
+
+    let stt = d.runner_profile("faster_whisper").expect("faster_whisper");
+    assert_eq!(stt.interpreter, format!("{ROOT}/bin/python"));
+    assert_eq!(stt.environment_root, ROOT);
+    assert_eq!(
+        stt.library_search_paths,
+        [format!(
+            "{ROOT}/lib/python3.12/site-packages/nvidia/cublas/lib"
+        )]
+    );
+    assert_eq!(stt.compute_types, [ComputeType::Float16]);
+
+    let tts = d.runner_profile("kokoro").expect("kokoro");
+    assert!(tts.library_search_paths.is_empty());
+    assert_eq!(tts.compute_types, [ComputeType::Float32]);
+    assert!(d.runner_profile("smolvla").is_none());
+
+    // The non-speech interpreter stays where it was.
+    assert_eq!(
+        d.python.and_then(|p| p.interpreter).as_deref(),
+        Some("/usr/bin/python3")
+    );
 }
 
 #[test]
-fn malformed_runner_profiles_fail_the_schema() {
+fn the_shipped_descriptor_declares_no_runner_profile() {
+    // No package installs a speech runner profile yet; a descriptor that
+    // declared one would have doctor report an environment that is absent.
+    let d = BackendDescriptor::parse_with_path(&read(SHIPPED), Path::new(SHIPPED)).expect("parses");
+    assert!(d.runner_profiles.is_empty());
+}
+
+#[test]
+fn malformed_runner_profiles_are_refused_by_the_schema_and_the_reader() {
     let validator =
         jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
     let cases: Vec<(&str, Value)> = vec![
@@ -93,6 +138,14 @@ fn malformed_runner_profiles_fail_the_schema() {
         (
             "relative library search path",
             with_profile_field(0, "library_search_paths", Some(json!(["lib"]))),
+        ),
+        (
+            "repeated library search path",
+            with_profile_field(
+                0,
+                "library_search_paths",
+                Some(json!([format!("{ROOT}/lib"), format!("{ROOT}/lib")])),
+            ),
         ),
         (
             "unknown compute type",
@@ -119,12 +172,22 @@ fn malformed_runner_profiles_fail_the_schema() {
             with_profile_field(1, "packages", Some(json!([""]))),
         ),
         (
+            "repeated package",
+            with_profile_field(1, "packages", Some(json!(["a", "a"]))),
+        ),
+        (
             "id not lower_snake_case",
             with_profile_field(1, "id", Some(json!("Kokoro"))),
         ),
-        ("missing interpreter", with_profile_field(0, "interpreter", None)),
+        (
+            "missing interpreter",
+            with_profile_field(0, "interpreter", None),
+        ),
         ("missing packages", with_profile_field(1, "packages", None)),
-        ("missing compute types", with_profile_field(1, "compute_types", None)),
+        (
+            "missing compute types",
+            with_profile_field(1, "compute_types", None),
+        ),
         (
             "unknown field in an entry",
             with_profile_field(0, "python_path", Some(json!("/usr/bin/python3"))),
@@ -138,11 +201,106 @@ fn malformed_runner_profiles_fail_the_schema() {
             doc["runner_profiles"] = Value::Null;
             doc
         }),
+        ("an entry written as an array", {
+            let mut doc = fixture();
+            doc["runner_profiles"][0] = json!([
+                "faster_whisper",
+                format!("{ROOT}/bin/python"),
+                ROOT,
+                [],
+                ["p"],
+                ["float16"]
+            ]);
+            doc
+        }),
     ];
     for (label, instance) in cases {
         assert!(
             !validator.is_valid(&instance),
-            "{label}: the schema must reject it"
+            "{label}: the schema must refuse it"
+        );
+        assert!(
+            !rust_accepts(&instance),
+            "{label}: the reader must refuse it"
         );
     }
+}
+
+#[test]
+fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
+    // The schema accepts each of these; the reader refuses them. Pinning
+    // the schema's verdict keeps the list honest if the schema grows a rule.
+    let validator =
+        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
+    let cases: Vec<(&str, Value)> = vec![
+        ("duplicate profile id", {
+            let mut doc = fixture();
+            doc["runner_profiles"][1]["id"] = json!("faster_whisper");
+            doc
+        }),
+        (
+            "interpreter outside the environment root",
+            with_profile_field(0, "interpreter", Some(json!("/usr/bin/python3"))),
+        ),
+        (
+            "interpreter equal to the environment root",
+            with_profile_field(0, "interpreter", Some(json!(ROOT))),
+        ),
+        (
+            "interpreter escaping the root through `..`",
+            with_profile_field(
+                0,
+                "interpreter",
+                Some(json!(format!("{ROOT}/../../../bin/python3"))),
+            ),
+        ),
+        (
+            "interpreter with a `.` component",
+            with_profile_field(
+                0,
+                "interpreter",
+                Some(json!(format!("{ROOT}/./bin/python"))),
+            ),
+        ),
+        (
+            "library search path outside the environment root",
+            with_profile_field(
+                0,
+                "library_search_paths",
+                Some(json!(["/usr/lib/x86_64-linux-gnu"])),
+            ),
+        ),
+        (
+            "environment root with a `..` component",
+            with_profile_field(
+                0,
+                "environment_root",
+                Some(json!("/usr/lib/tensorplate/../tensorplate/speech-runtime")),
+            ),
+        ),
+        (
+            "blank-only package name",
+            with_profile_field(1, "packages", Some(json!([" "]))),
+        ),
+    ];
+    for (label, instance) in cases {
+        assert!(
+            validator.is_valid(&instance),
+            "{label}: the schema accepts it, so the reader is the only guard"
+        );
+        assert!(
+            !rust_accepts(&instance),
+            "{label}: the reader must refuse it"
+        );
+    }
+}
+
+#[test]
+fn a_descriptor_with_an_empty_runner_profile_list_parses() {
+    let mut doc = fixture();
+    doc["runner_profiles"] = json!([]);
+    let validator =
+        jsonschema::JSONSchema::compile(&schema_document()).expect("schema compiles as Draft-07");
+    assert!(validator.is_valid(&doc));
+    assert!(rust_accepts(&doc));
 }

@@ -16,10 +16,12 @@
 // The schema mirrors `protocol/schemas/backend_descriptor.json`. Both
 // shall be edited together.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::serde_shape::{deserialize_vec_map_only, is_canonical_snake_identifier};
 use crate::SCHEMA_VERSION;
 
 /// Parsed backend descriptor.
@@ -44,6 +46,15 @@ pub struct BackendDescriptor {
     pub capabilities: Option<BackendCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
+    /// Installed runner profiles, each in its own interpreter environment.
+    /// Empty when the descriptor declares none; `python` then describes the
+    /// only interpreter the backend uses.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_vec_map_only"
+    )]
+    pub runner_profiles: Vec<RunnerProfile>,
 }
 
 fn default_schema_version() -> String {
@@ -148,6 +159,43 @@ pub struct BackendCapabilities {
     pub supported_precision: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_artifact_kinds: Vec<String>,
+}
+
+/// Compute types a runner profile can load a model with. `auto` is
+/// deliberately absent: a profile states what it supports, and selection
+/// never substitutes one silently.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeType {
+    Float32,
+    Float16,
+    Bfloat16,
+    Int8,
+    Int8Float32,
+    Int8Float16,
+    Int8Bfloat16,
+    Int16,
+}
+
+/// One installed runner profile: the environment the launcher starts the
+/// profile's sidecar in and the packages that install it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerProfile {
+    /// Profile identity a deployment selects, lower_snake_case.
+    pub id: String,
+    /// Absolute interpreter path inside `environment_root`.
+    pub interpreter: String,
+    /// Absolute root of the profile's installed environment.
+    pub environment_root: String,
+    /// Absolute directories inside `environment_root` the launcher adds
+    /// to the sidecar's shared-library search path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_search_paths: Vec<String>,
+    /// OS packages that install this profile.
+    pub packages: Vec<String>,
+    /// Compute types this installed profile can load a model with.
+    pub compute_types: Vec<ComputeType>,
 }
 
 /// Typed errors raised when parsing a backend descriptor.
@@ -275,7 +323,26 @@ impl BackendDescriptor {
                 }
             }
         }
+        let mut ids = BTreeSet::new();
+        for profile in &self.runner_profiles {
+            if let Err(message) = profile.check() {
+                return Err(invalid(&message));
+            }
+            if !ids.insert(profile.id.as_str()) {
+                return Err(invalid(&format!(
+                    "runner profile `{}` is declared more than once",
+                    profile.id
+                )));
+            }
+        }
         Ok(self)
+    }
+
+    /// The installed runner profile with this id, if the descriptor
+    /// declares one.
+    #[must_use]
+    pub fn runner_profile(&self, id: &str) -> Option<&RunnerProfile> {
+        self.runner_profiles.iter().find(|p| p.id == id)
     }
 
     /// Convenience: does this descriptor declare a Python sidecar?
@@ -295,6 +362,84 @@ impl BackendDescriptor {
     pub fn requires_pytorch(&self) -> bool {
         self.pytorch.as_ref().is_some_and(|p| p.required)
     }
+}
+
+impl RunnerProfile {
+    /// The rules the schema cannot state: paths are absolute and
+    /// normalized, the interpreter and every library search path sit
+    /// inside the environment root, and no list repeats an entry.
+    fn check(&self) -> Result<(), String> {
+        let id = &self.id;
+        if !is_canonical_snake_identifier(id) {
+            return Err(format!("runner profile id `{id}` must be lower_snake_case"));
+        }
+        if !is_normalized_absolute(&self.environment_root) {
+            return Err(format!(
+                "runner profile `{id}`: `environment_root` must be an absolute path with no `.` or `..` components"
+            ));
+        }
+        let root = Path::new(&self.environment_root);
+        if !is_normalized_absolute(&self.interpreter) {
+            return Err(format!(
+                "runner profile `{id}`: `interpreter` must be an absolute path with no `.` or `..` components"
+            ));
+        }
+        let interpreter = Path::new(&self.interpreter);
+        if interpreter == root || !interpreter.starts_with(root) {
+            return Err(format!(
+                "runner profile `{id}`: `interpreter` must sit inside `environment_root`"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for dir in &self.library_search_paths {
+            if !is_normalized_absolute(dir) {
+                return Err(format!(
+                    "runner profile `{id}`: each `library_search_paths` entry must be an absolute path with no `.` or `..` components"
+                ));
+            }
+            if !Path::new(dir).starts_with(root) {
+                return Err(format!(
+                    "runner profile `{id}`: each `library_search_paths` entry must sit inside `environment_root`"
+                ));
+            }
+            if !seen.insert(Path::new(dir)) {
+                return Err(format!(
+                    "runner profile `{id}`: `library_search_paths` repeats `{dir}`"
+                ));
+            }
+        }
+        if self.packages.is_empty() || self.packages.iter().any(|p| p.trim().is_empty()) {
+            return Err(format!(
+                "runner profile `{id}` must name at least one non-empty package"
+            ));
+        }
+        if self.packages.iter().collect::<BTreeSet<_>>().len() != self.packages.len() {
+            return Err(format!(
+                "runner profile `{id}`: `packages` repeats an entry"
+            ));
+        }
+        if self.compute_types.is_empty() {
+            return Err(format!(
+                "runner profile `{id}` must declare at least one compute type"
+            ));
+        }
+        if self.compute_types.iter().collect::<BTreeSet<_>>().len() != self.compute_types.len() {
+            return Err(format!(
+                "runner profile `{id}`: `compute_types` repeats an entry"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Absolute, with no `.` or `..` segment, which would let a path name
+/// somewhere its text does not show. Checked on the text: `Path::components`
+/// drops an interior `.` silently.
+fn is_normalized_absolute(path: &str) -> bool {
+    Path::new(path).is_absolute()
+        && path
+            .split('/')
+            .all(|segment| segment != "." && segment != "..")
 }
 
 #[cfg(test)]
