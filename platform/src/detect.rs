@@ -102,8 +102,8 @@ pub struct HostSources {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_type_record: Option<String>,
     /// Body of the GCE metadata instance-id response: the instance id in
-    /// decimal. Asked only after the machine-type query answered, within the
-    /// same budget.
+    /// decimal. Asked only after the machine-type query answered, with a
+    /// budget of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gce_instance_id: Option<String>,
     /// The instance binding `tensorplate-agent` wrote beside an earlier live

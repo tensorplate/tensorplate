@@ -357,7 +357,7 @@ const DETECTION_RETRY_FIRST_DELAY: Duration = Duration::from_millis(500);
 /// ends at up to this budget plus one attempt's work — and an attempt's
 /// work has no timeout of its own, because `SystemHostProbe::sources`
 /// forks `uname -m` through an untimed `Command::output()`. The metadata
-/// connect inside it is capped at 250ms; nothing else is.
+/// queries inside it are capped at 250ms each; nothing else is.
 ///
 /// Deliberately short. Exhausting the budget is byte-identical to the
 /// behaviour before the retry existed, so being too short costs nothing
