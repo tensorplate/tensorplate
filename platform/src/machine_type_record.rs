@@ -463,11 +463,12 @@ pub fn establish_machine_type(
             // Offline there is no instance id to tell a resize from a moved
             // disk; the online start that follows refuses either way, with
             // MachineTypeChanged or InstanceChanged, and both reprovision
-            // alike.
+            // alike. That start needs the service, so the message opens with
+            // why it gave none now, as every other refusal here does.
             return Err(machine_type_changed(&format!(
-                "the machine type recorded in this boot is `{}`, and this host's identity was \
-                 recorded on `{}`; the instance was given a different machine type, or the disk \
-                 was moved to an instance of that type",
+                "{context}, and the machine type recorded in this boot is `{}`, and this host's \
+                 identity was recorded on `{}`; the instance was given a different machine type, \
+                 or the disk was moved to an instance of that type",
                 record.machine_type, binding.machine_type
             )));
         }

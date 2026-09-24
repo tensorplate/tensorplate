@@ -148,6 +148,37 @@ fn with_a_record_that_cannot_stand_in_the_error_still_opens_with_the_cause_class
 }
 
 #[test]
+fn a_binding_on_another_machine_type_is_refused_opening_with_the_cause_class() {
+    // Offline, an earlier-boot binding on another machine type than this
+    // boot's record: the remedy is an online start, so the cause class of
+    // the missing answer comes first here too.
+    let binding = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/identity/instance-binding-v1.json"),
+    )
+    .expect("binding fixture")
+    .replace("g2-standard-8", "g2-standard-4")
+    .replace(BOOT, "00000000-0000-4000-8000-000000000002");
+    let sources = HostSources {
+        instance_binding: Some(binding),
+        ..unanswered_l4(Some("refused"), Some(l4_record()))
+    };
+    match identify(&sources) {
+        Err(PlatformProbeError::MachineTypeChanged { detail, .. }) => {
+            assert!(
+                detail.starts_with(
+                    "host reports as a Compute Engine instance and connections to its \
+                     metadata service at 169.254.169.254:80 were refused (blocked access"
+                ),
+                "{detail}"
+            );
+            assert!(detail.contains("`g2-standard-4`"), "{detail}");
+        }
+        other => panic!("expected MachineTypeChanged, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_same_boot_record_stands_in_whatever_the_cause() {
     let record = l4_record();
     for unanswered in ["http-503", "http-429", "refused", "timeout"] {
