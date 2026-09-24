@@ -93,6 +93,39 @@ Result<std::unique_ptr<ExecutionSession>> BackendRegistry::create_session(
   return factory(hooks);
 }
 
+Result<SessionWithBridge> BackendRegistry::create_session_with_bridge(
+    std::string_view backend_name, ExecutionSessionRuntimeHooks hooks) const {
+  SessionWithBridgeFactory factory;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = entries_.find(std::string(backend_name));
+    if (it == entries_.end()) {
+      return unexpected(Error::Code::Unsupported,
+                        "backend not registered: " + std::string(backend_name));
+    }
+    if (!it->second.session_with_bridge_factory) {
+      return unexpected(Error::make(Error::Code::Unsupported,
+                                    "backend runs no jobs: " + std::string(backend_name),
+                                    "job_bridge_unsupported"));
+    }
+    factory = it->second.session_with_bridge_factory;
+  }
+  // Invoked outside the mutex for the same reason as create_session.
+  auto created = factory(hooks);
+  if (!created) {
+    return created;
+  }
+  if (!created.value().session) {
+    return unexpected(Error::make(Error::Code::Internal, "job bridge factory returned no session",
+                                  "null_session"));
+  }
+  if (!created.value().bridge) {
+    return unexpected(
+        Error::make(Error::Code::Internal, "job bridge factory returned no bridge", "null_bridge"));
+  }
+  return created;
+}
+
 Result<void> BackendRegistry::validate_backend_hint(const ModelSpec& spec) const {
   const std::string& hint = spec.backend_hint();
   auto cap_r = capability(hint);
