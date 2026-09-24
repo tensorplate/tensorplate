@@ -6,6 +6,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- A supply-chain CI workflow, `.github/workflows/supply-chain.yml`, runs on
+  every pull request, on pushes to `main` and `develop`, and weekly. It checks
+  the Rust workspace with `cargo-deny` against a new `deny.toml`: licenses
+  limited to `Apache-2.0`, `MIT` and `Unicode-3.0`, no wildcard requirements,
+  crates.io as the only source, no yanked crates, and the RustSec advisory
+  database. For each Python package (`sdk/python`,
+  `backends/python_pytorch`) it installs the package into a clean
+  environment, uploads a CycloneDX SBOM of it as a workflow artifact, and
+  audits it with `pip-audit`. A known vulnerability is accepted only
+  through `tools/release/vulnerability-dispositions.json`, whose entries
+  carry a reason and a review date at most 180 days out;
+  `tools/release/check-vulnerability-dispositions.py` refuses an expired
+  entry and keeps the cargo entries equal to `deny.toml`'s ignore list. The
+  file starts empty. `SECURITY.md` and `docs/release/artifacts.md` describe
+  the checks; an SBOM attached to each release remains on the roadmap.
+  (V030-E01-F03-T01)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added

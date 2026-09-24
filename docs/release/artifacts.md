@@ -291,6 +291,44 @@ staging mistake, so it never reaches a manifest for verification to judge.
 A file whose name matches no required package is not examined at all and is
 simply never collected.
 
+## Supply-chain checks
+
+`.github/workflows/supply-chain.yml` runs on every pull request, on pushes to
+`main` and `develop`, weekly on a schedule (advisories are published without
+any change here), and on demand. It uses no secrets.
+
+| Job | What it checks | Policy |
+| --- | --- | --- |
+| `vulnerability dispositions` | the disposition file and its checker's tests | `tools/release/vulnerability-dispositions.json` |
+| `cargo-deny` | licenses, wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
+| `SBOM and audit` | a CycloneDX JSON SBOM of each Python package installed into a clean environment, uploaded as a workflow artifact, and a `pip-audit` run over that environment | the PyPI entries of the disposition file |
+
+cargo-deny runs as a prebuilt binary whose version and SHA-256 are pinned
+in the workflow; `cyclonedx-bom` and `pip-audit` are pinned by version and
+installed in an environment of their own, so their dependencies are never
+part of what is audited.
+
+**License policy.** `deny.toml` allows `Apache-2.0`, `MIT` and
+`Unicode-3.0`, which every Rust dependency satisfies today. A dependency
+that needs another license fails the check; allowing it is a reviewed
+change to `deny.toml`.
+
+**Accepting a vulnerability.** A known vulnerability is accepted only
+through `tools/release/vulnerability-dispositions.json`, whose schema is
+`tools/release/vulnerability-dispositions.schema.json`. Each entry names the
+advisory id the scanner reports, the ecosystem (`cargo` or `pypi`), the
+package, a decision (`not_affected`, `accepted` or `fix_pending`), the
+reason, the date decided and a `review_by` date at most 180 days later.
+`tools/release/check-vulnerability-dispositions.py` refuses an entry past
+its `review_by` date, so an expired acceptance turns the check red instead
+of lasting forever. A `cargo` entry must also appear in `deny.toml`'s
+`[advisories] ignore` list, which is what cargo-deny reads; the checker
+refuses the two lists when they differ in either direction. `pypi` entries
+become `pip-audit --ignore-vuln` arguments.
+
+Not covered yet: native dependencies of the C++ runtime, the contents of
+the Debian packages as built, and an SBOM attached to each release.
+
 ## Signing and Provenance
 
 On the publish path, the `Release` workflow signs and attests the assets so
