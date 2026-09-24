@@ -27,8 +27,11 @@ concurrency:
 
 env:
   # A prebuilt, checksum-pinned binary: cargo-deny 0.20.2 declares
-  # rust-version 1.88 and edition 2024, and the workspace toolchain is
-  # pinned to 1.78, so it cannot be built here from source.
+  # rust-version 1.88 and edition 2024 on crates.io, and the workspace
+  # toolchain is pinned to 1.78, so it cannot be built here from source.
+  # The SHA-256 is the digest GitHub publishes for the release asset
+  # cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+  # (GET /repos/EmbarkStudios/cargo-deny/releases, assets[].digest).
   CARGO_DENY_VERSION: '0.20.2'
   CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
   CYCLONEDX_BOM_VERSION: '7.4.0'
@@ -42,10 +45,10 @@ jobs:
     name: vulnerability dispositions
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -62,7 +65,20 @@ jobs:
     name: cargo-deny (licenses, bans, sources, advisories)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # cargo-deny reads deny.toml's ignore list, which has no dates. This
+      # job therefore checks the dispositions first, so an expired cargo
+      # entry turns it red instead of quietly suppressing the advisory.
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Every disposition is current and agrees with deny.toml
+        run: |
+          python -m pip install --quiet -r tools/release/requirements.txt
+          python tools/release/check-vulnerability-dispositions.py
 
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: |
@@ -85,21 +101,27 @@ jobs:
           cargo deny --locked check advisories bans licenses sources
 
   python:
-    name: SBOM and audit (${{ matrix.package }})
+    name: SBOM and audit (${{ matrix.install }})
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - package: sdk/python
+            install: ./sdk/python
             artifact: tensorplate-sdk-python
+          # The extra detection workflows install: numpy and pillow.
+          - package: sdk/python
+            install: ./sdk/python[vision]
+            artifact: tensorplate-sdk-python-vision
           - package: backends/python_pytorch
+            install: ./backends/python_pytorch
             artifact: tensorplate-backend-python-pytorch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -108,14 +130,17 @@ jobs:
           python -m venv "${RUNNER_TEMP}/scanners"
           "${RUNNER_TEMP}/scanners/bin/python" -m pip install --quiet \
             "cyclonedx-bom==${CYCLONEDX_BOM_VERSION}" "pip-audit==${PIP_AUDIT_VERSION}"
+          # Only the two scanners are pinned; this records what their own
+          # dependencies resolved to for this run.
+          "${RUNNER_TEMP}/scanners/bin/python" -m pip freeze
 
       # Created without pip and installed into from outside, so the
       # environment holds the package and its runtime dependencies and
       # nothing that only installs them.
-      - name: Install ${{ matrix.package }} into a clean environment
+      - name: Install ${{ matrix.install }} into a clean environment
         run: |
           python -m venv --without-pip "${RUNNER_TEMP}/target"
-          python -m pip --python "${RUNNER_TEMP}/target/bin/python" install --quiet "./${{ matrix.package }}"
+          python -m pip --python "${RUNNER_TEMP}/target/bin/python" install --quiet "${{ matrix.install }}"
           python -m pip --python "${RUNNER_TEMP}/target/bin/python" list
 
       - name: CycloneDX SBOM
@@ -135,6 +160,14 @@ jobs:
           print(bom["bomFormat"], bom["specVersion"], "for", root.get("name"), root.get("version"))
           print(len(components), "components:", ", ".join(f"{c.get('name')} {c.get('version')}" for c in components) or "none")
           PY
+
+      # Before the audit, so a run whose audit fails still keeps its SBOM.
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-${{ matrix.artifact }}
+          path: sbom/${{ matrix.artifact }}.cdx.json
+          if-no-files-found: error
 
       # What is audited is the package's runtime dependency closure: what
       # pip freeze lists in the clean environment, less the package.
@@ -177,10 +210,3 @@ jobs:
           else
             echo "nothing to audit: the package has no third-party runtime dependency"
           fi
-
-      - name: Upload the SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-${{ matrix.artifact }}
-          path: sbom/${{ matrix.artifact }}.cdx.json
-          if-no-files-found: error
