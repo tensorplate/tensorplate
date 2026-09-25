@@ -8,6 +8,39 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A supply-chain CI workflow, `.github/workflows/supply-chain.yml`, runs on
+  every pull request, on pushes to `main` and `develop`, and weekly. It checks
+  the Rust workspace with `cargo-deny` against a new `deny.toml`: licenses
+  limited to `Apache-2.0`, `MIT` and `Unicode-3.0`, no wildcard requirements,
+  crates.io as the only source, no yanked crates, and the RustSec advisory
+  database. For each Python package (`sdk/python`, with and without its
+  `vision` extra, and `backends/python_pytorch`) it installs the package
+  into a clean environment, uploads a CycloneDX SBOM of it as a workflow
+  artifact, and
+  audits its runtime dependency closure with `pip-audit`, after a positive
+  control that requires the scanner to report a pin with published
+  advisories. A known vulnerability is accepted only
+  through `tools/release/vulnerability-dispositions.json`, whose entries
+  carry a reason and a review date at most 180 days out;
+  `tools/release/check-vulnerability-dispositions.py` refuses an expired
+  entry, failing the scanner jobs as well as its own, and keeps the cargo
+  entries equal to `deny.toml`'s ignore list. Its
+  one entry records RUSTSEC-2026-0009 in `time` as not affected: only
+  `jsonschema` reaches `time`, and it never parses RFC 2822. `SECURITY.md`
+  and `docs/release/artifacts.md` describe the checks; an SBOM attached to
+  each release remains on the roadmap. (V030-E01-F03-T01)
+
+### Security
+
+- `anyhow` 1.0.102 -> 1.0.103 (RUSTSEC-2026-0190: `Error::downcast_mut`
+  was unsound after `Error::context`) and `url` 2.5.0 -> 2.5.4, which
+  brings `idna` 0.5.0 -> 1.1.0 (RUSTSEC-2024-0421: Punycode labels that
+  decode to no non-ASCII compared equal to ASCII host names). `idna_adapter`
+  is pinned at 1.1.0 so the whole graph still builds with the workspace's
+  Rust 1.78. The same update moves `tinyvec` 1.12.0 -> 1.13.3, which drops
+  `tinyvec_macros`. Both advisories were found by the new cargo-deny check's
+  first run.
+  (V030-E01-F03-T01)
 - The lifecycle report can carry a `reboot` stage, and the release gate
   requires it on the L4 cloud row from 0.3.0. The stage sits beside the
   canonical eight rather than among them. No other row, and no earlier
