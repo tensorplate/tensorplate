@@ -1,0 +1,88 @@
+{
+  "schema_version": "0.2",
+  "store_version": 12,
+  "next_generation": 6,
+  "resident_set": {
+    "set_id": "resident-set-1",
+    "revision": 4,
+    "members": [
+      {
+        "deployment_id": "speech-stt",
+        "generation": 3,
+        "bundle_digest": "sha256:5171000000000000000000000000000000000000000000000000000000000003",
+        "descriptor_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d3",
+        "configuration_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000c3",
+        "admission_mode": "production",
+        "quota": {
+          "session_count": 1,
+          "domain_bytes": {
+            "guest_ram": 268435456,
+            "device_vram": 1073741824
+          }
+        },
+        "state": "serving",
+        "staged_path": "/var/lib/tensorplate/bundles/staging/speech-stt/3",
+        "bundle_name": "speech-stt-bundle",
+        "bundle_version": "1.0.0",
+        "backend_hint": "python_pytorch",
+        "model_class": "speech",
+        "promoted_monotonic_ns": 1790206528000000000
+      },
+      {
+        "deployment_id": "speech-tts",
+        "generation": 5,
+        "bundle_digest": "sha256:7715000000000000000000000000000000000000000000000000000000000005",
+        "descriptor_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d5",
+        "configuration_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000c5",
+        "admission_mode": "production",
+        "quota": {
+          "session_count": 1,
+          "domain_bytes": {
+            "guest_ram": 134217728,
+            "device_vram": 536870912
+          }
+        },
+        "state": "serving",
+        "staged_path": "/var/lib/tensorplate/bundles/staging/speech-tts/5",
+        "bundle_name": "speech-tts-bundle",
+        "bundle_version": "1.0.1",
+        "backend_hint": "python_pytorch",
+        "model_class": "speech",
+        "promoted_monotonic_ns": 1790206529000000000,
+        "previous": {
+          "deployment_id": "speech-tts",
+          "generation": 4,
+          "bundle_digest": "sha256:7715000000000000000000000000000000000000000000000000000000000004",
+          "descriptor_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d4",
+          "configuration_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000c4",
+          "admission_mode": "production",
+          "quota": {
+            "session_count": 1,
+            "domain_bytes": {
+              "guest_ram": 134217728,
+              "device_vram": 536870912
+            }
+          },
+          "staged_path": "/var/lib/tensorplate/bundles/staging/speech-tts/4",
+          "bundle_name": "speech-tts-bundle",
+          "bundle_version": "1.0.0",
+          "backend_hint": "python_pytorch",
+          "model_class": "speech",
+          "promoted_monotonic_ns": 1790206527000000000
+        }
+      }
+    ],
+    "endpoint_map": [
+      {
+        "deployment_id": "speech-stt",
+        "generation": 3,
+        "stream_endpoint": "127.0.0.1:18103"
+      },
+      {
+        "deployment_id": "speech-tts",
+        "generation": 5,
+        "stream_endpoint": "127.0.0.1:18105"
+      }
+    ]
+  }
+}

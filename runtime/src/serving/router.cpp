@@ -23,6 +23,8 @@
 #include "tensorplate/serving/pipeline.hpp"
 #include "tensorplate/serving/serialization.hpp"
 
+#include "serving/error_status.hpp"
+
 namespace tensorplate::serving {
 
 namespace {
@@ -41,27 +43,6 @@ std::string generate_correlation_id() {
     out.push_back(hex[(v >> (i * 4)) & 0xF]);
   }
   return out;
-}
-
-int http_status_for_error(Error::Code code) {
-  switch (code) {
-    case Error::Code::ConfigInvalid:
-    case Error::Code::ShapeMismatch:
-      return 400;
-    case Error::Code::Unsupported:
-      return 415;
-    case Error::Code::OOMError:
-      return 429;
-    case Error::Code::Timeout:
-      return 504;
-    case Error::Code::NotReady:
-      return 503;
-    case Error::Code::LoadFailed:
-    case Error::Code::InferenceFailed:
-    case Error::Code::Internal:
-    default:
-      return 500;
-  }
 }
 
 bool has_json_content_type(const http::Request& req) {
@@ -84,6 +65,33 @@ bool has_binary_content_type(const http::Request& req) {
 }
 
 }  // namespace
+
+int http_status_for_error(Error::Code code) noexcept {
+  // No default: -Wswitch makes a newly appended Error::Code a build error
+  // here until it is given a status.
+  switch (code) {
+    case Error::Code::ConfigInvalid:
+    case Error::Code::ShapeMismatch:
+      return 400;
+    case Error::Code::Unsupported:
+      return 415;
+    case Error::Code::OOMError:
+    case Error::Code::ResourceExhausted:
+      return 429;
+    case Error::Code::Timeout:
+      return 504;
+    case Error::Code::NotReady:
+    case Error::Code::Unavailable:
+      return 503;
+    case Error::Code::Cancelled:
+      return 499;
+    case Error::Code::LoadFailed:
+    case Error::Code::InferenceFailed:
+    case Error::Code::Internal:
+      break;
+  }
+  return 500;
+}
 
 RequestRouter::RequestRouter(RequestRouterDeps deps) : deps_(std::move(deps)) {}
 RequestRouter::~RequestRouter() = default;

@@ -153,7 +153,12 @@ class ServingMetrics {
 
   /// Increment the rejection counter that matches `code`. Convenience
   /// wrapper used by the request router so the typed-error -> metric
-  /// mapping lives in one place.
+  /// mapping lives in one place:
+  /// `config_invalid`, `shape_mismatch` -> rejected_malformed;
+  /// `unsupported` -> rejected_unsupported;
+  /// `oom_error`, `resource_exhausted` -> rejected_overload;
+  /// `timeout` -> rejected_deadline; `not_ready` -> rejected_stopping;
+  /// every other code -> requests_failed.
   void record_rejection(Error::Code code) noexcept;
 
   void observe_ingress_ms(double ms) { ingress_.observe_ms(ms); }

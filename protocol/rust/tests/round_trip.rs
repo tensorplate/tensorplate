@@ -28,7 +28,7 @@ use std::path::PathBuf;
 
 use tensorplate_protocol::{
     decode_with_version_check, DecodeError, DeployTransaction, DesiredState, HealthEvent,
-    IpcMessage, ValidatePayload, WorkerStatus, SCHEMA_VERSION,
+    IpcMessage, ValidatePayload, WorkerStatus, AGENT_STATE_SCHEMA_VERSIONS, SCHEMA_VERSION,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -172,7 +172,8 @@ fn unknown_schema_version_is_rejected_with_typed_error() {
 #[test]
 fn fixtures_match_committed_schema_version() {
     // Sanity: every fixture must declare the v0.1 schema version, except
-    // the explicit unknown-version negative fixture. This guards against
+    // the explicit unknown-version negative fixture and the agent's durable
+    // state file, which has its own version track. This guards against
     // accidentally checking in a fixture against an unreleased schema.
     let dir = fixtures_dir();
     let entries = std::fs::read_dir(dir).expect("read fixtures dir");
@@ -196,6 +197,11 @@ fn fixtures_match_committed_schema_version() {
             .expect("schema_version field");
         if name == "python_pytorch_ipc_unknown_version.json" {
             assert_ne!(observed, SCHEMA_VERSION);
+        } else if name.starts_with("agent_state_") {
+            assert!(
+                AGENT_STATE_SCHEMA_VERSIONS.contains(&observed),
+                "fixture `{name}` declares a state version the agent does not read"
+            );
         } else {
             assert_eq!(
                 observed, SCHEMA_VERSION,
