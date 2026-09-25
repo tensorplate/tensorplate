@@ -26,9 +26,16 @@ jobs:
           - preset: relwithdebinfo
             build_type: RelWithDebInfo
             sanitizers: 'OFF'
+            tsan: 'OFF'
           - preset: asan-ubsan
             build_type: Debug
             sanitizers: 'ON'
+            tsan: 'OFF'
+          # ThreadSanitizer cannot share a build with ASan, so it is its own leg.
+          - preset: tsan
+            build_type: Debug
+            sanitizers: 'OFF'
+            tsan: 'ON'
     steps:
       - uses: actions/checkout@v4
 
@@ -100,6 +107,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DTP_WARNINGS_AS_ERRORS=ON \
             -DTP_ENABLE_SANITIZERS=${{ matrix.sanitizers }} \
+            -DTP_ENABLE_TSAN=${{ matrix.tsan }} \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
@@ -110,12 +118,14 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: ctest --test-dir build --output-on-failure -L T1
 
       - name: T2 integration tests
         env:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
           TP_TEST_PYTHON: python
         run: ctest --test-dir build --output-on-failure -L T2
 
@@ -123,6 +133,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:halt_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
           TP_TEST_PYTHON: python
         run: ctest --test-dir build --output-on-failure -L T3
 
