@@ -142,7 +142,20 @@ cmake -S . -B build-asan \
   -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
 cmake --build build-asan
 ctest --test-dir build-asan --output-on-failure -L T1
+
+# ThreadSanitizer dev configure. TSAN cannot share a build with ASAN, so
+# configure fails if TP_ENABLE_SANITIZERS is also ON.
+cmake -S . -B build-tsan \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DTP_ENABLE_TSAN=ON \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build-tsan
+ctest --test-dir build-tsan --output-on-failure -L T1
 ```
+
+Some hosts need address-space randomization off for sanitized binaries; see
+[`docs/contributing/local-validation.md`](docs/contributing/local-validation.md).
 
 `vcpkg.json` declares the C++ dependency baseline (currently GoogleTest).
 Adapter SDKs (TensorRT, PyTorch/LibTorch, CUDA) are not vendored; they are picked
@@ -200,11 +213,12 @@ pytest -q
 
 Two workflows live under `.github/workflows/`:
 
-- `cpp.yml` builds the C++ targets and runs T1 unit tests on Ubuntu 22.04.
-  Jobs: `build-test` (release and ASAN/UBSAN matrix), `format` (clang-format
-  --dry-run -Werror over all tracked C++ files), and `tidy` (clang-tidy on
-  runtime and serving worker translation units against the configured
-  `compile_commands.json`).
+- `cpp.yml` builds the C++ targets and runs the T1, T2 and T3 labels on
+  Ubuntu 22.04. Jobs: `build-test` (release, ASAN/UBSAN and TSAN matrix),
+  `adapter-shells` (the TensorRT and LibTorch adapter shells built without
+  their SDKs, T1), `format` (clang-format --dry-run -Werror over all
+  tracked C++ files), and `tidy` (clang-tidy on runtime and serving worker
+  translation units against the configured `compile_commands.json`).
 - `rust.yml` runs `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, and `cargo test --workspace`. The pinned
   toolchain in `rust-toolchain.toml` is materialized via `rustup toolchain
@@ -230,6 +244,8 @@ Two workflows live under `.github/workflows/`:
 | --- | --- | --- |
 | `cpp.yml / build-test (relwithdebinfo)` | Yes | PR + push to main, develop |
 | `cpp.yml / build-test (asan-ubsan)` | Yes | PR + push to main, develop |
+| `cpp.yml / build-test (tsan)` | Not yet; runs on every PR | PR + push to main, develop |
+| `cpp.yml / adapter-shells` | Yes | PR + push to main, develop |
 | `cpp.yml / format` | Yes | PR + push to main, develop |
 | `cpp.yml / tidy` | Yes | PR + push to main, develop |
 | `rust.yml / fmt + clippy + test` | Yes | PR + push to main, develop |
@@ -239,8 +255,8 @@ Two workflows live under `.github/workflows/`:
 | T5 benchmark regression | No | release branch only |
 
 T3, T4, and T5 workflows are added in later epics (V01-E05, release validation) and
-will not block ordinary PRs. Branch protection should require the five
-PR-gated jobs above.
+will not block ordinary PRs. Branch protection should require the jobs
+marked Yes above.
 
 ## Release and Changelog Policy
 
@@ -257,6 +273,9 @@ constants in the same PR:
 - Public C++ interface under `include/tensorplate/` (runtime version).
 - New, removed, or renamed runtime error codes (runtime version).
 - Cross-process schemas under `protocol/schemas/` (protocol + schema version).
+  The agent's durable state file, `protocol/schemas/agent_state.json`, is
+  the exception: it has its own state version, which moves with its Rust
+  mirror (see `docs/architecture/protocol.md`).
 - Config schemas under `config/schemas/` (schema version).
 - Bundle format layout or manifest fields (bundle format version).
 - Feature flags introduced or graduated (runtime version, plus a flag note).

@@ -94,7 +94,7 @@ deliberate v0.2+ decision.
 
 | Method | Path | Body | Response |
 | ------ | ---- | ---- | -------- |
-| POST   | `/infer` | `serving_http_envelope.InferRequest` | `InferResponseSuccess` (200) or `InferResponseFailure` (4xx/5xx). |
+| POST   | `/infer` | `serving_http_envelope.InferRequest` | `InferResponseSuccess` (200) or `InferResponseFailure` (4xx/5xx, or 200 when the backend itself reports the failure). |
 | POST   | `/policy/infer` | `serving_http_envelope.InferRequest` | `AsyncAccepted` (202) with `result_url` and `cancel_url`, or 501 when the resolved backend lacks `supports_async`. |
 | GET    | `/policy/result/<request_id>` | _empty_ | `AsyncResult` (200) — `status` discriminates `pending`/`in_flight`/`completed`/`cancelled`/`stale`/`failed`/`expired`, or 501 when the resolved backend lacks `supports_async`. |
 | POST   | `/policy/cancel/<request_id>` | _empty_ | `AsyncCancelResponse` (200 if cancelled, 404 otherwise), or 501 when the resolved backend lacks `supports_async`. |
@@ -120,14 +120,21 @@ the envelope shape *before* any buffer-plane allocation:
    bytes.
 4. Metadata strings, if present, must be non-empty.
 
-Validation errors map to typed `Error::Code` values:
+Validation errors map to typed `Error::Code` values. A typed error that
+ends a request before or instead of an inference result is answered with
+the status its code maps to below; a few routes answer a specific
+condition with a fixed status instead (413 for an oversized payload, 501
+when the backend lacks async support, 404 for an unknown async request
+id), and a failure the backend itself reports comes back as a 200
+`InferResponseFailure` carrying its code:
 
 - `config_invalid` (400)
 - `shape_mismatch` (400)
 - `unsupported` (415)
-- `oom_error` (429)
+- `oom_error` / `resource_exhausted` (429)
 - `timeout` (504)
-- `not_ready` (503)
+- `not_ready` / `unavailable` (503)
+- `cancelled` (499, Client Closed Request)
 - `inference_failed` / `load_failed` / `internal` (500)
 
 Only after structural validation passes do the input payloads cross

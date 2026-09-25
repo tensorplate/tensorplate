@@ -36,6 +36,23 @@ stay fast and hardware/release-only checks stay separate.
 - Manual Jetson target validation for adapter/release readiness is documented
   in [`docs/contributing/jetson-target-validation.md`](../docs/contributing/jetson-target-validation.md).
 
+## Sanitizers
+
+CI builds the C++ tree three ways: plain, with AddressSanitizer and
+UndefinedBehaviorSanitizer (`TP_ENABLE_SANITIZERS=ON`), and with
+ThreadSanitizer (`TP_ENABLE_TSAN=ON`). ThreadSanitizer cannot share a build
+with AddressSanitizer, so configure refuses both options together; the
+`cmake.sanitizer_options` test checks that refusal. Race tests must pass
+under both sanitizer builds.
+
+Only `tp_*` targets are instrumented. Libraries built by vcpkg (GoogleTest
+today) and the Python sidecar process are not, so a race inside them is
+invisible to ThreadSanitizer. A test that exercises concurrency across such
+a boundary must drive TensorPlate's own code against a fake at that
+boundary (for example, a fake transport below a network library once one is
+added) rather than rely on ThreadSanitizer to see into the uninstrumented
+library.
+
 ## Running
 
 The CMake (V01-E01-F02) and Cargo (V01-E01-F03) baselines wire the runnable

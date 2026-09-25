@@ -769,7 +769,8 @@ impl RecordDirectory {
         file.write_all(body)?;
         file.sync_all()?;
         renameat(&self.directory, &temporary, &self.directory, &self.name)?;
-        // Match the agent state store's best-effort directory durability.
+        // Best-effort directory durability, as the agent state store keeps
+        // for its legacy (0.1) writes; this record carries no counter.
         let _ = self.directory.sync_all();
         Ok(())
     }

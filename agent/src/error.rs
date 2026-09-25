@@ -89,6 +89,15 @@ pub enum AgentError {
     #[error("durable state file is corrupt or malformed: {0}")]
     CorruptState(String),
 
+    /// A state write failed at or after the rename that makes it what the
+    /// next start reads, so whether it survives is unknown; the store
+    /// refuses further writes until the agent restarts and re-reads the
+    /// durable state.
+    #[error(
+        "durable state write outcome is indeterminate ({0}); the state store refuses further writes until the agent restarts"
+    )]
+    StateIndeterminate(String),
+
     #[error("worker control failed: {0}")]
     WorkerControl(String),
 
@@ -121,6 +130,7 @@ impl AgentError {
             | AgentError::BundleMissing(_)
             | AgentError::CorruptState(_)
             | AgentError::InvalidTransition(_) => (ErrorCode::ConfigInvalid, false),
+            AgentError::StateIndeterminate(_) => (ErrorCode::Internal, false),
             AgentError::BundleIntegrity { .. } => (ErrorCode::LoadFailed, false),
             AgentError::UnsupportedRuntimeVersion(_)
             | AgentError::UnsupportedHardware(_)
