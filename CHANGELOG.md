@@ -8,6 +8,70 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A supply-chain CI workflow, `.github/workflows/supply-chain.yml`, runs on
+  every pull request, on pushes to `main` and `develop`, and weekly. It checks
+  the Rust workspace with `cargo-deny` against a new `deny.toml`: licenses
+  limited to `Apache-2.0`, `MIT` and `Unicode-3.0`, no wildcard requirements,
+  crates.io as the only source, no yanked crates, and the RustSec advisory
+  database. For each Python package (`sdk/python`, with and without its
+  `vision` extra, and `backends/python_pytorch`) it installs the package
+  into a clean environment, uploads a CycloneDX SBOM of it as a workflow
+  artifact, and
+  audits its runtime dependency closure with `pip-audit`, after a positive
+  control that requires the scanner to report a pin with published
+  advisories. A known vulnerability is accepted only
+  through `tools/release/vulnerability-dispositions.json`, whose entries
+  carry a reason and a review date at most 180 days out;
+  `tools/release/check-vulnerability-dispositions.py` refuses an expired
+  entry, failing the scanner jobs as well as its own, and keeps the cargo
+  entries equal to `deny.toml`'s ignore list. Its
+  one entry records RUSTSEC-2026-0009 in `time` as not affected: only
+  `jsonschema` reaches `time`, and it never parses RFC 2822. `SECURITY.md`
+  and `docs/release/artifacts.md` describe the checks; an SBOM attached to
+  each release remains on the roadmap. (V030-E01-F03-T01)
+
+### Security
+
+- `anyhow` 1.0.102 -> 1.0.103 (RUSTSEC-2026-0190: `Error::downcast_mut`
+  was unsound after `Error::context`) and `url` 2.5.0 -> 2.5.4, which
+  brings `idna` 0.5.0 -> 1.1.0 (RUSTSEC-2024-0421: Punycode labels that
+  decode to no non-ASCII compared equal to ASCII host names). `idna_adapter`
+  is pinned at 1.1.0 so the whole graph still builds with the workspace's
+  Rust 1.78. The same update moves `tinyvec` 1.12.0 -> 1.13.3, which drops
+  `tinyvec_macros`. Both advisories were found by the new cargo-deny check's
+  first run.
+  (V030-E01-F03-T01)
+- The lifecycle report can carry a `reboot` stage, and the release gate
+  requires it on the L4 cloud row from 0.3.0. The stage sits beside the
+  canonical eight rather than among them. No other row, and no earlier
+  release of this one, may carry it, so every recorded report stays valid
+  and `check-evidence-bundles.sh --version 0.2.1` still finds all four
+  Production rows complete.
+  - `config/schemas/lifecycle_report.json` gains an optional top-level
+    `reboot` object. It records whether the boot ID changed, the retry
+    window the run observed, and three required sub-cases (`blocked`,
+    `transient`, `denied_egress_resumes`), each with a status and a log.
+  - `tools/release/check-evidence-bundles.sh` requires the stage where
+    the row and version call for it and refuses it everywhere else. It
+    compares versions as numbers, so 0.10.0 counts as later than 0.3.0 and
+    a 0.3.0 candidate counts as 0.3.0. It accepts the stage only when the
+    boot ID changed, every sub-case passed, the retry window was recorded
+    and every cited log exists. It now refuses a report carrying `NaN` or
+    `Infinity`, which are not JSON but which Python's parser accepts.
+  - `tools/validation/lifecycle-stages.sh` can suspend a run to a marker
+    file and resume it, once, in a new shell after the reboot. It records
+    the sub-cases in order, and fails the stage and the run when a
+    sub-case fails, the boot ID did not change or no retry window was
+    recorded. A run that stops mid-stage still records which sub-case
+    failed and which were never reached.
+  - The Ubuntu cloud harness does not run the stage yet, and
+    `docs/validation/cloud-row-runbooks.md` says so.
+  - Tests cover the runner, the checker, reports built from the recorded
+    Jetson and L4 evidence, and the Rust schema contract. They also cover
+    a report whose stage list carries a name outside the canonical eight,
+    which no release-gate test exercised before.
+
+  (V030-E06-F02-T01)
 - `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
   tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
   AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
@@ -226,6 +290,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `python_pytorch` descriptor this way showed that its `$schema` key had
   never been allowed by its own schema, so the schema now declares it.
   (V030-E01-F01-T04)
+- `tensorplate bundle provision <name> --from <dir>` puts a bundle that the
+  provisioning manifest lists into `/var/lib/tensorplate/bundles/import/<name>/`,
+  verified file by file. The provisioning manifest (schema
+  `protocol/schemas/provisioning_manifest.json`) lists every file of every
+  bundle with its SHA-256 and size. The `tensorplate-cli` Debian package now
+  ships one at `/usr/share/tensorplate/provisioning/manifest.json`, which
+  lists no bundles yet; on macOS pass `--manifest` and `--into`. Files are
+  copied into an exclusively created partial root, hashed as they are
+  copied, never read through a symbolic link below `--from`, and given
+  modes `0755` and `0644` whatever the umask. The result must pass the
+  bundle parser `tensorplate deploy` runs first before it is renamed into
+  place, and any failure removes the partial root. An existing destination
+  is verified in place and never written to. Each failure has a stable
+  `error.context` token and exit code 12, a new code. The source is a local
+  directory for now. (V030-E01-F01-T05)
 
 ## [0.2.1] - 2026-09-23
 

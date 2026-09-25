@@ -219,6 +219,7 @@ pub fn exit_code_label(code: ExitCode) -> &'static str {
         ExitCode::Unavailable => "unavailable",
         ExitCode::DoctorFindings => "doctor_findings",
         ExitCode::InferenceFailed => "inference_failed",
+        ExitCode::ProvisionFailed => "provision_failed",
     }
 }
 

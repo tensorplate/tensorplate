@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-deny policy for the Rust workspace, run by
+# .github/workflows/supply-chain.yml. See docs/release/artifacts.md,
+# "Supply-chain checks".
+
+[graph]
+all-features = true
+
+[advisories]
+# The RustSec advisory database. A vulnerability this workspace accepts is
+# recorded in tools/release/vulnerability-dispositions.json first, with a
+# reason and a review date; its id is then listed here, and
+# tools/release/check-vulnerability-dispositions.py refuses the two lists
+# when they differ.
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0009", reason = "not affected; see tools/release/vulnerability-dispositions.json" },
+]
+
+[licenses]
+# Every dependency today is satisfiable under these. A new license is a
+# review decision, made here in a reviewed change, never by widening the
+# threshold.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

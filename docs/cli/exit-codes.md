@@ -14,6 +14,7 @@ release validation harness and shell scripts may assert on these.
 |    6 | unavailable       | Operation is structurally unavailable (e.g. rollback with no previous active, reserved profile mode, `logs` where this install writes no NDJSON source). |
 |   10 | doctor_findings   | `doctor` returned at least one `fail` finding.                        |
 |   11 | inference_failed  | `infer` got a typed failure from the serving worker.                  |
+|   12 | provision_failed  | `bundle provision` could not provision a verified bundle. A run that was copying removed its partial root; an existing destination was left as it was found. |
 
 New CLI errors must extend this table rather than re-use a code that already
 means something different.

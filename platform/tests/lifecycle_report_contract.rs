@@ -110,6 +110,114 @@ fn an_aborted_run_still_validates_and_names_the_failed_stage() {
     assert_eq!(failed, vec!["deploy-smoke"]);
 }
 
+/// The reboot stage the L4 row's release boundary asks for: a boot-ID
+/// verdict, three sub-cases in order, and the observed retry window.
+const PASSING_REBOOT: &str = "lifecycle_reboot_begin true\n\
+    lifecycle_reboot_subcase blocked true\n\
+    lifecycle_reboot_retry_window 120\n\
+    lifecycle_reboot_subcase transient true\n\
+    lifecycle_reboot_subcase denied_egress_resumes true\n\
+    lifecycle_reboot_finish";
+
+#[test]
+fn a_run_with_a_reboot_stage_validates_against_the_schema() {
+    let (doc, _dir) = run_harness(&format!(
+        "lifecycle_stage install true\n{PASSING_REBOOT}\nlifecycle_finish"
+    ));
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "a report with a reboot stage must satisfy the schema: {errors:?}"
+    );
+    assert_eq!(doc["reboot"]["status"], "pass");
+    assert_eq!(doc["reboot"]["boot_id_changed"], true);
+    assert_eq!(doc["reboot"]["retry_window_seconds"], 120);
+    for name in ["blocked", "transient", "denied_egress_resumes"] {
+        assert_eq!(doc["reboot"]["sub_cases"][name]["status"], "pass", "{name}");
+    }
+}
+
+#[test]
+fn a_run_stopped_inside_the_reboot_stage_still_validates() {
+    // The second sub-case fails and the run exits there. The report must
+    // still be well formed and say which sub-case failed and which were
+    // never reached, rather than leave the stage half written.
+    let (ok, doc, _dir) = run_harness_raw(
+        "lifecycle_stage install true\n\
+         lifecycle_reboot_begin true\n\
+         lifecycle_reboot_subcase blocked true\n\
+         lifecycle_reboot_subcase transient false\n\
+         lifecycle_reboot_finish\n\
+         lifecycle_finish",
+    );
+    assert!(!ok, "a failing sub-case must fail the run");
+    let doc = doc.expect("the run must leave a report");
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "a run stopped in the reboot stage must still satisfy the schema: {errors:?}"
+    );
+    assert_eq!(doc["outcome"], "fail");
+    assert_eq!(doc["reboot"]["status"], "fail");
+    let subs = &doc["reboot"]["sub_cases"];
+    assert_eq!(subs["blocked"]["status"], "pass");
+    assert_eq!(subs["transient"]["status"], "fail");
+    assert_eq!(subs["denied_egress_resumes"]["status"], "skipped");
+}
+
+#[test]
+fn a_run_suspended_and_resumed_in_a_new_shell_validates() {
+    // The reboot ends the process that holds the stage records, so the
+    // run is suspended to a marker and resumed by a new shell. The marker
+    // lives outside the evidence directory: it is not evidence.
+    let marker_dir = tempfile::TempDir::new().expect("tempdir");
+    let marker = marker_dir.path().join("lifecycle-suspend.json");
+    let (ok, doc, dir) = run_harness_raw(&format!(
+        "lifecycle_stage install true\nlifecycle_suspend '{}'",
+        marker.display()
+    ));
+    assert!(ok, "suspending a run is not a failure");
+    assert!(
+        doc.is_none(),
+        "a suspended run writes no report until it finishes"
+    );
+
+    let harness = repo_root().join("tools/validation/lifecycle-stages.sh");
+    let body = format!(
+        "source '{}'\nlifecycle_resume '{}'\ntrap 'lifecycle_abort $?' EXIT\n\
+         {PASSING_REBOOT}\nlifecycle_finish\n",
+        harness.display(),
+        marker.display()
+    );
+    let output = Command::new("bash")
+        .env_remove("TP_LIFECYCLE_SOURCE_REVISION")
+        .arg("-c")
+        .arg(&body)
+        .output()
+        .expect("resume the harness");
+    assert!(output.status.success(), "the resumed run finishes");
+    let text = std::fs::read_to_string(dir.path().join("lifecycle-report.json"))
+        .expect("the resumed run writes the report");
+    let doc: Value = serde_json::from_str(&text).expect("report parses");
+    let errors = validation_errors(&compiled_schema(), &doc);
+    assert!(
+        errors.is_empty(),
+        "a resumed run's report must satisfy the schema: {errors:?}"
+    );
+    let stages: Vec<&str> = doc["stages"]
+        .as_array()
+        .expect("stages")
+        .iter()
+        .map(|s| s["stage"].as_str().expect("stage name"))
+        .collect();
+    assert_eq!(
+        stages,
+        vec!["install"],
+        "the records from before the reboot are kept"
+    );
+    assert_eq!(doc["reboot"]["status"], "pass");
+}
+
 /// Run the converter over a harness-shaped stage log, optionally with the
 /// artifact-digest sidecar a harness writes beside it. Returns whether it
 /// exited 0 and the report it wrote, if it wrote one.

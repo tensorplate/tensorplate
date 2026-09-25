@@ -237,6 +237,255 @@ mutate_report "$d" escaping-log
 check "a log path escaping the bundle fails" "1" "$(run_checker "$d")"
 check "  and calls it unsafe" "yes" "$(grep -q 'unsafe log path' "${d}/out.txt" && echo yes || echo no)"
 
+# --- The reboot stage: required on the L4 cloud row from 0.3.0, and
+# carried by no other row or release. Reports are produced by the real
+# runner, suspending before the reboot and resuming after it, or taken
+# from the recorded 0.2.1 evidence the rule must leave exactly as it is.
+L4=ubuntu2404-x86-l4-g2s8
+JETSON=jetson-orin-nano-8gb-jp62
+recorded="${repo_root}/docs/validation/evidence/v0.2.1"
+
+# stage_row <dir> <row>: a registry holding that one Production row.
+stage_row() {
+  local dir="$1" row="$2"
+  mkdir -p "${dir}/registry/rows"
+  cat >"${dir}/registry/rows/${row}.json" <<JSON
+{
+  "schema_version": "0.1",
+  "row_id": "${row}",
+  "support_level": "Production",
+  "provenance": "recorded",
+  "evidence": { "location": "evidence/${row}/" }
+}
+JSON
+}
+
+# produce_row_bundle <dir> <row> <version> <reboot>: all eight stages
+# passing, then the reboot stage as <reboot> says: none, pass,
+# subcase-fails, same-boot or no-window.
+produce_row_bundle() (
+  local dir="$1" row="$2" version="$3" reboot="$4" stage
+  # shellcheck disable=SC1090
+  source "$runner"
+  lifecycle_begin "$row" "${dir}/evidence/${row}" "$version" test-harness
+  trap 'lifecycle_abort $?' EXIT
+  lifecycle_artifact_digest "$DIGEST" SHA256SUMS
+  for stage in install upgrade deploy-smoke status-logs rollback restart crash-loop offline; do
+    lifecycle_stage "$stage" true
+  done
+  if [[ "$reboot" != none ]]; then
+    lifecycle_suspend "${dir}/suspend.json"
+    lifecycle_resume "${dir}/suspend.json"
+    if [[ "$reboot" == same-boot ]]; then
+      lifecycle_reboot_begin false
+    else
+      lifecycle_reboot_begin true
+    fi
+    lifecycle_reboot_subcase blocked true
+    [[ "$reboot" == no-window ]] || lifecycle_reboot_retry_window 120
+    if [[ "$reboot" == subcase-fails ]]; then
+      lifecycle_reboot_subcase transient false || :
+    else
+      lifecycle_reboot_subcase transient true
+    fi
+    lifecycle_reboot_subcase denied_egress_resumes true
+    lifecycle_reboot_finish
+  fi
+  lifecycle_finish
+)
+
+# recorded_bundle <dir> <row>: the row's recorded 0.2.1 evidence, copied.
+recorded_bundle() {
+  local dir="$1" row="$2"
+  stage_row "$dir" "$row"
+  mkdir -p "${dir}/evidence"
+  cp -R "${recorded}/${row}" "${dir}/evidence/${row}"
+}
+
+# mutate_row <dir> <row> <how>: edit a staged report in place.
+mutate_row() {
+  python3 - "${1}/evidence/${2}" "$3" <<'PY'
+import json, os, sys
+directory, how = sys.argv[1], sys.argv[2]
+path = os.path.join(directory, "lifecycle-report.json")
+with open(path) as handle:
+    report = json.load(handle)
+if how.startswith("version="):
+    report["subject"]["tested_version"] = how.split("=", 1)[1]
+elif how == "add-reboot":
+    # A complete, passing stage with its logs, so the only thing wrong is
+    # that this row and release do not run one.
+    subs = {}
+    for name in ("blocked", "transient", "denied_egress_resumes"):
+        log = "reboot-" + name + ".log"
+        open(os.path.join(directory, log), "w").close()
+        subs[name] = {"status": "pass", "log": log}
+    open(os.path.join(directory, "reboot.log"), "w").close()
+    report["reboot"] = {
+        "status": "pass", "started_at": "2026-09-23T00:00:00Z",
+        "finished_at": "2026-09-23T00:10:00Z", "log": "reboot.log",
+        "boot_id_changed": True, "retry_window_seconds": 120, "sub_cases": subs,
+    }
+elif how == "drop-sub-case":
+    del report["reboot"]["sub_cases"]["transient"]
+elif how == "drop-reboot-log":
+    os.remove(os.path.join(directory, report["reboot"]["log"]))
+elif how.startswith("edit:"):
+    # Python statements on `report`, `reboot` and `directory`, for the one
+    # field a case needs wrong.
+    exec(how[len("edit:"):], {"report": report, "reboot": report.get("reboot"),
+                              "directory": directory, "os": os})
+elif how == "non-canonical-stage":
+    report["stages"].append({
+        "stage": "reboot", "status": "pass", "log": "install.log",
+        "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:00:01Z",
+    })
+else:
+    sys.exit(f"unknown mutation {how}")
+with open(path, "w") as handle:
+    json.dump(report, handle, indent=2)
+PY
+}
+
+has_out() {
+  if grep -qF -- "$2" "${1}/out.txt"; then echo yes; else echo no; fi
+}
+
+d="${work}/l4-reboot"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 pass >/dev/null 2>&1
+check "an L4 report at 0.3.1 with a passing reboot stage is complete" "0" "$(run_checker "$d" 0.3.1)"
+check "  the producer's report is schema-valid" "yes" "$(
+  python3 - "$schema" "${d}/evidence/${L4}/lifecycle-report.json" <<'PY'
+import json, sys, jsonschema
+schema = json.load(open(sys.argv[1]))
+report = json.load(open(sys.argv[2]))
+print("yes" if not list(jsonschema.Draft7Validator(schema).iter_errors(report)) else "no")
+PY
+)"
+
+d="${work}/l4-no-reboot"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 none >/dev/null 2>&1
+check "an L4 report at 0.3.1 without the reboot stage fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says the stage is required" "yes" "$(has_out "$d" "omits the reboot stage")"
+
+d="${work}/l4-missing-sub-case"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 pass >/dev/null 2>&1
+mutate_row "$d" "$L4" drop-sub-case
+check "a reboot stage missing a sub-case fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says it violated the schema" "yes" "$(has_out "$d" "violates the schema")"
+
+d="${work}/l4-sub-case-fails"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 subcase-fails >/dev/null 2>&1
+check "a reboot stage whose sub-case failed fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and names the sub-case" "yes" "$(has_out "$d" "transient=fail")"
+
+d="${work}/l4-same-boot"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 same-boot >/dev/null 2>&1
+check "a reboot stage whose boot ID did not change fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says no reboot was crossed" "yes" "$(has_out "$d" "no reboot was crossed")"
+
+d="${work}/l4-no-window"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 no-window >/dev/null 2>&1
+check "a reboot stage without the observed retry window fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says so" "yes" "$(has_out "$d" "retry window")"
+
+d="${work}/l4-no-reboot-log"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 pass >/dev/null 2>&1
+mutate_row "$d" "$L4" drop-reboot-log
+check "a reboot stage citing a log that does not exist fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and names the log" "yes" "$(has_out "$d" "cites a log that does not exist: reboot.log")"
+
+# Each case below is a passing stage with one thing wrong, and asserts the
+# message only that check writes.
+reboot_case() {
+  local what="$1" message="$2" edit="$3"
+  case_count=$((${case_count:-0} + 1))
+  d="${work}/l4-reboot-case-${case_count}"; stage_row "$d" "$L4"
+  produce_row_bundle "$d" "$L4" 0.3.1 pass >/dev/null 2>&1
+  mutate_row "$d" "$L4" "edit:${edit}"
+  check "${what} fails" "1 yes" "$(run_checker "$d" 0.3.1) $(has_out "$d" "$message")"
+}
+reboot_case "a reboot stage recorded as failed" "reboot stage did not pass: recorded as failed" \
+  'reboot["status"] = "fail"; reboot["detail"] = "recorded as failed"'
+# The runner fails a stage with no window, so this is the gate's own rule
+# on a report that says the stage passed.
+reboot_case "a passing reboot stage with no retry window" "does not record the observed retry window" \
+  'del reboot["retry_window_seconds"]'
+# Python's parser accepts NaN and Infinity, which are not JSON, and NaN
+# satisfies no numeric bound.
+reboot_case "a retry window of NaN" "is unreadable: NaN is not JSON" \
+  'reboot["retry_window_seconds"] = float("nan")'
+reboot_case "a retry window of Infinity" "is unreadable: Infinity is not JSON" \
+  'reboot["retry_window_seconds"] = float("inf")'
+reboot_case "a skipped sub-case" "transient=skipped" \
+  'reboot["sub_cases"]["transient"].update(status="skipped", detail="not applied")'
+reboot_case "a sub-case log that does not exist" "cites a log that does not exist: reboot-transient.log" \
+  'os.remove(os.path.join(directory, "reboot-transient.log"))'
+reboot_case "a sub-case log outside the bundle" "cites an unsafe log path" \
+  'reboot["sub_cases"]["transient"]["log"] = "../reboot-transient.log"'
+reboot_case "a stage log outside the bundle" "cites an unsafe log path" \
+  'reboot["log"] = "/etc/hostname"'
+# What the schema refuses before the gate's own rules run.
+reboot_case "a retry window of zero" "violates the schema" 'reboot["retry_window_seconds"] = 0'
+reboot_case "a retry window given as text" "violates the schema" 'reboot["retry_window_seconds"] = "120"'
+reboot_case "a reboot stage without a start time" "violates the schema" 'del reboot["started_at"]'
+reboot_case "a reboot stage with an unknown key" "violates the schema" 'reboot["attempts"] = 2'
+reboot_case "a reboot stage recorded as skipped" "violates the schema" \
+  'reboot["status"] = "skipped"; reboot["detail"] = "not run"'
+reboot_case "a failed reboot stage without a reason" "violates the schema" 'reboot["status"] = "fail"'
+reboot_case "a skipped sub-case without a reason" "violates the schema" \
+  'reboot["sub_cases"]["blocked"]["status"] = "skipped"'
+reboot_case "a sub-case outside the three" "violates the schema" \
+  'reboot["sub_cases"]["rollback"] = dict(reboot["sub_cases"]["blocked"])'
+reboot_case "a boot ID verdict given as text" "violates the schema" 'reboot["boot_id_changed"] = "true"'
+
+# The threshold is numeric: a string compare puts 0.10.0 before 0.3.0.
+d="${work}/l4-0.10.0"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.10.0 none >/dev/null 2>&1
+check "an L4 report at 0.10.0 without the reboot stage fails" "1" "$(run_checker "$d" 0.10.0)"
+check "  and says the stage is required" "yes" "$(has_out "$d" "omits the reboot stage")"
+
+# A pre-release counts as its release.
+d="${work}/l4-0.3.0-rc"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.0-rc.1 none >/dev/null 2>&1
+check "an L4 report at 0.3.0-rc.1 without the reboot stage fails" "1" "$(run_checker "$d" 0.3.0-rc.1)"
+check "  and says the stage is required" "yes" "$(has_out "$d" "omits the reboot stage")"
+
+d="${work}/l4-0.2.9"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.2.9 none >/dev/null 2>&1
+check "an L4 report before 0.3.0 without the reboot stage is complete" "0" "$(run_checker "$d" 0.2.9)"
+
+d="${work}/l4-0.2.9-reboot"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.2.9 pass >/dev/null 2>&1
+check "an L4 report before 0.3.0 carrying a reboot stage fails" "1" "$(run_checker "$d" 0.2.9)"
+check "  and says the row and version do not run one" "yes" "$(has_out "$d" "does not run")"
+
+# The recorded evidence, which the rule must leave as it was.
+d="${work}/l4-recorded"; recorded_bundle "$d" "$L4"
+check "the recorded L4 report at 0.2.1 is still complete" "0" "$(run_checker "$d" 0.2.1)"
+
+d="${work}/l4-recorded-reboot"; recorded_bundle "$d" "$L4"
+mutate_row "$d" "$L4" add-reboot
+check "  and with a reboot stage added it fails" "1" "$(run_checker "$d" 0.2.1)"
+
+d="${work}/jetson-recorded"; recorded_bundle "$d" "$JETSON"
+mutate_row "$d" "$JETSON" version=0.3.1
+check "the recorded Jetson report at 0.3.1 needs no reboot stage" "0" "$(run_checker "$d" 0.3.1)"
+
+d="${work}/jetson-recorded-reboot"; recorded_bundle "$d" "$JETSON"
+mutate_row "$d" "$JETSON" version=0.3.1
+mutate_row "$d" "$JETSON" add-reboot
+check "a Jetson report carrying a reboot stage fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says the row does not run one" "yes" "$(has_out "$d" "does not run")"
+
+# The reboot stage is not a ninth entry in the stage list: the list is the
+# closed eight, and a stage outside it is refused by the schema.
+d="${work}/l4-non-canonical"; stage_row "$d" "$L4"
+produce_row_bundle "$d" "$L4" 0.3.1 pass >/dev/null 2>&1
+mutate_row "$d" "$L4" non-canonical-stage
+check "a stage outside the canonical eight fails" "1" "$(run_checker "$d" 0.3.1)"
+check "  and says it violated the schema" "yes" "$(has_out "$d" "violates the schema")"
+
 # --- A check that did nothing must not read as success, and must be
 # distinguishable from evidence that is merely incomplete.
 d="${work}/empty"; mkdir -p "${d}/registry/rows"

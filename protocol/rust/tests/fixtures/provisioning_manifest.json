@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../schemas/provisioning_manifest.json",
+  "schema_version": "0.1",
+  "bundles": [
+    {
+      "name": "smolvla-fixture",
+      "description": "The committed test/models/bundles/v0_1/smolvla_python_pytorch bundle, file for file.",
+      "files": [
+        {
+          "path": "assets/tokenizer.json",
+          "sha256": "7e1cf4c7ff05aae7124880a486668933d5657e23887237a64ca48230efe1fb8c",
+          "size": 65
+        },
+        {
+          "path": "manifest.json",
+          "sha256": "084a8820c2107e443b2ed64efced9af2426e70b63f8d62f23ab9cc1d46dadcc9",
+          "size": 2224
+        },
+        {
+          "path": "policy.py",
+          "sha256": "005c47a3f614f360e796a928b884424acf72d694edbfffe44e840a7d115a17cd",
+          "size": 338
+        },
+        {
+          "path": "policy_weights.safetensors",
+          "sha256": "55f46defb61e5a6d94c2afeac237ae54dd09b7d873c7b7c354148b5b4e68e876",
+          "size": 133
+        }
+      ]
+    }
+  ]
+}
