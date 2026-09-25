@@ -22,6 +22,9 @@ class ErrorCode(str, Enum):
     TIMEOUT = "timeout"
     INFERENCE_FAILED = "inference_failed"
     INTERNAL = "internal"
+    CANCELLED = "cancelled"
+    UNAVAILABLE = "unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
 
 
 class TensorPlateError(Exception):

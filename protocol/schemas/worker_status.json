@@ -69,7 +69,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ],
       "description": "Most-recent typed error code seen by the worker. Absent if the worker is healthy."
     },

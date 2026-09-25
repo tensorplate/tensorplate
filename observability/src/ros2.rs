@@ -316,6 +316,9 @@ fn error_code_label(code: Option<ErrorCode>) -> String {
         Some(ErrorCode::Timeout) => "timeout".into(),
         Some(ErrorCode::InferenceFailed) => "inference_failed".into(),
         Some(ErrorCode::Internal) => "internal".into(),
+        Some(ErrorCode::Cancelled) => "cancelled".into(),
+        Some(ErrorCode::Unavailable) => "unavailable".into(),
+        Some(ErrorCode::ResourceExhausted) => "resource_exhausted".into(),
         None => String::new(),
     }
 }
@@ -447,6 +450,21 @@ mod tests {
             .find(|v| v.key == "last_error_code")
             .expect("last_error_code present");
         assert_eq!(kv.value, "oom_error");
+    }
+
+    #[test]
+    fn every_error_code_is_serialized_by_its_wire_name() {
+        for code in ErrorCode::ALL {
+            let mut a = agg(ObservabilityState::Failed);
+            a.last_error_code = Some(code);
+            let arr = build_diagnostic_array("/t", &a);
+            let kv = arr.status[0]
+                .values
+                .iter()
+                .find(|v| v.key == "last_error_code")
+                .expect("last_error_code present");
+            assert_eq!(kv.value, code.as_str());
+        }
     }
 
     #[test]
