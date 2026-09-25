@@ -5,6 +5,52 @@
   "description": "One harness run against one support row. Written by tools/validation/lifecycle-stages.sh and consumed by evidence-bundle assembly, which decides completeness from the stage set rather than from prose.",
   "type": "object",
   "additionalProperties": false,
+  "definitions": {
+    "reboot_sub_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "log"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "skipped"
+          ]
+        },
+        "log": {
+          "type": "string",
+          "description": "The sub-case's log, relative to the report. Attached whether it ran or not.",
+          "minLength": 1
+        },
+        "detail": {
+          "type": "string",
+          "description": "Why the sub-case failed or was skipped. Required for both."
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "fail",
+              "skipped"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "detail"
+        ]
+      }
+    }
+  },
   "required": [
     "schema_version",
     "row_id",
@@ -68,7 +114,91 @@
         "fail",
         "incomplete"
       ],
-      "description": "pass only when all eight canonical stages are present and passed. fail when any stage failed. incomplete when nothing failed but the eight are not all present and passing -- a deliberate skip is not a breakage, and conflating the two would either hide a gap or invent a failure. Only pass satisfies the release gate."
+      "description": "pass only when all eight canonical stages are present and passed and, if the report carries the reboot stage, it passed too. fail when any stage failed, the reboot stage included. incomplete when nothing failed but the eight are not all present and passing -- a deliberate skip is not a breakage, and conflating the two would either hide a gap or invent a failure. Only pass satisfies the release gate."
+    },
+    "reboot": {
+      "type": "object",
+      "description": "The reboot stage: a stage beside the canonical eight, not one of them, because only some rows at some versions run it and every other report must stay exactly as it is. It crosses a host reboot (the runner persists the run across it) and asserts, in this order because each consumes the state the one before leaves, that with the machine's cloud metadata blocked the agent fails closed after its retry window (blocked), that lifting the block inside the window recovers the committed set with no reprovisioning (transient), and that denied-egress operation then resumes within the new boot (denied_egress_resumes). Absent from a report, it was not run; the release gate decides which rows and versions require it.",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "started_at",
+        "finished_at",
+        "log",
+        "boot_id_changed",
+        "sub_cases"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "fail"
+          ],
+          "description": "pass only when the boot ID changed, all three sub-cases passed and the retry window was recorded. There is no skipped: a reboot stage that did not run is absent, never present and skipped."
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "log": {
+          "type": "string",
+          "description": "The stage's log, relative to the report.",
+          "minLength": 1
+        },
+        "detail": {
+          "type": "string",
+          "description": "Why the stage failed. Required when it did."
+        },
+        "boot_id_changed": {
+          "type": "boolean",
+          "description": "Whether the kernel boot ID after the reboot differs from the one recorded before it. false means no reboot happened, whatever else passed."
+        },
+        "retry_window_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "The agent's metadata retry window as the run observed it, in seconds. Absent when the run never reached a point where it could be observed, and then the stage failed."
+        },
+        "sub_cases": {
+          "type": "object",
+          "description": "The three sub-cases, each present whether it ran or not, so a report cannot quietly leave one out.",
+          "additionalProperties": false,
+          "required": [
+            "blocked",
+            "transient",
+            "denied_egress_resumes"
+          ],
+          "properties": {
+            "blocked": {
+              "$ref": "#/definitions/reboot_sub_case"
+            },
+            "transient": {
+              "$ref": "#/definitions/reboot_sub_case"
+            },
+            "denied_egress_resumes": {
+              "$ref": "#/definitions/reboot_sub_case"
+            }
+          }
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "fail"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "detail"
+        ]
+      }
     },
     "stages": {
       "type": "array",

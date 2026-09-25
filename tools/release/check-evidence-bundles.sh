@@ -17,6 +17,8 @@
 #   3. that report's outcome is `pass`        -- and they passed
 #   4. its subject names the version released -- for THIS release
 #   5. every stage log it cites exists        -- and can be read
+#   6. the reboot stage, where the row and      -- and the boot boundary
+#      version require it, and nowhere else        was crossed
 #
 # (4) and (5) are what stop a report being reusable. Without the subject
 # check a run recorded once blesses every later tag; without the log check
@@ -110,6 +112,69 @@ CANONICAL = [
     "rollback", "restart", "crash-loop", "offline",
 ]
 
+# The reboot stage sits beside the canonical eight and is required only
+# where a row's release boundary depends on it: the L4 cloud row, from the
+# 0.3 line on, whose denied-egress operation holds within one boot and
+# must recover through the metadata service after a reboot. Every other
+# row, and every earlier release, must not carry one, so every report
+# recorded before this rule (all of them before 0.3.0) is still accepted.
+REBOOT_REQUIRED_FROM = {"ubuntu2404-x86-l4-g2s8": (0, 3, 0)}
+REBOOT_SUB_CASES = ["blocked", "transient", "denied_egress_resumes"]
+
+
+def refuse_constant(name):
+    """NaN and Infinity are not JSON, but Python's parser accepts them, and
+    NaN satisfies no numeric bound: a retry window of NaN is neither above
+    nor below zero, so the schema would pass it."""
+    raise ValueError(f"{name} is not JSON")
+
+
+def release_triple(version):
+    """(major, minor, patch) of a release version, compared as numbers.
+
+    A string compare puts 0.10.0 before 0.3.0. A pre-release counts as its
+    release: requiring the stage from 0.3.0 includes every 0.3.0 candidate,
+    which is the fail-closed reading.
+    """
+    core = version.split("-", 1)[0]
+    return tuple(int(part) for part in core.split("."))
+
+
+def reboot_problems(row_id, tested, report):
+    """What is wrong with the report's reboot stage, or an empty list."""
+    reboot = report.get("reboot")
+    threshold = REBOOT_REQUIRED_FROM.get(row_id)
+    required = threshold is not None and release_triple(tested) >= threshold
+    if not required:
+        if reboot is not None:
+            return [
+                f"lifecycle report carries a reboot stage that `{row_id}` at "
+                f"`{tested}` does not run -- a stage no release requires here "
+                "is not evidence for anything"
+            ]
+        return []
+    if reboot is None:
+        return [
+            "lifecycle report omits the reboot stage, which this row requires "
+            f"from {'.'.join(str(part) for part in threshold)}"
+        ]
+    found = []
+    if reboot.get("status") != "pass":
+        found.append(f"reboot stage did not pass: {reboot.get('detail', reboot.get('status'))}")
+    if reboot.get("boot_id_changed") is not True:
+        found.append("reboot stage does not show the boot ID changed -- no reboot was crossed")
+    if "retry_window_seconds" not in reboot:
+        found.append("reboot stage does not record the observed retry window")
+    sub_cases = reboot.get("sub_cases") or {}
+    not_passed = [
+        f"{name}={(sub_cases.get(name) or {}).get('status')}"
+        for name in REBOOT_SUB_CASES
+        if (sub_cases.get(name) or {}).get("status") != "pass"
+    ]
+    if not_passed:
+        found.append(f"reboot sub-cases did not pass: {', '.join(not_passed)}")
+    return found
+
 
 def safe_relative(target):
     """A log path that stays inside the bundle.
@@ -148,8 +213,8 @@ def problems_for(row):
 
     try:
         with open(report_path, encoding="utf-8") as handle:
-            report = json.load(handle)
-    except (OSError, json.JSONDecodeError) as err:
+            report = json.load(handle, parse_constant=refuse_constant)
+    except (OSError, ValueError) as err:
         found.append(f"lifecycle-report.json is unreadable: {err}")
         return found
 
@@ -207,17 +272,24 @@ def problems_for(row):
     if not_passed:
         found.append(f"stages did not pass: {', '.join(not_passed)}")
 
+    found.extend(reboot_problems(row["row_id"], tested, report))
+
     # Every cited log must be readable. A report may otherwise reference
     # evidence that was never written, which is the failure this whole
     # gate exists to make impossible.
-    for name, entries in sorted(counts.items()):
-        for entry in entries:
-            target = entry.get("log")
-            if not safe_relative(target):
-                found.append(f"stage `{name}` cites an unsafe log path: {target!r}")
-                continue
-            if not os.path.isfile(os.path.join(directory, target)):
-                found.append(f"stage `{name}` cites a log that does not exist: {target}")
+    cited = [(name, entry.get("log")) for name, entries in sorted(counts.items())
+             for entry in entries]
+    reboot = report.get("reboot")
+    if reboot is not None:
+        cited.append(("reboot", reboot.get("log")))
+        for name in REBOOT_SUB_CASES:
+            cited.append((f"reboot/{name}", ((reboot.get("sub_cases") or {}).get(name) or {}).get("log")))
+    for name, target in cited:
+        if not safe_relative(target):
+            found.append(f"stage `{name}` cites an unsafe log path: {target!r}")
+            continue
+        if not os.path.isfile(os.path.join(directory, target)):
+            found.append(f"stage `{name}` cites a log that does not exist: {target}")
 
     if report.get("outcome") != "pass":
         found.append(f"lifecycle outcome is `{report.get('outcome')}`")
