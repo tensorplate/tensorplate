@@ -43,7 +43,7 @@ fn main() -> ExitCode {
 
 fn command_of(argv: &[String]) -> &'static str {
     const COMMANDS: &[&str] = &[
-        "doctor", "deploy", "status", "infer", "logs", "rollback", "device", "version",
+        "doctor", "deploy", "status", "infer", "logs", "rollback", "device", "bundle", "version",
     ];
     for token in argv {
         if let Some(name) = COMMANDS.iter().find(|c| **c == token) {
@@ -179,7 +179,9 @@ fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning:
 }
 
 /// Raise an unusable packaged conffile as the config error it is, except
-/// for the two commands that exist to diagnose exactly that.
+/// for the two commands that exist to diagnose exactly that, and `bundle`,
+/// which reads no profile: it provisions from a local directory into this
+/// host's import directory and never talks to the agent.
 ///
 /// `doctor` is what the docs tell an operator to run when an install
 /// misbehaves, and it reports the loader's rejection as a failing
@@ -193,7 +195,10 @@ fn report_config_warning<E: Write>(renderer: &Renderer, stderr: &mut E, warning:
 /// configured profile, so for those the fault stays fatal.
 fn blocking_install_fault(source: &ConfigSource, command: &Subcommand) -> Option<CliError> {
     let fault = source.install_fault()?;
-    if matches!(command, Subcommand::Doctor(_) | Subcommand::Version) {
+    if matches!(
+        command,
+        Subcommand::Doctor(_) | Subcommand::Version | Subcommand::Bundle(_)
+    ) {
         return None;
     }
     Some(CliError::Config(fault.to_string()))
@@ -208,6 +213,7 @@ fn command_label(command: &Subcommand) -> &'static str {
         Subcommand::Infer(_) => "infer",
         Subcommand::Logs(_) => "logs",
         Subcommand::Device(_) => "device",
+        Subcommand::Bundle(_) => "bundle",
         Subcommand::Version => "version",
     }
 }
@@ -339,6 +345,20 @@ mod tests {
         )
         .is_none());
         assert!(blocking_install_fault(&source, &Subcommand::Version).is_none());
+    }
+
+    /// Provisioning reads only the provisioning manifest and a local
+    /// directory, never the CLI config, so a packaged config the loader
+    /// rejects does not stand in its way.
+    #[test]
+    fn bundle_provision_still_runs_on_an_unusable_packaged_config() {
+        let command = Subcommand::Bundle(args::BundleCommand::Provision(args::ProvisionArgs {
+            name: "smolvla-fixture".to_string(),
+            from: std::path::PathBuf::from("/nonexistent"),
+            manifest: None,
+            into: None,
+        }));
+        assert!(blocking_install_fault(&unusable_packaged_config(), &command).is_none());
     }
 
     /// The binary's own wiring: a packaged config the loader rejects is

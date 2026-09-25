@@ -22,6 +22,8 @@ endpoint at a time.
 - `tensorplate logs` — bounded NDJSON reader for local structured logs.
 - `tensorplate rollback` — restores the previous active deployment via the
   agent.
+- `tensorplate bundle provision` — verifies a bundle the provisioning
+  manifest lists into this host's bundle import directory.
 - `tensorplate version` — CLI / protocol / bundle format versions.
 
 ## Dependency direction

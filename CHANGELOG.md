@@ -270,6 +270,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
   `docs/contributing/local-validation.md` make the scan the step before
   every push. (V030-E06-F02-T01)
+- `tensorplate bundle provision <name> --from <dir>` puts a bundle that the
+  provisioning manifest lists into `/var/lib/tensorplate/bundles/import/<name>/`,
+  verified file by file. The provisioning manifest (schema
+  `protocol/schemas/provisioning_manifest.json`) lists every file of every
+  bundle with its SHA-256 and size. The `tensorplate-cli` Debian package now
+  ships one at `/usr/share/tensorplate/provisioning/manifest.json`, which
+  lists no bundles yet; on macOS pass `--manifest` and `--into`. Files are
+  copied into an exclusively created partial root, hashed as they are
+  copied, never read through a symbolic link below `--from`, and given
+  modes `0755` and `0644` whatever the umask. The result must pass the
+  bundle parser `tensorplate deploy` runs first before it is renamed into
+  place, and any failure removes the partial root. An existing destination
+  is verified in place and never written to. Each failure has a stable
+  `error.context` token and exit code 12, a new code. The source is a local
+  directory for now. (V030-E01-F01-T05)
 
 ## [0.2.1] - 2026-09-23
 

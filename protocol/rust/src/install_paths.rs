@@ -105,6 +105,12 @@ pub const BUNDLE_QUARANTINE_DIR: &str = "/var/lib/tensorplate/bundles/quarantine
 /// (see [`mode::DIR_1775`]) rather than owner-only like the agent's own dirs.
 pub const BUNDLE_IMPORT_DIR: &str = "/var/lib/tensorplate/bundles/import";
 
+/// The provisioning manifest `tensorplate-cli` ships: every bundle
+/// `tensorplate bundle provision` can provision, each file with its SHA-256
+/// and size. It is the trust root for what lands under
+/// [`BUNDLE_IMPORT_DIR`]; see `protocol/schemas/provisioning_manifest.json`.
+pub const PROVISIONING_MANIFEST_PATH: &str = "/usr/share/tensorplate/provisioning/manifest.json";
+
 /// Agent-rendered serving-worker configs (one per warming candidate).
 pub const WORKER_CONFIG_DIR: &str = "/var/lib/tensorplate/worker-configs";
 

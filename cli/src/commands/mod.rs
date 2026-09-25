@@ -4,6 +4,7 @@
 // agent client calls, and renderer wiring. The shared [`crate::run`]
 // entry point dispatches to these modules with no logic of its own.
 
+pub mod bundle;
 pub mod deploy;
 pub mod device;
 pub mod doctor;

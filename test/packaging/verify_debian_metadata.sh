@@ -74,6 +74,12 @@ if ! grep -q 'deb-systemd-invoke stop tensorplate-observability.service' "${debi
   echo "FAIL: tensorplate-observability.prerm must stop the running unit before remove/upgrade" >&2
   fail=1
 fi
+# The provisioning manifest is the trust root for `tensorplate bundle
+# provision`, and the CLI reads it from the path the protocol crate names.
+if ! grep -Eq '^packaging/provisioning/manifest\.json[[:space:]]+usr/share/tensorplate/provisioning/$' "${debian}/tensorplate-cli.install"; then
+  echo "FAIL: tensorplate-cli must ship the provisioning manifest at /usr/share/tensorplate/provisioning/manifest.json" >&2
+  fail=1
+fi
 if ! grep -q 'rmdir /var/lib/tensorplate /etc/tensorplate' "${debian}/tensorplate-agent.postrm"; then
   echo "FAIL: tensorplate-agent.postrm purge must remove empty install roots" >&2
   fail=1

@@ -62,6 +62,7 @@ pub enum Subcommand {
     Infer(InferArgs),
     Logs(LogsArgs),
     Device(DeviceCommand),
+    Bundle(BundleCommand),
     Version,
 }
 
@@ -114,6 +115,25 @@ pub struct LogsArgs {
     pub source_override: Option<PathBuf>,
 }
 
+/// A `bundle` subcommand.
+#[derive(Clone, Debug)]
+pub enum BundleCommand {
+    Provision(ProvisionArgs),
+}
+
+/// `bundle provision <name> --from <dir> [--manifest <file>] [--into <dir>]`.
+#[derive(Clone, Debug, Default)]
+pub struct ProvisionArgs {
+    /// The bundle's name in the provisioning manifest.
+    pub name: String,
+    /// The local directory holding the bundle's files.
+    pub from: PathBuf,
+    /// The provisioning manifest; the one `tensorplate-cli` ships when absent.
+    pub manifest: Option<PathBuf>,
+    /// The import directory to provision into; `/var/lib/tensorplate/bundles/import` when absent.
+    pub into: Option<PathBuf>,
+}
+
 /// A `device` registry subcommand.
 #[derive(Clone, Debug)]
 pub enum DeviceCommand {
@@ -162,6 +182,9 @@ Commands:
   logs                Read bounded structured logs.
   rollback            Roll back to the previous active deployment.
   device              Manage the local SSH device registry.
+  bundle provision <name> --from <dir>
+                      Verify a bundle the provisioning manifest lists into
+                      this host's bundle import directory.
   version             Print CLI and protocol versions.
 
 Global flags:
@@ -223,6 +246,7 @@ pub fn parse(argv: &[String]) -> CliResult<ParseOutcome> {
         "infer" => Subcommand::Infer(parse_infer(rest, &mut global)?),
         "logs" => Subcommand::Logs(parse_logs(rest, &mut global)?),
         "device" => Subcommand::Device(parse_device(rest, &mut global)?),
+        "bundle" => Subcommand::Bundle(parse_bundle(rest, &mut global)?),
         other => return Err(CliError::Usage(format!("unknown command `{other}`"))),
     };
     Ok(ParseOutcome::Run(ParsedArgs { global, subcommand }))
@@ -637,6 +661,79 @@ fn parse_u16(value: &str, flag: &str) -> CliResult<u16> {
     value
         .parse::<u16>()
         .map_err(|_| CliError::Usage(format!("{flag} requires an integer between 0 and 65535")))
+}
+
+const BUNDLE_USAGE: &str = "bundle <subcommand>
+
+Subcommands:
+  provision <name> --from <dir> [--manifest <file>] [--into <dir>]";
+
+fn parse_bundle(rest: &[String], global: &mut GlobalArgs) -> CliResult<BundleCommand> {
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        break;
+    }
+    let Some(sub) = rest.get(i).cloned() else {
+        return Err(CliError::Usage(BUNDLE_USAGE.into()));
+    };
+    let args = &rest[i + 1..];
+    match sub.as_str() {
+        "provision" => parse_bundle_provision(args, global),
+        "-h" | "--help" => Err(CliError::Usage(BUNDLE_USAGE.into())),
+        other => Err(CliError::Usage(format!(
+            "unknown bundle subcommand `{other}`\n{BUNDLE_USAGE}"
+        ))),
+    }
+}
+
+fn parse_bundle_provision(rest: &[String], global: &mut GlobalArgs) -> CliResult<BundleCommand> {
+    let mut args = ProvisionArgs::default();
+    let mut name: Option<String> = None;
+    let mut from: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if parse_global_flag(rest, &mut i, global, true)? {
+            continue;
+        }
+        let a = &rest[i];
+        match a.as_str() {
+            "--from" => from = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
+            "--manifest" => args.manifest = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
+            "--into" => args.into = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
+            "-h" | "--help" => {
+                return Err(CliError::Usage(
+                    "bundle provision <name> --from <dir> [--manifest <file>] [--into <dir>]"
+                        .into(),
+                ));
+            }
+            s if s.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `bundle provision`: {s}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "bundle provision accepts one <name>, got an extra `{other}`"
+                    )));
+                }
+                name = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    args.name =
+        name.ok_or_else(|| CliError::Usage("bundle provision requires a <name> argument".into()))?;
+    args.from = from.ok_or_else(|| {
+        CliError::Usage(
+            "bundle provision requires `--from <dir>`, the directory holding the bundle's files"
+                .into(),
+        )
+    })?;
+    Ok(BundleCommand::Provision(args))
 }
 
 fn parse_device(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeviceCommand> {
