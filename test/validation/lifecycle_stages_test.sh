@@ -421,6 +421,374 @@ set -e
 check "  and carries a full SHA" "$revision" \
   "$(subject_field "${cv}/lifecycle-report.json" source_revision)"
 
+# --- The reboot stage and the run it crosses.
+#
+# A reboot ends the process that holds the stage records, so the runner
+# suspends the run to a marker and a new shell resumes it. Each half runs
+# in its own `bash` here, as it does on the machine.
+report_field() {
+  python3 -c 'import json,sys
+value = json.load(open(sys.argv[1]))
+for key in sys.argv[2].split("."):
+    value = value.get(key, "absent") if isinstance(value, dict) else "absent"
+print(json.dumps(value) if isinstance(value, (bool, int, float)) else value)' "$1" "$2"
+}
+
+# before_reboot <dir> [stages]: the named canonical stages pass (install
+# and upgrade by default), then the run suspends to <dir>/suspend.json.
+before_reboot() {
+  bash -c 'set -Eeuo pipefail
+source "$1"
+lifecycle_begin ubuntu2404-x86-l4-g2s8 "$2/evidence" 0.3.1 test-harness
+trap "lifecycle_abort \$?" EXIT
+for stage in $3; do lifecycle_stage "$stage" true; done
+lifecycle_suspend "$2/suspend.json"' _ "$harness" "$1" "${2:-install upgrade}" 2>/dev/null
+}
+
+# resumed <dir> <script>: resume the run, then run the script. Its stderr
+# goes to <dir>/stderr; the exit status is the script's.
+resumed() {
+  bash -c 'set -Eeuo pipefail
+source "$1"
+lifecycle_resume "$2/suspend.json"
+trap "lifecycle_abort \$?" EXIT
+eval "$3"' _ "$harness" "$1" "$2" 2>"${1}/stderr"
+}
+
+passing_reboot='lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked true
+lifecycle_reboot_retry_window 120
+lifecycle_reboot_subcase transient true
+lifecycle_reboot_subcase denied_egress_resumes true
+lifecycle_reboot_finish'
+
+rb="${work}/rb-pass"
+before_reboot "$rb"
+check "a suspended run writes the marker" "yes" "$([[ -f "${rb}/suspend.json" ]] && echo yes || echo no)"
+check "  and no report before the reboot" "no" \
+  "$([[ -f "${rb}/evidence/lifecycle-report.json" ]] && echo yes || echo no)"
+resumed "$rb" "${passing_reboot}
+lifecycle_finish"
+report="${rb}/evidence/lifecycle-report.json"
+check "the resumed run writes the report" "yes" "$([[ -f "$report" ]] && echo yes || echo no)"
+check "  keeping the stages from before the reboot" "install upgrade" \
+  "$(python3 -c 'import json,sys;print(" ".join(s["stage"] for s in json.load(open(sys.argv[1]))["stages"]))' "$report")"
+check "  and the tested version" "0.3.1" "$(subject_field "$report" tested_version)"
+check "a passing reboot stage is a pass" "pass" "$(report_field "$report" reboot.status)"
+check "  records that the boot ID changed" "true" "$(report_field "$report" reboot.boot_id_changed)"
+check "  and the observed retry window" "120" "$(report_field "$report" reboot.retry_window_seconds)"
+for name in blocked transient denied_egress_resumes; do
+  check "  and sub-case ${name} passed with its log" "pass yes" \
+    "$(report_field "$report" "reboot.sub_cases.${name}.status") $([[ -f "${rb}/evidence/reboot-${name}.log" ]] && echo yes || echo no)"
+done
+check "  and writes the stage log" "yes" "$([[ -f "${rb}/evidence/reboot.log" ]] && echo yes || echo no)"
+check "the marker resumes once: it is consumed" "no yes" \
+  "$([[ -f "${rb}/suspend.json" ]] && echo yes || echo no) $([[ -f "${rb}/suspend.json.resumed" ]] && echo yes || echo no)"
+set +e
+resumed "$rb" "$passing_reboot"
+status=$?
+set -e
+check "  and a second resume is refused" "2 yes" "${status} $(grep -q 'no suspend marker' "${rb}/stderr" && echo yes || echo no)"
+
+# Seven canonical stages and a skip, then a passing reboot stage: the
+# reboot stage is not one of the eight, so the run is still incomplete.
+rb="${work}/rb-seven"
+before_reboot "$rb" "install upgrade deploy-smoke status-logs rollback restart crash-loop"
+resumed "$rb" "lifecycle_skip offline 'no denial on this host'
+${passing_reboot}
+lifecycle_finish"
+check "a passing reboot stage does not stand in for a canonical stage" "incomplete" \
+  "$(report_field "${rb}/evidence/lifecycle-report.json" outcome)"
+
+rb="${work}/rb-fail"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked true
+lifecycle_reboot_subcase transient false || :
+lifecycle_reboot_subcase denied_egress_resumes true
+lifecycle_reboot_finish
+lifecycle_finish'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a failing sub-case in a tested context is still a failure" "fail" \
+  "$(report_field "$report" reboot.sub_cases.transient.status)"
+check "  and fails the reboot stage" "fail" "$(report_field "$report" reboot.status)"
+check "  and the run" "fail" "$(report_field "$report" outcome)"
+check "  and the run still finishes" "0" "$status"
+
+rb="${work}/rb-abort"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked true
+lifecycle_reboot_subcase transient false'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a run that stops after a failing sub-case exits non-zero" "1" "$status"
+check "  and still writes the report" "yes" "$([[ -f "$report" ]] && echo yes || echo no)"
+check "  naming the sub-case that failed" "fail" "$(report_field "$report" reboot.sub_cases.transient.status)"
+check "  and the one never reached" "skipped" \
+  "$(report_field "$report" reboot.sub_cases.denied_egress_resumes.status)"
+check "  and the stage and run as failed" "fail fail" \
+  "$(report_field "$report" reboot.status) $(report_field "$report" outcome)"
+
+# A sub-case that ends the shell itself: the EXIT trap finds it running.
+rb="${work}/rb-exit"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'quit() { exit 3; }
+lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked quit'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a sub-case that exits the shell stops the run" "3" "$status"
+check "  and is recorded as failed where it stopped" "fail yes" \
+  "$(report_field "$report" reboot.sub_cases.blocked.status) $(grep -q 'stopped in this sub-case' "$report" && echo yes || echo no)"
+check "  with the sub-cases after it not reached" "skipped skipped" \
+  "$(report_field "$report" reboot.sub_cases.transient.status) $(report_field "$report" reboot.sub_cases.denied_egress_resumes.status)"
+
+rb="${work}/rb-skip"
+before_reboot "$rb"
+resumed "$rb" 'lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked true
+lifecycle_reboot_retry_window 1.5
+lifecycle_reboot_subcase transient true
+lifecycle_reboot_skip denied_egress_resumes "the denial could not be applied"
+lifecycle_reboot_finish
+lifecycle_finish'
+report="${rb}/evidence/lifecycle-report.json"
+check "a skipped sub-case is recorded with its reason and log" "skipped the denial could not be applied yes" \
+  "$(report_field "$report" reboot.sub_cases.denied_egress_resumes.status) $(report_field "$report" reboot.sub_cases.denied_egress_resumes.detail) $([[ -f "${rb}/evidence/reboot-denied_egress_resumes.log" ]] && echo yes || echo no)"
+check "  and fails the stage" "fail" "$(report_field "$report" reboot.status)"
+check "  and a fractional retry window is kept" "1.5" "$(report_field "$report" reboot.retry_window_seconds)"
+
+# Everything else passes, so the boot ID is the only reason to fail.
+rb="${work}/rb-same-boot"
+before_reboot "$rb"
+resumed "$rb" "${passing_reboot/lifecycle_reboot_begin true/lifecycle_reboot_begin false}
+lifecycle_finish"
+report="${rb}/evidence/lifecycle-report.json"
+check "a reboot stage whose boot ID did not change fails" "fail fail" \
+  "$(report_field "$report" reboot.status) $(report_field "$report" outcome)"
+check "  and says why" "the boot ID did not change" "$(report_field "$report" reboot.detail)"
+
+# Likewise the retry window: a stage that could have observed it and did
+# not record it fails here rather than at the release gate.
+rb="${work}/rb-no-window"
+before_reboot "$rb"
+resumed "$rb" "${passing_reboot/lifecycle_reboot_retry_window 120/}
+lifecycle_finish"
+report="${rb}/evidence/lifecycle-report.json"
+check "a reboot stage with no retry window recorded fails" "fail fail" \
+  "$(report_field "$report" reboot.status) $(report_field "$report" outcome)"
+check "  and says why" "the retry window was not recorded" "$(report_field "$report" reboot.detail)"
+
+rb="${work}/rb-unrun"
+before_reboot "$rb"
+resumed "$rb" 'lifecycle_reboot_begin true
+lifecycle_reboot_retry_window 5
+lifecycle_reboot_finish
+lifecycle_finish'
+report="${rb}/evidence/lifecycle-report.json"
+check "sub-cases the harness never ran are recorded as skipped" "skipped skipped skipped" \
+  "$(report_field "$report" reboot.sub_cases.blocked.status) $(report_field "$report" reboot.sub_cases.transient.status) $(report_field "$report" reboot.sub_cases.denied_egress_resumes.status)"
+check "  and fail the stage" "fail" "$(report_field "$report" reboot.status)"
+
+# A stop just after a sub-case is recorded, before the runner moves to the
+# next: the sub-case keeps its record and its log. The counter is set back
+# by hand because the real window is one statement wide.
+rb="${work}/rb-recorded"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'say() { echo "the evidence"; return 1; }
+lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked say || :
+_lc_rb_next=0
+exit 143'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a sub-case recorded just before a stop keeps its record" "143 fail yes" \
+  "${status} $(report_field "$report" reboot.sub_cases.blocked.status) $(grep -q 'the evidence' "${rb}/evidence/reboot-blocked.log" && echo yes || echo no)"
+
+# A failing sub-case whose last lines are longer than the argument limit
+# (1 MiB here; 128 KiB per argument on Linux): its detail is bounded so the
+# stage can still be composed, and the log keeps everything.
+rb="${work}/rb-long-tail"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'long() { python3 -c "print(\"x\" * 1100000)"; return 1; }
+lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked long || :
+lifecycle_reboot_retry_window 5
+lifecycle_reboot_subcase transient true
+lifecycle_reboot_subcase denied_egress_resumes true
+lifecycle_reboot_finish
+lifecycle_finish'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a sub-case with a very long log tail does not stop the run" "0" "$status"
+check "  and is recorded with a bounded detail" "fail yes" \
+  "$(report_field "$report" reboot.sub_cases.blocked.status 2>/dev/null) $(python3 -c 'import json,sys;print("yes" if len(json.load(open(sys.argv[1]))["reboot"]["sub_cases"]["blocked"]["detail"]) < 2100 else "no")' "$report" 2>/dev/null)"
+check "  and its log keeps the whole output" "yes" \
+  "$([[ $(wc -c <"${rb}/evidence/reboot-blocked.log") -gt 1100000 ]] && echo yes || echo no)"
+
+# When the stage cannot be composed at all, a run stopping inside it still
+# writes a failed report, keeps its exit status and returns to the
+# caller's own cleanup: the EXIT trap must never exit on the harness's
+# behalf. python3 is made to fail for the compose call alone.
+rb="${work}/rb-unrecorded"
+before_reboot "$rb"
+set +e
+resumed "$rb" 'python3() {
+  if [[ "${1:-}" == - && "${2:-}" == "${_lc_rb_started:-}" ]]; then return 1; fi
+  command python3 "$@"
+}
+trap "lifecycle_abort \$?; echo ran >\"\$2/cleanup\"" EXIT
+lifecycle_reboot_begin true
+lifecycle_reboot_subcase blocked true
+exit 3'
+status=$?
+set -e
+report="${rb}/evidence/lifecycle-report.json"
+check "a reboot stage that cannot be composed is recorded as failed" "fail fail" \
+  "$(report_field "$report" reboot.status) $(report_field "$report" outcome)"
+check "  and says so" "the reboot stage could not be recorded" "$(report_field "$report" reboot.detail)"
+check "  keeping the run's exit status and the caller's cleanup" "3 yes" \
+  "${status} $([[ -f "${rb}/cleanup" ]] && echo yes || echo no)"
+check "  and the sub-case log it had" "yes" "$([[ -f "${rb}/evidence/reboot-blocked.log" ]] && echo yes || echo no)"
+
+# Harness bugs stop the run with exit 2 and their own message: the script
+# ends at the offending call, so the message is the only thing that can say
+# which guard fired. A call made from inside a stage writes its message to
+# that stage's log. Arguments are checked explicitly, not with `${2:?}`:
+# under `set -e`, bash 3.2 ends the shell with status 0 on that error.
+refused() {
+  local what="$1" message="$2" script="$3" rb status=0
+  case_count=$((${case_count:-0} + 1))
+  rb="${work}/rb-refused-${case_count}"
+  before_reboot "$rb"
+  resumed "$rb" "$script" || status=$?
+  check "${what} is refused" "2 yes" \
+    "${status} $(grep -qsF -- "$message" "${rb}/stderr" "${rb}"/evidence/*.log && echo yes || echo no)"
+}
+refused "a sub-case before lifecycle_reboot_begin" "before lifecycle_reboot_begin" \
+  'lifecycle_reboot_subcase blocked true'
+refused "a boot ID verdict that is not true or false" "not true or false" \
+  'lifecycle_reboot_begin maybe'
+refused "a sub-case out of order" "out of order" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_subcase transient true'
+refused "a skipped sub-case out of order" "out of order" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_skip transient "x"'
+refused "a skipped sub-case without a reason" "a skipped sub-case needs a reason" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_skip blocked'
+refused "a sub-case with no command" "has no command to run" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_subcase blocked'
+refused "a sub-case with no name" "out of order" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_subcase'
+refused "a missing boot ID verdict" "not true or false" \
+  'lifecycle_reboot_begin'
+refused "a missing retry window" "not a positive number" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_retry_window'
+refused "beginning the reboot stage twice" "already begun" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_begin true'
+refused "a canonical stage inside the reboot stage" "inside the reboot stage; run its checks" \
+  'lifecycle_reboot_begin true; lifecycle_stage offline true'
+refused "a canonical stage skipped inside the reboot stage" "skipped inside the reboot stage" \
+  'lifecycle_reboot_begin true; lifecycle_skip offline "x"'
+refused "a retry window of zero" "not a positive number" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_retry_window 0'
+refused "a retry window that is not a number" "not a positive number" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_retry_window soon'
+refused "a retry window of ten digits" "not a positive number" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_retry_window 1234567890'
+refused "a retry window outside the reboot stage" "outside the reboot stage" \
+  'lifecycle_reboot_retry_window 5'
+refused "finishing the run with the reboot stage open" "still open" \
+  'lifecycle_reboot_begin true; lifecycle_finish'
+refused "finishing the reboot stage twice" "already finished" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_finish; lifecycle_reboot_finish'
+refused "finishing the reboot stage before it begins" "before lifecycle_reboot_begin" \
+  'lifecycle_reboot_finish'
+refused "a sub-case after the reboot stage finished" "after lifecycle_reboot_finish" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_finish; lifecycle_reboot_subcase blocked true'
+refused "a fourth sub-case" "after all three" \
+  'lifecycle_reboot_begin true; lifecycle_reboot_subcase blocked true; lifecycle_reboot_subcase transient true; lifecycle_reboot_subcase denied_egress_resumes true; lifecycle_reboot_subcase blocked true'
+refused "beginning the reboot stage during a stage" "during stage" \
+  'lifecycle_stage install lifecycle_reboot_begin true'
+refused "beginning the reboot stage after the run finished" "after the run finished" \
+  'lifecycle_finish; lifecycle_reboot_begin true'
+refused "suspending during a stage" "lifecycle_suspend during stage" \
+  'lifecycle_stage install lifecycle_suspend "${2}/again.json"'
+refused "suspending inside the reboot stage" "lifecycle_suspend inside the reboot stage" \
+  'lifecycle_reboot_begin true; lifecycle_suspend "${2}/again.json"'
+refused "suspending after the run finished" "lifecycle_suspend after the run finished" \
+  'lifecycle_finish; lifecycle_suspend "${2}/again.json"'
+refused "suspending with no marker path" "lifecycle_suspend needs a marker path" \
+  'lifecycle_suspend'
+
+rb="${work}/rb-unstarted"
+mkdir -p "$rb"
+set +e
+bash -c 'set -Eeuo pipefail; source "$1"; lifecycle_reboot_begin true' _ "$harness" 2>"${rb}/stderr"
+check "the reboot stage before any run is refused" "yes" \
+  "$([[ $? -ne 0 ]] && grep -q 'before lifecycle_begin or lifecycle_resume' "${rb}/stderr" && echo yes || echo no)"
+bash -c 'set -Eeuo pipefail; source "$1"; lifecycle_suspend "$2/m.json"' _ "$harness" "$rb" 2>"${rb}/stderr"
+check "suspending before any run is refused" "yes" \
+  "$([[ $? -ne 0 ]] && grep -q 'lifecycle_suspend before lifecycle_begin' "${rb}/stderr" && echo yes || echo no)"
+bash -c 'set -Eeuo pipefail; source "$1"; lifecycle_resume' _ "$harness" 2>"${rb}/stderr"
+check "resuming with no marker path is refused" "yes" \
+  "$([[ $? -eq 2 ]] && grep -q 'lifecycle_resume needs a marker path' "${rb}/stderr" && echo yes || echo no)"
+set -e
+
+# Markers: each negative case is the valid marker of a suspended run with
+# one thing wrong, so the named check is the only one that can refuse it.
+# marker_case <what> <message> <python edit of `state`, or a shell action>
+marker_case() {
+  local what="$1" message="$2" edit="$3" rb status=0
+  case_count=$((${case_count:-0} + 1))
+  rb="${work}/rb-marker-${case_count}"
+  before_reboot "$rb"
+  if [[ "$edit" == shell:* ]]; then
+    eval "${edit#shell:}"
+  else
+    python3 - "${rb}/suspend.json" "$edit" <<'PY'
+import json, os, sys
+path, edit = sys.argv[1], sys.argv[2]
+stamp = os.stat(path)
+state = json.load(open(path))
+exec(edit)
+json.dump(state, open(path, "w"))
+os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+PY
+  fi
+  resumed "$rb" "$passing_reboot" || status=$?
+  check "${what} is refused" "2 yes" \
+    "${status} $(grep -qF -- "$message" "${rb}/stderr" && echo yes || echo no)"
+}
+marker_case "a marker of another kind" "not a lifecycle run" 'state["marker"] = "something-else"'
+marker_case "a marker of another version" "not a lifecycle run" 'state["version"] = 2'
+marker_case "a marker carrying a record for no known stage" "not a lifecycle run" \
+  'state["records"].append("{\"stage\":\"not-a-stage\"}")'
+marker_case "a marker whose tested version is not a release" "is not a release version" \
+  'state["tested_version"] = "v0.3"'
+marker_case "a marker whose revision is not a full SHA" "is not a full git SHA" \
+  'state["source_revision"] = "abc1234"'
+marker_case "a marker whose digest is not lowercase hex" "is not bare lowercase sha256 hex" \
+  'state["artifact_digest"] = "A" * 64'
+marker_case "a marker whose evidence directory is gone" "evidence directory is gone" \
+  'shell:rm -rf "${rb}/evidence"'
+marker_case "a missing marker" "no suspend marker" 'shell:rm -f "${rb}/suspend.json"'
+# Another run finished in the same evidence directory after the marker was
+# written: resuming would write the older run's records over its result.
+marker_case "a marker older than a report in its evidence directory" "after this marker was written" \
+  'shell:bash -c '"'"'source "$1"; lifecycle_begin ubuntu2404-x86-l4-g2s8 "$2/evidence" 0.3.1 t; lifecycle_stage install false || :; lifecycle_finish'"'"' _ "$harness" "$rb" 2>/dev/null'
+
 if ! bash "${repo_root}/test/validation/lifecycle_retry_test.sh"; then
   failures=$((failures + 1))
 fi
