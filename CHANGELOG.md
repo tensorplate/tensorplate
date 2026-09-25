@@ -8,6 +8,37 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The lifecycle report can carry a `reboot` stage, and the release gate
+  requires it on the L4 cloud row from 0.3.0. The stage sits beside the
+  canonical eight rather than among them. No other row, and no earlier
+  release of this one, may carry it, so every recorded report stays valid
+  and `check-evidence-bundles.sh --version 0.2.1` still finds all four
+  Production rows complete.
+  - `config/schemas/lifecycle_report.json` gains an optional top-level
+    `reboot` object. It records whether the boot ID changed, the retry
+    window the run observed, and three required sub-cases (`blocked`,
+    `transient`, `denied_egress_resumes`), each with a status and a log.
+  - `tools/release/check-evidence-bundles.sh` requires the stage where
+    the row and version call for it and refuses it everywhere else. It
+    compares versions as numbers, so 0.10.0 counts as later than 0.3.0 and
+    a 0.3.0 candidate counts as 0.3.0. It accepts the stage only when the
+    boot ID changed, every sub-case passed, the retry window was recorded
+    and every cited log exists. It now refuses a report carrying `NaN` or
+    `Infinity`, which are not JSON but which Python's parser accepts.
+  - `tools/validation/lifecycle-stages.sh` can suspend a run to a marker
+    file and resume it, once, in a new shell after the reboot. It records
+    the sub-cases in order, and fails the stage and the run when a
+    sub-case fails, the boot ID did not change or no retry window was
+    recorded. A run that stops mid-stage still records which sub-case
+    failed and which were never reached.
+  - The Ubuntu cloud harness does not run the stage yet, and
+    `docs/validation/cloud-row-runbooks.md` says so.
+  - Tests cover the runner, the checker, reports built from the recorded
+    Jetson and L4 evidence, and the Rust schema contract. They also cover
+    a report whose stage list carries a name outside the canonical eight,
+    which no release-gate test exercised before.
+
+  (V030-E06-F02-T01)
 - `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
   tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
   AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
