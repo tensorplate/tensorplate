@@ -32,6 +32,13 @@ TensorPlate keeps the four version surfaces defined in
 | Schema version | `0.1` | `config/schemas/*.json`, `protocol/schemas/*.json` |
 | Bundle format version | `0.1` | `CMakeLists.txt`, `protocol/rust/src/lib.rs`, bundle manifest docs and fixtures |
 
+The schema check reads every `schema_version` constraint in those files and
+requires it to equal the protocol version, with one exception: the agent's
+durable state file (`protocol/schemas/agent_state.json`) carries its own
+state versions (`0.1` and `0.2` today), listed at the schema's root, and
+every other `schema_version` constraint in that file must name one of them.
+Its values are pinned by the Rust mirror's tests, not by the release driver.
+
 For a final release, development suffixes must be removed from release
 version surfaces:
 

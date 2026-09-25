@@ -118,7 +118,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ],
       "description": "Typed error code accompanying `degraded` / `failed` / `missed_deadline` / `overload` events."
     },

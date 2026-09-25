@@ -42,6 +42,13 @@ struct Error {
     InferenceFailed = 7,
     /// Unexpected internal error; usually a bug.
     Internal = 8,
+    /// Operation was cancelled at the caller's request.
+    Cancelled = 9,
+    /// A backend process or worker the operation needs is unavailable,
+    /// was reset, or is shutting down.
+    Unavailable = 10,
+    /// A bounded quota, credit, or capacity limit was exhausted.
+    ResourceExhausted = 11,
   };
 
   Code code = Code::Internal;
@@ -62,13 +69,14 @@ struct Error {
 };
 
 /// Serialized snake_case name for an Error::Code. Stable across releases.
-/// The inverse mapping for protocol decoders lives in
-/// `protocol/rust/src/error.rs` and any future C++ JSON binding.
+/// The inverse is `error_code_from_string`; the Rust mirror is
+/// `protocol/rust/src/error.rs`.
 [[nodiscard]] std::string_view to_string(Error::Code code) noexcept;
 
 /// Parse a snake_case error-code name back into an Error::Code.
-/// Returns std::nullopt for unknown names so callers can map to
-/// Error::Code::Unsupported for unknown protocol versions.
+/// Returns std::nullopt for unknown names; the caller chooses the
+/// fallback (the Python sidecar adapter maps an unknown code to
+/// Error::Code::Internal).
 [[nodiscard]] std::optional<Error::Code> error_code_from_string(std::string_view name) noexcept;
 
 /// Human-readable single-line representation of an Error. Intended for logs;

@@ -63,7 +63,26 @@ cmake --build build-asan --parallel
 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
   UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
   ctest --test-dir build-asan --output-on-failure -L T1
+
+# 7. Optional: ThreadSanitizer, in its own build tree (it cannot be combined
+#    with ASAN; configure refuses TP_ENABLE_TSAN with TP_ENABLE_SANITIZERS).
+cmake -S . -B build-tsan \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DTP_ENABLE_TSAN=ON \
+  -DTP_WARNINGS_AS_ERRORS=ON \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build-tsan --parallel
+# T2 starts the Python sidecar: install it first, as CI does, with
+# `pip install -e backends/python_pytorch` for the interpreter named here.
+TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 TP_TEST_PYTHON=python3 \
+  ctest --test-dir build-tsan --output-on-failure -L 'T1|T2'
 ```
+
+On some recent Linux kernels, test binaries built with clang 15's sanitizers
+crash at startup: ASAN binaries intermittently, TSAN binaries on every run.
+Running them with address-space randomization off,
+`setarch "$(uname -m)" -R ctest ...`, avoids it.
 
 ## Rust
 

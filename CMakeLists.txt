@@ -76,6 +76,8 @@ option(TP_BUILD_SERVING_WORKER
 option(TP_BUILD_EXAMPLES
        "Build the developer-facing examples under examples/" ON)
 option(TP_ENABLE_SANITIZERS "Enable ASAN/UBSAN on tp_* targets" OFF)
+option(TP_ENABLE_TSAN
+       "Enable ThreadSanitizer on tp_* targets (not with TP_ENABLE_SANITIZERS)" OFF)
 option(TP_WARNINGS_AS_ERRORS
        "Treat C++ warnings as errors on tp_* targets" OFF)
 
@@ -106,4 +108,5 @@ message(STATUS "  tests             : ${TP_BUILD_TESTS}")
 message(STATUS "  serving worker    : ${TP_BUILD_SERVING_WORKER}")
 message(STATUS "  examples          : ${TP_BUILD_EXAMPLES}")
 message(STATUS "  sanitizers (A/U)  : ${TP_ENABLE_SANITIZERS}")
+message(STATUS "  sanitizer (TSAN)  : ${TP_ENABLE_TSAN}")
 message(STATUS "  warnings as errors: ${TP_WARNINGS_AS_ERRORS}")
