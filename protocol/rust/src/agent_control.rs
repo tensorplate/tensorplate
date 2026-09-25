@@ -182,7 +182,9 @@ pub enum ControlRequestError {
     InvalidExpectedDigest,
 }
 
-fn looks_like_digest(d: &str) -> bool {
+/// Whether `d` has the repository's digest form: `algo:hex`, lowercase
+/// algorithm name.
+pub(crate) fn looks_like_digest(d: &str) -> bool {
     if let Some((algo, hex)) = d.split_once(':') {
         let algo_ok = !algo.is_empty()
             && algo

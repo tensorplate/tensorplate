@@ -38,6 +38,19 @@ error `Error::Code::Unsupported` (C++) /
 `tensorplate_protocol::decode_with_version_check` provides this; the C++
 binding will follow the same shape when JSON parsing lands.
 
+One document has its own version track: `agent_state.json`, the agent's
+durable state file, which no other process reads. Its `schema_version` is a
+state version, `"0.1"` (the singleton layout) or `"0.2"` (adds the
+deployment generation counter and the resident set), listed as an `enum` at
+the schema's root. It is decoded by `tensorplate_protocol::decode_agent_state`,
+which accepts exactly those versions and rejects any other with the same
+typed error. Moving the protocol version does not move the state versions,
+though the schema's `$id` follows the protocol version like every other
+schema's. A new state version changes that schema and its Rust mirror
+(the version constants and the decoder's accepted list) and their tests; a
+new document with its own version track also adds its path to the release
+driver's list of state-track documents.
+
 ## Bindings
 
 Bindings are **hand-written** in v0.1.0:

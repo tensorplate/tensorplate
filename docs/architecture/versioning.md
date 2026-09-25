@@ -93,6 +93,12 @@ the protocol version, scoped to that schema. A bundle manifest at
 `0.1` and `0.2`; a runtime that only supports `0.1` rejects it with a
 typed error rather than guessing.
 
+The agent's durable state file is the first document scoped this way. Its
+state versions `0.1` and `0.2` are accepted by the current agent's own
+decoder while every other payload stays pinned to the protocol version; an
+agent that reads only `0.1` rejects a `0.2` state file with its typed
+error. See [`protocol.md`](protocol.md#versioning).
+
 ### Bundle format version
 
 - **Minor**: additive optional fields in the manifest, new optional

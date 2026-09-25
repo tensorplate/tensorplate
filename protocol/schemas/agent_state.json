@@ -2,16 +2,20 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/agent_state.json",
   "title": "TensorPlate Agent Durable State",
-  "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`; partial-write recovery falls back to the last known-good copy. The state file is the only durable record of the active deployment, the previous active deployment, the candidate deployment, the in-flight transaction phase, and the quarantine list. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nMigration policy: the agent rejects unknown future `schema_version` values without mutation. Older versions are migrated forward by an explicit migration step when one ships; v0.1 ships no migrations.",
+  "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`, beside a same-directory `state.json.bak` the agent falls back to when `state.json` is damaged. The state file is the only durable record of what is deployed: the singleton active, previous active and candidate deployments, the in-flight transaction phase, the last error and the quarantine list, and from state version 0.2 the resident set and the deployment generation counter. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nVersioning: this file has its own version track, independent of the protocol version every other payload carries. State version `0.1` is the singleton layout every agent through 0.2.x reads. State version `0.2` adds `next_generation` and `resident_set`. The agent stamps the oldest version whose readers decode the file without loss: `0.2` from the first generation it allocates, `0.1` otherwise; a `0.1` file carries only the error codes, phases and transaction kinds agents through 0.2.x know. When it writes a `0.2` file it refreshes `state.json.bak` before `state.json`, so a `0.2` primary never sits beside a `0.1` backup an older agent would fall back to. An older agent refuses a `0.2` file with its unsupported-schema-version error and changes nothing; the documented downgrade sets the state directory aside rather than migrating it. A reader refuses a `0.2` file that carries any field it does not know; once a release writes `0.2`, any later change to its shape takes a new state version. The agent rejects unknown state versions without mutation.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "store_version"],
   "properties": {
-    "schema_version": {"type": "string", "const": "0.1"},
+    "schema_version": {
+      "type": "string",
+      "enum": ["0.1", "0.2"],
+      "description": "State version of this file (see the file description). Independent of the protocol version."
+    },
     "store_version": {
       "type": "integer",
       "minimum": 1,
-      "description": "Monotonically incremented every persisted update. Useful for diagnostics and as a tie-breaker between a stale primary file and a fresher backup."
+      "description": "Monotonically incremented every persisted update. Diagnostic only: the reader prefers `state.json` whenever it decodes, whatever the backup's `store_version`."
     },
     "active": {"$ref": "#/definitions/DeploymentRecord"},
     "previous_active": {"$ref": "#/definitions/DeploymentRecord"},
@@ -21,9 +25,198 @@
     "quarantined": {
       "type": "array",
       "items": {"$ref": "#/definitions/QuarantineRecord"}
-    }
+    },
+    "next_generation": {
+      "$ref": "#/definitions/StateCounter",
+      "description": "The next deployment generation the agent will hand out. Present from the first allocation on; never removed and never lowered, so the agent never hands out the same generation twice from one state file. Every generation in `resident_set` is below it."
+    },
+    "resident_set": {"$ref": "#/definitions/ResidentSet"}
   },
+  "allOf": [
+    {
+      "$comment": "State version 0.1 is exactly what agents through 0.2.x read: no generation counter (and so no resident set, which requires it), and only the error codes, phases and transaction kinds those agents know.",
+      "if": {"properties": {"schema_version": {"const": "0.1"}}},
+      "then": {
+        "not": {"required": ["next_generation"]},
+        "properties": {
+          "last_error": {"$ref": "#/definitions/LegacyErrorRecord"},
+          "in_flight_transaction": {
+            "properties": {
+              "phase": {"$ref": "#/definitions/LegacyPhase"},
+              "kind": {"enum": ["deploy", "rollback"]},
+              "failure": {"$ref": "#/definitions/LegacyErrorRecord"}
+            }
+          },
+          "quarantined": {
+            "items": {
+              "properties": {
+                "phase": {"$ref": "#/definitions/LegacyPhase"},
+                "error": {"$ref": "#/definitions/LegacyErrorRecord"}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"required": ["resident_set"]},
+      "then": {
+        "required": ["next_generation"],
+        "not": {
+          "anyOf": [
+            {"required": ["active"]},
+            {"required": ["previous_active"]},
+            {"required": ["candidate"]}
+          ]
+        }
+      }
+    }
+  ],
   "definitions": {
+    "LegacyErrorRecord": {
+      "properties": {
+        "code": {
+          "enum": ["config_invalid", "load_failed", "not_ready", "shape_mismatch", "unsupported", "oom_error", "timeout", "inference_failed", "internal"]
+        }
+      }
+    },
+    "LegacyPhase": {
+      "enum": ["received", "verified", "staged", "capacity_checked", "prepared", "warmed", "promoted", "active", "failed", "rolled_back"]
+    },
+    "StateCounter": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "DeploymentId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "not": {"enum": [".", ".."]},
+      "description": "One filesystem-safe path segment, the same rule the control API applies to deployment ids."
+    },
+    "Digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+    "AbsolutePath": {"type": "string", "pattern": "^/"},
+    "QuotaBytes": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "ResidentSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["set_id", "revision", "members", "endpoint_map"],
+      "description": "One committed revision of the resident set. `set_id` is assigned at the set's first commit and never changes; `revision` increases with every committed change. Rules the decoder enforces beyond this schema: member ids are unique; generations are unique across members and their `previous` generations, and each is below `next_generation`; a member's `previous` generation is older than the member's; `endpoint_map` has exactly one entry per serving member, in member order, at that member's generation.",
+      "properties": {
+        "set_id": {"$ref": "#/definitions/DeploymentId"},
+        "revision": {"$ref": "#/definitions/StateCounter"},
+        "members": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/ResidentMember"}
+        },
+        "endpoint_map": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/EndpointEntry"}
+        }
+      }
+    },
+    "ResidentMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "generation", "bundle_digest", "descriptor_digest", "configuration_digest", "admission_mode", "quota", "state", "staged_path", "bundle_name", "bundle_version", "backend_hint", "model_class"],
+      "description": "One committed member: one deployment at one generation. It carries every field of the singleton `active` record; a singleton record whose id or staged path breaks the member rules cannot become a member.",
+      "properties": {
+        "deployment_id": {"$ref": "#/definitions/DeploymentId"},
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "bundle_digest": {"$ref": "#/definitions/Digest"},
+        "descriptor_digest": {"$ref": "#/definitions/Digest"},
+        "configuration_digest": {"$ref": "#/definitions/Digest"},
+        "admission_mode": {"type": "string", "enum": ["production", "qualification"]},
+        "quota": {"$ref": "#/definitions/MemberQuota"},
+        "state": {
+          "type": "string",
+          "enum": ["serving", "quarantined"],
+          "description": "A quarantined member stays in the set, is not launched and has no endpoint until it is recovered or undeployed."
+        },
+        "staged_path": {"$ref": "#/definitions/AbsolutePath"},
+        "bundle_name": {"type": "string"},
+        "bundle_version": {"type": "string"},
+        "backend_hint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "promoted_monotonic_ns": {"type": "integer", "minimum": 0},
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "previous": {"$ref": "#/definitions/RetainedGeneration"}
+      }
+    },
+    "RetainedGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "generation", "bundle_digest", "descriptor_digest", "configuration_digest", "admission_mode", "quota", "staged_path", "bundle_name", "bundle_version", "backend_hint", "model_class"],
+      "description": "A generation kept for rollback: the member's previous committed generation, or the member a one-member replace displaced.",
+      "properties": {
+        "deployment_id": {"$ref": "#/definitions/DeploymentId"},
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "bundle_digest": {"$ref": "#/definitions/Digest"},
+        "descriptor_digest": {"$ref": "#/definitions/Digest"},
+        "configuration_digest": {"$ref": "#/definitions/Digest"},
+        "admission_mode": {"type": "string", "enum": ["production", "qualification"]},
+        "quota": {"$ref": "#/definitions/MemberQuota"},
+        "staged_path": {"$ref": "#/definitions/AbsolutePath"},
+        "bundle_name": {"type": "string"},
+        "bundle_version": {"type": "string"},
+        "backend_hint": {"type": "string"},
+        "model_class": {"type": "string"},
+        "promoted_monotonic_ns": {"type": "integer", "minimum": 0},
+        "labels": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "MemberQuota": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_count", "domain_bytes"],
+      "description": "Session quota the agent assigned to the member: the concurrent session count and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
+      "properties": {
+        "session_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "domain_bytes": {"$ref": "#/definitions/DomainQuotaBytes"}
+      },
+      "if": {"properties": {"session_count": {"minimum": 1}}},
+      "then": {"properties": {"domain_bytes": {"minProperties": 1}}}
+    },
+    "DomainQuotaBytes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Session quota bytes per budget domain. `shared_pool` (unified memory) never appears beside `guest_ram` or `device_vram` (discrete accelerator).",
+      "properties": {
+        "shared_pool": {"$ref": "#/definitions/QuotaBytes"},
+        "guest_ram": {"$ref": "#/definitions/QuotaBytes"},
+        "device_vram": {"$ref": "#/definitions/QuotaBytes"}
+      },
+      "not": {
+        "anyOf": [
+          {"required": ["shared_pool", "guest_ram"]},
+          {"required": ["shared_pool", "device_vram"]}
+        ]
+      }
+    },
+    "EndpointEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment_id", "generation"],
+      "description": "Where one serving member listens in the committed revision.",
+      "properties": {
+        "deployment_id": {"$ref": "#/definitions/DeploymentId"},
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "unary_endpoint": {"type": "string", "minLength": 1},
+        "stream_endpoint": {"type": "string", "minLength": 1}
+      },
+      "anyOf": [
+        {"required": ["unary_endpoint"]},
+        {"required": ["stream_endpoint"]}
+      ]
+    },
     "DeploymentRecord": {
       "type": "object",
       "additionalProperties": false,

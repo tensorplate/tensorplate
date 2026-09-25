@@ -27,6 +27,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stays `0.1`, no bundle compatibility floor moves, and no dated
   `[0.3.1]` section or release notes file is opened here.
   (V030-E01-F01-T04)
+
+- The agent no longer falls back to `state.json.bak` when `state.json` is
+  refused for an unsupported state version (a newer state file supersedes an
+  older backup, so the agent exits with `CorruptState` instead of starting
+  on the stale backup) or cannot be read at all (an I/O error now stops the
+  agent). A damaged, empty or missing `state.json` still falls back as
+  before. On Linux, both directory syncs of a `0.2` state write must now
+  succeed. A state write that fails at or after the rename that commits it
+  (the one that makes it what the next start reads) returns the new
+  `StateIndeterminate` error, and the store then refuses every later write
+  until the agent restarts, while status reports the agent `failed` with a
+  `last_error` saying so; a write that fails before that rename leaves the
+  state and the store as they were. (V030-E03-F01-T03)
 ### Added
 
 - Three error codes are appended to the shared error taxonomy:
@@ -66,6 +79,36 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   a typed failure's code through the protocol enum instead of its own
   copy of the list. `protocol.md` documents the narrow exception that lets these enums
   grow under protocol `0.1`. (V030-E04-F01-T01)
+
+- The agent's durable state file gains state version `0.2`. It records the
+  resident set (the deployments kept loaded together, each member at a
+  deployment generation with its bundle, descriptor and configuration
+  digests, session quota, admission mode, serving or quarantined state and
+  a retained previous generation, plus the committed endpoint map) and a
+  `next_generation` counter that is never removed or lowered, so the agent
+  never hands out the same generation twice from one state file. The state
+  file now has its own version track:
+  `protocol/schemas/agent_state.json` accepts state versions `0.1` and
+  `0.2`, decoded by the new `tensorplate_protocol::decode_agent_state`,
+  while `PROTOCOL_VERSION` and `SCHEMA_VERSION` stay `0.1` for every other
+  payload. The agent stamps the oldest state version whose readers decode
+  the file without loss: `0.2` once it has allocated a generation, `0.1`
+  otherwise. No agent code path allocates a generation yet, so deployed
+  agents keep writing the same `0.1` files as before. A `0.2` state is written
+  `state.json.bak` first and `state.json` last, so an agent through 0.2.x
+  never falls back to a `0.1` backup beside a `0.2` primary; it refuses the
+  `0.2` file with its existing `CorruptState` error and exit status 3.
+  Every write is refused before anything reaches disk unless it decodes back
+  unchanged, keeps the generation counter, the resident set's identity and
+  its revision moving forward, and adds no generation to the set below the
+  newest one it already names. New `ResidentSet`, `ResidentMember`,
+  `RetainedGeneration`, `EndpointEntry`, `AdmissionMode`, `MemberState` and
+  `MemberQuota` types in `tensorplate-protocol`, with fixtures
+  `agent_state_0_1_legacy.json` (recorded from the 0.2.1 state writer),
+  `agent_state_0_2_restore_step.json` and
+  `agent_state_0_2_two_member_set.json`. The release driver's schema version
+  check admits a list of versions only on documents with their own version
+  track, and only at the schema's root. (V030-E03-F01-T03)
 - `tools/validation/check-public-hygiene.sh` scans what a push or a pull
   request publishes for values a public repository must never carry, and
   a second job in `.github/workflows/evidence-publication.yml` runs it on
