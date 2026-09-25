@@ -39,6 +39,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
     which no release-gate test exercised before.
 
   (V030-E06-F02-T01)
+- `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
+  tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
+  AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
+  `TP_ENABLE_SANITIZERS`, and the `cmake.sanitizer_options` T1 test holds
+  that refusal and checks each option alone is accepted. The C++ workflow
+  gains a `tsan` leg that runs the T1, T2 and T3 labels; it is not yet a
+  required check. `test/README.md` records what is not instrumented.
+  (V030-E04-F03-T02)
+
+### Fixed
+
+- `HttpServer::stop()` closed the listening socket while the accept
+  thread could still be polling it, a data race ThreadSanitizer reports
+  in 25 of the 47 T2 tests. The socket is now closed only after that
+  thread exits, so its descriptor cannot be reused under a live poll, and
+  the thread accepts no connection once `stop()` has begun.
+  (V030-E04-F03-T02)
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
@@ -60,8 +77,88 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stays `0.1`, no bundle compatibility floor moves, and no dated
   `[0.3.1]` section or release notes file is opened here.
   (V030-E01-F01-T04)
+
+- The agent no longer falls back to `state.json.bak` when `state.json` is
+  refused for an unsupported state version (a newer state file supersedes an
+  older backup, so the agent exits with `CorruptState` instead of starting
+  on the stale backup) or cannot be read at all (an I/O error now stops the
+  agent). A damaged, empty or missing `state.json` still falls back as
+  before. On Linux, both directory syncs of a `0.2` state write must now
+  succeed. A state write that fails at or after the rename that commits it
+  (the one that makes it what the next start reads) returns the new
+  `StateIndeterminate` error, and the store then refuses every later write
+  until the agent restarts, while status reports the agent `failed` with a
+  `last_error` saying so; a write that fails before that rename leaves the
+  state and the store as they were. (V030-E03-F01-T03)
 ### Added
 
+- Three error codes are appended to the shared error taxonomy:
+  `cancelled` (the caller asked for the operation to stop),
+  `unavailable` (a backend process or worker the operation needs is
+  unavailable, was reset or is shutting down) and `resource_exhausted`
+  (a bounded quota, credit or capacity limit was reached). They are C++
+  `Error::Code` values 9, 10 and 11; no existing value moves. The Rust
+  `ErrorCode`, the Python SDK's `ErrorCode`, the Python sidecar's `ERR_*`
+  constants, `error.json` and all 17 schema copies of the code enum carry
+  them. The router answers them with HTTP 499 (Client Closed Request),
+  503 and 429, and serving metrics count `resource_exhausted` as an
+  overload rejection and the other two as failed requests. Nothing emits
+  them yet: the sidecar still reports a cancelled request as `timeout`.
+  A serving worker that predates them reports an unknown sidecar code as
+  `internal`, and an SDK that predates them reports an unknown code as
+  `ErrorCode.INTERNAL`. (V030-E04-F01-T01)
+
+- Five failure reasons describe how a streaming session ends, with a new
+  `session` failure category: `input_credit_exceeded` and
+  `slow_consumer` (category `session`, code `resource_exhausted`, not
+  retryable), `backend_reset` (category `sidecar`), and
+  `deployment_retired` and `worker_shutdown` (category `supervision`), all
+  three with code `unavailable` and retryable. Observability derives no
+  reason from the three new codes alone; a `serving_failed` state change
+  whose last error code has no reason is reported as `internal`, as one
+  with no code already was. (V030-E04-F01-T01)
+
+- The shared enums are checked across languages. A Rust test holds every
+  schema copy of the error-code enum, the `failure_reason.json` enums and
+  the reason table in `docs/observability/failure-reasons.md` to the Rust
+  taxonomy; a C++ test holds the `Error::Code` names to `error.json`; each
+  Python package holds its constants to `error.json`; and the C++ name
+  mapping, the router's status mapping and the metrics mapping are
+  switches over every code, so under the CI warning flags a new code fails
+  the build until it is named and mapped. `tensorplate infer` now parses
+  a typed failure's code through the protocol enum instead of its own
+  copy of the list. `protocol.md` documents the narrow exception that lets these enums
+  grow under protocol `0.1`. (V030-E04-F01-T01)
+
+- The agent's durable state file gains state version `0.2`. It records the
+  resident set (the deployments kept loaded together, each member at a
+  deployment generation with its bundle, descriptor and configuration
+  digests, session quota, admission mode, serving or quarantined state and
+  a retained previous generation, plus the committed endpoint map) and a
+  `next_generation` counter that is never removed or lowered, so the agent
+  never hands out the same generation twice from one state file. The state
+  file now has its own version track:
+  `protocol/schemas/agent_state.json` accepts state versions `0.1` and
+  `0.2`, decoded by the new `tensorplate_protocol::decode_agent_state`,
+  while `PROTOCOL_VERSION` and `SCHEMA_VERSION` stay `0.1` for every other
+  payload. The agent stamps the oldest state version whose readers decode
+  the file without loss: `0.2` once it has allocated a generation, `0.1`
+  otherwise. No agent code path allocates a generation yet, so deployed
+  agents keep writing the same `0.1` files as before. A `0.2` state is written
+  `state.json.bak` first and `state.json` last, so an agent through 0.2.x
+  never falls back to a `0.1` backup beside a `0.2` primary; it refuses the
+  `0.2` file with its existing `CorruptState` error and exit status 3.
+  Every write is refused before anything reaches disk unless it decodes back
+  unchanged, keeps the generation counter, the resident set's identity and
+  its revision moving forward, and adds no generation to the set below the
+  newest one it already names. New `ResidentSet`, `ResidentMember`,
+  `RetainedGeneration`, `EndpointEntry`, `AdmissionMode`, `MemberState` and
+  `MemberQuota` types in `tensorplate-protocol`, with fixtures
+  `agent_state_0_1_legacy.json` (recorded from the 0.2.1 state writer),
+  `agent_state_0_2_restore_step.json` and
+  `agent_state_0_2_two_member_set.json`. The release driver's schema version
+  check admits a list of versions only on documents with their own version
+  track, and only at the schema's root. (V030-E03-F01-T03)
 - `tools/validation/check-public-hygiene.sh` scans what a push or a pull
   request publishes for values a public repository must never carry, and
   a second job in `.github/workflows/evidence-publication.yml` runs it on

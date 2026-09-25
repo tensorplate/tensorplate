@@ -19,7 +19,8 @@
       "type": "string",
       "enum": [
         "config_invalid", "load_failed", "not_ready", "shape_mismatch", "unsupported",
-        "oom_error", "timeout", "inference_failed", "internal"
+        "oom_error", "timeout", "inference_failed", "internal", "cancelled", "unavailable",
+        "resource_exhausted"
       ]
     },
     "last_error_message": {"type": "string"},

@@ -7,6 +7,14 @@
 # T4 hil:         release branch only; requires hardware.
 # T5 benchmark:   release branch only.
 
+# The sanitizer option check runs in CMake script mode, so it needs no
+# GoogleTest and is registered before the GoogleTest lookup below.
+add_test(NAME cmake.sanitizer_options
+  COMMAND ${CMAKE_COMMAND}
+          -DSANITIZERS_CMAKE=${PROJECT_SOURCE_DIR}/cmake/features/sanitizers.cmake
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sanitizer_options_test.cmake)
+set_tests_properties(cmake.sanitizer_options PROPERTIES LABELS "T1")
+
 # GoogleTest is provided by vcpkg (see vcpkg.json) for T1/T2.
 find_package(GTest CONFIG QUIET)
 

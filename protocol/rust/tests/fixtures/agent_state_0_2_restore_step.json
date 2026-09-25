@@ -1,0 +1,71 @@
+{
+  "schema_version": "0.2",
+  "store_version": 31,
+  "last_error": {
+    "code": "load_failed",
+    "message": "bundle artifact `manifest.json` failed integrity check: expected_bundle_digest mismatch: caller `sha256:00ff` computed `sha256:76c485ab2e0bb2fa6cef76b5b4566dc389230245291686ba0998eef4e5f2a608`"
+  },
+  "quarantined": [
+    {
+      "transaction_id": "tx-ef8a4705-c951-4c12-9a32-162f3cc452d8",
+      "deployment_id": "vision-v3",
+      "phase": "received",
+      "error": {
+        "code": "load_failed",
+        "message": "bundle artifact `manifest.json` failed integrity check: expected_bundle_digest mismatch: caller `sha256:00ff` computed `sha256:76c485ab2e0bb2fa6cef76b5b4566dc389230245291686ba0998eef4e5f2a608`"
+      },
+      "quarantined_monotonic_ns": 1790206528939840278
+    }
+  ],
+  "next_generation": 3,
+  "resident_set": {
+    "set_id": "resident-set-1",
+    "revision": 1,
+    "members": [
+      {
+        "deployment_id": "vision-v2",
+        "generation": 2,
+        "bundle_digest": "sha256:7732ef17a25dd9aaf695e8d2e06599f97ca6bf0aa0abaf8f2f5a96382ae3c56e",
+        "descriptor_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d2",
+        "configuration_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000c2",
+        "admission_mode": "production",
+        "quota": {
+          "session_count": 0,
+          "domain_bytes": {}
+        },
+        "state": "serving",
+        "staged_path": "/var/lib/tensorplate/bundles/staging/vision-v2",
+        "bundle_name": "bundle-vision-v2",
+        "bundle_version": "vision-v2",
+        "backend_hint": "mock",
+        "model_class": "vision",
+        "promoted_monotonic_ns": 1790206528928482543,
+        "previous": {
+          "deployment_id": "vision-v1",
+          "generation": 1,
+          "bundle_digest": "sha256:dca1d4bae7c28379abcf73f2e007364e684be7db85938c5f21570330155165ac",
+          "descriptor_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000d1",
+          "configuration_digest": "sha256:00000000000000000000000000000000000000000000000000000000000000c1",
+          "admission_mode": "production",
+          "quota": {
+            "session_count": 0,
+            "domain_bytes": {}
+          },
+          "staged_path": "/var/lib/tensorplate/bundles/staging/vision-v1",
+          "bundle_name": "bundle-vision-v1",
+          "bundle_version": "vision-v1",
+          "backend_hint": "mock",
+          "model_class": "vision",
+          "promoted_monotonic_ns": 1790206528902382652
+        }
+      }
+    ],
+    "endpoint_map": [
+      {
+        "deployment_id": "vision-v2",
+        "generation": 2,
+        "unary_endpoint": "http://127.0.0.1:18080"
+      }
+    ]
+  }
+}

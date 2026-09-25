@@ -81,7 +81,9 @@ minor bump would make such an additive local field operationally breaking.
 This exception does not cover request fields, removals, type changes, or
 meaning changes, and it must be removed when compatible version ranges are
 implemented. See [`protocol.md`](protocol.md#versioning) for the full
-conditions and existing fields covered by the rule.
+conditions and existing fields covered by the rule. A second exception
+there lets a value be appended to the shared error-code, failure-reason
+and failure-category enums under `0.1`.
 
 ### Schema version
 
@@ -90,6 +92,12 @@ the protocol version, scoped to that schema. A bundle manifest at
 `schemaVersion 0.2` is acceptable to a runtime that supports schemas
 `0.1` and `0.2`; a runtime that only supports `0.1` rejects it with a
 typed error rather than guessing.
+
+The agent's durable state file is the first document scoped this way. Its
+state versions `0.1` and `0.2` are accepted by the current agent's own
+decoder while every other payload stays pinned to the protocol version; an
+agent that reads only `0.1` rejects a `0.2` state file with its typed
+error. See [`protocol.md`](protocol.md#versioning).
 
 ### Bundle format version
 
@@ -136,3 +144,10 @@ constants are hand-mirrored. The tests in
 `protocol/rust/src/lib.rs` verify intra-language consistency. A future
 build-time validator (V01-E02) will compare both surfaces against the
 schema files and fail the build on drift.
+
+The shared error-code and failure-reason enums are already held to their
+schema files: `protocol/rust/tests/schema_enum_drift.rs` compares every
+schema copy of the error-code enum, and the `failure_reason.json` enums,
+with the Rust enums; `test/unit/error_test.cpp` compares the C++ names
+with `error.json`; and each Python package has a test that does the same
+for its constants.

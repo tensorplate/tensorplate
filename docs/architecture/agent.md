@@ -144,17 +144,49 @@ load-bearing failures do both.
 The store persists exactly two files in the agent's state directory:
 
 - `state.json` — the current, latest-committed state.
-- `state.json.bak` — a snapshot refreshed after every successful primary
-  write. Consulted only when `state.json` fails to decode.
+- `state.json.bak` — the same bytes, written by every mutation. Consulted
+  when `state.json` is missing, empty or fails to decode — but never when
+  `state.json` is refused for its state version, because a newer file
+  supersedes whatever older backup sits beside it, and never when
+  `state.json` cannot be read at all (an I/O error stops the agent). After a failed 0.2
+  write the backup may hold the state that write attempted until the next
+  write succeeds; it is read only if `state.json` is missing or damaged.
 
 Every mutation:
 
 1. Walks an in-memory clone of the current state through a closure.
-2. Bumps `store_version`.
-3. Writes the new state to `state.json.tmp` and `fsync`s it.
-4. `rename(2)`s the tmp file over `state.json` (atomic on POSIX).
-5. Best-effort directory `fsync` so the rename survives power loss.
-6. Refreshes `state.json.bak` from the just-committed primary.
+2. Bumps `store_version` and stamps the state version (below).
+3. Refuses the result, before writing anything, if it would remove or
+   lower the deployment generation counter, remove the resident set,
+   change its `set_id`, change it without advancing its `revision`, add a
+   generation below the newest one the set already names, or not decode
+   back to exactly the same state.
+4. Writes each file to a sibling `.tmp` file, `fsync`s it and `rename(2)`s
+   it over its target (atomic on POSIX), syncing the directory after each
+   rename. A state-version-0.1 state writes `state.json` first and then the
+   backup, as every earlier release did. A state-version-0.2 state writes
+   the backup first and `state.json` last: an agent through 0.2.x falls back
+   to the backup when `state.json` does not decode, so a 0.2 `state.json`
+   must never sit beside a 0.1 backup; and with `state.json` renamed last, a
+   write that fails before that rename has not committed while `state.json`
+   decodes. For a 0.2
+   write both directory syncs must succeed on Linux, so a state the store
+   acknowledged, and any generation it handed out, survives power loss;
+   elsewhere, and for a 0.1 write, the syncs are best-effort.
+5. Commits at the rename that makes the new state what the next start
+   reads: `state.json`'s for a 0.1 write and while `state.json` decodes;
+   the backup's when a 0.2 write renames the backup first over a
+   `state.json` that does not decode (missing, empty or damaged when the
+   store opened, and no write has succeeded since). A write that fails at
+   or after that rename, including a required directory sync, may or may
+   not be what the next start reads: it returns `StateIndeterminate`, and
+   the store refuses every later write until the agent restarts and
+   re-reads the durable state, so nothing is written from memory that may
+   be stale. Until then status reports `agent_state` `failed` with a
+   `last_error` saying so.
+
+The store assumes it is the directory's only writer; the mutex serializes
+writers inside one agent process, and nothing stops a second agent process.
 
 The store never persists model bytes, request payloads, or unbounded
 logs — only digests, paths, and bounded error metadata. The
@@ -276,12 +308,30 @@ just because they appeared in the original request order.
 
 ## Versioning policy
 
-Every payload carries `schema_version` const-fixed to `0.1`. The agent
-rejects unknown schema versions on the control API with the typed
-`Unsupported` error code. The on-disk state file follows the same rule;
-older versions are migrated forward by an explicit migration step when
-one ships (v0.1 ships none).
+Every control API payload carries `schema_version` const-fixed to `0.1`.
+The agent rejects unknown schema versions on the control API with the typed
+`Unsupported` error code.
 
-The durable state schema and the deploy transaction phase names are
-load-bearing for the CLI (V01-E11) and observability (V01-E10). They
-will not change without a coordinated schema bump.
+The on-disk state file has its own version track
+(`protocol/schemas/agent_state.json`). State version `0.1` is the singleton
+layout every agent through 0.2.x reads. State version `0.2` adds the
+deployment generation counter (`next_generation`, never removed or lowered,
+so the agent never hands out the same generation twice from one state
+file; the allocator takes an inclusive floor, and a caller that knows of
+generations recorded elsewhere, such as staged roots left by an earlier
+state directory, passes one more than the highest of them, getting the
+typed exhausted-counter error when no generation remains above it)
+and the resident set (members at their generations, retained
+previous generations, and the committed endpoint map; the singleton
+`active`, `previous_active` and `candidate` slots are absent beside it). The
+agent stamps the oldest state version whose readers decode the file without
+loss: `0.2` from the first generation it allocates, `0.1` until then. An
+agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
+error and exits instead of misreading it; nothing migrates a state file
+backwards, and a downgrade sets the state directory aside instead. The
+current agent refuses an unknown state version the same way, and a `0.2`
+file with any field it does not know.
+
+The durable state file is read only by the agent. The CLI (V01-E11) and
+observability (V01-E10) read the status the agent projects from it, and the
+deploy transaction phase names are load-bearing for both.
