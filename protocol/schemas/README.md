@@ -38,6 +38,19 @@ error `Error::Code::Unsupported` (C++) /
 `tensorplate_protocol::decode_with_version_check` provides this; the C++
 binding will follow the same shape when JSON parsing lands.
 
+One document has its own version track: `agent_state.json`, the agent's
+durable state file, which no other process reads. Its `schema_version` is a
+state version, `"0.1"` (the singleton layout) or `"0.2"` (adds the
+deployment generation counter and the resident set), listed as an `enum` at
+the schema's root. It is decoded by `tensorplate_protocol::decode_agent_state`,
+which accepts exactly those versions and rejects any other with the same
+typed error. Moving the protocol version does not move the state versions,
+though the schema's `$id` follows the protocol version like every other
+schema's. A new state version changes that schema and its Rust mirror
+(the version constants and the decoder's accepted list) and their tests; a
+new document with its own version track also adds its path to the release
+driver's list of state-track documents.
+
 ## Bindings
 
 Bindings are **hand-written** in v0.1.0:
@@ -53,6 +66,21 @@ current-version data that violates constructor-level invariants. C++
 value objects mirror the same fields and use stable string mappings
 declared in runtime translation units; C++ JSON round trips start once
 the V01-E07 / V01-E05 bindings land.
+
+## Shared enums
+
+The error-code enum in `error.json` is copied inline into most schemas
+that carry a code (a few `$ref` it instead). Append a new code at the end,
+in C++ `Error::Code` numeric order, to `error.json` and to every copy in
+the same change, together with the language mirrors;
+`protocol/rust/tests/schema_enum_drift.rs` fails on any copy that differs
+from `ErrorCode::ALL`. The failure `reason`, `category` and `severity`
+enums exist only in `failure_reason.json` and are held to the Rust
+taxonomy by the same test. Appending to these enums keeps
+`schema_version` at `0.1` only under the narrow exception, and with the
+reader constraints, that
+[`docs/architecture/protocol.md`](../../docs/architecture/protocol.md#versioning)
+records.
 
 ## Adding a new payload
 

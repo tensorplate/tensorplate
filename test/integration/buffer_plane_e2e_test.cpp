@@ -186,13 +186,13 @@ TEST(BufferPlaneE2E, CancellationReleasesEveryInputBuffer) {
 
   // Simulate scheduler cancellation. The runtime would call the cleanup
   // helper; the original cancellation error survives.
-  Error original = Error::make(Error::Code::Internal, "client cancelled");
+  Error original = Error::make(Error::Code::Cancelled, "client cancelled");
   auto report = release_request_buffers(*mgr, req.value());
   EXPECT_TRUE(report.clean());
   EXPECT_EQ(report.buffers_released, 4u);
   EXPECT_EQ(mgr->accounting().active_count, 0u);
   // Original error is unchanged by cleanup.
-  EXPECT_EQ(original.code, Error::Code::Internal);
+  EXPECT_EQ(original.code, Error::Code::Cancelled);
 }
 
 TEST(BufferPlaneE2E, TimeoutReleasesEveryInputBufferThroughGuard) {

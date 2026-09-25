@@ -23,9 +23,12 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ],
-      "description": "Stable error code. The numeric C++ enum value is NOT part of the wire protocol; only these strings are."
+      "description": "Stable error code. The numeric C++ enum value is NOT part of the wire protocol; only these strings are. The set is append-only."
     },
     "message": {
       "type": "string",

@@ -145,9 +145,11 @@ TEST(InferResult, ErrorStatusIsCompatibleWithErrorTaxonomy) {
   // Verify every Error::Code can be used in a failure result; this is
   // the F04 acceptance criterion that result error status is "compatible
   // with tp::Error".
-  for (auto code : {Error::Code::ConfigInvalid, Error::Code::LoadFailed, Error::Code::NotReady,
-                    Error::Code::ShapeMismatch, Error::Code::Unsupported, Error::Code::OOMError,
-                    Error::Code::Timeout, Error::Code::InferenceFailed, Error::Code::Internal}) {
+  for (auto code :
+       {Error::Code::ConfigInvalid, Error::Code::LoadFailed, Error::Code::NotReady,
+        Error::Code::ShapeMismatch, Error::Code::Unsupported, Error::Code::OOMError,
+        Error::Code::Timeout, Error::Code::InferenceFailed, Error::Code::Internal,
+        Error::Code::Cancelled, Error::Code::Unavailable, Error::Code::ResourceExhausted}) {
     auto r = InferResult::create_failure("req", Error::make(code, "x"));
     EXPECT_TRUE(r.is_failure());
     EXPECT_EQ(r.error().code, code);

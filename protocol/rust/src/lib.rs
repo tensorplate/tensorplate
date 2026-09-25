@@ -46,11 +46,13 @@ pub mod infer_result;
 pub mod install_paths;
 pub mod json_numbers;
 pub mod log_event;
+pub mod member_quota;
 pub mod memory_budget;
 pub mod metric_event;
 pub mod model_spec;
 pub mod platform_memory_profile;
 pub mod python_pytorch_ipc;
+pub mod resident_set;
 pub mod serde_shape;
 pub mod supervision_event;
 pub mod tensor_view;
@@ -66,8 +68,9 @@ pub use agent_control::{
     SupervisionStatusSummary, MAX_DEPLOYMENT_ID_BYTES,
 };
 pub use agent_state::{
-    AgentState, AgentStateError, DeploymentRecord, ErrorRecord, QuarantineRecord, TransactionKind,
-    TransactionRecord,
+    decode_agent_state, AgentState, AgentStateError, DeploymentRecord, ErrorRecord,
+    QuarantineRecord, TransactionKind, TransactionRecord, AGENT_STATE_SCHEMA_VERSIONS,
+    AGENT_STATE_SCHEMA_VERSION_LEGACY, AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET,
 };
 pub use buffer_pressure_event::{BufferPressureEvent, BufferPressureEventError, MemoryPressure};
 pub use buffer_ref::{BufferOwnership, BufferRef, BufferRefError, NULL_BUFFER_ID};
@@ -111,6 +114,7 @@ pub use log_event::{
     LogComponent, LogContextValue, LogEvent, LogLevel, MAX_LOG_CONTEXT_ENTRIES,
     MAX_LOG_CONTEXT_STRING_BYTES,
 };
+pub use member_quota::{DomainQuotaBytes, MemberQuota, MemberQuotaError};
 pub use memory_budget::{
     MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError,
     MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
@@ -127,6 +131,10 @@ pub use platform_memory_profile::{
 pub use python_pytorch_ipc::{
     IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcRuntimeCapability,
     IpcStatus, IpcTensor,
+};
+pub use resident_set::{
+    AdmissionMode, EndpointEntry, MemberState, ResidentMember, ResidentSet, ResidentSetError,
+    RetainedGeneration, MAX_STATE_COUNTER,
 };
 pub use supervision_event::{
     SupervisionAgentState, SupervisionEvent, SupervisionEventKind, SupervisionServingState,
@@ -184,7 +192,8 @@ pub fn version() -> &'static str {
     }
 }
 
-/// Errors returned by [`decode_with_version_check`].
+/// Errors returned by [`decode_with_version_check`] and by the agent state
+/// file's own decoder, [`agent_state::decode_agent_state`].
 ///
 /// Production decoders translate [`DecodeError::UnsupportedSchemaVersion`]
 /// into a [`ProtocolError`] with [`ErrorCode::Unsupported`] before
@@ -200,12 +209,14 @@ pub enum DecodeError {
     #[error("missing or non-string `schema_version` field")]
     MissingSchemaVersion,
 
-    /// Top-level `schema_version` did not match [`SCHEMA_VERSION`].
+    /// Top-level `schema_version` is not one the decoder accepts:
+    /// [`SCHEMA_VERSION`] for [`decode_with_version_check`], the state
+    /// versions for [`agent_state::decode_agent_state`].
     #[error("unsupported schema_version `{got}` (expected `{expected}`)")]
     UnsupportedSchemaVersion {
         /// The version string the decoder observed.
         got: String,
-        /// The version string the build was compiled against.
+        /// The version, or the versions, the decoder accepts.
         expected: &'static str,
     },
 
@@ -253,9 +264,11 @@ pub trait ValidatePayload: Sized {
 /// Decode a JSON payload of type `T` after verifying that its top-level
 /// `schema_version` field matches [`SCHEMA_VERSION`].
 ///
-/// This is the single entry point for "unknown schema versions are rejected
-/// with typed errors" required by V01-E02. Decoders that bypass it lose
-/// the guarantee.
+/// This is the entry point for "unknown schema versions are rejected with
+/// typed errors" required by V01-E02, for every payload except the agent's
+/// durable state file, which has its own version track and its own decoder
+/// ([`agent_state::decode_agent_state`]) giving the same guarantee.
+/// Decoders that bypass both lose it.
 ///
 /// # Errors
 ///

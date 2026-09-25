@@ -56,7 +56,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ],
       "description": "Optional bounded error code carried on rejection / expiry / cancellation events."
     },

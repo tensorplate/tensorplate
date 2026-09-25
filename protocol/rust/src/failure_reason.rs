@@ -66,6 +66,20 @@ pub enum FailureReason {
     /// Unexpected internal error; usually a bug. The producer must
     /// include a correlation id when emitting this reason.
     Internal,
+    /// A streaming client sent input beyond the credit its session
+    /// granted.
+    InputCreditExceeded,
+    /// A streaming client left bounded output undelivered past the
+    /// session's no-progress limit.
+    SlowConsumer,
+    /// The backend process serving a session was reset or reaped, so
+    /// every session it served ends.
+    BackendReset,
+    /// The deployment generation serving a session was retired and its
+    /// drain deadline passed.
+    DeploymentRetired,
+    /// The serving worker shut down with the session still open.
+    WorkerShutdown,
 }
 
 /// Coarse grouping used by CLI rendering and metric aggregation.
@@ -82,6 +96,26 @@ pub enum FailureCategory {
     Heartbeat,
     Permission,
     Internal,
+    /// A logical streaming session ended for a reason tied to that
+    /// session's own traffic (credit, output progress).
+    Session,
+}
+
+impl FailureCategory {
+    /// Every category in declaration order, which is the order of the
+    /// `category` enum in `protocol/schemas/failure_reason.json`.
+    pub const ALL: [Self; 10] = [
+        Self::Config,
+        Self::Bundle,
+        Self::Platform,
+        Self::Backend,
+        Self::Sidecar,
+        Self::Supervision,
+        Self::Heartbeat,
+        Self::Permission,
+        Self::Internal,
+        Self::Session,
+    ];
 }
 
 /// Severity hint for CLI rendering. Sinks may downsample lower
@@ -95,6 +129,36 @@ pub enum FailureSeverity {
 }
 
 impl FailureReason {
+    /// Every reason in declaration order, which is the order of the
+    /// `reason` enum in `protocol/schemas/failure_reason.json`.
+    pub const ALL: [Self; 25] = [
+        Self::ConfigInvalid,
+        Self::BundleSchemaInvalid,
+        Self::BundleIntegrityFailed,
+        Self::UnsupportedRuntime,
+        Self::UnsupportedHardware,
+        Self::BackendUnavailable,
+        Self::BackendUnsupportedCapability,
+        Self::ShapeMismatch,
+        Self::Oom,
+        Self::Timeout,
+        Self::DeadlineMissed,
+        Self::SidecarStartupFailed,
+        Self::SidecarMalformedResponse,
+        Self::SidecarProcessExit,
+        Self::WorkerNotReady,
+        Self::WorkerExit,
+        Self::WorkerCrashLoop,
+        Self::NoHeartbeat,
+        Self::PermissionDenied,
+        Self::Internal,
+        Self::InputCreditExceeded,
+        Self::SlowConsumer,
+        Self::BackendReset,
+        Self::DeploymentRetired,
+        Self::WorkerShutdown,
+    ];
+
     /// Stable serialised name (`snake_case`).
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -119,6 +183,11 @@ impl FailureReason {
             Self::NoHeartbeat => "no_heartbeat",
             Self::PermissionDenied => "permission_denied",
             Self::Internal => "internal",
+            Self::InputCreditExceeded => "input_credit_exceeded",
+            Self::SlowConsumer => "slow_consumer",
+            Self::BackendReset => "backend_reset",
+            Self::DeploymentRetired => "deployment_retired",
+            Self::WorkerShutdown => "worker_shutdown",
         }
     }
 
@@ -137,13 +206,17 @@ impl FailureReason {
             | Self::DeadlineMissed => FailureCategory::Backend,
             Self::SidecarStartupFailed
             | Self::SidecarMalformedResponse
-            | Self::SidecarProcessExit => FailureCategory::Sidecar,
-            Self::WorkerNotReady | Self::WorkerExit | Self::WorkerCrashLoop => {
-                FailureCategory::Supervision
-            }
+            | Self::SidecarProcessExit
+            | Self::BackendReset => FailureCategory::Sidecar,
+            Self::WorkerNotReady
+            | Self::WorkerExit
+            | Self::WorkerCrashLoop
+            | Self::DeploymentRetired
+            | Self::WorkerShutdown => FailureCategory::Supervision,
             Self::NoHeartbeat => FailureCategory::Heartbeat,
             Self::PermissionDenied => FailureCategory::Permission,
             Self::Internal => FailureCategory::Internal,
+            Self::InputCreditExceeded | Self::SlowConsumer => FailureCategory::Session,
         }
     }
 
@@ -172,8 +245,13 @@ impl FailureReason {
             | Self::BackendUnsupportedCapability
             | Self::SidecarMalformedResponse
             | Self::WorkerNotReady
-            | Self::WorkerExit => FailureSeverity::Error,
-            Self::DeadlineMissed => FailureSeverity::Warning,
+            | Self::WorkerExit
+            | Self::InputCreditExceeded
+            | Self::BackendReset => FailureSeverity::Error,
+            Self::DeadlineMissed
+            | Self::SlowConsumer
+            | Self::DeploymentRetired
+            | Self::WorkerShutdown => FailureSeverity::Warning,
         }
     }
 
@@ -188,6 +266,9 @@ impl FailureReason {
                 | Self::WorkerExit
                 | Self::SidecarProcessExit
                 | Self::NoHeartbeat
+                | Self::BackendReset
+                | Self::DeploymentRetired
+                | Self::WorkerShutdown
         )
     }
 
@@ -216,6 +297,10 @@ impl FailureReason {
                 ErrorCode::NotReady
             }
             Self::Internal => ErrorCode::Internal,
+            Self::InputCreditExceeded | Self::SlowConsumer => ErrorCode::ResourceExhausted,
+            Self::BackendReset | Self::DeploymentRetired | Self::WorkerShutdown => {
+                ErrorCode::Unavailable
+            }
         }
     }
 }
@@ -377,6 +462,14 @@ mod tests {
             (FailureReason::WorkerCrashLoop, ErrorCode::NotReady),
             (FailureReason::NoHeartbeat, ErrorCode::NotReady),
             (FailureReason::Internal, ErrorCode::Internal),
+            (
+                FailureReason::InputCreditExceeded,
+                ErrorCode::ResourceExhausted,
+            ),
+            (FailureReason::SlowConsumer, ErrorCode::ResourceExhausted),
+            (FailureReason::BackendReset, ErrorCode::Unavailable),
+            (FailureReason::DeploymentRetired, ErrorCode::Unavailable),
+            (FailureReason::WorkerShutdown, ErrorCode::Unavailable),
         ];
         for (reason, expected) in cases {
             assert_eq!(
@@ -385,6 +478,110 @@ mod tests {
                 "reason {reason} mapped to wrong code"
             );
         }
+    }
+
+    #[test]
+    fn all_lists_every_value_once_in_declaration_order() {
+        use serde::de::value::{Error as ValueError, U32Deserializer};
+        use serde::Deserialize;
+
+        // serde's derived Deserialize also accepts a variant index, so it
+        // knows every variant: each ALL must match it at each index and end
+        // where the enum ends.
+        fn by_index<T: for<'de> Deserialize<'de>>(index: usize) -> Result<T, ValueError> {
+            let index = u32::try_from(index).expect("index fits in u32");
+            T::deserialize(U32Deserializer::<ValueError>::new(index))
+        }
+        for (index, reason) in FailureReason::ALL.into_iter().enumerate() {
+            assert_eq!(reason as usize, index, "{reason} is out of place");
+            assert_eq!(
+                by_index::<FailureReason>(index).expect("variant index"),
+                reason
+            );
+        }
+        assert!(
+            by_index::<FailureReason>(FailureReason::ALL.len()).is_err(),
+            "FailureReason has a variant that FailureReason::ALL does not list"
+        );
+        for (index, category) in FailureCategory::ALL.into_iter().enumerate() {
+            assert_eq!(category as usize, index, "{category:?} is out of place");
+            assert_eq!(
+                by_index::<FailureCategory>(index).expect("variant index"),
+                category
+            );
+        }
+        assert!(
+            by_index::<FailureCategory>(FailureCategory::ALL.len()).is_err(),
+            "FailureCategory has a variant that FailureCategory::ALL does not list"
+        );
+    }
+
+    #[test]
+    fn session_stream_reasons_have_their_canonical_hints() {
+        // (reason, wire name, category, severity, retryable, error code)
+        let cases = [
+            (
+                FailureReason::InputCreditExceeded,
+                "input_credit_exceeded",
+                FailureCategory::Session,
+                FailureSeverity::Error,
+                false,
+                ErrorCode::ResourceExhausted,
+            ),
+            (
+                FailureReason::SlowConsumer,
+                "slow_consumer",
+                FailureCategory::Session,
+                FailureSeverity::Warning,
+                false,
+                ErrorCode::ResourceExhausted,
+            ),
+            (
+                FailureReason::BackendReset,
+                "backend_reset",
+                FailureCategory::Sidecar,
+                FailureSeverity::Error,
+                true,
+                ErrorCode::Unavailable,
+            ),
+            (
+                FailureReason::DeploymentRetired,
+                "deployment_retired",
+                FailureCategory::Supervision,
+                FailureSeverity::Warning,
+                true,
+                ErrorCode::Unavailable,
+            ),
+            (
+                FailureReason::WorkerShutdown,
+                "worker_shutdown",
+                FailureCategory::Supervision,
+                FailureSeverity::Warning,
+                true,
+                ErrorCode::Unavailable,
+            ),
+        ];
+        for (reason, name, category, severity, retryable, code) in cases {
+            let record = FailureReasonRecord::new(reason);
+            assert_eq!(reason.as_str(), name);
+            assert_eq!(record.category, category, "{name}");
+            assert_eq!(record.severity, severity, "{name}");
+            assert_eq!(record.retryable, retryable, "{name}");
+            assert_eq!(record.error_code, code, "{name}");
+            let json = serde_json::to_string(&record).expect("serialise");
+            let back =
+                decode_with_version_check::<FailureReasonRecord>(&json).expect("canonical decode");
+            assert_eq!(back, record);
+        }
+    }
+
+    #[test]
+    fn decode_rejects_session_reason_under_another_category() {
+        let json = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","reason":"slow_consumer","category":"backend","severity":"warning","retryable":false,"error_code":"resource_exhausted"}}"#
+        );
+        let err = decode_with_version_check::<FailureReasonRecord>(&json).expect_err("rejected");
+        assert!(matches!(err, DecodeError::InvalidPayload(_)));
     }
 
     #[test]

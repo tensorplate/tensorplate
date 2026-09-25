@@ -1,0 +1,40 @@
+{
+  "schema_version": "0.1",
+  "store_version": 30,
+  "active": {
+    "deployment_id": "vision-v2",
+    "bundle_digest": "sha256:7732ef17a25dd9aaf695e8d2e06599f97ca6bf0aa0abaf8f2f5a96382ae3c56e",
+    "bundle_name": "bundle-vision-v2",
+    "bundle_version": "vision-v2",
+    "backend_hint": "mock",
+    "model_class": "vision",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/vision-v2",
+    "promoted_monotonic_ns": 1790206528928482543
+  },
+  "previous_active": {
+    "deployment_id": "vision-v1",
+    "bundle_digest": "sha256:dca1d4bae7c28379abcf73f2e007364e684be7db85938c5f21570330155165ac",
+    "bundle_name": "bundle-vision-v1",
+    "bundle_version": "vision-v1",
+    "backend_hint": "mock",
+    "model_class": "vision",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/vision-v1",
+    "promoted_monotonic_ns": 1790206528902382652
+  },
+  "last_error": {
+    "code": "load_failed",
+    "message": "bundle artifact `manifest.json` failed integrity check: expected_bundle_digest mismatch: caller `sha256:00ff` computed `sha256:76c485ab2e0bb2fa6cef76b5b4566dc389230245291686ba0998eef4e5f2a608`"
+  },
+  "quarantined": [
+    {
+      "transaction_id": "tx-ef8a4705-c951-4c12-9a32-162f3cc452d8",
+      "deployment_id": "vision-v3",
+      "phase": "received",
+      "error": {
+        "code": "load_failed",
+        "message": "bundle artifact `manifest.json` failed integrity check: expected_bundle_digest mismatch: caller `sha256:00ff` computed `sha256:76c485ab2e0bb2fa6cef76b5b4566dc389230245291686ba0998eef4e5f2a608`"
+      },
+      "quarantined_monotonic_ns": 1790206528939840278
+    }
+  ]
+}

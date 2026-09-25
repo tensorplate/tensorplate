@@ -63,7 +63,10 @@
         "oom_error",
         "timeout",
         "inference_failed",
-        "internal"
+        "internal",
+        "cancelled",
+        "unavailable",
+        "resource_exhausted"
       ]
     },
     "monotonic_age_ms": {
