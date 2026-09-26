@@ -8,6 +8,8 @@ C++ and Rust components.
 - `schemas/` — schema source-of-truth (JSON Schema for config and bundles;
   protobuf or equivalent for binary IPC if introduced).
 - `rust/` — `tensorplate-protocol` Rust crate consuming the schemas.
+- `fixtures/` — language-neutral test vectors that every implementation of
+  the objects they describe replays; not wire schemas.
 - C++ bindings live in [`include/tensorplate/`](../include/tensorplate/) and
   [`runtime/`](../runtime/) and are generated from or kept in sync with
   `schemas/`.

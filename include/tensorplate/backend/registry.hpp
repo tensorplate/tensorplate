@@ -20,6 +20,13 @@
 //   `precision_hint` is accepted by the backend's capability record.
 //   Validation does not consult device probing or fallback heuristics:
 //   v0.1.0 fails fast with a typed error and never silently redirects.
+//
+// Job bridges:
+//   An entry may also provide `session_with_bridge_factory`, which builds a
+//   session together with the BoundedJobBridge bound to it
+//   (tensorplate/backend/bounded_job_bridge.hpp). Only such entries run
+//   typed jobs; `create_session_with_bridge` reports `Unsupported` for every
+//   other entry. `create_session` is unchanged and never builds a bridge.
 
 #pragma once
 
@@ -32,6 +39,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "tensorplate/backend/bounded_job_bridge.hpp"
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
@@ -48,13 +56,39 @@ namespace tensorplate {
 using ExecutionSessionFactory =
     std::function<Result<std::unique_ptr<ExecutionSession>>(ExecutionSessionRuntimeHooks)>;
 
-/// One registry entry: stable backend key, capability record, and the
-/// factory that builds a session. Equality is identity-by-name; the
-/// factory closure is not compared.
+/// A session and the job bridge bound to it, built by one factory call.
+/// The bridge controls jobs of this session's backend only and may outlive
+/// the session object. By the time the session's destructor returns, every
+/// job without a terminal event has received `failed`, every job whose
+/// release was confirmed has received `released`, and every session release
+/// whose jobs were all released has been acknowledged; afterwards no
+/// callback runs and `submit`, `release_session` and `health` report
+/// `Unavailable`. A job whose release could not be confirmed keeps its
+/// reservations held.
+struct SessionWithBridge {
+  std::unique_ptr<ExecutionSession> session;
+  std::shared_ptr<BoundedJobBridge> bridge;
+};
+
+/// Factory closure that constructs a concrete ExecutionSession together
+/// with its BoundedJobBridge. Same failure contract as
+/// `ExecutionSessionFactory`; on success both pointers are non-null.
+using SessionWithBridgeFactory =
+    std::function<Result<SessionWithBridge>(ExecutionSessionRuntimeHooks)>;
+
+/// One registry entry: stable backend key, capability record, the
+/// factory that builds a session and, optionally, the factory that builds
+/// a session with its job bridge. Equality is identity-by-name; the
+/// factory closures are not compared.
 struct BackendEntry {
   std::string backend_name;
   BackendCapability capability;
   ExecutionSessionFactory factory;
+  /// Optional. Builds a session and the BoundedJobBridge bound to it, for
+  /// backends that run typed jobs. `factory` stays required either way.
+  /// The default initializer keeps three-field initializations of this
+  /// aggregate free of missing-initializer warnings.
+  SessionWithBridgeFactory session_with_bridge_factory = nullptr;
 };
 
 /// Thread-safe execution-backend registry. The registry owns
@@ -110,6 +144,22 @@ class BackendRegistry {
   /// (`LoadFailed`, `ConfigInvalid`, `OOMError`); the registry
   /// forwards them unchanged.
   [[nodiscard]] Result<std::unique_ptr<ExecutionSession>> create_session(
+      std::string_view backend_name, ExecutionSessionRuntimeHooks hooks = {}) const;
+
+  /// Construct a fresh, unloaded `ExecutionSession` for `backend_name`
+  /// together with the `BoundedJobBridge` bound to it, by calling the
+  /// entry's `session_with_bridge_factory` outside the registry mutex.
+  /// Each call yields a new session and a new bridge.
+  ///
+  /// Returns:
+  ///   - `Unsupported` if the backend is not registered.
+  ///   - `Unsupported` with context `job_bridge_unsupported` if the entry
+  ///     has no `session_with_bridge_factory`; nothing is constructed.
+  ///   - the factory's error, unchanged.
+  ///   - `Internal` with context `null_session` or `null_bridge` if the
+  ///     factory reports success without one of the pair; whatever it did
+  ///     build is destroyed before returning.
+  [[nodiscard]] Result<SessionWithBridge> create_session_with_bridge(
       std::string_view backend_name, ExecutionSessionRuntimeHooks hooks = {}) const;
 
   /// Validate a model spec's `backend_hint` and precision hint against

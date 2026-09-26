@@ -14,6 +14,7 @@ add_executable(tp_test_unit
   buffer_pressure_test.cpp
   infer_request_test.cpp
   infer_result_test.cpp
+  job_value_objects_test.cpp
   execution_session_interface_test.cpp
   execution_session_lifecycle_test.cpp
   execution_session_validation_test.cpp

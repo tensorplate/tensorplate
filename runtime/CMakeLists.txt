@@ -26,6 +26,10 @@ set(_tp_runtime_sources
   src/core/infer_request.cpp
   src/core/infer_result.cpp
   src/core/execution_session.cpp
+  # Typed backend jobs: requests, results and the event-order checker.
+  src/core/job_request.cpp
+  src/core/job_result.cpp
+  src/core/job_event.cpp
   src/buffer/buffer_ref.cpp
   src/buffer/tensor_view.cpp
   src/buffer/buffer_manager.cpp
