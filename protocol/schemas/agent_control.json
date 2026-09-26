@@ -472,9 +472,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["session_count", "domain_bytes"],
-      "description": "Session quota the agent assigned to the member: the concurrent session count and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
+      "description": "Session quota the agent assigned to the member: the concurrent session count (at most 2048, the most sessions one member's ledger reports) and the per-domain session quota bytes that back it. In qualification mode `session_count` is the operator's test count. A member that serves no logical sessions carries zero sessions and no domain bytes.",
       "properties": {
-        "session_count": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "session_count": {"type": "integer", "minimum": 0, "maximum": 2048},
         "domain_bytes": {"$ref": "#/definitions/DomainQuotaBytes"}
       },
       "if": {"properties": {"session_count": {"minimum": 1}}},
