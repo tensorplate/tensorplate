@@ -924,7 +924,7 @@ fn the_bus_reading_never_reaches_matching() {
     //
     // Said deliberately once already: the NVIDIA display device ids are one
     // of the facts a RECORDED GCE machine type is checked against when the
-    // metadata service cannot be reached. They validate that record and
+    // metadata service gives no answer. They validate that record and
     // never derive a machine type -- and this fixture carries a live
     // metadata answer, so the record path is not taken here at all.
     let (_, fixture) = fixtures()
@@ -1585,7 +1585,11 @@ fn a_live_answer_that_is_not_a_machine_type_resource_name_is_refused_and_never_r
             }) => {
                 assert_eq!(source_name, "GCE metadata service", "{body}");
                 assert!(!detail.contains("REDACTED"), "{body}: not echoed: {detail}");
-                assert!(!detail.contains("proxy"), "{body}: not echoed: {detail}");
+                assert!(!detail.contains(body), "{body}: not echoed: {detail}");
+                assert!(
+                    detail.contains("such as a proxy or a custom route"),
+                    "{body}: says where such an answer comes from: {detail}"
+                );
             }
             other => panic!("{body}: expected Unrecognized, got {other:?}"),
         }

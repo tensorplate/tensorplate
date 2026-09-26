@@ -119,16 +119,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   record for the current boot the start uses it; without one, detection
   fails in the step the agent's start-up retry repeats over its existing
   20 s window, where before a 429 or 503 was a broken source that was
-  never retried. Any other answer still fails detection at once; its error
-  and `tensorplate doctor`'s hint now say it came from the metadata server
-  or from something answering in its place, and what to check. When
-  detection fails without an answer, the error names the cause class of
-  the last attempt, transient unavailability, blocked access (a refused
-  connection, now named apart from a timeout) or not reached, and what to
-  do about it, and `tensorplate doctor`'s hint covers all three. This is
-  the reboot boundary: after a reboot the agent
-  must reach the metadata service once before denied-egress operation
-  resumes. (V030-E01-F01-T03)
+  never retried. Any other answer -- another status, a response that
+  cannot be parsed, or a 200 whose body is not a machine type or an
+  instance id -- still fails detection at once; its error and `tensorplate
+  doctor`'s hint now say it came from the metadata server or from
+  something answering in its place, and what to check. When detection
+  fails without an answer, the error names the cause class of the last
+  attempt, transient unavailability, blocked access (a connection refused
+  or denied by local policy, now named apart from a timeout) or not
+  reached, and what to do about it, and `tensorplate doctor`'s hint covers
+  all three. This is the reboot boundary: after a reboot the agent must
+  reach the metadata service once before denied-egress operation resumes.
+  (V030-E01-F01-T03)
 - The documented rollback in `docs/install/lifecycle.md` restores
   `state/machine-type.json` from `state.bak` before the older release is
   installed, so the older agent keeps the machine type recorded in this boot.

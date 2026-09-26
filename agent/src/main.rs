@@ -1077,10 +1077,11 @@ mod tests {
     }
 
     #[test]
-    fn a_transient_or_refused_metadata_answer_without_a_record_is_retried() {
-        // What the probe hands identify when the service answered 429 or 503,
-        // or refused the connection, on a boot with no record yet: the
-        // failure the retry loop retries, never a broken source it gives up on.
+    fn every_unanswered_cause_without_a_record_is_the_failure_the_retry_repeats() {
+        // Whatever cause class the probe records -- 429, 503, refused or
+        // timeout -- a start without a record for this boot raises the one
+        // failure the retry loop repeats: the class changes the message,
+        // never whether the start is retried.
         for unanswered in ["http-503", "http-429", "refused", "timeout"] {
             let sources = HostSources {
                 gce_machine_type: None,

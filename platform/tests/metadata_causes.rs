@@ -60,7 +60,8 @@ fn without_a_record_the_error_names_the_cause_class_and_its_remedy() {
         ),
         (
             Some("timeout"),
-            "nothing answered from its metadata service within the budget (not reached",
+            "its metadata service was not reached: the connect failed or nothing answered within \
+             the budget (not reached",
             "a firewall rule, a proxy or custom routing drops the traffic",
         ),
         (
@@ -148,10 +149,10 @@ fn with_a_record_that_cannot_stand_in_the_error_still_opens_with_the_cause_class
 }
 
 #[test]
-fn a_binding_on_another_machine_type_is_refused_opening_with_the_cause_class() {
+fn a_binding_on_another_machine_type_is_refused_naming_the_cause_class() {
     // Offline, an earlier-boot binding on another machine type than this
-    // boot's record: the remedy is an online start, so the cause class of
-    // the missing answer comes first here too.
+    // boot's record: the remedy is an online start, so the message names the
+    // cause class of the missing answer too, after the refusal itself.
     let binding = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/identity/instance-binding-v1.json"),
@@ -166,11 +167,15 @@ fn a_binding_on_another_machine_type_is_refused_opening_with_the_cause_class() {
     match identify(&sources) {
         Err(PlatformProbeError::MachineTypeChanged { detail, .. }) => {
             assert!(
-                detail.starts_with(
-                    "host reports as a Compute Engine instance and connections to its \
+                detail.starts_with("the machine type recorded in this boot is `g2-standard-8`"),
+                "the refusal leads: {detail}"
+            );
+            assert!(
+                detail.contains(
+                    "(host reports as a Compute Engine instance and connections to its \
                      metadata service at 169.254.169.254:80 were refused (blocked access"
                 ),
-                "{detail}"
+                "the cause class follows: {detail}"
             );
             assert!(detail.contains("`g2-standard-4`"), "{detail}");
         }

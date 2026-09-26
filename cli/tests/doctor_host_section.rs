@@ -966,6 +966,12 @@ fn another_instance_another_machine_type_an_unreadable_binding_and_a_broken_answ
         source_name: tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH.to_string(),
         detail: "Permission denied (os error 13)".to_string(),
     };
+    // A 200 whose body is not a machine type: the same, from its source.
+    let unrecognized_answer = PlatformProbeError::Unrecognized {
+        source_name: tensorplate_platform::GCE_METADATA_SOURCE_NAME.to_string(),
+        detail: "the machine-type answer is not `projects/<project>/machineTypes/<machine-type>`"
+            .to_string(),
+    };
     // An answer that is not a result: no permission would change it.
     let broken_answer = PlatformProbeError::Unreadable {
         source_name: tensorplate_platform::GCE_METADATA_SOURCE_NAME.to_string(),
@@ -983,6 +989,10 @@ fn another_instance_another_machine_type_an_unreadable_binding_and_a_broken_answ
         (&unreadable, ["which owns /var/lib/tensorplate/identity"; 2]),
         (
             &broken_answer,
+            ["reaches 169.254.169.254:80 directly rather than through a proxy or custom route"; 2],
+        ),
+        (
+            &unrecognized_answer,
             ["reaches 169.254.169.254:80 directly rather than through a proxy or custom route"; 2],
         ),
     ] {

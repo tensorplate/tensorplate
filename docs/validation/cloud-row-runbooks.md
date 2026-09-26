@@ -323,7 +323,8 @@ machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
 every start where the GCE metadata service answered. The record is bound
 to the kernel boot id, the logical CPU count, `MemTotal` and the NVIDIA
 display PCI ids, and offline detection uses it only while the metadata
-query fails as unreachable **and** every one of those facts still
+query gives no answer (nothing in time, a refused connection, or a
+transient `429` or `503`) **and** every one of those facts still
 matches. The stage requires the record to exist before it denies
 anything, and then requires the identity to have come from it: the
 agent's `platform identity: ... source=recorded_gce_metadata
@@ -342,7 +343,7 @@ to or cloned into another instance, and so does one that names this
 instance on another machine type than the live answer, because the
 instance was given a different machine type; neither start writes either
 file. Reprovision by stopping the agent, deleting both files and starting
-it with the service reachable. With the service unreachable, a binding
+it with the service reachable. With no answer from the service, a binding
 written in the same boot must agree with the record, and one from an
 earlier boot must name the record's machine type. Upgrade requires the record the baseline wrote to be
 byte-identical after the candidate starts and the binding to exist;

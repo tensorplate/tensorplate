@@ -215,11 +215,11 @@ fn agent_socket_hint() -> &'static str {
     "is `tensorplate-agent` running? check its state in this platform's service supervisor"
 }
 
-/// What to do when a Compute Engine instance whose metadata service could not
-/// be reached has a machine-type record this user cannot read. The record
+/// What to do when a Compute Engine instance whose metadata service gave no
+/// answer has a machine-type record this user cannot read. The record
 /// lives in the state directory, which only root and the `tensorplate` group
 /// can enter; nothing about the record itself is wrong.
-const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reached and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
+const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service gave no answer and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
 
 /// What to do when a Compute Engine instance could not establish its machine
 /// type without the metadata service. Neither re-running as another user nor
@@ -295,8 +295,8 @@ pub fn render_host_section(
             // is malformed to re-run as root wastes their next ten minutes.
             let hint = match err {
                 // Read only on a Compute Engine instance whose metadata
-                // service could not be reached, from a directory only root
-                // and the tensorplate group can enter.
+                // service gave no answer, from a directory only root and the
+                // tensorplate group can enter.
                 PlatformProbeError::Unreadable { source_name, .. }
                     if source_name.ends_with(MACHINE_TYPE_RECORD_PATH) =>
                 {
@@ -315,6 +315,12 @@ pub fn render_host_section(
                 }
                 PlatformProbeError::Unreadable { .. } => {
                     "a detection source could not be read — re-run as a user that can read /etc and /proc"
+                }
+                // A 200 whose body is not a machine type or an instance id.
+                PlatformProbeError::Unrecognized { source_name, .. }
+                    if source_name == GCE_METADATA_SOURCE_NAME =>
+                {
+                    METADATA_ANSWER_HINT
                 }
                 PlatformProbeError::Unrecognized { .. } => {
                     "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"

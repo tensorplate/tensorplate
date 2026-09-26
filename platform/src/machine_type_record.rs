@@ -12,7 +12,7 @@
 // So `tensorplate-agent` records what the metadata service answered, next to
 // the local facts it answered on: the kernel boot ID, logical CPU count,
 // `MemTotal`, and the NVIDIA display device ids on the PCI bus. When the
-// service later cannot be reached, detection uses the recorded machine type only while every one of
+// service later gives no answer, detection uses the recorded machine type only while every one of
 // those facts is still exactly what it was. A record cannot survive a new
 // kernel boot: start the agent online after every reboot before going offline.
 // Anything else -- no record, a record this release cannot read, a fact that
@@ -28,9 +28,10 @@ use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{
     is_compute_engine, logical_cpu_count, machine_type_from_metadata, mem_total_from_meminfo,
-    nvidia_display_devices, HostSources,
+    nvidia_display_devices, HostSources, UNANSWERED_HTTP_429, UNANSWERED_HTTP_503,
+    UNANSWERED_REFUSED, UNANSWERED_TIMEOUT,
 };
-use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME};
+use crate::error::{PlatformProbeError, BROKEN_METADATA_ANSWER, GCE_METADATA_SOURCE_NAME};
 use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
 /// What every unestablished-identity error opens with when the sources do
@@ -46,26 +47,31 @@ const CONTEXT: &str =
 /// come from something else answering in the server's place.
 fn context(sources: &HostSources) -> String {
     match sources.gce_metadata_unanswered.as_deref() {
-        Some("http-503") => "host reports as a Compute Engine instance and its metadata service \
+        Some(UNANSWERED_HTTP_503) => {
+            "host reports as a Compute Engine instance and its metadata service \
              answered HTTP 503 (transient unavailability: Google documents 503 while the \
              metadata server boots or migrates or the host is under maintenance, and says it \
              resolves within a few seconds; if it persists, something other than the metadata \
              server may be answering for 169.254.169.254:80, such as a proxy or a custom route)"
-            .to_string(),
-        Some("http-429") => "host reports as a Compute Engine instance and its metadata service \
+                .to_string()
+        }
+        Some(UNANSWERED_HTTP_429) => {
+            "host reports as a Compute Engine instance and its metadata service \
              answered HTTP 429 (transient unavailability: Google documents 429 as an endpoint's \
              rate limiting, and says to retry after a few seconds; if it persists, something \
              other than the metadata server may be answering for 169.254.169.254:80, such as a \
              proxy or a custom route)"
+                .to_string()
+        }
+        Some(UNANSWERED_REFUSED) => "host reports as a Compute Engine instance and connections to \
+             its metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
+             rule, a proxy, custom routing or local policy on this host rejects them; allow that \
+             address and port for tensorplate-agent)"
             .to_string(),
-        Some("refused") => "host reports as a Compute Engine instance and connections to its \
-             metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
-             rule, a proxy or custom routing on this host rejects them; allow that address and \
-             port for tensorplate-agent)"
-            .to_string(),
-        Some("timeout") => "host reports as a Compute Engine instance and nothing answered from \
-             its metadata service within the budget (not reached: the network may not be up \
-             yet, or a firewall rule, a proxy or custom routing drops the traffic)"
+        Some(UNANSWERED_TIMEOUT) => "host reports as a Compute Engine instance and its metadata \
+             service was not reached: the connect failed or nothing answered within the budget \
+             (not reached: the network may not be up yet, or a firewall rule, a proxy or custom \
+             routing drops the traffic)"
             .to_string(),
         _ => CONTEXT.to_string(),
     }
@@ -80,7 +86,7 @@ pub enum MachineTypeSource {
     /// A live answer from the GCE metadata service.
     GceMetadata,
     /// A metadata answer `tensorplate-agent` recorded earlier in this kernel boot,
-    /// used because the service could not be reached and every local fact
+    /// used because the service gave no answer and every local fact
     /// the record is bound to is unchanged.
     RecordedFromMetadata,
 }
@@ -390,10 +396,11 @@ pub fn establish_machine_type(
         let machine_type =
             machine_type_from_metadata(body).ok_or_else(|| PlatformProbeError::Unrecognized {
                 source_name: GCE_METADATA_SOURCE_NAME.to_string(),
-                detail: "the machine-type answer is not \
-                         `projects/<project>/machineTypes/<machine-type>` with a canonical \
-                         machine type"
-                    .to_string(),
+                detail: format!(
+                    "the machine-type answer is not \
+                     `projects/<project>/machineTypes/<machine-type>` with a canonical machine \
+                     type; {BROKEN_METADATA_ANSWER}"
+                ),
             })?;
         check_live_instance(sources, &machine_type)?;
         return Ok(Some((machine_type, MachineTypeSource::GceMetadata)));
@@ -463,12 +470,14 @@ pub fn establish_machine_type(
             // Offline there is no instance id to tell a resize from a moved
             // disk; the online start that follows refuses either way, with
             // MachineTypeChanged or InstanceChanged, and both reprovision
-            // alike. That start needs the service, so the message opens with
-            // why it gave none now, as every other refusal here does.
+            // alike. That start needs the service, so the message also says
+            // why it gave none now, as every other refusal here does -- after
+            // the refusal, which no wait clears.
             return Err(machine_type_changed(&format!(
-                "{context}, and the machine type recorded in this boot is `{}`, and this host's \
-                 identity was recorded on `{}`; the instance was given a different machine type, \
-                 or the disk was moved to an instance of that type",
+                "the machine type recorded in this boot is `{}` and this host's identity was \
+                 recorded on `{}`: the instance was given a different machine type, or the disk \
+                 was moved to an instance of that type, and without a live answer the two cannot \
+                 be told apart ({context})",
                 record.machine_type, binding.machine_type
             )));
         }

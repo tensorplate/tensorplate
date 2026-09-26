@@ -24,8 +24,9 @@ use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RE
 
 use crate::detect::{
     identify, instance_id_from_metadata, is_compute_engine, HostReport, HostSources,
+    UNANSWERED_HTTP_429, UNANSWERED_HTTP_503, UNANSWERED_REFUSED, UNANSWERED_TIMEOUT,
 };
-use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME};
+use crate::error::{PlatformProbeError, BROKEN_METADATA_ANSWER, GCE_METADATA_SOURCE_NAME};
 use crate::identity::{HostIdentity, HostProbe};
 use crate::instance_binding::InstanceBinding;
 use crate::machine_type_record::{MachineTypeRecord, RecordWrite};
@@ -70,16 +71,6 @@ type GceSources = (
     Option<String>,
 );
 
-/// What a metadata answer that is neither a result nor a documented
-/// transient status says about the host, for the error that reports it.
-/// The 403 causes are Google's, from its metadata server troubleshooting
-/// page; that page also says a proxy can intercept the VM's queries.
-const BROKEN_ANSWER: &str = "the answer came from the metadata server itself, which Google \
-    documents answering 403 for an endpoint disabled by project or instance settings or a \
-    request that fails its security checks, or from something answering in its place for \
-    169.254.169.254:80, such as a proxy or a custom route; check those settings and let this \
-    host reach the metadata server directly, then start tensorplate-agent again";
-
 /// What asking for the instance id came to.
 #[derive(Debug, Eq, PartialEq)]
 enum InstanceSources {
@@ -113,7 +104,7 @@ impl SystemHostProbe {
     /// service describe the machine running the test, not the tree, so
     /// under a root they are not consulted at all — including `uname` — and
     /// neither are the machine-type record, which is only ever read when the
-    /// metadata service was asked and could not be reached, and the instance
+    /// metadata service was asked and gave no answer, and the instance
     /// binding, which is read beside that question. Writing either does
     /// honour the root.
     /// [`Self::detect`] therefore fails on a staged tree rather than
@@ -376,7 +367,7 @@ impl SystemHostProbe {
             Err(failure) => Err(PlatformProbeError::Unreadable {
                 source_name: GCE_METADATA_SOURCE_NAME.to_string(),
                 detail: format!(
-                    "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms); {BROKEN_ANSWER}",
+                    "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms); {BROKEN_METADATA_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
                 ),
             }),
@@ -489,7 +480,7 @@ impl SystemHostProbe {
             Err(failure) => Err(PlatformProbeError::Unreadable {
                 source_name: GCE_METADATA_SOURCE_NAME.to_string(),
                 detail: format!(
-                    "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms); {BROKEN_ANSWER}",
+                    "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms); {BROKEN_METADATA_ANSWER}",
                     METADATA_TIMEOUT.as_millis()
                 ),
             }),
@@ -498,7 +489,7 @@ impl SystemHostProbe {
 
     /// Record the machine type a live metadata answer in `sources` names,
     /// bound to the local facts it was answered on, for detection to use
-    /// when the metadata service cannot be reached.
+    /// when the metadata service gives no answer.
     ///
     /// Writes nothing, and reports [`RecordWrite::NotApplicable`], when
     /// `sources` carry no live answer — including sources whose machine type
@@ -942,8 +933,9 @@ enum MetadataFailure {
     /// The service was not reached: the connect or the request failed, or
     /// nothing at all came back before the budget ran out.
     Timeout,
-    /// The connection was actively refused: something on this host or its
-    /// route rejected the connection to 169.254.169.254:80.
+    /// The connection was actively refused, or denied by local policy:
+    /// something on this host or its route rejected the connection to
+    /// 169.254.169.254:80.
     Refused,
     /// The service answered one of the two statuses Google documents as
     /// transient, HTTP 429 or 503, with a status line and header block this
@@ -960,10 +952,10 @@ impl MetadataFailure {
     /// not been asked, or `None` for an answer that is a broken source.
     fn unanswered(&self) -> Option<&'static str> {
         match self {
-            Self::Timeout => Some("timeout"),
-            Self::Refused => Some("refused"),
-            Self::Transient(429) => Some("http-429"),
-            Self::Transient(_) => Some("http-503"),
+            Self::Timeout => Some(UNANSWERED_TIMEOUT),
+            Self::Refused => Some(UNANSWERED_REFUSED),
+            Self::Transient(429) => Some(UNANSWERED_HTTP_429),
+            Self::Transient(_) => Some(UNANSWERED_HTTP_503),
             Self::Answered(_) => None,
         }
     }
@@ -980,15 +972,15 @@ impl std::fmt::Display for MetadataFailure {
     }
 }
 
-/// What a failed connect to the metadata service came to: refused only when
-/// the connection was actively refused. Every other failure -- a timeout,
-/// an unreachable network, an address this host cannot use -- is a service
-/// that was not reached.
+/// What a failed connect to the metadata service came to: blocked when the
+/// connection was actively refused or denied by local policy (a firewall
+/// rule rejecting it, or a service unit's address deny list). Every other
+/// failure -- a timeout, an unreachable network, an address this host cannot
+/// use -- is a service that was not reached.
 fn connect_failure(kind: ErrorKind) -> MetadataFailure {
-    if kind == ErrorKind::ConnectionRefused {
-        MetadataFailure::Refused
-    } else {
-        MetadataFailure::Timeout
+    match kind {
+        ErrorKind::ConnectionRefused | ErrorKind::PermissionDenied => MetadataFailure::Refused,
+        _ => MetadataFailure::Timeout,
     }
 }
 
@@ -2198,17 +2190,18 @@ mod tests {
     }
 
     #[test]
-    fn only_a_refused_connect_is_named_as_refused() {
-        assert!(matches!(
-            connect_failure(ErrorKind::ConnectionRefused),
-            MetadataFailure::Refused
-        ));
+    fn only_a_refused_or_denied_connect_is_named_as_refused() {
+        for kind in [ErrorKind::ConnectionRefused, ErrorKind::PermissionDenied] {
+            assert!(
+                matches!(connect_failure(kind), MetadataFailure::Refused),
+                "{kind:?} is blocked access"
+            );
+        }
         for kind in [
             ErrorKind::TimedOut,
             ErrorKind::ConnectionReset,
             ErrorKind::ConnectionAborted,
             ErrorKind::AddrNotAvailable,
-            ErrorKind::PermissionDenied,
             ErrorKind::Other,
         ] {
             assert!(
@@ -2289,12 +2282,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_service_that_answers_503_twice_is_retried_into_a_live_answer() {
-        // The reboot case: no record for this boot, and a metadata server
-        // still starting. Each attempt is what one start of the agent's
-        // retry loop does -- gather, then identify -- against a stand-in
-        // that answers 503, 503, then the machine type.
+    /// What one start gathers from the stand-in at `addr` on the committed
+    /// L4 host, as the agent's retry loop does before it identifies.
+    fn gathered(probe: &SystemHostProbe, addr: &str) -> HostSources {
         let host: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -2304,44 +2294,49 @@ mod tests {
         )
         .expect("host fixture parses");
         let text = |key: &str| host["sources"][key].as_str().map(str::to_string);
+        let (
+            gce_machine_type,
+            machine_type_record,
+            gce_instance_id,
+            instance_binding,
+            gce_metadata_unanswered,
+        ) = probe
+            .gce_sources(
+                GCE,
+                || query_metadata(addr, METADATA_PATH, Duration::from_millis(500)),
+                || query_metadata(addr, METADATA_INSTANCE_ID_PATH, Duration::from_millis(500)),
+            )
+            .expect("gathered");
+        HostSources {
+            uname_machine: text("uname_machine"),
+            os_release: text("os_release"),
+            cpuinfo: text("cpuinfo"),
+            proc_meminfo: text("proc_meminfo"),
+            pci_devices: text("pci_devices"),
+            dmi_product_name: GCE.map(str::to_string),
+            boot_id: Some("00000000-0000-4000-8000-000000000001\n".to_string()),
+            gce_machine_type,
+            machine_type_record,
+            gce_instance_id,
+            instance_binding,
+            gce_metadata_unanswered,
+            ..HostSources::default()
+        }
+    }
+
+    #[test]
+    fn a_service_that_answers_503_twice_is_retried_into_a_live_answer() {
+        // The reboot case: no record for this boot, and a metadata server
+        // still starting. Each attempt is what one start of the agent's
+        // retry loop does -- gather, then identify -- against a stand-in
+        // that answers 503, 503, then the machine type.
         let root = staged_identity_root();
         let probe = SystemHostProbe::with_root(root.path());
         let addr = serve_metadata(
             vec![UNAVAILABLE_503, UNAVAILABLE_503, MACHINE_TYPE_200],
             INSTANCE_ID_200,
         );
-        let mut outcomes = Vec::new();
-        for _ in 0..3 {
-            let (
-                gce_machine_type,
-                machine_type_record,
-                gce_instance_id,
-                instance_binding,
-                gce_metadata_unanswered,
-            ) = probe
-                .gce_sources(
-                    GCE,
-                    || query_metadata(&addr, METADATA_PATH, Duration::from_millis(500)),
-                    || query_metadata(&addr, METADATA_INSTANCE_ID_PATH, Duration::from_millis(500)),
-                )
-                .expect("gathered");
-            let sources = HostSources {
-                uname_machine: text("uname_machine"),
-                os_release: text("os_release"),
-                cpuinfo: text("cpuinfo"),
-                proc_meminfo: text("proc_meminfo"),
-                pci_devices: text("pci_devices"),
-                dmi_product_name: GCE.map(str::to_string),
-                boot_id: Some("00000000-0000-4000-8000-000000000001\n".to_string()),
-                gce_machine_type,
-                machine_type_record,
-                gce_instance_id,
-                instance_binding,
-                gce_metadata_unanswered,
-                ..HostSources::default()
-            };
-            outcomes.push(identify(&sources));
-        }
+        let outcomes: Vec<_> = (0..3).map(|_| identify(&gathered(&probe, &addr))).collect();
         for outcome in &outcomes[..2] {
             match outcome {
                 Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
@@ -2361,6 +2356,74 @@ mod tests {
                 .machine_type
                 .as_deref(),
             Some("g2-standard-8")
+        );
+    }
+
+    #[test]
+    fn a_200_that_is_not_a_machine_type_or_an_id_names_where_it_came_from() {
+        // What a proxy's or a captive portal's page looks like: a well-framed
+        // 200 whose body is not the resource the query asked for.
+        const PROXY_PAGE_200: &str =
+            "HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\n<html>proxy login</html>";
+        const NOT_AN_ID_200: &str = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\ninstance-1";
+        for (label, machine_type, instance_id) in [
+            (
+                "a page for the machine type",
+                PROXY_PAGE_200,
+                INSTANCE_ID_200,
+            ),
+            (
+                "a name for the instance id",
+                MACHINE_TYPE_200,
+                NOT_AN_ID_200,
+            ),
+        ] {
+            let root = staged_identity_root();
+            let probe = SystemHostProbe::with_root(root.path());
+            let addr = serve_metadata(vec![machine_type], instance_id);
+            match identify(&gathered(&probe, &addr)) {
+                Err(PlatformProbeError::Unrecognized {
+                    source_name,
+                    detail,
+                }) => {
+                    assert_eq!(source_name, GCE_METADATA_SOURCE_NAME, "{label}");
+                    assert!(
+                        detail.contains("such as a proxy or a custom route"),
+                        "{label}: {detail}"
+                    );
+                    assert!(
+                        !detail.contains("proxy login"),
+                        "{label}: not echoed: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected Unrecognized, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn another_instance_answering_through_the_stand_in_is_refused() {
+        // The changed-instance class end to end: a binding for this host's
+        // instance, and a metadata service answering for another one.
+        let root = staged_identity_root();
+        let binding = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/identity/instance-binding-v1.json"
+        ))
+        .expect("binding fixture");
+        assert!(binding.contains("1234567890123456789"));
+        std::fs::write(staged_binding(&root), binding).expect("stage the binding");
+        let probe = SystemHostProbe::with_root(root.path());
+        let addr = serve_metadata(
+            vec![MACHINE_TYPE_200],
+            "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n1234567890123456790",
+        );
+        assert!(
+            matches!(
+                identify(&gathered(&probe, &addr)),
+                Err(PlatformProbeError::InstanceChanged { .. })
+            ),
+            "a binding for another instance is refused"
         );
     }
 
