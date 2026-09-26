@@ -14,11 +14,16 @@ Operator command-line interface for one reachable `tensorplate-agent`. Lands in
 | `tensorplate logs` | Reads bounded NDJSON log entries from a local source (V01-E11-F07). |
 | `tensorplate rollback` | Restores the previous active deployment via the agent (V01-E11-F04). |
 | `tensorplate device` | Manages the local registry of SSH-reachable devices. |
+| `tensorplate bundle provision` | Puts a bundle the provisioning manifest lists into the bundle import directory, verified file by file ([`bundle.md`](bundle.md)). |
 | `tensorplate version` | Prints CLI, protocol, and bundle-format versions. |
 
 The CLI is **a client**. Every mutating operation goes through the
 `tensorplate-agent` control API; the CLI never edits desired-state files,
 launches/restarts workers, or mutates serving-worker process state directly.
+The exception is `bundle provision`, which writes into this host's bundle
+import directory, `/var/lib/tensorplate/bundles/import/`, without the agent;
+remote deploy already copies into that directory, and a deploy from there
+still goes through the agent.
 
 ## Device access profiles
 

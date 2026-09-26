@@ -63,6 +63,40 @@ it publishes a release, so a local signature bundle alone is insufficient.
 The verified public checksum digest stays bound to the baseline assets
 when the harness records evidence and later installs them.
 
+### The reboot stage (L4 row, from 0.3.0)
+
+From 0.3.0 the release gate also requires the L4 row's report to carry a
+`reboot` stage. It is a stage beside the canonical eight, not one of them:
+no other row, and no earlier release of this one, may carry it, so every
+report recorded before the rule stays valid. `check-evidence-bundles.sh`
+compares versions as numbers, so 0.10.0 and a 0.3.0 candidate both count
+as 0.3.0 or later.
+
+The stage crosses a host reboot. Before it, the runner suspends the run to
+a marker file (`lifecycle_suspend`). After it, a new shell resumes the run
+from the marker (`lifecycle_resume`). A marker resumes once: the runner
+renames it to `<marker>.resumed`, and it refuses a marker older than a
+report already in the evidence directory, since another run has finished
+there since. The resumed run records:
+
+- whether the boot ID changed;
+- the three sub-cases, in this order, because each consumes the state the
+  one before it leaves:
+  - `blocked`: metadata denied, the agent fails closed after its retry
+    window;
+  - `transient`: the denial lifted inside the window, the committed set
+    recovers with no reprovisioning;
+  - `denied_egress_resumes`: denied-egress operation resumes within the
+    new boot;
+- the retry window the run observed.
+
+The gate accepts the stage only when the boot ID changed, all three
+sub-cases passed, the window was recorded and every cited log exists.
+**The Ubuntu cloud harness does not run this stage yet**, so an L4 run
+filed for 0.3.0 or later is refused until it does. The marker, before and
+after it is resumed, records the evidence directory's absolute path: keep
+it outside the evidence directory and never file it.
+
 ## What a passing run does and does not prove
 
 On these rows doctor reports `cuda_runtime = ok` with the NVIDIA driver
@@ -637,6 +671,7 @@ run's files are known to carry:
 | `doctor-baseline.json`, `doctor-after-rollback.json` and their `.exit` files, `doctor-after-upgrade.json` | doctor on the baseline, filed; doctor after the upgrade, asserted |
 | `upgrade-baseline-deploy.json`, `status-after-upgrade.json`, `upgrade-result.json`, `status-after-rollback.json`, `rollback-result.json` | the live results on the baseline, after the upgrade and after the rollback |
 | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and copies whatever that tail quotes |
+| `reboot.log`, `reboot-blocked.log`, `reboot-transient.log`, `reboot-denied_egress_resumes.log` | the reboot stage's summary and each sub-case's output, when the run records the stage; a sub-case's output can quote whatever the checks it runs print |
 
 Check every file and report `detail` before filing. Put both assets
 directories somewhere without an account name in their paths to keep it

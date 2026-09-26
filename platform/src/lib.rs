@@ -72,7 +72,7 @@ pub use row::{
     Accelerator, AcceleratorMatchPolicy, AdmissionPosture, BackendPackageSet, CpuArchitecture,
     CpuIdentity, CpuVendor, Evidence, Gate, GateSemantics, GateValue, KernelDriverStack,
     ModelClassRowRef, OsIdentity, PackageChannel, Partitioning, PlatformSupportRow, Provenance,
-    StackComponent, SupportLevel, ValidationEnvironment, ValidationEnvironmentKind,
-    PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
+    RunnerProfilePackageSet, StackComponent, SupportLevel, ValidationEnvironment,
+    ValidationEnvironmentKind, PLATFORM_SUPPORT_ROW_SCHEMA_VERSION,
 };
 pub use signal_telemetry::{SignalName, SignalOutcome, SignalStatus, SignalTelemetry};

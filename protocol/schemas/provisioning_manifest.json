@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/provisioning_manifest.json",
+  "title": "TensorPlate provisioning manifest",
+  "description": "The trust root for `tensorplate bundle provision`: every file of every bundle it can provision, with the SHA-256 and size each file must have. The `tensorplate-cli` Debian package ships one at /usr/share/tensorplate/provisioning/manifest.json. A provisioned bundle directory holds exactly these files, one of which is the bundle's own `manifest.json`, and nothing else. Beyond this schema, readers also require unique bundle names, unique file paths within a bundle, no path that is also another path's directory, and a `manifest.json` file in every bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bundles"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor hint; readers ignore it."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "files"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What the operator names on the command line, and the directory the bundle is provisioned into under /var/lib/tensorplate/bundles/import/.",
+            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "maxLength": 128
+          },
+          "description": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "sha256", "size"],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "Relative path inside the bundle directory, `/`-separated, with no empty, `.` or `..` segment.",
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$",
+                  "maxLength": 512
+                },
+                "sha256": {
+                  "type": "string",
+                  "description": "Lowercase hex SHA-256 of the file's exact bytes.",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The file's size in bytes."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

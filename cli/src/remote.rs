@@ -376,6 +376,9 @@ fn build_remote_args(subcommand: &Subcommand) -> CliResult<Vec<String>> {
         Subcommand::Device(_) => Err(CliError::Internal(
             "device subcommands are local-only and not remotely routable".into(),
         )),
+        Subcommand::Bundle(_) => Err(CliError::Internal(
+            "bundle subcommands are local-only and not remotely routable".into(),
+        )),
     }
 }
 

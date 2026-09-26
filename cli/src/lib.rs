@@ -143,6 +143,17 @@ where
         return commands::device::run(&OpensshRunner, &renderer, cmd, stdout, stderr);
     }
 
+    // Provisioning writes into this host's import directory from a local
+    // source, in the operator's shell; it is never routed to a device.
+    if let Subcommand::Bundle(cmd) = parsed.subcommand {
+        if parsed.global.device.is_some() {
+            return Err(CliError::Usage(
+                "`bundle provision` provisions the host it runs on; run it on the device, not through --device".into(),
+            ));
+        }
+        return commands::bundle::run(&renderer, cmd, stdout);
+    }
+
     // Route operational commands to a selected device over SSH when one is
     // selected; otherwise fall through to the local agent path below.
     if let Route::Device { name, entry } = remote::resolve_route(&parsed.global)? {
@@ -191,6 +202,9 @@ where
         // Handled above; kept for exhaustiveness without a panic path.
         Subcommand::Device(_) => Err(CliError::Internal(
             "device subcommand should have been dispatched locally".into(),
+        )),
+        Subcommand::Bundle(_) => Err(CliError::Internal(
+            "bundle subcommand should have been dispatched locally".into(),
         )),
         Subcommand::Doctor(opts) => {
             let profile = resolve_profile()?;

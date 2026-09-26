@@ -211,6 +211,34 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "runner_profiles": {
+            "type": "array",
+            "description": "Packages a runner profile on this backend path needs beyond `packages`, per profile. Optional; readers also require unique `runner_profile` values within one backend path.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "runner_profile",
+                "packages"
+              ],
+              "properties": {
+                "runner_profile": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$"
+                },
+                "packages": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
           }
         }
       }

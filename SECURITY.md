@@ -75,9 +75,16 @@ gh attestation verify tensorplate-agent_0.1.0-1_arm64.deb \
   --repo tensorplate/tensorplate
 ```
 
-A dependency SBOM (SPDX/CycloneDX) attested with `actions/attest-sbom` is on
-the roadmap; until then, provenance attestations capture build materials and
-the manifest records package versions and digests.
+Every pull request, every push to `main` and `develop`, and a weekly
+scheduled run check the Rust workspace's licenses, dependency sources and
+known vulnerabilities with `cargo-deny`, and produce a CycloneDX SBOM of each
+Python package (the SDK with and without its `vision` extra) and audit its
+runtime dependencies with `pip-audit`; see
+[Supply-chain checks](docs/release/artifacts.md#supply-chain-checks). Those
+SBOMs are workflow artifacts, not release assets: an SBOM attached to a
+release and attested with `actions/attest-sbom` is still on the roadmap.
+Until then, provenance attestations capture build materials and the
+manifest records package versions and digests.
 
 Hosts installed through the APT channel (`packages.tensorplate.com`) get
 this verification automatically: repository metadata (`InRelease`) is
