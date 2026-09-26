@@ -1,0 +1,2 @@
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000008","op":"ledger_status","member":{"deployment_id":"speech-tts","generation":4},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"runtime","correlation_id":"ctl-000008","op":"ledger_status","member":{"deployment_id":"speech-tts","generation":5},"status":"member_mismatch"}

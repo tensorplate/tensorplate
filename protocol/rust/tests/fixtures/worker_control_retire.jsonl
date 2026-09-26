@@ -1,0 +1,2 @@
+{"schema_version":"0.1","transaction_id":"tx-00000000-0000-4000-8000-000000000001","correlation_id":"ctl-000003","op":"retire","member":{"deployment_id":"speech-tts","generation":4},"drain_timeout_ms":30000,"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"tx-00000000-0000-4000-8000-000000000001","correlation_id":"ctl-000003","op":"retire","member":{"deployment_id":"speech-tts","generation":4},"status":"ok"}

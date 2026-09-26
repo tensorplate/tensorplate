@@ -1,0 +1,2 @@
+{"schema_version":"0.1","transaction_id":"tx-00000000-0000-4000-8000-000000000001","correlation_id":"ctl-000012","op":"activate","member":{"deployment_id":"speech-tts","generation":5},"timeout_ms":1000}
+{"schema_version":"0.1","transaction_id":"tx-00000000-0000-4000-8000-000000000001","correlation_id":"ctl-000012","op":"activate","member":{"deployment_id":"speech-tts","generation":5},"status":"error","error":{"code":"not_ready","message":"still warming: 1/2 engines loaded\n\"decoder\" pending (café)"}}
