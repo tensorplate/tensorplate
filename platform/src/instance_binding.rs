@@ -21,7 +21,7 @@
 //   reachable. A binding this release cannot parse has no instance or
 //   machine type to compare, so it is treated as absent and replaced on
 //   that start.
-// - With the service unreachable, a binding written in this boot must agree
+// - With no answer from the service, a binding written in this boot must agree
 //   with the machine-type record detection is about to use -- the same
 //   machine type, and a digest of exactly those bytes -- or detection fails.
 //   A binding from an earlier boot must still name the record's machine
@@ -42,7 +42,7 @@ use tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH;
 use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{instance_id_from_metadata, HostSources};
-use crate::error::{PlatformProbeError, BROKEN_METADATA_ANSWER, GCE_METADATA_SOURCE_NAME};
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME, NOT_THE_METADATA_RESOURCE};
 use crate::machine_type_record::{is_boot_id, MachineTypeRecord};
 
 /// The only binding layout this release reads or writes. A rollback
@@ -187,7 +187,7 @@ pub fn check_live_instance(
         instance_id_from_metadata(answer).ok_or_else(|| PlatformProbeError::Unrecognized {
             source_name: GCE_METADATA_SOURCE_NAME.to_string(),
             detail: format!(
-                "the instance-id answer is not a decimal instance id; {BROKEN_METADATA_ANSWER}"
+                "the instance-id answer is not a decimal instance id; {NOT_THE_METADATA_RESOURCE}"
             ),
         })?;
     let Some(binding) = sources

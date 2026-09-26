@@ -62,7 +62,7 @@ fn without_a_record_the_error_names_the_cause_class_and_its_remedy() {
             Some("timeout"),
             "its metadata service was not reached: the connect failed or nothing answered within \
              the budget (not reached",
-            "a firewall rule, a proxy or custom routing drops the traffic",
+            "an address deny list on the agent's unit, a proxy or custom routing drops the traffic",
         ),
         (
             None,

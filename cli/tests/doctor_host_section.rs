@@ -989,11 +989,17 @@ fn another_instance_another_machine_type_an_unreadable_binding_and_a_broken_answ
         (&unreadable, ["which owns /var/lib/tensorplate/identity"; 2]),
         (
             &broken_answer,
-            ["reaches 169.254.169.254:80 directly rather than through a proxy or custom route"; 2],
+            [
+                "reaches 169.254.169.254:80 directly rather than through a proxy or custom route",
+                "project and instance settings do not disable the endpoint",
+            ],
         ),
         (
             &unrecognized_answer,
-            ["reaches 169.254.169.254:80 directly rather than through a proxy or custom route"; 2],
+            [
+                "reaches 169.254.169.254:80 directly rather than through a proxy or custom route",
+                "project and instance settings do not disable the endpoint",
+            ],
         ),
     ] {
         let section =
@@ -1056,7 +1062,7 @@ fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
     for cause in [
         "transient unavailability (HTTP 429 or 503) clears within seconds",
         "blocked access needs this host allowed to reach 169.254.169.254:80",
-        "not reached means nothing answered in time",
+        "not reached means the connect failed or nothing answered in time",
     ] {
         assert!(
             hint.contains(cause),

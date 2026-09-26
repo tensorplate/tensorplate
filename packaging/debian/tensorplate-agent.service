@@ -29,7 +29,7 @@ Wants=local-fs.target
 # The window must exceed five worst-case restart cycles, or the burst never
 # trips and a genuinely broken agent restarts forever instead of settling
 # into `failed`. A cycle is RestartSec plus the agent's own startup work,
-# and on a Compute Engine host whose metadata service is unreachable that
+# and on a Compute Engine host whose metadata service gives no answer that
 # work includes the bounded detection retry -- about 15.5s of sleeping, up
 # to ~25s when each attempt is slow. So a cycle reaches ~30s and five of
 # them ~150s, which a 60s window cannot contain. 300s holds that with

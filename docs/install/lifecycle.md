@@ -84,7 +84,7 @@ sudo systemctl stop tensorplate-agent tensorplate-observability
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
 # On a Compute Engine instance, put the machine-type record back: the older
 # agent reads it at this path, and without it an older agent started with
-# the metadata service unreachable cannot establish its machine type.
+# no answer from the metadata service cannot establish its machine type.
 if sudo test -f /var/lib/tensorplate/state.bak/machine-type.json; then
   sudo install -d -o tensorplate -g tensorplate -m 0750 /var/lib/tensorplate/state
   sudo cp -p /var/lib/tensorplate/state.bak/machine-type.json /var/lib/tensorplate/state/machine-type.json

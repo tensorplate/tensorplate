@@ -933,9 +933,9 @@ enum MetadataFailure {
     /// The service was not reached: the connect or the request failed, or
     /// nothing at all came back before the budget ran out.
     Timeout,
-    /// The connection was actively refused, or denied by local policy:
-    /// something on this host or its route rejected the connection to
-    /// 169.254.169.254:80.
+    /// The connection was actively refused, or denied by a local security
+    /// policy: something on this host or its route rejected the connection
+    /// to 169.254.169.254:80.
     Refused,
     /// The service answered one of the two statuses Google documents as
     /// transient, HTTP 429 or 503, with a status line and header block this
@@ -973,10 +973,12 @@ impl std::fmt::Display for MetadataFailure {
 }
 
 /// What a failed connect to the metadata service came to: blocked when the
-/// connection was actively refused or denied by local policy (a firewall
-/// rule rejecting it, or a service unit's address deny list). Every other
-/// failure -- a timeout, an unreachable network, an address this host cannot
-/// use -- is a service that was not reached.
+/// connection was actively refused (a firewall rule rejecting it) or denied
+/// by a local security policy (an LSM, a seccomp filter or a BPF connect
+/// hook, which return `PermissionDenied`). Every other failure -- a timeout,
+/// an unreachable network, an address this host cannot use -- is a service
+/// that was not reached. That includes a firewall rule or a unit's address
+/// deny list that drops the traffic: a dropped SYN only times out.
 fn connect_failure(kind: ErrorKind) -> MetadataFailure {
     match kind {
         ErrorKind::ConnectionRefused | ErrorKind::PermissionDenied => MetadataFailure::Refused,
@@ -1452,8 +1454,9 @@ mod tests {
                 assert!(detail.contains(METADATA_INSTANCE_ID_PATH), "{detail}");
                 assert!(detail.contains("404"), "{detail}");
                 assert!(
-                    detail.contains("such as a proxy or a custom route"),
-                    "the broken-answer remedy: {detail}"
+                    detail.contains("such as a proxy or a custom route")
+                        && detail.contains("disabled by project or instance settings"),
+                    "the broken-answer remedy, both sources: {detail}"
                 );
             }
             other => panic!("an answer that is not an id is a broken source: {other:?}"),
@@ -2274,8 +2277,9 @@ mod tests {
             Err(PlatformProbeError::Unreadable { detail, .. }) => {
                 assert!(detail.contains("403"), "{detail}");
                 assert!(
-                    detail.contains("such as a proxy or a custom route"),
-                    "{detail}"
+                    detail.contains("such as a proxy or a custom route")
+                        && detail.contains("disabled by project or instance settings"),
+                    "both sources: {detail}"
                 );
             }
             other => panic!("a 403 is a broken source: {other:?}"),
@@ -2366,16 +2370,18 @@ mod tests {
         const PROXY_PAGE_200: &str =
             "HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\n<html>proxy login</html>";
         const NOT_AN_ID_200: &str = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\ninstance-1";
-        for (label, machine_type, instance_id) in [
+        for (label, machine_type, instance_id, body) in [
             (
                 "a page for the machine type",
                 PROXY_PAGE_200,
                 INSTANCE_ID_200,
+                "<html>proxy login</html>",
             ),
             (
                 "a name for the instance id",
                 MACHINE_TYPE_200,
                 NOT_AN_ID_200,
+                "instance-1",
             ),
         ] {
             let root = staged_identity_root();
@@ -2388,13 +2394,15 @@ mod tests {
                 }) => {
                     assert_eq!(source_name, GCE_METADATA_SOURCE_NAME, "{label}");
                     assert!(
-                        detail.contains("such as a proxy or a custom route"),
+                        detail.contains("in the metadata server's place")
+                            && detail.contains("such as a proxy or a custom route"),
                         "{label}: {detail}"
                     );
                     assert!(
-                        !detail.contains("proxy login"),
-                        "{label}: not echoed: {detail}"
+                        !detail.contains("403"),
+                        "{label}: a 200 is not given the server's own refusals: {detail}"
                     );
+                    assert!(!detail.contains(body), "{label}: not echoed: {detail}");
                 }
                 other => panic!("{label}: expected Unrecognized, got {other:?}"),
             }

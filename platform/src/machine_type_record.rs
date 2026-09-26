@@ -31,7 +31,7 @@ use crate::detect::{
     nvidia_display_devices, HostSources, UNANSWERED_HTTP_429, UNANSWERED_HTTP_503,
     UNANSWERED_REFUSED, UNANSWERED_TIMEOUT,
 };
-use crate::error::{PlatformProbeError, BROKEN_METADATA_ANSWER, GCE_METADATA_SOURCE_NAME};
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME, NOT_THE_METADATA_RESOURCE};
 use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
 /// What every unestablished-identity error opens with when the sources do
@@ -65,13 +65,13 @@ fn context(sources: &HostSources) -> String {
         }
         Some(UNANSWERED_REFUSED) => "host reports as a Compute Engine instance and connections to \
              its metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
-             rule, a proxy, custom routing or local policy on this host rejects them; allow that \
-             address and port for tensorplate-agent)"
+             rule, a proxy or custom routing rejects them, or a local security policy denies \
+             them; allow that address and port for tensorplate-agent)"
             .to_string(),
         Some(UNANSWERED_TIMEOUT) => "host reports as a Compute Engine instance and its metadata \
              service was not reached: the connect failed or nothing answered within the budget \
-             (not reached: the network may not be up yet, or a firewall rule, a proxy or custom \
-             routing drops the traffic)"
+             (not reached: the network may not be up yet, or a firewall rule, an address deny \
+             list on the agent's unit, a proxy or custom routing drops the traffic)"
             .to_string(),
         _ => CONTEXT.to_string(),
     }
@@ -399,7 +399,7 @@ pub fn establish_machine_type(
                 detail: format!(
                     "the machine-type answer is not \
                      `projects/<project>/machineTypes/<machine-type>` with a canonical machine \
-                     type; {BROKEN_METADATA_ANSWER}"
+                     type; {NOT_THE_METADATA_RESOURCE}"
                 ),
             })?;
         check_live_instance(sources, &machine_type)?;

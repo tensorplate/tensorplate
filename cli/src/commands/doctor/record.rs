@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn an_offline_instance_with_no_recorded_machine_type_is_still_recorded() {
-        // The metadata service unreachable and nothing recorded: detection
+        // No answer from the metadata service and nothing recorded: detection
         // refuses to establish an identity, and that refusal is a note. The
         // sources that led to it -- the firmware name included -- are the
         // deliverable.

@@ -40,23 +40,23 @@ use crate::identity::{
 use crate::machine_type_record::{establish_machine_type, MachineTypeSource};
 use crate::row::{CpuArchitecture, CpuVendor};
 
-/// The recorded content of every source host identity is derived from.
-///
-/// A field is `None` when its source does not exist on the machine (no
-/// `/etc/os-release` on macOS, no `/etc/nv_tegra_release` off Jetson).
-/// Absence is a signal, not a failure: it is how the platform is told
-/// apart.
 /// The [`HostSources::gce_metadata_unanswered`] tokens: why a Compute
 /// Engine instance has no live metadata answer this start. The probe
 /// writes them and detection's messages read them.
 pub const UNANSWERED_TIMEOUT: &str = "timeout";
-/// The connection was refused, or denied by local policy.
+/// The connection was refused, or denied by a local security policy.
 pub const UNANSWERED_REFUSED: &str = "refused";
 /// The service answered HTTP 429.
 pub const UNANSWERED_HTTP_429: &str = "http-429";
 /// The service answered HTTP 503.
 pub const UNANSWERED_HTTP_503: &str = "http-503";
 
+/// The recorded content of every source host identity is derived from.
+///
+/// A field is `None` when its source does not exist on the machine (no
+/// `/etc/os-release` on macOS, no `/etc/nv_tegra_release` off Jetson).
+/// Absence is a signal, not a failure: it is how the platform is told
+/// apart.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct HostSources {
     /// `uname -m`.
@@ -107,9 +107,9 @@ pub struct HostSources {
     /// The machine-type record `tensorplate-agent` wrote from an earlier live
     /// metadata answer (see [`crate::machine_type_record`]).
     ///
-    /// Read only on a Compute Engine instance whose metadata service could
-    /// not be reached, so it is `None` whenever [`Self::gce_machine_type`]
-    /// is present.
+    /// Read only on a Compute Engine instance whose metadata service gave no
+    /// answer, so it is `None` whenever [`Self::gce_machine_type`] is
+    /// present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_type_record: Option<String>,
     /// Body of the GCE metadata instance-id response: the instance id in
@@ -124,8 +124,8 @@ pub struct HostSources {
     pub instance_binding: Option<String>,
     /// Why a Compute Engine instance has no live metadata answer this
     /// start: `timeout` (the connect failed or nothing came back within the
-    /// budget), `refused` (the connection was refused, or denied by local
-    /// policy), `http-429` or `http-503` (the service
+    /// budget), `refused` (the connection was refused, or denied by a local
+    /// security policy), `http-429` or `http-503` (the service
     /// answered a status Google documents as transient). Names the last
     /// query that went unanswered. `None` when there is a live answer or the
     /// host is not an instance.

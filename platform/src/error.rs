@@ -72,9 +72,8 @@ impl PlatformRegistryError {
 pub const GCE_METADATA_SOURCE_NAME: &str = "GCE metadata service";
 
 /// What a metadata answer that is neither a result nor a documented
-/// transient status says about the host, for every error that reports one:
-/// another status, a response that cannot be parsed, or a 200 whose body is
-/// not a machine type or an instance id.
+/// transient status says about the host, for the error that reports it:
+/// another status, or a response that cannot be parsed.
 /// The 403 causes are Google's, from its metadata server troubleshooting
 /// page; that page also says a proxy can intercept the VM's queries.
 pub(crate) const BROKEN_METADATA_ANSWER: &str =
@@ -83,6 +82,15 @@ pub(crate) const BROKEN_METADATA_ANSWER: &str =
     request that fails its security checks, or from something answering in its place for \
     169.254.169.254:80, such as a proxy or a custom route; check those settings and let this \
     host reach the metadata server directly, then start tensorplate-agent again";
+
+/// What a 200 whose body is not the resource the query asked for -- not a
+/// machine type, not an instance id -- says about the host. The metadata
+/// server answers those resources in a fixed form; a page or a bare name
+/// comes from something answering in its place.
+pub(crate) const NOT_THE_METADATA_RESOURCE: &str = "a 200 that is not the resource asked \
+    for comes from something answering for 169.254.169.254:80 in the metadata server's place, \
+    such as a proxy or a custom route; let this host reach the metadata server directly, then \
+    start tensorplate-agent again";
 
 /// Why platform detection failed.
 ///

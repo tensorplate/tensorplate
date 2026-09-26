@@ -323,8 +323,9 @@ machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
 every start where the GCE metadata service answered. The record is bound
 to the kernel boot id, the logical CPU count, `MemTotal` and the NVIDIA
 display PCI ids, and offline detection uses it only while the metadata
-query gives no answer (nothing in time, a refused connection, or a
-transient `429` or `503`) **and** every one of those facts still
+query gives no answer (a connect that failed or was refused, nothing in
+time, or a transient `429` or `503`) **and** every one of those facts
+still
 matches. The stage requires the record to exist before it denies
 anything, and then requires the identity to have come from it: the
 agent's `platform identity: ... source=recorded_gce_metadata
@@ -381,8 +382,8 @@ attempt cannot settle and the retry ended early. None of these lines
 appears on a host that answers first time, and none appears off Compute
 Engine at all.
 
-Retried alike: nothing answering in time, a refused connection, and the
-two statuses Google documents as transient, `503` (the metadata server
+Retried alike: a connect that fails or is refused, nothing answering in
+time, and the two statuses Google documents as transient, `503` (the metadata server
 booting or migrating, or host maintenance) and `429` (an endpoint's rate
 limiting). With a record for the current boot the start uses it and does
 not retry; without one it retries. Any other answer is not retried. When
