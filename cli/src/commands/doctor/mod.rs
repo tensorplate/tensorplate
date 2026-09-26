@@ -1187,6 +1187,20 @@ fn findings_from_status(status: &AgentStatus) -> Vec<Finding> {
             ),
             None,
         ));
+    } else if let Some(set) = status
+        .resident_set
+        .as_ref()
+        .filter(|set| !set.members.is_empty())
+    {
+        out.push(Finding::ok(
+            FindingId::ActiveDeployment,
+            Severity::Info,
+            format!(
+                "resident set of {} members; no single active deployment",
+                set.members.len()
+            ),
+            None,
+        ));
     } else {
         out.push(Finding::missing(
             FindingId::ActiveDeployment,
@@ -1309,6 +1323,8 @@ mod tests {
 
     fn ok_status_response(active: bool) -> ControlResponse {
         let mut status = AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Ready,
             active: None,
             previous_active: None,
@@ -1500,6 +1516,63 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f["id"] == "active_deployment" && f["status"] == "ok"));
+    }
+
+    #[test]
+    fn doctor_reports_a_resident_set_instead_of_no_deployment() {
+        let client = MockAgentClient::new();
+        client.enqueue_ok(ControlResponse::ok(Some("v".into())));
+        let mut response = ok_status_response(false);
+        let member = |id: &str, generation| tensorplate_protocol::MemberStatus {
+            deployment_id: id.into(),
+            generation,
+            bundle_digest: "sha256:ab".into(),
+            state: tensorplate_protocol::MemberState::Serving,
+            admission_mode: tensorplate_protocol::AdmissionMode::Production,
+            quota: tensorplate_protocol::MemberQuota::default(),
+            unary_endpoint: None,
+            stream_endpoint: None,
+            stream_api_version: None,
+            effective_quota: None,
+            staged_bytes: None,
+            contact: None,
+        };
+        if let Some(status) = response.agent_status.as_mut() {
+            status.resident_set = Some(tensorplate_protocol::ResidentSetStatus {
+                set_id: "set-1".into(),
+                revision: 2,
+                members: vec![member("speech-stt", 3), member("speech-tts", 5)],
+            });
+        }
+        client.enqueue_ok(response);
+        let r = Renderer::new(OutputMode::Json);
+        let mut out = Vec::new();
+        let result = run(
+            &r,
+            &profile(),
+            &client,
+            &DoctorArgs::default(),
+            None,
+            &mut out,
+            &mut Vec::new(),
+        );
+        assert!(result.is_ok());
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        let finding = parsed["payload"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "active_deployment")
+            .expect("active_deployment finding")
+            .clone();
+        assert_eq!(finding["status"], "ok");
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("resident set of 2 members"),
+            "{finding}"
+        );
     }
 
     #[test]

@@ -23,6 +23,8 @@ use tensorplate_protocol::agent_control::{
 
 fn active_deployment_response() -> ControlResponse {
     let status = AgentStatus {
+        resident_set: None,
+        control_features: Vec::new(),
         agent_state: AgentRunState::Ready,
         active: Some(DeploymentSummary {
             deployment_id: "d-1".into(),
@@ -112,6 +114,8 @@ fn infer_returns_unavailable_when_no_active_deployment() {
     let stub = AgentStub::start();
     let mut response = ControlResponse::ok(Some("c".into()));
     response.agent_status = Some(AgentStatus {
+        resident_set: None,
+        control_features: Vec::new(),
         agent_state: AgentRunState::Ready,
         active: None,
         previous_active: None,

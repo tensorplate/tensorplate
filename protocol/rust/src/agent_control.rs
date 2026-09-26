@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::deploy_transaction::DeployState;
 use crate::error::ErrorCode;
+use crate::member_quota::MemberQuota;
+use crate::resident_set::{
+    AdmissionMode, MemberState, ResidentMember, ResidentSet, RetainedGeneration,
+};
+use crate::serde_shape::{deserialize_some, deserialize_some_map_only};
 use crate::supervision_event::{SupervisionAgentState, SupervisionServingState};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
@@ -32,6 +37,18 @@ pub fn is_valid_deployment_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+/// Longest `evidence_ref` a deploy request may carry, in characters (the
+/// unit JSON Schema's `maxLength` counts).
+pub const MAX_EVIDENCE_REF_CHARS: usize = 256;
+
+/// `AgentStatus::control_features` entry of an agent that executes a
+/// `deploy` with `set_operation` `add`.
+pub const FEATURE_SET_OPERATION_ADD: &str = "set_operation_add";
+
+/// `AgentStatus::control_features` entry of an agent that executes a
+/// `rollback` naming a `deployment_id`.
+pub const FEATURE_MEMBER_ROLLBACK: &str = "member_rollback";
+
 /// Operation discriminator.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,26 +58,133 @@ pub enum ControlOp {
     Rollback,
     Health,
     Version,
+    /// Retire one resident-set member.
+    Undeploy,
+    /// Return a quarantined member to service.
+    Recover,
+}
+
+impl ControlOp {
+    /// The operation's wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deploy => "deploy",
+            Self::Status => "status",
+            Self::Rollback => "rollback",
+            Self::Health => "health",
+            Self::Version => "version",
+            Self::Undeploy => "undeploy",
+            Self::Recover => "recover",
+        }
+    }
+}
+
+impl std::fmt::Display for ControlOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How a deploy changes the resident set.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetOperation {
+    /// Deploy in place of the current deployment: the singleton semantics,
+    /// and a new generation of the named member in a resident set.
+    #[default]
+    Replace,
+    /// Admit an additional member beside the committed set.
+    Add,
+}
+
+impl SetOperation {
+    /// Whether this is the default, which writers omit.
+    // serde's `skip_serializing_if` callback receives `&T`.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    #[must_use]
+    pub fn is_replace(&self) -> bool {
+        *self == Self::Replace
+    }
 }
 
 /// Deploy operation payload.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+///
+/// Every field added after the singleton contract is omitted at its
+/// default, so a default deploy is byte-for-byte the request earlier
+/// clients send. `admission_mode`, `test_count` and `evidence_ref` are
+/// operator-only.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeployRequest {
     pub bundle_path: String,
     pub deployment_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub expected_bundle_digest: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "SetOperation::is_replace")]
+    pub set_operation: SetOperation,
+    /// Absent means `production`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub admission_mode: Option<AdmissionMode>,
+    /// The member's session count in qualification mode.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub test_count: Option<u32>,
+    /// The approved evidence reference of an ordinary activation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub evidence_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RollbackRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub reason: Option<String>,
+    /// The member to roll back; absent means the singleton rollback.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub deployment_id: Option<String>,
+}
+
+/// Payload of `undeploy` and `recover`: the member they act on.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberRequest {
+    pub deployment_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatusRequest {
     #[serde(default = "default_true")]
     pub include_quarantine: bool,
@@ -85,101 +209,195 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Top-level control request envelope.
+///
+/// The agent refuses any request field it does not know, so a field a
+/// later client adds is refused rather than ignored, and an explicit
+/// `null` where the schema requires a value.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlRequest {
     pub schema_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
     pub correlation_id: Option<String>,
     pub op: ControlOp,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_map_only"
+    )]
     pub deploy: Option<DeployRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_map_only"
+    )]
     pub rollback: Option<RollbackRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_map_only"
+    )]
     pub status: Option<StatusRequest>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_map_only"
+    )]
+    pub undeploy: Option<MemberRequest>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some_map_only"
+    )]
+    pub recover: Option<MemberRequest>,
 }
 
 impl ControlRequest {
+    fn envelope(op: ControlOp, correlation_id: Option<String>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            correlation_id,
+            op,
+            deploy: None,
+            rollback: None,
+            status: None,
+            undeploy: None,
+            recover: None,
+        }
+    }
+
     /// Build a `deploy` request, stamping the schema version automatically.
     #[must_use]
     pub fn deploy(correlation_id: Option<String>, payload: DeployRequest) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            correlation_id,
-            op: ControlOp::Deploy,
             deploy: Some(payload),
-            rollback: None,
-            status: None,
+            ..Self::envelope(ControlOp::Deploy, correlation_id)
         }
     }
 
     #[must_use]
     pub fn rollback(correlation_id: Option<String>, payload: RollbackRequest) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            correlation_id,
-            op: ControlOp::Rollback,
-            deploy: None,
             rollback: Some(payload),
-            status: None,
+            ..Self::envelope(ControlOp::Rollback, correlation_id)
         }
     }
 
     #[must_use]
     pub fn status(correlation_id: Option<String>, payload: StatusRequest) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            correlation_id,
-            op: ControlOp::Status,
-            deploy: None,
-            rollback: None,
             status: Some(payload),
+            ..Self::envelope(ControlOp::Status, correlation_id)
         }
     }
 
     #[must_use]
     pub fn health(correlation_id: Option<String>) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            correlation_id,
-            op: ControlOp::Health,
-            deploy: None,
-            rollback: None,
-            status: None,
-        }
+        Self::envelope(ControlOp::Health, correlation_id)
     }
 
     #[must_use]
     pub fn version(correlation_id: Option<String>) -> Self {
+        Self::envelope(ControlOp::Version, correlation_id)
+    }
+
+    /// Build an `undeploy` request for one member.
+    #[must_use]
+    pub fn undeploy(correlation_id: Option<String>, payload: MemberRequest) -> Self {
         Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            correlation_id,
-            op: ControlOp::Version,
-            deploy: None,
-            rollback: None,
-            status: None,
+            undeploy: Some(payload),
+            ..Self::envelope(ControlOp::Undeploy, correlation_id)
+        }
+    }
+
+    /// Build a `recover` request for one member.
+    #[must_use]
+    pub fn recover(correlation_id: Option<String>, payload: MemberRequest) -> Self {
+        Self {
+            recover: Some(payload),
+            ..Self::envelope(ControlOp::Recover, correlation_id)
         }
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlRequestError {
-    #[error("deploy operation requires a `deploy` payload")]
-    MissingDeployPayload,
-    #[error("rollback operation must not carry a `deploy` payload")]
-    UnexpectedDeployPayload,
-    #[error("deploy operation must not carry a `rollback` payload")]
-    UnexpectedRollbackPayload,
+    #[error("`{0}` operation requires a `{0}` payload")]
+    MissingPayload(ControlOp),
+    #[error("`{op}` operation must not carry a `{payload}` payload")]
+    UnexpectedPayload {
+        op: ControlOp,
+        payload: &'static str,
+    },
     #[error("deploy.bundle_path must be non-empty")]
     EmptyBundlePath,
     #[error("deploy.deployment_id must be non-empty")]
     EmptyDeploymentId,
     #[error(
-        "deploy.deployment_id must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved"
+        "{0}.deployment_id must be 1 to 128 bytes and contain only ASCII letters, digits, `-`, `_`, or `.`; `.` and `..` are reserved"
     )]
-    InvalidDeploymentId,
+    InvalidDeploymentId(ControlOp),
     #[error("deploy.expected_bundle_digest, if present, must follow the `algo:hex` form")]
     InvalidExpectedDigest,
+    #[error("deploy.test_count requires admission_mode `qualification`")]
+    TestCountWithoutQualification,
+    #[error("deploy.admission_mode `qualification` requires a test_count")]
+    QualificationWithoutTestCount,
+    #[error("deploy.test_count must be at least 1")]
+    ZeroTestCount,
+    #[error("deploy.evidence_ref does not belong with admission_mode `qualification`")]
+    EvidenceWithQualification,
+    #[error(
+        "deploy.evidence_ref must be 1 to {MAX_EVIDENCE_REF_CHARS} characters with no control characters"
+    )]
+    InvalidEvidenceRef,
+}
+
+fn validate_deploy(d: &DeployRequest) -> Result<(), ControlRequestError> {
+    if d.bundle_path.is_empty() {
+        return Err(ControlRequestError::EmptyBundlePath);
+    }
+    if d.deployment_id.is_empty() {
+        return Err(ControlRequestError::EmptyDeploymentId);
+    }
+    if !is_valid_deployment_id(&d.deployment_id) {
+        return Err(ControlRequestError::InvalidDeploymentId(ControlOp::Deploy));
+    }
+    if let Some(ref dg) = d.expected_bundle_digest {
+        if !looks_like_digest(dg) {
+            return Err(ControlRequestError::InvalidExpectedDigest);
+        }
+    }
+    let qualification = d.admission_mode == Some(AdmissionMode::Qualification);
+    match (qualification, d.test_count) {
+        (true, None) => return Err(ControlRequestError::QualificationWithoutTestCount),
+        (false, Some(_)) => return Err(ControlRequestError::TestCountWithoutQualification),
+        (true, Some(0)) => return Err(ControlRequestError::ZeroTestCount),
+        _ => {}
+    }
+    if let Some(evidence) = &d.evidence_ref {
+        if qualification {
+            return Err(ControlRequestError::EvidenceWithQualification);
+        }
+        if !(1..=MAX_EVIDENCE_REF_CHARS).contains(&evidence.chars().count())
+            || evidence.chars().any(|c| c.is_ascii_control())
+        {
+            return Err(ControlRequestError::InvalidEvidenceRef);
+        }
+    }
+    Ok(())
+}
+
+fn validate_member_id(op: ControlOp, deployment_id: &str) -> Result<(), ControlRequestError> {
+    if is_valid_deployment_id(deployment_id) {
+        Ok(())
+    } else {
+        Err(ControlRequestError::InvalidDeploymentId(op))
+    }
 }
 
 /// Whether `d` has the repository's digest form: `algo:hex`, lowercase
@@ -197,46 +415,55 @@ pub(crate) fn looks_like_digest(d: &str) -> bool {
     }
 }
 
-impl ValidatePayload for ControlRequest {
-    fn validate_payload(self) -> Result<Self, DecodeError> {
-        let invalid = |err: ControlRequestError| DecodeError::InvalidPayload(err.to_string());
-        match self.op {
-            ControlOp::Deploy => {
-                let Some(ref d) = self.deploy else {
-                    return Err(invalid(ControlRequestError::MissingDeployPayload));
-                };
-                if self.rollback.is_some() {
-                    return Err(invalid(ControlRequestError::UnexpectedRollbackPayload));
-                }
-                if d.bundle_path.is_empty() {
-                    return Err(invalid(ControlRequestError::EmptyBundlePath));
-                }
-                if d.deployment_id.is_empty() {
-                    return Err(invalid(ControlRequestError::EmptyDeploymentId));
-                }
-                if !is_valid_deployment_id(&d.deployment_id) {
-                    return Err(invalid(ControlRequestError::InvalidDeploymentId));
-                }
-                if let Some(ref dg) = d.expected_bundle_digest {
-                    if !looks_like_digest(dg) {
-                        return Err(invalid(ControlRequestError::InvalidExpectedDigest));
-                    }
-                }
-            }
-            ControlOp::Rollback => {
-                if self.deploy.is_some() {
-                    return Err(invalid(ControlRequestError::UnexpectedDeployPayload));
-                }
-            }
-            ControlOp::Status | ControlOp::Health | ControlOp::Version => {
-                if self.deploy.is_some() {
-                    return Err(invalid(ControlRequestError::UnexpectedDeployPayload));
-                }
-                if self.rollback.is_some() {
-                    return Err(invalid(ControlRequestError::UnexpectedRollbackPayload));
-                }
+impl ControlRequest {
+    fn validate(&self) -> Result<(), ControlRequestError> {
+        // Each payload belongs to exactly one operation.
+        let payloads = [
+            ("deploy", self.deploy.is_some(), ControlOp::Deploy),
+            ("rollback", self.rollback.is_some(), ControlOp::Rollback),
+            ("status", self.status.is_some(), ControlOp::Status),
+            ("undeploy", self.undeploy.is_some(), ControlOp::Undeploy),
+            ("recover", self.recover.is_some(), ControlOp::Recover),
+        ];
+        for (payload, present, owner) in payloads {
+            if present && self.op != owner {
+                return Err(ControlRequestError::UnexpectedPayload {
+                    op: self.op,
+                    payload,
+                });
             }
         }
+        match self.op {
+            ControlOp::Deploy => validate_deploy(
+                self.deploy
+                    .as_ref()
+                    .ok_or(ControlRequestError::MissingPayload(self.op))?,
+            ),
+            ControlOp::Rollback => self
+                .rollback
+                .as_ref()
+                .and_then(|rollback| rollback.deployment_id.as_deref())
+                .map_or(Ok(()), |id| validate_member_id(self.op, id)),
+            ControlOp::Undeploy | ControlOp::Recover => {
+                let member = if self.op == ControlOp::Undeploy {
+                    &self.undeploy
+                } else {
+                    &self.recover
+                };
+                let member = member
+                    .as_ref()
+                    .ok_or(ControlRequestError::MissingPayload(self.op))?;
+                validate_member_id(self.op, &member.deployment_id)
+            }
+            ControlOp::Status | ControlOp::Health | ControlOp::Version => Ok(()),
+        }
+    }
+}
+
+impl ValidatePayload for ControlRequest {
+    fn validate_payload(self) -> Result<Self, DecodeError> {
+        self.validate()
+            .map_err(|err| DecodeError::InvalidPayload(err.to_string()))?;
         Ok(self)
     }
 }
@@ -324,6 +551,41 @@ pub struct DeploymentSummary {
     pub promoted_monotonic_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serving_url: Option<String>,
+}
+
+impl DeploymentSummary {
+    /// The singleton summary of a resident-set member, served at
+    /// `serving_url`.
+    #[must_use]
+    pub fn from_member(member: &ResidentMember, serving_url: Option<String>) -> Self {
+        Self {
+            deployment_id: member.deployment_id.clone(),
+            bundle_digest: member.bundle_digest.clone(),
+            bundle_name: Some(member.bundle_name.clone()),
+            bundle_version: Some(member.bundle_version.clone()),
+            backend_hint: Some(member.backend_hint.clone()),
+            model_class: Some(member.model_class.clone()),
+            staged_path: Some(member.staged_path.clone()),
+            promoted_monotonic_ns: member.promoted_monotonic_ns,
+            serving_url,
+        }
+    }
+
+    /// The singleton summary of a retained generation.
+    #[must_use]
+    pub fn from_retained(retained: &RetainedGeneration) -> Self {
+        Self {
+            deployment_id: retained.deployment_id.clone(),
+            bundle_digest: retained.bundle_digest.clone(),
+            bundle_name: Some(retained.bundle_name.clone()),
+            bundle_version: Some(retained.bundle_version.clone()),
+            backend_hint: Some(retained.backend_hint.clone()),
+            model_class: Some(retained.model_class.clone()),
+            staged_path: Some(retained.staged_path.clone()),
+            promoted_monotonic_ns: retained.promoted_monotonic_ns,
+            serving_url: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -629,7 +891,7 @@ fn validate_signal_telemetry(telemetry: &PlatformTelemetryStatus) -> Result<(), 
 }
 
 /// Aggregate agent status payload.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentStatus {
     pub agent_state: AgentRunState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -650,6 +912,144 @@ pub struct AgentStatus {
     pub supervision: Option<SupervisionStatusSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_telemetry: Option<PlatformTelemetryStatus>,
+    /// The committed resident set, when the durable state records one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_set: Option<ResidentSetStatus>,
+    /// Control operations this agent executes beyond the singleton deploy
+    /// and rollback ([`FEATURE_SET_OPERATION_ADD`],
+    /// [`FEATURE_MEMBER_ROLLBACK`]). A client sends a request that depends
+    /// on one only when it is listed, because an agent that predates a
+    /// request field ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_features: Vec<String>,
+}
+
+/// Whether the agent's polls of a member's worker are being answered.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactState {
+    InContact,
+    OutOfContact,
+}
+
+/// One resident-set member at its committed generation, as status reports
+/// it. Fields whose source does not exist yet stay absent:
+/// `stream_api_version` until the stream endpoint lands, `effective_quota`
+/// and `contact` until the agent polls the member's worker over the
+/// runtime control channel, and `staged_bytes` until staging is keyed by
+/// generation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MemberStatus {
+    pub deployment_id: String,
+    pub generation: u64,
+    pub bundle_digest: String,
+    pub state: MemberState,
+    pub admission_mode: AdmissionMode,
+    /// The session quota committed for the member.
+    pub quota: MemberQuota,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unary_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_api_version: Option<String>,
+    /// The quota the member's worker reports in force; it may be lower than
+    /// `quota`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_quota: Option<MemberQuota>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactState>,
+}
+
+/// The committed resident set as status reports it, members in committed
+/// order.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResidentSetStatus {
+    pub set_id: String,
+    pub revision: u64,
+    pub members: Vec<MemberStatus>,
+}
+
+impl ResidentSetStatus {
+    /// Project a committed set: each member with the endpoints the
+    /// committed endpoint map gives its generation.
+    #[must_use]
+    pub fn from_committed(set: &ResidentSet) -> Self {
+        let members = set
+            .members
+            .iter()
+            .map(|member| {
+                let endpoints = set.endpoint_map.iter().find(|entry| {
+                    entry.deployment_id == member.deployment_id
+                        && entry.generation == member.generation
+                });
+                MemberStatus {
+                    deployment_id: member.deployment_id.clone(),
+                    generation: member.generation,
+                    bundle_digest: member.bundle_digest.clone(),
+                    state: member.state,
+                    admission_mode: member.admission_mode,
+                    quota: member.quota,
+                    unary_endpoint: endpoints.and_then(|entry| entry.unary_endpoint.clone()),
+                    stream_endpoint: endpoints.and_then(|entry| entry.stream_endpoint.clone()),
+                    stream_api_version: None,
+                    effective_quota: None,
+                    staged_bytes: None,
+                    contact: None,
+                }
+            })
+            .collect();
+        Self {
+            set_id: set.set_id.clone(),
+            revision: set.revision,
+            members,
+        }
+    }
+}
+
+/// The singleton `active` and `previous_active` a committed set projects,
+/// so clients that read only `active` keep working on a set of one: its
+/// only member when the set has exactly one and it serves (with the unary
+/// `/infer` URL of its committed endpoint), and that member's retained
+/// generation. A set of any other shape projects neither.
+#[must_use]
+pub fn singleton_slots(
+    set: &ResidentSet,
+) -> (Option<DeploymentSummary>, Option<DeploymentSummary>) {
+    let [member] = set.members.as_slice() else {
+        return (None, None);
+    };
+    if member.state != MemberState::Serving {
+        return (None, None);
+    }
+    let serving_url = set
+        .endpoint_map
+        .iter()
+        .find(|entry| {
+            entry.deployment_id == member.deployment_id && entry.generation == member.generation
+        })
+        .and_then(|entry| entry.unary_endpoint.as_deref())
+        .and_then(unary_infer_url);
+    (
+        Some(DeploymentSummary::from_member(member, serving_url)),
+        member
+            .previous
+            .as_ref()
+            .map(DeploymentSummary::from_retained),
+    )
+}
+
+/// The `/infer` URL of a unary endpoint that is a loopback HTTP origin
+/// (`http://127.0.0.1:<port>` or `http://localhost:<port>`), the form the
+/// singleton `serving_url` takes.
+fn unary_infer_url(endpoint: &str) -> Option<String> {
+    let port = endpoint
+        .strip_prefix("http://127.0.0.1:")
+        .or_else(|| endpoint.strip_prefix("http://localhost:"))?;
+    (!port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| format!("{endpoint}/infer"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -761,6 +1161,7 @@ mod tests {
                 deployment_id: "deploy-2024-1".into(),
                 expected_bundle_digest: Some("sha256:cafebabe".into()),
                 labels: Default::default(),
+                ..DeployRequest::default()
             },
         );
         let raw = serde_json::to_string(&req).expect("serialize");
@@ -832,6 +1233,7 @@ mod tests {
         let req = ControlRequest::rollback(
             None,
             RollbackRequest {
+                deployment_id: None,
                 reason: Some("operator intervention".into()),
             },
         );
@@ -1008,6 +1410,8 @@ mod tests {
                 failure: None,
             }),
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: None,
                 previous_active: None,
@@ -1086,6 +1490,8 @@ mod tests {
     #[test]
     fn agent_status_with_supervision_round_trips() {
         let status = AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Failed,
             active: None,
             previous_active: None,

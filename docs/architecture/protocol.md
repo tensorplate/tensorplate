@@ -63,13 +63,27 @@ The agent and CLI currently share one exact-match version decoder with every
 other protocol payload; bumping that global constant for a local status field
 would reject mixed-version agent/CLI installs and every unrelated `0.1`
 payload rather than provide minor-version compatibility. `supervision`,
-`serving_url`, and `platform_telemetry` follow this rule. The schema, Rust
-binding, and round-trip tests still change together, and the exception does
-not apply to request fields or changed meanings. Schema validators pinned to
-the previous file remain strict because `additionalProperties` is false;
-compatibility here is the deployed serde-reader contract. Retire this
-exception when per-schema minor-version negotiation replaces the global
-exact-equality check.
+`serving_url`, `platform_telemetry`, `resident_set` and `control_features`
+follow this rule. The schema, Rust binding, and round-trip tests still
+change together, and the exception does not apply to changed meanings.
+Schema validators pinned to the previous file remain strict because
+`additionalProperties` is false; compatibility here is the deployed
+serde-reader contract. Retire this exception when per-schema minor-version
+negotiation replaces the global exact-equality check.
+
+Request additions to the same local API follow a stricter rule, because
+agents before the set-mutation shapes ignore request fields they do not
+know. From that release on the agent refuses any request field, payload or
+`null` it does not know, so a later addition is refused rather than
+misread. An added request field must mean exactly today's behaviour when
+absent and be omitted at that default, so existing requests stay
+byte-for-byte what earlier agents read (a recorded golden exchange pins
+this). A client sends a non-default value only to an agent that lists the
+matching `control_features` entry, since an older agent would act on the
+rest of the request. A new operation needs no such check: an older agent
+refuses an unknown `op`. `set_operation`, `admission_mode`, `test_count`,
+`evidence_ref`, `rollback.deployment_id`, `undeploy` and `recover` follow
+this rule, which retires with the response exception.
 
 A second narrow pre-1.0 exception covers the shared closed enums: a value
 may be appended under `0.1` to the error-code enum (`error.json` and every

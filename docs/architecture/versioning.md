@@ -78,14 +78,17 @@ control response has a constrained pre-1.0 exception: optional output-only
 and new readers default their absence. The global decoder currently requires
 exact equality and shares its version with every protocol family, so a global
 minor bump would make such an additive local field operationally breaking.
-This exception does not cover request fields, removals, type changes, or
-meaning changes, and it must be removed when compatible version ranges are
-implemented. See [`protocol.md`](protocol.md#versioning) for the full
-conditions and existing fields covered by the rule. A second exception
-there lets a value be appended to the shared error-code, failure-reason
-and failure-category enums under `0.1`. A third lets an optional
-output-only property be added to `scheduler_metrics.json`, and a value be
-appended to the scheduler policy enum, under `0.1`.
+This exception does not cover removals, type changes, or meaning changes, and
+it must be removed when compatible version ranges are implemented. Request
+additions to that API follow a stricter rule: agents from the set-mutation
+release on refuse request fields they do not know, an added field is omitted
+at its default, and a client sends another value only to an agent that lists
+the matching control feature. See [`protocol.md`](protocol.md#versioning) for
+the full conditions and the fields covered by each rule. A second exception
+there lets a value be appended to the shared error-code, failure-reason and
+failure-category enums under `0.1`. A third lets an optional output-only
+property be added to `scheduler_metrics.json`, and a value be appended to the
+scheduler policy enum, under `0.1`.
 
 ### Schema version
 

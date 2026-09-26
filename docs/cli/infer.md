@@ -20,7 +20,11 @@ Order of precedence:
 2. `serving_url` field on the active profile.
 3. Agent-discovered active deployment: the CLI asks the agent for status,
    confirms an active deployment exists, and uses
-   `AgentStatus.active.serving_url` when the agent reports one.
+   `AgentStatus.active.serving_url` when the agent reports one. An agent
+   serving a resident set of more than one member reports no single active
+   deployment; the CLI then refuses (`unavailable`) and asks for
+   `--serving-url` with the endpoint of the member to query, which
+   `tensorplate status` lists.
 4. If older agents do not report `serving_url`, the CLI falls back to the
    v0.1.0 default loopback serving endpoint
    (`http://127.0.0.1:18080/infer`).
