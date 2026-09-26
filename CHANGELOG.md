@@ -374,6 +374,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `error.context` token and exit code 12, a new code. The source is a local
   directory for now. (V030-E01-F01-T05)
 
+- A logical streaming session has a defined lifecycle:
+  `include/tensorplate/serving/session.hpp` adds `LogicalSessionMachine`,
+  a pure state machine with no timers, queues, threads or I/O, and the
+  bounded `LogicalSessionStatus` a session reports. It binds a session to
+  its deployment generation at open, refuses a stale or absent generation,
+  and refuses every event its state does not permit, changing nothing:
+  `not_ready` for a client's protocol violation, `internal` for an owner
+  report its state cannot receive. It writes exactly one terminal outcome,
+  keeps a session's reservation until the backend acknowledges physical
+  release, and acknowledges a client Cancel separately from cleanup. The
+  complete transition table is a test fixture
+  (`test/mocks/session_transition_fixtures.hpp`) that the unit tests walk
+  cell by cell, and it is rendered in `docs/architecture/serving-worker.md`,
+  which a test holds to the fixture. Nothing in the worker creates logical
+  sessions yet. (V030-E04-F01-T01)
+
 ## [0.2.1] - 2026-09-23
 
 ### Added

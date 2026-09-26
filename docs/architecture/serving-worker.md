@@ -206,6 +206,120 @@ Draining → Stopped):
 ASAN-clean: the buffer manager reports zero active buffers after
 shutdown in the V01-E07-F08 integration tests.
 
+## Logical sessions
+
+A logical session is one client stream pinned to the deployment
+generation its worker serves. Every session of a worker shares the
+worker's single loaded backend: opening one never loads weights or
+starts a process. `include/tensorplate/serving/session.hpp` defines its
+lifecycle as `LogicalSessionMachine`, a pure state machine. It holds no
+timers, clocks, queues, threads or I/O. Its owner applies one session's
+events in order and carries out the effects of each accepted event, in
+ascending `LogicalSessionEffect` order, before applying the next. The
+serving worker does not create logical sessions yet; this is the
+lifecycle the streaming serving modes build on.
+
+States: `opening`, `active`, `finalizing`, `draining`,
+`cancel_requested`, and the terminal `closed` and `failed`. Events come
+from the client (`open`, `data`, `finalize`, `cancel`, `half_close`,
+`ping`, `status_request`) and from the owner: admission (`admitted`),
+the pipeline and backend (`automatic_endpoint`, `finalize_completed`,
+`drain_completed`, `backend_reset`, `release_acknowledged`), timers,
+pressure and worker control (`drain`, `abort`, `fail`). Effects, in
+execution order: `suppress_output`, `emit_cancel_accepted`,
+`request_cleanup`, `emit_ready`, `accept_input`, `emit_reply`,
+`start_finalize`, `start_drain`, `release_slot`, `emit_terminal`.
+
+The machine distinguishes ten configurations: the public states, with
+`finalizing` split by whether a client Finalize or an automatic endpoint
+started it (only the latter still accepts input), `draining` split by
+whether release was requested, and `failed` split by whether release was
+acknowledged. The table below is the machine's complete transition
+function; the unit tests hold it to the same table in
+`test/mocks/session_transition_fixtures.hpp`.
+
+Configurations: O `opening`, A `active`, FF finalizing after a client
+Finalize, FE finalizing after an automatic endpoint, DW draining with
+work in progress, DR draining with release requested, CR
+`cancel_requested`, CL `closed`, FH failed holding its reservation, FR
+failed and released. Effects: Rdy `emit_ready`, In `accept_input`, Rep
+`emit_reply`, Fin `start_finalize`, Drn `start_drain`, Cln
+`request_cleanup`, Sup `suppress_output`, Ack `emit_cancel_accepted`,
+Rel `release_slot`, Term `emit_terminal`. `=` stays in the same
+configuration, followed by its effects if any; `X` refuses.
+
+| | open | data | finalize | cancel | half_close | ping | status_request | admitted | automatic_endpoint | finalize_completed | drain_completed | drain | abort | fail | backend_reset | release_acknowledged |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| O | X | X | X | CR Sup Cln | X | X | X | A Rdy | X | X | X | CR Sup Cln | CR Sup Cln | FH Sup Cln Term | FH Sup Cln Term | X |
+| A | X | = In | FF Fin | CR Sup Ack Cln | DW Drn | = Rep | = Rep | X | FE Fin | X | X | DW Drn | CR Sup Cln | FH Sup Cln Term | FH Sup Cln Term | X |
+| FF | X | X | = | CR Sup Ack Cln | DW Drn | = Rep | = Rep | X | = Fin | A | X | DW Drn | CR Sup Cln | FH Sup Cln Term | FH Sup Cln Term | X |
+| FE | X | = In | FF Fin | CR Sup Ack Cln | DW Drn | = Rep | = Rep | X | = Fin | A | X | DW Drn | CR Sup Cln | FH Sup Cln Term | FH Sup Cln Term | X |
+| DW | X | = | = | CR Sup Ack Cln | = | = Rep | = Rep | X | = Fin | = | DR Cln | = | CR Sup Cln | FH Sup Cln Term | FH Sup Cln Term | X |
+| DR | X | = | = | CR Sup Ack | = | = Rep | = Rep | X | X | X | X | = | CR Sup | FH Sup Term | FH Sup Term | CL Rel Term |
+| CR | X | X | X | = | = | X | X | = | = | = | = | = | = | = | FH Term | CL Rel Term |
+| CL | X | X | X | = | = | X | X | = | = | = | = | = | = | = | = | = |
+| FH | X | X | X | = | = | X | X | = | = | = | = | = | = | = | = | FR Rel |
+| FR | X | X | X | = | = | X | X | = | = | = | = | = | = | = | = | = |
+
+Rules the table encodes:
+
+- **Refusals.** A refused event changes nothing. A client message the
+  state does not permit, including a client request after the outcome is
+  fixed, is a protocol violation: `not_ready` with context
+  `illegal_transition`. An owner report that its producer cannot emit in
+  that state is a defect in the owner: `internal` with context
+  `unexpected_report`. The owner answers a refusal by applying `fail`
+  with the refusal as its cause; `fail` is ignored once cancellation or a
+  terminal outcome has fixed the result, so doing so is always safe.
+- **Accepted without effect.** Events that can legitimately arrive late
+  or race a state change, for example: a repeated cancel, half-close,
+  drain, abort or fail, or a Finalize repeated while finalizing; input or
+  a Finalize racing a drain; late pipeline reports after cancellation or
+  failure; a duplicate release acknowledgement.
+- **Finalization.** The owner applies `finalize_completed` before it
+  publishes the message that completes the client's Finalize, so the
+  client's next input finds the session active.
+- **Exactly one terminal outcome.** `emit_terminal` is produced once per
+  session. `closed` writes it after physical release; `failed` writes it
+  on entry and keeps its reservation until release is acknowledged.
+  Nothing leaves `closed` or `failed`, and no task output follows
+  `suppress_output`.
+- **Cancellation is not cleanup.** `emit_cancel_accepted` answers a
+  client Cancel after Ready, while the outcome is still open, at once;
+  the reservation is returned (`release_slot`) only after the backend
+  acknowledges physical release. A Cancel before Ready ends the session
+  without an acknowledgement, and a Cancel after a worker abort or a
+  failure is answered by the terminal outcome alone. A backend reset
+  while cancellation waits for release fails the session.
+- **Generation binding.** `LogicalSessionMachine::open` binds a session
+  to the worker's generation and refuses a mismatched or absent
+  generation (`not_ready`, `stale_generation`); a worker without a
+  generation is `config_invalid` (`invalid_generation`). The owner checks
+  every later message or backend report with `check_generation`,
+  discards a stale one and applies `fail`.
+
+How sessions end, and the code their terminal outcome carries:
+
+| Situation | Owner applies | Ends | Code (reason) |
+|---|---|---|---|
+| Client Cancel | `cancel` | `closed` | `cancelled` |
+| Client half-close | `half_close`, then `drain_completed` and `release_acknowledged` | `closed` | none |
+| Input above the session's credit | `fail` | `failed` | `resource_exhausted` (`input_credit_exceeded`) |
+| Output undelivered past the no-progress limit | `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
+| Backend process reset or reaped | `backend_reset` | `failed` | `unavailable` (`backend_reset`) |
+| Deployment generation retiring | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`deployment_retired`) |
+| Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |
+| Stale generation in a later message | `fail` | `failed` | `not_ready` (`stale_generation`) |
+| Protocol violation | `fail` | `failed` | `not_ready` (`illegal_transition`) |
+| Owner report the state does not permit (a defect) | `fail` | `failed` | `internal` (`unexpected_report`) |
+
+The reason strings are the failure reasons in
+[`failure-reasons.md`](../observability/failure-reasons.md) where one
+exists. The owner keeps the end cause: the error carried by the most
+recent accepted event that moved the session into `draining`,
+`cancel_requested` or `failed`, which can only move from a drain to a
+cancel to a failure.
+
 ## Test surface
 
 - Host-CI mock path: `deployment.use_mock_session = true`. No real
