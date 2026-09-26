@@ -148,13 +148,18 @@ class FifoScheduler final : public InferScheduler {
   std::unordered_map<std::string, InFlightRecord> in_flight_;
   // Ids cancelled while in-flight. The next on_completion for one of
   // these is a typed no-op so adapters that race cancellation with
-  // completion observe deterministic behavior.
+  // completion observe deterministic behavior. Until that on_completion
+  // an id counts in in_flight_physical and in_flight_physical_cancelled,
+  // not in in_flight.
   std::unordered_set<std::string> cancelled_in_flight_ids_;
 
   bool shutdown_called_ = false;
 
   // Metrics counters and aggregates. The snapshot in metrics() is
-  // taken under mutex_ and is a value copy of this state.
+  // taken under mutex_ and is a value copy of this state, except that
+  // metrics() fills in_flight_logical, in_flight_physical and
+  // in_flight_physical_cancelled from in_flight_ and
+  // cancelled_in_flight_ids_; they stay 0 here.
   SchedulerMetrics metrics_;
 };
 

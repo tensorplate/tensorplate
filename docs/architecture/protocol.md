@@ -92,6 +92,35 @@ different release. The change that first emits an appended value must
 therefore keep it away from readers that may predate it, or negotiate first.
 Retire this exception with the first.
 
+A third narrow pre-1.0 exception covers the scheduler's metrics snapshot and
+policy key. Under `0.1`, an optional, output-only property may be added to
+`scheduler_metrics.json`, and a value may be appended to the scheduler policy
+enum, which `config/schemas/scheduler.json`, `scheduler_metrics.json` and
+`scheduler_event.json` each carry. An added property is never required and is
+absent rather than `null` when a writer has no value for it. Existing
+properties and values are never renamed, removed, retyped, reordered, made
+required or given a new meaning; in particular `in_flight` keeps counting
+logical in-flight requests (dispatched requests whose outcome is still open to
+the caller) whatever counts are added beside it. The three copies of the
+policy enum move in the same change, and `SchedulerMetrics` moves with
+`scheduler_metrics.json`; `test/unit/scheduler_schema_test.cpp` fails if they
+do not, or if a listed policy is neither registered nor refused with
+`Error::Code::Unsupported`. Schema validators pinned to the previous files
+remain strict, because these objects set `additionalProperties` to false and
+the enums are closed, so an added property or value is safe only while nothing
+sends it to a reader that predates it. Nothing does yet: no shipped component
+writes a `scheduler_metrics.json` or `scheduler_event.json` payload, and the
+one reader of the policy key, the serving worker, refuses a key that no
+scheduler is registered under with `Error::Code::Unsupported` and does not
+start; only an operator-edited worker config can carry the key. The exception
+does not cover new properties of `config/schemas/scheduler.json`, which the
+worker's config parser ignores rather than refuses. The change that first
+writes these payloads, or first registers an appended policy, must keep them
+away from readers that may predate it, or negotiate first. Retire this
+exception with the first. Naming a key inside an open map, such as `gauges` in
+`serving_metrics.json`, with the same constraint as the map's other values
+accepts exactly the same payloads and needs no exception.
+
 The agent's durable state file (`agent_state.json`) is the one document
 with its own version track, because it is read by nothing but the agent
 that wrote it and must stay safe across agent upgrades and downgrades: an

@@ -15,13 +15,16 @@
 
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "tensorplate/backend/capability.hpp"
@@ -30,7 +33,9 @@
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
+#include "tensorplate/scheduler/scheduler.hpp"
 #include "tensorplate/serving/config.hpp"
+#include "tensorplate/serving/metrics.hpp"
 #include "tensorplate/serving/serialization.hpp"
 #include "tensorplate/serving/worker.hpp"
 
@@ -53,6 +58,44 @@ class SyncOnlySession final : public ExecutionSession {
   Result<std::vector<NamedOutput>> do_infer(const InferRequest& /*request*/) override {
     return unexpected(Error::Code::Unsupported, "sync-only fixture does not execute inference");
   }
+};
+
+// Holds every infer call until the test opens the gate.
+struct InferGate {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool entered = false;
+  bool open = false;
+
+  void release() {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      open = true;
+    }
+    cv.notify_all();
+  }
+};
+
+class GatedSession final : public ExecutionSession {
+ public:
+  GatedSession(ExecutionSessionRuntimeHooks hooks, std::shared_ptr<InferGate> gate)
+      : ExecutionSession(hooks), gate_(std::move(gate)) {}
+
+  [[nodiscard]] std::string_view backend_name() const noexcept override { return "gated"; }
+
+ protected:
+  Result<void> do_load(const ModelSpec& /*spec*/) override { return Result<void>{}; }
+  Result<void> do_prime() override { return Result<void>{}; }
+  Result<std::vector<NamedOutput>> do_infer(const InferRequest& /*request*/) override {
+    std::unique_lock<std::mutex> lock(gate_->mutex);
+    gate_->entered = true;
+    gate_->cv.notify_all();
+    gate_->cv.wait(lock, [this] { return gate_->open; });
+    return unexpected(Error::Code::InferenceFailed, "gated fixture produces no outputs");
+  }
+
+ private:
+  std::shared_ptr<InferGate> gate_;
 };
 
 struct ServingHarness {
@@ -226,6 +269,84 @@ TEST(ServingE2E, MetricsRouteReturnsPrometheusBody) {
   auto resp = client.get("/metrics");
   EXPECT_EQ(resp.status, 200);
   EXPECT_NE(resp.body.find("tensorplate_serving_requests_total"), std::string::npos);
+}
+
+TEST(ServingE2E, MetricsKeepCountingACancelledRequestPhysicallyUntilItReturns) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("gated", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "gated",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new GatedSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "gated";
+  cfg.deployment.model =
+      ModelSpec::create("gated-model", ModelClass::Custom, "fixture://gated", "gated").value();
+  cfg.metrics_mode = MetricsMode::Json;
+  auto h = ServingHarness::start(std::move(cfg), registry);
+  HttpClient client("127.0.0.1", h.port);
+  const auto gauges = [&client] {
+    auto resp = client.get("/metrics");
+    EXPECT_EQ(resp.status, 200);
+    return nlohmann::json::parse(resp.body).at("gauges");
+  };
+
+  std::thread caller([port = h.port] {
+    HttpClient c("127.0.0.1", port);
+    (void)c.post("/infer", make_infer_body("held"));
+  });
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& caller;
+    ~OpenAndJoin() {
+      gate.release();
+      if (caller.joinable()) {
+        caller.join();
+      }
+    }
+  } open_and_join{*gate, caller};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  // Cancelled while the dispatcher is still inside infer: the logical
+  // count drops at once, the physical count does not.
+  ASSERT_TRUE(h.worker->scheduler().cancel("held", CancellationReason::ClientRequest));
+  // The scheduler event sink has already recorded the cancel, before any
+  // scrape: logical 0 and cancelled 1 hold only after it.
+  const auto recorded = h.worker->metrics().snapshot();
+  EXPECT_EQ(recorded.scheduler_in_flight, 0U);
+  EXPECT_EQ(recorded.scheduler_in_flight_physical, std::optional<std::uint64_t>{1});
+  EXPECT_EQ(recorded.scheduler_in_flight_physical_cancelled, std::optional<std::uint64_t>{1});
+  const auto during = gauges();
+  EXPECT_EQ(during.at("scheduler_in_flight"), 0);
+  EXPECT_EQ(during.at("scheduler_in_flight_logical"), 0);
+  EXPECT_EQ(during.at("scheduler_in_flight_physical"), 1);
+  EXPECT_EQ(during.at("scheduler_in_flight_physical_cancelled"), 1);
+
+  gate->release();
+  caller.join();
+  const auto after = gauges();
+  EXPECT_EQ(after.at("scheduler_in_flight_physical"), 0);
+  EXPECT_EQ(after.at("scheduler_in_flight_physical_cancelled"), 0);
+}
+
+TEST(ServingE2E, ReservedSchedulerPolicyIsRefusedWhenTheWorkerIsBuilt) {
+  auto cfg = default_test_config();
+  cfg.scheduler.policy = "session_round_robin";
+  auto worker = ServingWorker::create(std::move(cfg));
+  ASSERT_FALSE(worker);
+  EXPECT_EQ(worker.error().code, Error::Code::Unsupported);
 }
 
 TEST(ServingE2E, InferRouteHappyPath) {

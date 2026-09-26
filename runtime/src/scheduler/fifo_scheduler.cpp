@@ -266,7 +266,8 @@ Result<void> FifoScheduler::admit(SchedulerRequest request) {
                                 request.model_id(),
                                 request.estimate(),
                                 now_tp,
-                                request.priority()};
+                                request.priority(),
+                                request.session_key()};
       queue_.push_back(std::move(accepted));
       ++metrics_.admitted_total;
       metrics_.queue_depth = queue_.size();
@@ -321,6 +322,11 @@ std::optional<SchedulerRequest> FifoScheduler::next() {
         metrics_.in_flight_high_water = in_flight_.size();
       }
       metrics_.in_flight = in_flight_.size();
+      // Dispatch is the only step that raises the physical count: cancel()
+      // and shutdown() move an id from in_flight_ to the tombstones.
+      metrics_.in_flight_physical_high_water =
+          std::max(metrics_.in_flight_physical_high_water,
+                   in_flight_.size() + cancelled_in_flight_ids_.size());
 
       SchedulerEvent dispatched;
       dispatched.kind = SchedulerEventKind::Dispatched;
@@ -607,7 +613,14 @@ std::size_t FifoScheduler::shutdown() {
 
 SchedulerMetrics FifoScheduler::metrics() const {
   std::lock_guard<std::mutex> guard(mutex_);
-  return metrics_;
+  SchedulerMetrics snapshot = metrics_;
+  // in_flight_ holds dispatched ids whose outcome is open; the tombstones
+  // hold ids cancelled in flight whose on_completion has not arrived.
+  // admit() refuses an id held in either set, so the two never overlap.
+  snapshot.in_flight_logical = in_flight_.size();
+  snapshot.in_flight_physical_cancelled = cancelled_in_flight_ids_.size();
+  snapshot.in_flight_physical = in_flight_.size() + cancelled_in_flight_ids_.size();
+  return snapshot;
 }
 
 }  // namespace tensorplate

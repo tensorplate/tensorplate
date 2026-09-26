@@ -180,6 +180,17 @@ labels: `endpoint`, `model_class`, `model_name`, `backend`. The
 Prometheus exposition format is the default; JSON mode mirrors
 `protocol/schemas/serving_metrics.json`.
 
+`/metrics` refreshes the scheduler gauges from `InferScheduler::metrics()`
+on every request: `scheduler_queue_depth`, `scheduler_in_flight` (the
+logical in-flight count under its protocol 0.1 name),
+`scheduler_in_flight_logical` (the same value),
+`scheduler_in_flight_physical` and `scheduler_in_flight_physical_cancelled`;
+the Prometheus names add the `tensorplate_serving_` prefix. A request
+cancelled while the dispatcher is inside `infer` leaves the logical count at
+once and the physical count only after `infer` returns and the pipeline
+reports its completion. `/health` reports `in_flight` as the logical count.
+[`scheduler.md`](scheduler.md#metrics-and-events) defines the counts.
+
 Latency histograms use the same bucket boundaries everywhere:
 `0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf` ms.
 
@@ -195,7 +206,7 @@ Draining → Stopped):
 3. If `shutdown.cancel_queued_immediately` is true, `InferScheduler::shutdown`
    cancels every queued request and releases their input buffers.
 4. The composition root waits up to `shutdown.drain_deadline` for
-   in-flight scheduler accounting to reach zero.
+   the scheduler's queue depth and logical in-flight count to reach zero.
 5. `InferScheduler::shutdown` is called again to clear anything left.
 6. `AsyncPolicyStore::cancel_all` releases retained input / completed
    buffers.

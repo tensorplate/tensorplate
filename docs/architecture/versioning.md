@@ -83,7 +83,9 @@ meaning changes, and it must be removed when compatible version ranges are
 implemented. See [`protocol.md`](protocol.md#versioning) for the full
 conditions and existing fields covered by the rule. A second exception
 there lets a value be appended to the shared error-code, failure-reason
-and failure-category enums under `0.1`.
+and failure-category enums under `0.1`. A third lets an optional
+output-only property be added to `scheduler_metrics.json`, and a value be
+appended to the scheduler policy enum, under `0.1`.
 
 ### Schema version
 
@@ -150,4 +152,7 @@ schema files: `protocol/rust/tests/schema_enum_drift.rs` compares every
 schema copy of the error-code enum, and the `failure_reason.json` enums,
 with the Rust enums; `test/unit/error_test.cpp` compares the C++ names
 with `error.json`; and each Python package has a test that does the same
-for its constants.
+for its constants. `test/unit/scheduler_schema_test.cpp` holds the three
+schema copies of the scheduler policy enum to each other and to the policy
+registry, `SchedulerMetrics` to `scheduler_metrics.json`, and the serving
+exporter's in-flight gauges to the names `serving_metrics.json` gives them.

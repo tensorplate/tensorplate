@@ -20,7 +20,32 @@
       }
     },
     "counters": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
-    "gauges": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "gauges": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "minimum": 0},
+      "properties": {
+        "scheduler_in_flight": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scheduler logical in-flight count under its protocol 0.1 name, kept with this meaning (in_flight in scheduler_metrics.json). The same value as scheduler_in_flight_logical."
+        },
+        "scheduler_in_flight_logical": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scheduler dispatched requests whose outcome is still open to the caller (in_flight_logical in scheduler_metrics.json)."
+        },
+        "scheduler_in_flight_physical": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scheduler dispatched requests the executor has not yet reported released, including requests cancelled while executing (in_flight_physical in scheduler_metrics.json). Omitted, never null, when the producer has no physical count."
+        },
+        "scheduler_in_flight_physical_cancelled": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Scheduler requests cancelled after dispatch that the executor has not yet reported released (in_flight_physical_cancelled in scheduler_metrics.json). Omitted, never null, when the producer has no physical count."
+        }
+      }
+    },
     "latency_ms": {
       "type": "object",
       "additionalProperties": {

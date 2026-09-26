@@ -82,6 +82,16 @@ reader constraints, that
 [`docs/architecture/protocol.md`](../../docs/architecture/protocol.md#versioning)
 records.
 
+The scheduler policy enum in `config/schemas/scheduler.json` is copied into
+`scheduler_metrics.json` and `scheduler_event.json`, because the scheduler
+echoes its configured key into every metrics snapshot and event. Append a
+value to all three in the same change; `test/unit/scheduler_schema_test.cpp`
+fails on a copy that differs and on a listed value that the runtime neither
+registers nor refuses with `Error::Code::Unsupported`. An appended value, and
+an optional property added to `scheduler_metrics.json`, keep
+`schema_version` at `0.1` only under the third exception that `protocol.md`
+records.
+
 ## Adding a new payload
 
 1. Add `protocol/schemas/<name>.json` with `schema_version`

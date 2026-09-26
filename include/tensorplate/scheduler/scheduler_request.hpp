@@ -13,7 +13,9 @@
 //     can be labeled without re-resolving the model),
 //   - an optional priority field preserved through the v0.1.0 FIFO
 //     scheduler so a future priority policy does not need an interface
-//     change.
+//     change,
+//   - an optional session key naming the logical session the request
+//     belongs to, preserved the same way for a session-aware policy.
 //
 // The envelope is move-only with a copy escape hatch (clone) because
 // the underlying InferRequest can carry owned BufferRef handles; the
@@ -60,15 +62,27 @@ class SchedulerRequest {
   /// indicate higher priority; default 0.
   using Priority = std::int32_t;
 
+  /// Opaque key of the logical session a request belongs to; 0 means the
+  /// request belongs to none. The serving layer that owns logical sessions
+  /// assigns keys. A key is not a client-visible identifier and is never
+  /// copied into a SchedulerEvent or a metric label. A backend job built
+  /// for a request of the session must carry the same value as its session
+  /// key, and a key must not be given to another session while a request
+  /// carrying it is queued, or dispatched and not yet reported released.
+  using SessionKey = std::uint64_t;
+
+  /// Build an envelope. `priority` and `session_key` default to 0: no
+  /// priority preference and no logical session.
   SchedulerRequest(InferRequest request, std::string backend_name, std::string model_id,
                    ServiceEstimate estimate, SchedulerClock::TimePoint enqueue_time,
-                   Priority priority = 0) noexcept
+                   Priority priority = 0, SessionKey session_key = 0) noexcept
       : request_(std::move(request)),
         backend_name_(std::move(backend_name)),
         model_id_(std::move(model_id)),
         estimate_(estimate),
         enqueue_time_(enqueue_time),
-        priority_(priority) {}
+        priority_(priority),
+        session_key_(session_key) {}
 
   SchedulerRequest(const SchedulerRequest&) = delete;
   SchedulerRequest& operator=(const SchedulerRequest&) = delete;
@@ -84,6 +98,11 @@ class SchedulerRequest {
   [[nodiscard]] SchedulerClock::TimePoint enqueue_time() const noexcept { return enqueue_time_; }
   [[nodiscard]] Priority priority() const noexcept { return priority_; }
 
+  /// Session key, or 0 when the request belongs to no logical session.
+  /// Schedulers keep it from admit() to next(); the "fifo" policy does not
+  /// read it.
+  [[nodiscard]] SessionKey session_key() const noexcept { return session_key_; }
+
   /// Convenience accessor for the underlying request id.
   [[nodiscard]] const std::string& request_id() const noexcept { return request_.request_id(); }
 
@@ -97,6 +116,7 @@ class SchedulerRequest {
   ServiceEstimate estimate_;
   SchedulerClock::TimePoint enqueue_time_;
   Priority priority_ = 0;
+  SessionKey session_key_ = 0;
 };
 
 }  // namespace tensorplate

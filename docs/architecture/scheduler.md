@@ -60,6 +60,30 @@ v0.1.0 registers exactly one policy: `fifo`. Unknown policy strings
 return `Error::Code::Unsupported`; malformed config fields return
 `Error::Code::ConfigInvalid`.
 
+The policy enum in the config schema, and its copies in
+`scheduler_metrics.json` and `scheduler_event.json`, also list
+`session_round_robin`. That key is reserved for a policy that dispatches
+round-robin across the session keys of queued requests, first-in
+first-out within one key. No scheduler is registered under it, so it
+returns `Error::Code::Unsupported` like any other unregistered key, and a
+serving worker configured with it does not start.
+
+## Session key
+
+`SchedulerRequest` carries an optional session key
+(`SchedulerRequest::SessionKey`, 64 bits): the opaque key of the logical
+session the request belongs to, or 0 for none. The serving layer that
+owns logical sessions assigns it. The key is not a client-visible
+identifier and is never a `SchedulerEvent` field or a metric label. A
+backend job built for a request of the session must carry the same value
+as its session key, and a key must not be given to another session while
+a request carrying it is queued, or dispatched and not yet reported
+released.
+
+The FIFO scheduler keeps the key on the envelope from `admit()` to
+`next()` and does not read it: dispatch order stays first-in first-out
+whatever the keys.
+
 ## Monotonic deadline domain
 
 Every deadline decision uses the injected `SchedulerClock` (defaulting
@@ -145,9 +169,33 @@ affects new admission.
 ## Metrics and events
 
 `metrics()` returns a `SchedulerMetrics` snapshot covering queue
-depth, in-flight count, admission counts, rejection counts by reason,
+depth, in-flight counts, admission counts, rejection counts by reason,
 expiry, cancellation, completion outcomes, pressure counts, and
 wait-time aggregates. Wait time is monotonic.
+
+A request is dispatched when `next()` returns it. The snapshot counts
+dispatched requests two ways:
+
+| Field | Counts |
+| --- | --- |
+| `in_flight_logical` | dispatched requests whose outcome is still open to the caller: until `on_completion` or an accepted `cancel` |
+| `in_flight_physical` | dispatched requests the executor has not yet reported released; in this interface `on_completion` is that report, and `next()` requires it for every request it returns, including one cancelled in flight |
+| `in_flight_physical_cancelled` | requests cancelled after dispatch and not yet reported released: counted physically, no longer logically |
+| `in_flight_physical_high_water` | the largest `in_flight_physical` observed |
+
+`in_flight` and `in_flight_high_water` keep their protocol `0.1` names
+and meaning: `in_flight` always equals `in_flight_logical`, and the
+high-water mark tracks it. `in_flight_physical` is never less than
+`in_flight_logical + in_flight_physical_cancelled`. A queued request
+enters neither count. A request cancelled by `cancel()` or `shutdown()`
+while executing leaves the logical count at once and the physical count
+at its `on_completion`, which the scheduler still refuses with the typed
+`Internal` no-op.
+
+The in-flight gate (`in_flight_capacity`) counts logical requests. An
+in-flight cancel therefore frees a slot at once, and `next()` may
+dispatch another request while the cancelled one is still executing;
+`in_flight_physical` and its high-water mark show that overlap.
 
 `SchedulerEventSink::on_event` receives one `SchedulerEvent` per
 state transition. Events carry bounded labels (`endpoint`,

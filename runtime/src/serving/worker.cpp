@@ -65,8 +65,7 @@ class SchedulerHealthSink final : public SchedulerEventSink {
     if (scheduler_ != nullptr) {
       const auto m = scheduler_->metrics();
       health_.record_queue_state(m.queue_depth, m.in_flight);
-      metrics_.record_scheduler_accounting(m.queue_depth, m.in_flight, m.admitted_total,
-                                           m.completed_success, m.completed_failure);
+      metrics_.record_scheduler_accounting(m);
     }
     if (event.kind == SchedulerEventKind::Cancelled) {
       metrics_.increment_cancelled();
@@ -327,8 +326,7 @@ Result<void> ServingWorker::Impl::start_listener() {
     }
     if (self->scheduler != nullptr) {
       const auto m = self->scheduler->metrics();
-      self->metrics.record_scheduler_accounting(m.queue_depth, m.in_flight, m.admitted_total,
-                                                m.completed_success, m.completed_failure);
+      self->metrics.record_scheduler_accounting(m);
     }
     auto snap = self->metrics.snapshot();
     if (self->config.metrics_mode == MetricsMode::PrometheusText) {
