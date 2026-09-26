@@ -110,6 +110,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stays `0.1`, no bundle compatibility floor moves, and no dated
   `[0.3.1]` section or release notes file is opened here.
   (V030-E01-F01-T04)
+- On a Compute Engine instance, the metadata service answering HTTP 503 or
+  429, the two statuses Google documents as transient (503 while the
+  metadata server boots or migrates or the host is under maintenance, 429
+  for an endpoint's rate limiting), now counts as no answer, as a query
+  that times out or a refused connection already did. A 429 or 503 counts
+  only with a header block the agent would accept on a result. With a
+  record for the current boot the start uses it; without one, detection
+  fails in the step the agent's start-up retry repeats over its existing
+  20 s window, where before a 429 or 503 was a broken source that was
+  never retried. Any other answer -- another status, a response that
+  cannot be parsed, or a 200 whose body is not a machine type or an
+  instance id -- still fails detection at once; its error and `tensorplate
+  doctor`'s hint now say it came from the metadata server or from
+  something answering in its place, and what to check. When detection
+  fails without an answer, the error names the cause class of the last
+  attempt, transient unavailability, blocked access (a connection refused
+  or denied by local policy, now named apart from a timeout) or not
+  reached, and what to do about it, and `tensorplate doctor`'s hint covers
+  all three. This is the reboot boundary: after a reboot the agent must
+  reach the metadata service once before denied-egress operation resumes.
+  (V030-E01-F01-T03)
 - The documented rollback in `docs/install/lifecycle.md` restores
   `state/machine-type.json` from `state.bak` before the older release is
   installed, so the older agent keeps the machine type recorded in this boot.

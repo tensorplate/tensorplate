@@ -174,6 +174,7 @@ fn every_committed_row_is_selected_by_its_own_host_identity() {
             machine_type_record: text("machine_type_record"),
             gce_instance_id: text("gce_instance_id"),
             instance_binding: text("instance_binding"),
+            gce_metadata_unanswered: text("gce_metadata_unanswered"),
             boot_id: text("boot_id"),
             proc_meminfo: text("proc_meminfo"),
             pci_devices: text("pci_devices"),

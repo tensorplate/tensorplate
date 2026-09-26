@@ -67,6 +67,31 @@ impl PlatformRegistryError {
     }
 }
 
+/// The `source_name` of every detection error about what the metadata
+/// service answered, for `tensorplate doctor` to choose its hint by.
+pub const GCE_METADATA_SOURCE_NAME: &str = "GCE metadata service";
+
+/// What a metadata answer that is neither a result nor a documented
+/// transient status says about the host, for the error that reports it:
+/// another status, or a response that cannot be parsed.
+/// The 403 causes are Google's, from its metadata server troubleshooting
+/// page; that page also says a proxy can intercept the VM's queries.
+pub(crate) const BROKEN_METADATA_ANSWER: &str =
+    "the answer came from the metadata server itself, which Google \
+    documents answering 403 for an endpoint disabled by project or instance settings or a \
+    request that fails its security checks, or from something answering in its place for \
+    169.254.169.254:80, such as a proxy or a custom route; check those settings and let this \
+    host reach the metadata server directly, then start tensorplate-agent again";
+
+/// What a 200 whose body is not the resource the query asked for -- not a
+/// machine type, not an instance id -- says about the host. The metadata
+/// server answers those resources in a fixed form; a page or a bare name
+/// comes from something answering in its place.
+pub(crate) const NOT_THE_METADATA_RESOURCE: &str = "a 200 that is not the resource asked \
+    for comes from something answering for 169.254.169.254:80 in the metadata server's place, \
+    such as a proxy or a custom route; let this host reach the metadata server directly, then \
+    start tensorplate-agent again";
+
 /// Why platform detection failed.
 ///
 /// Kept separate from [`PlatformRegistryError`] because the two are
@@ -95,8 +120,8 @@ pub enum PlatformProbeError {
     /// identity a row can be matched against, and reporting a partial one
     /// would be admitted as something it is not.
     ///
-    /// Today this is a Compute Engine instance whose metadata service could
-    /// not be reached and whose recorded machine type is missing, unusable,
+    /// Today this is a Compute Engine instance whose metadata service gave no
+    /// answer and whose recorded machine type is missing, unusable,
     /// bound to local facts that have changed, or contradicted by the
     /// instance binding written in the same boot. Reporting that instance
     /// with no machine type would admit it as an unvalidated shape.

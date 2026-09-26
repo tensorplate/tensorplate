@@ -85,7 +85,8 @@ pub const STATE_INNER_DIR: &str = "/var/lib/tensorplate/state";
 ///
 /// Written by the agent on every start where the metadata service answered,
 /// never by the installer, and read by platform detection only when the
-/// metadata service cannot be reached. Lives under [`STATE_INNER_DIR`] so
+/// metadata service gives no answer (a connect that failed or was refused,
+/// nothing in time, or a transient 429 or 503). Lives under [`STATE_INNER_DIR`] so
 /// purge removes it along with the rest of the agent's state.
 pub const MACHINE_TYPE_RECORD_PATH: &str = "/var/lib/tensorplate/state/machine-type.json";
 

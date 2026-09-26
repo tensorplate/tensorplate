@@ -12,7 +12,7 @@
 // So `tensorplate-agent` records what the metadata service answered, next to
 // the local facts it answered on: the kernel boot ID, logical CPU count,
 // `MemTotal`, and the NVIDIA display device ids on the PCI bus. When the
-// service later cannot be reached, detection uses the recorded machine type only while every one of
+// service later gives no answer, detection uses the recorded machine type only while every one of
 // those facts is still exactly what it was. A record cannot survive a new
 // kernel boot: start the agent online after every reboot before going offline.
 // Anything else -- no record, a record this release cannot read, a fact that
@@ -28,14 +28,54 @@ use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{
     is_compute_engine, logical_cpu_count, machine_type_from_metadata, mem_total_from_meminfo,
-    nvidia_display_devices, HostSources,
+    nvidia_display_devices, HostSources, UNANSWERED_HTTP_429, UNANSWERED_HTTP_503,
+    UNANSWERED_REFUSED, UNANSWERED_TIMEOUT,
 };
-use crate::error::PlatformProbeError;
+use crate::error::{PlatformProbeError, GCE_METADATA_SOURCE_NAME, NOT_THE_METADATA_RESOURCE};
 use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
-/// What every unestablished-identity error opens with.
+/// What every unestablished-identity error opens with when the sources do
+/// not say why the metadata service gave no answer.
 const CONTEXT: &str =
     "host reports as a Compute Engine instance and the metadata service could not be reached";
+
+/// What every unestablished-identity error opens with: an instance without
+/// a live answer, and the cause class of the last attempt -- transient
+/// unavailability, blocked access, or not reached -- with what the operator
+/// can do about it. What the two statuses mean is Google's, from its
+/// metadata server troubleshooting page; a status that does not pass may
+/// come from something else answering in the server's place.
+fn context(sources: &HostSources) -> String {
+    match sources.gce_metadata_unanswered.as_deref() {
+        Some(UNANSWERED_HTTP_503) => {
+            "host reports as a Compute Engine instance and its metadata service \
+             answered HTTP 503 (transient unavailability: Google documents 503 while the \
+             metadata server boots or migrates or the host is under maintenance, and says it \
+             resolves within a few seconds; if it persists, something other than the metadata \
+             server may be answering for 169.254.169.254:80, such as a proxy or a custom route)"
+                .to_string()
+        }
+        Some(UNANSWERED_HTTP_429) => {
+            "host reports as a Compute Engine instance and its metadata service \
+             answered HTTP 429 (transient unavailability: Google documents 429 as an endpoint's \
+             rate limiting, and says to retry after a few seconds; if it persists, something \
+             other than the metadata server may be answering for 169.254.169.254:80, such as a \
+             proxy or a custom route)"
+                .to_string()
+        }
+        Some(UNANSWERED_REFUSED) => "host reports as a Compute Engine instance and connections to \
+             its metadata service at 169.254.169.254:80 were refused (blocked access: a firewall \
+             rule, a proxy or custom routing rejects them, or a local security policy denies \
+             them; allow that address and port for tensorplate-agent)"
+            .to_string(),
+        Some(UNANSWERED_TIMEOUT) => "host reports as a Compute Engine instance and its metadata \
+             service was not reached: the connect failed or nothing answered within the budget \
+             (not reached: the network may not be up yet, or a firewall rule, an address deny \
+             list on the agent's unit, a proxy or custom routing drops the traffic)"
+            .to_string(),
+        _ => CONTEXT.to_string(),
+    }
+}
 
 /// The only record layout this release reads or writes.
 pub const MACHINE_TYPE_RECORD_SCHEMA_VERSION: u32 = 2;
@@ -46,7 +86,7 @@ pub enum MachineTypeSource {
     /// A live answer from the GCE metadata service.
     GceMetadata,
     /// A metadata answer `tensorplate-agent` recorded earlier in this kernel boot,
-    /// used because the service could not be reached and every local fact
+    /// used because the service gave no answer and every local fact
     /// the record is bound to is unchanged.
     RecordedFromMetadata,
 }
@@ -355,11 +395,12 @@ pub fn establish_machine_type(
         // whatever the peer sent.
         let machine_type =
             machine_type_from_metadata(body).ok_or_else(|| PlatformProbeError::Unrecognized {
-                source_name: "GCE metadata service".to_string(),
-                detail: "the machine-type answer is not \
-                         `projects/<project>/machineTypes/<machine-type>` with a canonical \
-                         machine type"
-                    .to_string(),
+                source_name: GCE_METADATA_SOURCE_NAME.to_string(),
+                detail: format!(
+                    "the machine-type answer is not \
+                     `projects/<project>/machineTypes/<machine-type>` with a canonical machine \
+                     type; {NOT_THE_METADATA_RESOURCE}"
+                ),
             })?;
         check_live_instance(sources, &machine_type)?;
         return Ok(Some((machine_type, MachineTypeSource::GceMetadata)));
@@ -372,11 +413,12 @@ pub fn establish_machine_type(
         return Ok(None);
     }
 
+    let context = context(sources);
     let Some(body) = sources.machine_type_record.as_deref() else {
         return Err(PlatformProbeError::IdentityUnestablished {
             source_name: MACHINE_TYPE_RECORD_PATH.to_string(),
             detail: format!(
-                "{CONTEXT}, and no machine type has been recorded on this host; \
+                "{context}, and no machine type has been recorded on this host; \
                  start tensorplate-agent once while the metadata service is reachable"
             ),
         });
@@ -387,20 +429,20 @@ pub fn establish_machine_type(
     };
     let record = MachineTypeRecord::parse(body).map_err(|reason| {
         unestablished(format!(
-            "{CONTEXT}, and the recorded machine type is unusable: {reason}; \
+            "{context}, and the recorded machine type is unusable: {reason}; \
              start tensorplate-agent once while the metadata service is reachable to record it again"
         ))
     })?;
     let live = LocalShapeFacts::from_sources(sources).map_err(|fact| {
         unestablished(format!(
-            "{CONTEXT}, and the recorded machine type `{}` cannot be checked against this host \
+            "{context}, and the recorded machine type `{}` cannot be checked against this host \
              because {fact} is unavailable",
             record.machine_type
         ))
     })?;
     if let Some(difference) = record.first_difference(&live) {
         return Err(unestablished(format!(
-            "{CONTEXT}, and the recorded machine type `{}` no longer describes this host: \
+            "{context}, and the recorded machine type `{}` no longer describes this host: \
              {difference}; start tensorplate-agent once while the metadata service is reachable \
              to record it again (a stopped instance can be given a different machine type; if \
              it was, that start refuses and says how to reprovision)",
@@ -411,7 +453,7 @@ pub fn establish_machine_type(
         let unbound = |detail: String| PlatformProbeError::IdentityUnestablished {
             source_name: INSTANCE_BINDING_PATH.to_string(),
             detail: format!(
-                "{CONTEXT}, and {detail}; start tensorplate-agent once while the metadata \
+                "{context}, and {detail}; start tensorplate-agent once while the metadata \
                  service is reachable to record both again"
             ),
         };
@@ -428,11 +470,14 @@ pub fn establish_machine_type(
             // Offline there is no instance id to tell a resize from a moved
             // disk; the online start that follows refuses either way, with
             // MachineTypeChanged or InstanceChanged, and both reprovision
-            // alike.
+            // alike. That start needs the service, so the message also says
+            // why it gave none now, as every other refusal here does -- after
+            // the refusal, which no wait clears.
             return Err(machine_type_changed(&format!(
-                "the machine type recorded in this boot is `{}`, and this host's identity was \
-                 recorded on `{}`; the instance was given a different machine type, or the disk \
-                 was moved to an instance of that type",
+                "the machine type recorded in this boot is `{}` and this host's identity was \
+                 recorded on `{}`: the instance was given a different machine type, or the disk \
+                 was moved to an instance of that type, and without a live answer the two cannot \
+                 be told apart ({context})",
                 record.machine_type, binding.machine_type
             )));
         }

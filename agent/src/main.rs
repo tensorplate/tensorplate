@@ -983,6 +983,7 @@ mod tests {
             machine_type_record: None,
             gce_instance_id: None,
             instance_binding: None,
+            gce_metadata_unanswered: None,
             // Synthetic boot identity supplements the recorded hardware facts.
             boot_id: Some("12345678-1234-4234-8234-123456789abc".to_string()),
             proc_meminfo: text("proc_meminfo"),
@@ -1073,6 +1074,26 @@ mod tests {
             bound,
             "an offline start never rewrites the binding"
         );
+    }
+
+    #[test]
+    fn every_unanswered_cause_without_a_record_is_the_failure_the_retry_repeats() {
+        // Whatever cause class the probe records -- 429, 503, refused or
+        // timeout -- a start without a record for this boot raises the one
+        // failure the retry loop repeats: the class changes the message,
+        // never whether the start is retried.
+        for unanswered in ["http-503", "http-429", "refused", "timeout"] {
+            let sources = HostSources {
+                gce_machine_type: None,
+                gce_metadata_unanswered: Some(unanswered.to_string()),
+                ..l4_live_sources()
+            };
+            let err = identify_platform(&sources).expect_err("no record for this boot");
+            assert!(
+                is_retryable(&ObservationFailure::Identify(err)),
+                "{unanswered}"
+            );
+        }
     }
 
     #[test]

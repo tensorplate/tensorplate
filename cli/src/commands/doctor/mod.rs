@@ -23,7 +23,7 @@ use tensorplate_platform::{
     classify_accelerator_probe_failure, identify, identify_accelerator,
     AcceleratorProbeFailureClass, HostIdentity, HostReport, MachineTypeSource, NvidiaSmiProbe,
     PlatformProbeError, PlatformReason, PlatformRegistry, PlatformRegistryError, PlatformReport,
-    ProfileSelection, RowMatch, SystemHostProbe,
+    ProfileSelection, RowMatch, SystemHostProbe, GCE_METADATA_SOURCE_NAME,
 };
 
 use crate::args::DoctorArgs;
@@ -215,17 +215,25 @@ fn agent_socket_hint() -> &'static str {
     "is `tensorplate-agent` running? check its state in this platform's service supervisor"
 }
 
-/// What to do when a Compute Engine instance whose metadata service could not
-/// be reached has a machine-type record this user cannot read. The record
+/// What to do when a Compute Engine instance whose metadata service gave no
+/// answer has a machine-type record this user cannot read. The record
 /// lives in the state directory, which only root and the `tensorplate` group
 /// can enter; nothing about the record itself is wrong.
-const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service could not be reached and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
+const RECORD_UNREADABLE_HINT: &str = "the GCE metadata service gave no answer and the machine type tensorplate-agent recorded could not be read — re-run doctor as root or as a member of the `tensorplate` group, which owns /var/lib/tensorplate/state";
 
 /// What to do when a Compute Engine instance could not establish its machine
 /// type without the metadata service. Neither re-running as another user nor
 /// attaching output helps: the fix is one agent start in the current boot
-/// with the service reachable, which records the machine type again.
-const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start is refused for a different machine type, reprovision as its message says";
+/// with the service reachable, which records the machine type again. Where
+/// detection knew why the service gave no answer, the message names the
+/// cause class of the last attempt, and the hint says what each one needs.
+const IDENTITY_UNESTABLISHED_HINT: &str = "the machine type could not be established without the GCE metadata service — where the message above names a cause class, transient unavailability (HTTP 429 or 503) clears within seconds unless something else answers in the metadata server's place, blocked access needs this host allowed to reach 169.254.169.254:80 past any firewall rule, proxy or custom route, and not reached means the connect failed or nothing answered in time — then start tensorplate-agent once while the metadata service is reachable so it records the machine type for this boot; repeat after every OS reboot or when the recorded hardware facts change; if that start is refused for a different machine type, reprovision as its message says";
+
+/// What to do when the GCE metadata service answered with neither a result
+/// nor a status Google documents as transient. Re-running as another user
+/// changes nothing: the answer came from the metadata server itself or from
+/// something answering in its place.
+const METADATA_ANSWER_HINT: &str = "the GCE metadata service answered, but not with a machine type or instance id — check that project and instance settings do not disable the endpoint, and that this host reaches 169.254.169.254:80 directly rather than through a proxy or custom route; then start tensorplate-agent again";
 
 /// What to do when the instance binding is read on every Compute Engine
 /// start, reachable or not, and this user cannot read it. It lives in the
@@ -287,8 +295,8 @@ pub fn render_host_section(
             // is malformed to re-run as root wastes their next ten minutes.
             let hint = match err {
                 // Read only on a Compute Engine instance whose metadata
-                // service could not be reached, from a directory only root
-                // and the tensorplate group can enter.
+                // service gave no answer, from a directory only root and the
+                // tensorplate group can enter.
                 PlatformProbeError::Unreadable { source_name, .. }
                     if source_name.ends_with(MACHINE_TYPE_RECORD_PATH) =>
                 {
@@ -299,8 +307,20 @@ pub fn render_host_section(
                 {
                     BINDING_UNREADABLE_HINT
                 }
+                // The metadata service gave an answer detection cannot use.
+                PlatformProbeError::Unreadable { source_name, .. }
+                    if source_name == GCE_METADATA_SOURCE_NAME =>
+                {
+                    METADATA_ANSWER_HINT
+                }
                 PlatformProbeError::Unreadable { .. } => {
                     "a detection source could not be read — re-run as a user that can read /etc and /proc"
+                }
+                // A 200 whose body is not a machine type or an instance id.
+                PlatformProbeError::Unrecognized { source_name, .. }
+                    if source_name == GCE_METADATA_SOURCE_NAME =>
+                {
+                    METADATA_ANSWER_HINT
                 }
                 PlatformProbeError::Unrecognized { .. } => {
                     "a detection source was readable but not interpretable — the named source is malformed on this image; attach `tensorplate doctor --output json`"

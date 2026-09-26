@@ -323,7 +323,9 @@ machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
 every start where the GCE metadata service answered. The record is bound
 to the kernel boot id, the logical CPU count, `MemTotal` and the NVIDIA
 display PCI ids, and offline detection uses it only while the metadata
-query fails as unreachable **and** every one of those facts still
+query gives no answer (a connect that failed or was refused, nothing in
+time, or a transient `429` or `503`) **and** every one of those facts
+still
 matches. The stage requires the record to exist before it denies
 anything, and then requires the identity to have come from it: the
 agent's `platform identity: ... source=recorded_gce_metadata
@@ -342,7 +344,7 @@ to or cloned into another instance, and so does one that names this
 instance on another machine type than the live answer, because the
 instance was given a different machine type; neither start writes either
 file. Reprovision by stopping the agent, deleting both files and starting
-it with the service reachable. With the service unreachable, a binding
+it with the service reachable. With no answer from the service, a binding
 written in the same boot must agree with the record, and one from an
 earlier boot must name the record's machine type. Upgrade requires the record the baseline wrote to be
 byte-identical after the candidate starts and the binding to exist;
@@ -379,6 +381,17 @@ exhausted:` reporting the attempt count and the budget when none did, or
 attempt cannot settle and the retry ended early. None of these lines
 appears on a host that answers first time, and none appears off Compute
 Engine at all.
+
+Retried alike: a connect that fails or is refused, nothing answering in
+time, and the two statuses Google documents as transient, `503` (the metadata server
+booting or migrating, or host maintenance) and `429` (an endpoint's rate
+limiting). With a record for the current boot the start uses it and does
+not retry; without one it retries. Any other answer is not retried. When
+the window ends without an answer, the error names the cause class of the
+last attempt and the remedy: transient unavailability, blocked access or
+not reached. This is the reboot boundary the release states: after a
+reboot the agent must reach the metadata service once, within this
+window or on a later restart, before denied-egress operation resumes.
 
 This narrows the window rather than removing it. A host whose network is
 denied for longer than the budget, or denied outright, still has no

@@ -336,6 +336,7 @@ mod tests {
                 machine_type_record: text("machine_type_record"),
                 gce_instance_id: text("gce_instance_id"),
                 instance_binding: text("instance_binding"),
+                gce_metadata_unanswered: text("gce_metadata_unanswered"),
                 boot_id: text("boot_id"),
                 proc_meminfo: text("proc_meminfo"),
                 pci_devices: text("pci_devices"),
@@ -491,7 +492,7 @@ mod tests {
 
     #[test]
     fn an_offline_instance_with_no_recorded_machine_type_is_still_recorded() {
-        // The metadata service unreachable and nothing recorded: detection
+        // No answer from the metadata service and nothing recorded: detection
         // refuses to establish an identity, and that refusal is a note. The
         // sources that led to it -- the firmware name included -- are the
         // deliverable.

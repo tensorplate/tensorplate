@@ -55,6 +55,7 @@ fn sources_of(fixture: &Value) -> HostSources {
         machine_type_record: text("machine_type_record"),
         gce_instance_id: text("gce_instance_id"),
         instance_binding: text("instance_binding"),
+        gce_metadata_unanswered: text("gce_metadata_unanswered"),
         boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
@@ -927,7 +928,8 @@ fn host_os_says_which_source_established_the_machine_type() {
 }
 
 #[test]
-fn another_instance_another_machine_type_and_an_unreadable_binding_each_get_their_own_fix() {
+fn another_instance_another_machine_type_an_unreadable_binding_and_a_broken_answer_each_get_their_own_fix(
+) {
     // A binding from another instance, or for this instance on another
     // machine type: the fix is explicit reprovisioning, not another agent
     // start, and doctor says so, for its own cause, without quoting an id.
@@ -964,6 +966,17 @@ fn another_instance_another_machine_type_and_an_unreadable_binding_each_get_thei
         source_name: tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH.to_string(),
         detail: "Permission denied (os error 13)".to_string(),
     };
+    // A 200 whose body is not a machine type: the same, from its source.
+    let unrecognized_answer = PlatformProbeError::Unrecognized {
+        source_name: tensorplate_platform::GCE_METADATA_SOURCE_NAME.to_string(),
+        detail: "the machine-type answer is not `projects/<project>/machineTypes/<machine-type>`"
+            .to_string(),
+    };
+    // An answer that is not a result: no permission would change it.
+    let broken_answer = PlatformProbeError::Unreadable {
+        source_name: tensorplate_platform::GCE_METADATA_SOURCE_NAME.to_string(),
+        detail: "host reports as a Compute Engine instance but /computeMetadata/v1/instance/machine-type gave no machine type (metadata service answered `HTTP/1.1 403 Forbidden`; budget 250ms)".to_string(),
+    };
 
     let registry = registry();
     let reprovision = "delete /var/lib/tensorplate/identity/instance-binding.json and /var/lib/tensorplate/state/machine-type.json";
@@ -974,6 +987,20 @@ fn another_instance_another_machine_type_and_an_unreadable_binding_each_get_thei
             [reprovision, "was given a different machine type"],
         ),
         (&unreadable, ["which owns /var/lib/tensorplate/identity"; 2]),
+        (
+            &broken_answer,
+            [
+                "reaches 169.254.169.254:80 directly rather than through a proxy or custom route",
+                "project and instance settings do not disable the endpoint",
+            ],
+        ),
+        (
+            &unrecognized_answer,
+            [
+                "reaches 169.254.169.254:80 directly rather than through a proxy or custom route",
+                "project and instance settings do not disable the endpoint",
+            ],
+        ),
     ] {
         let section =
             render_host_section(HostSectionDetection::HostProbeFailed(err), Ok(&registry));
@@ -1032,6 +1059,16 @@ fn an_unestablished_gce_identity_warns_with_the_fix_and_matches_no_row() {
         hint.contains("start tensorplate-agent once while the metadata service is reachable"),
         "the hint names the fix: {hint}"
     );
+    for cause in [
+        "transient unavailability (HTTP 429 or 503) clears within seconds",
+        "blocked access needs this host allowed to reach 169.254.169.254:80",
+        "not reached means the connect failed or nothing answered in time",
+    ] {
+        assert!(
+            hint.contains(cause),
+            "the hint covers every cause class: {hint}"
+        );
+    }
     assert!(
         !hint.contains("re-run as a user"),
         "nothing here is a permission problem: {hint}"

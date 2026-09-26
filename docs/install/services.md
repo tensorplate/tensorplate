@@ -41,8 +41,8 @@ enters `failed` state and stops retrying.
 
 The window is five minutes rather than one because it must contain five
 worst-case restart cycles. A cycle is `RestartSec` plus the unit's own
-startup work, and on a Compute Engine host whose metadata service is
-unreachable the agent's startup includes a bounded detection retry, so a
+startup work, and on a Compute Engine host whose metadata service gives
+no answer the agent's startup includes a bounded detection retry, so a
 cycle can reach roughly thirty seconds. Five of those do not fit in sixty
 seconds, and a window too narrow to contain them never trips the burst --
 the unit would restart forever instead of settling into `failed`. A
@@ -83,13 +83,37 @@ The episode then closes with exactly one of three lines:
 - `platform detection stopped: attempts=... elapsed=... budget=... error=...`
   followed by `platform detection failed: ...` — an attempt failed for a
   reason another attempt cannot settle, so the retry ended early with
-  most of its budget unspent. The usual cause is a metadata service that
-  has started answering but is not yet serving machine types, which is
-  deliberately not retried: something answering on an unauthenticated
-  link-local address with the wrong content is not treated as flaky.
+  most of its budget unspent. For the metadata service that reason is an
+  answer that is neither the resource asked for nor a transient status,
+  since another attempt would get the same answer. Another status, or a
+  response that cannot be parsed, comes from the metadata server itself,
+  which [Google documents](https://docs.cloud.google.com/compute/docs/troubleshooting/troubleshoot-metadata-server)
+  answering `403` for an endpoint disabled by project or instance settings
+  or a request that fails its security checks, or from something answering
+  in its place, such as a proxy or a custom route; the message says to
+  check both. A `200` whose body is not a machine type or an instance id
+  comes from something answering in the server's place, and the message
+  says so. The two statuses Google documents as transient, `503` (while
+  the metadata server boots or migrates, or the host is under maintenance)
+  and `429` (an endpoint's rate limiting), are retried like a service that
+  did not answer at all.
 
-The remedy for an exhausted or stopped detection is unchanged: restart
-`tensorplate-agent` once with the metadata service reachable.
+When detection fails because the service gave no answer, the message
+names the cause class of the last attempt, with what to do about it:
+transient unavailability (the service answered `429` or `503`; one that
+persists past the window may come from something answering in the
+metadata server's place), blocked access (the connection was refused, as
+by a firewall rule that rejects it, or denied by a local security policy
+such as an LSM, a seccomp filter or a BPF connect hook) or not reached
+(the connect failed or nothing answered in time: the network was not up
+yet, or a firewall rule, the unit's address deny list, a proxy or a
+custom route drops the traffic, which a connect only sees as a timeout).
+
+The remedy for an exhausted detection is unchanged: restart
+`tensorplate-agent` once with the metadata service reachable. A detection
+stopped by a metadata answer names its remedy in the message: check the
+project and instance settings where it says so, and that the host reaches
+`169.254.169.254:80` directly, then restart.
 
 Two detection failures have a different remedy. `platform identity in
 `/var/lib/tensorplate/identity/instance-binding.json` belongs to another
