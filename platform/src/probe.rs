@@ -20,11 +20,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 
-use crate::detect::{identify, is_compute_engine, HostReport, HostSources};
+use crate::detect::{
+    identify, instance_id_from_metadata, is_compute_engine, HostReport, HostSources,
+};
 use crate::error::PlatformProbeError;
 use crate::identity::{HostIdentity, HostProbe};
+use crate::instance_binding::InstanceBinding;
 use crate::machine_type_record::{MachineTypeRecord, RecordWrite};
 
 /// Firmware product name. Readable without privileges, and how a Compute
@@ -35,18 +38,48 @@ const DMI_PRODUCT_NAME_PATH: &str = "/sys/class/dmi/id/product_name";
 /// name so a broken resolver cannot turn detection into a DNS timeout.
 const METADATA_ADDR: &str = "169.254.169.254:80";
 const METADATA_PATH: &str = "/computeMetadata/v1/instance/machine-type";
+const METADATA_INSTANCE_ID_PATH: &str = "/computeMetadata/v1/instance/id";
 
-/// How long the metadata service gets. It is on the local link and answers
-/// in single-digit milliseconds; anything slower is a machine that is not
-/// on GCE, and detection must not stall a service start over it.
+/// How long the metadata service gets for each query. It is on the local
+/// link and answers in single-digit milliseconds; anything slower is a
+/// machine that is not on GCE, and detection must not stall a service start
+/// over it. The instance-id query has a budget of its own rather than what
+/// the machine-type query left, so a slow first answer never starves it.
 const METADATA_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Ceiling on the metadata response. The answer is a short resource name;
 /// an unbounded read from an unauthenticated endpoint is not on offer.
 const MAX_METADATA_RESPONSE: u64 = 8 * 1024;
 
-/// Ceiling on the machine-type record. A record is a few hundred bytes.
+/// Ceiling on the machine-type record and on the instance binding. Each is
+/// a few hundred bytes.
 const MAX_MACHINE_TYPE_RECORD: u64 = 4 * 1024;
+
+/// What the pinned-directory readers and writer call each file, in errors.
+const MACHINE_TYPE_RECORD_NAME: &str = "the machine-type record";
+const INSTANCE_BINDING_NAME: &str = "the instance binding";
+
+/// `(live machine type, machine-type record, live instance id, instance
+/// binding)`, as [`SystemHostProbe::gce_sources`] gathers them.
+type GceSources = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// What asking for the instance id came to.
+#[derive(Debug, Eq, PartialEq)]
+enum InstanceSources {
+    /// Asked and answered, or not asked because the machine-type query had
+    /// already gone unanswered or the host is not an instance.
+    Answered {
+        instance_id: Option<String>,
+        binding: Option<String>,
+    },
+    /// Asked after a machine-type answer and not answered.
+    Unanswered { binding: Option<String> },
+}
 
 /// Reads host identity from the running machine.
 #[derive(Clone, Debug, Default)]
@@ -67,9 +100,10 @@ impl SystemHostProbe {
     /// This stages the file-backed sources only. Commands and the metadata
     /// service describe the machine running the test, not the tree, so
     /// under a root they are not consulted at all — including `uname` — and
-    /// neither is the machine-type record, which is only ever read when the
-    /// metadata service was asked and could not be reached. Writing the
-    /// record does honour the root.
+    /// neither are the machine-type record, which is only ever read when the
+    /// metadata service was asked and could not be reached, and the instance
+    /// binding, which is read beside that question. Writing either does
+    /// honour the root.
     /// [`Self::detect`] therefore fails on a staged tree rather than
     /// returning an identity that is part fixture and part host; fixture
     /// -driven detection goes through [`crate::detect::identify`] with
@@ -129,12 +163,15 @@ impl SystemHostProbe {
         // already identified itself as a Jetson, so it is only asked for
         // there — and a Jetson that cannot answer it is broken.
         let jetson = commands && cfg!(target_os = "linux") && nv_tegra_release.is_some();
-        let (gce_machine_type, machine_type_record) = if commands {
-            self.machine_type_sources(dmi_product_name.as_deref(), || {
-                query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT)
-            })?
+        let (gce_machine_type, machine_type_record, gce_instance_id, instance_binding) = if commands
+        {
+            self.gce_sources(
+                dmi_product_name.as_deref(),
+                || query_metadata(METADATA_ADDR, METADATA_PATH, METADATA_TIMEOUT),
+                || query_metadata(METADATA_ADDR, METADATA_INSTANCE_ID_PATH, METADATA_TIMEOUT),
+            )?
         } else {
-            (None, None)
+            (None, None, None, None)
         };
 
         Ok(HostSources {
@@ -197,6 +234,8 @@ impl SystemHostProbe {
             dmi_product_name,
             gce_machine_type,
             machine_type_record,
+            gce_instance_id,
+            instance_binding,
             proc_meminfo: self.read("/proc/meminfo")?,
             pci_devices: self.pci_devices()?,
         })
@@ -308,12 +347,111 @@ impl SystemHostProbe {
             Ok(body) => Ok((Some(body), None)),
             Err(MetadataFailure::Timeout) => Ok((
                 None,
-                read_machine_type_record(&self.path(MACHINE_TYPE_RECORD_PATH))?,
+                read_identity_file(
+                    &self.path(MACHINE_TYPE_RECORD_PATH),
+                    MACHINE_TYPE_RECORD_NAME,
+                )?,
             )),
             Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
                 source_name: "GCE metadata service".to_string(),
                 detail: format!(
                     "host reports as a Compute Engine instance but {METADATA_PATH} gave no machine type ({failure}; budget {}ms)",
+                    METADATA_TIMEOUT.as_millis()
+                ),
+            }),
+        }
+    }
+
+    /// Every Compute Engine source: `(live machine type, machine-type
+    /// record, live instance id, instance binding)`.
+    ///
+    /// A service that answers the machine type and then does not answer the
+    /// instance id within its own budget makes this a start without a live
+    /// answer, exactly as if the first query had gone unanswered: the record
+    /// is read, and detection uses it only in the boot it was taken in. With
+    /// no record for this boot, detection fails in the step the agent's
+    /// retry loop retries, rather than as a broken source it never retries.
+    fn gce_sources(
+        &self,
+        dmi_product_name: Option<&str>,
+        machine_type_query: impl FnOnce() -> Result<String, MetadataFailure>,
+        instance_id_query: impl FnOnce() -> Result<String, MetadataFailure>,
+    ) -> Result<GceSources, PlatformProbeError> {
+        let (machine_type, record) =
+            self.machine_type_sources(dmi_product_name, machine_type_query)?;
+        match self.instance_sources(dmi_product_name, machine_type.is_some(), instance_id_query)? {
+            InstanceSources::Answered {
+                instance_id,
+                binding,
+            } => Ok((machine_type, record, instance_id, binding)),
+            InstanceSources::Unanswered { binding } => Ok((
+                None,
+                read_identity_file(
+                    &self.path(MACHINE_TYPE_RECORD_PATH),
+                    MACHINE_TYPE_RECORD_NAME,
+                )?,
+                None,
+                binding,
+            )),
+        }
+    }
+
+    /// The instance sources.
+    ///
+    /// Nothing is asked or read off Compute Engine. On an instance the
+    /// binding is always read, because a live answer is checked against it
+    /// and an offline record is checked with it. The instance id is asked
+    /// only when the machine-type query just answered: a service that could
+    /// not be reached a moment ago is not asked again.
+    ///
+    /// With a live machine type, a binding path that holds something that
+    /// is not a binding -- a directory, a link, an oversized file -- is read
+    /// as no binding: there is no instance or machine type in it to check
+    /// the live answers against, and this start's writer replaces the file
+    /// or reports that it cannot. Without one it is refused, as an unusable
+    /// machine-type record is.
+    ///
+    /// A service that answered the machine type and then answers the
+    /// instance-id query with anything but an id is a broken source, like
+    /// one that gives no machine type. One that does not answer at all is
+    /// [`InstanceSources::Unanswered`].
+    fn instance_sources(
+        &self,
+        dmi_product_name: Option<&str>,
+        machine_type_answered: bool,
+        query: impl FnOnce() -> Result<String, MetadataFailure>,
+    ) -> Result<InstanceSources, PlatformProbeError> {
+        if !dmi_product_name.is_some_and(is_compute_engine) {
+            return Ok(InstanceSources::Answered {
+                instance_id: None,
+                binding: None,
+            });
+        }
+        let path = self.path(INSTANCE_BINDING_PATH);
+        if !machine_type_answered {
+            return Ok(InstanceSources::Answered {
+                instance_id: None,
+                binding: read_identity_file(&path, INSTANCE_BINDING_NAME)?,
+            });
+        }
+        let binding = match read_identity_file(&path, INSTANCE_BINDING_NAME) {
+            Err(PlatformProbeError::IdentityUnestablished { .. }) => None,
+            read => read?,
+        };
+        match query() {
+            Ok(body) => Ok(InstanceSources::Answered {
+                instance_id: Some(body),
+                binding,
+            }),
+            // Read again strictly: this start now has no live answer, and
+            // without one an unusable binding is refused.
+            Err(MetadataFailure::Timeout) => Ok(InstanceSources::Unanswered {
+                binding: read_identity_file(&path, INSTANCE_BINDING_NAME)?,
+            }),
+            Err(failure @ MetadataFailure::Answered(_)) => Err(PlatformProbeError::Unreadable {
+                source_name: "GCE metadata service".to_string(),
+                detail: format!(
+                    "{METADATA_PATH} answered but {METADATA_INSTANCE_ID_PATH} gave no instance id ({failure}; budget {}ms)",
                     METADATA_TIMEOUT.as_millis()
                 ),
             }),
@@ -348,29 +486,59 @@ impl SystemHostProbe {
             Err(fact) => return Ok(RecordWrite::FactsUnavailable(fact)),
         };
         let target = self.path(MACHINE_TYPE_RECORD_PATH);
-        let failed = |detail: String| PlatformProbeError::Unreadable {
-            source_name: target.display().to_string(),
-            detail,
-        };
         let body = record
             .to_json()
-            .map_err(|err| failed(format!("cannot serialize the record: {err}")))?;
-        // Pin the directory for the comparison, temporary creation, and rename.
-        // No component of an agent-writable path is followed as a symlink.
-        let directory = RecordDirectory::open(&target)
-            .map_err(|err| failed(format!("cannot open the record directory: {err}")))?;
-        if read_machine_type_record_in(&directory, &target)
-            .ok()
-            .flatten()
+            .map_err(|err| PlatformProbeError::Unreadable {
+                source_name: target.display().to_string(),
+                detail: format!("cannot serialize the record: {err}"),
+            })?;
+        replace_identity_file(&target, MACHINE_TYPE_RECORD_NAME, &body)
+    }
+
+    /// Record the instance a live instance-id answer in `sources` names,
+    /// bound to the machine-type record [`Self::write_machine_type_record`]
+    /// writes from the same sources: its machine type, its boot, and the
+    /// SHA-256 of its exact bytes.
+    ///
+    /// The same outcomes as that writer: [`RecordWrite::NotApplicable`]
+    /// without a live machine type or instance id,
+    /// [`RecordWrite::FactsUnavailable`] when the record could not be bound,
+    /// [`RecordWrite::Unchanged`] when the file already holds these bytes.
+    /// Written whether or not the record itself was: a binding whose record
+    /// did not land disagrees with whatever is there, and detection without
+    /// the service refuses that pair rather than trusting either.
+    ///
+    /// # Errors
+    ///
+    /// [`PlatformProbeError::Unreadable`] naming the binding when it cannot
+    /// be written. The identity directory is never created here: it belongs
+    /// to the installer.
+    pub fn write_instance_binding(
+        &self,
+        sources: &HostSources,
+    ) -> Result<RecordWrite, PlatformProbeError> {
+        let Some(instance_id) = sources
+            .gce_instance_id
             .as_deref()
-            == Some(body.as_str())
-        {
-            return Ok(RecordWrite::Unchanged);
-        }
-        directory
-            .replace(body.as_bytes())
-            .map_err(|err| failed(format!("cannot write the machine-type record: {err}")))?;
-        Ok(RecordWrite::Written)
+            .and_then(instance_id_from_metadata)
+        else {
+            return Ok(RecordWrite::NotApplicable);
+        };
+        let record = match MachineTypeRecord::for_live_sources(sources) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Ok(RecordWrite::NotApplicable),
+            Err(fact) => return Ok(RecordWrite::FactsUnavailable(fact)),
+        };
+        let target = self.path(INSTANCE_BINDING_PATH);
+        let serialization = |err: serde_json::Error| PlatformProbeError::Unreadable {
+            source_name: target.display().to_string(),
+            detail: format!("cannot serialize the binding: {err}"),
+        };
+        let record_body = record.to_json().map_err(serialization)?;
+        let body = InstanceBinding::new(instance_id, &record, &record_body)
+            .to_json()
+            .map_err(serialization)?;
+        replace_identity_file(&target, INSTANCE_BINDING_NAME, &body)
     }
 }
 
@@ -393,12 +561,13 @@ fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
     }
 }
 
-/// Read the machine-type record without following a link and without
-/// reading more than any record can be.
+/// Read the machine-type record or the instance binding, called `name` in
+/// errors, without following a link and without reading more than either
+/// can be.
 ///
-/// Absent is `None`, and a record that cannot be read -- typically an
-/// operator outside the `tensorplate` group, which owns the state directory
-/// -- is [`PlatformProbeError::Unreadable`], as for every other source. A
+/// Absent is `None`, and a file that cannot be read -- typically an
+/// operator outside the `tensorplate` group, which owns both directories --
+/// is [`PlatformProbeError::Unreadable`], as for every other source. A
 /// path that is not a regular file, or a file larger than any record, is
 /// [`PlatformProbeError::IdentityUnestablished`]: there is something there,
 /// and it is not a record detection will use.
@@ -407,15 +576,45 @@ fn read_lossy(path: &Path) -> Result<Option<String>, PlatformProbeError> {
 /// refusing symlinks. The final file is opened with `O_NOFOLLOW` and checked
 /// through its descriptor before any bytes are read. Replacing a pathname
 /// while an elevated doctor is recording can therefore never redirect reads.
-fn read_machine_type_record(path: &Path) -> Result<Option<String>, PlatformProbeError> {
+fn read_identity_file(path: &Path, name: &str) -> Result<Option<String>, PlatformProbeError> {
     match RecordDirectory::open(path) {
-        Ok(directory) => read_machine_type_record_in(&directory, path),
-        Err(err) => record_open_error(path, &err),
+        Ok(directory) => read_identity_file_in(&directory, path, name),
+        Err(err) => record_open_error(path, name, &err),
     }
+}
+
+/// Replace the file at `target`, called `name` in errors, with `body`,
+/// unless it already holds exactly those bytes.
+fn replace_identity_file(
+    target: &Path,
+    name: &str,
+    body: &str,
+) -> Result<RecordWrite, PlatformProbeError> {
+    let failed = |detail: String| PlatformProbeError::Unreadable {
+        source_name: target.display().to_string(),
+        detail,
+    };
+    // Pin the directory for the comparison, temporary creation, and rename.
+    // No component of an agent-writable path is followed as a symlink.
+    let directory = RecordDirectory::open(target)
+        .map_err(|err| failed(format!("cannot open the record directory: {err}")))?;
+    if read_identity_file_in(&directory, target, name)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some(body)
+    {
+        return Ok(RecordWrite::Unchanged);
+    }
+    directory
+        .replace(body.as_bytes())
+        .map_err(|err| failed(format!("cannot write {name}: {err}")))?;
+    Ok(RecordWrite::Written)
 }
 
 fn record_open_error(
     path: &Path,
+    name: &str,
     err: &std::io::Error,
 ) -> Result<Option<String>, PlatformProbeError> {
     if err.kind() == ErrorKind::NotFound {
@@ -428,6 +627,7 @@ fn record_open_error(
     {
         return Err(unusable_record(
             path,
+            name,
             "is not a regular file or has a symlinked directory component",
         ));
     }
@@ -437,19 +637,26 @@ fn record_open_error(
     })
 }
 
-fn unusable_record(path: &Path, what: &str) -> PlatformProbeError {
+fn unusable_record(path: &Path, name: &str, what: &str) -> PlatformProbeError {
+    // A start that reaches the service replaces an unusable binding, or
+    // reports on its journal line that it cannot; removing it first makes
+    // the next such start the one that records it.
+    let remedy = if name == INSTANCE_BINDING_NAME {
+        "remove it, then start tensorplate-agent once while the metadata service is reachable \
+         to record it again"
+    } else {
+        "start tensorplate-agent once while the metadata service is reachable to record it again"
+    };
     PlatformProbeError::IdentityUnestablished {
         source_name: path.display().to_string(),
-        detail: format!(
-            "the machine-type record {what}; start tensorplate-agent once while the metadata \
-             service is reachable to record it again"
-        ),
+        detail: format!("{name} {what}; {remedy}"),
     }
 }
 
-fn read_machine_type_record_in(
+fn read_identity_file_in(
     directory: &RecordDirectory,
     path: &Path,
+    name: &str,
 ) -> Result<Option<String>, PlatformProbeError> {
     let unreadable = |err: std::io::Error| PlatformProbeError::Unreadable {
         source_name: path.display().to_string(),
@@ -457,15 +664,16 @@ fn read_machine_type_record_in(
     };
     let file = match directory.read() {
         Ok(file) => file,
-        Err(err) => return record_open_error(path, &err),
+        Err(err) => return record_open_error(path, name, &err),
     };
     let metadata = file.metadata().map_err(unreadable)?;
     if !metadata.file_type().is_file() {
-        return Err(unusable_record(path, "is not a regular file"));
+        return Err(unusable_record(path, name, "is not a regular file"));
     }
     if metadata.len() > MAX_MACHINE_TYPE_RECORD {
         return Err(unusable_record(
             path,
+            name,
             &format!("is larger than {MAX_MACHINE_TYPE_RECORD} bytes"),
         ));
     }
@@ -476,6 +684,7 @@ fn read_machine_type_record_in(
     if u64::try_from(bytes.len()).map_or(true, |len| len > MAX_MACHINE_TYPE_RECORD) {
         return Err(unusable_record(
             path,
+            name,
             &format!("is larger than {MAX_MACHINE_TYPE_RECORD} bytes"),
         ));
     }
@@ -1097,6 +1306,246 @@ mod tests {
         );
     }
 
+    fn staged_binding(root: &tempfile::TempDir) -> std::path::PathBuf {
+        root.path()
+            .join(INSTANCE_BINDING_PATH.trim_start_matches('/'))
+    }
+
+    /// A staged root with the state and identity directories.
+    fn staged_identity_root() -> tempfile::TempDir {
+        let root = staged_state_root();
+        std::fs::create_dir_all(staged_binding(&root).parent().expect("parent"))
+            .expect("stage the identity directory");
+        root
+    }
+
+    #[test]
+    fn the_instance_id_is_asked_only_after_a_machine_type_answer() {
+        let root = staged_identity_root();
+        std::fs::write(staged_binding(&root), "bound").expect("stage a binding");
+        let probe = SystemHostProbe::with_root(root.path());
+        let answered =
+            |instance_id: Option<&str>, binding: Option<&str>| InstanceSources::Answered {
+                instance_id: instance_id.map(str::to_string),
+                binding: binding.map(str::to_string),
+            };
+        for dmi in [None, Some("Precision 7960 Tower\n")] {
+            assert_eq!(
+                probe
+                    .instance_sources(dmi, true, || panic!("{dmi:?}: asked"))
+                    .expect("nothing is asked or read off Compute Engine"),
+                answered(None, None),
+                "{dmi:?}"
+            );
+        }
+        assert_eq!(
+            probe
+                .instance_sources(GCE, false, || panic!(
+                    "an unreachable service was asked again"
+                ))
+                .expect("the binding is read"),
+            answered(None, Some("bound")),
+            "offline, the binding is read and nothing is asked"
+        );
+        assert_eq!(
+            probe
+                .instance_sources(GCE, true, || Ok("1234567890123456789".to_string()))
+                .expect("answered"),
+            answered(Some("1234567890123456789"), Some("bound")),
+            "online, the binding is read beside the answer it is checked against"
+        );
+        assert_eq!(
+            probe
+                .instance_sources(GCE, true, || Err(MetadataFailure::Timeout))
+                .expect("an unanswered query is not an error here"),
+            InstanceSources::Unanswered {
+                binding: Some("bound".to_string())
+            }
+        );
+        match probe.instance_sources(GCE, true, || {
+            Err(MetadataFailure::Answered(
+                "metadata service answered `HTTP/1.0 404`".to_string(),
+            ))
+        }) {
+            Err(PlatformProbeError::Unreadable { detail, .. }) => {
+                assert!(detail.contains(METADATA_INSTANCE_ID_PATH), "{detail}");
+                assert!(detail.contains("404"), "{detail}");
+            }
+            other => panic!("an answer that is not an id is a broken source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unanswered_instance_id_makes_the_start_one_without_a_live_answer() {
+        // The service answered the machine type and then not the instance
+        // id: the live machine type is dropped and the same-boot record is
+        // read, as when the first query goes unanswered. The retry loop, not
+        // a broken source, is what a record-less host then meets.
+        let root = staged_identity_root();
+        std::fs::write(staged_record(&root), "recorded body").expect("stage a record");
+        std::fs::write(staged_binding(&root), "bound").expect("stage a binding");
+        let probe = SystemHostProbe::with_root(root.path());
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    || Ok("projects/REDACTED/machineTypes/g2-standard-8".to_string()),
+                    || Err(MetadataFailure::Timeout),
+                )
+                .expect("no error"),
+            (
+                None,
+                Some("recorded body".to_string()),
+                None,
+                Some("bound".to_string())
+            )
+        );
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    || Ok("projects/REDACTED/machineTypes/g2-standard-8".to_string()),
+                    || Ok("1234567890123456789".to_string()),
+                )
+                .expect("no error"),
+            (
+                Some("projects/REDACTED/machineTypes/g2-standard-8".to_string()),
+                None,
+                Some("1234567890123456789".to_string()),
+                Some("bound".to_string())
+            ),
+            "both answered: the record is never read"
+        );
+        assert_eq!(
+            probe
+                .gce_sources(
+                    GCE,
+                    || Err(MetadataFailure::Timeout),
+                    || panic!("an unreachable service was asked for the instance id"),
+                )
+                .expect("no error"),
+            (
+                None,
+                Some("recorded body".to_string()),
+                None,
+                Some("bound".to_string())
+            ),
+            "the machine type unanswered: the instance id is never asked"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_is_not_a_regular_file_is_refused_offline_and_replaced_online() {
+        let root = staged_identity_root();
+        std::fs::create_dir_all(staged_binding(&root)).expect("stage a directory");
+        let probe = SystemHostProbe::with_root(root.path());
+        for (label, answered, id_query) in [
+            ("offline", false, None),
+            (
+                "online, the instance id unanswered",
+                true,
+                Some(MetadataFailure::Timeout),
+            ),
+        ] {
+            match probe.instance_sources(GCE, answered, || {
+                Err(id_query.unwrap_or_else(|| panic!("{label}: not asked")))
+            }) {
+                Err(PlatformProbeError::IdentityUnestablished { detail, .. }) => {
+                    assert!(
+                        detail.starts_with("the instance binding "),
+                        "{label}: {detail}"
+                    );
+                    assert!(
+                        detail.contains("remove it, then start"),
+                        "{label}: {detail}"
+                    );
+                }
+                other => panic!("{label}: expected IdentityUnestablished, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            probe
+                .instance_sources(GCE, true, || Ok("1234567890123456789".to_string()))
+                .expect("online, a path holding no binding is read as none"),
+            InstanceSources::Answered {
+                instance_id: Some("1234567890123456789".to_string()),
+                binding: None
+            },
+            "online, a path that is no binding reads as none, for this start to replace"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_instance_id_is_bound_to_the_record_written_beside_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = staged_identity_root();
+        let probe = SystemHostProbe::with_root(root.path());
+        let mut live = live_gce_sources("g2-standard-8");
+        assert_eq!(
+            probe.write_instance_binding(&live).expect("nothing to do"),
+            RecordWrite::NotApplicable,
+            "no instance id, no binding"
+        );
+        assert!(!staged_binding(&root).exists());
+
+        live.gce_instance_id = Some("1234567890123456789\n".to_string());
+        assert_eq!(
+            probe.write_machine_type_record(&live).expect("record"),
+            RecordWrite::Written
+        );
+        assert_eq!(
+            probe.write_instance_binding(&live).expect("binding"),
+            RecordWrite::Written
+        );
+        assert_eq!(
+            probe.write_instance_binding(&live).expect("binding again"),
+            RecordWrite::Unchanged
+        );
+        let record = std::fs::read_to_string(staged_record(&root)).expect("record");
+        let binding = InstanceBinding::parse(
+            &std::fs::read_to_string(staged_binding(&root)).expect("binding"),
+        )
+        .expect("parses");
+        assert_eq!(binding.instance_id, "1234567890123456789");
+        assert_eq!(
+            binding.machine_type_record_sha256,
+            crate::instance_binding::sha256_hex(record.as_bytes())
+        );
+        let mode = std::fs::metadata(staged_binding(&root))
+            .expect("written")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o640,
+            "group-readable, never world-readable: {mode:o}"
+        );
+
+        let mut resolved_from_a_record = live.clone();
+        resolved_from_a_record.gce_machine_type = None;
+        assert_eq!(
+            probe
+                .write_instance_binding(&resolved_from_a_record)
+                .expect("nothing to do"),
+            RecordWrite::NotApplicable,
+            "only a live machine-type answer is bound"
+        );
+    }
+
+    #[test]
+    fn the_binding_writer_never_creates_the_identity_directory() {
+        let root = staged_state_root();
+        let mut live = live_gce_sources("g2-standard-8");
+        live.gce_instance_id = Some("1234567890123456789".to_string());
+        assert!(matches!(
+            SystemHostProbe::with_root(root.path()).write_instance_binding(&live),
+            Err(PlatformProbeError::Unreadable { .. })
+        ));
+        assert!(!staged_binding(&root).parent().expect("parent").exists());
+    }
+
     #[test]
     fn only_a_live_answer_is_ever_recorded() {
         let root = staged_state_root();
@@ -1292,7 +1741,7 @@ mod tests {
 
             assert!(
                 matches!(
-                    read_machine_type_record(&record),
+                    read_identity_file(&record, MACHINE_TYPE_RECORD_NAME),
                     Err(PlatformProbeError::IdentityUnestablished { .. })
                 ),
                 "the reader must refuse symlinked {ancestor}"
@@ -1330,7 +1779,7 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, state).expect("replace the path with a link");
 
         assert_eq!(
-            read_machine_type_record_in(&directory, &record)
+            read_identity_file_in(&directory, &record, MACHINE_TYPE_RECORD_NAME)
                 .expect("read from the pinned directory"),
             Some("original record".to_string())
         );
@@ -1367,7 +1816,7 @@ mod tests {
             .expect("read the original descriptor");
         assert_eq!(body, "original record");
         assert!(matches!(
-            read_machine_type_record_in(&directory, &record),
+            read_identity_file_in(&directory, &record, MACHINE_TYPE_RECORD_NAME),
             Err(PlatformProbeError::IdentityUnestablished { .. })
         ));
     }
@@ -1381,7 +1830,7 @@ mod tests {
         let record = staged_record(&root);
         mknodat(CWD, &record, FileType::Fifo, Mode::from_raw_mode(0o600), 0).expect("stage a FIFO");
         assert!(matches!(
-            read_machine_type_record(&record),
+            read_identity_file(&record, MACHINE_TYPE_RECORD_NAME),
             Err(PlatformProbeError::IdentityUnestablished { .. })
         ));
     }
@@ -1906,7 +2355,9 @@ mod tests {
                 assert!(detail.contains("boom"), "carries stderr: {detail}");
             }
             other @ (PlatformProbeError::Unrecognized { .. }
-            | PlatformProbeError::IdentityUnestablished { .. }) => {
+            | PlatformProbeError::IdentityUnestablished { .. }
+            | PlatformProbeError::InstanceChanged { .. }
+            | PlatformProbeError::MachineTypeChanged { .. }) => {
                 panic!("expected Unreadable, got {other:?}")
             }
         }
@@ -1956,7 +2407,9 @@ mod tests {
                     assert!(detail.contains("PATH"), "says why: {detail}");
                 }
                 other @ (PlatformProbeError::Unrecognized { .. }
-                | PlatformProbeError::IdentityUnestablished { .. }) => {
+                | PlatformProbeError::IdentityUnestablished { .. }
+                | PlatformProbeError::InstanceChanged { .. }
+                | PlatformProbeError::MachineTypeChanged { .. }) => {
                     panic!("expected Unreadable, got {other:?}")
                 }
             }

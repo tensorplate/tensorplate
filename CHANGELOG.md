@@ -110,6 +110,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stays `0.1`, no bundle compatibility floor moves, and no dated
   `[0.3.1]` section or release notes file is opened here.
   (V030-E01-F01-T04)
+- The documented rollback in `docs/install/lifecycle.md` restores
+  `state/machine-type.json` from `state.bak` before the older release is
+  installed, so the older agent keeps the machine type recorded in this boot.
+  `tools/validation/ubuntu-l4-cloud-lifecycle.sh` does the same, and now
+  checks both directions: upgrade requires the record the baseline wrote to
+  be byte-identical after the candidate starts and the instance binding to
+  exist, and rollback requires the restored record and the binding to be
+  byte-identical once the baseline is up. (V030-E01-F01-T03)
+- On a Compute Engine instance, `tensorplate doctor` now reads the instance
+  binding even when the metadata service answers, so it needs root or
+  `tensorplate` group membership there, as it already did when the service
+  was unreachable. Without either, the host finding says which directory it
+  could not read. (V030-E01-F01-T03)
+
 
 - The agent no longer falls back to `state.json.bak` when `state.json` is
   refused for an unsupported state version (a newer state file supersedes an
@@ -270,6 +284,39 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
   `docs/contributing/local-validation.md` make the scan the step before
   every push. (V030-E06-F02-T01)
+- On a Compute Engine instance, `tensorplate-agent` now records which
+  instance its machine-type record was taken on. Every start where the
+  metadata service answers also asks it for the instance id, with a 250 ms
+  budget of its own, and, unless detection refuses the binding, writes
+  `/var/lib/tensorplate/identity/instance-binding.json`:
+  the instance id, the machine type and the kernel boot ID, with the SHA-256
+  of the `machine-type.json` bytes written in that start. The machine-type
+  record itself is unchanged, still schema 2 at its old path, because the
+  0.2.1 agent a rollback reinstates reads it there and rejects fields it does
+  not know. With the service answering, a binding that names another
+  instance fails detection with the new `InstanceChanged` error: the disk
+  was moved to or cloned into another instance. A binding that names this
+  instance on another machine type than the live answer, whatever boot it
+  is from, fails with the new `MachineTypeChanged` error: the instance was
+  stopped and given a different machine type. Neither is retried, neither
+  start writes either file, and reprovisioning is explicit, by deleting
+  both files and starting the agent with the service reachable. With the
+  service unreachable, a binding written in the same boot must name the
+  record's machine type and digest its exact bytes, or detection fails; a
+  binding from an earlier boot must name the record's machine type, or
+  detection fails with `MachineTypeChanged`; a binding that cannot be
+  parsed at all fails detection; and without one the record alone decides,
+  as before. A service that answers
+  the machine type and then not the instance id makes that start one
+  without a live answer: the same-boot record decides, and without one the
+  start fails in the step the agent retries. A binding that cannot be parsed,
+  or a binding path holding a directory, a link or an oversized file, is
+  replaced on the next start that reaches the service, or reported on that
+  start's journal line when it cannot be. The
+  instance id is never logged or echoed in an error: the journal gets a
+  separate `platform instance binding:` line, and the `platform identity:`
+  line keeps its shape. The installer creates `/var/lib/tensorplate/identity/`;
+  remove keeps it and purge removes it. (V030-E01-F01-T03)
 - The backend descriptor schema (`protocol/schemas/backend_descriptor.json`)
   gains an optional `runner_profiles` list. Each entry names an installed
   runner profile, the absolute interpreter and environment root its sidecar

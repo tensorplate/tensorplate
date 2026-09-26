@@ -23,7 +23,7 @@
 // [`crate::probe`].
 
 use serde::{Deserialize, Serialize};
-use tensorplate_protocol::install_paths::MACHINE_TYPE_RECORD_PATH;
+use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 use tensorplate_protocol::serde_shape::is_canonical_identifier;
 
 use crate::detect::{
@@ -31,6 +31,7 @@ use crate::detect::{
     nvidia_display_devices, HostSources,
 };
 use crate::error::PlatformProbeError;
+use crate::instance_binding::{check_live_instance, machine_type_changed, InstanceBinding};
 
 /// What every unestablished-identity error opens with.
 const CONTEXT: &str =
@@ -93,6 +94,8 @@ impl std::fmt::Display for RecordWrite {
 /// instance can change machine type, and a disk can move to another instance,
 /// but both start a new boot. Capacity equality alone cannot establish this.
 /// The other facts also refuse changes within that boot; none derives a shape.
+/// Once the metadata service answers, the instance binding refuses both
+/// cases, and only reprovisioning records them again.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalShapeFacts {
     /// The kernel boot UUID from `/proc/sys/kernel/random/boot_id`.
@@ -101,7 +104,9 @@ pub struct LocalShapeFacts {
     pub logical_cpus: u32,
     /// `MemTotal`, in bytes. Compared exactly: a tolerance would be a
     /// guessed constant, and a changed total refuses loudly and heals on
-    /// the next start that reaches the metadata service.
+    /// the next start that reaches the metadata service, unless the
+    /// instance was given another machine type, which the instance binding
+    /// refuses until the host is reprovisioned.
     pub mem_total_bytes: u64,
     /// `<vendor>:<device>` of every NVIDIA display function, sorted.
     pub nvidia_display_devices: Vec<String>,
@@ -289,7 +294,7 @@ impl MachineTypeRecord {
 }
 
 /// A lowercase UUID as Linux exposes it, excluding the all-zero sentinel.
-fn is_boot_id(id: &str) -> bool {
+pub(crate) fn is_boot_id(id: &str) -> bool {
     id.len() == 36
         && id != "00000000-0000-0000-0000-000000000000"
         && id.bytes().enumerate().all(|(i, b)| {
@@ -319,19 +324,26 @@ fn is_pci_id(id: &str) -> bool {
 ///
 /// In order:
 ///
-/// 1. A live metadata answer wins, and any record is ignored. An answer
-///    that is not a machine-type resource name is uninterpretable, not
-///    absent.
+/// 1. A live metadata answer wins over any record, which is ignored. An
+///    answer that is not a machine-type resource name is uninterpretable,
+///    not absent. An instance binding naming another instance than the live
+///    instance-id answer, or this instance on another machine type than the
+///    live answer, fails detection (see [`crate::instance_binding`]).
 /// 2. A host whose firmware does not say it is a Compute Engine instance has
 ///    no machine type, and any record is ignored.
 /// 3. A Compute Engine instance without a live answer uses the recorded
-///    machine type only if the record parses and every fact it is bound to
-///    matches exactly.
+///    machine type only if the record parses, every fact it is bound to
+///    matches exactly, an instance binding written in this boot agrees
+///    with it, and a binding from an earlier boot names its machine type.
 ///
 /// # Errors
 ///
 /// [`PlatformProbeError::Unrecognized`] for a live answer that is not a
-/// machine-type resource name, and [`PlatformProbeError::IdentityUnestablished`] for every
+/// machine-type resource name or instance id,
+/// [`PlatformProbeError::InstanceChanged`] for a binding from another
+/// instance, [`PlatformProbeError::MachineTypeChanged`] for a binding that
+/// names another machine type for this instance, and
+/// [`PlatformProbeError::IdentityUnestablished`] for every
 /// other Compute Engine case without one. Never `Ok(None)` on Compute
 /// Engine: an instance reporting no machine type is admitted as an
 /// unvalidated shape rather than refused.
@@ -341,15 +353,16 @@ pub fn establish_machine_type(
     if let Some(body) = sources.gce_machine_type.as_deref() {
         // The body is not echoed: it carries the project number, and it is
         // whatever the peer sent.
-        return machine_type_from_metadata(body)
-            .map(|machine_type| Some((machine_type, MachineTypeSource::GceMetadata)))
-            .ok_or_else(|| PlatformProbeError::Unrecognized {
+        let machine_type =
+            machine_type_from_metadata(body).ok_or_else(|| PlatformProbeError::Unrecognized {
                 source_name: "GCE metadata service".to_string(),
                 detail: "the machine-type answer is not \
                          `projects/<project>/machineTypes/<machine-type>` with a canonical \
                          machine type"
                     .to_string(),
-            });
+            })?;
+        check_live_instance(sources, &machine_type)?;
+        return Ok(Some((machine_type, MachineTypeSource::GceMetadata)));
     }
     if !sources
         .dmi_product_name
@@ -388,10 +401,41 @@ pub fn establish_machine_type(
     if let Some(difference) = record.first_difference(&live) {
         return Err(unestablished(format!(
             "{CONTEXT}, and the recorded machine type `{}` no longer describes this host: \
-             {difference}; a stopped instance can be given a different machine type, so start \
-             tensorplate-agent once while the metadata service is reachable to record it again",
+             {difference}; start tensorplate-agent once while the metadata service is reachable \
+             to record it again (a stopped instance can be given a different machine type; if \
+             it was, that start refuses and says how to reprovision)",
             record.machine_type
         )));
+    }
+    if let Some(binding) = sources.instance_binding.as_deref() {
+        let unbound = |detail: String| PlatformProbeError::IdentityUnestablished {
+            source_name: INSTANCE_BINDING_PATH.to_string(),
+            detail: format!(
+                "{CONTEXT}, and {detail}; start tensorplate-agent once while the metadata \
+                 service is reachable to record both again"
+            ),
+        };
+        let binding = InstanceBinding::parse(binding)
+            .map_err(|reason| unbound(format!("the instance binding is unusable: {reason}")))?;
+        if binding.boot_id == live.boot_id {
+            if let Some(disagreement) = binding.disagreement(&record, body) {
+                return Err(unbound(disagreement));
+            }
+        } else if binding.machine_type != record.machine_type {
+            // The record is from this boot and the binding from an earlier
+            // one: only a record written without this release -- by the
+            // 0.2.1 agent after a rollback -- can name another machine type.
+            // Offline there is no instance id to tell a resize from a moved
+            // disk; the online start that follows refuses either way, with
+            // MachineTypeChanged or InstanceChanged, and both reprovision
+            // alike.
+            return Err(machine_type_changed(&format!(
+                "the machine type recorded in this boot is `{}`, and this host's identity was \
+                 recorded on `{}`; the instance was given a different machine type, or the disk \
+                 was moved to an instance of that type",
+                record.machine_type, binding.machine_type
+            )));
+        }
     }
     Ok(Some((
         record.machine_type,

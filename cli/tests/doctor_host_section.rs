@@ -53,6 +53,8 @@ fn sources_of(fixture: &Value) -> HostSources {
         dmi_product_name: text("dmi_product_name"),
         gce_machine_type: text("gce_machine_type"),
         machine_type_record: text("machine_type_record"),
+        gce_instance_id: text("gce_instance_id"),
+        instance_binding: text("instance_binding"),
         boot_id: text("boot_id"),
         proc_meminfo: text("proc_meminfo"),
         pci_devices: text("pci_devices"),
@@ -922,6 +924,76 @@ fn host_os_says_which_source_established_the_machine_type() {
         "{message}"
     );
     assert!(!message.contains("(from GCE metadata)"), "{message}");
+}
+
+#[test]
+fn another_instance_another_machine_type_and_an_unreadable_binding_each_get_their_own_fix() {
+    // A binding from another instance, or for this instance on another
+    // machine type: the fix is explicit reprovisioning, not another agent
+    // start, and doctor says so, for its own cause, without quoting an id.
+    let mut moved = sources_of(&fixture("ubuntu2404-x86-l4-g2s8"));
+    moved.dmi_product_name = Some("Google Compute Engine\n".to_string());
+    moved.gce_instance_id = Some("1234567890123456790".to_string());
+    moved.instance_binding = Some(
+        serde_json::json!({
+            "schema_version": 1,
+            "instance_id": "1234567890123456789",
+            "machine_type": "g2-standard-8",
+            "boot_id": "00000000-0000-4000-8000-000000000001",
+            "machine_type_record_sha256": "0".repeat(64),
+        })
+        .to_string(),
+    );
+    let err = identify_platform(&moved).expect_err("another instance is refused");
+    assert!(
+        matches!(err, PlatformProbeError::InstanceChanged { .. }),
+        "{err:?}"
+    );
+    let mut resized = moved.clone();
+    resized.gce_instance_id = Some("1234567890123456789".to_string());
+    resized.instance_binding = moved
+        .instance_binding
+        .as_deref()
+        .map(|binding| binding.replace("g2-standard-8", "g2-standard-4"));
+    let resized_err = identify_platform(&resized).expect_err("another machine type is refused");
+    assert!(
+        matches!(resized_err, PlatformProbeError::MachineTypeChanged { .. }),
+        "{resized_err:?}"
+    );
+    let unreadable = PlatformProbeError::Unreadable {
+        source_name: tensorplate_protocol::install_paths::INSTANCE_BINDING_PATH.to_string(),
+        detail: "Permission denied (os error 13)".to_string(),
+    };
+
+    let registry = registry();
+    let reprovision = "delete /var/lib/tensorplate/identity/instance-binding.json and /var/lib/tensorplate/state/machine-type.json";
+    for (err, fixes) in [
+        (&err, [reprovision, "moved to, or cloned into, another"]),
+        (
+            &resized_err,
+            [reprovision, "was given a different machine type"],
+        ),
+        (&unreadable, ["which owns /var/lib/tensorplate/identity"; 2]),
+    ] {
+        let section =
+            render_host_section(HostSectionDetection::HostProbeFailed(err), Ok(&registry));
+        let facts = section
+            .iter()
+            .find(|f| f.id == FindingId::HostFacts)
+            .expect("host_facts");
+        assert_eq!(facts.status, FindingStatus::Warning);
+        let hint = facts.hint.as_deref().expect("a hint");
+        for fix in fixes {
+            assert!(
+                hint.contains(fix),
+                "the hint names the cause and fix: {hint}"
+            );
+        }
+        let said = format!("{} {hint}", facts.message);
+        for id in ["1234567890123456789", "1234567890123456790"] {
+            assert!(!said.contains(id), "no instance id is quoted: {said}");
+        }
+    }
 }
 
 #[test]

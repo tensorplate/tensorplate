@@ -20,6 +20,9 @@
 //   /var/lib/tensorplate/state/        desired-state etc.  tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/state/machine-type.json            tensorplate:tensorplate 0640
 //                                      (agent-written, Compute Engine only)
+//   /var/lib/tensorplate/identity/                          tensorplate:tensorplate 0750
+//   /var/lib/tensorplate/identity/instance-binding.json     tensorplate:tensorplate 0640
+//                                      (agent-written, Compute Engine only)
 //   /var/lib/tensorplate/bundles/staging                   tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/bundles/active                    tensorplate:tensorplate 0750
 //   /var/lib/tensorplate/bundles/previous                  tensorplate:tensorplate 0750
@@ -85,6 +88,21 @@ pub const STATE_INNER_DIR: &str = "/var/lib/tensorplate/state";
 /// metadata service cannot be reached. Lives under [`STATE_INNER_DIR`] so
 /// purge removes it along with the rest of the agent's state.
 pub const MACHINE_TYPE_RECORD_PATH: &str = "/var/lib/tensorplate/state/machine-type.json";
+
+/// Host identity kept apart from [`STATE_INNER_DIR`], which the documented
+/// rollback sets aside. Purge removes it; remove keeps it, as it keeps the
+/// state directory.
+pub const IDENTITY_DIR: &str = "/var/lib/tensorplate/identity";
+
+/// The Compute Engine instance id, machine type and kernel boot ID
+/// `tensorplate-agent` recorded from live metadata answers, with the SHA-256
+/// of the machine-type record it wrote in the same start.
+///
+/// Written by the agent on every start where the metadata service answered
+/// and detection did not refuse the binding, never by the installer. Kept out of the machine-type record because the
+/// 0.2.1 agent a rollback reinstates reads that record and rejects fields it
+/// does not know; it never reads this file.
+pub const INSTANCE_BINDING_PATH: &str = "/var/lib/tensorplate/identity/instance-binding.json";
 
 /// Bundle staging root. Each verified bundle lands at
 /// `<BUNDLE_STAGING_DIR>/<deployment_id>/`.
@@ -270,6 +288,7 @@ pub fn required_directories() -> &'static [&'static str] {
         ETC_DIR,
         STATE_DIR,
         STATE_INNER_DIR,
+        IDENTITY_DIR,
         // bundles/ parent created by staging entry's mkdir -p in scripts.
         BUNDLE_STAGING_DIR,
         BUNDLE_ACTIVE_DIR,
@@ -328,6 +347,7 @@ mod tests {
         for p in [
             STATE_DIR,
             STATE_INNER_DIR,
+            IDENTITY_DIR,
             BUNDLE_STAGING_DIR,
             BUNDLE_ACTIVE_DIR,
             BUNDLE_PREVIOUS_DIR,
@@ -351,6 +371,19 @@ mod tests {
             Path::new(MACHINE_TYPE_RECORD_PATH).parent(),
             Some(Path::new(STATE_INNER_DIR))
         );
+    }
+
+    #[test]
+    fn the_instance_binding_is_outside_the_state_a_rollback_sets_aside() {
+        // Rollback moves the state directory aside and the reinstated agent
+        // never reads the binding, so the binding must not move with it.
+        // It stays under the state root, which purge clears and remove keeps.
+        let binding = Path::new(INSTANCE_BINDING_PATH);
+        assert_eq!(binding.parent(), Some(Path::new(IDENTITY_DIR)));
+        assert!(!binding.starts_with(STATE_INNER_DIR));
+        assert!(binding.starts_with(STATE_DIR));
+        assert!(required_directories().contains(&IDENTITY_DIR));
+        assert_eq!(expected_dir_mode(IDENTITY_DIR), mode::DIR_0750);
     }
 
     #[test]

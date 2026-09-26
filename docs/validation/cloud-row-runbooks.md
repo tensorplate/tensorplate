@@ -331,6 +331,31 @@ record=not_applicable` line in its own journal, and doctor's `host_os`
 finding saying the machine type was recorded rather than read live.
 Doctor must still resolve the row with nothing failing.
 
+**The record's instance.** Beside the record, the agent writes
+`/var/lib/tensorplate/identity/instance-binding.json` on the same starts:
+the instance id the metadata service answered, the machine type, the boot
+id, and the SHA-256 of the record bytes it wrote. It never logs the
+instance id; its journal line is `platform instance binding: written`,
+`unchanged` or `not_applicable`, among others. With the service answering, a binding
+that names another instance fails detection, because the disk was moved
+to or cloned into another instance, and so does one that names this
+instance on another machine type than the live answer, because the
+instance was given a different machine type; neither start writes either
+file. Reprovision by stopping the agent, deleting both files and starting
+it with the service reachable. With the service unreachable, a binding
+written in the same boot must agree with the record, and one from an
+earlier boot must name the record's machine type. Upgrade requires the record the baseline wrote to be
+byte-identical after the candidate starts and the binding to exist;
+rollback restores the record from `state.bak` before the baseline
+installs, as the documented procedure does, compares the restored copy
+with the one taken while the services were stopped, and requires the
+record and the binding to be byte-identical once the baseline is up.
+Because these stages run online and every start in the same boot rewrites
+exactly the record's bytes, the checks made after an agent starts show
+that each release writes the same layout, not that the file survived; the
+comparison right after the restore, before any agent starts, is the one
+that shows the rollback put the record back.
+
 **Because the record is bound to the boot, offline cold boot is not
 supported.** After a reboot the agent must start once with the metadata
 service reachable before offline detection works at all; a host that
@@ -371,9 +396,10 @@ installer runs with a denial in place, and no CLI call outside the
 offline stage runs denied or in a transient unit.
 
 **offline runs before upgrade, and has to.** Upgrade's clean baseline
-install deletes `/var/lib/tensorplate`, taking the machine-type record
-with it, and the baseline release never wrote one. An offline stage after
-upgrade would fail for want of evidence the stage ordering destroyed.
+install deletes `/var/lib/tensorplate`, taking the candidate's
+machine-type record with it. An offline stage after upgrade would rest on
+the record the baseline wrote, which is evidence about the baseline rather
+than the candidate it certifies.
 
 The report still reports `incomplete` without `--baseline-assets-dir`,
 because upgrade and rollback are skipped. With a baseline, all eight
@@ -402,11 +428,14 @@ over the running baseline. It passes when:
 - doctor is green and resolves the row, as in install;
 - the deployment made on the baseline answers health and inference on
   the candidate without being deployed again, re-warmed from the
-  baseline's durable state within the installer's own readiness wait.
+  baseline's durable state within the installer's own readiness wait;
+- the machine-type record the baseline wrote is byte-identical once the
+  candidate is up, and the candidate has written the instance binding.
 
 **rollback** follows the procedure in
 [`docs/install/lifecycle.md`](../install/lifecycle.md). It stops both
-services, moves durable state aside to `state.bak`, and removes — never
+services, moves durable state aside to `state.bak`, copies the
+machine-type record back into a fresh `state/`, and removes — never
 purges — every installed TensorPlate package except
 `tensorplate-apt-source`. Every package, because any newer one left
 behind makes the older installer's `apt-get -y` a refused downgrade.
@@ -415,9 +444,11 @@ requires that no TensorPlate package other than `tensorplate-apt-source`
 is still installed and that the agent's conffiles were kept.
 It passes when exactly the baseline's packages are installed, the edited
 `cli.json` still has its bytes, the whole set-aside `state.bak` directory
-is intact, the rolled-back agent answers with no active or previous
-deployment — it did not load the newer agent's state — and a fresh deploy
-answers health and inference.
+is intact, the restored machine-type record and the instance binding are
+byte-identical to their copies taken with the services stopped, the
+rolled-back agent answers with no active or previous deployment — it did
+not load the newer agent's state — and a fresh deploy answers health and
+inference.
 
 Intact means byte for byte, file by file: with the services stopped and
 before the move, the harness lists `state/` and digests every file in it,

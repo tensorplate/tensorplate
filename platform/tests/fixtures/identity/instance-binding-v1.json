@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "instance_id": "1234567890123456789",
+  "machine_type": "g2-standard-8",
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "machine_type_record_sha256": "edb854ce8e6258647f1595b3cc640f2d4c52c7fd267ad9d350534e8cf6394b85"
+}
