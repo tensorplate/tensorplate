@@ -270,6 +270,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
   `docs/contributing/local-validation.md` make the scan the step before
   every push. (V030-E06-F02-T01)
+- The backend descriptor schema (`protocol/schemas/backend_descriptor.json`)
+  gains an optional `runner_profiles` list. Each entry names an installed
+  runner profile, the absolute interpreter and environment root its sidecar
+  runs under, optional library directories for the sidecar's
+  shared-library search path, the packages that install it, and the compute
+  types it can load, from a closed list with no `auto`. The Rust reader
+  also refuses what the schema cannot state: a repeated profile id, a path
+  with a `.` or `..` segment, an interpreter or library directory outside
+  the environment root, and a blank package name. A platform row's `backend_packages` entry
+  gains optional per-runner-profile package lists, with the same schema and
+  decoder agreement. Both changes are additive inside schema 0.1, and no
+  version constant moves. No shipped descriptor or committed platform row
+  declares a runner profile yet, and nothing reads either list yet. New
+  fixture tests require the schema and the Rust decoder to accept the
+  committed descriptors and to refuse every malformed variant the schema
+  can express, and pin the schema's acceptance of each case only the
+  decoder refuses. Checking the shipped
+  `python_pytorch` descriptor this way showed that its `$schema` key had
+  never been allowed by its own schema, so the schema now declares it.
+  (V030-E01-F01-T04)
 - `tensorplate bundle provision <name> --from <dir>` puts a bundle that the
   provisioning manifest lists into `/var/lib/tensorplate/bundles/import/<name>/`,
   verified file by file. The provisioning manifest (schema

@@ -15,6 +15,8 @@
 // obtain a row — the type deliberately has no `Deserialize` impl — and
 // decoded rows are read-only.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use tensorplate_protocol::json_numbers;
 use tensorplate_protocol::serde_shape::{
@@ -318,6 +320,23 @@ pub struct BackendPackageSet {
     pub backend_path: String,
     pub channel: PackageChannel,
     pub packages: Vec<String>,
+    /// Packages each runner profile on this backend path needs beyond
+    /// `packages`. Empty when the row declares none.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_vec_map_only"
+    )]
+    pub runner_profiles: Vec<RunnerProfilePackageSet>,
+}
+
+/// Packages one runner profile needs on a backend path, beyond the
+/// path's own `packages`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerProfilePackageSet {
+    pub runner_profile: String,
+    pub packages: Vec<String>,
 }
 
 /// Pointer to a model support row valid on this platform row.
@@ -577,6 +596,26 @@ impl PlatformSupportRow {
                 return Err(invalid(
                     "each backend path must declare at least one non-empty package",
                 ));
+            }
+            let mut profiles = BTreeSet::new();
+            for profile in &set.runner_profiles {
+                if !is_canonical_snake_identifier(&profile.runner_profile) {
+                    return Err(invalid("runner_profile must be lower_snake_case"));
+                }
+                if !profiles.insert(profile.runner_profile.as_str()) {
+                    return Err(invalid(
+                        "a backend path must not list a runner profile twice",
+                    ));
+                }
+                if profile.packages.is_empty() || profile.packages.iter().any(|p| blank(p)) {
+                    return Err(invalid(
+                        "each runner profile must list at least one non-empty package",
+                    ));
+                }
+                if profile.packages.iter().collect::<BTreeSet<_>>().len() != profile.packages.len()
+                {
+                    return Err(invalid("a runner profile's packages must not repeat"));
+                }
             }
         }
         if self
