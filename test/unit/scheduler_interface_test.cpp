@@ -20,6 +20,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "tensorplate/core/job_request.hpp"
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/pressure.hpp"
@@ -32,6 +33,11 @@ namespace {
 
 using namespace tensorplate;
 using namespace tensorplate::testing;
+
+// A job carries the key its logical session was admitted under, so the
+// scheduler's session key and the typed job seam's session key are one type.
+static_assert(std::is_same_v<SchedulerRequest::SessionKey, decltype(JobIdentity::session_key)>,
+              "SchedulerRequest::SessionKey must be the type of JobIdentity::session_key");
 
 TEST(SchedulerFactory, FifoIsRegisteredOnGlobalRegistry) {
   SchedulerPolicyRegistry& registry = SchedulerPolicyRegistry::global();
