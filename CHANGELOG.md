@@ -456,6 +456,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   header now says where the accelerator proof lives instead of saying no
   CUDA fixture exists. (V030-E01-F01-T01)
 
+- A CUDA baseline for the `ubuntu2404-x86-l4-g2s8` support row, recorded on
+  that shape and published under
+  `docs/validation/evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/`.
+  The lifecycle evidence beside it runs the device-neutral profile and
+  executes no CUDA kernel, so it could not answer whether the hardened
+  service sandbox permits the accelerator at all. It does: `nvidia-smi`
+  resolves under systemd's default PATH as the service account inside the
+  agent's mount namespace, all three CUDA device nodes are present there
+  and openable, PyTorch reports CUDA available and a matmul returns the
+  correct result under every one of the unit's hardening properties, and a
+  deploy of the CUDA fixture reached active and answered an inference while
+  the sidecar held GPU memory. Package closure is recorded from the
+  published release alone; the CUDA deploy's own artifact and the patch that
+  distinguishes it are recorded with it. The row's
+  `kernel_driver_stack.components` stays empty on purpose: the agent reports
+  no stack components, so a row that declares one is resolved and then
+  refused on the machine it describes, which the bundle shows rather than
+  asserts. The bundle also records the login path and the guest agent
+  returning after a reboot with the appliance's autostart disabled.
+  `docs/validation/cloud-row-runbooks.md` carries the procedure.
+  (V030-E01-F01-T01, V030-E01-F01-T03)
+
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3

@@ -1,0 +1,19 @@
+# The agent's own journal for this run, projected to the service's own lines.
+Started tensorplate-agent.service - TensorPlate device agent (control plane, deploy transaction, worker supervision).
+platform registry: rows=30 supported=26 roadmap_targets=4 dir=/usr/share/tensorplate/platform
+platform identity: machine_type=g2-standard-8 source=gce_metadata record=written
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=none posture=technical_prerequisites (row floor) evidence=validated max_resident_model_memory=24152899584
+backend probe: backend=python_pytorch state=DescriptorMissing descriptor=/usr/share/tensorplate/backends/python_pytorch/backend.json
+startup recovery: NoOp (no deployment recorded)
+tensorplate-agent listening on /run/tensorplate/agent.sock
+Stopping tensorplate-agent.service - TensorPlate device agent (control plane, deploy transaction, worker supervision)...
+tensorplate-agent.service: Deactivated successfully.
+Stopped tensorplate-agent.service - TensorPlate device agent (control plane, deploy transaction, worker supervision).
+tensorplate-agent.service: Consumed 1.312s CPU time, 16.0M memory peak, 0B memory swap peak.
+Started tensorplate-agent.service - TensorPlate device agent (control plane, deploy transaction, worker supervision).
+platform registry: rows=30 supported=26 roadmap_targets=4 dir=/usr/share/tensorplate/platform
+platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=none posture=technical_prerequisites (row floor) evidence=validated max_resident_model_memory=24152899584
+backend probe: backend=python_pytorch state=Runnable descriptor=/usr/share/tensorplate/backends/python_pytorch/backend.json
+startup recovery: NoOp (no deployment recorded)
+tensorplate-agent listening on /run/tensorplate/agent.sock

@@ -1,0 +1,11 @@
+# Package closure: no source tree on this host, every artifact owned by a package
+# host source tree: ls: cannot access '/home/tp-synthetic-operator/tensorplate': No such file or directory
+PRESENT  /usr/lib/tensorplate/tensorplate-serving                                                     <- tensorplate-serving
+PRESENT  /usr/bin/tensorplate-backend-python-pytorch                                                  <- tensorplate-backend-python-pytorch
+PRESENT  /usr/lib/tensorplate/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py       <- tensorplate-backend-python-pytorch
+PRESENT  /usr/share/tensorplate/backends/python_pytorch/backend.json                                  <- tensorplate-backend-python-pytorch
+PRESENT  /usr/lib/python3/dist-packages/tensorplate_pytorch_backend.pth                               <- tensorplate-backend-python-pytorch
+PRESENT  /usr/bin/tensorplate-agent                                                                   <- tensorplate-agent
+PRESENT  /usr/bin/tensorplate                                                                         <- tensorplate-cli
+# dpkg --verify over all six installed packages: empty output means no installed file differs from its package
+# dpkg --verify exit=0

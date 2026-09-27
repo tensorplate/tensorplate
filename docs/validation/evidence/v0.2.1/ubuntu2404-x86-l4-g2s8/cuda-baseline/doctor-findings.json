@@ -1,0 +1,312 @@
+[
+  {
+    "run": "doctor-after-install",
+    "findings": [
+      {
+        "id": "cli_version",
+        "status": "ok",
+        "message": "tensorplate-cli 0.2.1 (protocol 0.1)"
+      },
+      {
+        "id": "profile_mode",
+        "status": "ok",
+        "message": "profile `local` mode `local` is supported"
+      },
+      {
+        "id": "agent_socket",
+        "status": "ok",
+        "message": "agent socket `/run/tensorplate/agent.sock` exists"
+      },
+      {
+        "id": "agent_config_valid",
+        "status": "ok",
+        "message": "/etc/tensorplate/agent.json satisfies the agent config schema"
+      },
+      {
+        "id": "host_facts",
+        "status": "ok",
+        "message": "host arch=x86_64 vendor=intel"
+      },
+      {
+        "id": "host_os",
+        "status": "ok",
+        "message": "Ubuntu 24.04 on g2-standard-8 (from GCE metadata) [exact: version 24.04.5 LTS (Noble Numbat)]"
+      },
+      {
+        "id": "accelerator_facts",
+        "status": "ok",
+        "message": "1 accelerator: `NVIDIA L4`"
+      },
+      {
+        "id": "platform_profile",
+        "status": "ok",
+        "message": "host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s8"
+      },
+      {
+        "id": "platform_row",
+        "status": "ok",
+        "message": "resolves to support row `ubuntu2404-x86-l4-g2s8`"
+      },
+      {
+        "id": "model_class_rows",
+        "status": "ok",
+        "message": "row `ubuntu2404-x86-l4-g2s8` serves chunked_policy (Preview)"
+      },
+      {
+        "id": "ros2_health_stub",
+        "status": "ok",
+        "message": "ROS 2 health stub config present (enabled=false)"
+      },
+      {
+        "id": "core_packages",
+        "status": "ok",
+        "message": "core Debian packages installed: tensorplate-common=0.2.1-1, tensorplate-agent=0.2.1-1, tensorplate-serving=0.2.1-1, tensorplate-observability=0.2.1-1, tensorplate-cli=0.2.1-1"
+      },
+      {
+        "id": "path_layout",
+        "status": "ok",
+        "message": "all 13 install directories exist with safe permissions"
+      },
+      {
+        "id": "config_files",
+        "status": "ok",
+        "message": "all 4 config files present with recognized schema_version"
+      },
+      {
+        "id": "config_endpoints",
+        "status": "ok",
+        "message": "installed service configs keep control, serving, and observability endpoints local"
+      },
+      {
+        "id": "serving_binary_installed",
+        "status": "ok",
+        "message": "serving worker installed at `/usr/lib/tensorplate/tensorplate-serving` (agent-supervised, not systemd-managed)"
+      },
+      {
+        "id": "agent_systemd_unit",
+        "status": "ok",
+        "message": "tensorplate-agent.service installed at `/lib/systemd/system/tensorplate-agent.service`"
+      },
+      {
+        "id": "observability_systemd_unit",
+        "status": "ok",
+        "message": "tensorplate-observability.service installed at `/lib/systemd/system/tensorplate-observability.service`"
+      },
+      {
+        "id": "serving_systemd_absent",
+        "status": "ok",
+        "message": "no tensorplate-serving systemd unit (agent supervises the serving worker)"
+      },
+      {
+        "id": "agent_service_state",
+        "status": "ok",
+        "message": "tensorplate-agent.service is active"
+      },
+      {
+        "id": "observability_service_state",
+        "status": "ok",
+        "message": "tensorplate-observability.service is active"
+      },
+      {
+        "id": "platform_registry",
+        "status": "ok",
+        "message": "platform support registry at `/usr/share/tensorplate/platform` loaded (30 rows, 26 supported combinations, 4 roadmap targets)"
+      },
+      {
+        "id": "python_pytorch_backend",
+        "status": "missing",
+        "message": "no Python/PyTorch backend descriptor at `/usr/share/tensorplate/backends/python_pytorch/backend.json`"
+      },
+      {
+        "id": "python_pytorch_runtime",
+        "status": "skipped",
+        "message": "skipped: backend descriptor absent"
+      },
+      {
+        "id": "cuda_runtime",
+        "status": "ok",
+        "message": "NVIDIA driver present (`/proc/driver/nvidia/version`); system CUDA toolkit at `/usr/local/cuda/version.json`; this build's serving worker carries no TensorRT adapter, so nothing installed requires that toolkit \u2014 no python_pytorch sidecar is installed (see `python_pytorch_backend`); if one is installed, a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+      },
+      {
+        "id": "tensorrt_runtime",
+        "status": "missing",
+        "message": "TensorRT not detected; vision-on-TensorRT validation will skip"
+      },
+      {
+        "id": "libtorch_runtime",
+        "status": "missing",
+        "message": "LibTorch not detected; the LibTorch native adapter is optional in v0.1.0"
+      },
+      {
+        "id": "agent_reachable",
+        "status": "ok",
+        "message": "agent reachable via `/run/tensorplate/agent.sock` (correlation_id=cli-818aadb9-c9f9-4680-80d9-857a25068426)"
+      },
+      {
+        "id": "agent_state",
+        "status": "ok",
+        "message": "agent_state=ready"
+      },
+      {
+        "id": "active_deployment",
+        "status": "missing",
+        "message": "no active deployment"
+      }
+    ]
+  },
+  {
+    "run": "doctor-after-backend-torch",
+    "findings": [
+      {
+        "id": "cli_version",
+        "status": "ok",
+        "message": "tensorplate-cli 0.2.1 (protocol 0.1)"
+      },
+      {
+        "id": "profile_mode",
+        "status": "ok",
+        "message": "profile `local` mode `local` is supported"
+      },
+      {
+        "id": "agent_socket",
+        "status": "ok",
+        "message": "agent socket `/run/tensorplate/agent.sock` exists"
+      },
+      {
+        "id": "agent_config_valid",
+        "status": "ok",
+        "message": "/etc/tensorplate/agent.json satisfies the agent config schema"
+      },
+      {
+        "id": "host_facts",
+        "status": "ok",
+        "message": "host arch=x86_64 vendor=intel"
+      },
+      {
+        "id": "host_os",
+        "status": "ok",
+        "message": "Ubuntu 24.04 on g2-standard-8 (from GCE metadata) [exact: version 24.04.5 LTS (Noble Numbat)]"
+      },
+      {
+        "id": "accelerator_facts",
+        "status": "ok",
+        "message": "1 accelerator: `NVIDIA L4`"
+      },
+      {
+        "id": "platform_profile",
+        "status": "ok",
+        "message": "host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s8"
+      },
+      {
+        "id": "platform_row",
+        "status": "ok",
+        "message": "resolves to support row `ubuntu2404-x86-l4-g2s8`"
+      },
+      {
+        "id": "model_class_rows",
+        "status": "ok",
+        "message": "row `ubuntu2404-x86-l4-g2s8` serves chunked_policy (Preview)"
+      },
+      {
+        "id": "ros2_health_stub",
+        "status": "ok",
+        "message": "ROS 2 health stub config present (enabled=false)"
+      },
+      {
+        "id": "core_packages",
+        "status": "ok",
+        "message": "core Debian packages installed: tensorplate-common=0.2.1-1, tensorplate-agent=0.2.1-1, tensorplate-serving=0.2.1-1, tensorplate-observability=0.2.1-1, tensorplate-cli=0.2.1-1"
+      },
+      {
+        "id": "path_layout",
+        "status": "ok",
+        "message": "all 13 install directories exist with safe permissions"
+      },
+      {
+        "id": "config_files",
+        "status": "ok",
+        "message": "all 4 config files present with recognized schema_version"
+      },
+      {
+        "id": "config_endpoints",
+        "status": "ok",
+        "message": "installed service configs keep control, serving, and observability endpoints local"
+      },
+      {
+        "id": "serving_binary_installed",
+        "status": "ok",
+        "message": "serving worker installed at `/usr/lib/tensorplate/tensorplate-serving` (agent-supervised, not systemd-managed)"
+      },
+      {
+        "id": "agent_systemd_unit",
+        "status": "ok",
+        "message": "tensorplate-agent.service installed at `/lib/systemd/system/tensorplate-agent.service`"
+      },
+      {
+        "id": "observability_systemd_unit",
+        "status": "ok",
+        "message": "tensorplate-observability.service installed at `/lib/systemd/system/tensorplate-observability.service`"
+      },
+      {
+        "id": "serving_systemd_absent",
+        "status": "ok",
+        "message": "no tensorplate-serving systemd unit (agent supervises the serving worker)"
+      },
+      {
+        "id": "agent_service_state",
+        "status": "ok",
+        "message": "tensorplate-agent.service is active"
+      },
+      {
+        "id": "observability_service_state",
+        "status": "ok",
+        "message": "tensorplate-observability.service is active"
+      },
+      {
+        "id": "platform_registry",
+        "status": "ok",
+        "message": "platform support registry at `/usr/share/tensorplate/platform` loaded (30 rows, 26 supported combinations, 4 roadmap targets)"
+      },
+      {
+        "id": "python_pytorch_backend",
+        "status": "ok",
+        "message": "Python/PyTorch backend descriptor present (package=tensorplate-backend-python-pytorch version=0.1.0-dev0)"
+      },
+      {
+        "id": "python_pytorch_runtime",
+        "status": "ok",
+        "message": "Python/PyTorch runtime is importable and meets the descriptor's minimum versions"
+      },
+      {
+        "id": "cuda_runtime",
+        "status": "ok",
+        "message": "NVIDIA driver present (`/proc/driver/nvidia/version`); system CUDA toolkit at `/usr/local/cuda/version.json`; this build's serving worker carries no TensorRT adapter, so nothing installed requires that toolkit \u2014 the installed python_pytorch sidecar reaches the accelerator, and a CUDA build of PyTorch ships its own CUDA runtime in the wheel"
+      },
+      {
+        "id": "tensorrt_runtime",
+        "status": "missing",
+        "message": "TensorRT not detected; vision-on-TensorRT validation will skip"
+      },
+      {
+        "id": "libtorch_runtime",
+        "status": "missing",
+        "message": "LibTorch not detected; the LibTorch native adapter is optional in v0.1.0"
+      },
+      {
+        "id": "agent_reachable",
+        "status": "ok",
+        "message": "agent reachable via `/run/tensorplate/agent.sock` (correlation_id=cli-df233b97-3fab-4246-8b1e-c53df30be36c)"
+      },
+      {
+        "id": "agent_state",
+        "status": "ok",
+        "message": "agent_state=ready"
+      },
+      {
+        "id": "active_deployment",
+        "status": "missing",
+        "message": "no active deployment"
+      }
+    ]
+  }
+]

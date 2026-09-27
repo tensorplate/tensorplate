@@ -1,0 +1,10 @@
+# the three device nodes inside the agent's mount namespace,
+# then opened as uid tensorplate in that namespace.
+crw-rw-rw- 1 root root 234,   0 Sep 27 03:38 /dev/nvidia-uvm
+crw-rw-rw- 1 root root 234,   1 Sep 27 03:38 /dev/nvidia-uvm-tools
+crw-rw-rw- 1 root root 195,   0 Sep 27 03:38 /dev/nvidia0
+crw-rw-rw- 1 root root 195, 255 Sep 27 03:38 /dev/nvidiactl
+
+OPEN OK   /dev/nvidiactl
+OPEN OK   /dev/nvidia0
+OPEN OK   /dev/nvidia-uvm

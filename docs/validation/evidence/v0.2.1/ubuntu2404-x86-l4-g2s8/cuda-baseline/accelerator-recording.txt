@@ -1,0 +1,33 @@
+# `tensorplate doctor --record` on this host, with the run's identifiers
+# replaced by the evidence README's synthetic forms.
+
+# The SKU line it recorded:
+NVIDIA L4, 23034, 580.173.02, GPU-00000000-0000-0000-0000-000000000001, [N/A]
+
+# Compared byte for byte against the recordings already in the tree, the SKU
+# field, the memory figure and the MIG spelling are identical to both, and the
+# driver version is identical to the Deep Learning VM recording:
+#   test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt       driver 595.71.05
+#   test/platform/accelerator/dlvm-ubuntu2404-l4-g2s8.txt      driver 580.173.02
+# So no accelerator recording changes for this row.
+
+# The stack this run measured. It is recorded HERE and deliberately NOT in the
+# row's `kernel_driver_stack.components`: the agent reports no stack components
+# at all, so a row that declares one is resolved and then refused on the very
+# machine it describes. kernel-driver-stack-experiment.txt is that measurement.
+kernel                 7.0.0-1011-gcp
+accelerator_driver     580.173.02 (NVIDIA open kernel module, NVRM)
+vbios                  95.04.29.00.07
+cuda_driver_api        13.0 (as nvidia-smi reports the driver's CUDA version)
+python                 3.12.3 (/usr/bin/python3, the interpreter the descriptor pins)
+pytorch                2.14.0+cu130, built against CUDA 13.0
+machine_type           g2-standard-8
+dmi_product_name       Google Compute Engine
+image                  common-cu129-ubuntu-2404-nvidia-580, deeplearning-platform-release
+os                     Ubuntu 24.04.5 LTS (noble)
+
+# The accelerator memory the agent reports, against the row's nominal figure:
+#   accelerator_total_bytes       24152899584  (measured)
+#   row_nominal_capacity_bytes    25769803776  (the row's declared 24 GiB)
+# The row's figure is nominal capacity and the telemetry figure is measured, so
+# the difference is expected and is not a row correction.
