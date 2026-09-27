@@ -163,3 +163,35 @@ has not been confirmed by a recording. The recorded L4 difference is
 enough to show why memory cannot be an exact match dimension: it would
 make the card miss its own row. Memory instead bounds the per-device
 capability after the identity matches.
+
+## The memory-observation recordings
+
+`test/platform/memory_observation/` holds what the accelerator and the
+kernel reported on the `ubuntu2404-x86-l4-g2s8` row on 2026-09-27, with a
+`python_pytorch` deployment live: `nvidia-smi -q -x` in full, the two-query
+CSV fallback (`--query-gpu` and `--query-compute-apps`), `/proc/meminfo`,
+and one `/proc/<pid>/status` for the agent, the serving worker and the
+Python sidecar. Driver `580.173.02` on the
+`common-cu129-ubuntu-2404-nvidia-580` Deep Learning VM image, Ubuntu
+24.04.5, kernel `7.0.0-1011-gcp`, one `NVIDIA L4`.
+
+Recorded before any code reads them, and no parser ships with them. A field
+a recording lacks is reported unavailable rather than inferred from another
+recording: the XML and the two-query CSV are separate observations of the
+same moment, not projections of one another, so each is kept whole.
+
+The `/proc/<pid>/status` captures were taken while a deployment was serving,
+which is the only state in which a worker and a sidecar process exist. The
+`--query-compute-apps` line names the sidecar's process holding GPU memory,
+and is the independent reading that the accelerator was in use rather than
+merely present.
+
+Sanitizing: the device UUID, the serial and the PDI (the per-device
+identifier the driver prints beside them) carry the evidence README's
+synthetic forms, the host, account, project, zone and instance identifiers
+were replaced before the first commit, and the PCI bus id is published as
+measured — a GCE bus id enumerates the virtual topology and is identical on
+every instance of a shape. `test/validation/memory_observation_publication_test.sh`
+pins which of those the publication scanner catches by pattern and which it
+does not, because the answer is not uniform and the two it does not catch
+are the operator's literal file's job.

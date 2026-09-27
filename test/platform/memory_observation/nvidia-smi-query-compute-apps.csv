@@ -1,0 +1,2 @@
+pid, process_name, gpu_uuid, used_gpu_memory [MiB]
+5819, python3, GPU-00000000-0000-0000-0000-000000000001, 248 MiB

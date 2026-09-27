@@ -417,6 +417,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   required check. `test/README.md` records what is not instrumented.
   (V030-E04-F03-T02)
 
+- `test/platform/memory_observation/` records what the accelerator and the
+  kernel reported on the `ubuntu2404-x86-l4-g2s8` row with a deployment
+  live: `nvidia-smi -q -x` in full, the two-query CSV fallback, `/proc/meminfo`
+  and one `/proc/<pid>/status` for the agent, the serving worker and the
+  Python sidecar. No parser ships with them — they are recorded before
+  anything reads them, so a field a recording lacks is reported unavailable
+  rather than inferred, and the XML and the CSV stay separate observations
+  of one moment rather than projections of each other.
+  `test/validation/memory_observation_publication_test.sh` pins which
+  identifier classes the publication scanner catches by pattern in that
+  shape and which it does not: a device UUID and a cloud project are
+  caught, and a serial in the XML tag form and a PCI bus id are not, so
+  the first is the operator's literal file's job and the second is
+  published as measured, a GCE bus id being the same on every instance of a
+  shape. The evidence-publication workflow now scans `test/platform` beside
+  `docs/validation/evidence`, since both hold recorded fixtures, and
+  shellchecks the new test. `test/platform/accelerator/PROVENANCE.md`
+  records the driver, image and kernel the recordings were taken on.
+  (V030-E03-F02-T04)
+
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
