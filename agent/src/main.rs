@@ -473,8 +473,8 @@ fn observe_platform_once(log: &mut impl Write) -> Result<Observation, Observatio
             Err(err) => accelerator_probe_error = Some(err),
         }
     }
-    // Rows record no driver components until their first evidence run, so
-    // this is empty today by construction rather than by omission.
+    // No driver stack is observed, so this is empty by construction and any
+    // component a row declares is refused; rows therefore declare none.
     let observed = ObservedStack {
         components: BTreeMap::new(),
         installed_packages: installed_packages(),

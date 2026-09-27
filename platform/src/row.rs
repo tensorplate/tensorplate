@@ -243,9 +243,10 @@ pub struct StackComponent {
     pub version: String,
 }
 
-/// Kernel constraints and driver/runtime versions, recorded exactly at
-/// evidence time. Planned rows declare an empty list until their first
-/// evidence run records the stack.
+/// Kernel, driver and runtime component versions admission requires the
+/// host to report. The agent reports no components, so a declared one
+/// refuses every deploy: rows declare an empty list and keep the measured
+/// stack in their evidence bundle.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KernelDriverStack {
@@ -756,7 +757,8 @@ impl PlatformSupportRow {
         &self.os
     }
 
-    /// Kernel/driver/runtime stack recorded at evidence time.
+    /// The kernel, driver and runtime components the row requires the host
+    /// to report; see [`KernelDriverStack`].
     #[must_use]
     pub fn kernel_driver_stack(&self) -> &KernelDriverStack {
         &self.kernel_driver_stack

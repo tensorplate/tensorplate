@@ -62,7 +62,7 @@
       "properties": {
         "components": {
           "type": "array",
-          "description": "Kernel constraints and driver/runtime versions recorded exactly at evidence time (accelerator driver, compute runtime, inference runtime, Python, framework; or OS build plus framework on Apple rows). Planned rows declare an empty list until their first evidence run records the stack.",
+          "description": "Kernel, driver and runtime component versions admission requires the host to report (accelerator driver, compute runtime, inference runtime, Python, framework; or OS build plus framework on Apple rows). The agent reports no components, so a declared one is absent on every host and admission refuses every deploy: rows declare an empty list, and an evidence run records the measured stack in the row's evidence bundle instead.",
           "items": {
             "type": "object",
             "additionalProperties": false,

@@ -22,8 +22,8 @@ sha256 is the file as measured.
 | `nvidia-smi-reachability.txt` | `nvidia-smi` resolved and answered as uid `tensorplate` inside the agent's mount namespace under that PATH alone; and what the observability unit's private `/dev` does instead |
 | `device-nodes.txt` | `/dev/nvidiactl`, `/dev/nvidia0` and `/dev/nvidia-uvm` present in the agent's namespace and opened as uid `tensorplate` |
 | `cuda-under-agent-hardening.json` | PyTorch reporting CUDA available, and a 512×512 matmul returning the arithmetically correct sum, as uid `tensorplate` in a transient unit given the hardening that readback covers, not all of the unit's (see below) |
-| `package-closure.txt` | Each TensorPlate artifact the deploy starts from owned by an installed package, no source tree on the host, and `dpkg --verify` over the installed packages, which speaks for the published packages only (see below) |
-| `cuda-deploy.json` | The deploy reaching `active` inside the agent unit itself and an inference round-tripping through the worker, with the GPU memory the sidecar held while it was live and the live process tree |
+| `package-closure.txt` | No source tree on the host, each TensorPlate file the published packages install owned by its package, and `dpkg --verify` over them, taken from the published set alone before the backend package was repacked (see below) |
+| `cuda-deploy.json` | The deploy reaching `active` inside the agent unit itself and an inference round-tripping through the worker, with the GPU memory the sidecar held while it was live and the live process tree; its status excerpt reads `degraded` for the reason below |
 | `cuda-artifact-provenance.txt` | Exactly which artifact carried the CUDA runner, and the patch that distinguishes it from the published one |
 | `tensorrt-refusal.json` | A TensorRT bundle refused at admission |
 | `accelerator-recording.txt` | The `doctor --record` SKU line against the recordings already in the tree, and the stack this run measured |
@@ -31,6 +31,15 @@ sha256 is the file as measured.
 | `doctor-findings.json` | Every doctor finding, before and after the backend package and PyTorch were installed |
 | `agent-journal.txt` | The agent's own journal lines for the run |
 | `reboot-and-boot-binding.txt` | The login path and the guest agent returning after a reboot with the appliance's autostart disabled, and the machine-type record still carrying the pre-reboot boot id |
+
+`cuda-deploy.json`'s status excerpt reads `degraded` with the deployment
+active and ready because its quarantine list is not empty, and this CLI
+reports any quarantine entry as degraded. The entry is an earlier attempt at
+the same deployment id, refused with `backend descriptor not installed`: the
+backend package was installed while the agent was running, and the agent
+probes backends only at startup. `agent-journal.txt` shows the first start
+with `DescriptorMissing` and the restart with `Runnable`; the deployment that
+reached `active` came after that restart.
 
 ## What it does not prove
 
@@ -43,6 +52,11 @@ sha256 is the file as measured.
   and its revision suffixed, which
   `cuda-artifact-provenance.txt` records in full, including the
   patch. Every other package installed is the published artifact unmodified.
+  The patch is the payload as the deploy ran it. Since the run, the probe
+  reports the NVIDIA driver's version as the accelerator runtime version,
+  where this payload reported the version of CUDA the PyTorch wheel was built
+  against, and the module's docstring changed; no file here records a probe's
+  version output.
 - **The transient unit covered part of the agent unit's hardening.** The
   readback records 11 of the unit file's 18 hardening directives, and the
   transient unit was given those; `ProtectKernelTunables`,
@@ -53,17 +67,20 @@ sha256 is the file as measured.
   made under the unit's whole sandbox is the deploy in `cuda-deploy.json`:
   its sidecar ran as a descendant of the agent unit's own process, and
   `cuda_fixture` loads only after a checked CUDA matmul.
-- **The closure speaks for the published packages, not for everything the
-  deploy ran.** `dpkg --verify` compares each installed file with the
-  checksums its installed package shipped, so it says nothing about the
-  repacked backend package the CUDA deploy ran on, whose checksums the
-  repack regenerated; that package's provenance is the pair of digests and
-  the patch in `cuda-artifact-provenance.txt`. PyTorch is owned by no
-  package at all: it was installed with pip into the system interpreter.
+- **The closure is of the published set alone, not of everything the
+  deploy ran.** It was taken before the backend package was repacked, so its
+  `dpkg --verify` compares the published packages' installed files with the
+  checksums those packages shipped, and says nothing about the repacked
+  backend package installed afterwards; that package's provenance is the
+  pair of digests and the patch in `cuda-artifact-provenance.txt`. No
+  package listing from the closure's moment is in this bundle, and
+  `dpkg --verify` reads the same either way; that the closure preceded the
+  repack is the operator's record of the run. PyTorch is owned by no package
+  at all: it was installed with pip into the system interpreter.
 - **`/dev/nvidia-uvm` was present from boot on this image**, so the failure
   this gate watches for — the node's lazy creation blocked under
   `NoNewPrivileges` — could not arise here. That is a property of this
-  image, not a general clearance for a host without `nvidia-persistenced`.
+  image, not a clearance for one that creates the node on first use.
 - **No model was loaded and no speech runner ran.** The kernel here is a
   matmul chosen because it goes through cuBLAS, which is the library the
   speech runners reach the GPU through.

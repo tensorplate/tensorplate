@@ -1,10 +1,10 @@
 # Artifact provenance for the CUDA deploy
 # published backend deb, as fetched from the release and verified against its SHA256SUMS:
 13dfbd4f51e07003b31da84afcdd8df6c9f39f42abef6ce1697717995b45d25c  /home/tp-synthetic-operator/assets/tensorplate-backend-python-pytorch_0.2.1-1_all.deb
-# the same deb unpacked, with four payload files replaced from the branch and the revision suffixed, repacked:
+# the same deb unpacked, with four payload files replaced by the cuda_fixture sources as they stood at the run and the revision suffixed, repacked:
 9963f1d1ffeffd8aa69ee73c94a1583d8c67d9752cae73627df635753f47a1f1  /home/tp-synthetic-operator/deb-work/tensorplate-backend-python-pytorch_0.2.1-1+cudafixture1_all.deb
-# every other installed package is the published artifact, unmodified (dpkg --verify above)
-# the exact payload change, as a patch against the branch base:
+# every other installed package is the published artifact at 0.2.1-1, unchanged since install (dpkg --verify in package-closure.txt)
+# the exact payload change, as a patch against the v0.2.1 tag's sources:
 diff --git a/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py b/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py
 index 4f174d82..55eed4ee 100644
 --- a/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py

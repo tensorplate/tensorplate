@@ -476,17 +476,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   hardening directives its readback covers, and a deploy of the CUDA
   fixture, which loads only after a checked CUDA matmul, reached active
   inside the agent unit itself and answered an inference while the sidecar
-  held GPU memory. Package closure and `dpkg --verify` speak for the
-  published packages only: the repacked backend package the CUDA deploy ran
-  on is recorded by its digests and the patch that distinguishes it, and
-  PyTorch, installed with pip, is owned by no package. The row's
-  `kernel_driver_stack.components` stays empty on purpose: the agent reports
-  no stack components, so a row that declares one is resolved and then
-  refused on the machine it describes, which the bundle shows rather than
-  asserts. The bundle also records the login path and the guest agent
+  held GPU memory. Package closure and `dpkg --verify` were taken from the
+  published set alone, before the backend package was repacked for the CUDA
+  deploy: the repacked package is recorded by its digests and the patch that
+  distinguishes it, and PyTorch, installed with pip, is owned by no package.
+  The row's `kernel_driver_stack.components` stays empty on purpose: the
+  agent reports no stack components, so a row that declares one is resolved
+  and then refused on the machine it describes, which the bundle shows
+  rather than asserts; the row schema's description of that field, and the
+  comments that echoed it, no longer tell an evidence run to record the
+  stack there. The bundle also records the login path and the guest agent
   returning after a reboot with the appliance's autostart disabled.
-  `docs/validation/cloud-row-runbooks.md` carries the procedure.
-  (V030-E01-F01-T01, V030-E01-F01-T03)
+  `docs/validation/cloud-row-runbooks.md` carries the procedure, command by
+  command. (V030-E01-F01-T01, V030-E01-F01-T03)
 
 ### Changed
 

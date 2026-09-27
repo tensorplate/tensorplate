@@ -523,10 +523,11 @@ would claim more than the run establishes:
 
 It does **not** prove the accelerator computed anything. The
 deploy-smoke bundle selects the device-neutral `fixture` backend
-profile, because there is no CUDA fixture backend to select yet. The
+profile, so the harness runs unchanged on a host with no GPU. The
 run exercises admission, the worker launch and the inference path
 against the real installed appliance; it executes no CUDA kernel. Do not
-describe a run of this harness as GPU validation.
+describe a run of this harness as GPU validation: the accelerator has its
+own procedure, below.
 
 ## The CUDA baseline, which the harness does not run
 
@@ -535,6 +536,43 @@ CUDA kernel, so a passing run says nothing about the accelerator. The
 accelerator question is a separate, short procedure on the same instance,
 and its evidence goes in a `cuda-baseline/` directory inside the row's
 evidence directory. Run it once per row, on the image the row claims.
+
+The installer installs the five core packages. Install
+`tensorplate-backend-python-pytorch` from the same artifact set, and
+PyTorch for the interpreter the backend descriptor names (`/usr/bin/python3`
+on these rows; PyTorch is not packaged), then restart the agent: it probes
+backends only at startup, so a backend package installed under a running
+agent leaves the backend `DescriptorMissing` and quarantines the first
+deploy. The PyTorch wheel decides which CUDA runtime every check below
+exercises, so record its version: the recorded L4 run's came from the
+default index as `2.14.0+cu130`, and its exact install command is not in
+the bundle. On a disposable VM:
+
+```bash
+sudo apt-get install -y ./tensorplate-backend-python-pytorch_*_all.deb
+sudo python3 -m pip install --break-system-packages torch   # 24.04's interpreter is externally managed
+python3 -c 'import torch; print(torch.__version__, torch.version.cuda)'
+sudo systemctl restart tensorplate-agent.service
+```
+
+Take the package closure next, while every installed package is still the
+published artifact, and record the package listing with it so the evidence
+says which build the closure covers. A closure taken after a package was
+rebuilt or repacked speaks for that package, not for the published set:
+
+```bash
+ls -d ~/tensorplate                 # expect no such directory: no checkout on the host
+dpkg-query -W 'tensorplate*'        # the packages and versions the closure covers
+for f in /usr/lib/tensorplate/tensorplate-serving /usr/bin/tensorplate-backend-python-pytorch \
+    /usr/lib/tensorplate/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py \
+    /usr/share/tensorplate/backends/python_pytorch/backend.json \
+    /usr/lib/python3/dist-packages/tensorplate_pytorch_backend.pth \
+    /usr/bin/tensorplate-agent /usr/bin/tensorplate; do
+  printf '%s <- %s\n' "$f" "$(dpkg -S "$f" | cut -d: -f1)"
+done
+mapfile -t packages < <(dpkg-query -W -f '${Package}\n' 'tensorplate*')
+sudo dpkg --verify "${packages[@]}"; echo "exit=$?"   # no output and exit 0: nothing differs
+```
 
 Read the hardening back from systemd rather than from the unit file — the
 file's text is not what the service runs under — and record every hardening
@@ -546,20 +584,28 @@ systemctl show-environment          # the PATH a unit with no Environment=PATH g
 ```
 
 Then answer three things inside the agent's own mount namespace, as the
-service account, with that PATH and nothing else in the environment:
+service account, with that PATH and nothing else in the environment: that
+`nvidia-smi` resolves and answers, that the device nodes exist, and that the
+service account can open them:
 
 ```bash
 agent=$(systemctl show -p MainPID --value tensorplate-agent.service)
-sudo nsenter -t "$agent" -m -p -- setpriv --reuid tensorplate --regid tensorplate \
-  --clear-groups env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin \
-  sh -c 'nvidia-smi --query-gpu=name,driver_version --format=csv,noheader'
+as_service() {
+  sudo nsenter -t "$agent" -m -p -- setpriv --reuid tensorplate --regid tensorplate \
+    --clear-groups env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin "$@"
+}
+as_service sh -c 'command -v nvidia-smi && nvidia-smi --query-gpu=name,driver_version --format=csv,noheader'
 sudo nsenter -t "$agent" -m -p -- ls -l /dev/nvidiactl /dev/nvidia0 /dev/nvidia-uvm
+as_service python3 -c 'import os, sys
+for node in sys.argv[1:]:
+    os.close(os.open(node, os.O_RDWR))
+    print("OPEN OK  ", node)' /dev/nvidiactl /dev/nvidia0 /dev/nvidia-uvm
 ```
 
-`/dev/nvidia-uvm` may be created lazily. A Deep Learning VM image has it
-from boot because `nvidia-persistenced` runs; on an image without it, its
-absence here is the finding the hardening is being checked for, not a
-formatting quirk.
+`/dev/nvidia-uvm` may be created lazily. On the Deep Learning VM image it
+was already present, with the same boot-time timestamp as the other nodes;
+on an image without it, its absence here is the finding the hardening is
+being checked for, not a formatting quirk.
 
 Then run PyTorch's own CUDA check as the service account in a transient
 unit carrying the agent unit's properties, so the sandbox rather than the
@@ -569,6 +615,33 @@ properties back afterwards; a directive it was not given is one this check
 says nothing about. Check the kernel's result: an unchecked matmul passes on
 a card that computed nothing.
 
+```bash
+props=()
+while IFS= read -r directive; do props+=(-p "$directive"); done < <(
+  systemctl cat tensorplate-agent.service | grep -E '^(NoNewPrivileges|Protect[A-Za-z]+|ReadWritePaths|Private(Tmp|Devices)|Restrict[A-Za-z]+|SystemCallArchitectures|LockPersonality|MemoryDenyWriteExecute|UMask)=')
+echo "$(( ${#props[@]} / 2 )) directives"      # 18 in the packaged unit file
+sudo systemd-run --unit=tp-cuda-check --remain-after-exit \
+  -p User=tensorplate -p Group=tensorplate "${props[@]}" /usr/bin/python3 -c '
+import json, os, sys, torch
+record = {"argv0": sys.executable, "path_env": os.environ.get("PATH"),
+          "uid": os.getuid(), "gid": os.getgid(), "torch_version": torch.__version__,
+          "torch_cuda_build": torch.version.cuda, "cuda_is_available": torch.cuda.is_available()}
+if record["cuda_is_available"]:
+    x = torch.ones((512, 512), device="cuda")
+    record.update(device_count=torch.cuda.device_count(), device_name=torch.cuda.get_device_name(0),
+                  matmul_sum=float((x @ x).sum().item()), matmul_expected=512.0 ** 3)
+    record["kernel_ok"] = record["matmul_sum"] == record["matmul_expected"]
+print(json.dumps(record, indent=2))'
+echo "systemd-run exit=$?"                  # nonzero: no unit started, so nothing below applies
+for _ in $(seq 120); do                     # at most two minutes; `dead` means no such unit
+  [[ $(systemctl show -p SubState --value tp-cuda-check) =~ ^(exited|failed|dead)$ ]] && break
+  sleep 1
+done
+sudo journalctl -u tp-cuda-check -o cat --no-pager    # the check's own answer
+systemctl show tp-cuda-check                          # the properties it actually ran under
+sudo systemctl stop tp-cuda-check; sudo systemctl reset-failed tp-cuda-check 2>/dev/null
+```
+
 Finally deploy a bundle whose profile only loads after a CUDA kernel has
 run — `test/models/bundles/v0_1/x86_cuda_smoke` selects `cuda_fixture` —
 and, while it is active, read `nvidia-smi --query-compute-apps` to see the
@@ -576,7 +649,78 @@ sidecar holding GPU memory. Record the deploy, the inference and that line
 together: the deploy alone is a control-plane answer about a worker, and
 the compute-apps line is the independent one. This deploy is also the one
 check made under the agent unit's whole sandbox, since the sidecar runs as
-a descendant of the unit's own process.
+a descendant of the unit's own process. The published `v0.2.1` backend
+package predates `cuda_fixture`; a run against it adds the runner to that
+package after the closure and records exactly how, as the L4 bundle's
+`cuda-artifact-provenance.txt` does. The agent opens the bundle itself as
+the service account, so copy the bundle directory onto the host and stage
+it where that account can read it. The inference request is the harness's
+deploy-smoke request with `endpoint` set to this deployment id:
+
+```bash
+sudo install -d -m 0755 /opt/tensorplate-validation
+sudo cp -R x86_cuda_smoke /opt/tensorplate-validation/
+sudo chmod -R a+rX /opt/tensorplate-validation
+tensorplate deploy /opt/tensorplate-validation/x86_cuda_smoke \
+  --deployment-id validation-cuda-smoke --output json
+python3 - >request.json <<'EOF'
+import base64, json, struct
+probe = base64.b64encode(struct.pack("<4f", 1.0, 2.0, 3.0, 4.0)).decode("ascii")
+print(json.dumps({"schema_version": "0.1", "request_id": "cuda-smoke-1",
+                  "endpoint": "validation-cuda-smoke",
+                  "inputs": [{"name": "probe", "payload_b64": probe, "tensor": {
+                      "dtype": "float32", "layout": "row_major", "shape": [1, 4]}}]}))
+EOF
+tensorplate infer --input request.json --output-file response.json
+nvidia-smi --query-compute-apps=pid,process_name,gpu_uuid,used_gpu_memory --format=csv
+tensorplate status --output json
+ps -eo pid,ppid,user,etime,comm,args | grep -E '[t]ensorplate'
+```
+
+A TensorRT bundle must be refused at admission, before any worker starts.
+`vision_tensorrt` targets `jetson-orin`, and admission reports the first
+violation it finds, which on an `x86_64` row is the hardware family; so
+deploy a copy retargeted to `x86_64`, which makes the unavailable backend
+the refusal's subject. The manifest carries no digest of itself, so the
+edit leaves verification intact. Expect `unsupported`, "bundle declares
+unavailable backend `tensorrt`", and the same serving pids and worker
+configs before and after:
+
+```bash
+sudo cp -R vision_tensorrt /opt/tensorplate-validation/x86_tensorrt
+sudo python3 - /opt/tensorplate-validation/x86_tensorrt/manifest.json <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+manifest["target_hardware"]["device_family"] = "x86_64"
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(manifest, handle, indent=2)
+PY
+sudo chmod -R a+rX /opt/tensorplate-validation
+pidof tensorplate-serving; sudo ls /var/lib/tensorplate/worker-configs
+tensorplate deploy /opt/tensorplate-validation/x86_tensorrt \
+  --deployment-id validation-tensorrt --output json
+pidof tensorplate-serving; sudo ls /var/lib/tensorplate/worker-configs
+```
+
+Last, the reboot check the lifecycle harness's reboot stage depends on:
+with the appliance's autostart disabled, the login path and the guest agent
+must come back on their own, and the machine-type record on disk still
+carries the boot it was written in. Re-enable the unit with the network
+available afterwards: the record binds one boot, so the agent reaches the
+metadata server once after every reboot.
+
+```bash
+sudo systemctl disable tensorplate-agent.service
+cat /proc/sys/kernel/random/boot_id
+sudo reboot
+# after reconnecting:
+systemctl is-enabled tensorplate-agent.service; systemctl is-active tensorplate-agent.service
+systemctl is-active google-guest-agent.service ssh.service
+cat /proc/sys/kernel/random/boot_id
+sudo cat /var/lib/tensorplate/state/machine-type.json
+sudo systemctl enable --now tensorplate-agent.service
+```
 
 Two things to record rather than assume. First, `pgrep -f` over SSH matches
 the invoking command's own line, so a process count taken that way is
