@@ -455,9 +455,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   of one moment rather than projections of each other.
   `test/validation/memory_observation_publication_test.sh` pins which
   identifier classes the publication scanner catches by pattern in that
-  shape and which it does not: a device UUID, a GPU PDI and a cloud
-  project are caught, and a serial in the XML tag form and a PCI bus id
-  are not, so both are the operator's literal file's job. The recordings
+  shape and which it does not: a device UUID, a GPU PDI, a cloud project
+  and a serial, in the XML tag or the CSV column, are caught, and a PCI
+  bus id is not, so it is the operator's literal file's job. The recordings
   carry a synthetic PCI bus id, and the test holds every field that
   locates the device at that value. The evidence-publication workflow now
   scans `test/platform` beside `docs/validation/evidence`, since both hold
@@ -623,6 +623,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `CHANGELOG.md`, in the public hygiene scan of source files, commit
   messages and pull request text, where the prefixed form still passes.
   (V030-E06-F02-T01)
+- The evidence scanner found a serial number only after a label and a
+  colon or equals sign. It now also reports one as an XML element,
+  qualified or not (`<serial>` and `<chassis_serial_number>` in
+  `nvidia-smi -q -x`), and in a CSV column whose header names it, as
+  `nvidia-smi --query-gpu ... --format=csv` prints one: the rows under the
+  header up to the first with another field count, or with more than one
+  word in the serial field other than a bracketed placeholder such as
+  `[Not Supported]`. In every serial form the driver's own `N/A` (`[N/A]`
+  in CSV) now stays as recorded; a GPU PDI still takes `REDACTED`. Neither
+  scanner knew a planning wave label, `w` and one digit standing alone or
+  after the `+` of a package revision: the evidence scanner now reports
+  one as `wave-label`, except after a `+` inside a long base64 run or in
+  an Intel workstation Xeon's model name, and the public hygiene scan does
+  so in a branch name, the checked-out one or the one the new
+  `--branch FILE` names, which the pull request job now passes (a head
+  that predates the option gets the name as a message, as before). Source
+  files, commit messages and pull request text are not checked for it,
+  since the same shape is a compiler flag or a register name there. The
+  evidence README gains a synthetic value for a physical host's PCI bus
+  id, and says a cloud machine type's virtual PCI topology, the same on
+  every instance, may stay as recorded. (V030-E06-F02-T01)
 
 ### Security
 
