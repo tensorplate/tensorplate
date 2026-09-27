@@ -30,147 +30,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and `docs/release/artifacts.md` describe the checks; an SBOM attached to
   each release remains on the roadmap. (V030-E01-F03-T01)
 
-### Security
-
-- `anyhow` 1.0.102 -> 1.0.103 (RUSTSEC-2026-0190: `Error::downcast_mut`
-  was unsound after `Error::context`) and `url` 2.5.0 -> 2.5.4, which
-  brings `idna` 0.5.0 -> 1.1.0 (RUSTSEC-2024-0421: Punycode labels that
-  decode to no non-ASCII compared equal to ASCII host names). `idna_adapter`
-  is pinned at 1.1.0 so the whole graph still builds with the workspace's
-  Rust 1.78. The same update moves `tinyvec` 1.12.0 -> 1.13.3, which drops
-  `tinyvec_macros`. Both advisories were found by the new cargo-deny check's
-  first run.
-  (V030-E01-F03-T01)
-- The lifecycle report can carry a `reboot` stage, and the release gate
-  requires it on the L4 cloud row from 0.3.0. The stage sits beside the
-  canonical eight rather than among them. No other row, and no earlier
-  release of this one, may carry it, so every recorded report stays valid
-  and `check-evidence-bundles.sh --version 0.2.1` still finds all four
-  Production rows complete.
-  - `config/schemas/lifecycle_report.json` gains an optional top-level
-    `reboot` object. It records whether the boot ID changed, the retry
-    window the run observed, and three required sub-cases (`blocked`,
-    `transient`, `denied_egress_resumes`), each with a status and a log.
-  - `tools/release/check-evidence-bundles.sh` requires the stage where
-    the row and version call for it and refuses it everywhere else. It
-    compares versions as numbers, so 0.10.0 counts as later than 0.3.0 and
-    a 0.3.0 candidate counts as 0.3.0. It accepts the stage only when the
-    boot ID changed, every sub-case passed, the retry window was recorded
-    and every cited log exists. It now refuses a report carrying `NaN` or
-    `Infinity`, which are not JSON but which Python's parser accepts.
-  - `tools/validation/lifecycle-stages.sh` can suspend a run to a marker
-    file and resume it, once, in a new shell after the reboot. It records
-    the sub-cases in order, and fails the stage and the run when a
-    sub-case fails, the boot ID did not change or no retry window was
-    recorded. A run that stops mid-stage still records which sub-case
-    failed and which were never reached.
-  - The Ubuntu cloud harness does not run the stage yet, and
-    `docs/validation/cloud-row-runbooks.md` says so.
-  - Tests cover the runner, the checker, reports built from the recorded
-    Jetson and L4 evidence, and the Rust schema contract. They also cover
-    a report whose stage list carries a name outside the canonical eight,
-    which no release-gate test exercised before.
-
-  (V030-E06-F02-T01)
-- `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
-  tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
-  AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
-  `TP_ENABLE_SANITIZERS`, and the `cmake.sanitizer_options` T1 test holds
-  that refusal and checks each option alone is accepted. The C++ workflow
-  gains a `tsan` leg that runs the T1, T2 and T3 labels; it is not yet a
-  required check. `test/README.md` records what is not instrumented.
-  (V030-E04-F03-T02)
-
-### Fixed
-
-- `HttpServer::stop()` closed the listening socket while the accept
-  thread could still be polling it, a data race ThreadSanitizer reports
-  in 25 of the 47 T2 tests. The socket is now closed only after that
-  thread exits, so its descriptor cannot be reused under a live poll, and
-  the thread accepts no connection once `stop()` has begun.
-  (V030-E04-F03-T02)
-### Changed
-
-- Every version surface moves to `0.3.1`, the first release of the 0.3
-  line: `packaging/VERSION`, the CMake project version, the Cargo
-  workspace and path-dependency versions with `Cargo.lock`, the vcpkg
-  `version-string`, the Python SDK version, the installer's default
-  release and a `0.3.1-1` head stanza in `packaging/debian/changelog`.
-  `develop` carries the next first-release version directly, as it has
-  since the `0.2.1` bump, with no `-dev` suffix. The `python_pytorch`
-  backend descriptor now admits the 0.3 line:
-  `tensorplate_runtime_range.max_exclusive` rises from `0.3.0` to
-  `0.4.0`, and `test/packaging/verify_descriptor.sh` targets release
-  line `0.3`, which it requires the declared range to admit. That check
-  also refuses a target line behind `packaging/VERSION`, which would
-  otherwise pass unnoticed once the upper bound has moved, and it now
-  runs each of its refusals against fixed inputs on every invocation so
-  a broken check fails the script. This is a runtime-version bump only:
-  the protocol and schema versions stay `0.1`, the bundle format version
-  stays `0.1`, no bundle compatibility floor moves, and no dated
-  `[0.3.1]` section or release notes file is opened here.
-  (V030-E01-F01-T04)
-- On a Compute Engine instance, the metadata service answering HTTP 503 or
-  429, the two statuses Google documents as transient (503 while the
-  metadata server boots or migrates or the host is under maintenance, 429
-  for an endpoint's rate limiting), now counts as no answer, as a query
-  that times out or a refused connection already did. A 429 or 503 counts
-  only with a header block the agent would accept on a result. With a
-  record for the current boot the start uses it; without one, detection
-  fails in the step the agent's start-up retry repeats over its existing
-  20 s window, where before a 429 or 503 was a broken source that was
-  never retried. Any other answer -- another status, a response that
-  cannot be parsed, or a 200 whose body is not a machine type or an
-  instance id -- still fails detection at once; its error and `tensorplate
-  doctor`'s hint now say it came from the metadata server or from
-  something answering in its place, and what to check. When detection
-  fails without an answer, the error names the cause class of the last
-  attempt, transient unavailability, blocked access (a connection refused
-  or denied by local policy, now named apart from a timeout) or not
-  reached, and what to do about it, and `tensorplate doctor`'s hint covers
-  all three. This is the reboot boundary: after a reboot the agent must
-  reach the metadata service once before denied-egress operation resumes.
-  (V030-E01-F01-T03)
-- The documented rollback in `docs/install/lifecycle.md` restores
-  `state/machine-type.json` from `state.bak` before the older release is
-  installed, so the older agent keeps the machine type recorded in this boot.
-  `tools/validation/ubuntu-l4-cloud-lifecycle.sh` does the same, and now
-  checks both directions: upgrade requires the record the baseline wrote to
-  be byte-identical after the candidate starts and the instance binding to
-  exist, and rollback requires the restored record and the binding to be
-  byte-identical once the baseline is up. (V030-E01-F01-T03)
-- On a Compute Engine instance, `tensorplate doctor` now reads the instance
-  binding even when the metadata service answers, so it needs root or
-  `tensorplate` group membership there, as it already did when the service
-  was unreachable. Without either, the host finding says which directory it
-  could not read. (V030-E01-F01-T03)
-
-
-- The agent no longer falls back to `state.json.bak` when `state.json` is
-  refused for an unsupported state version (a newer state file supersedes an
-  older backup, so the agent exits with `CorruptState` instead of starting
-  on the stale backup) or cannot be read at all (an I/O error now stops the
-  agent). A damaged, empty or missing `state.json` still falls back as
-  before. On Linux, both directory syncs of a `0.2` state write must now
-  succeed. A state write that fails at or after the rename that commits it
-  (the one that makes it what the next start reads) returns the new
-  `StateIndeterminate` error, and the store then refuses every later write
-  until the agent restarts, while status reports the agent `failed` with a
-  `last_error` saying so; a write that fails before that rename leaves the
-  state and the store as they were. (V030-E03-F01-T03)
-
-- The agent now refuses a control request that carries a field it does not
-  know, a payload that belongs to another operation, or an explicit `null`,
-  with `config_invalid`, instead of ignoring it. Every request earlier CLIs
-  and the SDK send is unchanged and still accepted.
-  `docs/architecture/protocol.md` states the rule for request additions to
-  the control API under protocol `0.1`. The CLI's `unsupported` hint now
-  covers operations as well as backends. The quickstart, post-release and
-  clean-room guides no longer show `rollback --deployment-id`, which the
-  CLI never accepted and which now names a member.
-
-### Added
-
 - Three error codes are appended to the shared error taxonomy:
   `cancelled` (the caller asked for the operation to stop),
   `unavailable` (a backend process or worker the operation needs is
@@ -238,6 +97,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `agent_state_0_2_two_member_set.json`. The release driver's schema version
   check admits a list of versions only on documents with their own version
   track, and only at the schema's root. (V030-E03-F01-T03)
+
 - `protocol/schemas/worker_control.json` gains the runtime control
   channel's six operations and their payloads, with a Rust mirror and
   golden frames. `admission_fence`, `activate` and `retire` name the
@@ -264,6 +124,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the schema and are never sent over the channel. Nothing sends or answers
   these operations yet. Additive inside protocol 0.1; version constants
   unchanged. (V030-E04-F01-T04)
+
 - `tools/validation/check-public-hygiene.sh` scans what a push or a pull
   request publishes for values a public repository must never carry, and
   a second job in `.github/workflows/evidence-publication.yml` runs it on
@@ -342,6 +203,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/fixture-and-evidence-rules.md`, `CONTRIBUTING.md` and
   `docs/contributing/local-validation.md` make the scan the step before
   every push. (V030-E06-F02-T01)
+
 - On a Compute Engine instance, `tensorplate-agent` now records which
   instance its machine-type record was taken on. Every start where the
   metadata service answers also asks it for the instance id, with a 250 ms
@@ -375,6 +237,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   separate `platform instance binding:` line, and the `platform identity:`
   line keeps its shape. The installer creates `/var/lib/tensorplate/identity/`;
   remove keeps it and purge removes it. (V030-E01-F01-T03)
+
 - The backend descriptor schema (`protocol/schemas/backend_descriptor.json`)
   gains an optional `runner_profiles` list. Each entry names an installed
   runner profile, the absolute interpreter and environment root its sidecar
@@ -395,6 +258,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `python_pytorch` descriptor this way showed that its `$schema` key had
   never been allowed by its own schema, so the schema now declares it.
   (V030-E01-F01-T04)
+
 - `tensorplate bundle provision <name> --from <dir>` puts a bundle that the
   provisioning manifest lists into `/var/lib/tensorplate/bundles/import/<name>/`,
   verified file by file. The provisioning manifest (schema
@@ -511,6 +375,150 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   byte-for-byte what they were; a golden exchange recorded before the change
   pins them.
   (V030-E03-F01-T05, V030-E03-F01-T03)
+
+- The lifecycle report can carry a `reboot` stage, and the release gate
+  requires it on the L4 cloud row from 0.3.0. The stage sits beside the
+  canonical eight rather than among them. No other row, and no earlier
+  release of this one, may carry it, so every recorded report stays valid
+  and `check-evidence-bundles.sh --version 0.2.1` still finds all four
+  Production rows complete.
+  - `config/schemas/lifecycle_report.json` gains an optional top-level
+    `reboot` object. It records whether the boot ID changed, the retry
+    window the run observed, and three required sub-cases (`blocked`,
+    `transient`, `denied_egress_resumes`), each with a status and a log.
+  - `tools/release/check-evidence-bundles.sh` requires the stage where
+    the row and version call for it and refuses it everywhere else. It
+    compares versions as numbers, so 0.10.0 counts as later than 0.3.0 and
+    a 0.3.0 candidate counts as 0.3.0. It accepts the stage only when the
+    boot ID changed, every sub-case passed, the retry window was recorded
+    and every cited log exists. It now refuses a report carrying `NaN` or
+    `Infinity`, which are not JSON but which Python's parser accepts.
+  - `tools/validation/lifecycle-stages.sh` can suspend a run to a marker
+    file and resume it, once, in a new shell after the reboot. It records
+    the sub-cases in order, and fails the stage and the run when a
+    sub-case fails, the boot ID did not change or no retry window was
+    recorded. A run that stops mid-stage still records which sub-case
+    failed and which were never reached.
+  - The Ubuntu cloud harness does not run the stage yet, and
+    `docs/validation/cloud-row-runbooks.md` says so.
+  - Tests cover the runner, the checker, reports built from the recorded
+    Jetson and L4 evidence, and the Rust schema contract. They also cover
+    a report whose stage list carries a name outside the canonical eight,
+    which no release-gate test exercised before.
+
+  (V030-E06-F02-T01)
+
+- `TP_ENABLE_TSAN` builds the C++ runtime, the serving worker and the
+  tests with ThreadSanitizer. ThreadSanitizer cannot share a build with
+  AddressSanitizer, so configure refuses `TP_ENABLE_TSAN` together with
+  `TP_ENABLE_SANITIZERS`, and the `cmake.sanitizer_options` T1 test holds
+  that refusal and checks each option alone is accepted. The C++ workflow
+  gains a `tsan` leg that runs the T1, T2 and T3 labels; it is not yet a
+  required check. `test/README.md` records what is not instrumented.
+  (V030-E04-F03-T02)
+
+### Changed
+
+- Every version surface moves to `0.3.1`, the first release of the 0.3
+  line: `packaging/VERSION`, the CMake project version, the Cargo
+  workspace and path-dependency versions with `Cargo.lock`, the vcpkg
+  `version-string`, the Python SDK version, the installer's default
+  release and a `0.3.1-1` head stanza in `packaging/debian/changelog`.
+  `develop` carries the next first-release version directly, as it has
+  since the `0.2.1` bump, with no `-dev` suffix. The `python_pytorch`
+  backend descriptor now admits the 0.3 line:
+  `tensorplate_runtime_range.max_exclusive` rises from `0.3.0` to
+  `0.4.0`, and `test/packaging/verify_descriptor.sh` targets release
+  line `0.3`, which it requires the declared range to admit. That check
+  also refuses a target line behind `packaging/VERSION`, which would
+  otherwise pass unnoticed once the upper bound has moved, and it now
+  runs each of its refusals against fixed inputs on every invocation so
+  a broken check fails the script. This is a runtime-version bump only:
+  the protocol and schema versions stay `0.1`, the bundle format version
+  stays `0.1`, no bundle compatibility floor moves, and no dated
+  `[0.3.1]` section or release notes file is opened here.
+  (V030-E01-F01-T04)
+
+- On a Compute Engine instance, the metadata service answering HTTP 503 or
+  429, the two statuses Google documents as transient (503 while the
+  metadata server boots or migrates or the host is under maintenance, 429
+  for an endpoint's rate limiting), now counts as no answer, as a query
+  that times out or a refused connection already did. A 429 or 503 counts
+  only with a header block the agent would accept on a result. With a
+  record for the current boot the start uses it; without one, detection
+  fails in the step the agent's start-up retry repeats over its existing
+  20 s window, where before a 429 or 503 was a broken source that was
+  never retried. Any other answer -- another status, a response that
+  cannot be parsed, or a 200 whose body is not a machine type or an
+  instance id -- still fails detection at once; its error and `tensorplate
+  doctor`'s hint now say it came from the metadata server or from
+  something answering in its place, and what to check. When detection
+  fails without an answer, the error names the cause class of the last
+  attempt, transient unavailability, blocked access (a connection refused
+  or denied by local policy, now named apart from a timeout) or not
+  reached, and what to do about it, and `tensorplate doctor`'s hint covers
+  all three. This is the reboot boundary: after a reboot the agent must
+  reach the metadata service once before denied-egress operation resumes.
+  (V030-E01-F01-T03)
+
+- The documented rollback in `docs/install/lifecycle.md` restores
+  `state/machine-type.json` from `state.bak` before the older release is
+  installed, so the older agent keeps the machine type recorded in this boot.
+  `tools/validation/ubuntu-l4-cloud-lifecycle.sh` does the same, and now
+  checks both directions: upgrade requires the record the baseline wrote to
+  be byte-identical after the candidate starts and the instance binding to
+  exist, and rollback requires the restored record and the binding to be
+  byte-identical once the baseline is up. (V030-E01-F01-T03)
+
+- On a Compute Engine instance, `tensorplate doctor` now reads the instance
+  binding even when the metadata service answers, so it needs root or
+  `tensorplate` group membership there, as it already did when the service
+  was unreachable. Without either, the host finding says which directory it
+  could not read. (V030-E01-F01-T03)
+
+- The agent no longer falls back to `state.json.bak` when `state.json` is
+  refused for an unsupported state version (a newer state file supersedes an
+  older backup, so the agent exits with `CorruptState` instead of starting
+  on the stale backup) or cannot be read at all (an I/O error now stops the
+  agent). A damaged, empty or missing `state.json` still falls back as
+  before. On Linux, both directory syncs of a `0.2` state write must now
+  succeed. A state write that fails at or after the rename that commits it
+  (the one that makes it what the next start reads) returns the new
+  `StateIndeterminate` error, and the store then refuses every later write
+  until the agent restarts, while status reports the agent `failed` with a
+  `last_error` saying so; a write that fails before that rename leaves the
+  state and the store as they were. (V030-E03-F01-T03)
+
+- The agent now refuses a control request that carries a field it does not
+  know, a payload that belongs to another operation, or an explicit `null`,
+  with `config_invalid`, instead of ignoring it. Every request earlier CLIs
+  and the SDK send is unchanged and still accepted.
+  `docs/architecture/protocol.md` states the rule for request additions to
+  the control API under protocol `0.1`. The CLI's `unsupported` hint now
+  covers operations as well as backends. The quickstart, post-release and
+  clean-room guides no longer show `rollback --deployment-id`, which the
+  CLI never accepted and which now names a member.
+
+### Fixed
+
+- `HttpServer::stop()` closed the listening socket while the accept
+  thread could still be polling it, a data race ThreadSanitizer reports
+  in 25 of the 47 T2 tests. The socket is now closed only after that
+  thread exits, so its descriptor cannot be reused under a live poll, and
+  the thread accepts no connection once `stop()` has begun.
+  (V030-E04-F03-T02)
+
+### Security
+
+- `anyhow` 1.0.102 -> 1.0.103 (RUSTSEC-2026-0190: `Error::downcast_mut`
+  was unsound after `Error::context`) and `url` 2.5.0 -> 2.5.4, which
+  brings `idna` 0.5.0 -> 1.1.0 (RUSTSEC-2024-0421: Punycode labels that
+  decode to no non-ASCII compared equal to ASCII host names). `idna_adapter`
+  is pinned at 1.1.0 so the whole graph still builds with the workspace's
+  Rust 1.78. The same update moves `tinyvec` 1.12.0 -> 1.13.3, which drops
+  `tinyvec_macros`. Both advisories were found by the new cargo-deny check's
+  first run.
+  (V030-E01-F03-T01)
 
 ## [0.2.1] - 2026-09-23
 
