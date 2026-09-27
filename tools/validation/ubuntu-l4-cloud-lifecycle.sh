@@ -71,8 +71,11 @@
 #   profile. It exercises admission, worker supervision and the sidecar
 #   inference path against the real installed appliance -- it does NOT
 #   execute a CUDA kernel, and a passing run is not evidence that the
-#   accelerator computed anything. There is no CUDA fixture backend to
-#   select yet. Do not describe a run of this harness as GPU validation.
+#   accelerator computed anything. Do not describe a run of this harness
+#   as GPU validation. The `cuda_fixture` profile and the
+#   test/models/bundles/v0_1/x86_cuda_smoke bundle are what prove the
+#   accelerator computed something, deployed separately; this harness
+#   stays device-neutral so it runs unchanged on a host with no GPU.
 #
 # Skipped stages have their reason recorded in the report rather than
 # being omitted. Without --baseline-assets-dir, upgrade and rollback are

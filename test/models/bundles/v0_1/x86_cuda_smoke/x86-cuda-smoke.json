@@ -1,0 +1,4 @@
+{
+  "backend_profile": "cuda_fixture",
+  "device": "cuda"
+}
