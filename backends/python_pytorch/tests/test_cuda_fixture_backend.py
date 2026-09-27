@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from tensorplate_pytorch_backend import codec, protocol
-from tensorplate_pytorch_backend.accelerator import probe_cuda_runtime
+from tensorplate_pytorch_backend.accelerator import probe_cuda_runtime, require_cuda_runtime
 from tensorplate_pytorch_backend.backends.base import BackendError
 from tensorplate_pytorch_backend.backends.cuda_fixture import CudaFixtureBackend
 from tensorplate_pytorch_backend.runner import SidecarRunner
@@ -125,6 +125,42 @@ def test_probe_fails_closed_on_a_cpu_only_framework_build() -> None:
     assert capability.accelerator_runtime_built is False
     assert capability.accelerator_runtime_available is False
     assert capability.unavailable_reason == protocol.REASON_ACCELERATOR_RUNTIME_UNAVAILABLE
+
+
+class _UnreadableBuildMetadata:
+    def __getattr__(self, name: str) -> Any:
+        raise RuntimeError(f"torch.version.{name} is unreadable")
+
+
+def test_probe_fails_closed_when_the_build_metadata_raises() -> None:
+    torch = SimpleNamespace(
+        __version__="2.13.0",
+        version=_UnreadableBuildMetadata(),
+        cuda=SimpleNamespace(is_available=lambda: True),
+    )
+    capability = probe_cuda_runtime(torch)
+    assert capability.accelerator_runtime_built is False
+    assert capability.accelerator_runtime_available is False
+    assert capability.accelerator_runtime_version == "unknown"
+    assert capability.unavailable_reason == protocol.REASON_ACCELERATOR_RUNTIME_UNAVAILABLE
+
+
+def test_probe_fails_closed_when_the_availability_check_raises() -> None:
+    def is_available() -> bool:
+        raise RuntimeError("CUDA driver initialization failed")
+
+    torch = SimpleNamespace(
+        __version__="2.13.0",
+        version=SimpleNamespace(cuda="12.9"),
+        cuda=SimpleNamespace(is_available=is_available),
+    )
+    capability = probe_cuda_runtime(torch)
+    assert capability.accelerator_runtime_built is True
+    assert capability.accelerator_runtime_available is False
+    assert capability.unavailable_reason == protocol.REASON_ACCELERATOR_RUNTIME_UNAVAILABLE
+    with pytest.raises(BackendError) as caught:
+        require_cuda_runtime(torch)
+    assert caught.value.code == protocol.ERR_UNSUPPORTED
 
 
 def test_default_runner_selects_cuda_fixture_from_artifact(
