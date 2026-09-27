@@ -431,12 +431,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   of one moment rather than projections of each other.
   `test/validation/memory_observation_publication_test.sh` pins which
   identifier classes the publication scanner catches by pattern in that
-  shape and which it does not: a device UUID and a cloud project are
-  caught, and a serial in the XML tag form and a PCI bus id are not, so
-  both are the operator's literal file's job. The recordings carry a
-  synthetic PCI bus id, and the test holds every field that locates the
-  device at that value. The evidence-publication workflow now scans
-  `test/platform` beside `docs/validation/evidence`, since both hold
+  shape and which it does not: a device UUID, a GPU PDI and a cloud
+  project are caught, and a serial in the XML tag form and a PCI bus id
+  are not, so both are the operator's literal file's job. The recordings
+  carry a synthetic PCI bus id, and the test holds every field that
+  locates the device at that value. The evidence-publication workflow now
+  scans `test/platform` beside `docs/validation/evidence`, since both hold
   recorded fixtures, and shellchecks the new test.
   `test/platform/accelerator/PROVENANCE.md` records the driver, image and
   kernel the recordings were taken on. (V030-E03-F02-T04)

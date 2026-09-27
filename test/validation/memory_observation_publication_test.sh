@@ -125,6 +125,14 @@ check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
 check "  classed device-uuid" "yes" "$(has ": device-uuid" "${d}.out")"
 check "  without printing the value" "no" "$(has "$uuid" "${d}.out")"
 
+printf 'a GPU PDI in the XML tag form is caught by pattern\n'
+new_case
+pdi="0x$(random_hex 8)"
+replace_in_xml "<pdi>REDACTED</pdi>" "<pdi>${pdi}</pdi>"
+check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
+check "  classed gpu-pdi" "yes" "$(has ": gpu-pdi" "${d}.out")"
+check "  without printing the value" "no" "$(has "$pdi" "${d}.out")"
+
 printf 'a cloud project is caught by pattern\n'
 new_case
 project="$(random_digits 12)"
