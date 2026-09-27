@@ -18,12 +18,12 @@ sha256 is the file as measured.
 
 | File | What it holds |
 | --- | --- |
-| `systemd-effective-properties.txt` | The hardening as `systemctl show` reports it, not as the unit file spells it, plus the PATH a unit with no `Environment=PATH` actually gets |
+| `systemd-effective-properties.txt` | The agent unit's hardening as `systemctl show` reports it, not as the unit file spells it — 11 of the unit file's 18 hardening directives — plus the PATH a unit with no `Environment=PATH` actually gets |
 | `nvidia-smi-reachability.txt` | `nvidia-smi` resolved and answered as uid `tensorplate` inside the agent's mount namespace under that PATH alone; and what the observability unit's private `/dev` does instead |
 | `device-nodes.txt` | `/dev/nvidiactl`, `/dev/nvidia0` and `/dev/nvidia-uvm` present in the agent's namespace and opened as uid `tensorplate` |
-| `cuda-under-agent-hardening.json` | PyTorch reporting CUDA available, and a 512×512 matmul returning the arithmetically correct sum, as uid `tensorplate` in a transient unit carrying every one of the agent unit's hardening properties |
-| `package-closure.txt` | Every artifact the deploy needs owned by an installed package, no source tree on the host, and `dpkg --verify` finding no installed file that differs from its package |
-| `cuda-deploy.json` | The deploy reaching `active` and an inference round-tripping through the worker, with the GPU memory the sidecar held while it was live and the live process tree |
+| `cuda-under-agent-hardening.json` | PyTorch reporting CUDA available, and a 512×512 matmul returning the arithmetically correct sum, as uid `tensorplate` in a transient unit given the hardening that readback covers, not all of the unit's (see below) |
+| `package-closure.txt` | Each TensorPlate artifact the deploy starts from owned by an installed package, no source tree on the host, and `dpkg --verify` over the installed packages, which speaks for the published packages only (see below) |
+| `cuda-deploy.json` | The deploy reaching `active` inside the agent unit itself and an inference round-tripping through the worker, with the GPU memory the sidecar held while it was live and the live process tree |
 | `cuda-artifact-provenance.txt` | Exactly which artifact carried the CUDA runner, and the patch that distinguishes it from the published one |
 | `tensorrt-refusal.json` | A TensorRT bundle refused at admission |
 | `accelerator-recording.txt` | The `doctor --record` SKU line against the recordings already in the tree, and the stack this run measured |
@@ -43,7 +43,23 @@ sha256 is the file as measured.
   and its revision suffixed, which
   `cuda-artifact-provenance.txt` records in full, including the
   patch. Every other package installed is the published artifact unmodified.
-  The closure evidence above is from the published set alone.
+- **The transient unit covered part of the agent unit's hardening.** The
+  readback records 11 of the unit file's 18 hardening directives, and the
+  transient unit was given those; `ProtectKernelTunables`,
+  `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectControlGroups`,
+  `RestrictAddressFamilies`, `RestrictRealtime` and `RestrictSUIDSGID` were
+  not read back, and the transient unit's own properties were not captured.
+  `cuda-under-agent-hardening.json` speaks for those eleven only. The check
+  made under the unit's whole sandbox is the deploy in `cuda-deploy.json`:
+  its sidecar ran as a descendant of the agent unit's own process, and
+  `cuda_fixture` loads only after a checked CUDA matmul.
+- **The closure speaks for the published packages, not for everything the
+  deploy ran.** `dpkg --verify` compares each installed file with the
+  checksums its installed package shipped, so it says nothing about the
+  repacked backend package the CUDA deploy ran on, whose checksums the
+  repack regenerated; that package's provenance is the pair of digests and
+  the patch in `cuda-artifact-provenance.txt`. PyTorch is owned by no
+  package at all: it was installed with pip into the system interpreter.
 - **`/dev/nvidia-uvm` was present from boot on this image**, so the failure
   this gate watches for — the node's lazy creation blocked under
   `NoNewPrivileges` — could not arise here. That is a property of this

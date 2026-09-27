@@ -2,11 +2,12 @@
 # replaced by the evidence README's synthetic forms.
 
 # The SKU line it recorded:
-NVIDIA L4, 23034, 580.173.02, GPU-00000000-0000-0000-0000-000000000001, [N/A]
+NVIDIA L4, 23034, 580.173.02, GPU-00000000-0000-0000-0000-000000000005, [N/A]
 
 # Compared byte for byte against the recordings already in the tree, the SKU
 # field, the memory figure and the MIG spelling are identical to both, and the
-# driver version is identical to the Deep Learning VM recording:
+# driver version is identical to the Deep Learning VM recording; the UUID is
+# each card's own synthetic value, so it differs by design:
 #   test/platform/accelerator/ubuntu2404-x86-l4-g2s8.txt       driver 595.71.05
 #   test/platform/accelerator/dlvm-ubuntu2404-l4-g2s8.txt      driver 580.173.02
 # So no accelerator recording changes for this row.

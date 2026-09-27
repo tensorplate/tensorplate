@@ -537,7 +537,8 @@ and its evidence goes in a `cuda-baseline/` directory inside the row's
 evidence directory. Run it once per row, on the image the row claims.
 
 Read the hardening back from systemd rather than from the unit file — the
-file's text is not what the service runs under:
+file's text is not what the service runs under — and record every hardening
+directive the unit file sets, not a selection:
 
 ```bash
 systemctl show tensorplate-agent.service
@@ -562,15 +563,20 @@ formatting quirk.
 
 Then run PyTorch's own CUDA check as the service account in a transient
 unit carrying the agent unit's properties, so the sandbox rather than the
-login shell is what is measured. Check the kernel's result: an unchecked
-matmul passes on a card that computed nothing.
+login shell is what is measured. Give it every one of those directives and
+keep it with `--remain-after-exit`, so `systemctl show` can read its own
+properties back afterwards; a directive it was not given is one this check
+says nothing about. Check the kernel's result: an unchecked matmul passes on
+a card that computed nothing.
 
 Finally deploy a bundle whose profile only loads after a CUDA kernel has
 run — `test/models/bundles/v0_1/x86_cuda_smoke` selects `cuda_fixture` —
 and, while it is active, read `nvidia-smi --query-compute-apps` to see the
 sidecar holding GPU memory. Record the deploy, the inference and that line
 together: the deploy alone is a control-plane answer about a worker, and
-the compute-apps line is the independent one.
+the compute-apps line is the independent one. This deploy is also the one
+check made under the agent unit's whole sandbox, since the sidecar runs as
+a descendant of the unit's own process.
 
 Two things to record rather than assume. First, `pgrep -f` over SSH matches
 the invoking command's own line, so a process count taken that way is
