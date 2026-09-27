@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import platform
+import re
+from pathlib import Path
 from typing import Protocol
 
 from tensorplate_pytorch_backend.backends.base import BackendError, RuntimeCapability
@@ -25,6 +27,17 @@ class _TorchBackendsApi(Protocol):
 class _TorchApi(Protocol):
     __version__: object
     backends: _TorchBackendsApi
+
+
+# The loaded kernel module's own report; the agent unit's sandbox leaves
+# /proc/driver readable.
+NVIDIA_DRIVER_VERSION_FILE = Path("/proc/driver/nvidia/version")
+
+# The module's report opens `NVRM version: NVIDIA UNIX ... Kernel Module ...
+# <version>  ...`; a report of any other shape reads as unknown, not a guess.
+_NVRM_DRIVER_VERSION = re.compile(
+    r"^NVRM version: NVIDIA UNIX .*?Kernel Module.*?\s(\d+(?:\.\d+)+)(?=\s|$)", re.MULTILINE
+)
 
 
 class _CudaApi(Protocol):
@@ -89,6 +102,15 @@ def require_mps_runtime(
     return capability
 
 
+def _nvidia_driver_version() -> str | None:
+    try:
+        report = NVIDIA_DRIVER_VERSION_FILE.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _NVRM_DRIVER_VERSION.search(report)
+    return match.group(1) if match else None
+
+
 def probe_cuda_runtime(
     torch_module: _TorchCudaApi, *, accelerator_runtime_version: str | None = None
 ) -> RuntimeCapability:
@@ -110,9 +132,9 @@ def probe_cuda_runtime(
     except Exception:
         runtime_available = False
 
-    runtime_version = accelerator_runtime_version or (
-        str(built_version) if built_version else "unknown"
-    )
+    # For CUDA the operating-system-provided runtime is the driver: the wheel
+    # carries its own CUDA runtime, which `framework_version` already names.
+    runtime_version = accelerator_runtime_version or _nvidia_driver_version() or "unknown"
 
     return RuntimeCapability(
         backend_name="python_pytorch",

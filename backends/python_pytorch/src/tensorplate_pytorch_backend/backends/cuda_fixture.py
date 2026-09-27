@@ -1,4 +1,4 @@
-"""CUDA-backed fixture used by the packaged Linux accelerator deployment gate."""
+"""CUDA-backed fixture that proves a packaged deploy reaches the accelerator."""
 
 from __future__ import annotations
 

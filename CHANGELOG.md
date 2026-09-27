@@ -445,17 +445,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `mps_fixture`: its load succeeds only after a real CUDA matmul on the
   device has returned the arithmetically correct result, so a card that
   computed nothing fails the load instead of passing it. It refuses a
-  configuration that does not request `device=cuda`, and reports the
-  toolkit version the framework was built against as its accelerator
-  runtime capability; a CPU-only PyTorch build fails closed, and so does
-  one whose build metadata or availability check raises. The new
-  `probe_cuda_runtime` and `require_cuda_runtime` mirror the MPS pair at
-  the sidecar's accelerator boundary. `test/models/bundles/v0_1/x86_cuda_smoke`
-  is the matching deploy input, naming the `x86_64` device family so
-  admission matches it against the cloud rows' agent configuration
-  exactly. The Ubuntu cloud lifecycle harness stays device-neutral and its
-  header now says where the accelerator proof lives instead of saying no
-  CUDA fixture exists. (V030-E01-F01-T01)
+  configuration that does not request `device=cuda`. Its runtime
+  capability reports the NVIDIA driver's version, read from
+  `/proc/driver/nvidia/version`, as the accelerator runtime version, the
+  operating-system-provided runtime that field names, and `unknown` when
+  that report is absent or of a shape it does not recognize; whether
+  PyTorch was built for CUDA comes from `torch.version.cuda`, so a CPU-only
+  build fails closed, and so does one whose build metadata or availability
+  check raises. A load refused after the probe, a kernel that raises or
+  returns the wrong sum included, carries that capability in its error
+  response. The new `probe_cuda_runtime` and `require_cuda_runtime` mirror
+  the MPS pair at the sidecar's accelerator boundary.
+  `test/models/bundles/v0_1/x86_cuda_smoke` is the matching deploy input,
+  naming the `x86_64` device family so admission matches it against the
+  cloud rows' agent configuration exactly. The Ubuntu cloud lifecycle
+  harness stays device-neutral and its header now says where the
+  accelerator proof lives instead of saying no CUDA fixture exists.
+  (V030-E01-F01-T01)
 
 - A CUDA baseline for the `ubuntu2404-x86-l4-g2s8` support row, recorded on
   that shape and published under
