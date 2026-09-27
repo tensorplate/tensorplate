@@ -5,7 +5,7 @@
 	<driver_version>580.173.02</driver_version>
 	<cuda_version>13.0</cuda_version>
 	<attached_gpus>1</attached_gpus>
-	<gpu id="00000000:00:03.0">
+	<gpu id="00000000:00:00.0">
 		<product_name>NVIDIA L4</product_name>
 		<product_brand>NVIDIA</product_brand>
 		<product_architecture>Ada Lovelace</product_architecture>
@@ -28,12 +28,12 @@
 			<pending_dm>N/A</pending_dm>
 		</driver_model>
 		<serial>REDACTED</serial>
-		<uuid>GPU-00000000-0000-0000-0000-000000000001</uuid>
+		<uuid>GPU-00000000-0000-0000-0000-000000000005</uuid>
 		<pdi>REDACTED</pdi>
 		<minor_number>0</minor_number>
 		<vbios_version>95.04.29.00.07</vbios_version>
 		<multigpu_board>No</multigpu_board>
-		<board_id>0x3</board_id>
+		<board_id>0x0</board_id>
 		<board_part_number>900-2G193-6310-001</board_part_number>
 		<gpu_part_number>27B8-895-A1</gpu_part_number>
 		<gpu_fru_part_number>N/A</gpu_fru_part_number>
@@ -73,12 +73,12 @@
 		</ibmnpu>
 		<pci>
 			<pci_bus>00</pci_bus>
-			<pci_device>03</pci_device>
+			<pci_device>00</pci_device>
 			<pci_domain>0000</pci_domain>
 			<pci_base_class>3</pci_base_class>
 			<pci_sub_class>2</pci_sub_class>
 			<pci_device_id>27B810DE</pci_device_id>
-			<pci_bus_id>00000000:00:03.0</pci_bus_id>
+			<pci_bus_id>00000000:00:00.0</pci_bus_id>
 			<pci_sub_system_id>16EE10DE</pci_sub_system_id>
 			<pci_gpu_link_info>
 				<pcie_gen>

@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# The recorded memory-observation shape, against the publication scanner.
-#
-# test/platform/memory_observation holds an `nvidia-smi -q -x` XML
-# recording and the CSV, meminfo and /proc/<pid>/status captures taken
-# beside it. That XML carries a device UUID, a serial and a PCI bus id, so
-# which of them the scanner catches by pattern and which it does not is a
-# property this directory depends on. It is pinned here because the answer
-# is not uniform, and an operator who believes the scanner guards all three
-# will publish the two it does not.
-#
-# Every injected value is generated at runtime, so this file carries no
-# value with the shape of a live identifier.
+# Which device identifiers in the recorded memory-observation shape the
+# publication scanner catches by pattern, and which only the operator's
+# literal file or this test guards. Injected values are generated at runtime.
 
 set -Eeuo pipefail
 
@@ -20,6 +11,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 scanner="${repo_root}/tools/validation/check-evidence-publication.sh"
 recorded="${repo_root}/test/platform/memory_observation"
 xml="nvidia-smi-q-x.xml"
+synthetic_uuid="GPU-00000000-0000-0000-0000-000000000005"
+synthetic_bus_id="00000000:00:00.0"
+synthetic_board_id="0x0"
 failures=0
 case_count=0
 d=""
@@ -55,6 +49,10 @@ random_digits() {
 n = int(sys.argv[1])
 print(secrets.randbelow(10 ** n - 10 ** (n - 1)) + 10 ** (n - 1))' "$1"
 }
+random_bus_id() {
+  python3 -c 'import secrets
+print("%08x:%02x:%02x.%x" % (0, secrets.randbelow(255) + 1, secrets.randbelow(32), secrets.randbelow(8)))'
+}
 
 # scan <out> <scanner args...>: prints the scanner's exit status.
 scan() {
@@ -86,16 +84,43 @@ p.write_text(text.replace(sys.argv[2], sys.argv[3], 1), encoding="utf-8")
 PY
 }
 
+# pci_location_is <bus id> <board id>: prints yes only when every committed
+# field that locates the device carries those values; never prints a value.
+pci_location_is() {
+  python3 - "$recorded" "$1" "$2" <<'PY'
+import csv, pathlib, sys
+import xml.etree.ElementTree as ET
+root, bus_id, board_id = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+domain, bus, rest = bus_id.split(":")
+gpu = ET.parse(root / "nvidia-smi-q-x.xml").getroot().find("gpu")
+with open(root / "nvidia-smi-query-gpu.csv", encoding="utf-8") as handle:
+    rows = [{k.strip(): v.strip() for k, v in row.items()} for row in csv.DictReader(handle)]
+observed = [
+    gpu.get("id"),
+    gpu.findtext("pci/pci_bus_id"),
+    gpu.findtext("pci/pci_domain"),
+    gpu.findtext("pci/pci_bus"),
+    gpu.findtext("pci/pci_device"),
+    gpu.findtext("board_id"),
+] + [row["pci.bus_id"] for row in rows]
+expected = [bus_id, bus_id, domain[-4:], bus, rest.split(".")[0], board_id]
+expected += [bus_id] * len(rows)
+print("yes" if rows and observed == expected else "no")
+PY
+}
+
 printf 'the recorded shape as committed\n'
 new_case
 check "passes with patterns only" "0" "$(scan "${d}.out" --patterns-only "$d")"
+check "carries only the synthetic PCI location" "yes" \
+  "$(pci_location_is "$synthetic_bus_id" "$synthetic_board_id")"
 
 literals="${work}/literals.txt"
 
 printf 'a device UUID is caught by pattern\n'
 new_case
 uuid="GPU-$(random_hex 4)-$(random_hex 2)-$(random_hex 2)-$(random_hex 2)-$(random_hex 6)"
-replace_in_xml "GPU-00000000-0000-0000-0000-000000000001" "$uuid"
+replace_in_xml "$synthetic_uuid" "$uuid"
 check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
 check "  classed device-uuid" "yes" "$(has ": device-uuid" "${d}.out")"
 check "  without printing the value" "no" "$(has "$uuid" "${d}.out")"
@@ -108,11 +133,8 @@ check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
 check "  classed cloud-project" "yes" "$(has ": cloud-project" "${d}.out")"
 check "  without printing the value" "no" "$(has "$project" "${d}.out")"
 
-# The scanner's serial rule needs a `:` or `=` after the label, which is the
-# form `nvidia-smi -q` prints. Its XML form tags the value instead, so to the
-# patterns it is a bare number. The evidence README already assigns a device
-# serial to the operator's literal file for exactly this reason; these two
-# cases hold that division so nobody re-derives the wrong half of it.
+# The serial rule needs a `:` or `=` after the label; the XML tags the value
+# instead, so a device serial is the literal file's job.
 printf 'a serial in the XML tag form is NOT caught by pattern\n'
 new_case
 serial="$(random_digits 13)"
@@ -124,14 +146,18 @@ printf '%s\n' "$serial" >"$literals"
 check "is a finding with --literals" "1" "$(scan "${d}.out" --literals "$literals" "$d")"
 check "  without printing the value" "no" "$(has "$serial" "${d}.out")"
 
-# A GCE PCI bus id enumerates the virtual topology and is identical on every
-# instance of a shape, so the scanner has no class for it and the recorded
-# value is published as measured. A physical host's bus id goes in the
-# literal file like its serial.
+# No pattern class covers a PCI bus id, so the recordings carry a synthetic
+# one and the literal file is what catches a real one.
 printf 'a PCI bus id is NOT caught by pattern\n'
 new_case
-replace_in_xml "<pci_bus_id>00000000:00:03.0</pci_bus_id>" "<pci_bus_id>00000000:65:00.0</pci_bus_id>"
+bus_id="$(random_bus_id)"
+replace_in_xml "<pci_bus_id>${synthetic_bus_id}</pci_bus_id>" "<pci_bus_id>${bus_id}</pci_bus_id>"
 check "passes with patterns only" "0" "$(scan "${d}.out" --patterns-only "$d")"
+
+printf 'the same PCI bus id IS caught when the operator lists it\n'
+printf '%s\n' "$bus_id" >"$literals"
+check "is a finding with --literals" "1" "$(scan "${d}.out" --literals "$literals" "$d")"
+check "  without printing the value" "no" "$(has "$bus_id" "${d}.out")"
 
 printf 'every capture the directory claims is present\n'
 new_case
