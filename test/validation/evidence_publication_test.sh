@@ -197,6 +197,9 @@ link/none 00:00:00:00:00:00
 contacts ops@example.com ops@example.org ops@example.net
 Serial Number: REDACTED
 Hardware Serial: 0000000000
+    GPU PDI                               : REDACTED
+<pdi>REDACTED</pdi>
+detail: {\"pdi\": \"REDACTED\"}
 ii  tensorrt  10.3.0.30-1+cuda12.6  arm64
 tensorrt==10.3.0.30
 tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
@@ -703,6 +706,25 @@ new_case
 add_line "    Serial Number                         : ${serial}"
 expect_finding "a column-padded nvidia-smi -q serial" serial "$serial"
 
+# --- GPU PDIs, by their label in nvidia-smi -q and -q -x, and as a key.
+pdi="0x$(random_hex 8)"
+new_case
+add_line "    GPU PDI                               : ${pdi}"
+expect_finding "a column-padded nvidia-smi -q GPU PDI" gpu-pdi "$pdi"
+
+new_case
+printf '\t\t<uuid>GPU-00000000-0000-0000-0000-000000000001</uuid>\n\t\t<pdi>%s</pdi>\n' "$pdi" \
+  >"${d}/nvidia-smi-q-x.xml" || die "could not write nvidia-smi-q-x.xml"
+expect_finding "an nvidia-smi -q -x pdi element" gpu-pdi "$pdi"
+
+new_case
+printf '{"gpu": {"p\\u0064i": "%s"}}\n' "$pdi" >"${d}/gpu.json" || die "could not write gpu.json"
+expect_finding "a GPU PDI under an escaped JSON key" gpu-pdi "$pdi"
+
+new_case
+printf '{"gpuPdi": "%s"}\n' "$pdi" >"${d}/gpu.json" || die "could not write gpu.json"
+expect_finding "a GPU PDI under a camelCase key" gpu-pdi "$pdi"
+
 # --- Credentials, built at runtime so no scanner flags this file.
 new_case
 key_header="$(printf -- '-----BEGIN %s %s KEY-----' OPENSSH PRIVATE)"
@@ -784,11 +806,24 @@ planning_id="$(printf 'V%03d-E%02d-F%02d-T%02d' 21 5 1 1)"
 new_case
 add_line "implements ${planning_id}"
 expect_finding "a planning identifier" planning-id "$planning_id"
+check "  reported once, as the whole identifier" "notes.log:2: planning-id (${#planning_id} chars)" \
+  "$(grep ': planning-id' "${d}.out" | tr '\n' ' ' | sed 's/ $//')"
 
 planning_id="$(printf 'V%03d-F%02d-T%02d' 21 5 1)"
 new_case
 add_line "ii  tensorplate-agent  0.2.1  amd64  agent (${planning_id})"
 expect_finding "a planning identifier without an epic segment" planning-id "$planning_id"
+
+planning_id="$(printf 'E%02d-F%02d-T%02d' "$((RANDOM % 100))" "$((RANDOM % 100))" "$((RANDOM % 100))")"
+new_case
+add_line "# Captured for ${planning_id} after the second boot."
+expect_finding "a planning identifier without its release prefix" planning-id "$planning_id"
+
+planning_id="$(printf 'E%02d-F%02d' "$((RANDOM % 100))" "$((RANDOM % 100))")"
+new_case
+add_line "notes_${planning_id}_draft"
+expect_finding "a feature identifier without its release prefix, between underscores" planning-id \
+  "$planning_id"
 
 # --- Operator literals.
 lit_file="${work}/private/case-literals.txt"

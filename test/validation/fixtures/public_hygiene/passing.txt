@@ -17,6 +17,7 @@ placeholders /home/$USER /home/<name> /home/.config ~/.config
 devices GPU-00000000-0000-0000-0000-000000000001 MIG-00000000-0000-0000-0000-000000000002
 projects projects/1/zones/us-central1-a projects/REDACTED/zones/us-central1-b projects/12345/
 labels PR-1234 HW-Z123 HW-12 0xC01 D01X XM1 C1 PR-
+planning E1-F2-T3 E123-F45, an E2E test
 options useradd --home-dir /var/lib/tensorplate --no-create-home, work-from-home-office
 credentials Authorization: Bearer $TOKEN, Authorization: Basic <token>, ghp_short
 headers -----BEGIN PUBLIC KEY----- -----BEGIN CERTIFICATE-----

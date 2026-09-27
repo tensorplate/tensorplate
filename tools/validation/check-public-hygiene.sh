@@ -34,12 +34,14 @@
 #             narrow set of shapes that never belong in a public source
 #             tree: credentials, cloud service accounts and project
 #             numbers, home directories, device UUIDs, network addresses,
-#             and references to private planning material. The evidence
-#             scanner's host, journal, UUID, serial, e-mail, MAC,
-#             machine-id, cloud-project and planning-identifier classes are
+#             and references to private planning material, among them a
+#             planning identifier without its release prefix anywhere but
+#             CHANGELOG.md. The evidence scanner's host, journal, UUID,
+#             serial, GPU PDI, e-mail, MAC, machine-id and cloud-project
+#             classes, and its prefixed planning identifiers, are
 #             deliberately not part of it: negative tests, synthetic
-#             identities and the scanners' own patterns carry those
-#             legitimately.
+#             identities, the scanners' own patterns and pull request text
+#             carry those legitimately.
 #
 # Lines are scanned as written, with escapes and terminal control
 # sequences blanked, and with escapes decoded. A file that is not UTF-8
@@ -269,16 +271,24 @@ PRIVATE_REPOSITORY = re.compile(r"[A-Za-z0-9]+-internals", re.IGNORECASE)
 PRIVATE_LABEL = re.compile(
     r"(?<![A-Za-z0-9])(?:PR-[0-9]{1,3}[a-z]?|HW-[A-Z][0-9]{1,2}|XM[0-9]{2}|[CD][0-9]{2})"
     r"(?![A-Za-z0-9])")
+# A planning identifier without its release prefix. The prefixed form is
+# how pull request text cites work, and older source comments carry it, so
+# it is not reported, whatever precedes the prefix (an escape can).
+PLANNING_ID = re.compile(
+    r"(?<![A-Za-z0-9])(?<!V[0-9]{2}-)(?<!V[0-9]{3}-)E[0-9]{2}-F[0-9]{2}(?:-T[0-9]{2})?"
+    r"(?![A-Za-z0-9])")
+# The changelog cites planning identifiers by convention.
+PLANNING_ID_EXEMPT = frozenset(("CHANGELOG.md",))
 
 SOURCE_CLASSES = frozenset((
     "credential", "service-account", "cloud-project-number", "home-path",
     "device-uuid", "ipv4", "ipv6", "private-repository", "private-label",
-    "binary", "symlink", "submodule"))
+    "planning-id", "binary", "symlink", "submodule"))
 # check-evidence-publication.sh's classes, for its findings on evidence.
 EVIDENCE_CLASSES = frozenset((
     "journal-field", "journal-host", "hostname", "machine-id", "home-path",
     "device-uuid", "uuid", "ipv4", "ipv6", "mac", "email", "cloud-project",
-    "internal-dns", "serial", "credential", "planning-id", "symlink",
+    "internal-dns", "serial", "gpu-pdi", "credential", "planning-id", "symlink",
     "special-file", "binary"))
 NEVER_ALLOWED = frozenset(("credential",))
 
@@ -434,6 +444,8 @@ def scan_variant(line, literals):
         add("private-repository", m.group(0))
     for m in PRIVATE_LABEL.finditer(line):
         add("private-label", m.group(0))
+    for m in PLANNING_ID.finditer(line):
+        add("planning-id", m.group(0))
     for cls, pattern, length in literals:
         for m in pattern.finditer(line):
             found.append((cls, length, m.group(0).lower()))
@@ -943,6 +955,8 @@ def main(argv):
                     report(0, cls, length, count)
             continue
         for (line, cls, length), count in scan_text(text, literals).items():
+            if cls == "planning-id" and path in PLANNING_ID_EXEMPT:
+                continue
             report(line, cls, length, count)
 
     if evidence:

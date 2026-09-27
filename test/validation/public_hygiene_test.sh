@@ -235,7 +235,7 @@ fixture_class() {
     ipv4*) printf 'ipv4' ;;
     ipv6*) printf 'ipv6' ;;
     private-label-*) printf 'private-label' ;;
-    device-uuid | service-account | private-repository) printf '%s' "$1" ;;
+    device-uuid | service-account | private-repository | planning-id) printf '%s' "$1" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -415,6 +415,17 @@ fixture_values() {
     private-label-contract-section) printf 'C%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" ;;
     private-label-decision) printf 'D%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" ;;
     private-label-cross-model) printf 'XM%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" ;;
+    planning-id)
+      # A task, a feature, one between underscores, and one after a
+      # one-digit prefix, which is no release prefix.
+      printf 'E%s-F%s-T%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" \
+        "$(random_from 0123456789 2)"
+      printf 'E%s-F%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)"
+      token="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)-T$(random_from 0123456789 2)"
+      printf 'notes_%s_draft\t%s\n' "$token" "$token"
+      token="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)"
+      printf 'V%s-%s\t%s\n' "$(random_from 0123456789 1)" "$token" "$token"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -916,6 +927,48 @@ commit
 check "an evidence scanner fault is no verdict" "2" "$(scan "${r}.out" --base base)"
 check "  without a traceback" "no" "$(has "Traceback" "${r}.out")"
 
+pdi="0x$(random_hex 8)"
+new_case
+put test/platform/rec/nvidia-smi-q-x.xml $'\t\t<pdi>'"${pdi}"$'</pdi>'
+commit
+expect_finding "a GPU PDI in a recording" gpu-pdi "$pdi" --base base
+
+# --- Planning identifiers: CHANGELOG.md cites them, and pull request
+# text cites them with their release prefix.
+bare="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)-T$(random_from 0123456789 2)"
+prefixed="V$(random_from 0123456789 3)-${bare}"
+
+new_case
+put CHANGELOG.md "- A fix. (${prefixed}; ${bare})"
+put notes/a.txt "Implements ${prefixed}."
+put notes/b.json "{\"body\": \"Tasks:\\n${prefixed}\\u2014${prefixed} q=%20${prefixed}\"}"
+commit "Implement ${prefixed}"
+printf 'Task IDs: %s\n' "$prefixed" >"${r}.body" || die "could not write a body"
+check "a bare identifier in CHANGELOG.md, and prefixed ones anywhere, even after an escape, pass" "0" \
+  "$(scan "${r}.out" --base base --message "${r}.body")"
+
+new_case
+put packaging/debian/changelog "  * A fix. (${bare})"
+put docs/CHANGELOG.md "- A fix. (${bare})"
+commit
+expect_finding "a bare identifier in another changelog" planning-id "$bare" --base base
+check "  in each, the exemption being the repository's CHANGELOG.md only" \
+  "docs/CHANGELOG.md:1: planning-id packaging/debian/changelog:1: planning-id" \
+  "$(grep -oE '^[a-zA-Z/.]+:[0-9]+: planning-id' "${r}.out" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+
+new_case
+put notes/a.txt "clean"
+commit
+printf 'Task IDs: %s\n' "$bare" >"${r}.body" || die "could not write a body"
+expect_finding "a bare identifier in pull request text" planning-id "$bare" --base base \
+  --message "${r}.body"
+
+new_case
+put docs/validation/evidence/v9.9.9/synthetic-row/reboot.txt "# Captured for ${bare}."
+commit
+expect_finding "a bare identifier in evidence" planning-id "$bare" --base base
+check "  reported once, as both tiers class it" "1" "$(grep -c ': planning-id' "${r}.out" || :)"
+
 # --- Literals: the operator's private file and this machine's identity.
 literal="lit$(random_word 9)"
 literals_dir="${work}/private"
@@ -1186,6 +1239,19 @@ for bad in "notes/a.txt credential 1 Never." "notes/a.txt mac 1 An evidence-only
     "$(scan "${r}.out" --base base)"
   check "  and says which line" "yes" "$(has "allowlist line" "${r}.out")"
 done
+
+new_case
+put notes/a.txt "clean"
+put "$allowlist" "notes/a.txt gpu-pdi 1 A class only the evidence scanner reports."
+commit
+check "an entry for the GPU PDI class is no verdict" "2" "$(scan "${r}.out" --base base)"
+check "  as a class only the evidence scanner reports" "yes" "$(has "evidence-only gpu-pdi" "${r}.out")"
+
+new_case
+put notes/a.txt "see ${bare}"
+put "$allowlist" "notes/a.txt planning-id 1 A synthetic identifier."
+commit
+check "an allowlisted prefix-less planning identifier passes" "0" "$(scan "${r}.out" --base base)"
 
 # The entry's count covers both of the file's findings, and the allowlist
 # accepts its own address, so only the rule that a masked path is never
