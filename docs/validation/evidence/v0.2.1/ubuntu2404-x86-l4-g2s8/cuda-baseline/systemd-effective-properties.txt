@@ -1,0 +1,33 @@
+# Effective unit properties, read back with systemctl show, not from the unit file.
+# agent:
+Type=simple
+MainPID=3431
+NRestarts=0
+DevicePolicy=auto
+UMask=0027
+User=tensorplate
+Group=tensorplate
+ReadWritePaths=/var/lib/tensorplate /var/log/tensorplate /run/tensorplate
+PrivateTmp=yes
+PrivateDevices=no
+ProtectHome=yes
+ProtectSystem=strict
+NoNewPrivileges=yes
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+RestrictNamespaces=yes
+ActiveState=active
+
+# observability:
+MainPID=3432
+User=tensorplate
+Group=tensorplate
+PrivateDevices=yes
+ProtectSystem=strict
+NoNewPrivileges=yes
+ActiveState=active
+
+# systemd's default environment, which is the PATH a unit with no Environment=PATH gets:
+LANG=C.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin

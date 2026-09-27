@@ -528,6 +528,58 @@ run exercises admission, the worker launch and the inference path
 against the real installed appliance; it executes no CUDA kernel. Do not
 describe a run of this harness as GPU validation.
 
+## The CUDA baseline, which the harness does not run
+
+The harness deploys the device-neutral `fixture` profile and executes no
+CUDA kernel, so a passing run says nothing about the accelerator. The
+accelerator question is a separate, short procedure on the same instance,
+and its evidence goes in a `cuda-baseline/` directory inside the row's
+evidence directory. Run it once per row, on the image the row claims.
+
+Read the hardening back from systemd rather than from the unit file — the
+file's text is not what the service runs under:
+
+```bash
+systemctl show tensorplate-agent.service
+systemctl show-environment          # the PATH a unit with no Environment=PATH gets
+```
+
+Then answer three things inside the agent's own mount namespace, as the
+service account, with that PATH and nothing else in the environment:
+
+```bash
+agent=$(systemctl show -p MainPID --value tensorplate-agent.service)
+sudo nsenter -t "$agent" -m -p -- setpriv --reuid tensorplate --regid tensorplate \
+  --clear-groups env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin \
+  sh -c 'nvidia-smi --query-gpu=name,driver_version --format=csv,noheader'
+sudo nsenter -t "$agent" -m -p -- ls -l /dev/nvidiactl /dev/nvidia0 /dev/nvidia-uvm
+```
+
+`/dev/nvidia-uvm` may be created lazily. A Deep Learning VM image has it
+from boot because `nvidia-persistenced` runs; on an image without it, its
+absence here is the finding the hardening is being checked for, not a
+formatting quirk.
+
+Then run PyTorch's own CUDA check as the service account in a transient
+unit carrying the agent unit's properties, so the sandbox rather than the
+login shell is what is measured. Check the kernel's result: an unchecked
+matmul passes on a card that computed nothing.
+
+Finally deploy a bundle whose profile only loads after a CUDA kernel has
+run — `test/models/bundles/v0_1/x86_cuda_smoke` selects `cuda_fixture` —
+and, while it is active, read `nvidia-smi --query-compute-apps` to see the
+sidecar holding GPU memory. Record the deploy, the inference and that line
+together: the deploy alone is a control-plane answer about a worker, and
+the compute-apps line is the independent one.
+
+Two things to record rather than assume. First, `pgrep -f` over SSH matches
+the invoking command's own line, so a process count taken that way is
+wrong; use `ps` and `systemctl show -p MainPID`. Second, do not write the
+measured driver and runtime versions into the row's
+`kernel_driver_stack.components`: the agent reports no stack components, so
+a row that declares one resolves and is then refused on the machine it
+describes. The measured stack belongs in the evidence bundle.
+
 ## Prerequisites
 
 1. **A running VM** with an NVIDIA accelerator matching the row, running

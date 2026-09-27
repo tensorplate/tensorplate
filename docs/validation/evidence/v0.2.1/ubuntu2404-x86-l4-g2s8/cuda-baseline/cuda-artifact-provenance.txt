@@ -1,0 +1,221 @@
+# Artifact provenance for the CUDA deploy
+# published backend deb, as fetched from the release and verified against its SHA256SUMS:
+13dfbd4f51e07003b31da84afcdd8df6c9f39f42abef6ce1697717995b45d25c  /home/tp-synthetic-operator/assets/tensorplate-backend-python-pytorch_0.2.1-1_all.deb
+# the same deb unpacked, with four payload files replaced from the branch and the revision suffixed, repacked:
+9963f1d1ffeffd8aa69ee73c94a1583d8c67d9752cae73627df635753f47a1f1  /home/tp-synthetic-operator/deb-work/tensorplate-backend-python-pytorch_0.2.1-1+w0cudafixture1_all.deb
+# every other installed package is the published artifact, unmodified (dpkg --verify above)
+# the exact payload change, as a patch against the branch base:
+diff --git a/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py b/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py
+index 4f174d82..55eed4ee 100644
+--- a/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py
++++ b/backends/python_pytorch/src/tensorplate_pytorch_backend/accelerator.py
+@@ -27,6 +27,20 @@ class _TorchApi(Protocol):
+     backends: _TorchBackendsApi
+ 
+ 
++class _CudaApi(Protocol):
++    def is_available(self) -> bool: ...
++
++
++class _TorchVersionApi(Protocol):
++    cuda: str | None
++
++
++class _TorchCudaApi(Protocol):
++    __version__: object
++    cuda: _CudaApi
++    version: _TorchVersionApi
++
++
+ def probe_mps_runtime(
+     torch_module: _TorchApi, *, accelerator_runtime_version: str | None = None
+ ) -> RuntimeCapability:
+@@ -75,4 +89,64 @@ def require_mps_runtime(
+     return capability
+ 
+ 
+-__all__ = ["probe_mps_runtime", "require_mps_runtime"]
++def probe_cuda_runtime(
++    torch_module: _TorchCudaApi, *, accelerator_runtime_version: str | None = None
++) -> RuntimeCapability:
++    """Collect normalized facts from PyTorch's CUDA runtime boundary."""
++
++    framework_version = str(getattr(torch_module, "__version__", "unknown")) or "unknown"
++
++    # PyTorch exposes no `is_built()` for CUDA the way it does for MPS;
++    # `torch.version.cuda` is `None` in a CPU-only build and the toolkit
++    # version otherwise, so it carries the same meaning here.
++    try:
++        built_version = getattr(torch_module.version, "cuda", None)
++    except Exception:
++        built_version = None
++    runtime_built = built_version is not None
++
++    try:
++        runtime_available = runtime_built and bool(torch_module.cuda.is_available())
++    except Exception:
++        runtime_available = False
++
++    runtime_version = accelerator_runtime_version or (
++        str(built_version) if built_version else "unknown"
++    )
++
++    return RuntimeCapability(
++        backend_name="python_pytorch",
++        framework_version=framework_version,
++        accelerator_runtime_version=runtime_version,
++        accelerator_runtime_built=runtime_built,
++        accelerator_runtime_available=runtime_available,
++        unavailable_reason=(None if runtime_available else REASON_ACCELERATOR_RUNTIME_UNAVAILABLE),
++    )
++
++
++def require_cuda_runtime(
++    torch_module: _TorchCudaApi, *, accelerator_runtime_version: str | None = None
++) -> RuntimeCapability:
++    """Return the CUDA capability or reject before model loading."""
++
++    capability = probe_cuda_runtime(
++        torch_module, accelerator_runtime_version=accelerator_runtime_version
++    )
++    if not capability.accelerator_runtime_available:
++        raise BackendError(
++            ERR_UNSUPPORTED,
++            f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}: "
++            "the configured accelerator runtime is not available",
++            context=f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}; "
++            f"built={str(capability.accelerator_runtime_built).lower()}",
++            runtime_capability=capability,
++        )
++    return capability
++
++
++__all__ = [
++    "probe_cuda_runtime",
++    "probe_mps_runtime",
++    "require_cuda_runtime",
++    "require_mps_runtime",
++]
+diff --git a/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/__init__.py b/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/__init__.py
+index 3dc836b7..ccd85e8f 100644
+--- a/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/__init__.py
++++ b/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/__init__.py
+@@ -6,6 +6,7 @@ from tensorplate_pytorch_backend.backends.base import (
+     NamedTensor,
+     RuntimeCapability,
+ )
++from tensorplate_pytorch_backend.backends.cuda_fixture import CudaFixtureBackend
+ from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
+ from tensorplate_pytorch_backend.backends.mps_fixture import MpsFixtureBackend
+ from tensorplate_pytorch_backend.backends.smolvla import SmolVLABackend
+@@ -13,6 +14,7 @@ from tensorplate_pytorch_backend.backends.smolvla import SmolVLABackend
+ __all__ = [
+     "Backend",
+     "BackendError",
++    "CudaFixtureBackend",
+     "FixtureBackend",
+     "MpsFixtureBackend",
+     "NamedTensor",
+diff --git a/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/cuda_fixture.py b/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/cuda_fixture.py
+new file mode 100644
+index 00000000..5f9eb5b2
+--- /dev/null
++++ b/backends/python_pytorch/src/tensorplate_pytorch_backend/backends/cuda_fixture.py
+@@ -0,0 +1,77 @@
++"""CUDA-backed fixture used by the packaged Linux accelerator deployment gate."""
++
++from __future__ import annotations
++
++from typing import Any
++
++from tensorplate_pytorch_backend.accelerator import require_cuda_runtime
++from tensorplate_pytorch_backend.backends.base import BackendError, RuntimeCapability
++from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
++from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
++from tensorplate_pytorch_backend.protocol import ERR_CONFIG_INVALID, ERR_LOAD_FAILED
++
++# A matmul rather than an elementwise op: the speech runners reach the GPU
++# through cuBLAS, so this is the library path worth proving from inside the
++# service sandbox.
++_PROBE_EXTENT = 64
++
++
++class CudaFixtureBackend(FixtureBackend):
++    """Echo fixture whose load succeeds only after a CUDA matmul."""
++
++    def __init__(self) -> None:
++        super().__init__()
++        self._runtime_capability: RuntimeCapability | None = None
++
++    @property
++    def name(self) -> str:
++        return "cuda_fixture"
++
++    @property
++    def runtime_capability(self) -> RuntimeCapability | None:
++        return self._runtime_capability
++
++    def load(self, model_spec: dict[str, Any]) -> None:
++        self._runtime_capability = None
++        try:
++            config = read_artifact_config(model_spec)
++        except ArtifactConfigError as exc:
++            raise BackendError(ERR_CONFIG_INVALID, str(exc)) from exc
++        if config.get("device") != "cuda":
++            raise BackendError(
++                ERR_CONFIG_INVALID,
++                "CUDA fixture config requires device='cuda'",
++            )
++        try:
++            import torch
++        except Exception as exc:
++            raise BackendError(ERR_LOAD_FAILED, "PyTorch is required for the CUDA fixture") from exc
++
++        self._runtime_capability = require_cuda_runtime(torch)
++        try:
++            probe = torch.ones((_PROBE_EXTENT, _PROBE_EXTENT), device="cuda")
++            observed = float((probe @ probe).sum().item())
++            torch.cuda.synchronize()
++        except Exception as exc:
++            raise BackendError(
++                ERR_LOAD_FAILED,
++                f"CUDA fixture tensor operation failed: {exc}",
++                runtime_capability=self._runtime_capability,
++            ) from exc
++        # An unchecked kernel would also pass on a card that computed
++        # nothing, which is the failure this gate exists to catch.
++        expected = float(_PROBE_EXTENT**3)
++        if observed != expected:
++            raise BackendError(
++                ERR_LOAD_FAILED,
++                f"CUDA fixture matmul returned {observed}, expected {expected}",
++                runtime_capability=self._runtime_capability,
++            )
++        super().load(model_spec)
++
++    def unload(self) -> None:
++        super().unload()
++        self._runtime_capability = None
++
++
++__all__ = ["CudaFixtureBackend"]
+diff --git a/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py b/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py
+index ce65dd80..21685579 100644
+--- a/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py
++++ b/backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py
+@@ -38,6 +38,7 @@ from tensorplate_pytorch_backend import codec, protocol
+ from tensorplate_pytorch_backend.backends import (
+     Backend,
+     BackendError,
++    CudaFixtureBackend,
+     FixtureBackend,
+     MpsFixtureBackend,
+     NamedTensor,
+@@ -58,6 +59,7 @@ logger = logging.getLogger("tensorplate.sidecar")
+ def default_backend_factories() -> dict[str, type[Backend]]:
+     return {
+         "fixture": FixtureBackend,
++        "cuda_fixture": CudaFixtureBackend,
+         "mps_fixture": MpsFixtureBackend,
+         "smolvla": SmolVLABackend,
+     }

@@ -1,0 +1,25 @@
+# Reboot check for the pre-flight box the E06-F01-T03 reboot stage depends on:
+# does SSH and the GCE guest agent come back with the tensorplate-agent
+# unit autostart disabled?
+tensorplate-agent enabled state : disabled
+tensorplate-agent active state  : inactive
+google-guest-agent active state : active
+ssh active state                : active
+boot_id before the reboot       : 00000000-0000-0000-0000-000000000000
+boot_id after  the reboot       : 00000000-0000-0000-0000-000000000001
+# PASS: the login path and the guest agent are back and the appliance stayed down.
+
+# The machine-type record the agent wrote before the reboot, still on disk:
+{
+  "schema_version": 2,
+  "boot_id": "00000000-0000-0000-0000-000000000000",
+  "machine_type": "g2-standard-8",
+  "logical_cpus": 8,
+  "mem_total_bytes": 33646981120,
+  "nvidia_display_devices": [
+    "0x10de:0x27b8"
+  ]
+}
+# Its boot_id is the pre-reboot one, which is exactly the accepted boundary: the record
+# cannot be trusted across a kernel boot, and the agent is started online once
+# after every reboot. Nothing here re-fetches it, because the unit is disabled.
