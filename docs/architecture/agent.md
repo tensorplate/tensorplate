@@ -136,7 +136,9 @@ deployment generation) is changed through the same operations:
   service (`undeploy` removes it instead).
 - Operator-only deploy fields: `admission_mode` (`production`, the default,
   or `qualification`, which admits an unqualified member under the explicit
-  `test_count`, required with it and refused without it) and `evidence_ref`
+  `test_count`, required with it and refused without it; the test count
+  becomes the member's quota `session_count`, so it is 1 to 2048 and a
+  larger one is refused at decode) and `evidence_ref`
   (the approved evidence reference of an ordinary activation, refused in
   qualification mode). Speech clients do not send them: the SDK sends only
   the status query, which refuses them at decode, and the serving worker's

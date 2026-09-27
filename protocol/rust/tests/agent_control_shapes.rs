@@ -26,7 +26,7 @@ use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
     decode_with_version_check, AdmissionMode, ContactState, DecodeError, FEATURE_MEMBER_ROLLBACK,
-    FEATURE_SET_OPERATION_ADD,
+    FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
@@ -273,6 +273,44 @@ fn the_shared_definitions_match_the_state_schema() {
         assert_eq!(
             control["definitions"][definition], state["definitions"][definition],
             "{definition} differs between agent_control.json and agent_state.json"
+        );
+    }
+}
+
+/// A qualification member's quota carries its test count as
+/// `session_count`, so the request bound, both quota copies and the Rust
+/// ceiling are one number.
+#[test]
+fn the_test_count_and_the_quotas_share_the_member_session_ceiling() {
+    let control = control_schema();
+    let state = schema_file("agent_state.json");
+    let ceiling = json!(MAX_MEMBER_SESSIONS);
+    let phrase = format!("at most {MAX_MEMBER_SESSIONS}");
+    let test_count = &control["definitions"]["DeployRequest"]["properties"]["test_count"];
+    assert_eq!(test_count["minimum"], json!(1));
+    assert_eq!(test_count["maximum"], ceiling, "DeployRequest.test_count");
+    assert!(
+        test_count["description"]
+            .as_str()
+            .expect("description")
+            .contains(&phrase),
+        "the test_count description names the ceiling"
+    );
+    for (file, schema) in [
+        ("agent_control.json", &control),
+        ("agent_state.json", &state),
+    ] {
+        let quota = &schema["definitions"]["MemberQuota"];
+        assert_eq!(
+            quota["properties"]["session_count"]["maximum"], ceiling,
+            "{file} MemberQuota.session_count"
+        );
+        assert!(
+            quota["description"]
+                .as_str()
+                .expect("description")
+                .contains(&phrase),
+            "{file} MemberQuota description names the ceiling"
         );
     }
 }
@@ -526,6 +564,33 @@ fn refused_requests() -> Vec<Refusal> {
             "test_count must be at least 1",
         ),
         refusal(
+            "a test count past the member session ceiling",
+            |v| {
+                v["deploy"]["admission_mode"] = json!("qualification");
+                v["deploy"]["test_count"] = json!(MAX_MEMBER_SESSIONS + 1);
+            },
+            "/deploy/test_count",
+            "test_count 2049 exceeds the 2048 sessions",
+        ),
+        refusal(
+            "a test count at the u32 ceiling",
+            |v| {
+                v["deploy"]["admission_mode"] = json!("qualification");
+                v["deploy"]["test_count"] = json!(u32::MAX);
+            },
+            "/deploy/test_count",
+            "test_count 4294967295 exceeds the 2048 sessions",
+        ),
+        refusal(
+            "a test count past u32",
+            |v| {
+                v["deploy"]["admission_mode"] = json!("qualification");
+                v["deploy"]["test_count"] = json!(u64::from(u32::MAX) + 1);
+            },
+            "/deploy/test_count",
+            "invalid value: integer `4294967296`",
+        ),
+        refusal(
             "an evidence reference in qualification mode",
             |v| {
                 v["deploy"]["admission_mode"] = json!("qualification");
@@ -724,6 +789,14 @@ fn requests_both_readers_accept() {
         ("qualification with a test count", |v| {
             v["deploy"]["admission_mode"] = json!("qualification");
             v["deploy"]["test_count"] = json!(4);
+        }),
+        ("qualification with the least test count", |v| {
+            v["deploy"]["admission_mode"] = json!("qualification");
+            v["deploy"]["test_count"] = json!(1);
+        }),
+        ("qualification at the member session ceiling", |v| {
+            v["deploy"]["admission_mode"] = json!("qualification");
+            v["deploy"]["test_count"] = json!(MAX_MEMBER_SESSIONS);
         }),
         ("production with an evidence reference", |v| {
             v["deploy"]["admission_mode"] = json!("production");

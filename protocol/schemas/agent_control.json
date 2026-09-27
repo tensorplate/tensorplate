@@ -78,8 +78,8 @@
         "test_count": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 4294967295,
-          "description": "Operator-only. The member's session count in qualification mode; required with `admission_mode` `qualification` and refused without it."
+          "maximum": 2048,
+          "description": "Operator-only. The member's session count in qualification mode, which becomes its quota's `session_count` and so is at most 2048, the `MemberQuota.session_count` ceiling; required with `admission_mode` `qualification` and refused without it."
         },
         "evidence_ref": {
           "type": "string",

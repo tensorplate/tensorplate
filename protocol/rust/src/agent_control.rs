@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::deploy_transaction::DeployState;
 use crate::error::ErrorCode;
-use crate::member_quota::MemberQuota;
+use crate::member_quota::{MemberQuota, MAX_MEMBER_SESSIONS};
 use crate::resident_set::{
     AdmissionMode, MemberState, ResidentMember, ResidentSet, RetainedGeneration,
 };
@@ -136,7 +136,8 @@ pub struct DeployRequest {
         deserialize_with = "deserialize_some"
     )]
     pub admission_mode: Option<AdmissionMode>,
-    /// The member's session count in qualification mode.
+    /// The member's session count in qualification mode: 1 to
+    /// [`MAX_MEMBER_SESSIONS`], the quota ceiling it becomes.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -349,6 +350,10 @@ pub enum ControlRequestError {
     QualificationWithoutTestCount,
     #[error("deploy.test_count must be at least 1")]
     ZeroTestCount,
+    #[error(
+        "deploy.test_count {0} exceeds the {MAX_MEMBER_SESSIONS} sessions one member may hold"
+    )]
+    TestCountAboveMemberCeiling(u32),
     #[error("deploy.evidence_ref does not belong with admission_mode `qualification`")]
     EvidenceWithQualification,
     #[error(
@@ -377,6 +382,9 @@ fn validate_deploy(d: &DeployRequest) -> Result<(), ControlRequestError> {
         (true, None) => return Err(ControlRequestError::QualificationWithoutTestCount),
         (false, Some(_)) => return Err(ControlRequestError::TestCountWithoutQualification),
         (true, Some(0)) => return Err(ControlRequestError::ZeroTestCount),
+        (true, Some(count)) if count > MAX_MEMBER_SESSIONS => {
+            return Err(ControlRequestError::TestCountAboveMemberCeiling(count));
+        }
         _ => {}
     }
     if let Some(evidence) = &d.evidence_ref {

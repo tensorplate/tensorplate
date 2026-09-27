@@ -7,7 +7,8 @@
 // admission or an evidence reference, and a rollback naming a member are
 // answered with a typed `unsupported` error before any transaction
 // starts, so nothing is staged and the next request is not `busy`. A
-// request carrying a field the agent does not know is refused at decode.
+// request carrying a field the agent does not know, or a qualification
+// test count past the member session ceiling, is refused at decode.
 // With a committed resident set in the durable state, status projects it,
 // a set of one serving member also fills the singleton `active`, and the
 // deploy and rollback paths that would mutate the set are refused the same
@@ -36,7 +37,7 @@ use tensorplate_protocol::agent_control::{
     SetOperation, StatusRequest,
 };
 use tensorplate_protocol::agent_state::decode_agent_state;
-use tensorplate_protocol::{AdmissionMode, ErrorCode};
+use tensorplate_protocol::{AdmissionMode, ErrorCode, MAX_MEMBER_SESSIONS};
 
 fn exchange_raw(socket: &Path, line: &str) -> String {
     let mut stream = UnixStream::connect(socket).expect("connect");
@@ -236,6 +237,41 @@ fn unknown_and_misplaced_request_fields_are_refused_at_decode() {
         assert_eq!(error.code, ErrorCode::ConfigInvalid, "{line}");
         assert!(error.message.contains("unknown field"), "{}", error.message);
     }
+    assert_untouched(&h);
+    server.shutdown();
+}
+
+#[test]
+fn a_test_count_past_the_member_session_ceiling_is_refused_at_decode() {
+    let h = Harness::new();
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, h.coord.clone()).expect("start");
+    let bundle = vision_bundle(h.td.path(), "d1");
+    let response = exchange(
+        &socket,
+        &ControlRequest::deploy(
+            corr(),
+            DeployRequest {
+                admission_mode: Some(AdmissionMode::Qualification),
+                test_count: Some(MAX_MEMBER_SESSIONS + 1),
+                ..deploy(&bundle, "d1")
+            },
+        ),
+    );
+    // Refused at decode, before dispatch, so as `config_invalid` rather
+    // than the `unsupported` qualification admission gets, and with no
+    // correlation id.
+    assert_eq!(response.status, ResponseStatus::Error, "{response:?}");
+    let error = response.error.as_ref().expect("typed error");
+    assert_eq!(error.code, ErrorCode::ConfigInvalid, "{response:?}");
+    assert!(
+        error
+            .message
+            .contains("test_count 2049 exceeds the 2048 sessions"),
+        "{}",
+        error.message
+    );
+    assert_eq!(response.correlation_id, None);
     assert_untouched(&h);
     server.shutdown();
 }

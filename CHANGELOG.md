@@ -477,8 +477,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `undeploy` and `recover` operations, each naming a member;
   `deploy.set_operation` (`replace`, the default and what an absent field
   means, or `add`); the operator-only deploy fields `admission_mode`
-  (`production` or `qualification`), `test_count` and `evidence_ref`; and
-  `rollback.deployment_id`. The agent executes no set mutation yet:
+  (`production` or `qualification`), `test_count` (1 to 2048, the member
+  session ceiling its quota's `session_count` carries) and `evidence_ref`;
+  and `rollback.deployment_id`. The agent executes no set mutation yet:
   `undeploy`, `recover`, `add`, qualification admission, an `evidence_ref`
   and a rollback naming a member are each answered with a typed
   `unsupported` error before any transaction starts, as is any deploy or
@@ -500,7 +501,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   deploy, and the responses to it, are byte-for-byte what they were; a
   golden exchange recorded before the change pins them.
   (V030-E03-F01-T05, V030-E03-F01-T03)
-
 
 ## [0.2.1] - 2026-09-23
 
