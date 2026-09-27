@@ -1,0 +1,26 @@
+{
+  "schema_version": "0.1",
+  "name": "x86-cuda-smoke",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp32",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "x86-cuda-smoke.json",
+      "digest": "sha256:f7b514165c4d184a47288bd97e8badd0a0f060c262cba361ae2cb3e092d1839f",
+      "byte_size": 60,
+      "description": "Package validation configuration for the CUDA fixture backend."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64",
+    "memory_estimate_bytes": 1048576
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.1.0"
+  }
+}

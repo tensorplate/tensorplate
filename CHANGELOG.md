@@ -441,6 +441,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `test/platform/accelerator/PROVENANCE.md` records the driver, image and
   kernel the recordings were taken on. (V030-E03-F02-T04)
 
+- A `cuda_fixture` sidecar backend profile, the CUDA counterpart of
+  `mps_fixture`: its load succeeds only after a real CUDA matmul on the
+  device has returned the arithmetically correct result, so a card that
+  computed nothing fails the load instead of passing it. It refuses a
+  configuration that does not request `device=cuda`, and reports the
+  toolkit version the framework was built against as its accelerator
+  runtime capability; a CPU-only PyTorch build fails closed. The new
+  `probe_cuda_runtime` and `require_cuda_runtime` mirror the MPS pair at
+  the sidecar's accelerator boundary. `test/models/bundles/v0_1/x86_cuda_smoke`
+  is the matching deploy input, naming the `x86_64` device family so
+  admission matches it against the cloud rows' agent configuration
+  exactly. The Ubuntu cloud lifecycle harness stays device-neutral and its
+  header now says where the accelerator proof lives instead of saying no
+  CUDA fixture exists. (V030-E01-F01-T01)
+
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
