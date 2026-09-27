@@ -1,4 +1,7 @@
 # Effective unit properties, read back with systemctl show, not from the unit file.
+# The agent's lines cover 11 of the unit file's 18 hardening directives; ProtectKernelTunables,
+# ProtectKernelModules, ProtectKernelLogs, ProtectControlGroups, RestrictAddressFamilies,
+# RestrictRealtime and RestrictSUIDSGID were not read back.
 # agent:
 Type=simple
 MainPID=3431

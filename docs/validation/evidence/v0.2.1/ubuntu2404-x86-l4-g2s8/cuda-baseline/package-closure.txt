@@ -1,4 +1,5 @@
-# Package closure: no source tree on this host, every artifact owned by a package
+# Package closure: no source tree on this host, and each TensorPlate artifact below owned by a package.
+# PyTorch is not among them: it was installed with pip into the system interpreter and no package owns it.
 # host source tree: ls: cannot access '/home/tp-synthetic-operator/tensorplate': No such file or directory
 PRESENT  /usr/lib/tensorplate/tensorplate-serving                                                     <- tensorplate-serving
 PRESENT  /usr/bin/tensorplate-backend-python-pytorch                                                  <- tensorplate-backend-python-pytorch
@@ -7,5 +8,7 @@ PRESENT  /usr/share/tensorplate/backends/python_pytorch/backend.json            
 PRESENT  /usr/lib/python3/dist-packages/tensorplate_pytorch_backend.pth                               <- tensorplate-backend-python-pytorch
 PRESENT  /usr/bin/tensorplate-agent                                                                   <- tensorplate-agent
 PRESENT  /usr/bin/tensorplate                                                                         <- tensorplate-cli
-# dpkg --verify over all six installed packages: empty output means no installed file differs from its package
+# dpkg --verify over the six installed packages: empty output means no installed file differs from the checksums
+# its installed package shipped. That speaks for the published packages, not for the repacked backend package
+# the CUDA deploy ran on, whose checksums the repack regenerated (cuda-artifact-provenance.txt).
 # dpkg --verify exit=0

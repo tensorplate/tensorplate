@@ -68,7 +68,7 @@
   },
   "gpu_memory_held_by_the_sidecar": [
     "pid, process_name, gpu_uuid, used_gpu_memory [MiB]",
-    "5819, python3, GPU-00000000-0000-0000-0000-000000000001, 248 MiB"
+    "5819, python3, GPU-00000000-0000-0000-0000-000000000005, 248 MiB"
   ],
   "infer": {
     "correlation_id": "cli-488a67f9-0a05-472a-ab35-cd3515e2c3be",

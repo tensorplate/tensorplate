@@ -442,11 +442,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   resolves under systemd's default PATH as the service account inside the
   agent's mount namespace, all three CUDA device nodes are present there
   and openable, PyTorch reports CUDA available and a matmul returns the
-  correct result under every one of the unit's hardening properties, and a
-  deploy of the CUDA fixture reached active and answered an inference while
-  the sidecar held GPU memory. Package closure is recorded from the
-  published release alone; the CUDA deploy's own artifact and the patch that
-  distinguishes it are recorded with it. The row's
+  correct result in a transient unit given the 11 of the unit's 18
+  hardening directives its readback covers, and a deploy of the CUDA
+  fixture, which loads only after a checked CUDA matmul, reached active
+  inside the agent unit itself and answered an inference while the sidecar
+  held GPU memory. Package closure and `dpkg --verify` speak for the
+  published packages only: the repacked backend package the CUDA deploy ran
+  on is recorded by its digests and the patch that distinguishes it, and
+  PyTorch, installed with pip, is owned by no package. The row's
   `kernel_driver_stack.components` stays empty on purpose: the agent reports
   no stack components, so a row that declares one is resolved and then
   refused on the machine it describes, which the bundle shows rather than
