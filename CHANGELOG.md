@@ -423,7 +423,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   computed nothing fails the load instead of passing it. It refuses a
   configuration that does not request `device=cuda`, and reports the
   toolkit version the framework was built against as its accelerator
-  runtime capability; a CPU-only PyTorch build fails closed. The new
+  runtime capability; a CPU-only PyTorch build fails closed, and so does
+  one whose build metadata or availability check raises. The new
   `probe_cuda_runtime` and `require_cuda_runtime` mirror the MPS pair at
   the sidecar's accelerator boundary. `test/models/bundles/v0_1/x86_cuda_smoke`
   is the matching deploy input, naming the `x86_64` device family so
