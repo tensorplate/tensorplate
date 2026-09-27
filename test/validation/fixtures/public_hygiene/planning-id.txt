@@ -1,0 +1,1 @@
+# Captured for @VALUE@ after the second boot; the unit stayed disabled.

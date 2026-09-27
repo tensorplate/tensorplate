@@ -251,6 +251,13 @@ SERIAL = re.compile(
     r"(?:[ \t]*[^:=\n \t]){0,16}?[ \t]*[:=][ \t]*[\"']?([^\s\"',;}]*)")
 SERIAL_ALLOWED = re.compile(r"REDACTED|0+")
 
+# The GPU PDI, a per-device identifier nvidia-smi prints beside the serial
+# and UUID: `GPU PDI : <value>` in `-q`, `<pdi>` in `-q -x`. Like a serial,
+# it is recognized by its label, whatever its value looks like.
+PDI_LABELLED = re.compile(
+    r"(?i)(?<![A-Za-z0-9])pdi\\*[\"']?[ \t]*[:=][ \t]*\\*[\"']?([^\s\"'\\,;}<]*)")
+PDI_ELEMENT = re.compile(r"(?i)<pdi[ \t]*>[ \t]*([^\s<]*)")
+
 CREDENTIAL = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
     r"|(?<![A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}"
@@ -264,9 +271,10 @@ AUTH_CREDENTIAL = re.compile(
     r"\\*[\"']?[ \t]*(?:Bearer|Basic)[ \t]+[A-Za-z0-9._~+/-]+=*",
     re.IGNORECASE)
 
-# Planning identifiers belong in CHANGELOG.md only, with or without the
-# epic segment.
-PLANNING_ID = re.compile(r"(?<![A-Za-z0-9])V\d{2,3}(?:-[EFT]\d{2})+(?![A-Za-z0-9])")
+# Planning identifiers belong in CHANGELOG.md only: with the release
+# prefix, with or without the epic segment, and without the prefix.
+PLANNING_ID = re.compile(
+    r"(?<![A-Za-z0-9])(?:V\d{2,3}(?:-[EFT]\d{2})+|E\d{2}-F\d{2}(?:-T\d{2})?)(?![A-Za-z0-9])")
 
 
 def fault(message):
@@ -390,6 +398,10 @@ def scan_variant(line, literals):
     for m in SERIAL.finditer(line):
         if m.group(1) and not SERIAL_ALLOWED.fullmatch(m.group(1)):
             add("serial", m.group(1))
+    for pattern in (PDI_LABELLED, PDI_ELEMENT):
+        for m in pattern.finditer(line):
+            if m.group(1) and not SERIAL_ALLOWED.fullmatch(m.group(1)):
+                add("gpu-pdi", m.group(1))
     for m in CREDENTIAL.finditer(line):
         add("credential", m.group(0))
     for m in AUTH_CREDENTIAL.finditer(line):

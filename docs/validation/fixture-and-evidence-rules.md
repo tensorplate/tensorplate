@@ -21,13 +21,14 @@ not style.
    fact, the row is wrong.
 
 3. **Published fixtures are sanitized.** No live cloud account or project
-   identifiers, no device UUIDs or serials, no internal fleet, quota, or
-   auth status. Replace identifiers with clearly synthetic values, say so
-   where the fixture is described, and retain the unsanitized capture
-   privately with the release evidence. Matching must never read a field
-   that sanitization touches. **Sanitize before the first commit**: a
-   later sanitization commit leaves the identifiers in the branch
-   history, and the branch must then be rewritten before merge.
+   identifiers, no device UUIDs, serials or GPU PDIs, no internal fleet,
+   quota, or auth status. Replace identifiers with clearly synthetic
+   values, say so where the fixture is described, and retain the
+   unsanitized capture privately with the release evidence. Matching
+   must never read a field that sanitization touches. **Sanitize before
+   the first commit**: a later sanitization commit leaves the identifiers
+   in the branch history, and the branch must then be rewritten before
+   merge.
    `tensorplate doctor --record` labels its output as private raw evidence,
    and the fixture harness rejects live-looking GCP project numbers and
    device UUIDs outside the repository's explicit synthetic namespaces or
@@ -116,12 +117,15 @@ not style.
       metadata address and macOS's `fe80::1` also pass), judged by value:
       an IPv4-mapped address is its IPv4 address however it is written,
       and any other address with a dotted quad is IPv6. Last come private
-      planning references, as shapes only. A four-part version reads as
-      an address unless a pip pin, Debian revision or wheel name makes it
-      a version. The evidence scanner's host, journal, UUID, serial,
-      e-mail, MAC, machine-id, cloud-project and planning classes are not
-      part of the source policy: negative tests, synthetic identities and
-      the scanners' own patterns carry those legitimately. A binary file
+      planning references, as shapes only, among them a planning
+      identifier written without its release prefix anywhere but
+      `CHANGELOG.md`. A four-part version reads as an address unless a pip
+      pin, Debian revision or wheel name makes it a version. The evidence
+      scanner's host, journal, UUID, serial, GPU PDI, e-mail, MAC,
+      machine-id and cloud-project classes, and its planning identifiers
+      with the release prefix, are not part of the source policy:
+      negative tests, synthetic identities, the scanners' own patterns and
+      pull request text carry those legitimately. A binary file
       is a finding of its own, so each new image or recording needs a
       reviewed allowlist line, and its printable text is still checked for
       the long shapes.

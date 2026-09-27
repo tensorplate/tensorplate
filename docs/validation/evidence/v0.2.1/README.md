@@ -38,7 +38,8 @@ Before committing a bundle, remove from the report and from every log:
 
 - cloud project ids and numbers, instance ids, account ids, and billing
   identifiers
-- device serial numbers and GPU UUIDs
+- device serial numbers, GPU UUIDs and GPU PDIs (the per-device
+  identifier `nvidia-smi -q` prints beside the serial and UUID)
 - host names, user names, machine and boot ids, and network addresses
 - fleet, quota, or authentication status
 
@@ -63,7 +64,7 @@ still agree.
 | IPv6 address | `2001:db8::10` |
 | MAC address | `00:00:5e:00:53:01` |
 | email address | an address at `example.com`, `example.org` or `example.net` |
-| serial number or UDID | `REDACTED` |
+| serial number, UDID or GPU PDI | `REDACTED` |
 | journal field other than the service's own | drop the field |
 
 Loopback, `0.0.0.0`, the metadata server `169.254.169.254` and
@@ -141,9 +142,10 @@ lines, journal prefixes, `/home/<name>`, `uid=N(<name>)`,
 remaining occurrence of the bare name in the bundle, the row file and the
 commit message, and confirm each is that ordinary text. No scan can tell
 them apart, so that reading is the check for such a name. A physical
-device's machine id and serial numbers belong in its literal file too:
-the patterns recognize a machine id or a serial only after its label, so
-a bare value passes both modes.
+device's machine id, serial numbers and GPU PDI belong in its literal
+file too: the patterns recognize each only after its label, so a bare
+value, such as a column of `nvidia-smi --query-gpu` CSV, passes both
+modes.
 
 - Remove authorization headers carrying Basic or Bearer credentials,
   including ones recorded as JSON fields. Encoding a value or field name

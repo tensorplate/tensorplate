@@ -507,6 +507,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   thread exits, so its descriptor cannot be reused under a live poll, and
   the thread accepts no connection once `stop()` has begun.
   (V030-E04-F03-T02)
+- The publication scanners missed two identifiers. The evidence scanner
+  had no class for the GPU PDI, the per-device identifier `nvidia-smi -q`
+  prints beside the serial and UUID; it now reports one after its label,
+  as `GPU PDI :` or `<pdi>` in `nvidia-smi -q -x`, as `gpu-pdi`, and
+  accepts `REDACTED` in its place. Both scanners recognized a planning
+  identifier only with its release prefix; the prefix-less Feature and
+  Task forms are now a `planning-id` finding in evidence and, outside
+  `CHANGELOG.md`, in the public hygiene scan of source files, commit
+  messages and pull request text, where the prefixed form still passes.
+  (V030-E06-F02-T01)
 
 ### Security
 
