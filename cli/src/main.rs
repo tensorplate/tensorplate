@@ -43,7 +43,8 @@ fn main() -> ExitCode {
 
 fn command_of(argv: &[String]) -> &'static str {
     const COMMANDS: &[&str] = &[
-        "doctor", "deploy", "status", "infer", "logs", "rollback", "device", "bundle", "version",
+        "doctor", "deploy", "status", "infer", "logs", "rollback", "undeploy", "recover", "device",
+        "bundle", "version",
     ];
     for token in argv {
         if let Some(name) = COMMANDS.iter().find(|c| **c == token) {
@@ -209,6 +210,8 @@ fn command_label(command: &Subcommand) -> &'static str {
         Subcommand::Doctor(_) => "doctor",
         Subcommand::Deploy(_) => "deploy",
         Subcommand::Rollback(_) => "rollback",
+        Subcommand::Undeploy(_) => "undeploy",
+        Subcommand::Recover(_) => "recover",
         Subcommand::Status(_) => "status",
         Subcommand::Infer(_) => "infer",
         Subcommand::Logs(_) => "logs",

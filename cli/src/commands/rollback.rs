@@ -12,7 +12,9 @@ use std::io::Write;
 
 use serde_json::{json, Value};
 
-use tensorplate_protocol::agent_control::{ControlRequest, ControlResponse, RollbackRequest};
+use tensorplate_protocol::agent_control::{
+    ControlRequest, ControlResponse, RollbackRequest, FEATURE_MEMBER_ROLLBACK,
+};
 
 use crate::args::RollbackArgs;
 use crate::client::AgentClient;
@@ -36,7 +38,15 @@ pub fn run<W: Write, E: Write>(
     stderr: &mut E,
 ) -> CliResult<()> {
     let correlation = crate::new_correlation_id();
+    if args.deployment_id.is_some() {
+        crate::commands::member::require_control_feature(
+            client,
+            FEATURE_MEMBER_ROLLBACK,
+            "`rollback --deployment-id`",
+        )?;
+    }
     let payload = RollbackRequest {
+        deployment_id: args.deployment_id.clone(),
         reason: args.reason.clone(),
     };
     let request = ControlRequest::rollback(Some(correlation.clone()), payload);
@@ -149,6 +159,8 @@ mod tests {
             serving_url: None,
         };
         let agent_status = AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Ready,
             active: Some(restored),
             previous_active: None,

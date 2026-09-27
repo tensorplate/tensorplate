@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use serde_json::json;
 
 use tensorplate_protocol::agent_control::{
-    AgentRunState, AgentStatus, ControlRequest, ResponseStatus, SupervisionStatusSummary,
+    AgentRunState, AgentStatus, ControlRequest, ResidentSetStatus, ResponseStatus,
+    SupervisionStatusSummary,
 };
 use tensorplate_protocol::install_paths::{INSTANCE_BINDING_PATH, MACHINE_TYPE_RECORD_PATH};
 use tensorplate_protocol::supervision_event::SupervisionServingState;
@@ -33,6 +34,7 @@ use crate::error::{CliError, CliResult};
 use crate::output::Renderer;
 
 mod record;
+use crate::commands::status::ResidentSetHealth;
 use crate::profile::ResolvedProfile;
 
 pub mod finding;
@@ -1176,8 +1178,31 @@ fn findings_from_status(status: &AgentStatus) -> Vec<Finding> {
         ),
     };
     out.push(finding);
+    let set = status
+        .resident_set
+        .as_ref()
+        .filter(|set| !set.members.is_empty());
+    let health = set.map(ResidentSetHealth::of);
+    let set = set.zip(health.as_ref());
+    out.push(active_deployment_finding(status, set));
+    if let Some((set, health)) = set {
+        out.push(resident_set_members_finding(set, health));
+    }
+    if let Some(sup) = status.supervision.as_ref() {
+        out.push(supervision_finding(sup));
+    }
+    out
+}
+
+/// Whether something is committed as serving: the singleton `active`, or a
+/// resident set with a member in `serving` state. That state is committed,
+/// not observed; `resident_set_members` reports how the members stand.
+fn active_deployment_finding(
+    status: &AgentStatus,
+    set: Option<(&ResidentSetStatus, &ResidentSetHealth<'_>)>,
+) -> Finding {
     if let Some(active) = status.active.as_ref() {
-        out.push(Finding::ok(
+        return Finding::ok(
             FindingId::ActiveDeployment,
             Severity::Info,
             format!(
@@ -1186,19 +1211,105 @@ fn findings_from_status(status: &AgentStatus) -> Vec<Finding> {
                 active.backend_hint.as_deref().unwrap_or("<unknown>"),
             ),
             None,
-        ));
-    } else {
-        out.push(Finding::missing(
+        );
+    }
+    match set {
+        Some((set, health)) if health.serving > 0 => Finding::ok(
+            FindingId::ActiveDeployment,
+            Severity::Info,
+            format!(
+                "resident set of {} (`{}`), {} in `serving` state; no single active deployment",
+                members(set.members.len()),
+                set.set_id,
+                health.serving
+            ),
+            None,
+        ),
+        Some((set, _)) => Finding::missing(
+            FindingId::ActiveDeployment,
+            Severity::Info,
+            match set.members.len() {
+                1 => format!(
+                    "no active deployment: the only member of resident set `{}` is quarantined",
+                    set.set_id
+                ),
+                n => format!(
+                    "no active deployment: all {n} members of resident set `{}` are quarantined",
+                    set.set_id
+                ),
+            },
+            Some("see `resident_set_members` and `tensorplate status`".into()),
+        ),
+        None => Finding::missing(
             FindingId::ActiveDeployment,
             Severity::Info,
             "no active deployment",
             Some("run `tensorplate deploy <bundle>` to install one".into()),
-        ));
+        ),
     }
-    if let Some(sup) = status.supervision.as_ref() {
-        out.push(supervision_finding(sup));
+}
+
+/// How the members of a resident set stand, by the rule `status` degrades
+/// on. A member's `serving` state is committed, so the message says what
+/// the agent reports of contact rather than calling the member live.
+fn resident_set_members_finding(
+    set: &ResidentSetStatus,
+    health: &ResidentSetHealth<'_>,
+) -> Finding {
+    let total = set.members.len();
+    if !health.degraded() {
+        let contact = match health.in_contact {
+            0 => "; contact not reported".to_string(),
+            n if n == total => " and in contact".to_string(),
+            n => format!("; {n} in contact, contact not reported for the rest"),
+        };
+        return Finding::ok(
+            FindingId::ResidentSetMembers,
+            Severity::Info,
+            format!("{} in `serving` state{contact}", members(total)),
+            None,
+        );
     }
-    out
+    let mut faults = Vec::new();
+    let mut hints = Vec::new();
+    if !health.quarantined.is_empty() {
+        faults.push(format!("quarantined {}", quoted(&health.quarantined)));
+        hints.push(
+            "see `tensorplate status`; on an agent that executes them, `tensorplate recover` returns a quarantined member to service and `tensorplate undeploy` retires it",
+        );
+    }
+    if !health.out_of_contact.is_empty() {
+        faults.push(format!("out of contact {}", quoted(&health.out_of_contact)));
+        hints.push(
+            "the agent reports the member's worker out of contact; inspect agent logs and `tensorplate status`",
+        );
+    }
+    Finding::warn(
+        FindingId::ResidentSetMembers,
+        Severity::Warning,
+        format!(
+            "{} of {} degraded: {}",
+            health.quarantined.len() + health.out_of_contact.len(),
+            members(total),
+            faults.join("; ")
+        ),
+        Some(hints.join("; ")),
+    )
+}
+
+fn members(count: usize) -> String {
+    if count == 1 {
+        "1 member".to_string()
+    } else {
+        format!("{count} members")
+    }
+}
+
+fn quoted(ids: &[&str]) -> String {
+    ids.iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn supervision_finding(sup: &SupervisionStatusSummary) -> Finding {
@@ -1309,6 +1420,8 @@ mod tests {
 
     fn ok_status_response(active: bool) -> ControlResponse {
         let mut status = AgentStatus {
+            resident_set: None,
+            control_features: Vec::new(),
             agent_state: AgentRunState::Ready,
             active: None,
             previous_active: None,
@@ -1500,6 +1613,402 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f["id"] == "active_deployment" && f["status"] == "ok"));
+    }
+
+    #[test]
+    fn doctor_reports_a_resident_set_instead_of_no_deployment() {
+        let client = MockAgentClient::new();
+        client.enqueue_ok(ControlResponse::ok(Some("v".into())));
+        let mut response = ok_status_response(false);
+        let member = |id: &str, generation| tensorplate_protocol::MemberStatus {
+            deployment_id: id.into(),
+            generation,
+            bundle_digest: "sha256:ab".into(),
+            state: tensorplate_protocol::MemberState::Serving,
+            admission_mode: tensorplate_protocol::AdmissionMode::Production,
+            quota: tensorplate_protocol::MemberQuota::default(),
+            unary_endpoint: None,
+            stream_endpoint: None,
+            stream_api_version: None,
+            effective_quota: None,
+            staged_bytes: None,
+            contact: None,
+        };
+        if let Some(status) = response.agent_status.as_mut() {
+            status.resident_set = Some(tensorplate_protocol::ResidentSetStatus {
+                set_id: "set-1".into(),
+                revision: 2,
+                members: vec![member("speech-stt", 3), member("speech-tts", 5)],
+            });
+        }
+        client.enqueue_ok(response);
+        let r = Renderer::new(OutputMode::Json);
+        let mut out = Vec::new();
+        let result = run(
+            &r,
+            &profile(),
+            &client,
+            &DoctorArgs::default(),
+            None,
+            &mut out,
+            &mut Vec::new(),
+        );
+        assert!(result.is_ok());
+        let parsed: Value = serde_json::from_str(&String::from_utf8(out).unwrap()).unwrap();
+        let finding = parsed["payload"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["id"] == "active_deployment")
+            .expect("active_deployment finding")
+            .clone();
+        assert_eq!(finding["status"], "ok");
+        assert!(
+            finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("resident set of 2 members"),
+            "{finding}"
+        );
+        assert!(
+            parsed["payload"]["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["id"] == "resident_set_members" && f["status"] == "ok"),
+            "{parsed}"
+        );
+    }
+
+    fn set_member(
+        id: &str,
+        state: tensorplate_protocol::MemberState,
+        contact: Option<tensorplate_protocol::ContactState>,
+    ) -> tensorplate_protocol::MemberStatus {
+        tensorplate_protocol::MemberStatus {
+            deployment_id: id.into(),
+            generation: 2,
+            bundle_digest: "sha256:ab".into(),
+            state,
+            admission_mode: tensorplate_protocol::AdmissionMode::Production,
+            quota: tensorplate_protocol::MemberQuota::default(),
+            unary_endpoint: None,
+            stream_endpoint: None,
+            stream_api_version: None,
+            effective_quota: None,
+            staged_bytes: None,
+            contact,
+        }
+    }
+
+    /// Findings for a ready agent reporting `members` as its resident set
+    /// (and, when `active`, the singleton the agent projects beside it).
+    fn set_findings(
+        active: bool,
+        members: Vec<tensorplate_protocol::MemberStatus>,
+    ) -> Vec<Finding> {
+        let mut status = ok_status_response(active).agent_status.expect("status");
+        status.resident_set = Some(tensorplate_protocol::ResidentSetStatus {
+            set_id: "set-1".into(),
+            revision: 2,
+            members,
+        });
+        let findings = findings_from_status(&status);
+        assert!(
+            findings.iter().all(|f| f.status != FindingStatus::Fail),
+            "member state never fails doctor: {findings:?}"
+        );
+        findings
+    }
+
+    fn finding(findings: &[Finding], id: FindingId) -> &Finding {
+        findings
+            .iter()
+            .find(|f| f.id == id)
+            .unwrap_or_else(|| panic!("no {} finding in {findings:?}", id.as_str()))
+    }
+
+    #[test]
+    fn a_wholly_quarantined_set_is_no_active_deployment() {
+        use tensorplate_protocol::MemberState::Quarantined;
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("speech-stt", Quarantined, None),
+                set_member("speech-tts", Quarantined, None),
+            ],
+        );
+        assert_eq!(
+            finding(&findings, FindingId::AgentState).status,
+            FindingStatus::Pass
+        );
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Missing, "{active:?}");
+        assert_eq!(active.severity, Severity::Info);
+        assert!(
+            active
+                .message
+                .contains("all 2 members of resident set `set-1` are quarantined"),
+            "{active:?}"
+        );
+        assert!(
+            active
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("resident_set_members"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+        assert_eq!(members.severity, Severity::Warning);
+        assert!(
+            members
+                .message
+                .contains("2 of 2 members degraded: quarantined `speech-stt`, `speech-tts`"),
+            "{members:?}"
+        );
+        let hint = members.hint.as_deref().unwrap();
+        assert!(hint.contains("see `tensorplate status`"), "{hint}");
+        assert!(hint.contains("on an agent that executes them"), "{hint}");
+    }
+
+    #[test]
+    fn a_quarantined_set_of_one_is_no_active_deployment() {
+        let findings = set_findings(
+            false,
+            vec![set_member(
+                "vision-v2",
+                tensorplate_protocol::MemberState::Quarantined,
+                None,
+            )],
+        );
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Missing, "{active:?}");
+        assert!(
+            active
+                .message
+                .contains("the only member of resident set `set-1` is quarantined"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+        assert!(
+            members.message.contains("1 of 1 member degraded"),
+            "{members:?}"
+        );
+    }
+
+    #[test]
+    fn a_partly_quarantined_set_serves_and_names_the_quarantined_member() {
+        use tensorplate_protocol::MemberState::{Quarantined, Serving};
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("speech-stt", Serving, None),
+                set_member("speech-tts", Quarantined, None),
+            ],
+        );
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
+        assert!(
+            active
+                .message
+                .contains("resident set of 2 members (`set-1`), 1 in `serving` state"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+        assert!(
+            members
+                .message
+                .contains("1 of 2 members degraded: quarantined `speech-tts`"),
+            "{members:?}"
+        );
+        assert!(!members.message.contains("speech-stt"), "{members:?}");
+    }
+
+    #[test]
+    fn a_healthy_set_says_what_it_knows_of_contact() {
+        use tensorplate_protocol::ContactState::InContact;
+        use tensorplate_protocol::MemberState::Serving;
+        let cases = [
+            (
+                None,
+                None,
+                "2 members in `serving` state; contact not reported",
+            ),
+            (
+                Some(InContact),
+                Some(InContact),
+                "2 members in `serving` state and in contact",
+            ),
+            (
+                Some(InContact),
+                None,
+                "2 members in `serving` state; 1 in contact, contact not reported for the rest",
+            ),
+        ];
+        for (first, second, says) in cases {
+            let findings = set_findings(
+                false,
+                vec![
+                    set_member("speech-stt", Serving, first),
+                    set_member("speech-tts", Serving, second),
+                ],
+            );
+            let active = finding(&findings, FindingId::ActiveDeployment);
+            assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
+            assert!(
+                active.message.contains("2 in `serving` state"),
+                "{active:?}"
+            );
+            let members = finding(&findings, FindingId::ResidentSetMembers);
+            assert_eq!(members.status, FindingStatus::Pass, "{members:?}");
+            assert_eq!(members.severity, Severity::Info);
+            assert_eq!(members.message, says);
+            assert_eq!(members.hint, None);
+        }
+    }
+
+    #[test]
+    fn an_out_of_contact_member_is_degraded_but_still_committed() {
+        use tensorplate_protocol::ContactState::{InContact, OutOfContact};
+        use tensorplate_protocol::MemberState::{Quarantined, Serving};
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("speech-stt", Serving, Some(InContact)),
+                set_member("speech-tts", Serving, Some(OutOfContact)),
+            ],
+        );
+        // Committed state, like the singleton's durable `active`: both
+        // members are in `serving` state, and only one answers.
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
+        assert!(
+            active.message.contains("2 in `serving` state"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+        assert!(
+            members
+                .message
+                .contains("1 of 2 members degraded: out of contact `speech-tts`"),
+            "{members:?}"
+        );
+        assert!(!members.message.contains("serving"), "{members:?}");
+        assert!(
+            members.hint.as_deref().unwrap().contains("out of contact"),
+            "{members:?}"
+        );
+
+        // Every member out of contact: still committed as serving, so
+        // `active_deployment` stays ok and never calls them quarantined.
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("speech-stt", Serving, Some(OutOfContact)),
+                set_member("speech-tts", Serving, Some(OutOfContact)),
+            ],
+        );
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
+        assert!(
+            active.message.contains("2 in `serving` state"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert!(
+            members
+                .message
+                .contains("2 of 2 members degraded: out of contact `speech-stt`, `speech-tts`"),
+            "{members:?}"
+        );
+
+        // A quarantined member out of contact counts once, as quarantined.
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("speech-stt", Quarantined, Some(OutOfContact)),
+                set_member("speech-tts", Serving, None),
+            ],
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert!(
+            members
+                .message
+                .contains("1 of 2 members degraded: quarantined `speech-stt`"),
+            "{members:?}"
+        );
+        assert!(!members.message.contains("out of contact"), "{members:?}");
+    }
+
+    #[test]
+    fn both_fault_classes_are_named_with_both_hints() {
+        use tensorplate_protocol::ContactState::{InContact, OutOfContact};
+        use tensorplate_protocol::MemberState::{Quarantined, Serving};
+        let findings = set_findings(
+            false,
+            vec![
+                set_member("a", Serving, Some(InContact)),
+                set_member("b", Quarantined, None),
+                set_member("c", Serving, Some(OutOfContact)),
+            ],
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+        assert!(
+            members
+                .message
+                .contains("2 of 3 members degraded: quarantined `b`; out of contact `c`"),
+            "{members:?}"
+        );
+        let hint = members.hint.as_deref().unwrap();
+        assert!(hint.contains("`tensorplate recover`"), "{hint}");
+        assert!(
+            hint.contains("out of contact; inspect agent logs"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn a_projected_set_of_one_still_reports_its_member() {
+        use tensorplate_protocol::ContactState::OutOfContact;
+        // The agent fills `active` for a set of one serving member; the
+        // member's contact is still reported.
+        let findings = set_findings(
+            true,
+            vec![set_member(
+                "d-1",
+                tensorplate_protocol::MemberState::Serving,
+                Some(OutOfContact),
+            )],
+        );
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
+        assert!(
+            active.message.contains("active deployment `d-1`"),
+            "{active:?}"
+        );
+        let members = finding(&findings, FindingId::ResidentSetMembers);
+        assert_eq!(members.status, FindingStatus::Warning, "{members:?}");
+    }
+
+    #[test]
+    fn no_set_or_an_empty_one_adds_no_member_finding() {
+        let singleton = findings_from_status(&ok_status_response(true).agent_status.unwrap());
+        assert!(singleton
+            .iter()
+            .all(|f| f.id != FindingId::ResidentSetMembers));
+        let findings = set_findings(false, Vec::new());
+        assert!(findings
+            .iter()
+            .all(|f| f.id != FindingId::ResidentSetMembers));
+        let active = finding(&findings, FindingId::ActiveDeployment);
+        assert_eq!(active.status, FindingStatus::Missing);
+        assert_eq!(active.message, "no active deployment");
     }
 
     #[test]

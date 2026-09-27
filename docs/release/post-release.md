@@ -87,7 +87,7 @@ Deployment rollback uses the CLI path from
 [`docs/cli/deploy-rollback.md`](../cli/deploy-rollback.md):
 
 ```bash
-tensorplate rollback --deployment-id <previous-deployment-id>
+tensorplate rollback
 tensorplate status
 ```
 

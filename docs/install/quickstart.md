@@ -106,7 +106,7 @@ runtime as `ok` before the deploy is expected to pass.
 If a previous active deployment exists:
 
 ```bash
-tensorplate rollback --deployment-id <previous-deployment-id>
+tensorplate rollback
 tensorplate status
 ```
 

@@ -33,6 +33,11 @@ pub enum FindingId {
     AgentStatusShape,
     AgentState,
     ActiveDeployment,
+    /// How the members of a non-empty resident set stand, by the rule
+    /// `tensorplate status` degrades on: `warning` naming each quarantined
+    /// or out-of-contact member, `ok` otherwise; never `fail`. Absent when
+    /// the agent reports no resident set, or an empty one.
+    ResidentSetMembers,
     WorkerState,
     WorkerCrashLoop,
     HostFacts,
@@ -112,6 +117,7 @@ impl FindingId {
             Self::AgentStatusShape => "agent_status_shape",
             Self::AgentState => "agent_state",
             Self::ActiveDeployment => "active_deployment",
+            Self::ResidentSetMembers => "resident_set_members",
             Self::WorkerState => "worker_state",
             Self::WorkerCrashLoop => "worker_crash_loop",
             Self::HostFacts => "host_facts",
@@ -300,6 +306,7 @@ mod tests {
             (FindingId::CliVersion, "cli_version"),
             (FindingId::AgentReachable, "agent_reachable"),
             (FindingId::Ros2HealthStub, "ros2_health_stub"),
+            (FindingId::ResidentSetMembers, "resident_set_members"),
         ];
         for (id, expected) in cases {
             assert_eq!(id.as_str(), expected);

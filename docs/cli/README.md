@@ -13,6 +13,8 @@ Operator command-line interface for one reachable `tensorplate-agent`. Lands in
 | `tensorplate infer` | Sends a single inference request to the active deployment (V01-E11-F06). |
 | `tensorplate logs` | Reads bounded NDJSON log entries from a local source (V01-E11-F07). |
 | `tensorplate rollback` | Restores the previous active deployment via the agent (V01-E11-F04). |
+| `tensorplate undeploy` | Retires one resident-set member via the agent. |
+| `tensorplate recover` | Returns a quarantined resident-set member to service via the agent. |
 | `tensorplate device` | Manages the local registry of SSH-reachable devices. |
 | `tensorplate bundle provision` | Puts a bundle the provisioning manifest lists into the bundle import directory, verified file by file ([`bundle.md`](bundle.md)). |
 | `tensorplate version` | Prints CLI, protocol, and bundle-format versions. |

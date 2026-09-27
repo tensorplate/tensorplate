@@ -61,12 +61,14 @@ pub mod worker_control;
 pub mod worker_status;
 
 pub use agent_control::{
-    is_valid_deployment_id, AgentRunState, AgentStatus, ControlOp, ControlRequest, ControlResponse,
-    DeployFailureSummary, DeployRequest, DeployStatus, DeploymentSummary,
-    PlatformMemoryTelemetryStatus, PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus,
-    PlatformTelemetryGate, PlatformTelemetrySignalName, PlatformTelemetryStatus, QuarantineSummary,
-    RecoveryAction, RecoverySummary, ResponseError, ResponseStatus, RollbackRequest, StatusRequest,
-    SupervisionStatusSummary, MAX_DEPLOYMENT_ID_BYTES,
+    is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, ContactState, ControlOp,
+    ControlRequest, ControlResponse, DeployFailureSummary, DeployRequest, DeployStatus,
+    DeploymentSummary, MemberRequest, MemberStatus, PlatformMemoryTelemetryStatus,
+    PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus, PlatformTelemetryGate,
+    PlatformTelemetrySignalName, PlatformTelemetryStatus, QuarantineSummary, RecoveryAction,
+    RecoverySummary, ResidentSetStatus, ResponseError, ResponseStatus, RollbackRequest,
+    SetOperation, StatusRequest, SupervisionStatusSummary, FEATURE_MEMBER_ROLLBACK,
+    FEATURE_SET_OPERATION_ADD, MAX_DEPLOYMENT_ID_BYTES, MAX_EVIDENCE_REF_CHARS,
 };
 pub use agent_state::{
     decode_agent_state, AgentState, AgentStateError, DeploymentRecord, ErrorRecord,

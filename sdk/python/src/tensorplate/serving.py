@@ -98,7 +98,9 @@ class ServingClient:
 
     The endpoint is resolved once at construction with the same precedence
     as ``tensorplate infer`` (explicit URL, then CLI profile, then
-    read-only agent discovery, then the loopback default). The client is
+    read-only agent discovery, then the loopback default). Construction
+    raises :class:`~tensorplate.errors.EndpointUnavailableError` when the
+    agent reports a resident set with no single serving URL. The client is
     model-class-neutral so higher-level helpers can build on it.
     """
 

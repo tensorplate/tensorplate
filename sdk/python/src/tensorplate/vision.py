@@ -28,7 +28,9 @@ class VisionClient:
     Composes client-side preprocessing, ``ServingClient.infer``, and YOLO
     postprocessing into a single :meth:`detect` call. Synchronous in
     v0.1.3. Pass an existing :class:`ServingClient` via ``client``, or let
-    the constructor resolve one with the same precedence as the CLI.
+    the constructor resolve one with the same precedence as the CLI (it
+    raises :class:`~tensorplate.errors.EndpointUnavailableError` when the
+    agent reports a resident set with no single serving URL).
     """
 
     def __init__(

@@ -348,12 +348,25 @@ fn quota_domains_are_the_budget_domain_vocabulary() {
 #[test]
 fn the_id_rule_is_the_control_apis_deployment_id_rule() {
     let control = agent_control_schema();
-    let deploy_id = &control["definitions"]["DeployRequest"]["properties"]["deployment_id"];
+    let control_id = &control["definitions"]["DeploymentId"];
     let state_id = &schema_document()["definitions"]["DeploymentId"];
     for keyword in ["type", "minLength", "maxLength", "pattern", "not"] {
         assert_eq!(
-            state_id[keyword], deploy_id[keyword],
-            "DeploymentId.{keyword} differs from the control API's deployment_id"
+            state_id[keyword], control_id[keyword],
+            "DeploymentId.{keyword} differs from the control API's DeploymentId"
+        );
+    }
+    // Every deployment id the control API takes uses that definition.
+    let defs = &control["definitions"];
+    for (definition, property) in [
+        ("DeployRequest", "deployment_id"),
+        ("RollbackRequest", "deployment_id"),
+        ("MemberRequest", "deployment_id"),
+        ("MemberStatus", "deployment_id"),
+    ] {
+        assert_eq!(
+            defs[definition]["properties"][property]["$ref"], "#/definitions/DeploymentId",
+            "{definition}.{property}"
         );
     }
 }

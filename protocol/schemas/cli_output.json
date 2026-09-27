@@ -10,7 +10,7 @@
     "schema_version": {"type": "string", "const": "0.1"},
     "command": {
       "type": "string",
-      "enum": ["doctor", "deploy", "status", "infer", "logs", "rollback", "device", "bundle", "version"]
+      "enum": ["doctor", "deploy", "status", "infer", "logs", "rollback", "undeploy", "recover", "device", "bundle", "version"]
     },
     "status": {
       "type": "string",

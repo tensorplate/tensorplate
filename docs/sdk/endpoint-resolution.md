@@ -15,13 +15,24 @@ Both clients take `serving_url=None` and resolve in this order:
    config.
 3. **Agent-discovered active deployment** — a read-only `status` query to
    the local agent; if it reports an active deployment with a `serving_url`,
-   that is used. Skipped when `discover=False`.
+   that is used. If it reports a resident set but no `serving_url` (more
+   than one member; an only member that is quarantined, has no unary
+   endpoint, or has one other than `http://127.0.0.1:<port>` or
+   `http://localhost:<port>`; or no member), resolution raises `EndpointUnavailableError` instead of
+   guessing the default, as `tensorplate infer` refuses. A malformed
+   `resident_set` raises too; the CLI cannot decode such a reply and fails
+   with a transport error, so neither uses the default. Skipped when
+   `discover=False`, which goes straight to the loopback default without
+   asking the agent.
 4. **Loopback default** — `http://127.0.0.1:18080`.
 
 > **Deliberate deviation from the CLI:** agent discovery is *best-effort*.
-> An unreachable or silent agent falls through to the loopback default
-> rather than raising. Resolution only raises `EndpointResolutionError` for
-> a malformed URL or a misconfigured CLI profile.
+> An unreachable, silent or undecodable agent, or a status that lists no
+> resident set and names no `serving_url`, falls through to the loopback
+> default rather than raising. Resolution raises `EndpointResolutionError`
+> for a malformed URL or a misconfigured CLI profile, and its subclass
+> `EndpointUnavailableError` for a resident set with no single serving
+> URL.
 
 `resolve_serving_url(...)` is exported if you want the resolved
 `ResolvedEndpoint` (its `url`, `host`, `port`, `path`, and `source`) without

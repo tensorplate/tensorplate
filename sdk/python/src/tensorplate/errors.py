@@ -40,6 +40,17 @@ class EndpointResolutionError(TensorPlateError):
     """Raised when the serving endpoint cannot be resolved or canonicalized."""
 
 
+class EndpointUnavailableError(EndpointResolutionError):
+    """Raised when the agent reports a resident set but no single serving URL.
+
+    That is a set of more than one member; one whose only member is
+    quarantined, has no unary endpoint, or has one other than
+    ``http://127.0.0.1:<port>`` or ``http://localhost:<port>``; an empty
+    set; or a malformed ``resident_set``. No default is guessed: pass
+    ``serving_url`` or set one on the CLI profile.
+    """
+
+
 class TransportError(TensorPlateError):
     """Raised when the serving endpoint cannot be reached or the HTTP exchange fails."""
 

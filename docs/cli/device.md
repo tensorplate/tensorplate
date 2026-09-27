@@ -52,7 +52,8 @@ or agent secrets — authentication stays with your SSH client and
 - `use <name>` selects the default device.
 - `prune <name>` reclaims staged remote import storage (see Deploy staging).
   Requires `--keep <n>` (most-recent) and/or `--older-than <dur>` (e.g. `7d`,
-  `24h`); it always keeps the active deployment's import.
+  `24h`); it always keeps the imports of the active deployment and of every
+  resident-set member.
 - `sync [<name>]` refreshes cached facts (remote CLI version, protocol version,
   and last-seen time) for the named device, or the default when omitted. A
   failed sync is non-destructive — it leaves the entry as it was.
@@ -116,8 +117,11 @@ Target selection precedence, highest first:
 4. the registry's default device (`device use`).
 5. local, when nothing is selected.
 
-`status`, `rollback`, `logs`, `doctor`, `infer`, `version`, and `deploy` route to
-the selected device. Devices enrolled with `--run-as` route through a structured,
+`status`, `rollback`, `undeploy`, `recover`, `logs`, `doctor`, `infer`,
+`version`, and `deploy` route to the selected device. Flags added for resident
+sets (`deploy --set-operation add`, `rollback --deployment-id`) are forwarded
+only when given, so a device with an older CLI accepts every command that does
+not use them. Devices enrolled with `--run-as` route through a structured,
 non-interactive `sudo -n -u <user> -- …` invocation. Path flags are
 interpreted where the file lives: `logs --source` and
 `status --observability-snapshot` are device-local, while `infer --input` is read
@@ -132,8 +136,9 @@ recorded at enrollment, default `/var/lib/tensorplate/bundles/import`) — using
 `rsync` when available and `scp` otherwise, then runs the remote deploy
 transaction against that path with the original flags forwarded
 (`--deployment-id`, `--expected-digest`, `--no-wait`, `--wait-timeout-ms`,
-`--label`). A deployment id is generated when one is not supplied so each import
-is named by its deployment id.
+`--label`, and `--set-operation add` when given). A deployment id is
+generated when one is not supplied so each import is named by its deployment
+id.
 
 The import dir is created group-writable (sticky `1775`,
 `tensorplate:tensorplate`) by the package install, so a copy user in the
@@ -145,9 +150,10 @@ tensorplate device prune orin-lab --keep 3         # keep the 3 newest imports
 tensorplate device prune orin-lab --older-than 7d  # delete imports older than 7 days
 ```
 
-`prune` requires at least one of `--keep`/`--older-than`, always keeps the active
-deployment's import, and never deletes an import that survives either policy — so
-a just-staged (newest) import is not reclaimed out from under an in-flight deploy.
+`prune` requires at least one of `--keep`/`--older-than`, always keeps the imports
+of the active deployment and of every resident-set member, and never deletes an
+import that survives either policy — so a just-staged (newest) import is not
+reclaimed out from under an in-flight deploy.
 
 With `--output json`, routed output preserves the standard envelope and adds a
 top-level `device` object identifying the target; human output from the device

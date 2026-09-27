@@ -103,8 +103,10 @@ for out in result.outputs:
 
 A client for one serving worker. With no `serving_url` the endpoint is
 resolved with CLI-parity precedence (see
-[endpoint-resolution.md](./endpoint-resolution.md)); `discover=False` skips
-the agent-discovery tier; `timeout` is in seconds.
+[endpoint-resolution.md](./endpoint-resolution.md)); construction raises
+`EndpointUnavailableError` when the agent reports a resident set with no
+single serving URL. `discover=False` skips the agent-discovery tier;
+`timeout` is in seconds.
 
 - `infer(endpoint, inputs, *, deadline_ms=None, correlation_id=None) -> InferResult`
   — POST a request to the resolved worker. `endpoint` (required) is the
@@ -134,8 +136,9 @@ builds an input from an ndarray (also `[numpy]`).
 `VisionClient(serving_url=None, *, profile=None, config_path=None, timeout=30.0, discover=True, client=None)`
 
 A detection-focused wrapper over `ServingClient` (pass an existing
-`client=` to share one; `.serving` exposes it). Requires the `[vision]`
-extra.
+`client=` to share one; `.serving` exposes it). Without `client=` it
+resolves the endpoint as `ServingClient` does, with the same
+`EndpointUnavailableError`. Requires the `[vision]` extra.
 
 - `detect(image, *, endpoint, input_name="images", output_name=None, score_threshold=0.25, nms_threshold=0.45, labels=None, transposed=False, contract="yolo_v8_single_output", preprocess_config=None) -> list[Detection]`
   — preprocess `image` (a path, `bytes`, `Path`, or HWC `uint8` ndarray),
@@ -156,6 +159,7 @@ whole surface:
 | Exception | Raised when |
 | --- | --- |
 | `EndpointResolutionError` | A serving URL or CLI profile is malformed or unresolvable. |
+| `EndpointUnavailableError` (an `EndpointResolutionError`) | The agent reports a resident set but no single serving URL to discover; pass `serving_url` or set one on the CLI profile. |
 | `TransportError` | The worker is unreachable. |
 | `RequestTimeoutError` (a `TransportError`) | The request exceeds `timeout`. |
 | `ProtocolError` | The response is not a valid v0.1 envelope. |
@@ -177,7 +181,9 @@ except TransportError:
 
 `ServingClient` and `VisionClient` resolve the worker URL exactly as
 `tensorplate infer`: explicit URL → CLI profile `serving_url` →
-agent-discovered active deployment → loopback `http://127.0.0.1:18080`. The
+agent-discovered active deployment → loopback `http://127.0.0.1:18080`. An
+agent that reports a resident set but no `serving_url` raises
+`EndpointUnavailableError` rather than reaching the loopback default. The
 full precedence and URL canonicalization rules are in
 [endpoint-resolution.md](./endpoint-resolution.md).
 

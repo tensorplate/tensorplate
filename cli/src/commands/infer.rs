@@ -8,7 +8,10 @@
 //
 //   1. `--serving-url <url>` flag (highest precedence)
 //   2. The active profile's `serving_url` config field
-//   3. Agent-discovered serving endpoint (loopback HTTP by convention)
+//   3. Agent-discovered serving endpoint: `active.serving_url` from
+//      status. A status that lists a resident set but reports no
+//      `serving_url` is refused, never defaulted; only a status without
+//      a resident set falls back to the v0.1 loopback default.
 //
 // The data-plane HTTP call uses a hand-rolled HTTP/1.1 request rather
 // than a heavyweight client crate. The protocol is documented in
@@ -20,7 +23,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use tensorplate_protocol::agent_control::ControlRequest;
+use tensorplate_protocol::agent_control::{ControlRequest, ResidentSetStatus};
+use tensorplate_protocol::resident_set::MemberState;
 
 use crate::args::InferArgs;
 use crate::client::AgentClient;
@@ -34,7 +38,8 @@ use crate::profile::ResolvedProfile;
 ///
 /// Returns:
 /// - [`CliError::Usage`] when the input cannot be read.
-/// - [`CliError::Unavailable`] when there is no active deployment.
+/// - [`CliError::Unavailable`] when there is no active deployment, or the
+///   agent reports a resident set with no single loopback serving URL.
 /// - [`CliError::Inference`] when the serving worker returns a typed failure.
 /// - [`CliError::Transport`] / [`CliError::Timeout`] for HTTP failures.
 pub fn run<W: Write, E: Write>(
@@ -122,23 +127,72 @@ fn resolve_serving_endpoint(
         Some(correlation),
         Default::default(),
     ))?;
-    let active = response
-        .agent_status
-        .as_ref()
-        .and_then(|s| s.active.as_ref());
-    let Some(active) = active else {
+    let status = response.agent_status.as_ref();
+    let active = status.and_then(|s| s.active.as_ref());
+    if let Some(url) = active.and_then(|a| a.serving_url.as_deref()) {
+        return parse_serving_url(url, "agent-discovered");
+    }
+    // A status that lists a resident set comes from an agent that reports
+    // every serving URL it has; without `active.serving_url` it names no
+    // single unary route, and the v0.1 default could reach any member's
+    // listener or one unrelated to all of them.
+    if let Some(set) = status.and_then(|s| s.resident_set.as_ref()) {
+        return Err(no_discoverable_endpoint(set));
+    }
+    if active.is_none() {
         return Err(CliError::Unavailable {
             message: "no active deployment; deploy a bundle before running `infer`".into(),
             hint: Some("run `tensorplate deploy <bundle>` and wait for status=active".into()),
         });
-    };
-    if let Some(url) = active.serving_url.as_deref() {
-        return parse_serving_url(url, "agent-discovered");
     }
-    // The agent's serving endpoint is loopback by default. We hard-code
-    // the v0.1.0 default; the user can always override via flag or
-    // profile config if their device uses a non-default port.
+    // A status without a resident set is a singleton agent's, whose serving
+    // endpoint is loopback by default. We hard-code the v0.1.0 default; the
+    // user can always override via flag or profile config if their device
+    // uses a non-default port.
     parse_serving_url("http://127.0.0.1:18080", "agent-discovered")
+}
+
+/// The refusal for a resident set that projects no `active.serving_url`,
+/// worded for the set's shape.
+fn no_discoverable_endpoint(set: &ResidentSetStatus) -> CliError {
+    const QUERY_DIRECTLY: &str = "pass `--serving-url` to query a serving worker directly";
+    let (message, hint) = match set.members.as_slice() {
+        [] => (
+            "the agent's resident set has no members, so nothing serves `infer`".to_string(),
+            QUERY_DIRECTLY.to_string(),
+        ),
+        [member] if member.state == MemberState::Quarantined => (
+            format!(
+                "the resident set's only member `{}` is quarantined and serves nothing",
+                member.deployment_id
+            ),
+            format!("{QUERY_DIRECTLY}; `tensorplate status` shows the member's state"),
+        ),
+        [member] => (
+            match member.unary_endpoint.as_deref() {
+                None => format!(
+                    "the resident set's only member `{}` has no unary endpoint to discover",
+                    member.deployment_id
+                ),
+                Some(endpoint) => format!(
+                    "the agent reports no loopback serving URL for the resident set's only member `{}` (unary endpoint `{endpoint}`)",
+                    member.deployment_id
+                ),
+            },
+            "pass `--serving-url` with the unary endpoint of the worker to query".to_string(),
+        ),
+        members => (
+            format!(
+                "the agent serves a resident set of {} members and no single active deployment",
+                members.len()
+            ),
+            "pass `--serving-url` with the unary endpoint of the member to query (listed by `tensorplate status`)".to_string(),
+        ),
+    };
+    CliError::Unavailable {
+        message,
+        hint: Some(hint),
+    }
 }
 
 fn parse_serving_url(value: &str, source: &'static str) -> CliResult<EndpointResolution> {
@@ -421,12 +475,14 @@ mod tests {
     use crate::args::OutputMode;
     use crate::client::MockAgentClient;
     use crate::config::ProfileMode;
+    use crate::error::ExitCode;
     use crate::profile::{ResolvedProfile, Transport};
     use std::path::PathBuf;
     use std::time::Duration;
     use tensorplate_protocol::agent_control::{
-        AgentRunState, AgentStatus, ControlResponse, DeploymentSummary,
+        AgentRunState, AgentStatus, ControlResponse, DeploymentSummary, MemberStatus,
     };
+    use tensorplate_protocol::{AdmissionMode, MemberQuota};
 
     fn profile_with_serving(url: Option<&str>) -> ResolvedProfile {
         ResolvedProfile {
@@ -485,6 +541,8 @@ mod tests {
         // Agent status with no active deployment.
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: None,
                 previous_active: None,
@@ -555,6 +613,8 @@ mod tests {
         let client = MockAgentClient::new();
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
@@ -591,6 +651,8 @@ mod tests {
         let client = MockAgentClient::new();
         client.enqueue_ok(ControlResponse {
             agent_status: Some(AgentStatus {
+                resident_set: None,
+                control_features: Vec::new(),
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
@@ -619,5 +681,212 @@ mod tests {
         assert_eq!(res.host, "127.0.0.1");
         assert_eq!(res.port, 18081);
         assert_eq!(res.path, "/infer");
+    }
+
+    fn summary(deployment_id: &str, serving_url: Option<&str>) -> DeploymentSummary {
+        DeploymentSummary {
+            deployment_id: deployment_id.into(),
+            bundle_digest: "sha256:abc".into(),
+            bundle_name: None,
+            bundle_version: None,
+            backend_hint: None,
+            model_class: None,
+            staged_path: None,
+            promoted_monotonic_ns: None,
+            serving_url: serving_url.map(str::to_string),
+        }
+    }
+
+    fn member(
+        deployment_id: &str,
+        state: MemberState,
+        unary: Option<&str>,
+        stream: Option<&str>,
+    ) -> MemberStatus {
+        MemberStatus {
+            deployment_id: deployment_id.into(),
+            generation: 2,
+            bundle_digest: "sha256:abc".into(),
+            state,
+            admission_mode: AdmissionMode::Production,
+            quota: MemberQuota::default(),
+            unary_endpoint: unary.map(str::to_string),
+            stream_endpoint: stream.map(str::to_string),
+            stream_api_version: None,
+            effective_quota: None,
+            staged_bytes: None,
+            contact: None,
+        }
+    }
+
+    /// A client answering status with a resident set of `members` and the
+    /// singleton `active` the agent projected beside it.
+    fn set_client(
+        active: Option<DeploymentSummary>,
+        members: Vec<MemberStatus>,
+    ) -> MockAgentClient {
+        let client = MockAgentClient::new();
+        client.enqueue_ok(ControlResponse {
+            agent_status: Some(AgentStatus {
+                agent_state: AgentRunState::Ready,
+                active,
+                resident_set: Some(ResidentSetStatus {
+                    set_id: "set-1".into(),
+                    revision: 2,
+                    members,
+                }),
+                ..AgentStatus::default()
+            }),
+            ..ControlResponse::ok(Some("c".into()))
+        });
+        client
+    }
+
+    /// Resolve against `client`, expecting the typed refusal; returns its
+    /// message and hint.
+    fn refused(client: &MockAgentClient) -> (String, String) {
+        let (_td, p) = write_fixture(r#"{"inputs":[]}"#);
+        let Err(err) =
+            resolve_serving_endpoint(&profile_with_serving(None), client, &args_with_input(p))
+        else {
+            panic!("resolved, not refused");
+        };
+        assert_eq!(err.exit_code(), ExitCode::Unavailable, "{err:?}");
+        assert_eq!(client.history().len(), 1, "one status query");
+        match err {
+            CliError::Unavailable { message, hint } => (message, hint.expect("hint")),
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    // The tests above without a resident set are the legacy controls: the
+    // default applies there and only there.
+
+    #[test]
+    fn a_stream_only_set_of_one_does_not_fall_back_to_the_default() {
+        // The agent projects `active` for the serving member, but no
+        // `serving_url`: its only endpoint is a stream endpoint.
+        let client = set_client(
+            Some(summary("vision-v2", None)),
+            vec![member(
+                "vision-v2",
+                MemberState::Serving,
+                None,
+                Some("127.0.0.1:18105"),
+            )],
+        );
+        let (message, hint) = refused(&client);
+        assert!(
+            message.contains("`vision-v2` has no unary endpoint"),
+            "{message}"
+        );
+        assert!(hint.contains("--serving-url"), "{hint}");
+    }
+
+    #[test]
+    fn a_set_of_one_off_loopback_does_not_fall_back_to_the_default() {
+        let client = set_client(
+            Some(summary("vision-v2", None)),
+            vec![member(
+                "vision-v2",
+                MemberState::Serving,
+                Some("http://192.0.2.10:18090"),
+                None,
+            )],
+        );
+        let (message, hint) = refused(&client);
+        assert!(message.contains("no loopback serving URL"), "{message}");
+        assert!(message.contains("`http://192.0.2.10:18090`"), "{message}");
+        assert!(hint.contains("--serving-url"), "{hint}");
+    }
+
+    #[test]
+    fn a_multi_member_set_is_refused_even_beside_an_active() {
+        // Not a shape this agent projects; the refusal keys on the set,
+        // not on `active` being absent.
+        let client = set_client(
+            Some(summary("speech-stt", None)),
+            vec![
+                member(
+                    "speech-stt",
+                    MemberState::Serving,
+                    None,
+                    Some("127.0.0.1:18103"),
+                ),
+                member(
+                    "speech-tts",
+                    MemberState::Serving,
+                    None,
+                    Some("127.0.0.1:18105"),
+                ),
+            ],
+        );
+        let (message, hint) = refused(&client);
+        assert!(message.contains("resident set of 2 members"), "{message}");
+        assert!(hint.contains("--serving-url"), "{hint}");
+    }
+
+    #[test]
+    fn a_quarantined_set_of_one_names_the_quarantine() {
+        let client = set_client(
+            None,
+            vec![member("vision-v2", MemberState::Quarantined, None, None)],
+        );
+        let (message, hint) = refused(&client);
+        assert!(message.contains("`vision-v2` is quarantined"), "{message}");
+        assert!(!message.contains("1 members"), "{message}");
+        assert!(
+            hint.contains("`tensorplate status` shows the member's state"),
+            "{hint}"
+        );
+        assert!(!hint.contains("unary endpoint"), "{hint}");
+    }
+
+    #[test]
+    fn an_empty_resident_set_names_no_members() {
+        let client = set_client(None, Vec::new());
+        let (message, hint) = refused(&client);
+        assert!(message.contains("has no members"), "{message}");
+        assert!(!hint.contains("unary endpoint"), "{hint}");
+    }
+
+    #[test]
+    fn a_set_of_one_uses_its_projected_serving_url() {
+        // Control: a set of one serving member with a loopback unary
+        // endpoint resolves like a singleton.
+        let client = set_client(
+            Some(summary("vision-v2", Some("http://127.0.0.1:18090/infer"))),
+            vec![member(
+                "vision-v2",
+                MemberState::Serving,
+                Some("http://127.0.0.1:18090"),
+                None,
+            )],
+        );
+        let (_td, p) = write_fixture(r#"{"inputs":[]}"#);
+        let res =
+            resolve_serving_endpoint(&profile_with_serving(None), &client, &args_with_input(p))
+                .unwrap();
+        assert_eq!(res.source, "agent-discovered");
+        assert_eq!(res.port, 18090);
+        assert_eq!(res.path, "/infer");
+    }
+
+    #[test]
+    fn the_flag_and_the_profile_still_win_over_a_resident_set() {
+        // Control: overrides never ask the agent, so a set cannot refuse
+        // them.
+        let (_td, p) = write_fixture(r#"{"inputs":[]}"#);
+        let client = set_client(None, Vec::new());
+        let args = InferArgs {
+            serving_url: Some("http://127.0.0.1:18091".into()),
+            ..args_with_input(p.clone())
+        };
+        let res = resolve_serving_endpoint(&profile_with_serving(None), &client, &args).unwrap();
+        assert_eq!(res.source, "flag");
+        let prof = profile_with_serving(Some("http://127.0.0.1:18092/infer"));
+        let res = resolve_serving_endpoint(&prof, &client, &args_with_input(p)).unwrap();
+        assert_eq!(res.source, "profile");
+        assert_eq!(client.history().len(), 0);
     }
 }

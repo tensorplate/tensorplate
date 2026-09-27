@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tensorplate_protocol::agent_control::{
-    ControlOp, ControlRequest, ControlResponse, ResponseError, ResponseStatus,
+    ControlOp, ControlRequest, ControlResponse, DeployRequest, ResponseError, ResponseStatus,
+    RollbackRequest, SetOperation,
 };
-use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::{AdmissionMode, ErrorCode};
 
 use crate::coordinator::Coordinator;
 use crate::error::{AgentError, AgentResult};
@@ -60,6 +61,9 @@ pub fn dispatch(
                 ..ControlResponse::ok(correlation)
             })
         }
+        ControlOp::Undeploy | ControlOp::Recover => {
+            Ok(unsupported(correlation, &format!("`{}`", request.op)))
+        }
         ControlOp::Deploy => {
             let Some(payload) = request.deploy else {
                 return Ok(ControlResponse::error(
@@ -67,6 +71,9 @@ pub fn dispatch(
                     ResponseError::new(ErrorCode::ConfigInvalid, "deploy payload missing"),
                 ));
             };
+            if let Some(refusal) = deploy_refusal(coordinator, &payload, &correlation)? {
+                return Ok(refusal);
+            }
             let path = PathBuf::from(&payload.bundle_path);
             match coordinator.deploy(
                 &payload.deployment_id,
@@ -87,18 +94,118 @@ pub fn dispatch(
                 Err(err) => Ok(error_response(correlation, &err)),
             }
         }
-        ControlOp::Rollback => match coordinator.rollback(correlation.clone()) {
-            Ok(outcome) => {
-                let status = coordinator.status()?;
-                Ok(ControlResponse {
-                    transaction_id: Some(outcome.transaction_id),
-                    agent_status: Some(status),
-                    ..ControlResponse::ok(correlation)
-                })
+        ControlOp::Rollback => {
+            if let Some(refusal) =
+                rollback_refusal(coordinator, request.rollback.as_ref(), &correlation)?
+            {
+                return Ok(refusal);
             }
-            Err(err) => Ok(error_response(correlation, &err)),
-        },
+            match coordinator.rollback(correlation.clone()) {
+                Ok(outcome) => {
+                    let status = coordinator.status()?;
+                    Ok(ControlResponse {
+                        transaction_id: Some(outcome.transaction_id),
+                        agent_status: Some(status),
+                        ..ControlResponse::ok(correlation)
+                    })
+                }
+                Err(err) => Ok(error_response(correlation, &err)),
+            }
+        }
     }
+}
+
+/// The typed answer to a request this agent cannot execute yet.
+fn unsupported(correlation: Option<String>, what: &str) -> ControlResponse {
+    ControlResponse::error(
+        correlation,
+        ResponseError::new(
+            ErrorCode::Unsupported,
+            format!("{what} is not supported by this agent yet"),
+        ),
+    )
+}
+
+/// The answer to a deploy this agent cannot execute, decided before any
+/// transaction starts; `None` for the singleton `replace` it executes.
+///
+/// `replace` naming a non-member of a set of more than one member is
+/// refused as invalid first, as it always will be. The agent executes no
+/// set mutation yet, so `add`, qualification admission, an evidence
+/// reference and any deploy into a durable resident set are then refused as
+/// unsupported.
+fn deploy_refusal(
+    coordinator: &Arc<Coordinator>,
+    payload: &DeployRequest,
+    correlation: &Option<String>,
+) -> AgentResult<Option<ControlResponse>> {
+    let unsupported = |what: &str| Ok(Some(unsupported(correlation.clone(), what)));
+    let set = coordinator.state().snapshot()?.resident_set;
+    let names_non_member = set.as_ref().is_some_and(|set| {
+        set.members.len() > 1
+            && !set
+                .members
+                .iter()
+                .any(|member| member.deployment_id == payload.deployment_id)
+    });
+    if payload.set_operation == SetOperation::Replace && names_non_member {
+        return Ok(Some(ControlResponse::error(
+            correlation.clone(),
+            ResponseError::new(
+                ErrorCode::ConfigInvalid,
+                format!(
+                    "`{}` is not a member of the resident set: `replace` names a current member and `add` admits a new one",
+                    payload.deployment_id
+                ),
+            ),
+        )));
+    }
+    if payload.set_operation == SetOperation::Add {
+        return unsupported("`deploy` with set_operation `add`");
+    }
+    if payload.admission_mode == Some(AdmissionMode::Qualification) {
+        return unsupported("qualification admission");
+    }
+    if payload.evidence_ref.is_some() {
+        return unsupported("`deploy` with an evidence_ref");
+    }
+    if set.is_some() {
+        return unsupported("`deploy` into a resident set");
+    }
+    Ok(None)
+}
+
+/// The answer to a rollback this agent cannot execute, decided before any
+/// transaction starts; `None` for the singleton rollback it executes.
+fn rollback_refusal(
+    coordinator: &Arc<Coordinator>,
+    payload: Option<&RollbackRequest>,
+    correlation: &Option<String>,
+) -> AgentResult<Option<ControlResponse>> {
+    let named = payload.and_then(|rollback| rollback.deployment_id.as_deref());
+    let set = coordinator.state().snapshot()?.resident_set;
+    if named.is_none() && set.as_ref().is_some_and(|set| set.members.len() > 1) {
+        return Ok(Some(ControlResponse::error(
+            correlation.clone(),
+            ResponseError::new(
+                ErrorCode::ConfigInvalid,
+                "`rollback` must name a deployment_id when the resident set has more than one member",
+            ),
+        )));
+    }
+    if named.is_some() {
+        return Ok(Some(unsupported(
+            correlation.clone(),
+            "`rollback` of a named member",
+        )));
+    }
+    if set.is_some() {
+        return Ok(Some(unsupported(
+            correlation.clone(),
+            "`rollback` in a resident set",
+        )));
+    }
+    Ok(None)
 }
 
 fn error_response(correlation: Option<String>, err: &AgentError) -> ControlResponse {
@@ -202,6 +309,7 @@ mod tests {
                     deployment_id: "d1".into(),
                     expected_bundle_digest: None,
                     labels: Default::default(),
+                    ..DeployRequest::default()
                 },
             ),
         )
@@ -219,6 +327,7 @@ mod tests {
                     deployment_id: "d2".into(),
                     expected_bundle_digest: None,
                     labels: Default::default(),
+                    ..DeployRequest::default()
                 },
             ),
         )
@@ -285,6 +394,7 @@ mod tests {
                     deployment_id: "d1".into(),
                     expected_bundle_digest: None,
                     labels: Default::default(),
+                    ..DeployRequest::default()
                 },
             ),
         )
@@ -314,6 +424,7 @@ mod tests {
                     deployment_id: "../escaped".into(),
                     expected_bundle_digest: None,
                     labels: Default::default(),
+                    ..DeployRequest::default()
                 },
             ),
         )

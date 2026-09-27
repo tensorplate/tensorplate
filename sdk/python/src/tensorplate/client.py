@@ -3,9 +3,11 @@
 Resolution mirrors ``tensorplate infer`` so the SDK reaches the same
 worker the CLI would: an explicit URL wins, then the active CLI profile's
 ``serving_url``, then a read-only agent-status discovery, then the
-loopback default. URL canonicalization matches the CLI's exactly. The
-HTTP transport is hand-rolled over the standard library so the core SDK
-has no third-party dependency.
+loopback default. An agent that reports a resident set but no
+``active.serving_url`` has no endpoint to discover, and resolution raises
+rather than guessing the default. URL canonicalization matches the CLI's
+exactly. The HTTP transport is hand-rolled over the standard library so
+the core SDK has no third-party dependency.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pathlib import Path
 
 from tensorplate.errors import (
     EndpointResolutionError,
+    EndpointUnavailableError,
     RequestTimeoutError,
     TransportError,
 )
@@ -147,8 +150,16 @@ def resolve_serving_url(
     Order: explicit URL, then the chosen CLI profile's ``serving_url``,
     then read-only agent-status discovery, then the loopback default. When
     ``discover`` is false the agent tier is skipped. Discovery is
-    best-effort: an unreachable agent falls through to the loopback
-    default rather than raising.
+    best-effort: an unreachable, silent, or undecodable agent, or one
+    without resident sets that reports no ``serving_url``, falls through
+    to the loopback default rather than raising.
+
+    Raises:
+        EndpointUnavailableError: the agent reports a resident set but no
+            ``active.serving_url``: it names no single unary route, so the
+            default could reach any member's listener or one unrelated to
+            all of them.
+        EndpointResolutionError: the URL or the CLI profile is malformed.
     """
     if explicit is not None:
         return canonicalize_serving_url(explicit, "explicit")
@@ -230,8 +241,13 @@ def _transport_for_spec(spec: dict[str, object]) -> _AgentTransport | None:
 def _discover_via_agent(transport: _AgentTransport, timeout: float) -> str | None:
     """Query the agent's read-only ``status`` op for the active serving URL.
 
-    Best-effort: any transport, decode, or shape problem returns ``None``
-    so resolution falls through to the loopback default.
+    Best-effort: a transport or decode problem, a reply that is not
+    ``ok``, or an ``agent_status`` that is not an object returns ``None``
+    so resolution falls through to the loopback default. A status that
+    carries a non-null ``resident_set`` comes from an agent that reports
+    every serving URL it has, so a missing ``active.serving_url`` there
+    raises :class:`EndpointUnavailableError` instead, whatever shape the
+    ``resident_set`` value has: a malformed one fails closed too.
     """
     try:
         raw = _agent_status_roundtrip(transport, timeout)
@@ -247,10 +263,28 @@ def _discover_via_agent(transport: _AgentTransport, timeout: float) -> str | Non
     if not isinstance(agent_status, dict):
         return None
     active = agent_status.get("active")
-    if not isinstance(active, dict):
-        return None
-    serving_url = active.get("serving_url")
-    return serving_url if isinstance(serving_url, str) and serving_url else None
+    serving_url = active.get("serving_url") if isinstance(active, dict) else None
+    if isinstance(serving_url, str) and serving_url:
+        return serving_url
+    resident_set = agent_status.get("resident_set")
+    if resident_set is not None:
+        raise EndpointUnavailableError(_no_discoverable_endpoint(resident_set))
+    return None
+
+
+def _no_discoverable_endpoint(resident_set: object) -> str:
+    """The refusal for a resident set that projects no ``serving_url``."""
+    members = resident_set.get("members") if isinstance(resident_set, dict) else None
+    if isinstance(members, list) and len(members) > 1:
+        return (
+            f"the agent serves a resident set of {len(members)} members and no single "
+            "active deployment; pass serving_url (or set one on the CLI profile) with "
+            "the unary endpoint of the member to query, listed by `tensorplate status`"
+        )
+    return (
+        "the agent's status carries a resident set but no loopback serving URL to "
+        "discover; pass serving_url (or set one on the CLI profile)"
+    )
 
 
 def _agent_status_roundtrip(transport: _AgentTransport, timeout: float) -> bytes:

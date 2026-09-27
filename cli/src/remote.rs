@@ -18,6 +18,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
+use tensorplate_protocol::agent_control::SetOperation;
 use tensorplate_protocol::is_valid_deployment_id;
 
 use crate::args::{DeployArgs, InferArgs, OutputMode, Subcommand};
@@ -320,8 +321,16 @@ fn build_remote_args(subcommand: &Subcommand) -> CliResult<Vec<String>> {
                 v.push("--reason".to_string());
                 v.push(r.clone());
             }
+            // Forwarded only when given, so a device with an older CLI
+            // still accepts every rollback that does not name a member.
+            if let Some(id) = &a.deployment_id {
+                v.push("--deployment-id".to_string());
+                v.push(id.clone());
+            }
             Ok(v)
         }
+        Subcommand::Undeploy(a) => Ok(member_args("undeploy", a)),
+        Subcommand::Recover(a) => Ok(member_args("recover", a)),
         Subcommand::Logs(a) => {
             if a.follow {
                 return Err(CliError::Usage(
@@ -380,6 +389,20 @@ fn build_remote_args(subcommand: &Subcommand) -> CliResult<Vec<String>> {
             "bundle subcommands are local-only and not remotely routable".into(),
         )),
     }
+}
+
+/// The remote argv of `undeploy` or `recover` (`command`) for one member.
+fn member_args(command: &str, a: &crate::args::MemberArgs) -> Vec<String> {
+    let mut v = vec![
+        command.to_string(),
+        "--deployment-id".to_string(),
+        a.deployment_id.clone(),
+    ];
+    if let Some(r) = &a.reason {
+        v.push("--reason".to_string());
+        v.push(r.clone());
+    }
+    v
 }
 
 /// Run a remote command and forward its output in the local output mode:
@@ -1013,6 +1036,12 @@ pub fn route_deploy<O: Write, E: Write>(
         args.push("--label".to_string());
         args.push(format!("{k}={v}"));
     }
+    // `replace` is the default and is not forwarded, so a device with an
+    // older CLI still accepts every default deploy.
+    if opts.set_operation == SetOperation::Add {
+        args.push("--set-operation".to_string());
+        args.push("add".to_string());
+    }
     let ctx = RemoteCtx {
         runner,
         entry,
@@ -1136,6 +1165,19 @@ fn protected_import_names(
         {
             protected.insert(id.to_string());
         }
+    }
+    // Every resident-set member is deployed, whether or not it is `active`.
+    let members = agent
+        .and_then(|a| a.get("resident_set"))
+        .and_then(|set| set.get("members"))
+        .and_then(Value::as_array);
+    for id in members
+        .into_iter()
+        .flatten()
+        .filter_map(|member| member.get("deployment_id").and_then(Value::as_str))
+        .filter(|id| is_safe_path_segment(id))
+    {
+        protected.insert(id.to_string());
     }
     if let Some(name) = agent
         .and_then(|a| a.get("in_flight_transaction"))
@@ -1442,6 +1484,7 @@ mod tests {
         );
 
         let rollback = Subcommand::Rollback(RollbackArgs {
+            deployment_id: None,
             reason: Some("bad weights".into()),
         });
         assert_eq!(
@@ -1571,6 +1614,7 @@ mod tests {
     fn deploy_build_args_is_internal_error() {
         // Deploy routes through route_deploy, not build_remote_args.
         let deploy = Subcommand::Deploy(crate::args::DeployArgs {
+            set_operation: tensorplate_protocol::agent_control::SetOperation::Replace,
             bundle_path: std::path::PathBuf::from("/tmp/b"),
             deployment_id: None,
             expected_digest: None,
@@ -1591,6 +1635,7 @@ mod tests {
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
         let opts = crate::args::DeployArgs {
+            set_operation: tensorplate_protocol::agent_control::SetOperation::Replace,
             bundle_path: bundle.clone(),
             deployment_id: Some("yolo-1".into()),
             expected_digest: None,
@@ -1639,6 +1684,98 @@ mod tests {
         assert_eq!(args[1], "/var/lib/tensorplate/bundles/import/yolo-1");
         assert!(args.windows(2).any(|w| w == ["--deployment-id", "yolo-1"]));
         assert!(args.contains(&"--no-wait".to_string()));
+        // The default `replace` is not forwarded, so older device CLIs
+        // accept the argv.
+        assert!(!args.contains(&"--set-operation".to_string()));
+    }
+
+    #[test]
+    fn route_deploy_forwards_set_operation_add() {
+        let td = tempfile::TempDir::new().unwrap();
+        let bundle = td.path().join("bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
+        let opts = crate::args::DeployArgs {
+            set_operation: tensorplate_protocol::agent_control::SetOperation::Add,
+            bundle_path: bundle,
+            deployment_id: Some("speech-tts".into()),
+            expected_digest: None,
+            wait: false,
+            wait_timeout_ms: 1000,
+            labels: vec![],
+        };
+        let runner = MockRunner::new(
+            0,
+            r#"{"schema_version":"0.1","command":"deploy","status":"ok","payload":{}}"#,
+        );
+        let copier = MockCopier {
+            calls: RefCell::new(Vec::new()),
+        };
+        let r = Renderer::new(OutputMode::Json);
+        route_deploy(
+            &runner,
+            &copier,
+            &entry("host"),
+            "orin",
+            &opts,
+            RouteOptions {
+                renderer: &r,
+                timeout_ms: None,
+            },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let args = runner.last_args();
+        assert!(args.windows(2).any(|w| w == ["--set-operation", "add"]));
+    }
+
+    #[test]
+    fn member_commands_and_member_rollback_forward_their_flags() {
+        let rollback = Subcommand::Rollback(RollbackArgs {
+            deployment_id: Some("speech-tts".into()),
+            reason: None,
+        });
+        assert_eq!(
+            build_remote_args(&rollback).unwrap(),
+            vec!["rollback", "--deployment-id", "speech-tts"]
+        );
+        let member = crate::args::MemberArgs {
+            deployment_id: "speech-tts".into(),
+            reason: Some("retired".into()),
+        };
+        assert_eq!(
+            build_remote_args(&Subcommand::Undeploy(member.clone())).unwrap(),
+            vec![
+                "undeploy",
+                "--deployment-id",
+                "speech-tts",
+                "--reason",
+                "retired"
+            ]
+        );
+        assert_eq!(
+            build_remote_args(&Subcommand::Recover(member)).unwrap()[0],
+            "recover"
+        );
+    }
+
+    #[test]
+    fn prune_keeps_every_resident_set_member() {
+        let responses = vec![
+            ScriptedRunner::out(
+                0,
+                r#"{"schema_version":"0.1","command":"status","status":"ok","payload":{"agent":{"active":null,"resident_set":{"set_id":"set-1","revision":2,"members":[{"deployment_id":"speech-stt"},{"deployment_id":"speech-tts"}]}}}}"#,
+            ),
+            ScriptedRunner::out(0, "1000000\n"),
+            ScriptedRunner::out(0, "999000 speech-stt\n999100 speech-tts\n999200 stale\n"),
+            ScriptedRunner::out(0, ""),
+        ];
+        let runner = ScriptedRunner::new(responses);
+        let report = prune_imports(&runner, &entry("host"), None, Some(1)).unwrap();
+        assert_eq!(report.deleted, vec!["stale"]);
+        assert!(report.kept.contains(&"speech-stt".to_string()));
+        assert!(report.kept.contains(&"speech-tts".to_string()));
     }
 
     #[test]
@@ -1648,6 +1785,7 @@ mod tests {
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("manifest.json"), b"{}").unwrap();
         let opts = crate::args::DeployArgs {
+            set_operation: tensorplate_protocol::agent_control::SetOperation::Replace,
             bundle_path: bundle,
             deployment_id: Some("../../etc".into()),
             expected_digest: None,
