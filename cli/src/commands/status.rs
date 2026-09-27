@@ -311,6 +311,50 @@ impl Severity {
     }
 }
 
+/// How a committed resident set's members stand: the one rule `status`
+/// severity and `doctor` judge a set by. A member is degraded when it is
+/// quarantined, or in `serving` state while the agent reports its worker
+/// out of contact. An absent `contact` is unreported, not a fault.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResidentSetHealth<'a> {
+    /// Members in `serving` state, whether or not their worker answers.
+    pub(crate) serving: usize,
+    /// Members in `serving` state the agent reports in contact.
+    pub(crate) in_contact: usize,
+    /// Quarantined members, in committed order.
+    pub(crate) quarantined: Vec<&'a str>,
+    /// Members in `serving` state the agent reports out of contact, in
+    /// committed order.
+    pub(crate) out_of_contact: Vec<&'a str>,
+}
+
+impl<'a> ResidentSetHealth<'a> {
+    pub(crate) fn of(set: &'a ResidentSetStatus) -> Self {
+        let mut health = Self::default();
+        for member in &set.members {
+            let id = member.deployment_id.as_str();
+            match (member.state, member.contact) {
+                (MemberState::Quarantined, _) => health.quarantined.push(id),
+                (MemberState::Serving, contact) => {
+                    health.serving += 1;
+                    match contact {
+                        Some(ContactState::InContact) => health.in_contact += 1,
+                        Some(ContactState::OutOfContact) => health.out_of_contact.push(id),
+                        None => {}
+                    }
+                }
+            }
+        }
+        health
+    }
+
+    /// Some member is quarantined or out of contact: status reports the
+    /// set at least `degraded`.
+    pub(crate) fn degraded(&self) -> bool {
+        !self.quarantined.is_empty() || !self.out_of_contact.is_empty()
+    }
+}
+
 fn severity_of(
     agent_status: Option<&AgentStatus>,
     observability: Option<&ObservabilitySnapshotResult>,
@@ -343,13 +387,11 @@ fn severity_of(
         if !status.quarantined.is_empty() {
             severity = severity.max(Severity::Degraded);
         }
-        let member_degraded = status.resident_set.as_ref().is_some_and(|set| {
-            set.members.iter().any(|member| {
-                member.state == MemberState::Quarantined
-                    || member.contact == Some(ContactState::OutOfContact)
-            })
-        });
-        if member_degraded {
+        if status
+            .resident_set
+            .as_ref()
+            .is_some_and(|set| ResidentSetHealth::of(set).degraded())
+        {
             severity = severity.max(Severity::Degraded);
         }
     } else {
@@ -1073,5 +1115,97 @@ mod tests {
             "{stopping}"
         );
         assert!(!stopping.contains("removing pin"), "{stopping}");
+    }
+
+    fn health_member(
+        id: &str,
+        state: MemberState,
+        contact: Option<ContactState>,
+    ) -> tensorplate_protocol::MemberStatus {
+        tensorplate_protocol::MemberStatus {
+            deployment_id: id.into(),
+            generation: 2,
+            bundle_digest: "sha256:ab".into(),
+            state,
+            admission_mode: AdmissionMode::Production,
+            quota: tensorplate_protocol::MemberQuota::default(),
+            unary_endpoint: None,
+            stream_endpoint: None,
+            stream_api_version: None,
+            effective_quota: None,
+            staged_bytes: None,
+            contact,
+        }
+    }
+
+    #[test]
+    fn resident_set_health_sorts_every_state_and_contact() {
+        let set = ResidentSetStatus {
+            set_id: "set-1".into(),
+            revision: 1,
+            members: vec![
+                health_member("a", MemberState::Serving, None),
+                health_member("b", MemberState::Serving, Some(ContactState::InContact)),
+                health_member("c", MemberState::Serving, Some(ContactState::OutOfContact)),
+                health_member("d", MemberState::Quarantined, None),
+                health_member("e", MemberState::Quarantined, Some(ContactState::InContact)),
+                health_member(
+                    "f",
+                    MemberState::Quarantined,
+                    Some(ContactState::OutOfContact),
+                ),
+            ],
+        };
+        let health = ResidentSetHealth::of(&set);
+        assert_eq!(
+            health,
+            ResidentSetHealth {
+                serving: 3,
+                in_contact: 1,
+                quarantined: vec!["d", "e", "f"],
+                out_of_contact: vec!["c"],
+            }
+        );
+        assert!(health.degraded());
+        for (member, degraded) in [
+            (health_member("a", MemberState::Serving, None), false),
+            (
+                health_member("a", MemberState::Serving, Some(ContactState::InContact)),
+                false,
+            ),
+            (
+                health_member("a", MemberState::Serving, Some(ContactState::OutOfContact)),
+                true,
+            ),
+            (health_member("a", MemberState::Quarantined, None), true),
+        ] {
+            let set = ResidentSetStatus {
+                set_id: "set-1".into(),
+                revision: 1,
+                members: vec![member.clone()],
+            };
+            assert_eq!(
+                ResidentSetHealth::of(&set).degraded(),
+                degraded,
+                "{member:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wholly_quarantined_set_is_degraded() {
+        let status = AgentStatus {
+            agent_state: AgentRunState::Ready,
+            resident_set: Some(ResidentSetStatus {
+                set_id: "set-1".into(),
+                revision: 1,
+                members: vec![
+                    health_member("a", MemberState::Quarantined, None),
+                    health_member("b", MemberState::Quarantined, None),
+                ],
+            }),
+            ..AgentStatus::default()
+        };
+        assert_eq!(severity_of(Some(&status), None), Severity::Degraded);
     }
 }

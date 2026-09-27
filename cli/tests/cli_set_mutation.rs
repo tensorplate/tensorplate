@@ -533,3 +533,99 @@ fn infer_on_a_set_of_one_posts_to_its_projected_serving_url() {
     assert_eq!(body["payload"]["endpoint"], serving.url());
     assert_eq!(serving.requests().len(), 1);
 }
+
+/// The findings `doctor` reports against `status`.
+fn doctor_findings(status: ControlResponse) -> Vec<Value> {
+    let stub = AgentStub::start();
+    // doctor sends: version, then status.
+    stub.enqueue(ControlResponse::ok(Some("v".into())));
+    stub.enqueue(status);
+    let (code, stdout, stderr) = run_cli(&stub.socket, &["--output", "json", "doctor"]);
+    assert_eq!(
+        code, 0,
+        "member state never fails doctor; stderr was {stderr}"
+    );
+    let body: Value = serde_json::from_str(&stdout).expect("json envelope");
+    body["payload"]["findings"]
+        .as_array()
+        .expect("findings")
+        .clone()
+}
+
+fn doctor_finding<'a>(findings: &'a [Value], id: &str) -> &'a Value {
+    findings
+        .iter()
+        .find(|f| f["id"] == id)
+        .unwrap_or_else(|| panic!("no {id} finding in {findings:?}"))
+}
+
+#[test]
+fn doctor_reports_a_quarantined_member_of_a_set() {
+    let findings = doctor_findings(two_member_status(true));
+    let active = doctor_finding(&findings, "active_deployment");
+    assert_eq!(active["status"], "ok", "{active}");
+    let members = doctor_finding(&findings, "resident_set_members");
+    assert_eq!(members["status"], "warning", "{members}");
+    assert_eq!(members["severity"], "warning", "{members}");
+    assert!(
+        members["message"]
+            .as_str()
+            .expect("message")
+            .contains("quarantined `speech-tts`"),
+        "{members}"
+    );
+}
+
+#[test]
+fn status_and_doctor_judge_a_set_by_the_same_rule() {
+    use tensorplate_protocol::{AdmissionMode, ContactState, MemberState};
+    let with = |id: &str, state: MemberState, contact: Option<ContactState>| {
+        let mut m = member(id, 2, AdmissionMode::Production, ContactState::InContact);
+        m.state = state;
+        m.contact = contact;
+        m
+    };
+    let serving = MemberState::Serving;
+    let quarantined = MemberState::Quarantined;
+    let (in_contact, out) = (
+        Some(ContactState::InContact),
+        Some(ContactState::OutOfContact),
+    );
+    let sets = [
+        vec![with("a", serving, None), with("b", serving, None)],
+        vec![
+            with("a", serving, in_contact),
+            with("b", serving, in_contact),
+        ],
+        vec![with("a", serving, None), with("b", quarantined, None)],
+        vec![with("a", quarantined, None), with("b", quarantined, None)],
+        vec![with("a", serving, in_contact), with("b", serving, out)],
+        vec![with("a", serving, out), with("b", serving, out)],
+        vec![with("a", quarantined, out), with("b", serving, None)],
+    ];
+    let mut degraded_sets = 0;
+    for members in sets {
+        let stub = AgentStub::start();
+        stub.enqueue(status_with_members(members.clone()));
+        let (code, stdout, stderr) = run_cli(&stub.socket, &["--output", "json", "status"]);
+        assert_eq!(code, 0, "stderr was {stderr}");
+        let body: Value = serde_json::from_str(&stdout).expect("json envelope");
+        let severity = body["payload"]["severity"].as_str().expect("severity");
+        assert!(
+            severity == "ready" || severity == "degraded",
+            "only the members move severity here: {severity}"
+        );
+        let findings = doctor_findings(status_with_members(members.clone()));
+        let judged = doctor_finding(&findings, "resident_set_members")["status"]
+            .as_str()
+            .expect("status")
+            .to_string();
+        assert_eq!(
+            severity == "degraded",
+            judged == "warning",
+            "status says {severity}, doctor says {judged} for {members:?}"
+        );
+        degraded_sets += usize::from(judged == "warning");
+    }
+    assert_eq!(degraded_sets, 5, "both outcomes are exercised");
+}

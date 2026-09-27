@@ -498,14 +498,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   status lists a resident set but no `serving_url`, they refuse instead of
   falling back to the v0.1 loopback default (the CLI with `unavailable`,
   exit 6; the SDK with the new `EndpointUnavailableError`, an
-  `EndpointResolutionError`). Status also gains `control_features`, which
-  lists nothing yet. The CLI gains `undeploy`, `recover`,
-  `deploy --set-operation` and `rollback --deployment-id`, and renders the
-  resident set in `status`. It sends `add` or a member rollback only to an
-  agent that lists the matching control feature, because an older agent
-  would ignore the field and act on the rest of the request. A default
-  deploy, and the responses to it, are byte-for-byte what they were; a
-  golden exchange recorded before the change pins them.
+  `EndpointResolutionError`). `doctor` reports a resident set as
+  `active_deployment` only while a member is in `serving` state (a wholly
+  quarantined set is `missing`) and adds `resident_set_members`, which warns
+  on each quarantined or out-of-contact member by the rule `status` degrades
+  on. Status also gains `control_features`, which lists nothing yet. The CLI
+  gains `undeploy`, `recover`, `deploy --set-operation` and
+  `rollback --deployment-id`, and renders the resident set in `status`. It
+  sends `add` or a member rollback only to an agent that lists the matching
+  control feature, because an older agent would ignore the field and act on
+  the rest of the request. A default deploy, and the responses to it, are
+  byte-for-byte what they were; a golden exchange recorded before the change
+  pins them.
   (V030-E03-F01-T05, V030-E03-F01-T03)
 
 ## [0.2.1] - 2026-09-23

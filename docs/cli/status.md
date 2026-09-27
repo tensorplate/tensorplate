@@ -36,7 +36,8 @@ ready < degraded < no_heartbeat < crash_loop < failed
 
 The CLI picks the highest severity across agent state, supervision state,
 resident-set members (a quarantined or out-of-contact member is at least
-`degraded`), and observability state. Crash-loop is surfaced explicitly because the
+`degraded`; `tensorplate doctor` reports the same members as
+`resident_set_members`), and observability state. Crash-loop is surfaced explicitly because the
 supervisor's `crash_loop` flag is the early-warning signal V01-E09 publishes.
 
 ## Accelerator placement
