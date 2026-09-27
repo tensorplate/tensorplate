@@ -417,14 +417,14 @@ fixture_values() {
     private-label-cross-model) printf 'XM%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" ;;
     planning-id)
       # A task, a feature, one between underscores, and one after a
-      # release prefix that is not its own word.
+      # one-digit prefix, which is no release prefix.
       printf 'E%s-F%s-T%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)" \
         "$(random_from 0123456789 2)"
       printf 'E%s-F%s\n' "$(random_from 0123456789 2)" "$(random_from 0123456789 2)"
       token="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)-T$(random_from 0123456789 2)"
       printf 'notes_%s_draft\t%s\n' "$token" "$token"
       token="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)"
-      printf 'XV%s-%s\t%s\n' "$(random_from 0123456789 3)" "$token" "$token"
+      printf 'V%s-%s\t%s\n' "$(random_from 0123456789 1)" "$token" "$token"
       ;;
     *) return 1 ;;
   esac
@@ -941,15 +941,20 @@ prefixed="V$(random_from 0123456789 3)-${bare}"
 new_case
 put CHANGELOG.md "- A fix. (${prefixed}; ${bare})"
 put notes/a.txt "Implements ${prefixed}."
+put notes/b.json "{\"body\": \"Tasks:\\n${prefixed}\\u2014${prefixed} q=%20${prefixed}\"}"
 commit "Implement ${prefixed}"
 printf 'Task IDs: %s\n' "$prefixed" >"${r}.body" || die "could not write a body"
-check "a bare identifier in CHANGELOG.md, and prefixed ones anywhere, pass" "0" \
+check "a bare identifier in CHANGELOG.md, and prefixed ones anywhere, even after an escape, pass" "0" \
   "$(scan "${r}.out" --base base --message "${r}.body")"
 
 new_case
 put packaging/debian/changelog "  * A fix. (${bare})"
+put docs/CHANGELOG.md "- A fix. (${bare})"
 commit
 expect_finding "a bare identifier in another changelog" planning-id "$bare" --base base
+check "  in each, the exemption being the repository's CHANGELOG.md only" \
+  "docs/CHANGELOG.md:1: planning-id packaging/debian/changelog:1: planning-id" \
+  "$(grep -oE '^[a-zA-Z/.]+:[0-9]+: planning-id' "${r}.out" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 
 new_case
 put notes/a.txt "clean"

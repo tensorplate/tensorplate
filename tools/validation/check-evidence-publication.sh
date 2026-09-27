@@ -255,7 +255,8 @@ SERIAL_ALLOWED = re.compile(r"REDACTED|0+")
 # and UUID: `GPU PDI : <value>` in `-q`, `<pdi>` in `-q -x`. Like a serial,
 # it is recognized by its label, whatever its value looks like.
 PDI_LABELLED = re.compile(
-    r"(?i)(?<![A-Za-z0-9])pdi\\*[\"']?[ \t]*[:=][ \t]*\\*[\"']?([^\s\"'\\,;}<]*)")
+    r"(?:(?<![A-Za-z0-9])(?i:pdi)|(?<=[a-z0-9])P(?i:di))"
+    r"\\*[\"']?[ \t]*[:=][ \t]*\\*[\"']?([^\s\"'\\,;}<]*)")
 PDI_ELEMENT = re.compile(r"(?i)<pdi[ \t]*>[ \t]*([^\s<]*)")
 
 CREDENTIAL = re.compile(

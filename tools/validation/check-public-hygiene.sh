@@ -271,11 +271,11 @@ PRIVATE_REPOSITORY = re.compile(r"[A-Za-z0-9]+-internals", re.IGNORECASE)
 PRIVATE_LABEL = re.compile(
     r"(?<![A-Za-z0-9])(?:PR-[0-9]{1,3}[a-z]?|HW-[A-Z][0-9]{1,2}|XM[0-9]{2}|[CD][0-9]{2})"
     r"(?![A-Za-z0-9])")
-# A planning identifier without its release prefix. The prefixed form
-# (group 1) is how pull request text cites work, and older source comments
-# carry it, so it is matched only so that no part of it is reported.
+# A planning identifier without its release prefix. The prefixed form is
+# how pull request text cites work, and older source comments carry it, so
+# it is not reported, whatever precedes the prefix (an escape can).
 PLANNING_ID = re.compile(
-    r"(?<![A-Za-z0-9])(?:(V[0-9]{2,3}(?:-[EFT][0-9]{2})+)|E[0-9]{2}-F[0-9]{2}(?:-T[0-9]{2})?)"
+    r"(?<![A-Za-z0-9])(?<!V[0-9]{2}-)(?<!V[0-9]{3}-)E[0-9]{2}-F[0-9]{2}(?:-T[0-9]{2})?"
     r"(?![A-Za-z0-9])")
 # The changelog cites planning identifiers by convention.
 PLANNING_ID_EXEMPT = frozenset(("CHANGELOG.md",))
@@ -445,8 +445,7 @@ def scan_variant(line, literals):
     for m in PRIVATE_LABEL.finditer(line):
         add("private-label", m.group(0))
     for m in PLANNING_ID.finditer(line):
-        if m.group(1) is None:
-            add("planning-id", m.group(0))
+        add("planning-id", m.group(0))
     for cls, pattern, length in literals:
         for m in pattern.finditer(line):
             found.append((cls, length, m.group(0).lower()))

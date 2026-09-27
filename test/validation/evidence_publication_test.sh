@@ -721,6 +721,10 @@ new_case
 printf '{"gpu": {"p\\u0064i": "%s"}}\n' "$pdi" >"${d}/gpu.json" || die "could not write gpu.json"
 expect_finding "a GPU PDI under an escaped JSON key" gpu-pdi "$pdi"
 
+new_case
+printf '{"gpuPdi": "%s"}\n' "$pdi" >"${d}/gpu.json" || die "could not write gpu.json"
+expect_finding "a GPU PDI under a camelCase key" gpu-pdi "$pdi"
+
 # --- Credentials, built at runtime so no scanner flags this file.
 new_case
 key_header="$(printf -- '-----BEGIN %s %s KEY-----' OPENSSH PRIVATE)"
