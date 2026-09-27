@@ -18,14 +18,19 @@ Order of precedence:
 
 1. `--serving-url <url>` flag.
 2. `serving_url` field on the active profile.
-3. Agent-discovered active deployment: the CLI asks the agent for status,
-   confirms an active deployment exists, and uses
-   `AgentStatus.active.serving_url` when the agent reports one. An agent
-   serving a resident set of more than one member reports no single active
-   deployment; the CLI then refuses (`unavailable`) and asks for
-   `--serving-url` with the endpoint of the member to query, which
-   `tensorplate status` lists.
-4. If older agents do not report `serving_url`, the CLI falls back to the
+3. Agent-discovered active deployment: the CLI asks the agent for status and
+   uses `AgentStatus.active.serving_url` when the agent reports one. A
+   resident set reports it only for a set of one serving member whose unary
+   endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with
+   no path. When status lists a `resident_set` but no `serving_url` (more
+   than one member; an only member that is quarantined, has no unary
+   endpoint, or has one of any other form; or no member), the CLI refuses
+   (`unavailable`) rather than guess, and asks for `--serving-url` with the
+   endpoint of the worker to query, which `tensorplate status` lists.
+4. Only when status lists no resident set, names an active deployment and
+   reports no `serving_url` (an older agent, or one with no serving process
+   of its own running, such as mock worker mode or an exited worker), the
+   CLI falls back to the
    v0.1.0 default loopback serving endpoint
    (`http://127.0.0.1:18080/infer`).
 
@@ -46,7 +51,7 @@ Tensor bytes are expected to be base64-encoded inside the named-input objects.
 | --- | --- |
 | `2` | Input file missing, not JSON, or `--input`/`--stdin` mismatch. |
 | `4` | Serving endpoint unreachable. |
-| `6` | No active deployment and no override. |
+| `6` | No active deployment and no override, or a resident set with no single loopback serving URL. |
 | `11` | Serving worker returned a typed `failure` status. |
 
 ## Limitations

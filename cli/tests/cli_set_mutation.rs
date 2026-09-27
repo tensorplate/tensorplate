@@ -7,18 +7,19 @@
 // fields an agent that predates them would ignore, so the CLI first asks
 // for the agent's control features and sends nothing further unless the
 // matching feature is listed. `status` renders the resident set when the
-// agent reports one.
+// agent reports one, and `infer` discovers a set's endpoint only from the
+// `serving_url` the agent projects, never from the v0.1 default.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod common;
 
-use common::{run_cli, write_bundle_dir, AgentStub};
+use common::{run_cli, write_bundle_dir, AgentStub, ServingStub};
 use serde_json::Value;
 use tensorplate_protocol::agent_control::{
-    AgentRunState, AgentStatus, ControlOp, ControlResponse, ResidentSetStatus, ResponseError,
-    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD,
+    singleton_slots, AgentRunState, AgentStatus, ControlOp, ControlResponse, ResidentSetStatus,
+    ResponseError, FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD,
 };
 use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::ErrorCode;
@@ -436,4 +437,99 @@ fn infer_on_a_multi_member_set_asks_for_a_serving_url() {
     assert_eq!(code, 6, "stderr was {stderr}");
     assert!(stderr.contains("resident set of 2 members"), "{stderr}");
     assert!(stderr.contains("--serving-url"), "{stderr}");
+}
+
+/// Status for the restore-step fixture's set of one serving member, its
+/// committed endpoints replaced by `unary` and `stream`, projected as the
+/// agent projects it.
+fn set_of_one_status(unary: Option<String>, stream: Option<&str>) -> ControlResponse {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../protocol/rust/tests/fixtures/agent_state_0_2_restore_step.json");
+    let mut set = decode_agent_state(&std::fs::read_to_string(path).expect("fixture"))
+        .expect("decodes")
+        .resident_set
+        .expect("set");
+    set.endpoint_map[0].unary_endpoint = unary;
+    set.endpoint_map[0].stream_endpoint = stream.map(str::to_string);
+    let (active, previous_active) = singleton_slots(&set);
+    ControlResponse {
+        agent_status: Some(AgentStatus {
+            agent_state: AgentRunState::Ready,
+            active,
+            previous_active,
+            resident_set: Some(ResidentSetStatus::from_committed(&set)),
+            ..AgentStatus::default()
+        }),
+        ..ControlResponse::ok(Some("c".into()))
+    }
+}
+
+#[test]
+fn infer_on_a_stream_only_set_of_one_does_not_fall_back_to_the_default() {
+    let stub = AgentStub::start();
+    let status = set_of_one_status(None, Some("127.0.0.1:18105"));
+    let active = status
+        .agent_status
+        .as_ref()
+        .and_then(|s| s.active.as_ref())
+        .expect("a serving set of one projects `active`");
+    assert_eq!(active.serving_url, None, "and no unary route");
+    stub.enqueue(status);
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let input = td.path().join("request.json");
+    std::fs::write(&input, b"{}").expect("write input");
+    let (code, _stdout, stderr) = run_cli(
+        &stub.socket,
+        &[
+            "--output",
+            "json",
+            "infer",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    );
+    // The default would have been tried and refused: exit 4.
+    assert_eq!(code, 6, "stderr was {stderr}");
+    let envelope: Value = serde_json::from_str(&stderr).expect("json error envelope");
+    assert_eq!(envelope["status"], "unavailable");
+    assert_eq!(envelope["error"]["code"], "unsupported");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(
+        message.contains("`vision-v2` has no unary endpoint"),
+        "{message}"
+    );
+    let hint = envelope["error"]["hint"].as_str().expect("hint");
+    assert!(hint.contains("--serving-url"), "{hint}");
+    assert_eq!(stub.history().len(), 1);
+}
+
+#[test]
+fn infer_on_a_set_of_one_posts_to_its_projected_serving_url() {
+    // Control: a loopback unary endpoint is projected and used.
+    let serving = ServingStub::start(
+        r#"{"schema_version":"0.1","status":"success","request_id":"r-1","outputs":[]}"#,
+    );
+    let stub = AgentStub::start();
+    stub.enqueue(set_of_one_status(
+        Some(format!("http://{}", serving.addr)),
+        None,
+    ));
+    let td = tempfile::TempDir::new().expect("tempdir");
+    let input = td.path().join("request.json");
+    std::fs::write(&input, br#"{"inputs":[]}"#).expect("write input");
+    let (code, stdout, stderr) = run_cli(
+        &stub.socket,
+        &[
+            "--output",
+            "json",
+            "infer",
+            "--input",
+            input.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, 0, "stderr was {stderr}");
+    let body: Value = serde_json::from_str(&stdout).expect("json envelope");
+    assert_eq!(body["payload"]["endpoint_source"], "agent-discovered");
+    assert_eq!(body["payload"]["endpoint"], serving.url());
+    assert_eq!(serving.requests().len(), 1);
 }

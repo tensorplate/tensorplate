@@ -197,9 +197,18 @@ stream endpoints from the committed endpoint map. `stream_api_version`,
 until their sources exist. Beside a resident set the durable singleton slots
 are empty; a set whose only member is serving projects that member into
 `active` (with `serving_url`, the `/infer` URL of its unary endpoint when
-that endpoint is a loopback HTTP origin) and its retained generation into
-`previous_active`, so clients that read only `active` keep working. A set
-of any other shape fills neither, and clients read `resident_set`.
+that endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with
+no path) and its retained generation into `previous_active`. Clients that
+read only `active` keep working on such a set when `active` carries
+`serving_url`. A set of any other shape fills neither, and clients read
+`resident_set`. A client that finds `resident_set` but no
+`active.serving_url` has no single unary route to discover and must not
+assume the v0.1 loopback default, which could reach any member's listener or
+one unrelated to all of them: `tensorplate infer` refuses with
+`unavailable` and the Python SDK raises `EndpointUnavailableError`. A client
+that reads only `active` and falls back to the default without a
+`serving_url`, as every CLI and SDK before this change does, misroutes on a
+stream-only or off-loopback set of one.
 
 ## Durable state store (V01-E08-F02)
 

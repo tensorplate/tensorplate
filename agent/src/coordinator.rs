@@ -628,7 +628,8 @@ impl Coordinator {
         }
         let mut previous = s.previous_active.as_ref().map(deployment_summary);
         // Beside a durable resident set the singleton slots are empty; a
-        // size-1 set projects into them for clients that read only `active`.
+        // size-1 serving set projects into them for clients that read only
+        // `active` (with a `serving_url` only for a loopback unary endpoint).
         let resident_set = s.resident_set.as_ref().map(|set| {
             if active.is_none() && previous.is_none() {
                 (active, previous) = singleton_slots(set);

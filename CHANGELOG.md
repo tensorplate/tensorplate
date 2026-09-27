@@ -492,8 +492,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   admission mode, committed quota and endpoints. The member's stream API
   version, effective quota, staged bytes and contact state stay absent
   until their sources exist. A set whose only member is serving also fills
-  `active` and `previous_active`. Status also gains `control_features`,
-  which lists nothing yet. The CLI gains `undeploy`, `recover`,
+  `active` and `previous_active`, with `serving_url` when the member's unary
+  endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with no
+  path. `tensorplate infer` and the Python SDK use that `serving_url`; when
+  status lists a resident set but no `serving_url`, they refuse instead of
+  falling back to the v0.1 loopback default (the CLI with `unavailable`,
+  exit 6; the SDK with the new `EndpointUnavailableError`, an
+  `EndpointResolutionError`). Status also gains `control_features`, which
+  lists nothing yet. The CLI gains `undeploy`, `recover`,
   `deploy --set-operation` and `rollback --deployment-id`, and renders the
   resident set in `status`. It sends `add` or a member rollback only to an
   agent that lists the matching control feature, because an older agent

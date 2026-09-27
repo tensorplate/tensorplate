@@ -412,7 +412,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["set_id", "revision", "members"],
-      "description": "The committed resident set, one entry per member in committed order. Present only when the agent's durable state records a set. When the set has exactly one member and it is serving, the singleton `active` (and `previous_active`, from its retained generation) describe the same member, so clients that read only `active` keep working; with more members `active` is absent.",
+      "description": "The committed resident set, one entry per member in committed order. Present only when the agent's durable state records a set. When the set has exactly one member and it is serving, the singleton `active` (and `previous_active`, from its retained generation) describe the same member, with `serving_url` when its unary endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with no path, so clients that read only `active` keep working on it when `active` carries `serving_url`; with more members `active` is absent. A client that finds this object but no `active.serving_url` has no single unary route to discover and must not assume a default.",
       "properties": {
         "set_id": {"type": "string", "minLength": 1},
         "revision": {"$ref": "#/definitions/StateCounter"},
@@ -583,7 +583,7 @@
         "serving_url": {
           "type": "string",
           "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]+(/.*)?$",
-          "description": "Loopback data-plane URL for the active worker. Present only for the active deployment: when the agent owns a concrete serving process, or, for a resident set whose only member serves, the `/infer` URL of the member's committed unary endpoint."
+          "description": "Loopback data-plane URL for the active worker. Present only for the active deployment: when the agent owns a concrete serving process, or, for a resident set whose only member serves, the `/infer` URL of the member's committed unary endpoint when that endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with no path."
         }
       }
     },

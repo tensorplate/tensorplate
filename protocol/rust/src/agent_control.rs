@@ -1018,10 +1018,14 @@ impl ResidentSetStatus {
 }
 
 /// The singleton `active` and `previous_active` a committed set projects,
-/// so clients that read only `active` keep working on a set of one: its
-/// only member when the set has exactly one and it serves (with the unary
-/// `/infer` URL of its committed endpoint), and that member's retained
-/// generation. A set of any other shape projects neither.
+/// so clients that read only `active` keep working on a set of one when
+/// `active` carries `serving_url`: its only member when the set has exactly
+/// one and it serves (with the `/infer` URL of its committed unary endpoint
+/// when that endpoint is `http://127.0.0.1:<port>` or
+/// `http://localhost:<port>`), and that member's retained generation. A set
+/// of any other shape projects neither. Clients that find a set but no
+/// `serving_url` have no single unary route to discover and must not assume
+/// one.
 #[must_use]
 pub fn singleton_slots(
     set: &ResidentSet,

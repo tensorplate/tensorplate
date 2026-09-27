@@ -19,6 +19,7 @@ from tensorplate.client import (
 from tensorplate.conventions import YOLO26_E2E_DETECTIONS, YOLO_V8_SINGLE_OUTPUT, detections
 from tensorplate.errors import (
     EndpointResolutionError,
+    EndpointUnavailableError,
     ErrorCode,
     ProtocolError,
     RequestTimeoutError,
@@ -46,6 +47,7 @@ __all__ = [
     "DType",
     "Detection",
     "EndpointResolutionError",
+    "EndpointUnavailableError",
     "ErrorCode",
     "HealthSnapshot",
     "InferResult",

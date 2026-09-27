@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
+import tensorplate
+from tensorplate import ServingClient, VisionClient
 from tensorplate.client import canonicalize_serving_url, resolve_serving_url
-from tensorplate.errors import EndpointResolutionError
+from tensorplate.errors import EndpointResolutionError, EndpointUnavailableError
 
 
 @pytest.mark.parametrize(
@@ -135,3 +137,231 @@ def test_resolve_unknown_profile_raises(tmp_path: Path, monkeypatch: pytest.Monk
     config_file.write_text(json.dumps({"schema_version": "0.1"}), encoding="utf-8")
     with pytest.raises(EndpointResolutionError):
         resolve_serving_url(None, profile="nope", config_path=str(config_file), discover=False)
+
+
+# ---- Discovery against an agent that reports a resident set -----------------
+
+
+def _member(deployment_id: str, generation: int, **fields: object) -> dict[str, object]:
+    member: dict[str, object] = {
+        "deployment_id": deployment_id,
+        "generation": generation,
+        "bundle_digest": "sha256:ab",
+        "state": "serving",
+        "admission_mode": "production",
+        "quota": {"session_count": 0, "domain_bytes": {}},
+    }
+    member.update(fields)
+    return member
+
+
+def _set(*members: dict[str, object]) -> dict[str, object]:
+    return {"set_id": "set-1", "revision": 2, "members": list(members)}
+
+
+class _FakeAgent:
+    """Stands in for the agent's status round trip and counts the calls."""
+
+    def __init__(self, reply: bytes | Exception) -> None:
+        self.reply = reply
+        self.calls = 0
+
+    def __call__(self, transport: object, timeout: float) -> bytes:
+        self.calls += 1
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def _agent_replying(
+    monkeypatch: pytest.MonkeyPatch, reply: dict[str, object] | bytes | Exception
+) -> _FakeAgent:
+    """Answer discovery on the default local profile with ``reply``: an
+    ``agent_status`` object, raw bytes, or an exception to raise."""
+    monkeypatch.delenv("TENSORPLATE_CLI_CONFIG", raising=False)
+    if isinstance(reply, dict):
+        envelope = {"schema_version": "0.1", "status": "ok", "agent_status": reply}
+        reply = json.dumps(envelope).encode("utf-8") + b"\n"
+    fake = _FakeAgent(reply)
+    monkeypatch.setattr("tensorplate.client._agent_status_roundtrip", fake)
+    return fake
+
+
+_STREAM_ONLY_ACTIVE: dict[str, object] = {
+    "deployment_id": "vision-v2",
+    "bundle_digest": "sha256:ab",
+}
+_TWO_MEMBERS: dict[str, object] = {
+    "agent_state": "ready",
+    "resident_set": _set(
+        _member("speech-stt", 3, stream_endpoint="127.0.0.1:18103"),
+        _member("speech-tts", 5, stream_endpoint="127.0.0.1:18105"),
+    ),
+}
+
+
+def test_discovery_uses_the_serving_url_a_set_of_one_projects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Control: a set of one serving member with a loopback unary endpoint.
+    _agent_replying(
+        monkeypatch,
+        {
+            "agent_state": "ready",
+            "active": {**_STREAM_ONLY_ACTIVE, "serving_url": "http://127.0.0.1:18090/infer"},
+            "resident_set": _set(_member("vision-v2", 2, unary_endpoint="http://127.0.0.1:18090")),
+        },
+    )
+    endpoint = resolve_serving_url(None, discover=True)
+    assert endpoint.source == "agent-discovered"
+    assert endpoint.url == "http://127.0.0.1:18090/infer"
+
+
+@pytest.mark.parametrize(
+    ("agent_status", "says"),
+    [
+        pytest.param(
+            {
+                "agent_state": "ready",
+                "active": _STREAM_ONLY_ACTIVE,
+                "resident_set": _set(_member("vision-v2", 2, stream_endpoint="127.0.0.1:18105")),
+            },
+            "no loopback serving URL",
+            id="stream-only-set-of-one",
+        ),
+        pytest.param(
+            {
+                "agent_state": "ready",
+                "active": _STREAM_ONLY_ACTIVE,
+                "resident_set": _set(
+                    _member("vision-v2", 2, unary_endpoint="http://192.0.2.10:18090")
+                ),
+            },
+            "no loopback serving URL",
+            id="off-loopback-set-of-one",
+        ),
+        pytest.param(
+            {
+                "agent_state": "ready",
+                "resident_set": _set(_member("vision-v2", 2, state="quarantined")),
+            },
+            "no loopback serving URL",
+            id="quarantined-set-of-one",
+        ),
+        pytest.param(_TWO_MEMBERS, "resident set of 2 members", id="two-stream-members"),
+        pytest.param(
+            {
+                "agent_state": "ready",
+                "resident_set": _set(
+                    _member("vision-a", 2, unary_endpoint="http://127.0.0.1:18090"),
+                    _member("vision-b", 4, unary_endpoint="http://127.0.0.1:18091"),
+                ),
+            },
+            "resident set of 2 members",
+            id="two-unary-members",
+        ),
+        pytest.param(
+            {"agent_state": "ready", "resident_set": _set()},
+            "no loopback serving URL",
+            id="empty-set",
+        ),
+        pytest.param(
+            {"agent_state": "ready", "resident_set": []},
+            "no loopback serving URL",
+            id="malformed-set-list",
+        ),
+        pytest.param(
+            {"agent_state": "ready", "resident_set": "x"},
+            "no loopback serving URL",
+            id="malformed-set-string",
+        ),
+        pytest.param(
+            {"agent_state": "ready", "resident_set": {"set_id": "s", "members": {}}},
+            "no loopback serving URL",
+            id="malformed-members",
+        ),
+    ],
+)
+def test_discovery_refuses_a_resident_set_without_a_serving_url(
+    monkeypatch: pytest.MonkeyPatch, agent_status: dict[str, object], says: str
+) -> None:
+    agent = _agent_replying(monkeypatch, agent_status)
+    with pytest.raises(EndpointUnavailableError) as raised:
+        resolve_serving_url(None, discover=True)
+    assert isinstance(raised.value, EndpointResolutionError)
+    assert says in str(raised.value)
+    assert agent.calls == 1
+
+
+@pytest.mark.parametrize(
+    "agent_status",
+    [
+        pytest.param({"agent_state": "ready", "active": _STREAM_ONLY_ACTIVE}, id="no-serving-url"),
+        pytest.param({"agent_state": "ready"}, id="no-active"),
+        pytest.param(
+            {"agent_state": "ready", "active": _STREAM_ONLY_ACTIVE, "resident_set": None},
+            id="null-set",
+        ),
+    ],
+)
+def test_discovery_of_a_status_without_a_set_keeps_the_loopback_default(
+    monkeypatch: pytest.MonkeyPatch, agent_status: dict[str, object]
+) -> None:
+    # Control: the legacy fallback is unchanged.
+    _agent_replying(monkeypatch, agent_status)
+    endpoint = resolve_serving_url(None, discover=True)
+    assert endpoint.source == "loopback"
+    assert endpoint.url == "http://127.0.0.1:18080/infer"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(ConnectionRefusedError("refused"), id="unreachable"),
+        pytest.param(b"not json\n", id="undecodable"),
+        pytest.param(b'{"schema_version":"0.1","status":"error"}\n', id="not-ok"),
+    ],
+)
+def test_an_unusable_agent_reply_still_falls_back(
+    monkeypatch: pytest.MonkeyPatch, reply: bytes | Exception
+) -> None:
+    # Control: discovery stays best-effort.
+    _agent_replying(monkeypatch, reply)
+    assert resolve_serving_url(None, discover=True).source == "loopback"
+
+
+def test_overrides_and_discover_false_never_ask_the_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Control: a resident set cannot refuse a caller that names the URL or
+    # opts out of discovery.
+    agent = _agent_replying(monkeypatch, _TWO_MEMBERS)
+    assert resolve_serving_url("http://127.0.0.1:18091", discover=True).source == "explicit"
+    config = {
+        "schema_version": "0.1",
+        "default_profile": "local",
+        "profiles": {
+            "local": {
+                "mode": "local",
+                "socket_path": "/nonexistent",
+                "serving_url": "http://127.0.0.1:18092",
+            }
+        },
+    }
+    config_file = tmp_path / "cli.json"
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    assert resolve_serving_url(None, config_path=str(config_file)).source == "profile"
+    assert resolve_serving_url(None, discover=False).source == "loopback"
+    assert agent.calls == 0
+
+
+def test_client_construction_surfaces_endpoint_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _agent_replying(monkeypatch, _TWO_MEMBERS)
+    with pytest.raises(EndpointUnavailableError):
+        ServingClient()
+    with pytest.raises(EndpointUnavailableError):
+        VisionClient()
+    assert "EndpointUnavailableError" in tensorplate.__all__
+    assert tensorplate.EndpointUnavailableError is EndpointUnavailableError
