@@ -1,4 +1,4 @@
-# Reboot check for the pre-flight box the E06-F01-T03 reboot stage depends on:
+# Reboot check the lifecycle report's reboot stage depends on:
 # does SSH and the GCE guest agent come back with the tensorplate-agent
 # unit autostart disabled?
 tensorplate-agent enabled state : disabled
