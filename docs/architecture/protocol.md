@@ -43,6 +43,10 @@ versions with a typed error so that the runtime maps them to
 `Error::Code::Unsupported` and surfaces a stable error code to the
 operator. Bypassing the helper loses the guarantee.
 
+Bundle manifests decode through `tensorplate_protocol::bundle::parse_bundle`
+instead: format 0.2 fields are checked against the manifest's own text, so
+the helper refuses a format 0.2 manifest rather than return it unchecked.
+
 Bumping the protocol version requires touching:
 
 - `CMakeLists.txt` (`TP_PROTOCOL_VERSION_MAJOR/MINOR`)

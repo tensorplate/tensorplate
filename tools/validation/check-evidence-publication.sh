@@ -21,14 +21,16 @@
 #             a pattern cannot know that an ordinary word is a host name
 #
 # Every file and directory name below each PATH is scanned as well as
-# every file's contents. Contents are scanned line by line, then again as
-# the decoded strings of every JSON object or array found in them: a whole
-# document, JSON Lines, concatenated pretty-printed records, or a record
-# quoted after other text. JSON arrays of byte values are decoded too,
-# because journalctl encodes a non-printable or non-UTF-8 field value that
-# way. A symlink, a special file, and a file that is not UTF-8 text or
-# contains NUL are findings: archives and terminal captures cannot be
-# reviewed and are never publishable.
+# every file's contents. Contents are scanned line by line, then as CSV
+# tables whose header names a serial column, whose rows carry the value
+# with no label, then again as the decoded strings of every JSON object or
+# array found in them: a whole document, JSON Lines, concatenated
+# pretty-printed records, or a record quoted after other text. JSON arrays
+# of byte values are decoded too, because journalctl encodes a
+# non-printable or non-UTF-8 field value that way. A symlink, a special
+# file, and a file that is not UTF-8 text or contains NUL are findings:
+# archives and terminal captures cannot be reviewed and are never
+# publishable.
 #
 # Findings print as `<ref>:<line>: <class> (<n> chars)`. `<ref>` is the
 # path relative to the PATH argument, or `path#N` when a component of the
@@ -70,6 +72,7 @@ scan_status=0
 python3 - "$repo_root" "$@" <<'PY' || scan_status=$?
 # Keep this compatible with Python 3.9: that is /usr/bin/python3 on the
 # macOS hosts operators sanitize evidence on.
+import csv
 import ipaddress
 import json
 import os
@@ -249,7 +252,22 @@ INTERNAL_DNS_ALLOWED = "metadata.google.internal"
 SERIAL = re.compile(
     r"(?i)(?:serial(?:[\s_-]?(?:number|no\.?))?|(?<![a-z])udid)(?![a-z])"
     r"(?:[ \t]*[^:=\n \t]){0,16}?[ \t]*[:=][ \t]*[\"']?([^\s\"',;}]*)")
-SERIAL_ALLOWED = re.compile(r"REDACTED|0+")
+# nvidia-smi's own "not available" (`N/A`, `[N/A]` in CSV) names no device,
+# so it stays as recorded.
+SERIAL_ALLOWED = re.compile(r"REDACTED|0+|N/A|\[N/A\]")
+# The same labels as an XML element, qualified or not: `<serial>` and
+# `<chassis_serial_number>` in `nvidia-smi -q -x`.
+SERIAL_ELEMENT = re.compile(
+    r"(?i)<(?:[a-z0-9]+[_-])*(?:serial(?:[_-]?(?:number|no))?|udid)[ \t]*>[ \t]*([^\s<]*)")
+# In CSV the label is the column's header, printed once: `nvidia-smi
+# --query-gpu=... --format=csv` names its columns as `index, name, serial,
+# memory.total [MiB]`, then prints one unlabelled row per device.
+CSV_COLUMN_NAME = re.compile(r"[A-Za-z0-9_.-]+(?: \[[^\]]*\])?")
+CSV_SERIAL_COLUMN = re.compile(
+    r"(?i)(?:[a-z0-9]+[._])*(?:serial(?:[_.-]?(?:number|no))?|udid)")
+CSV_SERIAL_HINT = re.compile(r"(?i)serial|udid")
+# nvidia-smi's placeholder for a value it cannot give: `[N/A]`, `[Not Supported]`.
+CSV_PLACEHOLDER = re.compile(r"\[[^\]]*\]")
 
 # The GPU PDI, a per-device identifier nvidia-smi prints beside the serial
 # and UUID: `GPU PDI : <value>` in `-q`, `<pdi>` in `-q -x`. Like a serial,
@@ -258,6 +276,7 @@ PDI_LABELLED = re.compile(
     r"(?:(?<![A-Za-z0-9])(?i:pdi)|(?<=[a-z0-9])P(?i:di))"
     r"\\*[\"']?[ \t]*[:=][ \t]*\\*[\"']?([^\s\"'\\,;}<]*)")
 PDI_ELEMENT = re.compile(r"(?i)<pdi[ \t]*>[ \t]*([^\s<]*)")
+PDI_ALLOWED = re.compile(r"REDACTED|0+")
 
 CREDENTIAL = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"
@@ -276,6 +295,35 @@ AUTH_CREDENTIAL = re.compile(
 # prefix, with or without the epic segment, and without the prefix.
 PLANNING_ID = re.compile(
     r"(?<![A-Za-z0-9])(?:V\d{2,3}(?:-[EFT]\d{2})+|E\d{2}-F\d{2}(?:-T\d{2})?)(?![A-Za-z0-9])")
+# A planning wave label: `w` and one digit, not part of a longer word or
+# number, or after a package revision's `<digit>+`, where letters may follow.
+WAVE_LABEL = re.compile(
+    r"(?<![A-Za-z0-9])[Ww][0-9](?![A-Za-z0-9])|(?<=[0-9]\+)[Ww][0-9](?![0-9])")
+# Base64 of random bytes spells `<digit>+w<digit>` by chance. A package
+# revision's `+` never sits in a run of 40 base64 characters; a path's
+# `/w<digit>/` can, so only a label after a `+` is left alone there.
+BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{40,}")
+# Besides white space, what may set off a short option's token, as argv
+# lists, quoted commands and pipelines write one.
+OPTION_BEFORE = frozenset("\"'`[(,")
+OPTION_AFTER = frozenset("\"'`]),|;")
+# Intel names its workstation Xeons `w` and one digit: `Intel(R) Xeon(R)
+# w<digit>-<model>` in /proc/cpuinfo and lscpu.
+XEON_W = re.compile(r"Xeon(?:\(R\)|\u00ae)? $")
+
+
+def is_short_option(line, start, end):
+    """Whether line[start:end] is the value of a short option standing
+    alone, as `base64` takes its wrap width: `-w` and a digit."""
+    before = line[max(0, start - 2):start - 1]
+    after = line[end:end + 1]
+    return (line[start - 1:start] == "-"
+            and (not before.strip() or before in OPTION_BEFORE)
+            and (not after.strip() or after in OPTION_AFTER))
+
+
+def in_base64_run(line, start, end):
+    return any(m.start() <= start and end <= m.end() for m in BASE64_RUN.finditer(line))
 
 
 def fault(message):
@@ -396,12 +444,13 @@ def scan_variant(line, literals):
     for m in INTERNAL_DNS.finditer(line):
         if m.group(1).lower() != INTERNAL_DNS_ALLOWED:
             add("internal-dns", m.group(1))
-    for m in SERIAL.finditer(line):
-        if m.group(1) and not SERIAL_ALLOWED.fullmatch(m.group(1)):
-            add("serial", m.group(1))
-    for pattern in (PDI_LABELLED, PDI_ELEMENT):
+    for pattern in (SERIAL, SERIAL_ELEMENT):
         for m in pattern.finditer(line):
             if m.group(1) and not SERIAL_ALLOWED.fullmatch(m.group(1)):
+                add("serial", m.group(1))
+    for pattern in (PDI_LABELLED, PDI_ELEMENT):
+        for m in pattern.finditer(line):
+            if m.group(1) and not PDI_ALLOWED.fullmatch(m.group(1)):
                 add("gpu-pdi", m.group(1))
     for m in CREDENTIAL.finditer(line):
         add("credential", m.group(0))
@@ -409,6 +458,14 @@ def scan_variant(line, literals):
         add("credential", m.group(0))
     for m in PLANNING_ID.finditer(line):
         add("planning-id", m.group(0))
+    for m in WAVE_LABEL.finditer(line):
+        if is_short_option(line, m.start(), m.end()):
+            continue
+        if line[m.start() - 1:m.start()] == "+" and in_base64_run(line, m.start(), m.end()):
+            continue
+        if XEON_W.search(line, max(0, m.start() - 8), m.start()):
+            continue
+        add("wave-label", m.group(0))
     for number, pattern, length in literals:
         for _ in pattern.finditer(line):
             found.append(("operator-literal literal #%d" % number, length))
@@ -565,17 +622,70 @@ def json_values(text):
         yield first, line, value
 
 
+def csv_fields(line):
+    try:
+        return [field.strip() for field in next(csv.reader([line], skipinitialspace=True))]
+    except csv.Error:
+        # A stray carriage return or an oversized field: no header or row.
+        return None
+
+
+def csv_serial_header(line):
+    """(serial column indexes, width) when line is a CSV header naming a
+    serial column, else None."""
+    if not CSV_SERIAL_HINT.search(line):
+        return None
+    fields = csv_fields(line)
+    if not fields or not all(CSV_COLUMN_NAME.fullmatch(field) for field in fields):
+        return None
+    columns = [index for index, field in enumerate(fields)
+               if CSV_SERIAL_COLUMN.fullmatch(field)]
+    return (columns, len(fields)) if columns else None
+
+
+def csv_serials(lines):
+    """(line number, length) of each value in a CSV table's serial column.
+
+    Rows follow the header with as many fields, and end at a line that has
+    not, or whose serial field is more than one word, as an echoed command's
+    can be; a bracketed placeholder is a value, not the end."""
+    found = []
+    table = None
+    for number, line in enumerate(lines, 1):
+        header = csv_serial_header(line)
+        if header is not None:
+            table = header
+            continue
+        if table is None:
+            continue
+        columns, width = table
+        fields = csv_fields(line)
+        if fields is None or len(fields) != width \
+                or any(len(fields[index].split()) > 1
+                       and not CSV_PLACEHOLDER.fullmatch(fields[index]) for index in columns):
+            table = None
+            continue
+        for index in columns:
+            if fields[index] and not SERIAL_ALLOWED.fullmatch(fields[index]):
+                found.append((number, len(fields[index])))
+    return found
+
+
 def scan_text(text, literals):
-    """Set of (line, class, length) for text: its lines, then its JSON values.
+    """Set of (line, class, length) for text: its lines, its CSV tables,
+    then its JSON values.
 
     A finding inside a JSON value is reported on the line the value starts
     on, unless a line the value spans already reported the same finding.
     """
     on_line = {}
-    for number, line in enumerate(text.split("\n"), 1):
+    lines = text.split("\n")
+    for number, line in enumerate(lines, 1):
         findings = scan_line(line, literals)
         if findings:
             on_line[number] = set(findings)
+    for number, length in csv_serials(lines):
+        on_line.setdefault(number, set()).add(("serial", length))
     found = set((number, cls, length)
                 for number, findings in on_line.items() for cls, length in findings)
     for first, last, value in json_values(text):

@@ -141,17 +141,28 @@ check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
 check "  classed cloud-project" "yes" "$(has ": cloud-project" "${d}.out")"
 check "  without printing the value" "no" "$(has "$project" "${d}.out")"
 
-# The serial rule needs a `:` or `=` after the label; the XML tags the value
-# instead, so a device serial is the literal file's job.
-printf 'a serial in the XML tag form is NOT caught by pattern\n'
+printf 'a serial in the XML tag form is caught by pattern\n'
 new_case
 serial="$(random_digits 13)"
 replace_in_xml "<serial>REDACTED</serial>" "<serial>${serial}</serial>"
-check "passes with patterns only" "0" "$(scan "${d}.out" --patterns-only "$d")"
+check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
+check "  classed serial" "yes" "$(has ": serial" "${d}.out")"
+check "  without printing the value" "no" "$(has "$serial" "${d}.out")"
 
-printf 'the same serial IS caught when the operator lists it\n'
-printf '%s\n' "$serial" >"$literals"
-check "is a finding with --literals" "1" "$(scan "${d}.out" --literals "$literals" "$d")"
+# The CSV names the serial column once, in its header, and prints the value
+# unlabelled on the device's row.
+printf 'a serial in the CSV serial column is caught by pattern\n'
+new_case
+python3 - "${d}/nvidia-smi-query-gpu.csv" "$serial" <<'PY' || die "could not rewrite the CSV"
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text(encoding="utf-8")
+if text.count(", REDACTED, ") != 1:
+    raise SystemExit("the recording no longer carries one REDACTED serial")
+p.write_text(text.replace(", REDACTED, ", ", " + sys.argv[2] + ", "), encoding="utf-8")
+PY
+check "is a finding" "1" "$(scan "${d}.out" --patterns-only "$d")"
+check "  classed serial" "yes" "$(has ": serial" "${d}.out")"
 check "  without printing the value" "no" "$(has "$serial" "${d}.out")"
 
 # No pattern class covers a PCI bus id, so the recordings carry a synthetic

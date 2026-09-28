@@ -162,8 +162,9 @@ release validation:
 ### Other blocks
 
 `speech`, `embedding`, and `custom` blocks exist for forward
-compatibility. v0.1.0 parses them without semantic validation beyond the
-class consistency check.
+compatibility. Format 0.1 parses them without semantic validation beyond
+the class consistency check. Under format 0.2 the `speech` block is the
+speech contract described in [Format 0.2](#format-02).
 
 ---
 
@@ -225,6 +226,85 @@ form: every required artifact must publish a `sha256:hex` digest, and
 stripped.
 
 ---
+
+## Format 0.2
+
+A manifest opts into format 0.2 with `"format_version": "0.2"`; the
+envelope keeps `"schema_version": "0.1"`. A format 0.1 manifest that the
+schema accepts parses as before, and the keys below mean nothing to it:
+they stay in `BundleManifest.extra` like any other unknown key. (A
+sequence-shaped `speech` block, which the schema never allowed, now
+rejects.)
+
+Under format 0.2 the parser decodes these fields from the manifest's own
+text into `BundleManifest.profile` before anything else, and decodes them
+strictly: an unknown key, a `model_blocks` key that is not a class slug, a
+repeated key in any object, a present `null` where the field is not
+nullable, an array where an object belongs, or a number that is not an
+exact nonnegative integer (judged on its written form, so
+`1.0000000000000001` rejects while `4096.0` is 4096) fails the bundle with
+a `manifest_semantics` error naming the field. Format 0.2 manifests decode
+only through the bundle parser; `decode_with_version_check` refuses them.
+
+| Field | Meaning |
+| --- | --- |
+| `runner_profile` | Installed runner profile id, `lower_snake_case` (e.g. `faster_whisper`, `kokoro`); names a `runner_profiles[].id` in the backend descriptor, never a module or path. |
+| `hardware_compatibility` | Platform support row ids the bundle declares, unique. |
+| `compute_type` | Compute type the profile loads the model with; one of the descriptor's `compute_types` spellings (`float16`, `float32`, ...). |
+| `support_level` | Requested claim: `production`, `preview` or `experimental`. Registry evidence grants support; the manifest cannot. |
+| `warmup` | `fixtures` (1–16 `artifacts[].path` entries, so each is hashed), `repetitions` (1–100) and `timeout_ms` (1–600,000). |
+| `pipeline_stages` | 1–16 ordered stages, each `{stage, ownership, observable?, interface?}`. A `runtime_owned` stage is one of `ingress`, `vad`, `preprocessing`, `backend`, `postprocessing`, `egress`; a `caller_owned` stage names the caller's span and may carry an `interface` label. `observable: false` marks a stage fused into another, which reports `not_observable`. Stage names are unique. |
+| `memory_budget_by_domain` | Per-domain budgets under `shared_pool`, `guest_ram` and `device_vram`, each a line-item object of [`memory_budget_breakdown.json`](../../config/schemas/memory_budget_breakdown.json). A speech bundle declares `os_reserve_bytes: 0`; the row's admission configuration holds the OS reserve. |
+| `memory_budget_breakdown_bytes` | The same line items summed across domains; when both are present it must equal the per-line sum. It is a reporting total, not an admission input. |
+| `max_concurrent_sessions` | Declared upper bound, 1–2048. |
+| `degraded_profile` | `null` for no quality-changing degradation, or a reserved profile id. |
+
+The schema validates the same fields in its `format_0_2` definition; its
+description lists the checks readers make beyond it. A validator must be
+given `config/schemas/memory_budget_breakdown.json` beside the manifest
+schema, which references its line-item definition.
+
+### Speech contract
+
+Format 0.2's `model_blocks.speech` declares one task and serving mode and
+everything a session may request from it:
+
+```json
+"speech": {
+  "task":            "stt",                 // stt | tts
+  "serving_mode":    "streaming",           // streaming | batch
+  "languages":       ["en", "ar"],          // language tags, unique
+  "input_audio_formats": [                  // STT only
+    {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
+    {"encoding": "mulaw",     "sample_rate_hz": 8000,  "channels": 1}
+  ],
+  "chunking": {"frame_ms_min": 20, "frame_ms_max": 320, "max_utterance_ms": 30000},
+  "algorithm_profile":        {"id": "stt_vad_chunked", "digest": "sha256:..."},
+  "quality_profile_digest":   "sha256:...",
+  "benchmark_profile_digest": "sha256:..."
+}
+```
+
+- STT declares `input_audio_formats`, which must include 16 kHz mono
+  `pcm_s16le`; 8 kHz mono G.711 μ-law is the one other accepted format.
+  It declares no voices and no output audio.
+- TTS declares `voices` (`lower_snake_case`, e.g. `af_heart`) and
+  `output_audio_formats`, of which 24 kHz mono `pcm_s16le` is the one
+  accepted format. It declares no input audio.
+- `chunking` is required. For STT it bounds frames to 20–320 ms and
+  utterances to 30 s; for TTS it declares `max_segment_text_bytes` (up to
+  4,096), `max_segment_phoneme_tokens` (up to 200), `max_segment_audio_ms`
+  (up to 30,000), `max_synthesis_text_bytes` (up to 16,384) and
+  `max_synthesis_audio_ms` (up to 120,000). A minimum never exceeds its
+  maximum and a segment limit never exceeds its synthesis limit.
+- Digests are `sha256:` followed by 64 lowercase hex digits.
+- A streaming contract resolves to the `stt_streaming` or `tts_streaming`
+  serving mode; there is no second mode selector. Per-session memory is
+  declared only in the budget lines.
+
+The format 0.2 fixtures in
+[`test/models/bundles/v0_2/`](../../test/models/bundles/v0_2/README.md)
+show both tasks, with the rejected variants beside them.
 
 ## Forward compatibility
 

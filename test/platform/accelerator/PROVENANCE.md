@@ -204,7 +204,6 @@ value, `00000000:00:00.0`, everywhere it appears — the `<gpu id>` attribute,
 `<pci_device>` and `<pci_domain>` components, and the `<board_id>` that
 carried the same bus and device numbers, set to match.
 `test/validation/memory_observation_publication_test.sh` pins which of those
-the publication scanner catches by pattern and which it does not: a serial
-in the XML tag form and a PCI bus id are the operator's literal file's job,
-and the test holds every field that locates the device at its synthetic
-value, since no pattern guards them.
+the publication scanner catches by pattern and which it does not: a PCI bus
+id is the operator's literal file's job, and the test holds every field that
+locates the device at its synthetic value, since no pattern guards them.

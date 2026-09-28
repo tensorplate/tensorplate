@@ -114,7 +114,11 @@ error. See [`protocol.md`](protocol.md#versioning).
   artifacts, or changes to digest semantics.
 
 Bundle format compatibility is validated by the agent during the
-`verified` phase before staging.
+`verified` phase before staging. Format 0.2 is an opt-in minor: a manifest
+that declares it has its general profile fields and speech contract
+decoded strictly, and a format 0.1 manifest the schema accepts parses as
+before (see
+[`docs/bundles/manifest.md`](../bundles/manifest.md#format-02)).
 
 ## Compatibility checks (planned)
 

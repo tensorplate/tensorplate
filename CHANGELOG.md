@@ -455,9 +455,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   of one moment rather than projections of each other.
   `test/validation/memory_observation_publication_test.sh` pins which
   identifier classes the publication scanner catches by pattern in that
-  shape and which it does not: a device UUID, a GPU PDI and a cloud
-  project are caught, and a serial in the XML tag form and a PCI bus id
-  are not, so both are the operator's literal file's job. The recordings
+  shape and which it does not: a device UUID, a GPU PDI, a cloud project
+  and a serial, in the XML tag or the CSV column, are caught, and a PCI
+  bus id is not, so it is the operator's literal file's job. The recordings
   carry a synthetic PCI bus id, and the test holds every field that
   locates the device at that value. The evidence-publication workflow now
   scans `test/platform` beside `docs/validation/evidence`, since both hold
@@ -534,6 +534,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   these two tensors are a candidate-only convention, not a public bundle
   format, and go away when the speech bundle format lands.
   (V030-E01-F02-T01, V030-E01-F02-T02)
+- Bundle manifests can opt into format 0.2 with `"format_version": "0.2"`
+  under the unchanged `schema_version` 0.1 envelope. The manifest schema
+  gains a format 0.2 branch and the protocol crate a `bundle_profile`
+  module that decodes its fields into `BundleManifest.profile`:
+  `runner_profile`, `hardware_compatibility`, `compute_type`,
+  `support_level`, `warmup`, `pipeline_stages`, `memory_budget_by_domain`,
+  `memory_budget_breakdown_bytes` (the per-line sum of the domains when
+  both are present), `max_concurrent_sessions`, `degraded_profile`, and
+  the speech contract under `model_blocks.speech`: task `stt` or `tts`,
+  serving mode, languages, voices, the supported audio formats (STT
+  16 kHz PCM with an optional 8 kHz μ-law path, TTS 24 kHz PCM16),
+  required chunking limits and profile digests. Decoding reads the
+  manifest's own text before the envelope and fails closed on unknown or
+  repeated keys, present nulls, array-shaped objects and inexact numbers;
+  `decode_with_version_check` refuses format 0.2 manifests. A format 0.1
+  manifest the schema accepts parses as before and keeps these keys as
+  extras; a sequence-shaped speech block, which the schema never allowed,
+  now rejects, and a re-serialized speech block keeps the keys it does
+  not read. The budget lines
+  reuse `config/schemas/memory_budget_breakdown.json` by reference, and
+  the two speech budget fixtures now declare no OS reserve and a sidecar
+  residual. Fixtures: `test/models/bundles/v0_2/`. Additive inside
+  protocol 0.1; version constants unchanged. (V030-E02-F01-T01)
 
 ### Changed
 
@@ -626,6 +649,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   clean-room guides no longer show `rollback --deployment-id`, which the
   CLI never accepted and which now names a member.
 
+- The macOS Homebrew lifecycle harness names its smoke deployment
+  `macos-deploy-smoke-<UTC time>`, as it names the offline one
+  `macos-offline-deploy-<UTC time>`, instead of a name that began with a
+  planning wave label. Evidence already recorded keeps the name it was
+  recorded with. (V030-E06-F02-T01)
+
 ### Fixed
 
 - `HttpServer::stop()` closed the listening socket while the accept
@@ -646,6 +675,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (V030-E06-F02-T01)
 - The Python sidecar's `error` objects now carry the `schema_version` that
   `error.json` requires. (V030-E01-F02-T01)
+- The evidence scanner found a serial number only after a label and a
+  colon or equals sign. It now also reports one as an XML element,
+  qualified or not (`<serial>` and `<chassis_serial_number>` in
+  `nvidia-smi -q -x`), and in a CSV column whose header names it, as
+  `nvidia-smi --query-gpu ... --format=csv` prints one: the rows under the
+  header up to the first with another field count, or with more than one
+  word in the serial field other than a bracketed placeholder such as
+  `[Not Supported]`. In every serial form the driver's own `N/A` (`[N/A]`
+  in CSV) now stays as recorded; a GPU PDI still takes `REDACTED`. Neither
+  scanner knew a planning wave label, `w` and one digit standing alone or
+  after the `+` of a package revision: the evidence scanner now reports
+  one as `wave-label`, except after a `+` inside a long base64 run or in
+  an Intel workstation Xeon's model name, and the public hygiene scan does
+  so in a branch name, the checked-out one or the one the new
+  `--branch FILE` names, which the pull request job now passes (a head
+  that predates the option gets the name as a message, as before). Source
+  files, commit messages and pull request text are not checked for it,
+  since the same shape is a compiler flag or a register name there. The
+  evidence README gains a synthetic value for a physical host's PCI bus
+  id, and says a cloud machine type's virtual PCI topology, the same on
+  every instance, may stay as recorded. (V030-E06-F02-T01)
 
 ### Security
 

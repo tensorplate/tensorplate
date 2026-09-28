@@ -145,7 +145,7 @@ mkdir -p "$evidence_dir"
 evidence_dir="$(cd "$evidence_dir" && pwd)"
 work_dir="$(mktemp -d)"
 stage_results="${evidence_dir}/stages.tsv"
-smoke_deployment_id="wave-2b-macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
+smoke_deployment_id="macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)"
 offline_deployment_id="macos-offline-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
 printf 'stage\tstatus\tstarted_at\tfinished_at\tlog\n' >"$stage_results"
 

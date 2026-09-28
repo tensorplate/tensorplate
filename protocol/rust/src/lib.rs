@@ -34,6 +34,7 @@ pub mod buffer_pressure_event;
 pub mod buffer_ref;
 pub mod bundle;
 pub mod bundle_manifest;
+pub mod bundle_profile;
 pub mod control_loop_metrics;
 pub mod correlation_id;
 pub mod deploy_transaction;
@@ -92,6 +93,13 @@ pub use bundle_manifest::{
     RuntimeCompatibility, SbomReference, SpeechBlock, TargetHardware, TokenizerKind, VisionBlock,
     VisionInputSize, VisionNormalization, VitisAiPrecision, VitisQuantizeStrategy, VlaBlock,
     MAX_ARTIFACT_DESCRIPTION_BYTES, MAX_IO_LABEL_BYTES, RECOGNIZED_BACKEND_HINTS,
+};
+pub use bundle_profile::{
+    AudioEncoding, AudioFormat, BundleProfile, BundleProfileError, DegradedProfile,
+    MemoryBudgetByDomain, PipelineStage, ProfileReference, SpeechChunking, SpeechContract,
+    SpeechServingMode, SpeechTask, StageOwnership, SttChunking, SupportLevel, TtsChunking, Warmup,
+    PROFILE_FORMAT_VERSION, RUNTIME_PIPELINE_STAGES, STT_INPUT_AUDIO_FORMATS,
+    TTS_OUTPUT_AUDIO_FORMATS,
 };
 pub use control_loop_metrics::{
     ControlLoopEvent, ControlLoopLabels, ControlLoopSummary, MAX_CONTROL_LOOP_LABEL_BYTES,

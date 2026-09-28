@@ -389,15 +389,7 @@
         },
         "speech": {
           "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "task": {
-              "type": "string",
-              "enum": ["asr", "tts", "diarization", "vad", "custom"]
-            },
-            "sample_rate_hz": {"type": "integer", "minimum": 0},
-            "feature_extractor": {"type": "string", "maxLength": 64}
-          }
+          "description": "Speech-class block. Its shape depends on `format_version`: 0.1 keeps the published block (`definitions.speech_block_0_1`); 0.2 uses the speech contract (`definitions.speech_contract`). The root `allOf` selects between them."
         },
         "language": {
           "type": "object",
@@ -510,6 +502,263 @@
           }
         }
       }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["format_version"],
+        "properties": {"format_version": {"const": "0.2"}}
+      },
+      "then": {"$ref": "#/definitions/format_0_2"},
+      "else": {
+        "properties": {
+          "model_blocks": {
+            "properties": {"speech": {"$ref": "#/definitions/speech_block_0_1"}}
+          }
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "speech_block_0_1": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The format 0.1 speech block, unchanged from the v0.1.0 schema.",
+      "properties": {
+        "task": {
+          "type": "string",
+          "enum": ["asr", "tts", "diarization", "vad", "custom"]
+        },
+        "sample_rate_hz": {"type": "integer", "minimum": 0},
+        "feature_extractor": {"type": "string", "maxLength": 64}
+      }
+    },
+    "format_0_2": {
+      "description": "Fields a manifest opts into with `format_version: \"0.2\"`. Under format 0.1 these keys stay forward-compatible extras with no meaning. `memory_budget_breakdown_bytes` and each domain of `memory_budget_by_domain` use the canonical line items of `config/schemas/memory_budget_breakdown.json`, which a validator must be given alongside this document. Beyond this schema, readers also require every `warmup.fixtures` entry to name an `artifacts[].path`, `pipeline_stages` stage names to be unique, `memory_budget_breakdown_bytes` to equal the per-line sum of the declared domains when both are present, the speech contract's `chunking` minimums not to exceed its maximums, and a TTS segment limit not to exceed its synthesis limit.",
+      "properties": {
+        "runner_profile": {"$ref": "#/definitions/snake_identifier"},
+        "hardware_compatibility": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "description": "Platform support row ids this bundle declares it runs on.",
+          "items": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"}
+        },
+        "compute_type": {
+          "type": "string",
+          "enum": ["float32", "float16", "bfloat16", "int8", "int8_float32", "int8_float16", "int8_bfloat16", "int16"],
+          "description": "Compute type the runner profile loads the model with; one of the installed profile's `compute_types`."
+        },
+        "warmup": {"$ref": "#/definitions/warmup"},
+        "pipeline_stages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/definitions/pipeline_stage"}
+        },
+        "memory_budget_by_domain": {"$ref": "#/definitions/memory_budget_by_domain"},
+        "memory_budget_breakdown_bytes": {
+          "$ref": "https://tensorplate.com/schemas/v0.1/memory_budget_breakdown.json#/definitions/memory_budget_breakdown_bytes"
+        },
+        "max_concurrent_sessions": {"type": "integer", "minimum": 1, "maximum": 2048},
+        "degraded_profile": {
+          "oneOf": [{"type": "null"}, {"$ref": "#/definitions/snake_identifier"}]
+        },
+        "support_level": {
+          "type": "string",
+          "enum": ["production", "preview", "experimental"]
+        },
+        "model_blocks": {
+          "properties": {"speech": {"$ref": "#/definitions/speech_contract"}}
+        }
+      }
+    },
+    "snake_identifier": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$"
+    },
+    "sha256_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "warmup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtures", "repetitions", "timeout_ms"],
+      "description": "Declared readiness warmup: inputs taken from hashed bundle artifacts, run a fixed number of times within a deadline.",
+      "properties": {
+        "fixtures": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        },
+        "repetitions": {"type": "integer", "minimum": 1, "maximum": 100},
+        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000}
+      }
+    },
+    "pipeline_stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "ownership"],
+      "description": "One ordered pipeline stage. Runtime-owned stages are built-in stage ids; caller-owned stages run outside the runtime and carry only their span identity and interface label.",
+      "properties": {
+        "stage": {"$ref": "#/definitions/snake_identifier"},
+        "ownership": {"type": "string", "enum": ["runtime_owned", "caller_owned"]},
+        "observable": {
+          "type": "boolean",
+          "default": true,
+          "description": "False when the stage runs fused inside another and reports `not_observable` rather than its own span."
+        },
+        "interface": {"type": "string", "minLength": 1, "maxLength": 64}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"ownership": {"const": "runtime_owned"}}},
+          "then": {
+            "properties": {
+              "stage": {"enum": ["ingress", "vad", "preprocessing", "backend", "postprocessing", "egress"]}
+            },
+            "not": {"required": ["interface"]}
+          }
+        }
+      ]
+    },
+    "memory_budget_by_domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Per-domain budgets, each a canonical line-item object. Which domains a deployment needs follows the target row's memory profile.",
+      "properties": {
+        "shared_pool": {"$ref": "https://tensorplate.com/schemas/v0.1/memory_budget_breakdown.json#/definitions/memory_budget_breakdown_bytes"},
+        "guest_ram": {"$ref": "https://tensorplate.com/schemas/v0.1/memory_budget_breakdown.json#/definitions/memory_budget_breakdown_bytes"},
+        "device_vram": {"$ref": "https://tensorplate.com/schemas/v0.1/memory_budget_breakdown.json#/definitions/memory_budget_breakdown_bytes"}
+      }
+    },
+    "profile_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "digest"],
+      "properties": {
+        "id": {"$ref": "#/definitions/snake_identifier"},
+        "digest": {"$ref": "#/definitions/sha256_digest"}
+      }
+    },
+    "stt_input_audio_format": {
+      "description": "Audio formats the STT ingress stage accepts.",
+      "enum": [
+        {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
+        {"encoding": "mulaw", "sample_rate_hz": 8000, "channels": 1}
+      ]
+    },
+    "tts_output_audio_format": {
+      "description": "Audio formats the TTS egress stage produces.",
+      "enum": [
+        {"encoding": "pcm_s16le", "sample_rate_hz": 24000, "channels": 1}
+      ]
+    },
+    "stt_chunking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_ms_min", "frame_ms_max", "max_utterance_ms"],
+      "properties": {
+        "frame_ms_min": {"type": "integer", "minimum": 20, "maximum": 320},
+        "frame_ms_max": {"type": "integer", "minimum": 20, "maximum": 320},
+        "max_utterance_ms": {"type": "integer", "minimum": 1, "maximum": 30000}
+      }
+    },
+    "tts_chunking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_segment_text_bytes",
+        "max_segment_phoneme_tokens",
+        "max_segment_audio_ms",
+        "max_synthesis_text_bytes",
+        "max_synthesis_audio_ms"
+      ],
+      "properties": {
+        "max_segment_text_bytes": {"type": "integer", "minimum": 1, "maximum": 4096},
+        "max_segment_phoneme_tokens": {"type": "integer", "minimum": 1, "maximum": 200},
+        "max_segment_audio_ms": {"type": "integer", "minimum": 1, "maximum": 30000},
+        "max_synthesis_text_bytes": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "max_synthesis_audio_ms": {"type": "integer", "minimum": 1, "maximum": 120000}
+      }
+    },
+    "speech_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task",
+        "serving_mode",
+        "languages",
+        "chunking",
+        "algorithm_profile",
+        "quality_profile_digest",
+        "benchmark_profile_digest"
+      ],
+      "description": "The format 0.2 speech block: one task and serving mode, the languages, voices and audio formats a session may request, its chunking limits, and the digests of the streaming algorithm, quality and benchmark profiles. Per-session memory is declared only in the budget lines. STT declares input audio formats, including 16 kHz PCM, and no voices; TTS declares output audio formats and at least one voice.",
+      "properties": {
+        "task": {"type": "string", "enum": ["stt", "tts"]},
+        "serving_mode": {"type": "string", "enum": ["streaming", "batch"]},
+        "languages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"type": "string", "maxLength": 35, "pattern": "^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"}
+        },
+        "voices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/snake_identifier"}
+        },
+        "input_audio_formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/stt_input_audio_format"}
+        },
+        "output_audio_formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/definitions/tts_output_audio_format"}
+        },
+        "chunking": {"type": "object"},
+        "algorithm_profile": {"$ref": "#/definitions/profile_reference"},
+        "quality_profile_digest": {"$ref": "#/definitions/sha256_digest"},
+        "benchmark_profile_digest": {"$ref": "#/definitions/sha256_digest"}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["task"], "properties": {"task": {"const": "stt"}}},
+          "then": {
+            "required": ["input_audio_formats"],
+            "properties": {
+              "input_audio_formats": {
+                "contains": {"const": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}}
+              },
+              "chunking": {"$ref": "#/definitions/stt_chunking"}
+            },
+            "not": {"anyOf": [{"required": ["output_audio_formats"]}, {"required": ["voices"]}]}
+          }
+        },
+        {
+          "if": {"required": ["task"], "properties": {"task": {"const": "tts"}}},
+          "then": {
+            "required": ["output_audio_formats", "voices"],
+            "properties": {"chunking": {"$ref": "#/definitions/tts_chunking"}},
+            "not": {"required": ["input_audio_formats"]}
+          }
+        }
+      ]
     }
   }
 }

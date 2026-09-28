@@ -14,7 +14,7 @@ objects in the runtime.
 | `vision`    | Validated (TensorRT)  | n=1 input is the same shape as the general schema.                     |
 | `vla`       | Validated (python_pytorch) | Multi-input + named action chunk; `vla` block carries control metadata. |
 | `language`  | Parsed (reserved)     | Tokenizer + generation_config reserved for v0.2 generation runtime.    |
-| `speech`    | Parsed                | Reserved task/sample-rate/feature_extractor.                           |
+| `speech`    | Parsed                | Format 0.1: reserved task/sample-rate/feature_extractor. Format 0.2: the speech contract ([manifest](manifest.md#speech-contract)). |
 | `embedding` | Parsed                | Reserved dim/metric/normalize.                                         |
 | `custom`    | Parsed (free-form)    | Any combination of blocks is allowed.                                  |
 

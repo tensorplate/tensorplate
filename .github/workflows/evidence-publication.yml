@@ -122,7 +122,13 @@ jobs:
               with open(os.path.join(sys.argv[2], name), "w", encoding="utf-8") as out:
                   out.write(value + "\n")
           PY
+          # This workflow comes from the merge with the base branch, the
+          # scanner from the pull request's head, which may predate --branch.
+          # The fallback can go once no open pull request's head does.
+          branch_option=--branch
+          usage="$(tools/validation/check-public-hygiene.sh --help 2>&1 || :)"
+          [[ "$usage" == *"--branch FILE"* ]] || branch_option=--message
           tools/validation/check-public-hygiene.sh --base "$(cat "${text}/base.txt")" \
+            "$branch_option" "${text}/branch.txt" \
             --message "${text}/title.txt" \
-            --message "${text}/body.md" \
-            --message "${text}/branch.txt"
+            --message "${text}/body.md"
