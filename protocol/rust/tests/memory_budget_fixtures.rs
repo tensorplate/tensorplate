@@ -81,6 +81,16 @@ fn speech_stt_fixture_declares_streaming_session_state() {
     );
     assert!(b.io_buffer_bytes > 0, "STT declares the audio chunk ring");
     assert_eq!(b.step_scratch_bytes, 0, "STT maps no step scratch");
+    // The row's admission configuration holds the OS reserve, so a speech
+    // bundle declares none and charges its sidecar's residual instead.
+    assert_eq!(
+        b.os_reserve_bytes, 0,
+        "STT leaves the OS reserve to the row"
+    );
+    assert!(
+        b.sidecar_process_bytes > 0,
+        "STT charges its sidecar's residual footprint"
+    );
 }
 
 #[test]
@@ -100,6 +110,16 @@ fn speech_tts_fixture_declares_streaming_session_state() {
         "TTS declares text-in/audio-out buffers"
     );
     assert_eq!(b.step_scratch_bytes, 0, "TTS maps no step scratch");
+    // The row's admission configuration holds the OS reserve, so a speech
+    // bundle declares none and charges its sidecar's residual instead.
+    assert_eq!(
+        b.os_reserve_bytes, 0,
+        "TTS leaves the OS reserve to the row"
+    );
+    assert!(
+        b.sidecar_process_bytes > 0,
+        "TTS charges its sidecar's residual footprint"
+    );
 }
 
 #[test]
@@ -166,7 +186,9 @@ fn all_class_fixtures_declare_universal_lines() {
             "{name}: runtime overhead line"
         );
         assert!(b.session_scratch_bytes > 0, "{name}: session scratch line");
-        assert!(b.os_reserve_bytes > 0, "{name}: OS reserve line");
+        if !name.starts_with("memory_budget_speech_") {
+            assert!(b.os_reserve_bytes > 0, "{name}: OS reserve line");
+        }
         assert!(b.backend_reserve_bytes > 0, "{name}: backend reserve line");
         checked += 1;
     }
