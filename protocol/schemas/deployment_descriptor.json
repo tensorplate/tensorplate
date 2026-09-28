@@ -1,0 +1,223 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/deployment_descriptor.json",
+  "title": "TensorPlate deployment descriptor",
+  "description": "What the agent verified for one generation of one deployment: the portable `configuration` a verified bundle resolves to on this runtime, identified by `configuration_digest`, and the generation-specific instance around it, identified by `descriptor_digest`. Both digests are `sha256:` and the lowercase hex SHA-256 of canonical JSON version 1 (docs/bundles/integrity.md): `configuration_digest` of the `configuration` object, `descriptor_digest` of this whole document without its `descriptor_digest` member. A restart of the same configuration keeps `configuration_digest` and changes `generation` and `descriptor_digest`. An absent optional field is omitted, never null, and every number is an integer. Validating this document needs `bundle_manifest.json`, `config/schemas/memory_budget_breakdown.json`, `backend_descriptor.json` and `worker_control.json` registered beside it. Beyond this schema, readers also require the text to have a canonical JSON form (no repeated key, and integers written without a fraction or an exponent, which this schema's `integer` does not require), both digests to match, the document to be written exactly as its reader re-serializes it (every budget line and `observable` written out), the configuration's format 0.2 fields to decode as a manifest's would, format 0.2 fields only on a format 0.2 bundle, `runner_profile` and `runner_environment` together or not at all, exactly one `model` artifact, unique artifact paths that stay inside the bundle root, every `warmup.fixtures` entry among the artifact paths, and a quota that passes the worker control channel's rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "canonical_json_version",
+    "configuration",
+    "configuration_digest",
+    "deployment_id",
+    "generation",
+    "admission_mode",
+    "staged_path",
+    "descriptor_digest"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "canonical_json_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "The canonical JSON version both digests are computed over. A reader refuses a version it does not implement."
+    },
+    "configuration": {
+      "$ref": "#/definitions/configuration"
+    },
+    "configuration_digest": {
+      "$ref": "#/definitions/sha256_digest",
+      "description": "Identity of the portable configuration: the same bundle, runtime, runner profile, precision and quota give the same digest on every generation and every machine of the row."
+    },
+    "deployment_id": {
+      "$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberRef/properties/deployment_id",
+      "description": "The member's stable name. With `generation` it is the member identity the worker control channel and the sidecar's job messages carry."
+    },
+    "generation": {
+      "$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberRef/properties/generation",
+      "description": "The member's generation: durable, monotonic and never reused."
+    },
+    "admission_mode": {
+      "type": "string",
+      "enum": ["production", "qualification"],
+      "description": "How the operator admitted this generation. Qualification measures an explicit test count and is not a serving claim."
+    },
+    "staged_path": {
+      "type": "string",
+      "pattern": "^/",
+      "maxLength": 4096,
+      "description": "Absolute root of this generation's staged copy of the bundle. Artifact paths resolve under it."
+    },
+    "runner_environment": {
+      "$ref": "#/definitions/runner_environment"
+    },
+    "descriptor_digest": {
+      "$ref": "#/definitions/sha256_digest",
+      "description": "Identity of this generation's descriptor, covering `configuration_digest`."
+    }
+  },
+  "definitions": {
+    "sha256_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Portable execution configuration. It holds no generation, absolute path, endpoint, set revision, approval status or evidence record, so an equivalent restart or redeployment reproduces it. Profile digests in it name leaf documents only, never a bundle, configuration, descriptor or evidence digest.",
+      "required": [
+        "bundle",
+        "model_class",
+        "backend_hint",
+        "precision_hint",
+        "runtime_version",
+        "artifacts",
+        "quota"
+      ],
+      "properties": {
+        "bundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "format_version", "bundle_digest"],
+          "properties": {
+            "name": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/name"},
+            "version": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/version"},
+            "format_version": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/format_version"},
+            "bundle_digest": {
+              "$ref": "#/definitions/sha256_digest",
+              "description": "The bundle's canonical manifest digest, which pins every manifest declaration, including those this configuration does not repeat."
+            }
+          }
+        },
+        "model_class": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/model_class"},
+        "backend_hint": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/backend_hint"},
+        "precision_hint": {
+          "type": "string",
+          "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"],
+          "description": "The manifest's precision, written out even when it is `auto`."
+        },
+        "runtime_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.+~-]*$",
+          "description": "The TensorPlate release the agent runs, as it reports it. The runner profile's packages are version-locked to it."
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/definitions/artifact"},
+          "description": "The manifest's artifacts in manifest order, each resolved under `staged_path`."
+        },
+        "runner_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "packages"],
+          "description": "The installed runner profile the bundle names, resolved against the backend descriptor's `runner_profiles`: its identity and the packages that install it. Its install paths are the generation's `runner_environment`.",
+          "properties": {
+            "id": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/snake_identifier"},
+            "packages": {"$ref": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/properties/runner_profiles/items/properties/packages"}
+          }
+        },
+        "compute_type": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/format_0_2/properties/compute_type"},
+        "warmup": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/warmup"},
+        "pipeline_stages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "allOf": [
+              {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/pipeline_stage"},
+              {"required": ["observable"]}
+            ]
+          }
+        },
+        "memory_budget_by_domain": {
+          "allOf": [
+            {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/memory_budget_by_domain"},
+            {
+              "properties": {
+                "shared_pool": {"$ref": "#/definitions/every_budget_line"},
+                "guest_ram": {"$ref": "#/definitions/every_budget_line"},
+                "device_vram": {"$ref": "#/definitions/every_budget_line"}
+              }
+            }
+          ]
+        },
+        "max_concurrent_sessions": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/format_0_2/properties/max_concurrent_sessions"},
+        "degraded_profile": {
+          "$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/snake_identifier",
+          "description": "Present only when the manifest names a degraded profile; absent when it declares none."
+        },
+        "speech": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/speech_contract"},
+        "quota": {
+          "$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberQuota",
+          "description": "The session count and per-domain quota bytes selected for this configuration; in qualification mode the session count is the operator's test count. Changing it changes the configuration."
+        },
+        "acceptance_profile_digest": {
+          "$ref": "#/definitions/sha256_digest",
+          "description": "The acceptance profile this configuration is measured or admitted against, when one applies."
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "path", "digest"],
+      "properties": {
+        "role": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/artifacts/items/properties/role"},
+        "kind": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/properties/artifacts/items/properties/kind"},
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Relative path inside the bundle root."
+        },
+        "digest": {
+          "$ref": "#/definitions/sha256_digest",
+          "description": "The verified digest, lowercase."
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "every_budget_line": {
+      "description": "A budget domain written out in full: every canonical line, zero or not.",
+      "required": [
+        "model_weights_bytes",
+        "runtime_overhead_bytes",
+        "session_scratch_bytes",
+        "cache_bytes",
+        "step_scratch_bytes",
+        "output_queue_bytes",
+        "io_buffer_bytes",
+        "per_session_state_bytes",
+        "sidecar_process_bytes",
+        "os_reserve_bytes",
+        "backend_reserve_bytes"
+      ]
+    },
+    "runner_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpreter", "environment_root"],
+      "description": "Where the resolved runner profile is installed on this machine, as the backend descriptor declares it. Absolute install roots, so they are not part of the configuration.",
+      "properties": {
+        "interpreter": {"$ref": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/properties/runner_profiles/items/properties/interpreter"},
+        "environment_root": {"$ref": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/properties/runner_profiles/items/properties/environment_root"},
+        "library_search_paths": {
+          "allOf": [
+            {"$ref": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/properties/runner_profiles/items/properties/library_search_paths"},
+            {"minItems": 1}
+          ]
+        }
+      }
+    }
+  }
+}

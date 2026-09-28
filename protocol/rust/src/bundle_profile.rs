@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::de::{DeserializeOwned, Deserializer, IgnoredAny};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::backend_descriptor::ComputeType;
 use crate::bundle_manifest::BundleArtifact;
@@ -125,7 +125,7 @@ pub enum DegradedProfile {
 }
 
 /// Declared readiness warmup: inputs taken from hashed bundle artifacts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Warmup {
     /// Bundle-relative artifact paths, each listed in `artifacts[]`.
     pub fixtures: Vec<String>,
@@ -134,14 +134,15 @@ pub struct Warmup {
 }
 
 /// Who executes a pipeline stage.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StageOwnership {
     RuntimeOwned,
     CallerOwned,
 }
 
 /// One ordered pipeline stage.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PipelineStage {
     /// A [`RUNTIME_PIPELINE_STAGES`] id when runtime-owned; the caller's
     /// span identity when caller-owned.
@@ -151,14 +152,18 @@ pub struct PipelineStage {
     /// `not_observable` rather than its own span.
     pub observable: bool,
     /// Caller-owned stages only: where the caller reports the stage.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub interface: Option<String>,
 }
 
 /// Per-domain budgets, each a canonical line-item breakdown.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct MemoryBudgetByDomain {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_pool: Option<MemoryBudgetBreakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_ram: Option<MemoryBudgetBreakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub device_vram: Option<MemoryBudgetBreakdown>,
 }
 
@@ -192,20 +197,23 @@ impl MemoryBudgetByDomain {
 }
 
 /// Speech task a bundle serves.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SpeechTask {
     Stt,
     Tts,
 }
 
 /// Serving mode of the speech contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SpeechServingMode {
     Streaming,
     Batch,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AudioEncoding {
     /// Signed 16-bit little-endian PCM.
     PcmS16le,
@@ -223,7 +231,7 @@ impl AudioEncoding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct AudioFormat {
     pub encoding: AudioEncoding,
     pub sample_rate_hz: u32,
@@ -231,7 +239,7 @@ pub struct AudioFormat {
 }
 
 /// Declared STT chunking limits, in milliseconds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct SttChunking {
     pub frame_ms_min: u32,
     pub frame_ms_max: u32,
@@ -239,7 +247,7 @@ pub struct SttChunking {
 }
 
 /// Declared TTS segment and synthesis limits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct TtsChunking {
     pub max_segment_text_bytes: u32,
     pub max_segment_phoneme_tokens: u32,
@@ -248,31 +256,36 @@ pub struct TtsChunking {
     pub max_synthesis_audio_ms: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
 pub enum SpeechChunking {
     Stt(SttChunking),
     Tts(TtsChunking),
 }
 
 /// A profile named by id and pinned by digest.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProfileReference {
     pub id: String,
     pub digest: String,
 }
 
 /// The format 0.2 speech block. A session's requested languages, voices
-/// and formats must be a subset of these.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// and formats must be a subset of these. Serializes as the manifest block
+/// it was decoded from, in normalized form.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SpeechContract {
     pub task: SpeechTask,
     pub serving_mode: SpeechServingMode,
     pub languages: Vec<String>,
     /// TTS only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub voices: Vec<String>,
     /// STT only; includes 16 kHz PCM.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub input_audio_formats: Vec<AudioFormat>,
     /// TTS only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub output_audio_formats: Vec<AudioFormat>,
     pub chunking: SpeechChunking,
     pub algorithm_profile: ProfileReference,
@@ -1135,7 +1148,7 @@ fn is_language_tag(tag: &str) -> bool {
             .all(|s| (2..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
-fn is_sha256_digest(digest: &str) -> bool {
+pub(crate) fn is_sha256_digest(digest: &str) -> bool {
     digest.strip_prefix("sha256:").is_some_and(|hex| {
         hex.len() == 64
             && hex

@@ -460,7 +460,7 @@ impl RunnerProfile {
 /// Absolute, with no `.` or `..` segment, which would let a path name
 /// somewhere its text does not show. Checked on the text: `Path::components`
 /// drops an interior `.` silently.
-fn is_normalized_absolute(path: &str) -> bool {
+pub(crate) fn is_normalized_absolute(path: &str) -> bool {
     Path::new(path).is_absolute()
         && path
             .split('/')
