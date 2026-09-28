@@ -514,6 +514,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/cloud-row-runbooks.md` carries the procedure, command by
   command. (V030-E01-F01-T01, V030-E01-F01-T03)
 
+- Bundle manifests can opt into format 0.2 with `"format_version": "0.2"`
+  under the unchanged `schema_version` 0.1 envelope. The manifest schema
+  gains a format 0.2 branch and the protocol crate a `bundle_profile`
+  module that decodes its fields into `BundleManifest.profile`:
+  `runner_profile`, `hardware_compatibility`, `compute_type`,
+  `support_level`, `warmup`, `pipeline_stages`, `memory_budget_by_domain`,
+  `memory_budget_breakdown_bytes` (the per-line sum of the domains when
+  both are present), `max_concurrent_sessions`, `degraded_profile`, and
+  the speech contract under `model_blocks.speech`: task `stt` or `tts`,
+  serving mode, languages, voices, the supported audio formats (STT
+  16 kHz PCM with an optional 8 kHz μ-law path, TTS 24 kHz PCM16),
+  required chunking limits and profile digests. Decoding reads the
+  manifest's own text before the envelope and fails closed on unknown or
+  repeated keys, present nulls, array-shaped objects and inexact numbers;
+  `decode_with_version_check` refuses format 0.2 manifests. A format 0.1
+  manifest the schema accepts parses as before and keeps these keys as
+  extras; a sequence-shaped speech block, which the schema never allowed,
+  now rejects, and a re-serialized speech block keeps the keys it does
+  not read. The budget lines
+  reuse `config/schemas/memory_budget_breakdown.json` by reference, and
+  the two speech budget fixtures now declare no OS reserve and a sidecar
+  residual. Fixtures: `test/models/bundles/v0_2/`. Additive inside
+  protocol 0.1; version constants unchanged. (V030-E02-F01-T01)
+
 ### Changed
 
 - The Rust mirror of the sidecar IPC header, `IpcMessage`, now refuses
