@@ -150,3 +150,4 @@ def test_a_runner_that_enabled_no_capability_refuses_job_messages(
         assert reply.header["message_id"] == header["message_id"]
         assert reply.header["status"] == protocol.STATUS_ERROR
         assert reply.header["error"]["code"] == protocol.ERR_UNSUPPORTED
+        assert reply.header["error"]["schema_version"] == protocol.SCHEMA_VERSION

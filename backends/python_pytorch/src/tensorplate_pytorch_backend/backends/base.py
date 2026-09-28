@@ -43,7 +43,10 @@ class BackendError(Exception):
     """Raised by backend implementations to surface a typed sidecar error.
 
     The ``code`` matches a `tensorplate::Error::Code` snake_case name
-    (see ``tensorplate_pytorch_backend.protocol``).
+    (see ``tensorplate_pytorch_backend.protocol``). The message leaves the
+    sidecar as written, so it never names request data, a file path or an
+    upstream exception's text; the runner's error edge replaces a message
+    that repeats a chained exception's text.
     """
 
     def __init__(
@@ -51,13 +54,11 @@ class BackendError(Exception):
         code: str,
         message: str,
         *,
-        context: str | None = None,
         runtime_capability: RuntimeCapability | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.code_message = message
-        self.context = context
         self.runtime_capability = runtime_capability
 
 

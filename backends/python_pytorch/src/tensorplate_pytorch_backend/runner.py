@@ -17,8 +17,10 @@ Failure handling
     Every backend-raised :class:`BackendError` becomes a typed
     ``*_response`` frame with ``status: "error"``. Unknown exceptions
     are caught at the dispatch boundary and converted to
-    ``Error::Code::Internal``. The runner never lets a backend
-    exception kill the process.
+    ``Error::Code::Internal`` (``oom_error`` for out-of-memory classes).
+    Both pass through :mod:`~tensorplate_pytorch_backend.sanitize`, so no
+    exception's text reaches the frame, health or the log. The runner
+    never lets a backend exception kill the process.
 """
 
 from __future__ import annotations
@@ -27,14 +29,13 @@ import argparse
 import logging
 import os
 import socket
-import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from tensorplate_pytorch_backend import codec, protocol
+from tensorplate_pytorch_backend import codec, protocol, sanitize
 from tensorplate_pytorch_backend.backends import (
     Backend,
     BackendError,
@@ -97,17 +98,16 @@ def _build_response_header(
 
 def _typed_error_response(
     request: dict[str, Any],
-    code: str,
-    message: str,
+    error: sanitize.EdgeError,
     *,
-    context: str | None = None,
     runtime_capability: RuntimeCapability | None = None,
 ) -> codec.SidecarFrame:
     header = _build_response_header(request, status=protocol.STATUS_ERROR)
-    error: dict[str, Any] = {"code": code, "message": message}
-    if context is not None:
-        error["context"] = context
-    header["error"] = error
+    header["error"] = {
+        "schema_version": protocol.SCHEMA_VERSION,
+        "code": error.code,
+        "message": error.message,
+    }
     if runtime_capability is not None:
         header["runtime_capability"] = runtime_capability.to_wire()
     return codec.SidecarFrame(header=header)
@@ -139,9 +139,7 @@ def _slice_tensors(frame: codec.SidecarFrame) -> list[NamedTensor]:
             )
         if offset + length > len(frame.payload):
             raise BackendError(
-                protocol.ERR_SHAPE_MISMATCH,
-                f"tensor `{name}` payload window [{offset},{offset + length}) "
-                f"exceeds frame payload size {len(frame.payload)}",
+                protocol.ERR_SHAPE_MISMATCH, "a tensor's payload window exceeds the frame payload"
             )
         payload_slice = frame.payload[offset : offset + length]
         out.append(NamedTensor(name=name, tensor=tensor, payload=payload_slice))
@@ -210,12 +208,15 @@ class SidecarRunner:
                     try:
                         self._write_frame(response)
                     except (ConnectionError, OSError) as exc:
-                        logger.warning("sidecar runner exiting on socket write error: %s", exc)
+                        logger.warning(
+                            "sidecar runner exiting on socket write error: %s",
+                            sanitize.describe(exc),
+                        )
                         return
         except (ConnectionError, OSError) as exc:
-            logger.warning("sidecar runner exiting on socket error: %s", exc)
-        except Exception:
-            logger.exception("sidecar runner exiting on unexpected error")
+            logger.warning("sidecar runner exiting on socket error: %s", sanitize.describe(exc))
+        except Exception as exc:
+            logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
 
     # ------------------------------------------------------------------
     # framing
@@ -262,29 +263,18 @@ class SidecarRunner:
                 return self._handle_unload(frame)
             if kind == protocol.KIND_HEALTH_CHECK:
                 return self._handle_health_check(frame)
-            raise BackendError(
-                protocol.ERR_UNSUPPORTED, f"unknown or unsupported message kind: {kind!r}"
-            )
-        except BackendError as err:
-            self._state.last_error = err.code_message
-            return _typed_error_response(
-                header,
-                err.code,
-                err.code_message,
-                context=err.context,
-                runtime_capability=err.runtime_capability,
-            )
+            raise BackendError(protocol.ERR_UNSUPPORTED, "unknown or unsupported message kind")
         except Exception as exc:
-            logger.exception("unexpected sidecar dispatch failure")
-            self._state.last_error = str(exc)
-            return _typed_error_response(header, protocol.ERR_INTERNAL, str(exc))
+            if not isinstance(exc, BackendError):
+                logger.error("sidecar request failed: %s", sanitize.describe(exc))
+            error = sanitize.edge_error(exc)
+            self._state.last_error = error.message
+            capability = exc.runtime_capability if isinstance(exc, BackendError) else None
+            return _typed_error_response(header, error, runtime_capability=capability)
 
     def _reject_bad_schema(self, header: dict[str, Any]) -> None:
         if header.get("schema_version") != protocol.SCHEMA_VERSION:
-            raise BackendError(
-                protocol.ERR_UNSUPPORTED,
-                f"unsupported schema_version {header.get('schema_version')!r}",
-            )
+            raise BackendError(protocol.ERR_UNSUPPORTED, "unsupported schema_version")
         if not isinstance(header.get("message_id"), str) or not header["message_id"]:
             raise BackendError(protocol.ERR_CONFIG_INVALID, "message_id is required")
         if not isinstance(header.get("kind"), str) or not header["kind"]:
@@ -332,7 +322,7 @@ class SidecarRunner:
             return self._factories[requested_name]
         raise BackendError(
             protocol.ERR_CONFIG_INVALID,
-            f"no python_pytorch sidecar backend registered for {requested_name!r}",
+            "no sidecar backend is registered for the requested profile",
         )
 
     def _handle_load(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:
@@ -445,12 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=args.log_level)
+    sanitize.configure_process_logging(args.log_level)
 
     try:
         sock = _connect_socket(args.socket, timeout_s=args.connect_timeout_s)
     except OSError as exc:
-        sys.stderr.write(f"tensorplate sidecar: connect failed: {exc}\n")
+        logger.error("tensorplate sidecar: connect failed: %s", sanitize.describe(exc))
         return 2
 
     runner = SidecarRunner(sock, default_backend_name=args.default_backend)

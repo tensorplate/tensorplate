@@ -86,9 +86,7 @@ class SmolVLABackend(Backend):
             import torch
         except Exception as exc:
             raise BackendError(
-                ERR_LOAD_FAILED,
-                "SmolVLA core dependencies are not importable",
-                context=repr(exc),
+                ERR_LOAD_FAILED, "SmolVLA core dependencies are not importable"
             ) from exc
 
         try:
@@ -117,9 +115,7 @@ class SmolVLABackend(Backend):
             from transformers import AutoTokenizer
         except Exception as exc:
             raise BackendError(
-                ERR_LOAD_FAILED,
-                "SmolVLA model dependencies are not importable",
-                context=repr(exc),
+                ERR_LOAD_FAILED, "SmolVLA model dependencies are not importable"
             ) from exc
 
         try:
@@ -132,9 +128,7 @@ class SmolVLABackend(Backend):
                 cfg.vlm_model_name, cache_dir=cache_dir, padding_side="right"
             )
         except Exception as exc:
-            raise BackendError(
-                ERR_LOAD_FAILED, "failed to load SmolVLA policy", context=repr(exc)
-            ) from exc
+            raise BackendError(ERR_LOAD_FAILED, "failed to load SmolVLA policy") from exc
 
         self._torch = torch
         self._np = np
@@ -171,9 +165,7 @@ class SmolVLABackend(Backend):
         except BackendError:
             raise
         except Exception as exc:
-            raise BackendError(
-                ERR_INFERENCE_FAILED, "SmolVLA inference failed", context=repr(exc)
-            ) from exc
+            raise BackendError(ERR_INFERENCE_FAILED, "SmolVLA inference failed") from exc
 
         return [
             NamedTensor(
