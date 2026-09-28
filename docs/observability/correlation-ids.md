@@ -37,6 +37,12 @@ a channel, with the id it was first sent with; the worker keeps the id and
 outcome of the latest request it applied and answers a repeat from that
 record instead of applying it again.
 
+On the sidecar IPC, the speech job and session messages carry no
+`correlation_id`. A job's messages are joined by its `job_id`, which the
+serving layer assigns when it submits the job, its `session_key`, the serving
+layer's key for the logical session, which no client sees, and its
+`generation`, the deployment generation the session is bound to.
+
 ## Generation
 
 When neither the CLI nor an upstream caller supplies a value,

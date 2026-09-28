@@ -19,7 +19,7 @@ See also:
 | Bundle manifest (bundle format) | JSON Schema Draft 7 | Same audience as config. |
 | Cross-component control payloads (desired_state, worker_status, health_event, deploy_transaction) | JSON Schema Draft 7 | Crosses Rust/C++ language boundaries; JSON keeps the schema human-readable; the volume is low (status / event ticks, not request hot-path). |
 | HTTP `/infer` payload | JSON Schema Draft 7 (header) + raw bytes | The header documented in `infer_request.json` / `infer_result.json` rides as JSON; tensor payloads ride as raw bytes per `BufferRef` / `TensorView` metadata. v0.1.0 does not negotiate an alternative encoding; V01-E07 lands the HTTP server. |
-| Python/PyTorch sidecar IPC | JSON header + raw tensor bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: `[4-byte big-endian header_length][JSON header][raw tensor payload bytes]`. JSON-encoding tensors was an explicit non-goal (V01-E05). |
+| Python/PyTorch sidecar IPC | JSON header + raw payload bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: a 16-byte big-endian prefix (magic, wire version, header length, payload length), the JSON header, then the payload bytes: tensors, or a job's PCM or text input or its synthesized audio. JSON-encoding tensors was an explicit non-goal. |
 
 We deliberately do **not** introduce protobuf in v0.1.0. The v0.1.0 hot
 path runs in-process within `tensorplate-serving`; cross-process
@@ -135,6 +135,27 @@ exception with the first. Naming a key inside an open map, such as `gauges` in
 `serving_metrics.json`, with the same constraint as the map's other values
 accepts exactly the same payloads and needs no exception.
 
+A fourth narrow pre-1.0 exception covers the Python/PyTorch sidecar IPC,
+`python_pytorch_ipc.json`: under `0.1` it may gain message kinds and
+optional fields that only negotiated peers exchange. The speech job and
+session messages are the first. A sidecar lists the capabilities it
+implements on its `ready_event`; the adapter enables `speech_jobs_v1` on
+`load_model` only when that list names it, and neither peer sends a job or
+session message on a connection whose load did not enable it. So no peer
+receives them unless it asked for them. An adapter that predates the
+capability reads the `ready_event` fields it uses by name and ignores the
+rest. A sidecar that predates it lists nothing and answers a job message with
+an `unsupported` `error_event` that carries the message's `message_id`, which
+`backends/python_pytorch/tests/test_speech_jobs_messages.py` holds the
+current runner to; that refusal's `error` lacks the `schema_version` that
+`error.json` requires, so a reader takes its code and message by name.
+Existing kinds and fields are never renamed, removed or
+given a new meaning. The schema, the Rust mirror and the sidecar's
+`protocol.py` literals move in the same change;
+`protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` holds them to the
+golden frames and to the typed job seam's vectors
+(`protocol/fixtures/job_seam.json`). Retire this exception with the first.
+
 The agent's durable state file (`agent_state.json`) is the one document
 with its own version track, because it is read by nothing but the agent
 that wrote it and must stay safe across agent upgrades and downgrades: an
@@ -159,8 +180,8 @@ Bindings are **hand-written**, not code-generated, in v0.1.0.
 | Rust serde mirror | `protocol/rust/src/<schema>.rs` | Authoritative reference binding. Round-trip tested via `protocol/rust/tests/round_trip.rs`. |
 | C++ runtime value objects (Error, Result, ModelSpec, BufferRef, TensorView, InferRequest, InferResult) | `include/tensorplate/core/`, `include/tensorplate/buffer/` | Lands with the runtime types in V01-E02-F01..F06. JSON parsing for these objects lands when the HTTP server (V01-E07) imports a JSON parser. |
 | C++ control-plane value objects (desired_state, worker_status, health_event, deploy_transaction) | `protocol/cpp/` | **Deferred to V01-E07/V01-E10** alongside the components that emit/consume them. The Rust mirror plus the committed JSON fixtures under `protocol/rust/tests/fixtures/` are the v0.1.0 cross-language contract. |
-| C++ Python sidecar IPC binding | `protocol/cpp/python_pytorch_ipc.hpp` | **Deferred to V01-E05** alongside the sidecar adapter. |
-| Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | **Deferred to V01-E05** alongside the sidecar adapter. |
+| C++ Python sidecar IPC binding | `runtime/src/adapters/python_pytorch/python_pytorch_session.cpp` | Reads the header fields it uses by name and ignores the rest. It sends and reads no job or session message yet. |
+| Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals. `codec.py` frames headers without interpreting them. |
 
 We chose hand-written bindings over code generation because:
 

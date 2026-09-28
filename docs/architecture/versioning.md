@@ -88,7 +88,9 @@ the full conditions and the fields covered by each rule. A second exception
 there lets a value be appended to the shared error-code, failure-reason and
 failure-category enums under `0.1`. A third lets an optional output-only
 property be added to `scheduler_metrics.json`, and a value be appended to the
-scheduler policy enum, under `0.1`.
+scheduler policy enum, under `0.1`. A fourth lets the Python/PyTorch sidecar
+IPC gain kinds and optional fields that only negotiated peers exchange, under
+`0.1`.
 
 ### Schema version
 

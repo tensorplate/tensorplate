@@ -308,6 +308,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `protocol/fixtures/job_seam.json` holds the ceilings, names and test
   vectors. No backend implements the bridge yet. (V030-E04-F03-T03)
 
+- The Python/PyTorch sidecar IPC schema defines the speech job messages.
+  A sidecar lists the capabilities it implements on `ready_event`, the
+  adapter enables `speech_jobs_v1` on `load_model`, and a successful
+  `load_model_response` names the job classes the loaded runner runs. On
+  such a connection the adapter sends `job_submit` (the job's `job_id`,
+  `session_key` and `generation`, its class, options, progress limit and
+  input), `job_cancel` and `session_release`; the sidecar sends
+  `job_accepted`, `job_progress` (reserved: the speech runners emit
+  none), `job_completed` or `job_failed`, `job_cancel_acknowledged`,
+  `job_released` and `session_released`. Input PCM, input text and
+  synthesized audio ride in the frame payload, not the JSON header. A
+  `vad_frames` job with a new `utterance_id` starts from reset
+  voice-activity state, and `session_release` discards that state. Every
+  new field is confined to its kinds and bounded by the job seam's
+  ceilings. The Rust mirror gains the job types and checks job content
+  with the typed job objects' reasons; `protocol.py` gains the literals.
+  Golden frames under
+  `protocol/rust/tests/fixtures/python_pytorch_ipc_speech_jobs_*.jsonl`
+  pin the header bytes, which the Python codec writes identically for
+  these frames, and a Rust suite replays the job seam's cross-language
+  vectors through the schema and the mirror. Nothing sends or handles
+  these messages yet. Additive inside protocol 0.1; version constants
+  unchanged. (V030-E04-F03-T01)
+
 - The scheduler interface names logical sessions and counts in-flight work
   two ways, without changing dispatch. `SchedulerRequest` takes an optional
   trailing `session_key` (`SchedulerRequest::SessionKey`, a 64-bit key of
@@ -491,6 +515,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   command. (V030-E01-F01-T01, V030-E01-F01-T03)
 
 ### Changed
+
+- The Rust mirror of the sidecar IPC header, `IpcMessage`, now refuses
+  what the closed schema refuses at its top level and in its `error`:
+  unknown fields, explicit nulls, array forms and an `error` of another
+  schema version. The `health`, `metric`, `runtime_capability`,
+  `model_spec` and tensor objects keep their existing decoding.
+  `IpcMessage::tensors` becomes an `Option<Vec<IpcTensor>>`, so an empty
+  list is no longer read as an absent one, and `IpcMessage::envelope`
+  builds a message with every optional field absent. (V030-E04-F03-T01)
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
   line: `packaging/VERSION`, the CMake project version, the Cargo
