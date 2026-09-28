@@ -23,15 +23,21 @@ TEST(PythonPytorchAdapter, FeatureFlagDisabled) {
 }
 #else
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include "tensorplate/backend/builtin.hpp"
@@ -193,6 +199,102 @@ TEST_F(PythonPytorchAdapterFixture, InferAsyncReturnsUnsupportedWithoutAllocatin
 
   (void)manager->release_if_owned(buf);
   ASSERT_TRUE(session->unload().has_value());
+}
+
+// Sends this process's stderr, which a sidecar it starts inherits, to a file
+// until finish().
+class StderrCapture {
+ public:
+  explicit StderrCapture(std::filesystem::path file)
+      : file_(std::move(file)), saved_(::dup(STDERR_FILENO)) {
+    const int fd = ::open(file_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+      active_ = saved_ >= 0 && ::dup2(fd, STDERR_FILENO) == STDERR_FILENO;
+      ::close(fd);
+    }
+  }
+  StderrCapture(const StderrCapture&) = delete;
+  StderrCapture& operator=(const StderrCapture&) = delete;
+  ~StderrCapture() { restore(); }
+
+  [[nodiscard]] bool active() const noexcept { return active_; }
+
+  std::string finish() {
+    restore();
+    std::ifstream in(file_);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  }
+
+ private:
+  void restore() {
+    if (saved_ >= 0) {
+      std::fflush(stderr);
+      ::dup2(saved_, STDERR_FILENO);
+      ::close(saved_);
+      saved_ = -1;
+    }
+  }
+
+  std::filesystem::path file_;
+  int saved_;
+  bool active_ = false;
+};
+
+struct ScratchDir {
+  explicit ScratchDir(std::filesystem::path p) : path(std::move(p)) {}
+  ScratchDir(const ScratchDir&) = delete;
+  ScratchDir& operator=(const ScratchDir&) = delete;
+  ~ScratchDir() {
+    std::error_code ignored;
+    std::filesystem::remove_all(path, ignored);
+  }
+
+  std::filesystem::path path;
+};
+
+// The sidecar's error edge, seen from the adapter: a load that fails on a
+// path or profile name carrying a canary returns a typed error with a fixed
+// message and no context, and the sidecar writes none of it to stderr.
+TEST_F(PythonPytorchAdapterFixture, LoadErrorsCarryNoPathOrProfileName) {
+  const std::string canary = "tp-canary-7f3a9c";
+  const ScratchDir scratch{std::filesystem::temp_directory_path() /
+                           ("tp-sidecar-edge-" + std::to_string(::getpid()))};
+  const auto& dir = scratch.path;
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir / canary);
+  std::filesystem::create_directories(dir / (canary + ".json"));
+  {
+    std::ofstream entry(dir / "entry.json");
+    entry << R"({"backend_profile": ")" << canary << R"("})";
+  }
+  const std::vector<std::pair<std::filesystem::path, std::string>> cases = {
+      {dir / canary / "missing.json", "sidecar config not found"},
+      {dir / (canary + ".json"), "sidecar config could not be read"},
+      {dir / "entry.json", "no sidecar backend is registered for the requested profile"},
+  };
+
+  for (const auto& [artifact_path, message] : cases) {
+    SCOPED_TRACE(artifact_path.string());
+    BackendRegistry reg;
+    ASSERT_TRUE(register_builtin_backends(reg).has_value());
+    auto manager = make_manager();
+    ExecutionSessionRuntimeHooks hooks{};
+    hooks.buffer_manager = manager.get();
+    auto session = reg.create_session("python_pytorch", hooks).value();
+    auto spec = ModelSpec::create("m", ModelClass::Custom, artifact_path.string(), "python_pytorch")
+                    .value();
+
+    StderrCapture capture(dir / "stderr.txt");
+    ASSERT_TRUE(capture.active());
+    auto load_r = session->load(spec);
+    const std::string written = capture.finish();
+
+    ASSERT_FALSE(load_r.has_value());
+    EXPECT_EQ(load_r.error().code, Error::Code::ConfigInvalid);
+    EXPECT_EQ(load_r.error().message, message);
+    EXPECT_FALSE(load_r.error().context.has_value());
+    EXPECT_EQ(written.find(canary), std::string::npos) << written;
+  }
 }
 
 }  // namespace
