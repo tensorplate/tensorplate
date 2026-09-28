@@ -51,7 +51,8 @@ jobs:
           if command -v shellcheck >/dev/null 2>&1; then
             shellcheck --version
             shellcheck tools/validation/check-evidence-publication.sh \
-              test/validation/evidence_publication_test.sh
+              test/validation/evidence_publication_test.sh \
+              test/validation/memory_observation_publication_test.sh
           else
             echo '::warning::shellcheck is not installed on this runner; lint skipped'
           fi
@@ -60,9 +61,17 @@ jobs:
         shell: bash
         run: test/validation/evidence_publication_test.sh
 
+      - name: Recorded memory-observation shape
+        shell: bash
+        run: test/validation/memory_observation_publication_test.sh
+
+      # test/platform holds recorded host and accelerator fixtures, so it is
+      # scanned on the same terms as the evidence directories.
       - name: Scan committed evidence
         shell: bash
-        run: tools/validation/check-evidence-publication.sh --patterns-only docs/validation/evidence
+        run: |
+          tools/validation/check-evidence-publication.sh --patterns-only \
+            docs/validation/evidence test/platform
 
   public-hygiene:
     name: public hygiene scan

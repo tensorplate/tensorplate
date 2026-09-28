@@ -1,0 +1,2 @@
+index, name, uuid, serial, pci.bus_id, driver_version, memory.total [MiB], memory.used [MiB], memory.free [MiB], utilization.gpu [%], utilization.memory [%], temperature.gpu, power.draw [W], mig.mode.current
+0, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000005, REDACTED, 00000000:00:00.0, 580.173.02, 23034 MiB, 256 MiB, 22308 MiB, 0 %, 0 %, 46, 27.49 W, [N/A]
