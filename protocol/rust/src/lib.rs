@@ -132,8 +132,9 @@ pub use platform_memory_profile::{
     PLATFORM_MEMORY_PROFILE_SCHEMA_VERSION, PLATFORM_MEMORY_TELEMETRY_FIELD_NAMES,
 };
 pub use python_pytorch_ipc::{
-    IpcHealth, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcRuntimeCapability,
-    IpcStatus, IpcTensor,
+    IpcAudioEncoding, IpcAudioFormat, IpcHealth, IpcJobClass, IpcJobInput, IpcJobOptions,
+    IpcJobResult, IpcMessage, IpcMessageError, IpcMessageKind, IpcMetric, IpcRuntimeCapability,
+    IpcStatus, IpcTensor, IpcWordUnit,
 };
 pub use resident_set::{
     AdmissionMode, EndpointEntry, MemberState, ResidentMember, ResidentSet, ResidentSetError,
