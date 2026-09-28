@@ -145,6 +145,35 @@ fn x86_fixture_smoke_bundle_targets_the_cloud_row_device_family() {
 }
 
 #[test]
+fn x86_cuda_smoke_bundle_selects_the_cuda_fixture_profile() {
+    // The accelerator-side companion to the fixture smoke bundle: same
+    // row and device family, but its config selects a profile that only
+    // loads after a CUDA kernel has run.
+    let root = fixtures_root().join("x86_cuda_smoke");
+    let d = parse_bundle(&root).expect("x86 CUDA smoke fixture must parse");
+    assert_eq!(d.manifest.model_class, ModelClass::Custom);
+    assert_eq!(d.manifest.backend_hint, "python_pytorch");
+    assert_eq!(
+        d.manifest.target_hardware.device_family,
+        DeviceFamily::X86_64,
+        "the bundle must name the cloud rows' device family"
+    );
+    let model_artifact = d
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.role == ArtifactRole::Model)
+        .expect("model artifact present");
+    assert!(model_artifact
+        .relative_path
+        .ends_with("x86-cuda-smoke.json"));
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("x86-cuda-smoke.json")).unwrap())
+            .expect("config parses");
+    assert_eq!(config["backend_profile"], "cuda_fixture");
+    assert_eq!(config["device"], "cuda");
+}
+
+#[test]
 fn language_reserved_parses_without_requiring_runtime() {
     let root = fixtures_root().join("language_reserved");
     let d = parse_bundle(&root).expect("language fixture must parse");

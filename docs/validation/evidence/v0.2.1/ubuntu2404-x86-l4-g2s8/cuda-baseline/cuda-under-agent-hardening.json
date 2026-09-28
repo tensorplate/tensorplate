@@ -1,0 +1,14 @@
+{
+  "argv0": "/usr/bin/python3",
+  "path_env": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin",
+  "uid": 111,
+  "gid": 114,
+  "torch_version": "2.14.0+cu130",
+  "torch_cuda_build": "13.0",
+  "cuda_is_available": true,
+  "device_count": 1,
+  "device_name": "NVIDIA L4",
+  "matmul_sum": 134217728.0,
+  "matmul_expected": 134217728.0,
+  "kernel_ok": true
+}

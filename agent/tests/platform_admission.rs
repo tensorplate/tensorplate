@@ -256,10 +256,10 @@ fn an_off_matrix_card_is_refused_with_the_sku_reason() {
 
 #[test]
 fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
-    // The committed rows record no components yet — those are captured at
-    // the first evidence run — so the requirement under test is taken from
-    // a row that does declare one. That is the point: the check has no
-    // version of its own to compare against.
+    // The committed rows declare no components — the agent observes none, so
+    // a declared one would refuse every deploy — so the requirement under
+    // test is taken from a row that does declare one. That is the point: the
+    // check has no version of its own to compare against.
     let registry = registry();
     let row = l4(&registry);
     let detected = detected_from_fixture(row, "ubuntu2404-x86-l4-g2s8");
@@ -267,7 +267,7 @@ fn a_driver_stack_requirement_is_read_from_the_row_not_from_here() {
     // A row with no recorded stack must not invent a requirement.
     assert!(
         row.kernel_driver_stack().components.is_empty(),
-        "this case assumes the committed row has no recorded stack yet"
+        "this case assumes the committed row declares no stack"
     );
     assert!(matches!(
         PlatformAdmission::evaluate(&registry, &detected, &ObservedStack::default(), None),

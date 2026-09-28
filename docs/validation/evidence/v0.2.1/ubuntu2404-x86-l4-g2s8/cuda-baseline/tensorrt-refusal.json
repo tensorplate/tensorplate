@@ -1,0 +1,10 @@
+{
+  "command": "deploy",
+  "error": {
+    "code": "unsupported",
+    "hint": "the backend or capability is not enabled on this device",
+    "message": "agent returned an error response: bundle declares unavailable backend `tensorrt`"
+  },
+  "schema_version": "0.1",
+  "status": "error"
+}

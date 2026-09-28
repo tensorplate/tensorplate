@@ -14,6 +14,7 @@ artifacts authored outside the repo.
 | `smolvla_python_pytorch/` | `vla` | `python_pytorch` | SmolVLA-style multi-input + named action chunk output + `vla` block. |
 | `mps_python_pytorch_smoke/` | `custom` | `python_pytorch` | Package-validation fixture whose load performs and synchronizes an MPS tensor operation. |
 | `x86_fixture_smoke/` | `custom` | `python_pytorch` | Package-validation fixture for the Ubuntu x86_64 cloud rows. Selects the device-neutral `fixture` profile, so it exercises admission and the worker path without executing an accelerator kernel. |
+| `x86_cuda_smoke/` | `custom` | `python_pytorch` | Package-validation fixture for the Ubuntu x86_64 cloud rows. Selects the `cuda_fixture` profile, whose load performs a CUDA matmul and checks its result before the fixture serves. |
 | `language_reserved/` | `language` | `libtorch` | Reserved language block (tokenizer + empty generation_config). Parses cleanly; v0.1.0 never executes generation. |
 | `vitis_synthetic/` | `vision` | `vitis_ai` | `.xmodel` placeholder + Vitis INT8 calibration metadata. Parser-only. |
 

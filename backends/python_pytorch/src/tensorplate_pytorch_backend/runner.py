@@ -38,6 +38,7 @@ from tensorplate_pytorch_backend import codec, protocol
 from tensorplate_pytorch_backend.backends import (
     Backend,
     BackendError,
+    CudaFixtureBackend,
     FixtureBackend,
     MpsFixtureBackend,
     NamedTensor,
@@ -58,6 +59,7 @@ logger = logging.getLogger("tensorplate.sidecar")
 def default_backend_factories() -> dict[str, type[Backend]]:
     return {
         "fixture": FixtureBackend,
+        "cuda_fixture": CudaFixtureBackend,
         "mps_fixture": MpsFixtureBackend,
         "smolvla": SmolVLABackend,
     }

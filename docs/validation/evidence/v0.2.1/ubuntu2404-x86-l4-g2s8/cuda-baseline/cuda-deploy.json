@@ -1,0 +1,114 @@
+{
+  "agent_status": {
+    "command": "status",
+    "correlation_id": "cli-691a31ae-4ef8-4e45-a4d1-bd7134198f26",
+    "payload": {
+      "agent": {
+        "active": {
+          "backend": "python_pytorch",
+          "bundle_digest": "sha256:f52b460ea693fc2209ee787b8470bae7d13d52c0de88791052970e9a6537fa6e",
+          "bundle_name": "x86-cuda-smoke",
+          "bundle_version": "0.1.0",
+          "deployment_id": "validation-cuda-smoke",
+          "model_class": "custom",
+          "serving_url": "http://127.0.0.1:18080/infer"
+        },
+        "agent_state": "ready",
+        "available": true,
+        "candidate": null,
+        "in_flight_transaction": null,
+        "last_error": null,
+        "platform_telemetry": {
+          "memory": {
+            "accelerator_total_bytes": 24152899584,
+            "effective_budget_bytes": 24152899584,
+            "gate": "load_bearing",
+            "host_total_bytes": 33646981120,
+            "memory_profile": "discrete_gpu",
+            "row_nominal_capacity_bytes": 25769803776,
+            "shares_one_pool": false
+          },
+          "row_id": "ubuntu2404-x86-l4-g2s8",
+          "validated": true
+        },
+        "previous_active": null,
+        "quarantined": [
+          {
+            "bundle_digest": null,
+            "deployment_id": "validation-cuda-smoke",
+            "error_code": "unsupported",
+            "message": "backend `python_pytorch` is unrunnable on this device: backend descriptor not installed",
+            "phase": "received",
+            "quarantined_monotonic_ns": 1790481186796267155,
+            "transaction_id": "tx-13b95eba-7787-4715-bd5d-81228d29d2c2"
+          }
+        ],
+        "supervision": null
+      },
+      "agent_response_status": "ok",
+      "severity": "degraded"
+    },
+    "schema_version": "0.1",
+    "status": "ok",
+    "transaction_id": null
+  },
+  "deploy": {
+    "command": "deploy",
+    "correlation_id": "cli-8f9aa16e-7764-4854-a0f7-e3754be3ec51",
+    "payload": {
+      "agent_response_status": "ok",
+      "bundle_digest": "sha256:f52b460ea693fc2209ee787b8470bae7d13d52c0de88791052970e9a6537fa6e",
+      "deployment_id": "validation-cuda-smoke",
+      "phase": "active",
+      "transaction_id": "tx-37b68dff-53a1-4fb8-9943-ea83518dee34"
+    },
+    "schema_version": "0.1",
+    "status": "ok",
+    "transaction_id": "tx-37b68dff-53a1-4fb8-9943-ea83518dee34"
+  },
+  "gpu_memory_held_by_the_sidecar": [
+    "pid, process_name, gpu_uuid, used_gpu_memory [MiB]",
+    "5819, python3, GPU-00000000-0000-0000-0000-000000000005, 248 MiB"
+  ],
+  "infer": {
+    "correlation_id": "cli-488a67f9-0a05-472a-ab35-cd3515e2c3be",
+    "outputs": [
+      {
+        "name": "echo_probe",
+        "payload_b64": "AACAPwAAAEAAAEBAAACAQA==",
+        "tensor": {
+          "byte_offset": 0,
+          "byte_size": 16,
+          "dtype": "float32",
+          "layout": "row_major",
+          "shape": [
+            1,
+            4
+          ]
+        }
+      }
+    ],
+    "request_id": "cuda-smoke-1",
+    "schema_version": "0.1",
+    "status": "success",
+    "timing": {
+      "execution_latency_ns": 260219
+    }
+  },
+  "live_process_tree": [
+    "   3432       1 tensorp+       13:34 tensorplate-obs /usr/bin/tensorplate-observability --config /etc/tensorplate/observability.json",
+    "   5795       1 tensorp+       00:25 tensorplate-age /usr/bin/tensorplate-agent --config /etc/tensorplate/agent.json",
+    "   5818    5795 tensorp+       00:17 tensorplate-ser /usr/lib/tensorplate/tensorplate-serving --config /var/lib/tensorplate/worker-configs/serving-validation-cuda-smoke-18080.json",
+    "   5819    5818 tensorp+       00:17 python3         python3 -m tensorplate_pytorch_backend --socket /tmp/tp_sidecar_5818_0.sock"
+  ],
+  "serving_health": {
+    "active_model_id": "validation-cuda-smoke",
+    "backend": "python_pytorch",
+    "endpoint": "validation-cuda-smoke",
+    "in_flight": 0,
+    "queue_depth": 0,
+    "schema_version": "0.1",
+    "state": "ready",
+    "state_since_steady_ns": 928185726110
+  }
+}

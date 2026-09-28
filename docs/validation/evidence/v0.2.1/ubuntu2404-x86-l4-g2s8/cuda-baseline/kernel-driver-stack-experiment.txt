@@ -1,0 +1,26 @@
+# Experiment: does declaring one measured component in kernel_driver_stack keep admission working?
+# baseline (components: []):
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=none posture=technical_prerequisites (row floor) evidence=validated max_resident_model_memory=24152899584
+# with one declared component (nvidia_driver 580.173.02, the version this host actually runs):
+platform identity: machine_type=g2-standard-8 source=gce_metadata record=unchanged
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=missing_driver_runtime posture=none (none) evidence=none max_resident_model_memory=0
+# tensorplate doctor while the component was declared, still reporting the row as resolved:
+ok platform_profile - host matches 2 candidate support row(s): ubuntu2404-x86-cpu, ubuntu2404-x86-l4-g2s8
+ok platform_row - resolves to support row `ubuntu2404-x86-l4-g2s8`
+ok platform_registry - platform support registry at `/usr/share/tensorplate/platform` loaded (30 rows, 26 supported combinations, 4 roadmap targets)
+# and a deploy:
+{
+  "command": "deploy",
+  "error": {
+    "code": "unsupported",
+    "context": "missing_driver_runtime",
+    "hint": "the backend or capability is not enabled on this device",
+    "message": "agent returned an error response: platform cannot admit this deploy: row `ubuntu2404-x86-l4-g2s8` records nvidia_driver 580.173.02, which this machine does not report"
+  },
+  "schema_version": "0.1",
+  "status": "error"
+}
+# restored (components: []); the agent's last two admission lines, from the start with the component still
+# declared and then from the restart after the restore:
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=missing_driver_runtime posture=none (none) evidence=none max_resident_model_memory=0
+platform admission: row=ubuntu2404-x86-l4-g2s8 reason=none posture=technical_prerequisites (row floor) evidence=validated max_resident_model_memory=24152899584

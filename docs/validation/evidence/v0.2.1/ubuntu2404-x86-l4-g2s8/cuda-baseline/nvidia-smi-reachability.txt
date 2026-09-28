@@ -1,0 +1,35 @@
+# First: nvidia-smi as uid tensorplate inside the agent's mount
+# namespace, with only systemd's default PATH in the environment.
+/usr/bin/nvidia-smi
+NVIDIA L4, 580.173.02
+
+# Second: the same inside the observability unit, whose
+# PrivateDevices=yes gives it a private /dev with no accelerator nodes.
+# The message does not contain 'no devices were found', so this would
+# classify Unreadable rather than absence -- but that unit runs no
+# accelerator probe at all: it only loads the registry files.
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver. Make sure that the latest NVIDIA driver is installed and running.
+
+exit=9
+# its /dev, for the record:
+total 0
+drwxr-xr-x 2 root root  180 Sep 27 03:40 char
+lrwxrwxrwx 1 root root   11 Sep 27 03:40 core -> /proc/kcore
+lrwxrwxrwx 1 root root   13 Sep 27 03:40 fd -> /proc/self/fd
+crw-rw-rw- 1 root root 1, 7 Sep 27 03:40 full
+drwxr-xr-x 2 root root    0 Sep 27 03:38 hugepages
+lrwxrwxrwx 1 root root   28 Sep 27 03:40 log -> /run/systemd/journal/dev-log
+drwxrwxrwt 2 root root   40 Sep 27 03:38 mqueue
+crw-rw-rw- 1 root root 1, 3 Sep 27 03:40 null
+crw-rw-rw- 1 root root 5, 2 Sep 27 03:40 ptmx
+drwxr-xr-x 2 root root    0 Sep 27 03:38 pts
+crw-rw-rw- 1 root root 1, 8 Sep 27 03:40 random
+drwxrwxrwt 2 root root   40 Sep 27 03:38 shm
+lrwxrwxrwx 1 root root   15 Sep 27 03:40 stderr -> /proc/self/fd/2
+lrwxrwxrwx 1 root root   15 Sep 27 03:40 stdin -> /proc/self/fd/0
+lrwxrwxrwx 1 root root   15 Sep 27 03:40 stdout -> /proc/self/fd/1
+crw-rw-rw- 1 root root 5, 0 Sep 27 03:40 tty
+crw-rw-rw- 1 root root 1, 9 Sep 27 03:40 urandom
+crw-rw-rw- 1 root root 1, 5 Sep 27 03:40 zero
+# and the only platform line its journal carries:
+platform registry: rows=30 supported=26 roadmap_targets=4 dir=/usr/share/tensorplate/platform

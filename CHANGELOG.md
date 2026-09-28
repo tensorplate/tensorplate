@@ -441,6 +441,55 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `test/platform/accelerator/PROVENANCE.md` records the driver, image and
   kernel the recordings were taken on. (V030-E03-F02-T04)
 
+- A `cuda_fixture` sidecar backend profile, the CUDA counterpart of
+  `mps_fixture`: its load succeeds only after a real CUDA matmul on the
+  device has returned the arithmetically correct result, so a card that
+  computed nothing fails the load instead of passing it. It refuses a
+  configuration that does not request `device=cuda`. Its runtime
+  capability reports the NVIDIA driver's version, read from
+  `/proc/driver/nvidia/version`, as the accelerator runtime version, the
+  operating-system-provided runtime that field names, and `unknown` when
+  that report is absent or of a shape it does not recognize; whether
+  PyTorch was built for CUDA comes from `torch.version.cuda`, so a CPU-only
+  build fails closed, and so does one whose build metadata or availability
+  check raises. A load refused after the probe, a kernel that raises or
+  returns the wrong sum included, carries that capability in its error
+  response. The new `probe_cuda_runtime` and `require_cuda_runtime` mirror
+  the MPS pair at the sidecar's accelerator boundary.
+  `test/models/bundles/v0_1/x86_cuda_smoke` is the matching deploy input,
+  naming the `x86_64` device family so admission matches it against the
+  cloud rows' agent configuration exactly. The Ubuntu cloud lifecycle
+  harness stays device-neutral and its header now says where the
+  accelerator proof lives instead of saying no CUDA fixture exists.
+  (V030-E01-F01-T01)
+
+- A CUDA baseline for the `ubuntu2404-x86-l4-g2s8` support row, recorded on
+  that shape and published under
+  `docs/validation/evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/`.
+  The lifecycle evidence beside it runs the device-neutral profile and
+  executes no CUDA kernel, so it could not answer whether the hardened
+  service sandbox permits the accelerator at all. It does: `nvidia-smi`
+  resolves under systemd's default PATH as the service account inside the
+  agent's mount namespace, all three CUDA device nodes are present there
+  and openable, PyTorch reports CUDA available and a matmul returns the
+  correct result in a transient unit given the 11 of the unit's 18
+  hardening directives its readback covers, and a deploy of the CUDA
+  fixture, which loads only after a checked CUDA matmul, reached active
+  inside the agent unit itself and answered an inference while the sidecar
+  held GPU memory. Package closure and `dpkg --verify` were taken from the
+  published set alone, before the backend package was repacked for the CUDA
+  deploy: the repacked package is recorded by its digests and the patch that
+  distinguishes it, and PyTorch, installed with pip, is owned by no package.
+  The row's `kernel_driver_stack.components` stays empty on purpose: the
+  agent reports no stack components, so a row that declares one is resolved
+  and then refused on the machine it describes, which the bundle shows
+  rather than asserts; the row schema's description of that field, and the
+  comments that echoed it, no longer tell an evidence run to record the
+  stack there. The bundle also records the login path and the guest agent
+  returning after a reboot with the appliance's autostart disabled.
+  `docs/validation/cloud-row-runbooks.md` carries the procedure, command by
+  command. (V030-E01-F01-T01, V030-E01-F01-T03)
+
 ### Changed
 
 - Every version surface moves to `0.3.1`, the first release of the 0.3
