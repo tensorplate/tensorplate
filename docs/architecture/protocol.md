@@ -47,6 +47,14 @@ Bundle manifests decode through `tensorplate_protocol::bundle::parse_bundle`
 instead: format 0.2 fields are checked against the manifest's own text, so
 the helper refuses a format 0.2 manifest rather than return it unchecked.
 
+Deployment descriptors decode through
+`tensorplate_protocol::DeploymentDescriptor::from_json`, which also requires
+the text's canonical JSON form, the manifest decoder's verdict on its format
+0.2 fields and both digests (see
+[`docs/bundles/integrity.md`](../bundles/integrity.md#deployment-descriptor-digests)).
+Converted to a `ProtocolError`, its `schema_version` and
+`canonical_json_version` refusals are `Unsupported`, like the helper's.
+
 Bumping the protocol version requires touching:
 
 - `CMakeLists.txt` (`TP_PROTOCOL_VERSION_MAJOR/MINOR`)
@@ -229,6 +237,9 @@ the same semantic rules used by the C++ value-object factories.
    C++ mirror under `include/tensorplate/...` or `protocol/cpp/`
    and pair the validation factory.
 5. Add a fixture under `protocol/rust/tests/fixtures/` plus a
-   `round_trip` entry in `protocol/rust/tests/round_trip.rs`.
+   `round_trip` entry in `protocol/rust/tests/round_trip.rs`. Vectors
+   that more than one language replays, such as the job seam's or
+   canonical JSON's, go under `protocol/fixtures/` instead, with the test
+   that replays them in each language.
 6. Update `protocol/schemas/README.md` and this document if the
    policy changes.

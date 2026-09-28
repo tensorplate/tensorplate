@@ -665,7 +665,7 @@ fn parse_format_version(v: &str) -> Result<(u32, u32), ParseError> {
     Ok((major, minor))
 }
 
-fn artifact_path_is_safe(p: &str) -> bool {
+pub(crate) fn artifact_path_is_safe(p: &str) -> bool {
     if p.is_empty() {
         return false;
     }

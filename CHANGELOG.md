@@ -557,6 +557,50 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the two speech budget fixtures now declare no OS reserve and a sidecar
   residual. Fixtures: `test/models/bundles/v0_2/`. Additive inside
   protocol 0.1; version constants unchanged. (V030-E02-F01-T01)
+- A deployment descriptor records what the agent verified for one
+  generation of one deployment. `protocol/schemas/deployment_descriptor.json`
+  and the protocol crate's `deployment_descriptor` module derive it from a
+  verified bundle, the installed backend descriptor's runner profile, the
+  member's id and generation, its admission mode, staged root and session
+  quota, and the runtime version. It carries two identities:
+  `configuration_digest` over the portable configuration (bundle identity
+  and digest, artifacts, backend, precision, runtime version, runner
+  profile and packages, the format 0.2 profile fields and the quota),
+  which an equivalent restart keeps, and `descriptor_digest` over the
+  whole generation, which every generation changes. Both are SHA-256 over
+  canonical JSON version 1, the new `canonical_json` module: keys sorted
+  by code point, no whitespace, minimal string escapes, integers within
+  2^53-1 only, nesting at most 64 deep, and no `null`. Reading a
+  descriptor checks its canonical form, decodes its format 0.2 fields with
+  the manifest decoder, checks its rules and normalized form, and verifies
+  both digests; its version refusals map to `Unsupported`. Cross-language
+  vectors and three descriptor fixtures are under `protocol/fixtures/`,
+  written by `canonical_json_reference.py`, a Python standard-library
+  implementation that the Rust tests run with `--check`. Nothing consumes
+  the descriptor yet. Additive inside protocol 0.1; version constants
+  unchanged. (V030-E02-F01-T04)
+
+- The `python_pytorch` sidecar gains the `faster_whisper` runner profile,
+  a candidate: it transcribes speech on the tensor-only `/infer` path with
+  any Whisper-family model converted for CTranslate2, through
+  faster-whisper. Only an entry whose `backend_profile` names it selects
+  it. The entry names the model directory, the device, the CTranslate2
+  compute type (`auto`, `default` and `int8`, which leave the loaded type
+  to CTranslate2, are refused), the languages served and the input sample
+  rate, and a load verifies every listed file, refuses a model directory
+  whose `tokenizer.json` is not listed, and fails when the loaded model's
+  compute type, input rate or tokenizer disagrees with the entry. A request
+  is one mono `int16` PCM clip of at most one model input window plus its
+  language as `text_utf8`, decoded greedily at temperature 0 with word
+  timestamps, no prompt history and no voice-activity filter; the response
+  is one `result_json` holding the text, segments and words with integer
+  microsecond times checked against the clip, the decode options, the
+  compute type CTranslate2 reports, the engine versions and the load and
+  decode times. Failures are typed, CTranslate2's out-of-memory
+  `RuntimeError` included, and carry no path, language or engine text. The
+  STT candidate fixture's entry declares these fields.
+  `pip install ".[speech-stt]"` adds faster-whisper and CTranslate2 for
+  development; CI fakes them. (V030-E01-F02-T01)
 
 ### Changed
 

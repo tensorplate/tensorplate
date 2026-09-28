@@ -11,9 +11,9 @@
       "role": "model",
       "kind": "python_pytorch_entry",
       "path": "stt-whisper-candidate.json",
-      "digest": "sha256:81280215566a3d391a1a02e3524e41f5d833c25e3f87df23dcaab0a6a260bffe",
-      "byte_size": 774,
-      "description": "Candidate-only runner entry: selects the faster_whisper profile and lists its artifact set by relative path and digest."
+      "digest": "sha256:ba7f2b7535c54c10774c1816ba72fa1a6965fe5b61c404249480b585e0307c7d",
+      "byte_size": 921,
+      "description": "Candidate-only runner entry: selects the faster_whisper profile, declares the model directory, device, compute type, languages and input rate it loads, and lists its artifact set by relative path and digest."
     },
     {
       "role": "auxiliary",
