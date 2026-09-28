@@ -605,6 +605,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   clean-room guides no longer show `rollback --deployment-id`, which the
   CLI never accepted and which now names a member.
 
+- The macOS Homebrew lifecycle harness names its smoke deployment
+  `macos-deploy-smoke-<UTC time>`, as it names the offline one
+  `macos-offline-deploy-<UTC time>`, instead of a name that began with a
+  planning wave label. Evidence already recorded keeps the name it was
+  recorded with. (V030-E06-F02-T01)
+
 ### Fixed
 
 - `HttpServer::stop()` closed the listening socket while the accept
