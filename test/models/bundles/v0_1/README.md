@@ -56,6 +56,13 @@ the same digests, so the agent's bundle check and the runner's load check
 cover the same set; `protocol/rust/tests/bundle_conformance.rs` fails when
 the two lists differ.
 
+The STT entry also declares what its runner profile loads and serves:
+`model_directory`, `device`, `compute_type`, `languages` and
+`sample_rate_hz` (see `docs/install/python-pytorch-backend.md`). Its
+`float16` on `cuda`, `en` and `ar` at 16 kHz are this bundle's
+declarations, which the profile checks against the model it loads; the
+profile itself fixes none of them.
+
 The files under `model/` are synthetic placeholders, not models, named
 after the files the real ones ship: the converted model directory
 faster-whisper 1.2.1 reads (`config.json`, `model.bin`,
