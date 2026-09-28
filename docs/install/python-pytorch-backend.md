@@ -145,6 +145,28 @@ family requires a backend with native async/cancel support and returns
   scan the filesystem, or reach the network. The probe is read-only
   and bounded (it returns within seconds even when Python is missing).
 
+## Errors and logs
+
+The sidecar keeps request content out of everything it reports. A failed
+load, prime or inference returns one of the typed error codes with a short
+message the backend itself wrote, or, when that message would repeat an
+upstream library's exception text, a fixed message for the code; an error
+never carries a `context`. An exception a backend did not type becomes
+`internal` (`oom_error` for an out-of-memory class) with the fixed message.
+Messages name no file path, request text or voice and no name a request
+chose, because upstream libraries can put exactly those in their exception
+text; the sidecar's health payload keeps the same message as `last_error`.
+
+The sidecar's own log lines name an exception's class and the file, line
+and function it was raised from, never its message, and drop tracebacks.
+Records from other libraries' loggers and Python warnings are replaced by a
+line naming the logger and level. The sidecar's log is the only thing that
+reaches the stdout and stderr it shares with the serving worker: text that
+Python code writes to its standard streams is discarded after one line
+saying so, and what native libraries write to those descriptors is
+discarded without one. The upstream detail is recorded nowhere; reproduce
+the failure outside the service to see it.
+
 ## Tuning environment variables
 
 The adapter and the SmolVLA backend both read environment variables for

@@ -514,6 +514,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/validation/cloud-row-runbooks.md` carries the procedure, command by
   command. (V030-E01-F01-T01, V030-E01-F01-T03)
 
+- Two candidate speech bundle fixtures,
+  `test/models/bundles/v0_1/stt_whisper_candidate/` and
+  `tts_kokoro_candidate/`, select the `faster_whisper` and `kokoro` runner
+  profiles of the `python_pytorch` sidecar through their entry's
+  `backend_profile` field, and list the files each runner opens in an
+  `artifact_set` of paths relative to the entry with `sha256:` digests, the
+  same set the manifest lists; a conformance test fails when the two
+  differ. Their files are synthetic placeholders, and no runner for either
+  profile ships yet. The sidecar gains `artifact_set.py`, through which a
+  runner profile opens bundle files: it refuses absolute paths, `.`, `..`
+  and empty segments, backslashes and anything that resolves outside the
+  entry's directory, verifies every digest before it hands a file out, and
+  refuses a directory holding a file the entry does not list. It also gains
+  `speech_payload.py`, the tensors the speech runners use on the `/infer`
+  path: UTF-8 text in as a one-dimensional `uint8` tensor named
+  `text_utf8`, decoded strictly, and a JSON object out as one named
+  `result_json`, each at most 1 MiB. The `backend_profile` selector and
+  these two tensors are a candidate-only convention, not a public bundle
+  format, and go away when the speech bundle format lands.
+  (V030-E01-F02-T01, V030-E01-F02-T02)
 - Bundle manifests can opt into format 0.2 with `"format_version": "0.2"`
   under the unchanged `schema_version` 0.1 envelope. The manifest schema
   gains a format 0.2 branch and the protocol crate a `bundle_profile`
@@ -653,6 +673,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `CHANGELOG.md`, in the public hygiene scan of source files, commit
   messages and pull request text, where the prefixed form still passes.
   (V030-E06-F02-T01)
+- The Python sidecar's `error` objects now carry the `schema_version` that
+  `error.json` requires. (V030-E01-F02-T01)
 - The evidence scanner found a serial number only after a label and a
   colon or equals sign. It now also reports one as an XML element,
   qualified or not (`<serial>` and `<chassis_serial_number>` in
@@ -686,6 +708,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `tinyvec_macros`. Both advisories were found by the new cargo-deny check's
   first run.
   (V030-E01-F03-T01)
+
+- The Python sidecar no longer lets exception text out of the process.
+  Upstream libraries can put request text, file paths and voice names in
+  their exception messages, and the sidecar sent `str(exc)` of any exception
+  a backend had not typed as the IPC error message, kept it as the health
+  payload's `last_error` and logged its traceback to the stderr it shares
+  with the serving worker; the SmolVLA backend also sent `repr(exc)` as the
+  error's `context`. Now an untyped exception becomes `internal`, or
+  `oom_error` for an out-of-memory class, with a fixed message; a typed
+  backend error keeps its message unless that repeats a chained exception's
+  text, when it gets the fixed message for its code; no sidecar error
+  carries a `context`; and the messages the sidecar writes itself no longer
+  name the entry's path, a tensor name, the requested profile or an
+  accelerator probe's exception. The sidecar's log lines name an exception's
+  class and where it was raised, never its message or traceback; other
+  libraries' log records and Python warnings are replaced by a line naming
+  the logger; and the log is the only thing left on the sidecar's stdout and
+  stderr, where text Python code writes is discarded after one line saying
+  so and what native libraries write is discarded. Tests plant a marker in
+  each exception path and assert it is absent from the IPC frame bytes, the
+  health payload and the entry point's stdout and stderr, and, for three
+  load failures through the C++ adapter, from `Error::message` and
+  `Error::context`. (V030-E01-F02-T01, V030-E01-F02-T02)
 
 ## [0.2.1] - 2026-09-23
 

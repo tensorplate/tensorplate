@@ -1,0 +1,25 @@
+{
+  "backend_profile": "faster_whisper",
+  "artifact_set": [
+    {
+      "path": "model/config.json",
+      "digest": "sha256:b09b474b44f83c82461bf80785ac49359d50c96049bbfacbeca4d3b6e7f9a51e"
+    },
+    {
+      "path": "model/model.bin",
+      "digest": "sha256:0d9e69dca6185be37867b801e075e2961a49729c8828f6b89a2566766b25d1ee"
+    },
+    {
+      "path": "model/preprocessor_config.json",
+      "digest": "sha256:bcff0613928f664bb8a1a874ed660174458d51033e13ea3cd50457b078457616"
+    },
+    {
+      "path": "model/tokenizer.json",
+      "digest": "sha256:9f854f1497c4d81c43e2e2b0516c6e3db2e2dc45ccc837102fdc98877516854c"
+    },
+    {
+      "path": "model/vocabulary.json",
+      "digest": "sha256:0ed93b710e01d996eeff6df942c506a28fffa998c0526ffb5dc6430fe81b9910"
+    }
+  ]
+}

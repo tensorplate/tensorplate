@@ -151,11 +151,11 @@ capability reads the `ready_event` fields it uses by name and ignores the
 rest. A sidecar that predates it lists nothing and answers a job message with
 an `unsupported` `error_event` that carries the message's `message_id`, which
 `backends/python_pytorch/tests/test_speech_jobs_messages.py` holds the
-current runner to; that refusal's `error` lacks the `schema_version` that
-`error.json` requires, so a reader takes its code and message by name.
-Existing kinds and fields are never renamed, removed or
-given a new meaning. The schema, the Rust mirror and the sidecar's
-`protocol.py` literals move in the same change;
+current runner to. The sidecar's `error` objects carry the `schema_version`
+that `error.json` requires; sidecars released before 0.3.1 omit it, so a
+reader takes a sidecar error's code and message by name. Existing kinds and
+fields are never renamed, removed or given a new meaning. The schema, the
+Rust mirror and the sidecar's `protocol.py` literals move in the same change;
 `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` holds them to the
 golden frames and to the typed job seam's vectors
 (`protocol/fixtures/job_seam.json`). Retire this exception with the first.

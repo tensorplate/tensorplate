@@ -95,8 +95,6 @@ def require_mps_runtime(
             ERR_UNSUPPORTED,
             f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}: "
             "the configured accelerator runtime is not available",
-            context=f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}; "
-            f"built={str(capability.accelerator_runtime_built).lower()}",
             runtime_capability=capability,
         )
     return capability
@@ -159,8 +157,6 @@ def require_cuda_runtime(
             ERR_UNSUPPORTED,
             f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}: "
             "the configured accelerator runtime is not available",
-            context=f"{REASON_ACCELERATOR_RUNTIME_UNAVAILABLE}; "
-            f"built={str(capability.accelerator_runtime_built).lower()}",
             runtime_capability=capability,
         )
     return capability

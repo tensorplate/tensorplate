@@ -75,6 +75,12 @@ matrix (CPU, CUDA, Jetson aarch64).
   `protocol/schemas/`.
 - Hardware-boundary errors surface as typed exceptions translated to
   `Result<T>::Error` on the wire (V01-E02 contract).
+- A `BackendError` message names no request data, file path or upstream
+  exception text, and a log line names an exception's class, never its
+  message. The runner's error edge (`sanitize.py`) replaces a message that
+  repeats a chained exception's text, gives any other failure a fixed
+  message, and withholds other libraries' log records and anything written
+  to the process's stdout or stderr outside its own log.
 - Capabilities (async / generation / streaming / KV-cache / fixed-shape)
   are published through the adapter interface and must never be lied
   about.

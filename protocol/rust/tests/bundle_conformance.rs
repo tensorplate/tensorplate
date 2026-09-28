@@ -9,6 +9,7 @@
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::bundle::{
@@ -171,6 +172,89 @@ fn x86_cuda_smoke_bundle_selects_the_cuda_fixture_profile() {
             .expect("config parses");
     assert_eq!(config["backend_profile"], "cuda_fixture");
     assert_eq!(config["device"], "cuda");
+}
+
+fn x86_64_python_pytorch_device(runtime_version: &str) -> DeviceContext {
+    DeviceContext {
+        runtime_version: Some(runtime_version.into()),
+        device_family: Some(DeviceFamily::X86_64),
+        device_memory_bytes: None,
+        backends: vec![BackendProfile {
+            backend: "python_pytorch".into(),
+            capabilities: BackendCapabilityView::default(),
+            supported_precision: vec!["auto".into(), "fp32".into(), "fp16".into()],
+            supported_artifact_kinds: vec!["python_pytorch_entry".into()],
+        }],
+    }
+}
+
+/// A runner profile verifies the files its entry lists, and the agent the
+/// files the manifest lists, so the two lists must name the same files with
+/// the same digests: a file only one of them names escapes one of the checks.
+fn assert_candidate_speech_bundle(root: &Path, profile: &str) {
+    let d = parse_bundle(root).expect("candidate fixture must parse");
+    assert_eq!(d.manifest.model_class, ModelClass::Custom);
+    assert_eq!(d.manifest.backend_hint, "python_pytorch");
+    assert_eq!(
+        d.manifest.target_hardware.device_family,
+        DeviceFamily::X86_64
+    );
+
+    let entry_path = d.model_artifact_path().expect("model artifact present");
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(entry_path).unwrap()).expect("entry parses");
+    assert_eq!(entry["backend_profile"], profile);
+    let listed = entry["artifact_set"]
+        .as_array()
+        .expect("artifact_set array");
+    let from_entry: BTreeMap<&str, &str> = listed
+        .iter()
+        .map(|item| {
+            (
+                item["path"].as_str().expect("path"),
+                item["digest"].as_str().expect("digest"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        from_entry.len(),
+        listed.len(),
+        "artifact_set repeats a path"
+    );
+    let from_manifest: BTreeMap<&str, &str> = d
+        .manifest
+        .artifacts
+        .iter()
+        .filter(|a| a.role != ArtifactRole::Model)
+        .map(|a| (a.path.as_str(), a.digest.as_str()))
+        .collect();
+    assert_eq!(from_entry, from_manifest);
+
+    // The runner profiles ship with the 0.3 line, so an older runtime must
+    // refuse the bundle before it reaches a sidecar that cannot load it.
+    let current = evaluate_compatibility(&d, &x86_64_python_pytorch_device("0.3.1"));
+    assert!(current.ok, "got {current:?}");
+    let older = evaluate_compatibility(&d, &x86_64_python_pytorch_device("0.2.1"));
+    assert!(
+        older
+            .violations
+            .iter()
+            .any(|v| v.code() == "unsupported_runtime"),
+        "got {older:?}"
+    );
+}
+
+#[test]
+fn stt_whisper_candidate_bundle_lists_its_artifact_set_in_the_entry() {
+    assert_candidate_speech_bundle(
+        &fixtures_root().join("stt_whisper_candidate"),
+        "faster_whisper",
+    );
+}
+
+#[test]
+fn tts_kokoro_candidate_bundle_lists_its_artifact_set_in_the_entry() {
+    assert_candidate_speech_bundle(&fixtures_root().join("tts_kokoro_candidate"), "kokoro");
 }
 
 #[test]

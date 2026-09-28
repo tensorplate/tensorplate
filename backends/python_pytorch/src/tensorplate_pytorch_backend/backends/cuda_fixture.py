@@ -55,7 +55,7 @@ class CudaFixtureBackend(FixtureBackend):
         except Exception as exc:
             raise BackendError(
                 ERR_LOAD_FAILED,
-                f"CUDA fixture tensor operation failed: {exc}",
+                "CUDA fixture tensor operation failed",
                 runtime_capability=self._runtime_capability,
             ) from exc
         # An unchecked kernel would also pass on a card that computed
