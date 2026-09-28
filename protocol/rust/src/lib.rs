@@ -35,9 +35,11 @@ pub mod buffer_ref;
 pub mod bundle;
 pub mod bundle_manifest;
 pub mod bundle_profile;
+pub mod canonical_json;
 pub mod control_loop_metrics;
 pub mod correlation_id;
 pub mod deploy_transaction;
+pub mod deployment_descriptor;
 pub mod desired_state;
 pub mod error;
 pub mod failure_reason;
@@ -101,6 +103,7 @@ pub use bundle_profile::{
     PROFILE_FORMAT_VERSION, RUNTIME_PIPELINE_STAGES, STT_INPUT_AUDIO_FORMATS,
     TTS_OUTPUT_AUDIO_FORMATS,
 };
+pub use canonical_json::{CanonicalJsonError, CANONICAL_JSON_VERSION};
 pub use control_loop_metrics::{
     ControlLoopEvent, ControlLoopLabels, ControlLoopSummary, MAX_CONTROL_LOOP_LABEL_BYTES,
 };
@@ -110,6 +113,10 @@ pub use correlation_id::{
 };
 pub use deploy_transaction::{
     DeployFailure, DeployState, DeployTransaction, DeployTransactionError,
+};
+pub use deployment_descriptor::{
+    DeploymentConfiguration, DeploymentDescriptor, DeploymentDescriptorError, DescriptorArtifact,
+    DescriptorBundle, DescriptorInputs, DescriptorRunnerProfile, RunnerEnvironment,
 };
 pub use desired_state::{DesiredState, DesiredStateError, Rollout, RolloutStrategy};
 pub use error::{ErrorCode, ProtocolError};
@@ -281,8 +288,11 @@ pub trait ValidatePayload: Sized {
 /// This is the entry point for "unknown schema versions are rejected with
 /// typed errors" required by V01-E02, for every payload except the agent's
 /// durable state file, which has its own version track and its own decoder
-/// ([`agent_state::decode_agent_state`]) giving the same guarantee.
-/// Decoders that bypass both lose it.
+/// ([`agent_state::decode_agent_state`]) giving the same guarantee, and the
+/// deployment descriptor, whose reader
+/// ([`deployment_descriptor::DeploymentDescriptor::from_json`]) also checks
+/// its canonical form and digests and reports versions as `Unsupported`.
+/// Decoders that bypass all three lose it.
 ///
 /// # Errors
 ///
