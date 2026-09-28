@@ -1,0 +1,6 @@
+{"schema_version":"0.1","message_id":"a1","kind":"job_submit","job_id":1,"session_key":1,"generation":1,"job_class":"stt_decode","progress_limit":0,"options":{"language":"en"},"input":{"type":"audio_frames","format":{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1},"start_sample":0,"payload_length":32000}}
+{"schema_version":"0.1","message_id":"s1","kind":"job_accepted","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"a2","kind":"job_cancel","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s2","kind":"job_cancel_acknowledged","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s3","kind":"job_failed","job_id":1,"session_key":1,"generation":1,"error":{"schema_version":"0.1","code":"cancelled","message":"m"}}
+{"schema_version":"0.1","message_id":"s4","kind":"job_released","job_id":1,"session_key":1,"generation":1}

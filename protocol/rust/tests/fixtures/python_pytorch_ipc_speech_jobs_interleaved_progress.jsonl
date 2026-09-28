@@ -1,0 +1,13 @@
+{"schema_version":"0.1","message_id":"a1","kind":"job_submit","job_id":1,"session_key":1,"generation":1,"job_class":"stt_decode","progress_limit":3,"options":{"language":"en"},"input":{"type":"audio_frames","format":{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1},"start_sample":0,"payload_length":32000}}
+{"schema_version":"0.1","message_id":"a2","kind":"job_submit","job_id":2,"session_key":2,"generation":1,"job_class":"stt_decode","progress_limit":3,"options":{"language":"en"},"input":{"type":"audio_frames","format":{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1},"start_sample":0,"payload_length":32000}}
+{"schema_version":"0.1","message_id":"s1","kind":"job_accepted","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s2","kind":"job_accepted","job_id":2,"session_key":2,"generation":1}
+{"schema_version":"0.1","message_id":"s3","kind":"job_progress","job_id":1,"session_key":1,"generation":1,"progress_sequence":1,"result":{"type":"transcript","text":"t","tokens":[1],"words":[]}}
+{"schema_version":"0.1","message_id":"s4","kind":"job_progress","job_id":2,"session_key":2,"generation":1,"progress_sequence":1,"result":{"type":"transcript","text":"t","tokens":[1,2],"words":[]}}
+{"schema_version":"0.1","message_id":"s5","kind":"job_progress","job_id":1,"session_key":1,"generation":1,"progress_sequence":2,"result":{"type":"transcript","text":"t","tokens":[1],"words":[]}}
+{"schema_version":"0.1","message_id":"s6","kind":"job_progress","job_id":2,"session_key":2,"generation":1,"progress_sequence":2,"result":{"type":"transcript","text":"t","tokens":[1],"words":[]}}
+{"schema_version":"0.1","message_id":"s7","kind":"job_completed","job_id":2,"session_key":2,"generation":1,"result":{"type":"transcript","text":"","tokens":[],"words":[]}}
+{"schema_version":"0.1","message_id":"s8","kind":"job_progress","job_id":1,"session_key":1,"generation":1,"progress_sequence":3,"result":{"type":"transcript","text":"t","tokens":[1],"words":[]}}
+{"schema_version":"0.1","message_id":"s9","kind":"job_released","job_id":2,"session_key":2,"generation":1}
+{"schema_version":"0.1","message_id":"s10","kind":"job_completed","job_id":1,"session_key":1,"generation":1,"result":{"type":"transcript","text":"t","tokens":[1],"words":[]}}
+{"schema_version":"0.1","message_id":"s11","kind":"job_released","job_id":1,"session_key":1,"generation":1}

@@ -1,0 +1,4 @@
+{"schema_version":"0.1","message_id":"a1","kind":"job_submit","job_id":1,"session_key":1,"generation":1,"job_class":"tts_synthesis","progress_limit":0,"options":{"language":"en-US","voice":"af_heart","speed_milli":1000},"input":{"type":"text_segment","payload_length":12}}
+{"schema_version":"0.1","message_id":"s1","kind":"job_accepted","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s2","kind":"job_completed","job_id":1,"session_key":1,"generation":1,"result":{"type":"audio_chunk","format":{"encoding":"pcm_s16le","sample_rate_hz":24000,"channels":1},"clipped_samples":0,"payload_length":1920}}
+{"schema_version":"0.1","message_id":"s3","kind":"job_released","job_id":1,"session_key":1,"generation":1}
