@@ -1,0 +1,262 @@
+{
+  "description": "Cross-language vectors for TensorPlate canonical JSON version 1, the form the deployment descriptor's configuration_digest and descriptor_digest are computed over (docs/bundles/integrity.md). Each input is JSON text. An accepted input's canonical value is the exact canonical text once this file is parsed, and sha256 is the digest of its UTF-8 bytes; this file is ASCII, so non-ASCII characters are escaped here and written literally in the canonical text. A rejected input has no canonical form, for the reason named. Every implementation of the form replays every vector. canonical_json_reference.py, a standard-library implementation, writes this file.",
+  "canonical_json_version": 1,
+  "reasons": {
+    "malformed": "not JSON text: a grammar error, trailing text, a byte order mark, or a string escape that is not a Unicode scalar value",
+    "duplicate_key": "an object names the same key twice, compared after unescaping",
+    "null": "null anywhere; an absent value is omitted instead",
+    "number": "a number that is not an integer written without fraction or exponent in [-(2^53-1), 2^53-1], including -0",
+    "depth": "arrays and objects nested more than 64 deep"
+  },
+  "accept": [
+    {
+      "name": "empty_object",
+      "input": "{}",
+      "canonical": "{}",
+      "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "empty_array",
+      "input": "[]",
+      "canonical": "[]",
+      "sha256": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "top_level_string",
+      "input": "\"x\"",
+      "canonical": "\"x\"",
+      "sha256": "sha256:ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b"
+    },
+    {
+      "name": "top_level_zero",
+      "input": "0",
+      "canonical": "0",
+      "sha256": "sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    {
+      "name": "whitespace_between_tokens_is_removed",
+      "input": " { \"b\" : 1 ,\n\t\"a\" : [ true , false ] } \r\n",
+      "canonical": "{\"a\":[true,false],\"b\":1}",
+      "sha256": "sha256:ce99140bf2ed2c7d61a8431bc204693e40ce19e1c52b312617d6eb3a2aeef3ad"
+    },
+    {
+      "name": "keys_sort_recursively",
+      "input": "{\"b\":{\"z\":1,\"y\":2},\"a\":{\"d\":[{\"k\":1,\"j\":2}],\"c\":0}}",
+      "canonical": "{\"a\":{\"c\":0,\"d\":[{\"j\":2,\"k\":1}]},\"b\":{\"y\":2,\"z\":1}}",
+      "sha256": "sha256:b5d6ffa140b65577fd014887cf4d90d39558e29662f69d93e9d1c9e9f9dd96cf"
+    },
+    {
+      "name": "keys_sort_by_code_point",
+      "input": "{\"a\":1,\"_\":2,\"B\":3,\"0\":4}",
+      "canonical": "{\"0\":4,\"B\":3,\"_\":2,\"a\":1}",
+      "sha256": "sha256:356e31e075cacdb5b5f47130d0e07e03aa249c15ecd96606bf9a62ea10d694c3"
+    },
+    {
+      "name": "a_key_sorts_before_its_extensions",
+      "input": "{\"ab\":1,\"a\":2,\"a\\u0000\":3}",
+      "canonical": "{\"a\":2,\"a\\u0000\":3,\"ab\":1}",
+      "sha256": "sha256:e6cdbd88556d7bae59cbd1c3aa8dd6cb41348aaefd9345bca8ddaebb5ce120e4"
+    },
+    {
+      "name": "supplementary_keys_sort_after_the_private_use_area",
+      "input": "{\"\\ud800\\udc00\":1,\"\\ue000\":2}",
+      "canonical": "{\"\ue000\":2,\"\ud800\udc00\":1}",
+      "sha256": "sha256:daec79d8b6582badd3b46bd783a72379bc0b5ae29f5d59f6133025aad69bc8d4"
+    },
+    {
+      "name": "array_order_is_preserved",
+      "input": "[3,1,2,[2,1]]",
+      "canonical": "[3,1,2,[2,1]]",
+      "sha256": "sha256:5d00ce9626d76ce83ca8a5996c1d8881aafe8c2ffca0d073790f6534696513cf"
+    },
+    {
+      "name": "integers_at_the_interoperable_bounds",
+      "input": "[0,1,-1,9007199254740991,-9007199254740991]",
+      "canonical": "[0,1,-1,9007199254740991,-9007199254740991]",
+      "sha256": "sha256:3fb2e7f7f27e956bb936d78c13514cd21af6c7b32d370de937ceafbd01005d88"
+    },
+    {
+      "name": "short_escapes",
+      "input": "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"",
+      "canonical": "\"\\\"\\\\/\\b\\f\\n\\r\\t\"",
+      "sha256": "sha256:11b17be1c38ac0f40c1c36cb58861f9853f04d6702d8edf4c79e6aca6216c346"
+    },
+    {
+      "name": "other_controls_use_lowercase_hex",
+      "input": "\"\\u0000\\u001F\\u000b\\u007f\"",
+      "canonical": "\"\\u0000\\u001f\\u000b\u007f\"",
+      "sha256": "sha256:19ac19daec62cf9437542a9218c14f5fceecd03fbcf31e4b10e03b6ff08ea1e1"
+    },
+    {
+      "name": "non_ascii_is_written_as_utf8",
+      "input": "\"\\u00e9\\u20AC\\ud834\\udd1e\\u2028\"",
+      "canonical": "\"\u00e9\u20ac\ud834\udd1e\u2028\"",
+      "sha256": "sha256:72b65c419f37ef02f54b41c910f59ad671d464406e98893aba9ba1b37dc01866"
+    },
+    {
+      "name": "literal_utf8_input_is_kept",
+      "input": "\"caf\u00e9 \u2014 \ud834\udd1e\"",
+      "canonical": "\"caf\u00e9 \u2014 \ud834\udd1e\"",
+      "sha256": "sha256:c0a9047cf95405c7c59cd3429a155ebcc532f7a86129a91f4d30f47268f9bb7e"
+    },
+    {
+      "name": "booleans",
+      "input": "{\"t\":true,\"f\":false}",
+      "canonical": "{\"f\":false,\"t\":true}",
+      "sha256": "sha256:c22848c47426fcf4d27e55573c22f1d23546315c251e8e4bc384820ba5fae568"
+    },
+    {
+      "name": "arrays_nested_64_deep",
+      "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "canonical": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "sha256": "sha256:b3ff3b51ce17ef2a2a68203329ff0e73738c07df874044149c283b28841a0035"
+    }
+  ],
+  "reject": [
+    {
+      "name": "null_member",
+      "input": "{\"a\":null}",
+      "reason": "null"
+    },
+    {
+      "name": "null_array_element",
+      "input": "[1,null]",
+      "reason": "null"
+    },
+    {
+      "name": "null_document",
+      "input": "null",
+      "reason": "null"
+    },
+    {
+      "name": "fraction",
+      "input": "{\"a\":1.5}",
+      "reason": "number"
+    },
+    {
+      "name": "integral_fraction",
+      "input": "{\"a\":1.0}",
+      "reason": "number"
+    },
+    {
+      "name": "exponent",
+      "input": "{\"a\":1e2}",
+      "reason": "number"
+    },
+    {
+      "name": "exponent_beyond_a_double",
+      "input": "{\"a\":1e400}",
+      "reason": "number"
+    },
+    {
+      "name": "negative_zero",
+      "input": "-0",
+      "reason": "number"
+    },
+    {
+      "name": "above_the_interoperable_range",
+      "input": "9007199254740992",
+      "reason": "number"
+    },
+    {
+      "name": "below_the_interoperable_range",
+      "input": "-9007199254740992",
+      "reason": "number"
+    },
+    {
+      "name": "beyond_64_bits",
+      "input": "18446744073709551616",
+      "reason": "number"
+    },
+    {
+      "name": "integer_beyond_a_double",
+      "input": "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "reason": "number"
+    },
+    {
+      "name": "duplicate_key",
+      "input": "{\"a\":1,\"a\":1}",
+      "reason": "duplicate_key"
+    },
+    {
+      "name": "duplicate_nested_key",
+      "input": "{\"a\":{\"b\":1,\"b\":2}}",
+      "reason": "duplicate_key"
+    },
+    {
+      "name": "duplicate_key_after_unescaping",
+      "input": "{\"a\":1,\"\\u0061\":2}",
+      "reason": "duplicate_key"
+    },
+    {
+      "name": "arrays_nested_65_deep",
+      "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "reason": "depth"
+    },
+    {
+      "name": "objects_nested_65_deep",
+      "input": "{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "reason": "depth"
+    },
+    {
+      "name": "arrays_nested_128_deep",
+      "input": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "reason": "depth"
+    },
+    {
+      "name": "unpaired_high_surrogate",
+      "input": "\"\\ud800\"",
+      "reason": "malformed"
+    },
+    {
+      "name": "unpaired_low_surrogate",
+      "input": "\"\\udc00\"",
+      "reason": "malformed"
+    },
+    {
+      "name": "raw_control_character_in_string",
+      "input": "\"a\tb\"",
+      "reason": "malformed"
+    },
+    {
+      "name": "trailing_text",
+      "input": "{} x",
+      "reason": "malformed"
+    },
+    {
+      "name": "two_documents",
+      "input": "{}{}",
+      "reason": "malformed"
+    },
+    {
+      "name": "leading_zero",
+      "input": "01",
+      "reason": "malformed"
+    },
+    {
+      "name": "single_quotes",
+      "input": "{'a':1}",
+      "reason": "malformed"
+    },
+    {
+      "name": "not_a_number_literal",
+      "input": "NaN",
+      "reason": "malformed"
+    },
+    {
+      "name": "infinity_literal",
+      "input": "Infinity",
+      "reason": "malformed"
+    },
+    {
+      "name": "byte_order_mark",
+      "input": "\ufeff{}",
+      "reason": "malformed"
+    },
+    {
+      "name": "empty_text",
+      "input": "",
+      "reason": "malformed"
+    }
+  ]
+}

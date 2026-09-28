@@ -1,0 +1,147 @@
+{
+  "schema_version": "0.1",
+  "canonical_json_version": 1,
+  "configuration": {
+    "bundle": {
+      "name": "speech-stt-streaming",
+      "version": "0.2.0",
+      "format_version": "0.2",
+      "bundle_digest": "sha256:1b92187c5834ea34102b73e798e3d23dd1368e88a17b41575fafccaf438de7c7"
+    },
+    "model_class": "speech",
+    "backend_hint": "python_pytorch",
+    "precision_hint": "fp16",
+    "runtime_version": "0.3.1",
+    "artifacts": [
+      {
+        "role": "model",
+        "kind": "python_pytorch_entry",
+        "path": "entry.json",
+        "digest": "sha256:aa09fabd4f085f4c57fc96b61907837d0c1b0e9fede8617c2e539526470260f4",
+        "byte_size": 82
+      }
+    ],
+    "runner_profile": {
+      "id": "faster_whisper",
+      "packages": [
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-ct2",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-cublas"
+      ]
+    },
+    "compute_type": "float16",
+    "pipeline_stages": [
+      {
+        "stage": "ingress",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "vad",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "preprocessing",
+        "ownership": "runtime_owned",
+        "observable": false
+      },
+      {
+        "stage": "backend",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "postprocessing",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "egress",
+        "ownership": "runtime_owned",
+        "observable": true
+      }
+    ],
+    "memory_budget_by_domain": {
+      "guest_ram": {
+        "model_weights_bytes": 0,
+        "runtime_overhead_bytes": 1073741824,
+        "session_scratch_bytes": 0,
+        "cache_bytes": 0,
+        "step_scratch_bytes": 0,
+        "output_queue_bytes": 4194304,
+        "io_buffer_bytes": 16777216,
+        "per_session_state_bytes": 33554432,
+        "sidecar_process_bytes": 536870912,
+        "os_reserve_bytes": 0,
+        "backend_reserve_bytes": 134217728
+      },
+      "device_vram": {
+        "model_weights_bytes": 1744830464,
+        "runtime_overhead_bytes": 536870912,
+        "session_scratch_bytes": 268435456,
+        "cache_bytes": 134217728,
+        "step_scratch_bytes": 0,
+        "output_queue_bytes": 0,
+        "io_buffer_bytes": 0,
+        "per_session_state_bytes": 67108864,
+        "sidecar_process_bytes": 0,
+        "os_reserve_bytes": 0,
+        "backend_reserve_bytes": 268435456
+      }
+    },
+    "max_concurrent_sessions": 1,
+    "speech": {
+      "task": "stt",
+      "serving_mode": "streaming",
+      "languages": [
+        "en",
+        "ar"
+      ],
+      "input_audio_formats": [
+        {
+          "encoding": "pcm_s16le",
+          "sample_rate_hz": 16000,
+          "channels": 1
+        },
+        {
+          "encoding": "mulaw",
+          "sample_rate_hz": 8000,
+          "channels": 1
+        }
+      ],
+      "chunking": {
+        "frame_ms_min": 20,
+        "frame_ms_max": 320,
+        "max_utterance_ms": 30000
+      },
+      "algorithm_profile": {
+        "id": "stt_vad_chunked",
+        "digest": "sha256:cee024efffb88523584dc72cf848b3b6c43fb9e9889c4407155e7665795a615c"
+      },
+      "quality_profile_digest": "sha256:004a3ba72fd6b782a8f7698743e2b2c740f8de39dc689dba23fc86c81fc1be2e",
+      "benchmark_profile_digest": "sha256:15d0ee522824554187d409402a6b887510e35f1bef19e9a8d5a646e2d0624be7"
+    },
+    "quota": {
+      "session_count": 1,
+      "domain_bytes": {
+        "guest_ram": 33554432,
+        "device_vram": 67108864
+      }
+    }
+  },
+  "configuration_digest": "sha256:6eafccdcd19c9df08cb81cadc708245ea9d135995762375958bc864ac105bafa",
+  "deployment_id": "speech-stt",
+  "generation": 3,
+  "admission_mode": "qualification",
+  "staged_path": "/var/lib/tensorplate/bundles/staging/speech-stt/3",
+  "runner_environment": {
+    "interpreter": "/usr/lib/tensorplate/speech-runtime/bin/python",
+    "environment_root": "/usr/lib/tensorplate/speech-runtime",
+    "library_search_paths": [
+      "/usr/lib/tensorplate/speech-runtime/lib/python3.12/site-packages/nvidia/cublas/lib"
+    ]
+  },
+  "descriptor_digest": "sha256:f0859d3ed80535ae615803058c926913a495854c5e34e035721be6a119fa6985"
+}

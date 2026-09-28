@@ -1,0 +1,153 @@
+{
+  "schema_version": "0.1",
+  "canonical_json_version": 1,
+  "configuration": {
+    "bundle": {
+      "name": "speech-tts-streaming",
+      "version": "0.2.0",
+      "format_version": "0.2",
+      "bundle_digest": "sha256:77a813f90b6239be44541510a1d20482c89f1265f6e4dcb9d7164ffc7ed03de3"
+    },
+    "model_class": "speech",
+    "backend_hint": "python_pytorch",
+    "precision_hint": "fp32",
+    "runtime_version": "0.3.1",
+    "artifacts": [
+      {
+        "role": "model",
+        "kind": "python_pytorch_entry",
+        "path": "entry.json",
+        "digest": "sha256:aa09fabd4f085f4c57fc96b61907837d0c1b0e9fede8617c2e539526470260f4",
+        "byte_size": 82
+      },
+      {
+        "role": "auxiliary",
+        "kind": "auxiliary",
+        "path": "warmup/segment.txt",
+        "digest": "sha256:b47cc0f104b62d4c7c30bcd68fd8e67613e287dc4ad8c310ef10cbadea9c4380",
+        "byte_size": 45
+      }
+    ],
+    "runner_profile": {
+      "id": "kokoro",
+      "packages": [
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-kokoro",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-cuda"
+      ]
+    },
+    "compute_type": "float32",
+    "warmup": {
+      "fixtures": [
+        "warmup/segment.txt"
+      ],
+      "repetitions": 3,
+      "timeout_ms": 30000
+    },
+    "pipeline_stages": [
+      {
+        "stage": "ingress",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "preprocessing",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "backend",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "postprocessing",
+        "ownership": "runtime_owned",
+        "observable": true
+      },
+      {
+        "stage": "egress",
+        "ownership": "runtime_owned",
+        "observable": true
+      }
+    ],
+    "memory_budget_by_domain": {
+      "guest_ram": {
+        "model_weights_bytes": 0,
+        "runtime_overhead_bytes": 1073741824,
+        "session_scratch_bytes": 0,
+        "cache_bytes": 0,
+        "step_scratch_bytes": 0,
+        "output_queue_bytes": 8388608,
+        "io_buffer_bytes": 8388608,
+        "per_session_state_bytes": 16777216,
+        "sidecar_process_bytes": 805306368,
+        "os_reserve_bytes": 0,
+        "backend_reserve_bytes": 134217728
+      },
+      "device_vram": {
+        "model_weights_bytes": 402653184,
+        "runtime_overhead_bytes": 536870912,
+        "session_scratch_bytes": 134217728,
+        "cache_bytes": 67108864,
+        "step_scratch_bytes": 0,
+        "output_queue_bytes": 0,
+        "io_buffer_bytes": 0,
+        "per_session_state_bytes": 33554432,
+        "sidecar_process_bytes": 0,
+        "os_reserve_bytes": 0,
+        "backend_reserve_bytes": 134217728
+      }
+    },
+    "max_concurrent_sessions": 1,
+    "speech": {
+      "task": "tts",
+      "serving_mode": "streaming",
+      "languages": [
+        "en-US"
+      ],
+      "voices": [
+        "af_heart"
+      ],
+      "output_audio_formats": [
+        {
+          "encoding": "pcm_s16le",
+          "sample_rate_hz": 24000,
+          "channels": 1
+        }
+      ],
+      "chunking": {
+        "max_segment_text_bytes": 4096,
+        "max_segment_phoneme_tokens": 200,
+        "max_segment_audio_ms": 30000,
+        "max_synthesis_text_bytes": 16384,
+        "max_synthesis_audio_ms": 120000
+      },
+      "algorithm_profile": {
+        "id": "tts_segmented",
+        "digest": "sha256:b862b217809dc696000fb6e615bbbebdb7a9692b6a915135c881ce4608978f99"
+      },
+      "quality_profile_digest": "sha256:a93e1171d26e7ae49c740c2a89558402c16d02391635ff8f1a37c60b27ab1289",
+      "benchmark_profile_digest": "sha256:6a95e2b1c4a5389d352c39788969ffb125f2c3cb06d3da0063e94968c6ce5d75"
+    },
+    "quota": {
+      "session_count": 1,
+      "domain_bytes": {
+        "guest_ram": 16777216,
+        "device_vram": 33554432
+      }
+    }
+  },
+  "configuration_digest": "sha256:3a40ffd30e8ab6ad407a1b842cf225eef3009740300f84c94826b17ab0b22204",
+  "deployment_id": "speech-tts",
+  "generation": 5,
+  "admission_mode": "production",
+  "staged_path": "/var/lib/tensorplate/bundles/staging/speech-tts/5",
+  "runner_environment": {
+    "interpreter": "/usr/lib/tensorplate/speech-runtime/bin/python",
+    "environment_root": "/usr/lib/tensorplate/speech-runtime"
+  },
+  "descriptor_digest": "sha256:416e1fc722a11e1083f125cb40e2712275d596836af633e7b6a31c73186f6054"
+}
