@@ -53,6 +53,6 @@
     "identity": "Any x86_64 Ubuntu 22.04 host; smoke validated on GitHub-hosted runners"
   },
   "evidence": {
-    "location": "dist/release/v0.2.1/ubuntu2204-x86-cpu/"
+    "location": "dist/release/v0.3.1/ubuntu2204-x86-cpu/"
   }
 }

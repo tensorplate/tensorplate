@@ -56,6 +56,6 @@
     "machine_type": "a3-highgpu-1g"
   },
   "evidence": {
-    "location": "docs/validation/evidence/v0.2.1/ubuntu2404-x86-h100-80g-a3hg1/"
+    "location": "docs/validation/evidence/v0.3.1/ubuntu2404-x86-h100-80g-a3hg1/"
   }
 }
