@@ -213,10 +213,13 @@ the phoneme count, which a backend reports as `failed`.
 [`protocol/fixtures/job_seam.json`](../../protocol/fixtures/job_seam.json)
 holds the ceilings, the stable names, every validation reason, construction
 vectors and per-job event traces. `test/unit/job_value_objects_test.cpp`
-replays all of them. Another implementation of these objects, such as a
-future sidecar job message set, replays every vector whose `scope` is `all`
-and holds its own bounds to `limits`. A change to a ceiling, name or rule
-edits the header and the vectors in the same commit. There is no
+replays all of them. Another implementation of these objects replays every
+vector whose `scope` is `all` and holds its own bounds to `limits`. The
+sidecar's job messages in `python_pytorch_ipc.json` carry these objects over
+the socket; `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` replays
+the vectors through that schema and its Rust mirror, and the golden trace
+frames beside it are the traces on the socket. A change to a ceiling, name
+or rule edits the header and the vectors in the same commit. There is no
 `protocol/schemas/job_*.json`: no process exchanges these objects as
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.

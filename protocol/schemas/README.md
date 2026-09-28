@@ -12,9 +12,9 @@ the schema first.
 ## Format
 
 v0.1.0 uses **JSON Schema Draft 7** for all control-plane and
-configuration payloads. Binary tensor payloads in the Python/PyTorch
-sidecar IPC ride as raw bytes following a JSON header; see
-`python_pytorch_ipc.json`.
+configuration payloads. Binary payloads in the Python/PyTorch sidecar IPC
+(tensors, and a job's PCM or text input or its synthesized audio) ride as
+raw bytes following a JSON header; see `python_pytorch_ipc.json`.
 
 JSON field names are **snake_case** to match the Python ecosystem and
 keep parity with the C++/Rust wire format.
@@ -91,6 +91,18 @@ registers nor refuses with `Error::Code::Unsupported`. An appended value, and
 an optional property added to `scheduler_metrics.json`, keep
 `schema_version` at `0.1` only under the third exception that `protocol.md`
 records.
+
+## Sidecar IPC additions
+
+`python_pytorch_ipc.json` gains message kinds and optional fields that only
+negotiated peers exchange, such as the speech job and session messages, at
+`schema_version` `0.1` only under the fourth exception that
+[`docs/architecture/protocol.md`](../../docs/architecture/protocol.md#versioning)
+records: a peer sends them only on a connection whose `load_model` enabled
+the capability they belong to. The schema, the Rust mirror and the sidecar's
+`protocol.py` literals change together;
+`protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` holds them to the
+golden frames and to the typed job seam's vectors.
 
 ## Adding a new payload
 

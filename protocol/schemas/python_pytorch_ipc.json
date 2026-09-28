@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/python_pytorch_ipc.json",
   "title": "TensorPlate Python/PyTorch Sidecar IPC Header",
-  "description": "Schema header for the message exchange between `tensorplate-serving` (C++) and the managed Python/PyTorch sidecar backend. Each IPC message on the Unix domain socket is `[length-prefixed JSON header][raw tensor payload bytes]`. Tensor payloads are NEVER JSON-encoded; this schema describes only the header.",
+  "description": "Schema header for the message exchange between `tensorplate-serving` (C++) and the managed Python/PyTorch sidecar backend. Each IPC message on the Unix domain socket is `[length-prefixed JSON header][raw payload bytes]`. Tensor payloads, a job's input bytes and a job's audio are NEVER JSON-encoded; this schema describes only the header.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "message_id", "kind"],
@@ -14,7 +14,7 @@
     "message_id": {
       "type": "string",
       "minLength": 1,
-      "description": "Per-message identifier. Replies (response / event) carry the same `message_id` as the originating request."
+      "description": "Per-message identifier. A `*_response`, and an `error_event` that refuses a request, carries the `message_id` of that request; every other message carries its own. Job and session messages are correlated by their `job_id`, `session_key` and `generation`, not by `message_id`; a sidecar refuses one it cannot read, or one on a connection whose `load_model` did not enable `speech_jobs_v1`, with such an `error_event`."
     },
     "correlation_id": {
       "type": "string",
@@ -40,9 +40,19 @@
         "health_check_response",
         "ready_event",
         "error_event",
-        "metric_event"
+        "metric_event",
+        "job_submit",
+        "job_cancel",
+        "job_accepted",
+        "job_progress",
+        "job_completed",
+        "job_failed",
+        "job_cancel_acknowledged",
+        "job_released",
+        "session_release",
+        "session_released"
       ],
-      "description": "Message kind. `*_response` messages carry the same `message_id` as the originating request; `*_event` messages are unsolicited and carry their own `message_id`."
+      "description": "Message kind. `*_response` messages, and an `error_event` that refuses a request, carry the originating request's `message_id`; other `*_event` messages are unsolicited and carry their own `message_id`. The `job_*` and `session_*` kinds are the `speech_jobs_v1` messages: they flow only on a connection whose `load_model` enabled that capability and succeeded, and nothing answers them with a `*_response`. Of these, only a `job_submit` and a `job_progress` or `job_completed` whose result is an `audio_chunk` carry payload bytes; every other one has an empty payload region. The adapter sends `job_submit`, `job_cancel` and `session_release`; the sidecar sends the rest. A job's messages from the sidecar follow the order `[job_accepted] (job_progress | job_cancel_acknowledged)* (job_completed | job_failed) job_released`: `job_accepted` comes first when the sidecar admits the job, and a job it refuses, or that is cancelled before admission, ends with `job_failed` without it; `job_progress` requires `job_accepted` and ends at the job's `progress_limit`; `job_cancel_acknowledged` comes at most once, only after a `job_cancel` or `session_release` that covers the job, and never after the terminal message; nothing follows `job_released`, which reports that the sidecar holds nothing more for the job. `session_released` follows the `job_released` of every job of that session submitted before the `session_release`, and comes at most once. Messages of different jobs interleave freely."
     },
     "deadline_ns": {
       "type": "integer",
@@ -213,6 +223,434 @@
           "type": ["string", "null"]
         }
       }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_]*$"
+      },
+      "description": "Protocol capabilities beyond the unary request/response exchange. On `ready_event`: the capabilities this sidecar implements; a sidecar that omits the field implements none, and a reader ignores a listed capability it does not know. On `load_model`: the capabilities the adapter enables for this connection, each one the `ready_event` listed; a sidecar that cannot enable one for the model it loads answers `load_model_response` with status `error` and code `unsupported`. `speech_jobs_v1` enables the job and session messages."
+    },
+    "job_classes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/definitions/JobClass"
+      },
+      "description": "On a successful `load_model_response` to a `load_model` that enabled `speech_jobs_v1`, and only there: the job classes the loaded runner runs. A runner that runs none fails that load with `unsupported`."
+    },
+    "job_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "Job identifier, assigned by the job's submitter in the serving layer and never given to two unreleased jobs of one connection. Every `job_*` message carries the identity (`job_id`, `session_key`, `generation`) of the job it concerns."
+    },
+    "session_key": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "Opaque key of the logical session that owns the job or is being released. It keys session-scoped backend state, such as voice-activity state, and is not a client-visible identifier."
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "Deployment generation the session is bound to."
+    },
+    "job_class": {
+      "$ref": "#/definitions/JobClass"
+    },
+    "progress_limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1500,
+      "description": "On `job_submit`: the most `job_progress` messages the job may produce. Zero means the whole result arrives with `job_completed`."
+    },
+    "options": {
+      "$ref": "#/definitions/JobOptions"
+    },
+    "input": {
+      "$ref": "#/definitions/JobInput"
+    },
+    "progress_sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1500,
+      "description": "On `job_progress`: 1 for the job's first progress message and one more for each next one."
+    },
+    "result": {
+      "$ref": "#/definitions/JobResult"
+    }
+  },
+  "definitions": {
+    "JobMessageKind": {
+      "enum": ["job_submit", "job_cancel", "job_accepted", "job_progress", "job_completed", "job_failed", "job_cancel_acknowledged", "job_released"],
+      "description": "The kinds that concern one job; each carries the job's identity."
+    },
+    "SessionMessageKind": {
+      "enum": ["session_release", "session_released"],
+      "description": "The kinds that concern one logical session; each carries its `session_key` and `generation` and no `job_id`."
+    },
+    "JobClass": {
+      "type": "string",
+      "enum": ["stt_decode", "tts_synthesis", "vad_frames"],
+      "description": "Class of a job. It fixes the input, the options and the result: `stt_decode` decodes `audio_frames` into a `transcript`, `tts_synthesis` synthesizes a `text_segment` into an `audio_chunk`, and `vad_frames` scores `vad_frames` into `vad` probabilities. Values only ever append."
+    },
+    "JobInputAudioFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "sample_rate_hz", "channels"],
+      "description": "Format of a job's input PCM: mono signed 16-bit little-endian samples at 16 kHz, the serving layer's internal timeline.",
+      "properties": {
+        "encoding": {
+          "type": "string",
+          "enum": ["pcm_s16le"]
+        },
+        "sample_rate_hz": {
+          "type": "integer",
+          "enum": [16000]
+        },
+        "channels": {
+          "type": "integer",
+          "enum": [1]
+        }
+      }
+    },
+    "JobOutputAudioFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "sample_rate_hz", "channels"],
+      "description": "Format of synthesized PCM: mono signed 16-bit little-endian samples at 24 kHz.",
+      "properties": {
+        "encoding": {
+          "type": "string",
+          "enum": ["pcm_s16le"]
+        },
+        "sample_rate_hz": {
+          "type": "integer",
+          "enum": [24000]
+        },
+        "channels": {
+          "type": "integer",
+          "enum": [1]
+        }
+      }
+    },
+    "JobOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Selections the job's session made that the runner needs, so it never detects, guesses or defaults them; an option the job class does not take is absent. `stt_decode` requires `language`; `tts_synthesis` requires `language`, `voice` and `speed_milli`; `vad_frames` takes none. A runner refuses a value its loaded model does not declare.",
+      "properties": {
+        "language": {
+          "type": "string",
+          "maxLength": 16,
+          "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$",
+          "description": "Language tag such as `en`, `ar` or `en-US`: two or three ASCII letters, then subtags of one to eight ASCII letters or digits; at most 16 bytes."
+        },
+        "voice": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "description": "Voice identifier such as `af_heart`."
+        },
+        "speed_milli": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Speaking rate in thousandths; 1000 is normal speed."
+        }
+      }
+    },
+    "JobInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "payload_length"],
+      "description": "The input of a `job_submit`. Its bytes are the message's whole payload region: PCM for `audio_frames` and `vad_frames`, well-formed UTF-8 text for `text_segment`.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["audio_frames", "text_segment", "vad_frames"]
+        },
+        "format": {
+          "$ref": "#/definitions/JobInputAudioFormat"
+        },
+        "start_sample": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "`audio_frames`: index of the window's first sample on the session's 16 kHz timeline, which the transcript's word units also use."
+        },
+        "frame_samples": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384,
+          "description": "`vad_frames`: samples per frame, fixed by the loaded voice-activity model."
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "description": "`vad_frames`: consecutive frames in the payload, which holds exactly `frame_count` times `frame_samples` samples."
+        },
+        "utterance_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "`vad_frames`: utterance key within the session. A session's `vad_frames` jobs run in submission order; the first one naming a new `utterance_id` starts from reset voice-activity state and discards the state of the session's previous utterance, so no separate reset message exists. After a job of an utterance ends without `job_completed`, the adapter starts a new utterance."
+        },
+        "payload_length": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Length in bytes of the payload region: at most 960000 (30 s) for `audio_frames`, 32768 for `vad_frames` and 4096 for `text_segment`. PCM lengths are even."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "audio_frames"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["format", "start_sample"],
+            "properties": {
+              "payload_length": {
+                "multipleOf": 2,
+                "maximum": 960000
+              }
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["frame_samples"]},
+                {"required": ["frame_count"]},
+                {"required": ["utterance_id"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "text_segment"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "payload_length": {
+                "maximum": 4096
+              }
+            },
+            "not": {
+              "anyOf": [
+                {"required": ["format"]},
+                {"required": ["start_sample"]},
+                {"required": ["frame_samples"]},
+                {"required": ["frame_count"]},
+                {"required": ["utterance_id"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "vad_frames"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["format", "frame_samples", "frame_count", "utterance_id"],
+            "properties": {
+              "payload_length": {
+                "multipleOf": 2,
+                "maximum": 32768
+              }
+            },
+            "not": {
+              "required": ["start_sample"]
+            }
+          }
+        }
+      ]
+    },
+    "JobResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "description": "A job's result on `job_completed`, or a fragment of it on `job_progress`, of the type its job class fixes. Fragments are increments: texts and tokens concatenate, word units and probabilities append and audio concatenates, and a job's fragments and result together stay within the one-result bounds. The bytes of an `audio_chunk` are the message's whole payload region.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["transcript", "audio_chunk", "vad"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 8192,
+          "description": "`transcript`: the decoded text, at most 8192 bytes of UTF-8; may be empty."
+        },
+        "tokens": {
+          "type": "array",
+          "maxItems": 448,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "description": "`transcript`: output token ids; may be empty."
+        },
+        "words": {
+          "type": "array",
+          "maxItems": 448,
+          "items": {
+            "$ref": "#/definitions/WordUnit"
+          },
+          "description": "`transcript`: aligned words in audio order. Their token intervals increase without overlapping, their start samples never decrease, and their texts together are at most 8192 bytes."
+        },
+        "format": {
+          "$ref": "#/definitions/JobOutputAudioFormat"
+        },
+        "clipped_samples": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 720000,
+          "description": "`audio_chunk`: samples the conversion to 16-bit PCM clamped; at most the samples in the payload region."
+        },
+        "payload_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440000,
+          "multipleOf": 2,
+          "description": "`audio_chunk`: length in bytes of the payload region, at most 30 s of audio."
+        },
+        "probabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "description": "`vad`: the voice-activity probability of each frame, in frame order; a job's fragments and result together number exactly its frames. JSON carries no NaN or infinity, so a runner that produces one fails the job instead."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "transcript"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["text", "tokens", "words"],
+            "not": {
+              "anyOf": [
+                {"required": ["format"]},
+                {"required": ["clipped_samples"]},
+                {"required": ["payload_length"]},
+                {"required": ["probabilities"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "audio_chunk"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["format", "clipped_samples", "payload_length"],
+            "not": {
+              "anyOf": [
+                {"required": ["text"]},
+                {"required": ["tokens"]},
+                {"required": ["words"]},
+                {"required": ["probabilities"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "vad"
+              }
+            },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["probabilities"],
+            "not": {
+              "anyOf": [
+                {"required": ["text"]},
+                {"required": ["tokens"]},
+                {"required": ["words"]},
+                {"required": ["format"]},
+                {"required": ["clipped_samples"]},
+                {"required": ["payload_length"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "WordUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "token_begin", "token_end", "start_sample", "end_sample"],
+      "description": "One aligned word: tokens [`token_begin`, `token_end`) of the transcript's `tokens`, a non-empty interval, and audio [`start_sample`, `end_sample`) on the session's 16 kHz timeline, with `start_sample` at most `end_sample`.",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192,
+          "description": "The word, with any attached punctuation."
+        },
+        "token_begin": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 447
+        },
+        "token_end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 448
+        },
+        "start_sample": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_sample": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
     }
   },
   "allOf": [
@@ -357,6 +795,296 @@
           "tensors": {
             "minItems": 1
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {"$ref": "#/definitions/JobMessageKind"},
+              {"$ref": "#/definitions/SessionMessageKind"}
+            ]
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["session_key", "generation"],
+        "not": {
+          "anyOf": [
+            {"required": ["correlation_id"]},
+            {"required": ["deadline_ns"]},
+            {"required": ["async_id"]},
+            {"required": ["tensors"]},
+            {"required": ["model_spec"]},
+            {"required": ["status"]},
+            {"required": ["runtime_capability"]},
+            {"required": ["metric"]},
+            {"required": ["health"]}
+          ]
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["session_key"]},
+            {"required": ["generation"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "$ref": "#/definitions/JobMessageKind"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["job_id"]
+      },
+      "else": {
+        "not": {
+          "required": ["job_id"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_submit"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["job_class", "progress_limit", "options", "input"]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["job_class"]},
+            {"required": ["progress_limit"]},
+            {"required": ["options"]},
+            {"required": ["input"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_submit"
+          },
+          "job_class": {
+            "const": "stt_decode"
+          }
+        },
+        "required": ["kind", "job_class"]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "properties": {
+              "type": {
+                "const": "audio_frames"
+              }
+            }
+          },
+          "options": {
+            "required": ["language"],
+            "not": {
+              "anyOf": [
+                {"required": ["voice"]},
+                {"required": ["speed_milli"]}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_submit"
+          },
+          "job_class": {
+            "const": "tts_synthesis"
+          }
+        },
+        "required": ["kind", "job_class"]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "properties": {
+              "type": {
+                "const": "text_segment"
+              }
+            }
+          },
+          "options": {
+            "required": ["language", "voice", "speed_milli"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_submit"
+          },
+          "job_class": {
+            "const": "vad_frames"
+          }
+        },
+        "required": ["kind", "job_class"]
+      },
+      "then": {
+        "properties": {
+          "input": {
+            "properties": {
+              "type": {
+                "const": "vad_frames"
+              }
+            }
+          },
+          "options": {
+            "maxProperties": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_progress"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["progress_sequence", "result"]
+      },
+      "else": {
+        "not": {
+          "required": ["progress_sequence"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_completed"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["result"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["job_progress", "job_completed"]
+          }
+        },
+        "required": ["kind"]
+      },
+      "else": {
+        "not": {
+          "required": ["result"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "job_failed"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "properties": {
+              "message": {
+                "maxLength": 512
+              },
+              "context": {
+                "maxLength": 512
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {"$ref": "#/definitions/JobMessageKind"},
+              {"$ref": "#/definitions/SessionMessageKind"}
+            ],
+            "not": {
+              "const": "job_failed"
+            }
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "not": {
+          "required": ["error"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": ["ready_event", "load_model"]
+          }
+        },
+        "required": ["kind"]
+      },
+      "else": {
+        "not": {
+          "required": ["capabilities"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "load_model_response"
+          },
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": ["kind", "status"]
+      },
+      "else": {
+        "not": {
+          "required": ["job_classes"]
         }
       }
     }

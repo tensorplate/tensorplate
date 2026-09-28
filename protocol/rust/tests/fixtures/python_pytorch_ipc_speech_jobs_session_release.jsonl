@@ -1,0 +1,7 @@
+{"schema_version":"0.1","message_id":"a1","kind":"job_submit","job_id":1,"session_key":1,"generation":1,"job_class":"vad_frames","progress_limit":0,"options":{},"input":{"type":"vad_frames","format":{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1},"frame_samples":512,"frame_count":3,"utterance_id":1,"payload_length":3072}}
+{"schema_version":"0.1","message_id":"s1","kind":"job_accepted","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"a2","kind":"session_release","session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s2","kind":"job_cancel_acknowledged","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s3","kind":"job_failed","job_id":1,"session_key":1,"generation":1,"error":{"schema_version":"0.1","code":"cancelled","message":"m"}}
+{"schema_version":"0.1","message_id":"s4","kind":"job_released","job_id":1,"session_key":1,"generation":1}
+{"schema_version":"0.1","message_id":"s5","kind":"session_released","session_key":1,"generation":1}
