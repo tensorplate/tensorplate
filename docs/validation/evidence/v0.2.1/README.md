@@ -39,7 +39,8 @@ Before committing a bundle, remove from the report and from every log:
 - cloud project ids and numbers, instance ids, account ids, and billing
   identifiers
 - device serial numbers, GPU UUIDs and GPU PDIs (the per-device
-  identifier `nvidia-smi -q` prints beside the serial and UUID)
+  identifier `nvidia-smi -q` prints beside the serial and UUID), and a
+  physical host's PCI bus ids
 - host names, user names, machine and boot ids, and network addresses
 - fleet, quota, or authentication status
 
@@ -48,7 +49,9 @@ log. These values say they are synthetic by themselves, they are the
 forms the scanner below accepts, and they are plain text, so no JSON,
 schema or matcher is affected. Replace a value the same way everywhere it appears:
 a failing stage's `detail` quotes the tail of its log, and the two must
-still agree.
+still agree. A serial replaced in a stage log is replaced in the report's
+`detail` too: `detail` joins the log's last lines with spaces, so a CSV
+serial column quoted there is no longer a column the scanner can find.
 
 | Identifier | Synthetic value |
 | --- | --- |
@@ -64,8 +67,17 @@ still agree.
 | IPv6 address | `2001:db8::10` |
 | MAC address | `00:00:5e:00:53:01` |
 | email address | an address at `example.com`, `example.org` or `example.net` |
-| serial number, UDID or GPU PDI | `REDACTED` |
+| serial number or UDID | `REDACTED`; one the driver reported as `N/A` (`[N/A]` in CSV) stays as recorded |
+| GPU PDI | `REDACTED` |
+| a physical host's PCI bus id | `00000000:00:00.0`, as `nvidia-smi` writes it, or `0000:00:00.0` in `lspci -D` form (count up the device number) |
 | journal field other than the service's own | drop the field |
+
+A cloud machine type's virtual PCI topology is the same on every instance
+of the type and names no machine, so it may stay as recorded: the
+detection fixtures under `test/platform/host_identity/` keep it, because
+detection reads it, while an evidence capture may still use the synthetic
+value. No pattern recognizes a bus id, so replacing a physical host's is
+part of reading the capture before `git add`.
 
 Loopback, `0.0.0.0`, the metadata server `169.254.169.254` and
 `metadata.google.internal` are not identifiers and stay as recorded, as
@@ -95,8 +107,13 @@ Prose that merely mentions `systemctl` exempts nothing, and neither does
 a word that is lowercase but is not a verb. An address elsewhere on the
 command's own line is still a finding, and the unit type alone can never
 carry the exemption -- `target` is a delegated top-level domain.
-Credentials and planning identifiers have no synthetic form: neither
-belongs in evidence, so remove them.
+Credentials, planning identifiers and planning wave labels (`w` and one
+digit, standing alone or after the `+` of a package revision) have no
+synthetic form: none belongs in evidence, so remove them, and leave them
+out of the names a run gives its requests, files and packages. Where one
+is part of a recorded value that cannot be dropped, such as a package
+version whose digest the bundle records, replace it with a neutral token
+and say so in the bundle's notes.
 
 Remove, too, a tool's inventory of what else the machine carries, even
 though it identifies nobody: Homebrew's untrusted-tap warning names every
@@ -143,9 +160,10 @@ remaining occurrence of the bare name in the bundle, the row file and the
 commit message, and confirm each is that ordinary text. No scan can tell
 them apart, so that reading is the check for such a name. A physical
 device's machine id, serial numbers and GPU PDI belong in its literal
-file too: the patterns recognize each only after its label, so a bare
-value, such as a column of `nvidia-smi --query-gpu` CSV, passes both
-modes.
+file too: the patterns recognize each only after its label, or, for a
+serial, as an XML element or in a CSV column under a header that names
+it, so a bare value, such as `nvidia-smi --query-gpu` output recorded
+with `--format=csv,noheader`, passes both modes.
 
 - Remove authorization headers carrying Basic or Bearer credentials,
   including ones recorded as JSON fields. Encoding a value or field name

@@ -27,7 +27,7 @@ grep -Fq 'state/lifecycle-marker.XXXXXX' "$harness"
 grep -Fq 'backend_profile") != "mps_fixture"' "$harness"
 grep -Fq 'mps_tensor_operation_required_for_load' "$harness"
 # shellcheck disable=SC2016 # Match the literal expression in the harness.
-grep -Fq 'wave-2b-macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)' "$harness"
+grep -Fxq 'smoke_deployment_id="macos-deploy-smoke-$(date -u +%Y%m%dT%H%M%SZ)"' "$harness"
 grep -Fq '"status_severity": status.get("severity") == "ready"' "$harness"
 grep -Fq 'serving_parts.hostname == "127.0.0.1"' "$harness"
 grep -Fq '"serving_health_state": serving_health.get("state") == "ready"' "$harness"

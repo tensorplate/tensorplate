@@ -523,6 +523,50 @@ commit
 expect_finding "a label in the branch checked out" private-label "$label" --base base
 check "  reported against the branch" "yes" "$(has "branch:1: private-label" "${r}.out")"
 
+# A planning wave label, `w` and one digit, in a branch name: the one
+# checked out, and the one --branch names, as CI names the pull request's.
+wave="w$((RANDOM % 10))"
+wave_word="$(random_word 8)"
+new_case
+g checkout -q -b "lane-x/${wave}-${wave_word}" || die "git checkout failed"
+put notes/a.txt "clean"
+commit
+expect_finding "a wave label in the branch checked out" wave-label "${wave}-${wave_word}" --base base
+check "  reported against the branch" "yes" "$(has "branch:1: wave-label" "${r}.out")"
+
+new_case
+put notes/a.txt "clean"
+commit
+printf 'lane-x/%s-%s\n' "$wave_word" "$wave" >"${r}.branch" || die "could not write a branch name"
+expect_finding "a wave label in the branch --branch names" wave-label "${wave_word}-${wave}" \
+  --base base --branch "${r}.branch"
+check "  reported against the branch" "yes" "$(has "branch:1: wave-label" "${r}.out")"
+printf 'lane-x/%s-1+%s%s\n' "$wave_word" "$wave" "$wave_word" >"${r}.branch" \
+  || die "could not write a branch name"
+expect_finding "a wave label after a revision's plus in a branch name" wave-label \
+  "1+${wave}${wave_word}" --base base --branch "${r}.branch"
+upper_wave="$(printf '%s' "$wave" | tr '[:lower:]' '[:upper:]')"
+printf 'lane-x/%s-%s\n' "$upper_wave" "$wave_word" >"${r}.branch" || die "could not write a branch name"
+expect_finding "an upper-case wave label in a branch name" wave-label "${upper_wave}-${wave_word}" \
+  --base base --branch "${r}.branch"
+
+# Elsewhere outside evidence the shape is also a compiler flag or a
+# register name, so it is not looked for in source or in any other text.
+new_case
+put "notes/${wave}-${wave_word}.txt" "request ${wave}-${wave_word} of 1.0-1+${wave}"
+g commit -q -m "Run ${wave}-${wave_word}" || die "commit failed"
+printf 'Title\n\nRequest %s-%s.\n' "$wave" "$wave_word" >"${r}.body" || die "could not write a body"
+check "a wave label in a file, its name, a commit message and pull request text passes" "0" \
+  "$(scan "${r}.out" --base base --message "${r}.body")"
+printf 'lane-x/%s-h%s-%s0\n' "$wave_word" "$wave" "$wave" >"${r}.branch" \
+  || die "could not write a branch name"
+check "a branch name with the shape inside a word or a number passes" "0" \
+  "$(scan "${r}.out" --base base --branch "${r}.branch")"
+printf 'lane-x/%s+%s%s\n' "$wave_word" "$wave" "$wave_word" >"${r}.branch" \
+  || die "could not write a branch name"
+check "a branch name with the shape after a plus that follows a letter passes" "0" \
+  "$(scan "${r}.out" --base base --branch "${r}.branch")"
+
 new_case
 put notes/a.txt "token ${token}"
 commit "Add a note"
@@ -933,6 +977,17 @@ put test/platform/rec/nvidia-smi-q-x.xml $'\t\t<pdi>'"${pdi}"$'</pdi>'
 commit
 expect_finding "a GPU PDI in a recording" gpu-pdi "$pdi" --base base
 
+serial="$(random_digits 13)"
+new_case
+put test/platform/rec/nvidia-smi-query-gpu.csv "index, name, serial"$'\n'"0, NVIDIA L4, ${serial}"
+commit
+expect_finding "a serial in a recorded --query-gpu CSV column" serial "$serial" --base base
+
+new_case
+put docs/validation/evidence/v9.9.9/synthetic-row/stage.log "request ${wave}-${wave_word} accepted"
+commit
+expect_finding "a wave label in evidence" wave-label "${wave}-${wave_word}" --base base
+
 # --- Planning identifiers: CHANGELOG.md cites them, and pull request
 # text cites them with their release prefix.
 bare="E$(random_from 0123456789 2)-F$(random_from 0123456789 2)-T$(random_from 0123456789 2)"
@@ -1248,6 +1303,13 @@ check "an entry for the GPU PDI class is no verdict" "2" "$(scan "${r}.out" --ba
 check "  as a class only the evidence scanner reports" "yes" "$(has "evidence-only gpu-pdi" "${r}.out")"
 
 new_case
+put notes/a.txt "clean"
+put "$allowlist" "notes/a.txt wave-label 1 A class the source policy never reports in a file."
+commit
+check "an entry for the wave-label class is no verdict" "2" "$(scan "${r}.out" --base base)"
+check "  as a class only the evidence scanner reports" "yes" "$(has "evidence-only wave-label" "${r}.out")"
+
+new_case
 put notes/a.txt "see ${bare}"
 put "$allowlist" "notes/a.txt planning-id 1 A synthetic identifier."
 commit
@@ -1270,6 +1332,12 @@ put notes/a.txt "clean"
 commit
 check "no arguments is no verdict" "2" "$(scan "${r}.out")"
 check "--help is no verdict" "2" "$(scan "${r}.out" --help)"
+# The pull request job reads the usage text to learn whether the scanner
+# takes --branch, so rewording it would turn the branch check off.
+probe="$(sed -n 's/.*\[\[ "[$]usage" == \*"\([^"]*\)"\* \]\].*/\1/p' \
+  "${repo_root}/.github/workflows/evidence-publication.yml")"
+check "  the pull request job probes it for --branch FILE" "--branch FILE" "$probe"
+check "  which it names" "yes" "$(has "$probe" "${r}.out")"
 check "--base and --tree together is no verdict" "2" "$(scan "${r}.out" --base base --tree)"
 check "an unknown argument is no verdict" "2" "$(scan "${r}.out" --base base --verbose)"
 check "a --base that names no commit is no verdict" "2" "$(scan "${r}.out" --base "no-such-$(random_word 6)")"
@@ -1279,6 +1347,19 @@ check "a missing --message file is no verdict" "2" \
 printf '\377\376\n' >"${r}.latin" || die "could not write a message"
 check "a --message file that is not UTF-8 is no verdict" "2" \
   "$(scan "${r}.out" --base base --message "${r}.latin")"
+printf 'lane-x/fix\n' >"${r}.branch" || die "could not write a branch name"
+check "--branch with --tree is no verdict" "2" "$(scan "${r}.out" --tree --branch "${r}.branch")"
+check "--branch given twice is no verdict" "2" \
+  "$(scan "${r}.out" --base base --branch "${r}.branch" --branch "${r}.branch")"
+check "a missing --branch file is no verdict" "2" \
+  "$(scan "${r}.out" --base base --branch "${work}/absent.branch")"
+check "a --branch file that is not UTF-8 is no verdict" "2" \
+  "$(scan "${r}.out" --base base --branch "${r}.latin")"
+printf '\n' >"${r}.no-branch" || die "could not write a branch name"
+check "a --branch file that names no branch is no verdict" "2" \
+  "$(scan "${r}.out" --base base --branch "${r}.no-branch")"
+check "a --branch file that names a branch is a verdict" "0" \
+  "$(scan "${r}.out" --base base --branch "${r}.branch")"
 outside="${work}/not-a-repository"
 mkdir -p "$outside" || die "mkdir failed"
 outside_status=0
