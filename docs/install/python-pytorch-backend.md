@@ -145,6 +145,101 @@ family requires a backend with native async/cancel support and returns
   scan the filesystem, or reach the network. The probe is read-only
   and bounded (it returns within seconds even when Python is missing).
 
+## Candidate speech runner profile: `faster_whisper`
+
+The `faster_whisper` runner profile transcribes speech with a
+Whisper-family model converted for CTranslate2, through faster-whisper. It
+is a candidate: it runs on the tensor-only `/infer` path through a
+candidate-only convention that goes away when a speech bundle format
+lands, so do not publish a bundle that depends on it (see
+`test/models/bundles/v0_1/README.md`, "Candidate speech fixtures").
+
+Its runner entry, the bundle's `python_pytorch_entry` JSON, selects it with
+`"backend_profile": "faster_whisper"`. The profile refuses an entry that
+does not name it, so the sidecar's default-backend setting cannot load a
+model through it. The entry declares everything about the model the
+profile uses; nothing about a particular checkpoint is built in:
+
+| Field | Meaning |
+| --- | --- |
+| `model_directory` | The converted model directory, relative to the entry. Every file in it, `tokenizer.json` included, is listed in `artifact_set`; without `tokenizer.json` faster-whisper would fetch a tokenizer from the Hugging Face Hub. |
+| `device` | `cuda` or `cpu`. |
+| `compute_type` | The CTranslate2 compute type to load with, such as `float16` or `int8_float16`, as CTranslate2 names it once loaded. `auto`, `default` and `int8` are refused: for those CTranslate2 chooses the type, or for `int8` its float half, from the device and the model. |
+| `languages` | The Whisper language codes the deployment serves, such as `["en", "ar"]`. |
+| `sample_rate_hz` | The rate of the PCM requests send, which must be the model's own input rate. |
+| `artifact_set` | Every file the profile reads, by relative path and `sha256:` digest. |
+
+A load verifies every listed digest before the model is built, and fails
+with `unsupported` when CTranslate2 sees no CUDA device for `cuda` or the
+device lacks the compute type, or when the model spec's `precision_hint`
+is neither `auto` nor the precision of the entry's compute type (`fp32`,
+`fp16` and `bfloat16` name the float type of that name, `int8` any
+`int8_*` type). It fails with `config_invalid` when the model's input rate
+differs from `sample_rate_hz`, or when a declared language is one the
+model's tokenizer lacks or, for an English-only model, anything but `en`,
+which faster-whisper would otherwise quietly decode as English. It fails
+with `load_failed` when CTranslate2 reports a compute type other than the
+entry's after loading.
+
+A request carries two tensors: `audio_frames`, a one-dimensional `int16`
+tensor of mono little-endian PCM at the entry's rate, from one sample to
+one model input window (30 seconds for Whisper); and `text_utf8`, the
+request's language code, which must be one the entry declares. Every
+request decodes the same way: greedily (beam size 1) at temperature 0
+with no fallback, without conditioning on earlier text, with word
+timestamps, and with faster-whisper's voice-activity filter off. The
+response is one `result_json` tensor:
+
+```text
+{
+  "language": "<the request's language code>",
+  "text": "<the segments' texts, joined>",
+  "segments": [
+    {"start_us": <int>, "end_us": <int>, "text": "<text>", "tokens": [<int>, ...],
+     "words": [{"start_us": <int>, "end_us": <int>, "text": "<word>", "probability": <number>}, ...]},
+    ...
+  ],
+  "sample_rate_hz": <the entry's rate>,
+  "sample_count": <samples in audio_frames>,
+  "decode_options": {"beam_size": 1, "temperature": 0.0, "condition_on_previous_text": false,
+                     "vad_filter": false, "word_timestamps": true},
+  "runtime": {"device": "<cuda or cpu>", "compute_type": "<as CTranslate2 reports it>",
+              "faster_whisper": "<version>", "ctranslate2": "<version>"},
+  "timings_us": {"load": <int>, "artifact_verify": <int>, "model_build": <int>,
+                 "decode": <int>}
+}
+```
+
+Times are faster-whisper's, rounded to whole microseconds from the start
+of the clip. Whisper decodes a zero-padded window, so an end past the clip
+is cut to the clip's end; an interval that starts after the clip or ends
+before it starts fails the request with `inference_failed`.
+`runtime.compute_type` is the type CTranslate2 reports after loading.
+`timings_us` gives the profile's whole load (`load`), its digest
+verification (`artifact_verify`) and model build (`model_build`), and the
+request's `decode`, which includes consuming faster-whisper's lazy segment
+generator: the model decodes as the generator is consumed.
+
+A load runs within `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS`, which also
+covers the adapter's side of the exchange. A request runs within both
+`TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS` and the serving worker's
+`http.request_timeout_ms` (8 seconds in the packaged configuration), which
+bounds a whole `/infer` exchange: a decode that outlasts it loses its
+response. The sidecar serves one request at a time and answers nothing
+else while it decodes.
+
+A request fails with `shape_mismatch` when its tensors are not exactly
+those two or the audio is not a one-dimensional `int16` tensor of one
+sample to one window, `config_invalid` when `text_utf8` is not UTF-8, and
+`unsupported` for an undeclared language. A CTranslate2 out-of-memory
+failure, which it raises as a plain `RuntimeError`, is `oom_error` in a
+load or a request; any other failure is `load_failed` or
+`inference_failed`.
+
+The profile imports `faster_whisper`, `ctranslate2` and `numpy` only when
+a model loads. `pip install ".[speech-stt]"` in `backends/python_pytorch/`
+installs faster-whisper and CTranslate2, unpinned, for development.
+
 ## Errors and logs
 
 The sidecar keeps request content out of everything it reports. A failed

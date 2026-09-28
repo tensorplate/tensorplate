@@ -68,6 +68,17 @@ PyTorch itself is **not** pinned in `pyproject.toml` for V01-E01-F01;
 it joins the dependency set in V01-E05 along with the chosen wheel
 matrix (CPU, CUDA, Jetson aarch64).
 
+The `faster_whisper` runner profile (`backends/faster_whisper.py`)
+transcribes speech with a Whisper-family model converted for CTranslate2;
+its entry fields, tensors and errors are in
+`docs/install/python-pytorch-backend.md`. Its tests fake faster-whisper,
+CTranslate2 and NumPy whether or not they are installed, so the gates above
+need none of them. To run the profile itself against the real engine:
+
+```bash
+pip install -e ".[dev,speech-stt]"
+```
+
 ## Rules
 
 - `tensorplate-pytorch-backend` does **not** import from any C++ runtime

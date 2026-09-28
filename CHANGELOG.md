@@ -580,6 +580,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the descriptor yet. Additive inside protocol 0.1; version constants
   unchanged. (V030-E02-F01-T04)
 
+- The `python_pytorch` sidecar gains the `faster_whisper` runner profile,
+  a candidate: it transcribes speech on the tensor-only `/infer` path with
+  any Whisper-family model converted for CTranslate2, through
+  faster-whisper. Only an entry whose `backend_profile` names it selects
+  it. The entry names the model directory, the device, the CTranslate2
+  compute type (`auto`, `default` and `int8`, which leave the loaded type
+  to CTranslate2, are refused), the languages served and the input sample
+  rate, and a load verifies every listed file, refuses a model directory
+  whose `tokenizer.json` is not listed, and fails when the loaded model's
+  compute type, input rate or tokenizer disagrees with the entry. A request
+  is one mono `int16` PCM clip of at most one model input window plus its
+  language as `text_utf8`, decoded greedily at temperature 0 with word
+  timestamps, no prompt history and no voice-activity filter; the response
+  is one `result_json` holding the text, segments and words with integer
+  microsecond times checked against the clip, the decode options, the
+  compute type CTranslate2 reports, the engine versions and the load and
+  decode times. Failures are typed, CTranslate2's out-of-memory
+  `RuntimeError` included, and carry no path, language or engine text. The
+  STT candidate fixture's entry declares these fields.
+  `pip install ".[speech-stt]"` adds faster-whisper and CTranslate2 for
+  development; CI fakes them. (V030-E01-F02-T01)
+
 ### Changed
 
 - The Rust mirror of the sidecar IPC header, `IpcMessage`, now refuses
