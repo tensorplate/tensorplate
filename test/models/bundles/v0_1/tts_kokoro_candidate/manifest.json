@@ -1,0 +1,49 @@
+{
+  "schema_version": "0.1",
+  "name": "tts-kokoro-candidate",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp32",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "tts-kokoro-candidate.json",
+      "digest": "sha256:2be00de8cc56b7dc00bbc8d7234a855f67ee83887813937fd79495a499274041",
+      "byte_size": 483,
+      "description": "Candidate-only runner entry: selects the kokoro profile and lists its artifact set by relative path and digest."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/config.json",
+      "digest": "sha256:2e0907dc85b205148fc3d8180440aafa23d61478ddc5e029dfc023d814e8e8ac",
+      "byte_size": 48,
+      "description": "Synthetic placeholder for the model's config.json."
+    },
+    {
+      "role": "weights",
+      "kind": "weights",
+      "path": "model/kokoro-v1_0.pth",
+      "digest": "sha256:c59982fb85d807a14427dd6d3f7c3f76b626c37dfbcc375492a7b51e3648376e",
+      "byte_size": 71,
+      "description": "Synthetic placeholder for the model checkpoint."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/voices/af_heart.pt",
+      "digest": "sha256:ba76f71db49e0d95c1e30ed6ddf2a0b11036e300a73571143112351c87038088",
+      "byte_size": 70,
+      "description": "Synthetic placeholder for one voice file."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.3.0"
+  }
+}

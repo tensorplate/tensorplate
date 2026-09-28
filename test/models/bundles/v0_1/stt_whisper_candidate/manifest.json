@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "name": "stt-whisper-candidate",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp16",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "stt-whisper-candidate.json",
+      "digest": "sha256:81280215566a3d391a1a02e3524e41f5d833c25e3f87df23dcaab0a6a260bffe",
+      "byte_size": 774,
+      "description": "Candidate-only runner entry: selects the faster_whisper profile and lists its artifact set by relative path and digest."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/config.json",
+      "digest": "sha256:b09b474b44f83c82461bf80785ac49359d50c96049bbfacbeca4d3b6e7f9a51e",
+      "byte_size": 61,
+      "description": "Synthetic placeholder for the converted model's config.json."
+    },
+    {
+      "role": "weights",
+      "kind": "weights",
+      "path": "model/model.bin",
+      "digest": "sha256:0d9e69dca6185be37867b801e075e2961a49729c8828f6b89a2566766b25d1ee",
+      "byte_size": 78,
+      "description": "Synthetic placeholder for the converted model's weights."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/preprocessor_config.json",
+      "digest": "sha256:bcff0613928f664bb8a1a874ed660174458d51033e13ea3cd50457b078457616",
+      "byte_size": 62,
+      "description": "Synthetic placeholder for the feature extractor configuration."
+    },
+    {
+      "role": "tokenizer",
+      "kind": "tokenizer",
+      "path": "model/tokenizer.json",
+      "digest": "sha256:9f854f1497c4d81c43e2e2b0516c6e3db2e2dc45ccc837102fdc98877516854c",
+      "byte_size": 52,
+      "description": "Synthetic placeholder for the tokenizer."
+    },
+    {
+      "role": "tokenizer",
+      "kind": "tokenizer",
+      "path": "model/vocabulary.json",
+      "digest": "sha256:0ed93b710e01d996eeff6df942c506a28fffa998c0526ffb5dc6430fe81b9910",
+      "byte_size": 65,
+      "description": "Synthetic placeholder for the converted model's vocabulary."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.3.0"
+  }
+}
