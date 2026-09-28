@@ -62,11 +62,17 @@ random_uuid() {
 random_octet() {
   printf '%s' "$((1 + RANDOM % 254))"
 }
+random_digits() {
+  python3 -c 'import secrets, sys
+print(str(1 + secrets.randbelow(9)) + "".join(secrets.choice("0123456789") for _ in range(int(sys.argv[1]) - 1)))' "$1"
+}
 
 host="vm-$(random_word 10)" || die "could not generate a host name"
 account="op$(random_word 8)" || die "could not generate an account name"
 id32="$(random_hex 16)" || die "could not generate an id"
 bare_uuid="$(random_uuid)" || die "could not generate a uuid"
+# A planning wave label: `w` and one digit.
+wave="w$((RANDOM % 10))"
 literal="lit$(random_word 9)" || die "could not generate a literal"
 short_literal="qz7"
 
@@ -143,9 +149,17 @@ emit_failing_log() {
   return 1
 }
 
-# produce_report <dir> <failing host or empty>: the real runner's report.
+# shellcheck disable=SC2329 # Invoked by lifecycle_stage in produce_report.
+emit_failing_csv_log() {
+  printf 'index, name, serial\n0, NVIDIA L4, %s\n' "$1"
+  return 1
+}
+
+# produce_report <dir> <failing value or empty> [emitter]: the real
+# runner's report, whose install stage fails through emitter
+# (emit_failing_log) when a value is given.
 produce_report() (
-  local dir="$1" failing_host="$2" stage
+  local dir="$1" failing="$2" emitter="${3:-emit_failing_log}" stage
   # shellcheck disable=SC1090
   source "$runner"
   lifecycle_begin synthetic-row "$dir" 0.2.1 test-harness
@@ -153,8 +167,8 @@ produce_report() (
   for stage in install upgrade deploy-smoke status-logs rollback restart crash-loop offline; do
     if [[ "$stage" == offline ]]; then
       lifecycle_skip offline "cloud detection needs metadata.google.internal at 169.254.169.254"
-    elif [[ "$stage" == install && -n "$failing_host" ]]; then
-      lifecycle_stage install emit_failing_log "$failing_host" || :
+    elif [[ "$stage" == install && -n "$failing" ]]; then
+      lifecycle_stage install "$emitter" "$failing" || :
     elif [[ "$stage" == install ]]; then
       lifecycle_stage install emit_install_log
     else
@@ -199,7 +213,17 @@ Serial Number: REDACTED
 Hardware Serial: 0000000000
     GPU PDI                               : REDACTED
 <pdi>REDACTED</pdi>
+<serial>REDACTED</serial>
+<serial_number>0000000000000</serial_number>
+    Serial Number                         : N/A
+        Chassis Serial Number             : [N/A]
+<chassis_serial_number>N/A</chassis_serial_number>
+<board_serial>[N/A]</board_serial>
 detail: {\"pdi\": \"REDACTED\"}
++ base64 -${wave} report.json | fold -${wave}0 on hw${wave#w} and rw${wave#w}
+argv ["base64", "-${wave}", "report.json"], [-${wave}], (base64 -${wave}), base64 -${wave}| tr -d =
+payload_b64 "QUJD+${wave}xYQ==" "c3ludGhldGljIHBheWxvYWQgZm9y1+${wave}ZXZpZGVu"
+Model name:                           Intel(R) Xeon(R) ${wave}-2495X
 ii  tensorrt  10.3.0.30-1+cuda12.6  arm64
 tensorrt==10.3.0.30
 tensorrt-10.3.0.30-cp310-none-linux_aarch64.whl
@@ -224,6 +248,38 @@ journal="${pass}/agent-journal.txt"
 journal_record "$journal" "{\"MESSAGE\":\"Started tensorplate-agent.service.\",\"PRIORITY\":\"6\",\"SYSLOG_IDENTIFIER\":\"systemd\",\"UNIT\":\"tensorplate-agent.service\",\"_PID\":\"1\",\"_SYSTEMD_UNIT\":\"init.scope\",\"_SYSTEMD_INVOCATION_ID\":\"${zeros}\",\"__REALTIME_TIMESTAMP\":\"1757814123000000\"}"
 byte_message_record "$journal" "ready on tp-synthetic-host"
 printf 'nothing to see\n' >"${pass}/notes.log" || die "could not write notes.log"
+
+# CSV tables whose serial column carries synthetic values, and lines that
+# end a table: an echoed command whose serial field is several words, a
+# row with another field count, and prose after a lone header word. Prose
+# with commas that names a serial is no header.
+cat >"${pass}/nvidia-smi-query-gpu.csv" <<'EOF' || die "could not write nvidia-smi-query-gpu.csv"
+index, name, uuid, serial, pci.bus_id, memory.total [MiB]
+0, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000001, REDACTED, 00000000:00:00.0, 23034 MiB
+1, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000002, 0000000000000, 00000000:00:01.0, 23034 MiB
+2, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000003, [N/A], 00000000:00:02.0, 23034 MiB
+3, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000004, N/A, 00000000:00:03.0, 23034 MiB
+EOF
+cat >"${pass}/csv-tables.log" <<'EOF' || die "could not write csv-tables.log"
+index, name, serial
+0, NVIDIA L4, REDACTED
+$ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+pid, process_name, used_gpu_memory [MiB]
+42, tensorplate-serving, 256 MiB
+index, serial
+0, REDACTED
+total, listed, cards
+The name, serial, and UUID of each card are replaced
+Kept: name, uuid, count
+serial
+REDACTED
+The rest of this log is prose.
+EOF
+# A progress line redrawn with carriage returns after a table, and a short
+# option in backquotes.
+# shellcheck disable=SC2016 # The backquotes are the log's text.
+printf 'index, serial\n0, REDACTED\nfetching 10%%\rfetching 100%%\nrun `base64 -%s`\n' "$wave" \
+  >>"${pass}/csv-tables.log" || die "could not write csv-tables.log"
 
 literals_dir="${work}/private"
 mkdir -p "$literals_dir" || die "could not create the literal directory"
@@ -706,6 +762,82 @@ new_case
 add_line "    Serial Number                         : ${serial}"
 expect_finding "a column-padded nvidia-smi -q serial" serial "$serial"
 
+# A serial as an XML element, and under a CSV header: nvidia-smi
+# --query-gpu prints the column's name once and the values unlabelled.
+serial_a="$(random_digits 13)"
+serial_b="$(random_digits 13)"
+new_case
+printf '\t\t<uuid>GPU-00000000-0000-0000-0000-000000000001</uuid>\n\t\t<serial>%s</serial>\n' "$serial_a" \
+  >"${d}/nvidia-smi-q-x.xml" || die "could not write nvidia-smi-q-x.xml"
+expect_finding "an nvidia-smi -q -x serial element" serial "$serial_a"
+
+new_case
+printf '<SerialNumber>%s</SerialNumber>\n' "$serial_a" >"${d}/device.xml" || die "could not write device.xml"
+expect_finding "a serial number element" serial "$serial_a"
+
+new_case
+printf '\t\t\t<chassis_serial_number>%s</chassis_serial_number>\n' "$serial_a" \
+  >"${d}/nvidia-smi-q-x.xml" || die "could not write nvidia-smi-q-x.xml"
+expect_finding "a qualified serial number element" serial "$serial_a"
+
+new_case
+printf '<board_serial>%s</board_serial>\n' "$serial_a" >"${d}/device.xml" || die "could not write device.xml"
+expect_finding "a qualified serial element" serial "$serial_a"
+
+new_case
+add_line "    Serial Number                         : N/A${serial_a}"
+expect_finding "a serial that only starts with N/A" serial "$serial_a"
+
+new_case
+{
+  printf 'index, name, uuid, serial, pci.bus_id, memory.total [MiB]\n'
+  printf '0, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000001, %s, 00000000:00:00.0, 23034 MiB\n' "$serial_a"
+  printf '1, NVIDIA L4, GPU-00000000-0000-0000-0000-000000000002, %s, 00000000:00:01.0, 23034 MiB\n' "$serial_b"
+} >"${d}/nvidia-smi-query-gpu.csv" || die "could not write nvidia-smi-query-gpu.csv"
+expect_finding "serials in an nvidia-smi --query-gpu CSV column" serial "$serial_a"
+check "  one on each row" "nvidia-smi-query-gpu.csv:2: serial (13 chars) nvidia-smi-query-gpu.csv:3: serial (13 chars)" \
+  "$(grep ': serial' "${d}.out" | tr '\n' ' ' | sed 's/ $//')"
+check "  without printing the other" "no" "$(has "$serial_b" "${d}.out")"
+
+new_case
+printf 'gpu_serial\n%s\n' "$serial_a" >"${d}/serials.csv" || die "could not write serials.csv"
+expect_finding "a serial under a one-column gpu_serial header" serial "$serial_a"
+
+new_case
+{
+  printf 'index, name, serial\n'
+  printf '0, NVIDIA L4, [Not Supported]\n'
+  printf '1, NVIDIA L4, %s\n' "$serial_b"
+} >"${d}/nvidia-smi-query-gpu.csv" || die "could not write nvidia-smi-query-gpu.csv"
+expect_finding "a serial on the row after a placeholder" serial "$serial_b"
+check "  and the placeholder, which is no synthetic value" \
+  "nvidia-smi-query-gpu.csv:2: serial (15 chars) nvidia-smi-query-gpu.csv:3: serial (13 chars)" \
+  "$(grep ': serial' "${d}.out" | tr '\n' ' ' | sed 's/ $//')"
+
+# A recording that keeps a command's output whole, as the host detection
+# fixtures keep theirs.
+new_case
+python3 - "${d}/host-identity.json" "$serial_a" <<'PY' || die "could not write host-identity.json"
+import json, sys
+capture = "index, name, serial\n0, NVIDIA L4, " + sys.argv[2] + "\n"
+with open(sys.argv[1], "w") as handle:
+    json.dump({"sources": {"nvidia_smi_query_gpu": capture}}, handle, indent=2)
+PY
+expect_finding "a CSV table in a recorded JSON string" serial "$serial_a"
+
+# A failing stage's detail joins its log's last lines with spaces, so the
+# table it quotes is no table: the stage log is what reports the serial.
+csv_detail="${work}/detail-csv"
+produce_report "$csv_detail" "$serial_a" emit_failing_csv_log >/dev/null 2>&1 \
+  || die "the lifecycle runner failed"
+check "a failing stage that logs a CSV serial column fails" "1" \
+  "$(scan "${csv_detail}.out" --patterns-only "$csv_detail")"
+check "  on the stage log's row" "install.log:2: serial (13 chars)" \
+  "$(grep ': serial' "${csv_detail}.out" || :)"
+check "  and not on the report, whose detail quotes it" "no yes" \
+  "$(has lifecycle-report.json "${csv_detail}.out") $(has "$serial_a" "${csv_detail}/lifecycle-report.json")"
+check "  without printing the serial" "no" "$(has "$serial_a" "${csv_detail}.out")"
+
 # --- GPU PDIs, by their label in nvidia-smi -q and -q -x, and as a key.
 pdi="0x$(random_hex 8)"
 new_case
@@ -724,6 +856,11 @@ expect_finding "a GPU PDI under an escaped JSON key" gpu-pdi "$pdi"
 new_case
 printf '{"gpuPdi": "%s"}\n' "$pdi" >"${d}/gpu.json" || die "could not write gpu.json"
 expect_finding "a GPU PDI under a camelCase key" gpu-pdi "$pdi"
+
+# N/A stays as recorded in a serial field only.
+new_case
+add_line "<pdi>N/A</pdi>"
+expect_finding "a GPU PDI given as N/A" gpu-pdi ""
 
 # --- Credentials, built at runtime so no scanner flags this file.
 new_case
@@ -824,6 +961,53 @@ new_case
 add_line "notes_${planning_id}_draft"
 expect_finding "a feature identifier without its release prefix, between underscores" planning-id \
   "$planning_id"
+
+# --- Planning wave labels have no synthetic form either.
+wave_word="$(random_word 8)"
+new_case
+add_line "request ${wave}-smoke-${wave_word} accepted"
+expect_finding "a wave label leading a request id" wave-label "${wave}-smoke-${wave_word}"
+
+new_case
+add_line "request smoke-${wave_word}-${wave} accepted"
+expect_finding "a wave label ending a request id" wave-label "${wave_word}-${wave}"
+
+new_case
+add_line "captured into ${wave_word}-${wave}.log"
+expect_finding "a wave label ending a file name" wave-label "${wave_word}-${wave}"
+
+new_case
+add_line "ii  tensorplate-serving  0.2.1-1+${wave}  amd64"
+expect_finding "a wave label as a package revision suffix" wave-label "0.2.1-1+${wave}"
+
+new_case
+add_line "tensorplate-serving_0.2.1-1+${wave}${wave_word}1_amd64.deb"
+expect_finding "a wave label with letters after a package revision's plus" wave-label \
+  "+${wave}${wave_word}"
+
+upper_wave="$(printf '%s' "$wave" | tr '[:lower:]' '[:upper:]')"
+new_case
+add_line "# ${upper_wave} record"
+expect_finding "an upper-case wave label" wave-label "$upper_wave"
+
+new_case
+add_line "  base64 -${wave}-${wave_word} report.json"
+expect_finding "a wave label after a dash that is not a short option" wave-label "${wave}-${wave_word}"
+
+new_case
+add_line "state in /var/lib/tensorplate/deployments/${wave}/${wave_word}"
+expect_finding "a wave label in a path spelled only in base64's alphabet" wave-label "/${wave}/${wave_word}"
+
+# The passing bundle's run is 40 characters long; this one is 39.
+new_case
+add_line "build ${wave_word}${wave_word}20260927+${wave}${wave_word}rc12 done"
+expect_finding "a wave label after a revision's plus in a shorter run" wave-label "7+${wave}${wave_word}"
+
+new_case
+mkdir "${d}/${wave}-${wave_word}" || die "could not create a directory"
+printf 'ready\n' >"${d}/${wave}-${wave_word}/stage.log" || die "could not write a file"
+expect_finding "a wave label in a directory name" wave-label "${wave}-${wave_word}"
+check "  and the path is referenced by number" "yes" "$(has "path#" "${d}.out")"
 
 # --- Operator literals.
 lit_file="${work}/private/case-literals.txt"

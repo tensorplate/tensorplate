@@ -21,14 +21,14 @@ not style.
    fact, the row is wrong.
 
 3. **Published fixtures are sanitized.** No live cloud account or project
-   identifiers, no device UUIDs, serials or GPU PDIs, no internal fleet,
-   quota, or auth status. Replace identifiers with clearly synthetic
-   values, say so where the fixture is described, and retain the
-   unsanitized capture privately with the release evidence. Matching
-   must never read a field that sanitization touches. **Sanitize before
-   the first commit**: a later sanitization commit leaves the identifiers
-   in the branch history, and the branch must then be rewritten before
-   merge.
+   identifiers, no device UUIDs, serials or GPU PDIs, no physical host's
+   PCI bus ids, no internal fleet, quota, or auth status. Replace
+   identifiers with clearly synthetic values, say so where the fixture is
+   described, and retain the unsanitized capture privately with the
+   release evidence. Matching must never read a field that sanitization
+   touches. **Sanitize before the first commit**: a later sanitization
+   commit leaves the identifiers in the branch history, and the branch
+   must then be rewritten before merge.
    `tensorplate doctor --record` labels its output as private raw evidence,
    and the fixture harness rejects live-looking GCP project numbers and
    device UUIDs outside the repository's explicit synthetic namespaces or
@@ -91,8 +91,8 @@ not style.
     pull request's title or body. `tools/validation/check-public-hygiene.sh`
     scans all of them as committed: every changed file as each commit of
     the range wrote it, merges included, the commits' messages and
-    authors, the branch checked out, and the pull request text it is
-    given. It works in two tiers:
+    authors, the branch checked out or named with `--branch`, and the pull
+    request text it is given. It works in two tiers:
 
     - **Evidence**: recorded evidence and fixtures of real machines,
       under `docs/validation/evidence/` and `test/platform/` in any letter
@@ -125,7 +125,10 @@ not style.
       machine-id and cloud-project classes, and its planning identifiers
       with the release prefix, are not part of the source policy:
       negative tests, synthetic identities, the scanners' own patterns and
-      pull request text carry those legitimately. A binary file
+      pull request text carry those legitimately. Its planning wave labels
+      are looked for in a branch name too, and nowhere else outside
+      evidence: in source the same shape is a compiler flag or a register
+      name. A binary file
       is a finding of its own, so each new image or recording needs a
       reviewed allowlist line, and its printable text is still checked for
       the long shapes.

@@ -18,9 +18,10 @@
 #             found; and the name of every such file
 #   commits   the message, author and committer of every commit in the
 #             range
-#   messages  the name of the branch checked out, if any, and any further
-#             text the caller names with --message: a pull request's
-#             title and body, and in CI its branch name
+#   messages  the name of the branch checked out, if any, and the one
+#             --branch names (in CI, where HEAD is detached, the pull
+#             request's), and any further text the caller names with
+#             --message: a pull request's title and body
 #
 # Two tiers, because recorded evidence and source need different rules:
 #
@@ -41,7 +42,9 @@
 #             classes, and its prefixed planning identifiers, are
 #             deliberately not part of it: negative tests, synthetic
 #             identities, the scanners' own patterns and pull request text
-#             carry those legitimately.
+#             carry those legitimately. Its planning wave labels apply to
+#             a branch name as well, and nowhere else outside evidence:
+#             `w` and a digit is also a compiler flag or a register name.
 #
 # Lines are scanned as written, with escapes and terminal control
 # sequences blanked, and with escapes decoded. A file that is not UTF-8
@@ -71,9 +74,9 @@
 # not the one at HEAD, `changed-path#N` when either tier finds the path
 # itself (N counts the sorted scanned paths), `commit <commit>` for a
 # commit's message, with lines `author` and `committer` for its identity
-# lines, `branch` for the checked-out branch name, or `message#N` for the
-# Nth --message file. Line 0 means the finding is about the name or the
-# whole file. Findings from the evidence scanner keep its own class names.
+# lines, `branch` for a branch name, or `message#N` for the Nth --message
+# file. Line 0 means the finding is about the name or the whole file.
+# Findings from the evidence scanner keep its own class names.
 #
 # Exit 0 when the change is publishable, 1 when there are findings, and 2
 # when the scan did not reach a verdict (bad arguments or --help, a git
@@ -82,12 +85,15 @@
 # error).
 #
 # Usage:
-#   check-public-hygiene.sh --base REF [--message FILE]... [--literals FILE] [--local]
+#   check-public-hygiene.sh --base REF [--branch FILE] [--message FILE]...
+#                           [--literals FILE] [--local]
 #   check-public-hygiene.sh --tree [--literals FILE] [--local]
 #
 # --base REF scans the change from REF to HEAD: files that differ between
-# their merge base and HEAD, and the commits in REF..HEAD. --tree scans
-# every file at HEAD and checks the allowlist for stale entries.
+# their merge base and HEAD, and the commits in REF..HEAD. --branch FILE
+# holds the name the branch is published under, scanned besides the one
+# checked out. --tree scans every file at HEAD and checks the allowlist
+# for stale entries.
 # --literals FILE names a private literal file kept outside the
 # repository, as check-evidence-publication.sh reads it. --local adds this
 # machine's user name, short host name and gcloud project as literals,
@@ -132,7 +138,8 @@ FINDINGS = 3
 FAULT = 2
 INTERNAL = 4
 
-USAGE = """usage: check-public-hygiene.sh --base REF [--message FILE]... [--literals FILE] [--local]
+USAGE = """usage: check-public-hygiene.sh --base REF [--branch FILE] [--message FILE]...
+                               [--literals FILE] [--local]
        check-public-hygiene.sh --tree [--literals FILE] [--local]
 
 Exit 0: publishable. Exit 1: findings. Exit 2: no verdict."""
@@ -279,6 +286,10 @@ PLANNING_ID = re.compile(
     r"(?![A-Za-z0-9])")
 # The changelog cites planning identifiers by convention.
 PLANNING_ID_EXEMPT = frozenset(("CHANGELOG.md",))
+# check-evidence-publication.sh's planning wave label, looked for in a
+# branch name: every part of a branch name is a name.
+WAVE_LABEL = re.compile(
+    r"(?<![A-Za-z0-9])[Ww][0-9](?![A-Za-z0-9])|(?<=[0-9]\+)[Ww][0-9](?![0-9])")
 
 SOURCE_CLASSES = frozenset((
     "credential", "service-account", "cloud-project-number", "home-path",
@@ -288,8 +299,8 @@ SOURCE_CLASSES = frozenset((
 EVIDENCE_CLASSES = frozenset((
     "journal-field", "journal-host", "hostname", "machine-id", "home-path",
     "device-uuid", "uuid", "ipv4", "ipv6", "mac", "email", "cloud-project",
-    "internal-dns", "serial", "gpu-pdi", "credential", "planning-id", "symlink",
-    "special-file", "binary"))
+    "internal-dns", "serial", "gpu-pdi", "credential", "planning-id", "wave-label",
+    "symlink", "special-file", "binary"))
 NEVER_ALLOWED = frozenset(("credential",))
 
 # As in check-evidence-publication.sh: a control sequence or an escape
@@ -449,6 +460,15 @@ def scan_variant(line, literals):
     for cls, pattern, length in literals:
         for m in pattern.finditer(line):
             found.append((cls, length, m.group(0).lower()))
+    return found
+
+
+def wave_labels(text):
+    """Counter of (line, class, length) for the wave labels in a branch name."""
+    found = Counter()
+    for number, line in enumerate(text.split("\n"), 1):
+        for m in WAVE_LABEL.finditer(line):
+            found[(number, "wave-label", len(m.group(0)))] += 1
     return found
 
 
@@ -715,7 +735,8 @@ def load_allowlist(data):
 
 
 def parse_arguments(argv):
-    options = {"base": None, "tree": False, "messages": [], "literals": None, "local": False}
+    options = {"base": None, "tree": False, "branch": None, "messages": [], "literals": None,
+               "local": False}
     index = 0
 
     def value(flag):
@@ -733,6 +754,11 @@ def parse_arguments(argv):
             if options["base"] is not None:
                 fault("--base given twice")
             options["base"] = value(arg)
+            index += 1
+        elif arg == "--branch":
+            if options["branch"] is not None:
+                fault("--branch given twice")
+            options["branch"] = value(arg)
             index += 1
         elif arg == "--message":
             options["messages"].append(value(arg))
@@ -753,6 +779,8 @@ def parse_arguments(argv):
         fault("choose one of --base REF or --tree\n" + USAGE)
     if options["tree"] and options["messages"]:
         fault("--message applies to --base scans only")
+    if options["tree"] and options["branch"] is not None:
+        fault("--branch applies to --base scans only")
     return options
 
 
@@ -873,6 +901,18 @@ def main(argv):
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         if branch.returncode == 0:
             messages.append(("branch", branch.stdout.decode("utf-8", "surrogateescape").strip()))
+        if options["branch"] is not None:
+            try:
+                with open(options["branch"], "rb") as handle:
+                    name = handle.read().decode("utf-8").strip()
+            except OSError:
+                fault("the --branch file cannot be read")
+            except UnicodeDecodeError:
+                fault("the --branch file is not UTF-8 text")
+            if not name:
+                fault("the --branch file names no branch")
+            if ("branch", name) not in messages:
+                messages.append(("branch", name))
 
     # A tree entry can be named `..` with git plumbing, and git only warns.
     # Such a path is neither reviewable nor safe to stage.
@@ -1008,7 +1048,10 @@ def main(argv):
         for (line, cls, length), count in scan_text(body, literals).items():
             add((1, ordinal, line, cls, length, subject), count)
     for position, (label, text) in enumerate(messages, 1):
-        for (line, cls, length), count in scan_text(text, literals).items():
+        found = scan_text(text, literals)
+        if label == "branch":
+            found += wave_labels(text)
+        for (line, cls, length), count in found.items():
             add((2, position, line, cls, length, label), count)
 
     def ref_of(subject):
