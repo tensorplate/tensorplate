@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bundle_profile::{BundleProfile, BundleProfileError, PROFILE_FORMAT_VERSION};
 use crate::model_spec::{ModelClass, PrecisionHint};
 use crate::tensor_view::{DType, Layout};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
@@ -349,6 +350,9 @@ pub struct VisionNormalization {
     pub std: Vec<f64>,
 }
 
+/// Speech block as format 0.1 reads it. Format 0.2 decodes the block
+/// strictly into [`BundleManifest::profile`]; its other keys are kept here
+/// so the manifest re-serializes unchanged.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SpeechBlock {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,6 +361,8 @@ pub struct SpeechBlock {
     pub sample_rate_hz: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_extractor: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 /// Reserved language-block metadata. Parsed but not exercised in v0.1.0.
@@ -572,6 +578,12 @@ pub struct BundleManifest {
     /// additions without breaking older readers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty", flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+    /// The format 0.2 fields, decoded strictly from the manifest text by
+    /// the bundle parser; `None` under format 0.1. This is the normalized
+    /// view (exact integers); the source keys stay in `extra` and
+    /// `model_blocks.speech` as written, which serialization writes.
+    #[serde(skip)]
+    pub profile: Option<BundleProfile>,
 }
 
 // BundleManifest carries `f64` fields (e.g. VLA control frequency), so
@@ -682,6 +694,12 @@ pub enum BundleManifestError {
     InvalidVitisCalibrationDigest,
     #[error("BundleManifest.signature is present but missing required `algorithm` or `value`")]
     IncompleteSignature,
+    #[error(transparent)]
+    Profile(#[from] BundleProfileError),
+    #[error(
+        "BundleManifest.profile must be present exactly when format_version is `0.2`; decode format 0.2 manifests with the bundle parser"
+    )]
+    ProfileFormatMismatch,
 }
 
 fn validate_model_blocks(
@@ -785,6 +803,9 @@ impl BundleManifest {
         }
         if !looks_like_version_pair(&self.format_version) {
             return Err(BundleManifestError::InvalidFormatVersion);
+        }
+        if self.profile.is_some() != (self.format_version == PROFILE_FORMAT_VERSION) {
+            return Err(BundleManifestError::ProfileFormatMismatch);
         }
         if self.backend_hint.is_empty() {
             return Err(BundleManifestError::EmptyBackendHint);
@@ -921,6 +942,10 @@ impl BundleManifest {
             }
         }
 
+        if let Some(profile) = self.profile.as_ref() {
+            profile.check_artifact_references(&self.artifacts)?;
+        }
+
         Ok(self)
     }
 
@@ -966,6 +991,7 @@ impl Default for BundleManifest {
             provenance: ProvenanceMetadata::default(),
             manifest_digest: None,
             extra: BTreeMap::new(),
+            profile: None,
         }
     }
 }
@@ -1019,6 +1045,7 @@ mod tests {
             provenance: super::ProvenanceMetadata::default(),
             manifest_digest: Some("sha256:deadbeef".into()),
             extra: BTreeMap::new(),
+            profile: None,
         }
     }
 

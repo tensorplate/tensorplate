@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use crate::bundle_manifest::{
     ArtifactKind, ArtifactRole, BundleManifest, BundleManifestError, DeviceFamily,
 };
+use crate::bundle_profile::{BundleProfile, PROFILE_FORMAT_VERSION};
 use crate::SCHEMA_VERSION;
 
 /// Stable name of the manifest file inside a bundle root.
@@ -623,8 +624,18 @@ fn decode_manifest(raw: &str) -> Result<BundleManifest, ParseError> {
             expected: SCHEMA_VERSION,
         });
     }
-    let manifest: BundleManifest =
+    let profile = if value
+        .get("format_version")
+        .and_then(serde_json::Value::as_str)
+        == Some(PROFILE_FORMAT_VERSION)
+    {
+        Some(BundleProfile::from_manifest_text(raw).map_err(BundleManifestError::from)?)
+    } else {
+        None
+    };
+    let mut manifest: BundleManifest =
         serde_json::from_value(value).map_err(|e| ParseError::ManifestMalformed(e.to_string()))?;
+    manifest.profile = profile;
     let manifest = manifest.validate()?;
     Ok(manifest)
 }
