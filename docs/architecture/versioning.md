@@ -106,6 +106,13 @@ decoder while every other payload stays pinned to the protocol version; an
 agent that reads only `0.1` rejects a `0.2` state file with its typed
 error. See [`protocol.md`](protocol.md#versioning).
 
+The deployment descriptor carries a narrower version of its own,
+`canonical_json_version`: the byte form its two digests are computed over
+(see [`docs/bundles/integrity.md`](../bundles/integrity.md#canonical-json-version-1)).
+It is `1`. A different canonical form changes every digest, so it is a new
+version with its own vectors, and a reader refuses a version it does not
+implement rather than re-hashing.
+
 ### Bundle format version
 
 - **Minor**: additive optional fields in the manifest, new optional

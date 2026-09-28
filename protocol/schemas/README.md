@@ -36,7 +36,10 @@ Decoders **must** reject unknown `schema_version` values with the typed
 error `Error::Code::Unsupported` (C++) /
 `tensorplate_protocol::ErrorCode::Unsupported` (Rust). The Rust helper
 `tensorplate_protocol::decode_with_version_check` provides this; the C++
-binding will follow the same shape when JSON parsing lands.
+binding will follow the same shape when JSON parsing lands. The deployment
+descriptor has its own reader, `DeploymentDescriptor::from_json`, which
+also checks its canonical form and digests; its version refusals map to the
+same `Unsupported` code.
 
 One document has its own version track: `agent_state.json`, the agent's
 durable state file, which no other process reads. Its `schema_version` is a
@@ -103,6 +106,19 @@ the capability they belong to. The schema, the Rust mirror and the sidecar's
 `protocol.py` literals change together;
 `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` holds them to the
 golden frames and to the typed job seam's vectors.
+
+## Canonical JSON
+
+The two digests in `deployment_descriptor.json` are SHA-256 over canonical
+JSON version 1, specified in
+[`docs/bundles/integrity.md`](../../docs/bundles/integrity.md#canonical-json-version-1).
+`protocol/fixtures/canonical_json.json` and the three
+`protocol/fixtures/deployment_descriptor_*.json` documents are
+cross-language vectors that every implementation replays;
+`protocol/fixtures/canonical_json_reference.py` writes them, and
+`protocol/rust/tests/deployment_descriptor_fixtures.rs` replays them for
+the Rust crate. Validating the descriptor needs the four schemas it
+references registered beside it.
 
 ## Adding a new payload
 
