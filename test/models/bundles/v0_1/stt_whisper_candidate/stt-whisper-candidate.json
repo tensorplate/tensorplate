@@ -1,5 +1,13 @@
 {
   "backend_profile": "faster_whisper",
+  "model_directory": "model",
+  "device": "cuda",
+  "compute_type": "float16",
+  "languages": [
+    "en",
+    "ar"
+  ],
+  "sample_rate_hz": 16000,
   "artifact_set": [
     {
       "path": "model/config.json",

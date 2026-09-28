@@ -7,6 +7,7 @@ from tensorplate_pytorch_backend.backends.base import (
     RuntimeCapability,
 )
 from tensorplate_pytorch_backend.backends.cuda_fixture import CudaFixtureBackend
+from tensorplate_pytorch_backend.backends.faster_whisper import FasterWhisperBackend
 from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
 from tensorplate_pytorch_backend.backends.mps_fixture import MpsFixtureBackend
 from tensorplate_pytorch_backend.backends.smolvla import SmolVLABackend
@@ -15,6 +16,7 @@ __all__ = [
     "Backend",
     "BackendError",
     "CudaFixtureBackend",
+    "FasterWhisperBackend",
     "FixtureBackend",
     "MpsFixtureBackend",
     "NamedTensor",
