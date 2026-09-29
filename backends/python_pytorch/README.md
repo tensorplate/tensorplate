@@ -79,6 +79,14 @@ need none of them. To run the profile itself against the real engine:
 pip install -e ".[dev,speech-stt]"
 ```
 
+The `kokoro` runner (`backends/kokoro.py`) synthesizes bounded text using
+verified local model and static voice artifacts. Its entry and tensor contract,
+PCM conversion, error behavior and deserialization threat review are documented
+in [the installation guide](../../docs/install/python-pytorch-backend.md#candidate-speech-runner-profile-kokoro).
+Tests inject fake Kokoro, torch and NumPy modules; `dependencies = []` stays
+unchanged. `pip install -e ".[dev,speech-tts]"` supplies development engines,
+with language assets installed separately; the appliance uses locked packages.
+
 ## Rules
 
 - `tensorplate-pytorch-backend` does **not** import from any C++ runtime

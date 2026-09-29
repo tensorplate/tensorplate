@@ -71,6 +71,13 @@ the set `faster_whisper/utils.py` `download_model` fetches) and the
 `hexgrad/Kokoro-82M` repository layout (`config.json`, `kokoro-v1_0.pth`
 and `voices/<voice>.pt`).
 
+
+The Kokoro entry also declares the local config/checkpoint, device/compute type,
+languages, static voice selection and output sample rate. Its model and voice
+files remain synthetic placeholders, not loadable torch artifacts; the CPU
+runner tests use engine doubles. The entry's artifact digest is recomputed when
+those declarations change. See the installation guide for the runner contract.
+
 ## Regenerating digests
 
 When a fixture artifact body changes, regenerate the digests by running

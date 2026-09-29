@@ -240,6 +240,106 @@ The profile imports `faster_whisper`, `ctranslate2` and `numpy` only when
 a model loads. `pip install ".[speech-stt]"` in `backends/python_pytorch/`
 installs faster-whisper and CTranslate2, unpinned, for development.
 
+## Candidate speech runner profile: `kokoro`
+
+`kokoro` synthesizes one bounded text input on the same candidate-only
+batch path as `faster_whisper`. Its entry must name `backend_profile:
+"kokoro"`; the default-backend setting alone cannot enable it. The runner
+is a Kokoro-family adapter: its checkpoint, config, language and voice are
+bundle assets. The reference fixture declares en-US and af_heart; those
+values are not built into the runner.
+
+| Entry field | Meaning |
+| --- | --- |
+| `model_config`, `model_weights` | Relative paths to the local JSON config and checkpoint. |
+| `device`, `compute_type` | `cuda` or `cpu`, and `float32`. An explicit model-spec precision other than `fp32` is refused; the legacy `auto` hint is accepted but never chooses the loaded precision. |
+| `languages` | Nonempty list of distinct language tags (at most 16 UTF-8 bytes each), recognized by the installed Kokoro pipeline's language registry. |
+| `voices` | Map of voice IDs (1–64 UTF-8 bytes) to `{"path": "<local .pt>", "language": "<declared tag>"}`. Voice paths cannot contain commas, which upstream interprets as mixing voices. |
+| `language`, `voice` | Static selections from those declarations; the selected voice must declare this language. Requests cannot change either. |
+| `sample_rate_hz` | Positive integer output rate, checked against the loaded decoder's excitation source. Kokoro's JSON config does not carry a sample rate. |
+| `artifact_set` | Every local file the entry references, each with a SHA-256 digest. |
+
+All fields are required and unknown fields reject. Model and voice files
+are reached through the shared artifact-set verifier. The runner constructs
+`KModel(config=<local config>, model=<local checkpoint>)`, converts its
+parameters to float32 on the declared device, checks parameter/buffer
+precision and device, and passes that instance to `KPipeline`. The selected
+voice loads from its verified local `.pt` path; finite CPU float32 style
+tensor dimensions must agree with the model config. A missing packaged
+`en_core_web_sm` dependency rejects before pipeline construction, preventing
+misaki's automatic spaCy download. Missing English espeak fallback also
+fails load instead of silently skipping out-of-vocabulary words. Other
+language dependencies must already be installed by the chosen runtime.
+
+One request carries exactly one `text_utf8` tensor: strict UTF-8, nonblank,
+no NUL, at most 4,096 bytes and 4,096 characters. Phonemization runs before
+GPU synthesis. It must produce 1–200 phoneme characters, fit the loaded
+model context and voice table, and use only the model's vocabulary. This
+uses `g2p` followed by `generate_from_tokens` with a phoneme string, avoiding
+the upstream text pipeline's silent truncation. Speed is fixed at 1.0.
+
+The result contains an `audio_frames` tensor of mono PCM16LE and a
+`result_json` tensor. Metadata includes `language`, `voice`,
+`model_digest`, `config_digest`, `voice_digest`, `sample_rate_hz`,
+`sample_count`, `duration_us` (duration rounded up to whole microseconds),
+`dtype: "float32"` for the source waveform, and `clipped_samples` for source
+samples outside [-1, 1]. `runtime` records the checked device/compute type
+and Kokoro/PyTorch versions. `timings_us` reports whole-profile `load`,
+`artifact_verify`, `model_build`, `phonemize`, `synthesize` (including full
+generator consumption and the CPU copy), and `pcm` conversion.
+
+A waveform must be finite, one-dimensional float32, nonempty and at most
+30 seconds at the declared rate. Conversion clamps to [-1, 1], multiplies
+by 32768, rounds ties to even, saturates to [-32768, 32767], then writes
+little-endian int16. No resampling or streaming chunks are implied.
+Transient memory includes the float waveform, bounded conversion copies
+and PCM output. Unload drops the pipeline, model and cached voice, collects
+Python garbage, then empties the CUDA allocator cache. Device-allocation
+release beyond the allocator baseline still needs hardware measurement.
+
+Malformed entries/text are `config_invalid`, invalid tensors are
+`shape_mismatch`, undeclared selections or unrepresentable phonemes are
+`unsupported`, and dependency/load/synthesis failures are `load_failed` or
+`inference_failed`. Out-of-memory classes and torch's out-of-memory
+`RuntimeError` become `oom_error`. Errors and logs never contain upstream
+exception text, voice names or request text.
+
+The same startup, infer and whole-HTTP-exchange timeouts described above
+apply. Health and cancellation wait behind synchronous synthesis; this
+profile does not advertise responsive job control or streaming. Real
+Kokoro model loading, L4 synthesis, memory release, cancellation/crash
+behavior and listening quality are pending candidate qualification.
+
+### Deserialization threat review
+
+Checkpoint `.pth` and voice `.pt` files are pickle-backed. The approved
+bundle entry and its immutable, operator-provisioned artifact directory
+are the trust root: SHA-256 verification establishes identity, not safety
+of an arbitrary checkpoint. All digests are checked before deserialization;
+resolved paths must stay inside that root and appear in the allowlist.
+Writable bundle roots are outside this trust boundary: verification does
+not eliminate a concurrent replacement between hashing and opening a file.
+
+Kokoro 0.9.4's [model loader](https://github.com/hexgrad/kokoro/blob/1c7bdd971d2e32981f0f2b92d1fe5b0051e21457/kokoro/model.py)
+and [voice loader](https://github.com/hexgrad/kokoro/blob/1c7bdd971d2e32981f0f2b92d1fe5b0051e21457/kokoro/pipeline.py)
+explicitly use `torch.load(weights_only=True)`; model weights map to CPU.
+The runner also sets `TORCH_FORCE_WEIGHTS_ONLY_LOAD=1` in its dedicated
+sidecar before importing the engine. It never registers custom pickle
+safe globals or retries with unrestricted loading. A load requiring custom
+objects fails. Restricted loading still permits resource exhaustion and
+is not a sandbox for untrusted model code or native libraries; the
+[PyTorch security policy](https://github.com/pytorch/pytorch/blob/main/SECURITY.md)
+describes that boundary. Qualify only approved checkpoints with the packaged,
+patched dependency lock and service isolation. CPU fakes verify the loading
+path and rejection guards; real artifact deserialization remains part of
+the L4 run.
+
+For local development, `pip install ".[speech-tts]"` installs unpinned
+Kokoro, torch, NumPy and misaki English dependencies. Kokoro 0.9.4 supports
+Python 3.10–3.12; the sidecar's dependency-free CI also runs on 3.14. The
+extra does not install spaCy model data or distribution espeak assets and
+does not replace the appliance's locked runtime packages.
+
 ## Errors and logs
 
 The sidecar keeps request content out of everything it reports. A failed
