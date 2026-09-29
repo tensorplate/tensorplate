@@ -699,6 +699,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   planning wave label. Evidence already recorded keeps the name it was
   recorded with. (V030-E06-F02-T01)
 
+- The four Production platform rows' `evidence.location` now names
+  `docs/validation/evidence/v0.3.1/<row id>/`, and the two CPU rows',
+  which are Preview and keep their evidence out of the repository,
+  `dist/release/v0.3.1/<row id>/`, so each Production row's 0.3.1
+  lifecycle run is filed beside its v0.2.1 bundle instead of over it. The
+  v0.2.1 bundles, the L4 row's CUDA baseline among them, are unchanged,
+  and `docs/validation/cloud-row-runbooks.md` now names where that
+  baseline is filed. The new `docs/validation/evidence/v0.3.1/README.md`
+  describes the directory and leaves the sanitizing rules in the v0.2.1
+  README, which the publication scanner cites.
+  `tools/release/check-evidence-bundles.sh --version 0.3.1` reports every
+  Production row incomplete, as before, but now because the row's 0.3.1
+  directory does not exist rather than because its report tested 0.2.1;
+  each row stays incomplete until it is run for 0.3.1. On `develop`,
+  `--version 0.2.1` now reports the same, while a checkout of the `v0.2.1`
+  tag still reports all four rows complete; the v0.2.1 release notes now
+  say to run it there. (V030-E06-F02-T01)
+
 ### Fixed
 
 - `HttpServer::stop()` closed the listening socket while the accept

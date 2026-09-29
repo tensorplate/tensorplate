@@ -535,7 +535,11 @@ The harness deploys the device-neutral `fixture` profile and executes no
 CUDA kernel, so a passing run says nothing about the accelerator. The
 accelerator question is a separate, short procedure on the same instance,
 and its evidence goes in a `cuda-baseline/` directory inside the row's
-evidence directory. Run it once per row, on the image the row claims.
+evidence directory for the release it ran against. Run it once per row, on
+the image the row claims. The L4 row's, run against the published `v0.2.1`
+release, is in
+[`evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/`](evidence/v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/);
+the release gate reads only the lifecycle report and the logs it cites.
 
 The installer installs the five core packages. Install
 `tensorplate-backend-python-pytorch` from the same artifact set, and
