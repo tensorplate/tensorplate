@@ -773,6 +773,33 @@ def test_failed_load_releases_even_when_library_retains_exception(
     assert _calls(engine, "empty_cache") == [0]
 
 
+@pytest.mark.parametrize("chaining", ["cause", "context", "cycle"])
+def test_failed_load_releases_model_from_retained_exception_chain(
+    engine: _Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chaining: str
+) -> None:
+    inner, outer = RuntimeError(CANARY), RuntimeError(CANARY)
+    engine.errors["inner"] = inner
+
+    def fail(model: Any, device: str) -> None:
+        try:
+            raise inner
+        except RuntimeError:
+            if chaining == "cause":
+                outer.__cause__ = inner
+            if chaining == "cycle":
+                inner.__cause__ = outer
+            if chaining != "cause":
+                raise outer from None
+        raise outer
+
+    monkeypatch.setattr(sys.modules["kokoro"].KModel, "to", fail)
+    _error(lambda: _loaded(tmp_path), "load_failed")
+    assert inner.__traceback__ is None
+    assert outer.__traceback__ is None
+    assert not any(ref() for ref in engine.model_refs)
+    assert _calls(engine, "empty_cache") == [0]
+
+
 @pytest.mark.parametrize("stage", ["model", "synthesize"])
 def test_runtime_oom_message_is_classified_without_publication(
     engine: _Engine, tmp_path: Path, stage: str

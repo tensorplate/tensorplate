@@ -141,6 +141,19 @@ def _clear_cache(torch: Any, device: str) -> None:  # noqa: ANN401 -- optional e
             logger.warning("Kokoro allocator release failed: %s", sanitize.describe(exc))
 
 
+def _discard_tracebacks(exc: BaseException) -> None:
+    pending, visited = [exc], set[int]()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        current.__traceback__ = None
+        pending.extend(
+            linked for linked in (current.__cause__, current.__context__) if linked is not None
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _Loaded:
     pipeline: Any
@@ -311,8 +324,8 @@ class KokoroBackend(Backend):
                 if isinstance(exc, BackendError)
                 else "the Kokoro model could not be loaded"
             )
-            # Tracebacks can retain a partly constructed model through the error response.
-            exc.__traceback__ = None
+            # Libraries may retain chained errors whose frames still own the model.
+            _discard_tracebacks(exc)
         _clear_cache(torch, entry["device"])
         raise BackendError(code, message) from None
 
