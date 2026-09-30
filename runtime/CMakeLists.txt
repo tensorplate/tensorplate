@@ -67,6 +67,8 @@ set(_tp_runtime_sources
   # Logical-session lifecycle: a pure state machine with no timers or I/O.
   src/serving/session/state_machine.cpp
   src/serving/session/limits.cpp
+  src/serving/session/timers.cpp
+  src/serving/session/session_manager.cpp
 )
 
 if(TP_ENABLE_TENSORRT)

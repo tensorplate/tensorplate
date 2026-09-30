@@ -18,7 +18,8 @@ Result<SessionLimits> SessionLimits::create(std::chrono::milliseconds idle_timeo
                                             std::uint32_t max_sessions) {
   if (idle_timeout <= 0ms || heartbeat_interval <= 0ms || liveness_timeout <= 0ms ||
       max_duration <= 0ms || heartbeat_interval >= liveness_timeout || max_sessions == 0 ||
-      max_sessions > kProtocolSessionCeiling) {
+      max_sessions > kProtocolSessionCeiling || idle_timeout > 60min || liveness_timeout > 60min ||
+      max_duration > 60min) {
     return unexpected(Error::make(Error::Code::ConfigInvalid, "invalid session limits",
                                   "invalid_session_limits"));
   }

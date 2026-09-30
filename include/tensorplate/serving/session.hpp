@@ -45,6 +45,7 @@ class SessionLimits {
   [[nodiscard]] static SessionLimits defaults() noexcept;
 
   /// All durations must be positive, heartbeat must precede liveness, and
+  /// duration and idle/liveness bounds cannot exceed 60 min, and
   /// max_sessions must be in [1, 2048]. Invalid settings return ConfigInvalid.
   [[nodiscard]] static Result<SessionLimits> create(std::chrono::milliseconds idle_timeout,
                                                     std::chrono::milliseconds heartbeat_interval,
