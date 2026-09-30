@@ -17,6 +17,33 @@ use tensorplate_protocol::{BundleManifestError, BundleRuleCode};
 /// Result alias used throughout the agent crate.
 pub type AgentResult<T> = Result<T, AgentError>;
 
+/// Local worker-channel failures; no new wire error values are introduced.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ControlChannelError {
+    #[error("worker control deadline elapsed; operation outcome may be unknown")]
+    Deadline,
+    #[error("worker control peer closed")]
+    Closed,
+    #[error("invalid worker control frame or response pairing")]
+    Protocol,
+    #[error("worker control frame exceeds the size limit")]
+    FrameTooLarge,
+    #[error("worker control frame write was incomplete")]
+    PartialWrite,
+    #[error("worker control reply names another member generation")]
+    MemberMismatch,
+    #[error("worker control request is invalid")]
+    InvalidRequest,
+    #[error("worker control queue is full")]
+    QueueFull,
+    #[error("worker control thread stopped")]
+    Stopped,
+    #[error("worker did not supply a successful ledger response")]
+    Rejected,
+    #[error("worker control I/O failed: {0:?}")]
+    Io(std::io::ErrorKind),
+}
+
 /// Bundle diagnostic with an optional stable manifest rule code.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]

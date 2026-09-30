@@ -32,6 +32,20 @@ use tensorplate_protocol::worker_control::CandidateRef;
 use crate::config::{AgentConfig, WorkerControlMode};
 use crate::error::{AgentError, AgentResult};
 
+/// Pass the close-on-exec child socket as fd 0 without a pre-exec hook.
+/// Consuming the command closes its parent-side stdin copy before returning.
+#[cfg(unix)]
+pub fn spawn_with_control(
+    mut command: Command,
+) -> AgentResult<(Child, std::os::unix::net::UnixStream)> {
+    let (agent, worker) = std::os::unix::net::UnixStream::pair()?;
+    let worker: std::os::fd::OwnedFd = worker.into();
+    command.stdin(Stdio::from(worker));
+    let child = command.spawn()?;
+    drop(command);
+    Ok((child, agent))
+}
+
 /// Event surface for observability. `Coordinator` emits events at every
 /// state transition; the agent's main loop subscribes a logging sink and
 /// (in V01-E10) the observability service.

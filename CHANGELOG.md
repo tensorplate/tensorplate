@@ -8,6 +8,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Add an agent worker control client with bounded framing, independent ledger
+  polling, typed contact-loss escalation and safe inherited-socket spawning.
+  Production registry wiring remains deferred. (V030-E04-F01-T04)
+
 - Add a candidate Kokoro-family batch runner with verified local model and static voice artifacts, bounded phonemization and PCM16 output, restricted weights-only loading, typed sanitized failures, and CPU lifecycle tests. L4 qualification remains pending. (V030-E01-F02-T02)
 
 - Bundle, manifest and deployment-descriptor readers now accept exactly

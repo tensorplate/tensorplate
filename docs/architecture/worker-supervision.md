@@ -245,3 +245,52 @@ Integration tests under `agent/tests/`:
 
 All supervision tests use `FakeClock` so backoff / crash-loop windows
 fire deterministically with no real sleeps.
+
+## Runtime control client
+
+`agent::control_channel::ControlChannel` takes an owned Unix socket and a
+`MemberRef`. A dedicated standard-library thread polls `LedgerStatus` once per
+second. It shares neither the main-loop transaction path nor the bundle verifier
+or memory collector. `RuntimeCommand` exposes only the six runtime operations;
+the client assigns fresh correlation IDs and validates each request before
+queueing it. Frames are bounded at 65,536 bytes including the newline. Replies
+must validate against protocol 0.1 and match operation, transaction, correlation
+and member generation. Malformed frames, wrong members, EOF and partial writes
+close the transport; contact detection continues after closure.
+
+There are at most 16 queued commands and one active exchange. Queue time counts
+toward a command's one-second budget. A due ledger poll takes precedence: queued
+commands without a remaining execution window receive backpressure or expiry.
+An issued command's deadline is also bounded by the next poll. An expired read
+preserves partial framing; a later reply to that older correlation is drained
+without refreshing contact. Expired operations are never automatically retried,
+so a poll cannot cause a previously applied mutation to be applied again. A
+caller must treat an issued operation's timeout as an unknown outcome.
+
+`ContactMonitor` emits typed `OutOfContact` after three missed polls and
+`MemberFailed` at ten seconds without a valid paired ledger response. A worker
+error answer proves contact but supplies no usable ledger; it sets `last_error`
+to `Rejected`. A reply before failure resets the miss count and can emit `ContactRestored`;
+failure is terminal for that channel. `ChannelSnapshot` is a bounded watch value
+with the current contact state, latest ledger and its receipt time, last error,
+and the latest transition plus its revision. Slow consumers may skip intermediate
+transitions; they must act on the current state and must not use a retained
+ledger as proof of current contact or ignore `last_error` when using it. A newly
+created channel has no ledger yet and does not establish readiness. The client performs no kill, reap, restart or
+durable state write. Those actions belong to the member registry.
+
+`worker::spawn_with_control` consumes a `Command`, creates a close-on-exec
+`UnixStream::pair`, and moves the child end through `Command::stdin`. The standard
+library handles descriptor duplication to fd 0 without an unsafe pre-exec hook.
+Dropping the command immediately after spawn closes the parent's child-end copy;
+the returned agent end remains open until the client is dropped. Dropping the
+client signals and joins its thread, then closes the socket. The worker-side
+startup code must relocate fd 0 to a private close-on-exec slot before launching
+threads or sidecars. Linux tests check that exactly the agent end remains in the
+parent and worker exit produces EOF.
+
+Neither `ProcessWorkerControl` nor `WorkerSupervisor` currently uses this client
+or spawn helper. Production wiring belongs to registry/server integration;
+sibling/sidecar descriptor isolation and dispatcher TSAN remain server-side
+integration checks. The synthetic peer tests exercise the published golden
+frames and a blocked backend without claiming production interoperability.
