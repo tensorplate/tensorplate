@@ -1,4 +1,89 @@
 {
   "schema_version": "0.1",
-  "bundles": []
+  "bundles": [
+    {
+      "name": "stt-whisper-candidate",
+      "description": "Candidate-only validation reference; not a qualified support claim.",
+      "files": [
+        {
+          "path": "manifest.json",
+          "sha256": "bee62a4c9e005c838c08e184aed0301a4e4348d00169b52e7ec82fde8bb8e7e0",
+          "size": 2227,
+          "source_path": "bundles/stt-whisper-candidate/manifest.json"
+        },
+        {
+          "path": "stt-whisper-candidate.json",
+          "sha256": "7c46113f4d6a7623ca708c8e6ad5263358bf1c1354b5679157cfbcf4323a13c0",
+          "size": 921,
+          "source_path": "bundles/stt-whisper-candidate/stt-whisper-candidate.json"
+        },
+        {
+          "path": "model/config.json",
+          "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+          "size": 2263,
+          "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/config.json"
+        },
+        {
+          "path": "model/model.bin",
+          "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+          "size": 1617884929,
+          "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/model.bin"
+        },
+        {
+          "path": "model/preprocessor_config.json",
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+          "size": 340,
+          "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/preprocessor_config.json"
+        },
+        {
+          "path": "model/tokenizer.json",
+          "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+          "size": 2710337,
+          "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/tokenizer.json"
+        },
+        {
+          "path": "model/vocabulary.json",
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+          "size": 1068114,
+          "url": "https://huggingface.co/mobiuslabsgmbh/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/vocabulary.json"
+        }
+      ]
+    },
+    {
+      "name": "tts-kokoro-candidate",
+      "description": "Candidate-only validation reference; not a qualified support claim.",
+      "files": [
+        {
+          "path": "manifest.json",
+          "sha256": "e934738d85fef025796fedba38c88d29b1117d5d61545b4cd8f3b0ca29ee56c4",
+          "size": 1564,
+          "source_path": "bundles/tts-kokoro-candidate/manifest.json"
+        },
+        {
+          "path": "tts-kokoro-candidate.json",
+          "sha256": "a679f3fca2a4c30611d590592e1fe1cc973143fa5b80c44d5923bcb456390820",
+          "size": 833,
+          "source_path": "bundles/tts-kokoro-candidate/tts-kokoro-candidate.json"
+        },
+        {
+          "path": "model/config.json",
+          "sha256": "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+          "size": 2351,
+          "url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/f3ff3571791e39611d31c381e3a41a3af07b4987/config.json"
+        },
+        {
+          "path": "model/kokoro-v1_0.pth",
+          "sha256": "496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4",
+          "size": 327212226,
+          "url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/f3ff3571791e39611d31c381e3a41a3af07b4987/kokoro-v1_0.pth"
+        },
+        {
+          "path": "model/voices/af_heart.pt",
+          "sha256": "0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff",
+          "size": 523425,
+          "url": "https://huggingface.co/hexgrad/Kokoro-82M/resolve/f3ff3571791e39611d31c381e3a41a3af07b4987/voices/af_heart.pt"
+        }
+      ]
+    }
+  ]
 }

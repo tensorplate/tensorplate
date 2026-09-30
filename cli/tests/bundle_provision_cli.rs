@@ -84,7 +84,7 @@ fn a_provisioning_failure_exits_12_with_its_code() {
 }
 
 #[test]
-fn provisioning_is_never_routed_to_a_device_and_needs_a_source() {
+fn provisioning_is_never_routed_to_a_device() {
     let (code, _stdout, stderr) = run(&[
         "--device",
         "orin",
@@ -96,10 +96,6 @@ fn provisioning_is_never_routed_to_a_device_and_needs_a_source() {
     ]);
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(stderr.contains("run it on the device"), "{stderr}");
-
-    let (code, _stdout, stderr) = run(&["bundle", "provision", "smolvla-fixture"]);
-    assert_eq!(code, 2);
-    assert!(stderr.contains("requires `--from <dir>`"), "{stderr}");
 
     let (code, _stdout, stderr) = run(&["bundle", "fetch"]);
     assert_eq!(code, 2);
@@ -113,10 +109,10 @@ fn provisioning_is_never_routed_to_a_device_and_needs_a_source() {
 fn a_usage_error_is_reported_as_the_bundle_command() {
     // Even when an argument is another command's name.
     for args in [
-        ["--output", "json", "bundle", "provision", "smolvla-fixture"],
-        ["--output", "json", "bundle", "provision", "deploy"],
+        &["--output", "json", "bundle", "provision", "--invalid"][..],
+        &["--output", "json", "bundle", "provision", "deploy", "extra"][..],
     ] {
-        let (code, _stdout, stderr) = run(&args);
+        let (code, _stdout, stderr) = run(args);
         assert_eq!(code, 2, "stderr: {stderr}");
         let envelope: Value = serde_json::from_str(&stderr).expect("one JSON error envelope");
         assert_eq!(envelope["command"], "bundle", "{args:?}: {stderr}");

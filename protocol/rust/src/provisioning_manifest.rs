@@ -53,6 +53,20 @@ pub struct ProvisionedFile {
     pub sha256: String,
     /// Size in bytes.
     pub size: u64,
+    /// Digest-pinned fetch location; absent for local-only manifests.
+    #[serde(
+        default,
+        deserialize_with = "non_null_source",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub url: Option<String>,
+    /// File relative to the provisioning manifest, for packaged entries.
+    #[serde(
+        default,
+        deserialize_with = "non_null_source",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_path: Option<String>,
 }
 
 /// Why a manifest cannot be used.
@@ -120,6 +134,19 @@ impl ProvisioningManifest {
                         "bundle `{name}`: `{path}` needs a lowercase hex SHA-256"
                     ));
                 }
+                if file.url.is_some() && file.source_path.is_some() {
+                    return invalid(format!("bundle `{name}`: `{path}` has two fetch sources"));
+                }
+                if file.url.as_deref().is_some_and(|url| !is_fetch_url(url)) {
+                    return invalid(format!("bundle `{name}`: `{path}` needs an HTTPS URL without credentials or fragment (HTTP is loopback only)"));
+                }
+                if file
+                    .source_path
+                    .as_deref()
+                    .is_some_and(|path| !is_bundle_path(path))
+                {
+                    return invalid(format!("bundle `{name}`: `{path}` source_path is not a relative `/`-separated path"));
+                }
                 if !paths.insert(path.as_str()) {
                     return invalid(format!("bundle `{name}` lists `{path}` more than once"));
                 }
@@ -175,4 +202,37 @@ fn is_sha256_hex(digest: &str) -> bool {
         && digest
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn is_fetch_url(url: &str) -> bool {
+    if url.chars().count() > 2048 || url.chars().any(|c| c.is_whitespace() || c == '#') {
+        return false;
+    }
+    let (https, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return false;
+    };
+    let Some((authority, _)) = rest.split_once('/') else {
+        return false;
+    };
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(h, p)| (h, Some(p)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        && port.map_or(true, |p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())
+        })
+        && (https || matches!(host, "127.0.0.1" | "localhost"))
+}
+
+fn non_null_source<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
 }

@@ -1,27 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// `tensorplate bundle provision <name> --from <dir>`: put a bundle the
-// provisioning manifest lists into the bundle import directory, verified
-// file by file, so `tensorplate deploy` can take it from there.
-//
-// The provisioning manifest is the trust root: it lists every file of the
-// bundle -- its `manifest.json` included -- with the SHA-256 and size each
-// must have. Files are copied into a partial root beside the destination,
-// hashed as they are copied, never through a symbolic link below `--from`,
-// and given modes that do not depend on the operator's umask. The partial
-// root must then pass the bundle parser `tensorplate deploy` runs first,
-// and only then is it renamed into place. Any failure removes the partial
-// root, so a failed run never creates a directory a deploy could pick up.
-// A destination that already exists is verified in place and left as it
-// was found, whatever the outcome.
-//
-// The partial root is created exclusively, so two runs for one bundle
-// never share one: the second is refused, as is a run that finds one left
-// by an interrupted run.
-//
-// This runs in the operator's shell, never under the agent's service unit,
-// and reads only a local directory. Fetching from the files' upstream
-// sources is separate work.
+// The operator's manifest pins every byte; deploy still performs admission.
+
+mod fetch;
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -87,6 +68,12 @@ pub enum ProvisionError {
     BundleRejected { reason: String },
     #[error("{path} already exists and is not this bundle, so it is left as found: {reason}")]
     DestinationMismatch { path: PathBuf, reason: String },
+    #[error(
+        "fetching `{path}` failed ({reason}); verified files and partial bytes are kept for retry"
+    )]
+    Fetch { path: String, reason: String },
+    #[error("`{path}` has no fetch source; pass --from or list url/source_path")]
+    FetchSourceMissing { path: String },
     #[error("{what}: {detail}")]
     Io { what: String, detail: String },
 }
@@ -109,6 +96,8 @@ impl ProvisionError {
             Self::BundleRejected { .. } => "bundle_rejected",
             Self::DestinationMismatch { .. } => "destination_mismatch",
             Self::Io { .. } => "io",
+            Self::Fetch { .. } => "fetch_failed",
+            Self::FetchSourceMissing { .. } => "fetch_source_missing",
         }
     }
 
@@ -216,7 +205,7 @@ pub fn run<O: Write>(renderer: &Renderer, command: BundleCommand, stdout: &mut O
     }
 }
 
-/// Provision `args.name` from `args.from`.
+/// Provision `args.name` from a local directory or its pinned fetch sources.
 ///
 /// # Errors
 ///
@@ -304,8 +293,18 @@ pub fn provision(args: &ProvisionArgs) -> Result<ProvisionReport, ProvisionError
             ))
         }
     }
+    let mut cache = None;
     let outcome = set_mode(&partial, DIR_MODE)
-        .and_then(|()| fill(&args.from, &partial, bundle))
+        .and_then(|()| {
+            if args.from.as_os_str().is_empty() {
+                let fetched = fetch::Cache::prepare(&into, &manifest_path, bundle)?;
+                let result = fill_fetched(&fetched, &partial, bundle);
+                cache = Some(fetched);
+                result
+            } else {
+                fill(&args.from, &partial, bundle)
+            }
+        })
         .and_then(|()| {
             fs::rename(&partial, &destination).map_err(|err| {
                 ProvisionError::io(
@@ -315,9 +314,22 @@ pub fn provision(args: &ProvisionArgs) -> Result<ProvisionReport, ProvisionError
                     ),
                     &err,
                 )
-            })
+            })?;
+            // Publication succeeded; cleanup cannot turn it into a failed run.
+            if let Some(cache) = &cache {
+                let _ = cache.clear();
+            }
+            Ok(())
         });
     if let Err(err) = outcome {
+        if matches!(
+            err,
+            ProvisionError::SizeMismatch { .. } | ProvisionError::DigestMismatch { .. }
+        ) {
+            if let Some(cache) = &cache {
+                let _ = cache.clear();
+            }
+        }
         // Best effort: the error being reported is the one that matters.
         // The partial root is this run's own directory; std's
         // remove_dir_all does not follow links inside it.
@@ -343,6 +355,22 @@ pub fn provision(args: &ProvisionArgs) -> Result<ProvisionReport, ProvisionError
 fn fill(from: &Path, partial: &Path, bundle: &ProvisionedBundle) -> Result<(), ProvisionError> {
     for file in &bundle.files {
         copy_verified(from, partial, file)?;
+    }
+    parse_bundle(partial)
+        .map(|_| ())
+        .map_err(|err| ProvisionError::BundleRejected {
+            reason: err.to_string(),
+        })
+}
+
+fn fill_fetched(
+    cache: &fetch::Cache,
+    partial: &Path,
+    bundle: &ProvisionedBundle,
+) -> Result<(), ProvisionError> {
+    for file in &bundle.files {
+        let source = cache.open(file)?;
+        copy_opened(source, partial, file, partial)?;
     }
     parse_bundle(partial)
         .map(|_| ())
@@ -531,7 +559,16 @@ fn copy_verified(
     partial: &Path,
     file: &ProvisionedFile,
 ) -> Result<(), ProvisionError> {
-    let mut source = open_listed(from, file)?;
+    let source = open_listed(from, file)?;
+    copy_opened(source, partial, file, from)
+}
+
+fn copy_opened(
+    mut source: fs::File,
+    partial: &Path,
+    file: &ProvisionedFile,
+    from: &Path,
+) -> Result<(), ProvisionError> {
     let mut target_path = partial.to_path_buf();
     let mut segments = file.path.split('/').peekable();
     while let Some(segment) = segments.next() {
@@ -623,6 +660,8 @@ mod tests {
             path: path.to_string(),
             sha256: "0".repeat(64),
             size,
+            url: None,
+            source_path: None,
         }
     }
 

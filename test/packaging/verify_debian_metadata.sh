@@ -80,6 +80,22 @@ if ! grep -Eq '^packaging/provisioning/manifest\.json[[:space:]]+usr/share/tenso
   echo "FAIL: tensorplate-cli must ship the provisioning manifest at /usr/share/tensorplate/provisioning/manifest.json" >&2
   fail=1
 fi
+for payload in bundles README.md; do
+  if ! awk -v payload="packaging/provisioning/${payload}" '
+    $1 == payload && $2 == "usr/share/tensorplate/provisioning/" { found = 1 }
+    END { exit !found }
+  ' "${debian}/tensorplate-cli.install"; then
+    echo "FAIL: tensorplate-cli must ship provisioning ${payload}" >&2
+    fail=1
+  fi
+done
+cli_stanza="$(sed -n '/^Package: tensorplate-cli$/,/^Package: tensorplate-backend-python-pytorch$/p' "${debian}/control")"
+for dependency in curl ca-certificates; do
+  if ! printf '%s\n' "$cli_stanza" | grep -Eq "^ ${dependency},$"; then
+    echo "FAIL: tensorplate-cli needs ${dependency} for verified HTTPS fetch" >&2
+    fail=1
+  fi
+done
 if ! grep -q 'rmdir /var/lib/tensorplate /etc/tensorplate' "${debian}/tensorplate-agent.postrm"; then
   echo "FAIL: tensorplate-agent.postrm purge must remove empty install roots" >&2
   fail=1

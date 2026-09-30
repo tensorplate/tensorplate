@@ -532,7 +532,7 @@ fn manifest_and_import_directory_problems_are_named() {
     );
     match provision(&shipped) {
         Err(ProvisionError::UnknownBundle { available, .. }) => {
-            assert!(available.contains("lists no bundles yet"), "{available}");
+            assert!(available.contains("stt-whisper-candidate"), "{available}");
         }
         other => panic!("expected UnknownBundle, got {other:?}"),
     }

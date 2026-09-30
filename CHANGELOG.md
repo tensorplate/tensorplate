@@ -8,6 +8,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Pinned Whisper CT2 and Kokoro/af_heart reference provisioning manifests, with resumable digest-verified retrieval and repeat-run verification that writes nothing. (V030-E01-F01-T05)
+
 - Add an agent worker control client with bounded framing, independent ledger
   polling, typed contact-loss escalation and safe inherited-socket spawning.
   Production registry wiring remains deferred. (V030-E04-F01-T04)

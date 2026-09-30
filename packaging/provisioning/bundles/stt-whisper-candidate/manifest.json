@@ -1,0 +1,65 @@
+{
+  "schema_version": "0.1",
+  "name": "stt-whisper-candidate",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp16",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "stt-whisper-candidate.json",
+      "digest": "sha256:7c46113f4d6a7623ca708c8e6ad5263358bf1c1354b5679157cfbcf4323a13c0",
+      "byte_size": 921,
+      "description": "Candidate-only runner entry: selects the faster_whisper profile, declares the model directory, device, compute type, languages and input rate it loads, and lists its artifact set by relative path and digest."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/config.json",
+      "digest": "sha256:b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+      "byte_size": 2263,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "weights",
+      "kind": "weights",
+      "path": "model/model.bin",
+      "digest": "sha256:e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+      "byte_size": 1617884929,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/preprocessor_config.json",
+      "digest": "sha256:7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+      "byte_size": 340,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "tokenizer",
+      "kind": "tokenizer",
+      "path": "model/tokenizer.json",
+      "digest": "sha256:297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+      "byte_size": 2710337,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "tokenizer",
+      "kind": "tokenizer",
+      "path": "model/vocabulary.json",
+      "digest": "sha256:c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+      "byte_size": 1068114,
+      "description": "Pinned upstream reference artifact."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.3.0"
+  }
+}
