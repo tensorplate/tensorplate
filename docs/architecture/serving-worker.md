@@ -230,6 +230,32 @@ ascending `LogicalSessionEffect` order, before applying the next. The
 serving worker does not create logical sessions yet; this is the
 lifecycle the streaming serving modes build on.
 
+`SessionManager` owns those machines and their count reservations. It
+opens only for the worker's generation, admits at most the configured
+count (2,048 by default), and offers an admission check for a separate
+memory quota. An optional bounded initialization step runs after slot
+reservation and before `emit_ready`; failure emits one terminal error
+and holds the slot for physical cleanup. Its sink applies each machine's
+effects in order; the manager serializes event application and sink
+calls across client and timer threads. A slot remains held after cancel,
+failure or drain until `release_acknowledged` produces `release_slot`.
+`stop_admission_and_drain` closes admission, starts each live session's
+drain, and waits for `drain_completed` followed by physical release
+before closure. The manager does not reload a backend or schedule a
+physical job.
+
+`SessionLimits` defaults to 60 seconds idle, a 10-second client heartbeat
+cadence, 30 seconds liveness, and a 60-minute absolute duration. Data
+and client control refresh idle activity; only `ping` refreshes heartbeat
+liveness. Draining suspends idle and heartbeat expiry so accepted work
+can finish after the client write-half-closes; the absolute duration
+still applies. A dedicated timer thread finds due sessions using the
+injected monotonic `SchedulerClock`, independent of the serving
+worker's existing request evictor. Unit tests advance
+`FakeSchedulerClock` without sleeping. The current HTTP composition
+root does not instantiate `SessionManager`; the streaming transport
+binding will supply its effect sink and session status budgets.
+
 States: `opening`, `active`, `finalizing`, `draining`,
 `cancel_requested`, and the terminal `closed` and `failed`. Events come
 from the client (`open`, `data`, `finalize`, `cancel`, `half_close`,

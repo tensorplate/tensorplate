@@ -46,6 +46,9 @@ add_executable(tp_test_unit
   serving_async_store_test.cpp
   serving_error_status_test.cpp
   session_state_machine_test.cpp
+  session_limits_test.cpp
+  session_timers_test.cpp
+  session_manager_test.cpp
 )
 
 target_include_directories(tp_test_unit

@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <optional>
@@ -34,6 +35,55 @@
 #include "tensorplate/core/result.hpp"
 
 namespace tensorplate::serving {
+
+/// Limits shared by logical sessions of one serving worker. The count cap
+/// controls admission; backend job width and memory quotas are separate.
+class SessionLimits {
+ public:
+  /// Protocol defaults: 60 s idle, 10 s heartbeat, 30 s liveness,
+  /// 60 min duration and at most 2,048 logical sessions.
+  [[nodiscard]] static SessionLimits defaults() noexcept;
+
+  /// All durations must be positive, heartbeat must precede liveness, and
+  /// duration and idle/liveness bounds cannot exceed 60 min, and
+  /// max_sessions must be in [1, 2048]. Invalid settings return ConfigInvalid.
+  [[nodiscard]] static Result<SessionLimits> create(std::chrono::milliseconds idle_timeout,
+                                                    std::chrono::milliseconds heartbeat_interval,
+                                                    std::chrono::milliseconds liveness_timeout,
+                                                    std::chrono::milliseconds max_duration,
+                                                    std::uint32_t max_sessions);
+
+  [[nodiscard]] std::chrono::milliseconds idle_timeout() const noexcept { return idle_timeout_; }
+  [[nodiscard]] std::chrono::milliseconds heartbeat_interval() const noexcept {
+    return heartbeat_interval_;
+  }
+  [[nodiscard]] std::chrono::milliseconds liveness_timeout() const noexcept {
+    return liveness_timeout_;
+  }
+  [[nodiscard]] std::chrono::milliseconds max_duration() const noexcept { return max_duration_; }
+  [[nodiscard]] std::uint32_t max_sessions() const noexcept { return max_sessions_; }
+
+  friend constexpr bool operator==(const SessionLimits& lhs,
+                                   const SessionLimits& rhs) noexcept = default;
+
+ private:
+  constexpr SessionLimits(std::chrono::milliseconds idle_timeout,
+                          std::chrono::milliseconds heartbeat_interval,
+                          std::chrono::milliseconds liveness_timeout,
+                          std::chrono::milliseconds max_duration,
+                          std::uint32_t max_sessions) noexcept
+      : idle_timeout_(idle_timeout),
+        heartbeat_interval_(heartbeat_interval),
+        liveness_timeout_(liveness_timeout),
+        max_duration_(max_duration),
+        max_sessions_(max_sessions) {}
+
+  std::chrono::milliseconds idle_timeout_;
+  std::chrono::milliseconds heartbeat_interval_;
+  std::chrono::milliseconds liveness_timeout_;
+  std::chrono::milliseconds max_duration_;
+  std::uint32_t max_sessions_;
+};
 
 /// Lifecycle state of a logical session. Stable snake_case names (in
 /// parentheses) come from `to_string(LogicalSessionState)`.
