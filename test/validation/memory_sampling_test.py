@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix="tp-memory-test-") as tmp:
     stub.chmod(0o700)
     env = dict(os.environ, PATH=str(work) + os.pathsep + os.environ["PATH"])
 
-    def invoke(path, extra=(), mode="xml"):
+    def invoke(path, extra=(), mode="xml", phase="warm-idle"):
         return subprocess.run(
             [
                 str(ROOT / "tools/validation/memory-sample.sh"),
@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="tp-memory-test-") as tmp:
                 "--out",
                 str(path),
                 "--phase",
-                "warm-idle",
+                phase,
                 "--domain",
                 "device_vram",
                 "--process",
@@ -63,13 +63,18 @@ with tempfile.TemporaryDirectory(prefix="tp-memory-test-") as tmp:
             check=False,
         )
 
-    for mode in ("xml", "csv", "unavailable"):
+    for mode, phase in [
+        ("xml", "warm-idle"),
+        ("xml", "load"),
+        ("csv", "warm-idle"),
+        ("unavailable", "load"),
+    ]:
         log.write_text("")
-        path = work / f"{mode}.jsonl"
-        result = invoke(path, mode=mode)
+        path = work / f"{mode}-{phase}.jsonl"
+        result = invoke(path, mode=mode, phase=phase)
         assert result.returncode == (3 if mode == "unavailable" else 0), result.stderr
         summary = json.loads(result.stdout)
-        assert summary["phase"] == "warm-idle"
+        assert summary["phase"] == phase
         assert summary["interval_ms"] == 500 and summary["duration_ms"] == 1000
         report = summary["report"]
         assert report["complete"] == (mode != "unavailable")

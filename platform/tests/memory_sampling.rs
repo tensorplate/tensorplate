@@ -425,3 +425,36 @@ fn a_full_count_of_late_samples_is_still_incomplete() {
     assert_eq!(report.late_ticks, 3);
     assert!(!report.complete);
 }
+
+#[test]
+fn the_last_partial_interval_must_finish_before_the_window_ends() {
+    for (duration_ms, expected_ticks) in [(500, 1), (3500, 4)] {
+        let time = Rc::new(Cell::new(Duration::ZERO));
+        let mut collector = MemoryCollector::new(Sequence {
+            xml: vec![Some(XML.into()); expected_ticks].into(),
+            clock: time.clone(),
+            delay: Duration::from_millis(750),
+        });
+        let plan = SamplePlan::new(
+            Duration::from_secs(1),
+            Duration::from_millis(duration_ms),
+            vec![BudgetDomainName::DeviceVram],
+            vec![],
+        )
+        .unwrap();
+        let report = run_samples(
+            &plan,
+            &mut Clock(time.clone()),
+            &mut collector,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.completed_ticks,
+            u64::try_from(expected_ticks).unwrap()
+        );
+        assert_eq!(report.late_ticks, 1);
+        assert!(!report.complete);
+        assert!(time.get() > Duration::from_millis(duration_ms));
+    }
+}

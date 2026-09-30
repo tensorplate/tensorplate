@@ -61,7 +61,8 @@ at most 24 hours, with at most 100,000 scheduled ticks and 64 attributed PIDs.
 Sampling starts at zero, on a fixed monotonic schedule, with one observation per
 selected domain per batch. Overdue ticks are skipped, not replayed. Blocking
 source calls can overrun the interval or duration; a late batch or skipped tick
-makes coverage incomplete. A hung command needs operator interruption. This
+makes coverage incomplete. A batch must finish before its next scheduled tick
+or the window end, whichever comes first. A hung command needs operator interruption. This
 operator tool supplies no hard invocation deadline or pressure directives.
 
 Device sampling first runs one full `nvidia-smi -q -x`; missing/unusable required

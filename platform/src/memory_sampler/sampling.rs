@@ -345,7 +345,7 @@ pub fn run_samples<P: MemoryIo, C: SampleClock, W: Write>(
             .elapsed()
             .checked_sub(start)
             .ok_or(SamplingError::Invalid("clock moved backwards"))?;
-        if after.saturating_sub(elapsed) >= plan.interval {
+        if after >= (next + plan.interval).min(plan.duration) {
             late += 1;
         }
         next += plan.interval;
