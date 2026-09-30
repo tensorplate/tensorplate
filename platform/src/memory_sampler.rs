@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure parsers for independent command/proc captures. Collection policy belongs to callers.
+//! Parsers for independent command/proc captures and operator sampling.
+
+pub mod sampling;
 
 use std::collections::{HashMap, HashSet};
 
