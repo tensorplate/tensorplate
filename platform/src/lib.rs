@@ -35,6 +35,7 @@ pub mod identity;
 pub mod instance_binding;
 pub mod machine_type_record;
 pub mod matrix;
+pub mod memory_sampler;
 pub mod memory_telemetry;
 pub mod probe;
 pub mod probe_failure;

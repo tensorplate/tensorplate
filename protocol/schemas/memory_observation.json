@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/memory_observation.json",
+  "title": "Memory observation",
+  "description": "One domain sample. Allocator allocated/reserved bytes are distinct from process RSS/GPU usage and the domain aggregate. Unavailable readings never mean zero. The monotonic timestamp is relative to the sampling session, not a wall-clock or a peak.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "domain",
+    "source",
+    "availability",
+    "allocated",
+    "reserved",
+    "process_aggregate",
+    "device_aggregate",
+    "sampled_monotonic_ns"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "domain": {
+      "type": "string",
+      "enum": [
+        "shared_pool",
+        "guest_ram",
+        "device_vram"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "proc",
+        "nvidia_smi_xml",
+        "nvidia_smi_csv"
+      ]
+    },
+    "availability": {
+      "type": "string",
+      "enum": [
+        "available",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "allocated": {
+      "$ref": "#/definitions/ByteObservation"
+    },
+    "reserved": {
+      "$ref": "#/definitions/ByteObservation"
+    },
+    "process_aggregate": {
+      "$ref": "#/definitions/ProcessAggregate"
+    },
+    "device_aggregate": {
+      "$ref": "#/definitions/DomainMemory"
+    },
+    "sampled_monotonic_ns": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  },
+  "definitions": {
+    "ByteObservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "bytes"
+          ],
+          "properties": {
+            "availability": {
+              "type": "string",
+              "const": "available"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "reason"
+          ],
+          "properties": {
+            "availability": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "source_unavailable",
+                "missing_field",
+                "unsupported"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ProcessMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pid",
+        "role",
+        "bytes"
+      ],
+      "properties": {
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "serving_worker",
+            "python_sidecar",
+            "external"
+          ]
+        },
+        "bytes": {
+          "$ref": "#/definitions/ByteObservation"
+        }
+      }
+    },
+    "ProcessAggregate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "processes"
+          ],
+          "properties": {
+            "availability": {
+              "type": "string",
+              "const": "available"
+            },
+            "processes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/ProcessMemory"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "availability",
+            "reason"
+          ],
+          "properties": {
+            "availability": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "source_unavailable",
+                "missing_field",
+                "unsupported"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "DomainMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capacity",
+        "available",
+        "used",
+        "driver_reserved"
+      ],
+      "properties": {
+        "capacity": {
+          "$ref": "#/definitions/ByteObservation"
+        },
+        "available": {
+          "$ref": "#/definitions/ByteObservation"
+        },
+        "used": {
+          "$ref": "#/definitions/ByteObservation"
+        },
+        "driver_reserved": {
+          "$ref": "#/definitions/ByteObservation"
+        }
+      }
+    }
+  }
+}

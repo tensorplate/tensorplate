@@ -51,6 +51,7 @@ pub mod json_numbers;
 pub mod log_event;
 pub mod member_quota;
 pub mod memory_budget;
+pub mod memory_observation;
 pub mod metric_event;
 pub mod model_spec;
 pub mod platform_memory_profile;
@@ -136,6 +137,10 @@ pub use member_quota::{DomainQuotaBytes, MemberQuota, MemberQuotaError, MAX_MEMB
 pub use memory_budget::{
     MemoryBudgetBreakdown, MemoryBudgetDeclaration, MemoryBudgetError,
     MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES, MEMORY_BUDGET_SCHEMA_VERSION,
+};
+pub use memory_observation::{
+    ByteObservation, DomainMemory, MemoryObservation, MemorySource, ObservationAvailability,
+    ProcessAggregate, ProcessMemory, ProcessRole, UnavailableReason,
 };
 pub use metric_event::{
     MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,

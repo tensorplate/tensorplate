@@ -20,6 +20,7 @@ See also:
 | Cross-component control payloads (desired_state, worker_status, health_event, deploy_transaction) | JSON Schema Draft 7 | Crosses Rust/C++ language boundaries; JSON keeps the schema human-readable; the volume is low (status / event ticks, not request hot-path). |
 | HTTP `/infer` payload | JSON Schema Draft 7 (header) + raw bytes | The header documented in `infer_request.json` / `infer_result.json` rides as JSON; tensor payloads ride as raw bytes per `BufferRef` / `TensorView` metadata. v0.1.0 does not negotiate an alternative encoding; V01-E07 lands the HTTP server. |
 | Python/PyTorch sidecar IPC | JSON header + raw payload bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: a 16-byte big-endian prefix (magic, wire version, header length, payload length), the JSON header, then the payload bytes: tensors, or a job's PCM or text input or its synthesized audio. JSON-encoding tensors was an explicit non-goal. |
+| Agent-to-worker runtime control | Newline-delimited compact JSON | `worker_control.json` defines six runtime operations. The Rust and C++ codecs use the same byte-exact golden frames under `protocol/rust/tests/fixtures/worker_control_*.jsonl`. Each request and response names the member, transaction and correlation id. Frames are limited to 65,536 bytes including the newline. |
 
 We deliberately do **not** introduce protobuf in v0.1.0. The v0.1.0 hot
 path runs in-process within `tensorplate-serving`; cross-process
@@ -36,9 +37,9 @@ Every payload carries a `schema_version` string of the form
 v0.1.0 is `"0.1"`.
 
 Decoders **must** call
-`tensorplate_protocol::decode_with_version_check` (Rust) — or its
-forthcoming C++ equivalent — instead of `serde_json::from_str` /
-`nlohmann::json::parse` directly. The helper rejects unknown
+`tensorplate_protocol::decode_with_version_check` (Rust) — or a
+version-checking C++ codec such as the worker-control codec — instead of
+`serde_json::from_str` / `nlohmann::json::parse` directly. The helper rejects unknown
 versions with a typed error so that the runtime maps them to
 `Error::Code::Unsupported` and surfaces a stable error code to the
 operator. Bypassing the helper loses the guarantee.
@@ -250,3 +251,11 @@ the same semantic rules used by the C++ value-object factories.
    that replays them in each language.
 6. Update `protocol/schemas/README.md` and this document if the
    policy changes.
+
+## Memory observations
+
+`memory_observation.json` and its Rust mirror add a sample record inside
+protocol 0.1 without changing existing envelopes or version constants. It is
+currently consumed only by the platform crate and its tests; no C++ worker,
+Python sidecar or SDK receives the record. Its field and availability rules
+are in [memory observations](memory-observation.md).
