@@ -44,6 +44,7 @@ set(_tp_runtime_sources
   # codec and socket helpers can be unit-tested in T1 even when no
   # adapter consumes them yet.
   src/ipc/sidecar_codec.cpp
+  src/ipc/worker_control.cpp
   src/ipc/unix_socket.cpp
   # V01-E06: scheduler baseline. Interface, FIFO implementation,
   # factory, and shared string helpers.
