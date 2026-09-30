@@ -132,6 +132,14 @@ references registered beside it.
    `test/integration/`.
 5. Update `protocol/rust/src/lib.rs` to re-export the new module.
 
+## Memory observations
+
+`memory_observation.json` describes platform memory samples consumed by Rust
+management-plane tooling. It is not a worker/sidecar IPC message. The Rust
+mirror validates field availability and source/domain consistency; C++ and
+Python do not read it. See [observation semantics](../../docs/architecture/memory-observation.md)
+for quantities, provenance and parser limits.
+
 ## Schemas in this directory
 
 | File                       | Owner Feature   |
@@ -151,6 +159,7 @@ references registered beside it.
 | `agent_control.json`       | V01-E08-F01     |
 | `agent_state.json`         | V01-E08-F02     |
 | `worker_control.json`      | V01-E08-F05     |
+| `memory_observation.json`  | Memory observations |
 | `serving_http_envelope.json` | V01-E07       |
 | `serving_health.json`      | V01-E07         |
 | `serving_metrics.json`     | V01-E07         |

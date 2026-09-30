@@ -150,6 +150,12 @@ pub struct AgentConfig {
     pub available_backends: Vec<String>,
     #[serde(default)]
     pub backend_capabilities: BTreeMap<String, BackendCapability>,
+    #[serde(
+        default,
+        deserialize_with = "tensorplate_protocol::serde_shape::deserialize_some_map_only",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_admission: Option<crate::memory_admission::MemoryAdmissionConfig>,
     #[serde(default)]
     pub device_memory_bytes: Option<u64>,
     #[serde(default)]
@@ -246,6 +252,9 @@ impl AgentConfig {
     /// caller must not mutate durable state before this returns Ok.
     pub fn validate(mut self) -> AgentResult<Self> {
         self.check_enumerated_values()?;
+        if let Some(memory) = &self.memory_admission {
+            memory.validate()?;
+        }
         if let Some(posture) = self.admission_posture.as_deref() {
             posture
                 .parse::<tensorplate_platform::AdmissionPosture>()
@@ -429,6 +438,7 @@ mod tests {
             staging_dir: PathBuf::from("/var/lib/tensorplate/staging"),
             available_backends: vec!["mock".into()],
             backend_capabilities: Default::default(),
+            memory_admission: None,
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
             admission_posture: None,

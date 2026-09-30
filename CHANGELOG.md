@@ -8,6 +8,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Add explicit agent memory domain caps and reserves plus fixture-backed XML,
+  CSV and Linux proc memory observations with per-field availability. Idle
+  recordings remain parser evidence, not model peaks or reserve measurements.
+  (V030-E03-F01-T01, V030-E03-F02-T04)
+
 - Add a candidate Kokoro-family batch runner with verified local model and static voice artifacts, bounded phonemization and PCM16 output, restricted weights-only loading, typed sanitized failures, and CPU lifecycle tests. L4 qualification remains pending. (V030-E01-F02-T02)
 
 - Bundle, manifest and deployment-descriptor readers now accept exactly

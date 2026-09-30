@@ -210,6 +210,25 @@ that reads only `active` and falls back to the default without a
 `serving_url`, as every CLI and SDK before this change does, misroutes on a
 stream-only or off-loopback set of one.
 
+## Memory admission configuration
+
+The optional `memory_admission` block in `config/schemas/agent.json` joins a
+`row_id` to a `memory_profile_instance_id` and requires both `guest_ram` and
+`device_vram` entries under `domains`. Each entry supplies `reserve_bytes`
+explicitly and may supply `cap_bytes`. Byte counts are nonnegative exact JSON
+integers up to 2^53−1; a configured cap is positive. Configuration validation
+rejects a reserve above an explicit cap. `MemoryDomainConfig::resolve_cap`
+requires a positive measured capacity, uses it when the cap is omitted, and
+rejects a cap above measurement or a reserve above the resolved cap.
+
+This is a configuration shape for subsequent live admission integration;
+startup does not yet call `resolve_cap`, verify the row/profile join, start
+sampling or change singleton admission. Packaged configurations omit the
+block because their reserves require measurements under load. An older agent
+rejects the new block as an unknown field. No nominal figure supplies an
+absent measurement. The platform parsers and observation semantics are
+specified in [memory observations](memory-observation.md).
+
 ## Durable state store (V01-E08-F02)
 
 The store persists exactly two files in the agent's state directory:

@@ -137,6 +137,7 @@ fn runtime_keys() -> BTreeSet<String> {
         "available_backends": ["mock"],
         "device_memory_bytes": 8_589_934_592_u64,
         "admission_posture": "validated_row_required",
+        "memory_admission": memory_config()["memory_admission"],
         "runtime_version": "0.2.1",
         "supervision": {
             "binary_path": "/usr/lib/tensorplate/tensorplate-serving",
@@ -473,4 +474,123 @@ fn a_mistyped_field_is_refused_rather_than_silently_defaulted() {
         compiled_schema().validate(&document).is_err(),
         "the schema must reject it too"
     );
+}
+
+fn memory_config() -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(&config_json(None)).expect("config");
+    value["memory_admission"] = serde_json::json!({
+        "row_id": "ubuntu2404-x86-l4-g2s8",
+        "memory_profile_instance_id": "gcp-nvidia-l4-24gb",
+        "domains": {"guest_ram": {"reserve_bytes": 1024}, "device_vram": {"reserve_bytes": 2048}}
+    });
+    value
+}
+
+#[test]
+fn memory_configuration_resolves_caps_from_measurement_without_defaults_for_reserves() {
+    use tensorplate_protocol::BudgetDomainName;
+    let value = memory_config();
+    assert!(compiled_schema().is_valid(&value));
+    let config = AgentConfig::parse_json(&value.to_string()).expect("config");
+    let memory = config.memory_admission.expect("memory admission");
+    assert_eq!(memory.row_id, "ubuntu2404-x86-l4-g2s8");
+    assert_eq!(memory.memory_profile_instance_id, "gcp-nvidia-l4-24gb");
+    let mut domain = memory.domains[&BudgetDomainName::GuestRam].clone();
+    assert_eq!(domain.cap_bytes, None);
+    assert_eq!(domain.reserve_bytes, 1024);
+    assert_eq!(domain.resolve_cap(Some(4096)).expect("measured cap"), 4096);
+    assert!(domain.resolve_cap(None).is_err());
+    assert!(domain.resolve_cap(Some(0)).is_err());
+    assert!(domain.resolve_cap(Some(512)).is_err());
+    domain.cap_bytes = Some(2048);
+    assert_eq!(
+        domain.resolve_cap(Some(4096)).expect("configured cap"),
+        2048
+    );
+    assert!(domain.resolve_cap(Some(1024)).is_err());
+    let absent = AgentConfig::parse_json(&config_json(None)).expect("legacy config");
+    assert_eq!(absent.memory_admission, None);
+    assert!(serde_json::to_value(&absent)
+        .expect("serialize")
+        .get("memory_admission")
+        .is_none());
+}
+
+#[test]
+fn memory_schema_and_reader_refuse_missing_null_unknown_and_invalid_values() {
+    use serde_json::{json, Value};
+    let validator = compiled_schema();
+    for (pointer, replacement) in [
+        ("/memory_admission", Value::Null),
+        ("/memory_admission", json!([])),
+        ("/memory_admission/row_id", json!("Bad row")),
+        (
+            "/memory_admission/memory_profile_instance_id",
+            json!("bad_id"),
+        ),
+        ("/memory_admission/domains", json!({})),
+        ("/memory_admission/domains", json!([])),
+        ("/memory_admission/domains/guest_ram", json!({})),
+        ("/memory_admission/domains/guest_ram", json!([null, 1024])),
+        (
+            "/memory_admission/domains/guest_ram",
+            json!({"reserve_bytes":0,"cap_bytes":null}),
+        ),
+        (
+            "/memory_admission/domains/guest_ram",
+            json!({"reserve_bytes":0,"cap_bytes":0}),
+        ),
+        (
+            "/memory_admission/domains/guest_ram/reserve_bytes",
+            json!(null),
+        ),
+        (
+            "/memory_admission/domains/guest_ram/reserve_bytes",
+            json!(-1),
+        ),
+        (
+            "/memory_admission/domains/guest_ram/reserve_bytes",
+            json!(1.5),
+        ),
+        (
+            "/memory_admission/domains/guest_ram/reserve_bytes",
+            json!(9_007_199_254_740_992_u64),
+        ),
+    ] {
+        let mut value = memory_config();
+        *value.pointer_mut(pointer).expect("field") = replacement;
+        assert!(!validator.is_valid(&value), "schema {pointer}");
+        assert!(
+            AgentConfig::parse_json(&value.to_string()).is_err(),
+            "reader {pointer}"
+        );
+    }
+    for pointer in [
+        "/memory_admission",
+        "/memory_admission/domains",
+        "/memory_admission/domains/device_vram",
+    ] {
+        let mut value = memory_config();
+        value
+            .pointer_mut(pointer)
+            .expect("object")
+            .as_object_mut()
+            .expect("object")
+            .insert("unknown".into(), json!(1));
+        assert!(!validator.is_valid(&value));
+        assert!(AgentConfig::parse_json(&value.to_string()).is_err());
+    }
+    for field in ["row_id", "memory_profile_instance_id", "domains"] {
+        let mut value = memory_config();
+        value["memory_admission"]
+            .as_object_mut()
+            .expect("object")
+            .remove(field);
+        assert!(!validator.is_valid(&value));
+        assert!(AgentConfig::parse_json(&value.to_string()).is_err());
+    }
+    let mut over_cap = memory_config();
+    over_cap["memory_admission"]["domains"]["device_vram"]["cap_bytes"] = json!(1);
+    assert!(validator.is_valid(&over_cap));
+    assert!(AgentConfig::parse_json(&over_cap.to_string()).is_err());
 }

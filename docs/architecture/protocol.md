@@ -250,3 +250,11 @@ the same semantic rules used by the C++ value-object factories.
    that replays them in each language.
 6. Update `protocol/schemas/README.md` and this document if the
    policy changes.
+
+## Memory observations
+
+`memory_observation.json` and its Rust mirror add a sample record inside
+protocol 0.1 without changing existing envelopes or version constants. It is
+currently consumed only by the platform crate and its tests; no C++ worker,
+Python sidecar or SDK receives the record. Its field and availability rules
+are in [memory observations](memory-observation.md).
