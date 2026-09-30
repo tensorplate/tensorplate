@@ -14,7 +14,7 @@
 //   - Each artifact file's sha256 matches its declared digest.
 //   - manifest_digest (when present) matches the canonical manifest with
 //     that field stripped.
-//   - The format_version major matches the runtime's supported major.
+//   - format_version is exactly one of the supported formats, 0.1 or 0.2.
 //
 // Then the agent calls into the shared `evaluate_compatibility` to
 // check:

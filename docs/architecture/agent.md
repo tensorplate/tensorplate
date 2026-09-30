@@ -269,12 +269,13 @@ overflow.
 `bundle::verify` is the single deploy-time gate. It checks, in order:
 
 1. The bundle path exists and is a directory.
-2. `manifest.json` decodes through the shared protocol bundle parser, including
+2. `manifest.json` is readable JSON with `schema_version: "0.1"`.
+3. `format_version` is exactly `0.1` or `0.2`, then the corresponding
+   payload decodes through the shared protocol bundle parser, including
    the format 0.2 [manifest-local rules](../bundles/compatibility.md#format-02-manifest-rules).
-3. Each declared artifact's `sha256` digest matches its content.
-4. (Optional) the manifest's `manifest_digest` field matches the canonical
+4. Each declared artifact's `sha256` digest matches its content.
+5. (Optional) the manifest's `manifest_digest` field matches the canonical
    manifest with that field stripped.
-5. `format_version` major matches the runtime's supported major.
 6. `runtime_compatibility` range includes the agent's runtime version.
 7. `target_hardware.device_family` matches the agent's configured family
    (or is `any`).

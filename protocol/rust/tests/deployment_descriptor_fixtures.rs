@@ -323,7 +323,10 @@ fn a_format_0_1_bundle_derives_a_descriptor_without_profile_fields() {
         future["configuration_digest"] = json!(sha256_digest(
             &canonicalize(&future["configuration"].to_string()).expect("configuration")
         ));
-        future.as_object_mut().unwrap().remove("descriptor_digest");
+        future
+            .as_object_mut()
+            .expect("object")
+            .remove("descriptor_digest");
         future["descriptor_digest"] = json!(sha256_digest(
             &canonicalize(&future.to_string()).expect("descriptor")
         ));

@@ -247,3 +247,89 @@ fn manifest_rule_codes_survive_rejection_before_staging() {
     }
     assert_eq!(rejected, 11);
 }
+
+#[test]
+fn unknown_bundle_formats_never_stage_or_reach_the_worker() {
+    let h = Harness::new();
+    let healthy = vision_bundle(h.td.path(), "healthy");
+    h.coord
+        .deploy("healthy", &healthy, Default::default(), None, None)
+        .expect("positive control");
+    let calls = h.worker.calls().unwrap().len();
+    for version in ["0.0", "0.3", "0.99", "1.0"] {
+        let bundle = write_bundle(
+            h.td.path(),
+            "unknown",
+            BundleSpec {
+                format_version: Some(version),
+                ..Default::default()
+            },
+        );
+        let err = deploy_should_fail(&h, "unknown", &bundle);
+        assert!(matches!(err, AgentError::BundleManifest(_)));
+        assert!(err
+            .to_string()
+            .contains("runtime accepts [\"0.1\", \"0.2\"]"));
+        assert!(!h.config.staging_dir.join("unknown").exists());
+        assert_eq!(h.worker.calls().unwrap().len(), calls);
+        let state = h.store.snapshot().unwrap();
+        assert_eq!(state.active.unwrap().deployment_id, "healthy");
+        assert_eq!(
+            state.quarantined.last().unwrap().phase,
+            DeployState::Received
+        );
+    }
+}
+
+#[test]
+fn speech_runtime_floor_precedes_staging_and_preserves_active_deployment() {
+    use std::{path::Path, sync::Arc};
+    use tensorplate_agent::coordinator::Coordinator;
+
+    for runtime in ["0.2.1", "0.3.0", "0.3.1"] {
+        for fixture in ["speech_stt_streaming", "speech_tts_streaming"] {
+            let h = Harness::new();
+            let mut config = h.config.clone();
+            config.runtime_version = Some(runtime.into());
+            config.available_backends.push("python_pytorch".into());
+            let mut capability = config.backend_capabilities["mock"].clone();
+            capability.supported_artifact_kinds = vec!["python_pytorch_entry".into()];
+            config
+                .backend_capabilities
+                .insert("python_pytorch".into(), capability);
+            let coord = Coordinator::new(config.clone(), Arc::clone(&h.store), h.worker.clone());
+            let healthy = vision_bundle(h.td.path(), "healthy");
+            coord
+                .deploy("healthy", &healthy, Default::default(), None, None)
+                .expect("positive control");
+            let calls = h.worker.calls().unwrap().len();
+            let bundle = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/models/bundles/v0_2")
+                .join(fixture);
+            let result = coord.deploy("speech", &bundle, Default::default(), None, None);
+            if runtime == "0.2.1" {
+                let err = result.expect_err("old runtime must refuse");
+                assert!(
+                    matches!(err, AgentError::UnsupportedRuntimeVersion(_)),
+                    "{err}"
+                );
+                assert!(!config.staging_dir.join("speech").exists());
+                assert_eq!(h.worker.calls().unwrap().len(), calls);
+                let state = h.store.snapshot().unwrap();
+                assert_eq!(state.active.unwrap().deployment_id, "healthy");
+                assert_eq!(
+                    state.quarantined.last().unwrap().phase,
+                    DeployState::Received
+                );
+            } else {
+                result.expect("compatible runtime reaches the mock worker");
+                assert!(config.staging_dir.join("speech").exists());
+                assert!(h.worker.calls().unwrap().len() > calls);
+                assert_eq!(
+                    h.store.snapshot().unwrap().active.unwrap().deployment_id,
+                    "speech"
+                );
+            }
+        }
+    }
+}

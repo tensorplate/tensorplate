@@ -3,7 +3,7 @@
 #
 # packaging verification suite orchestrator.
 #
-# Usage: run.sh [all|core|harness]
+# Usage: run.sh [all|core|harness|compatibility]
 #
 #   core     the packaging, installer and descriptor checks, and the
 #            static checks over the lifecycle harnesses that drive no
@@ -12,7 +12,9 @@
 #            harness against a stubbed appliance through every failure
 #            mode, which takes far longer than the core checks, so CI
 #            runs them as their own job.
-#   all      both groups, core first. The default.
+#   compatibility  released-binary checks; Linux amd64 CPU only, requires
+#                  network access or TP_RELEASE_ASSET_DIR. Explicit opt-in.
+#   all      the portable core + harness groups, core first. The default.
 #
 # Every verify_*.sh here belongs to exactly one group or to the list of
 # host-mutating verifiers this suite never runs. A verifier in none of
@@ -39,6 +41,8 @@ verify_linux_offline_runtime.sh
 verify_ubuntu_l4_cloud_lifecycle.sh
 verify_jetson_lifecycle.sh"
 
+compatibility="verify_old_runtime_rejects_speech_bundle.sh"
+
 # Run elsewhere: they mutate the host they run on.
 host_mutating="verify_arch_package_set.sh
 verify_service_supervision.sh
@@ -50,14 +54,16 @@ case "${group}" in
 ${harness}" ;;
   core) selected="${core}" ;;
   harness) selected="${harness}" ;;
+  compatibility) selected="${compatibility}" ;;
   *)
-    echo "usage: $(basename "$0") [all|core|harness]" >&2
+    echo "usage: $(basename "$0") [all|core|harness|compatibility]" >&2
     exit 2
     ;;
 esac
 
 known="${core}
 ${harness}
+${compatibility}
 ${host_mutating}"
 unlisted=""
 for path in "${here}"/verify_*.sh; do
@@ -69,7 +75,7 @@ for path in "${here}"/verify_*.sh; do
 done
 if [ -n "${unlisted}" ]; then
   echo "run.sh: verifier(s) in no group:${unlisted}" >&2
-  echo "run.sh: add each to core, harness or host_mutating in $0" >&2
+  echo "run.sh: add each to core, harness, compatibility or host_mutating in $0" >&2
   exit 1
 fi
 

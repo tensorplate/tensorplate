@@ -1,6 +1,6 @@
 # Bundle Compatibility and Agent Deploy Integration
 
-**Status:** bundle formats 0.1 and 0.2
+**Supported bundle formats:** 0.1 and 0.2
 **Code:** [`protocol/rust/src/bundle.rs`](../../protocol/rust/src/bundle.rs) (shared evaluator), [`agent/src/bundle.rs`](../../agent/src/bundle.rs) (agent integration).
 **Deploy transaction:** [`docs/architecture/agent.md`](../architecture/agent.md), [`docs/architecture/worker-supervision.md`](../architecture/worker-supervision.md).
 
@@ -23,7 +23,8 @@ validation surface that previously lived inside `agent/src/bundle.rs`.
 ```text
 parse_bundle(bundle_path)
     └── load manifest -> typed ParseError on missing/malformed/unsafe paths
-    └── validate manifest semantics (model class, IO names, blocks, ...)
+    └── require format_version exactly 0.1 or 0.2; validate manifest semantics
+        (model class, IO names, blocks, the format 0.2 rules, ...)
     └── verify artifact digests (streaming sha256)
     └── verify optional manifest_digest
     └── BundleDescriptor                            ← value object
@@ -50,6 +51,22 @@ supported precision profiles, and accepted artifact kinds into that
 ---
 
 ## Compatibility checks
+
+`SUPPORTED_BUNDLE_FORMAT_VERSIONS` is the exact allowlist `{0.1, 0.2}`.
+Unknown minors such as `0.3`, unknown majors and alternate spellings are
+refused before payload decoding or artifact access. The generic typed
+manifest validator and deployment-descriptor reader enforce the same
+allowlist. `BUNDLE_FORMAT_VERSION` remains `"0.1"`; format 0.2 is explicit
+opt-in, not a change to the shared protocol/schema version.
+
+The format 0.2 speech fixtures require `min_runtime_version: "0.3.0"`.
+Pinned compatibility and coordinator tests reject runtime 0.2.1 and accept
+0.3.0 and 0.3.1 with a mock worker. The released-agent check in
+[`test/packaging`](../../test/packaging/README.md) executes the actual
+v0.2.1 Debian agent and requires the runtime-floor error before staging
+for both speech tasks. Lowering only that floor to 0.2.1 reaches the later
+backend-readiness refusal. This control proves the refusal reason, not
+speech execution or hardware qualification.
 
 | Check                          | Failure code                                                           |
 | ------------------------------ | ---------------------------------------------------------------------- |
