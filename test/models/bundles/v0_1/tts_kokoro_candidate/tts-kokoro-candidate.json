@@ -13,5 +13,21 @@
       "path": "model/voices/af_heart.pt",
       "digest": "sha256:ba76f71db49e0d95c1e30ed6ddf2a0b11036e300a73571143112351c87038088"
     }
-  ]
+  ],
+  "model_config": "model/config.json",
+  "model_weights": "model/kokoro-v1_0.pth",
+  "device": "cuda",
+  "compute_type": "float32",
+  "languages": [
+    "en-US"
+  ],
+  "language": "en-US",
+  "voices": {
+    "af_heart": {
+      "path": "model/voices/af_heart.pt",
+      "language": "en-US"
+    }
+  },
+  "voice": "af_heart",
+  "sample_rate_hz": 24000
 }

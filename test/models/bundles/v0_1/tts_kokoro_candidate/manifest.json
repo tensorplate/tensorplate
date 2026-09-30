@@ -11,8 +11,8 @@
       "role": "model",
       "kind": "python_pytorch_entry",
       "path": "tts-kokoro-candidate.json",
-      "digest": "sha256:2be00de8cc56b7dc00bbc8d7234a855f67ee83887813937fd79495a499274041",
-      "byte_size": 483,
+      "digest": "sha256:4c9b3813d59013b90a1c4a0a29c4dece0b418dc0f33e75d4b0561b1b11162a32",
+      "byte_size": 833,
       "description": "Candidate-only runner entry: selects the kokoro profile and lists its artifact set by relative path and digest."
     },
     {

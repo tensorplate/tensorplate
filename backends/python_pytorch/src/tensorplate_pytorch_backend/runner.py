@@ -42,6 +42,7 @@ from tensorplate_pytorch_backend.backends import (
     CudaFixtureBackend,
     FasterWhisperBackend,
     FixtureBackend,
+    KokoroBackend,
     MpsFixtureBackend,
     NamedTensor,
     RuntimeCapability,
@@ -65,6 +66,7 @@ def default_backend_factories() -> dict[str, type[Backend]]:
         "mps_fixture": MpsFixtureBackend,
         "smolvla": SmolVLABackend,
         "faster_whisper": FasterWhisperBackend,
+        "kokoro": KokoroBackend,
     }
 
 
