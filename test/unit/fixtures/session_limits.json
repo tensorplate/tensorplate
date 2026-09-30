@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "idle_timeout_ms": 60000,
+    "heartbeat_interval_ms": 10000,
+    "liveness_timeout_ms": 30000,
+    "max_duration_ms": 3600000,
+    "max_sessions": 2048
+  },
+  "invalid": [
+    {"idle_timeout_ms": 0, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 0, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 30000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 0, "max_duration_ms": 3600000, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 0, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 0},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2049}
+  ]
+}
