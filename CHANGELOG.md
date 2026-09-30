@@ -12,6 +12,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   CSV and Linux proc memory observations with per-field availability. Idle
   recordings remain parser evidence, not model peaks or reserve measurements.
   (V030-E03-F01-T01, V030-E03-F02-T04)
+- Add a typed C++ codec for the six runtime worker-control operations, with
+  byte-exact cross-language golden-frame and malformed-frame tests. The
+  additive protocol 0.1 contract keeps its version constants unchanged.
+  (V030-E04-F01-T04)
 
 - Add a candidate Kokoro-family batch runner with verified local model and static voice artifacts, bounded phonemization and PCM16 output, restricted weights-only loading, typed sanitized failures, and CPU lifecycle tests. L4 qualification remains pending. (V030-E01-F02-T02)
 
