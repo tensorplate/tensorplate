@@ -1,8 +1,9 @@
 # Memory observations
 
 `platform::memory_sampler` parses captured command/proc output into
-`tensorplate_protocol::MemoryObservation`. These are pure parsers: they run no
-commands, choose no sampling interval and apply no admission or pressure policy.
+`tensorplate_protocol::MemoryObservation`. The parsers remain pure. The
+`memory_sampler::sampling` submodule adds collection, scheduling and reduction
+for operator measurements; neither layer applies admission or pressure policy.
 Their observation contract is `protocol/schemas/memory_observation.json`.
 
 Each record names its budget domain, actual source and a caller-supplied
@@ -69,3 +70,20 @@ explicit test PID-to-role attribution. The parser replay compares every field.
 These model-free idle readings establish neither peaks under load, model
 budgets nor admission reserves. Recording and sampling a workload remains
 necessary before a qualification claim.
+
+The operator loop accepts an explicit domain/PID set and bounded sampling plan,
+streams observations to a writer and reduces only physical consumption and the
+requested individual process readings. Its injected clock and command/proc
+boundary allow recorded-input tests. `WindowReducer` is shared library code for
+future agent sampling; the recipe performs no separate measurement or reduction.
+Missing samples preserve null values and availability counts. Complete coverage
+requires every scheduled tick and requested value, with no late batch. An empty
+attribution list measures domain totals only. The timestamp is relative to the
+sampling session and marks the batch start, before any blocking source reads.
+
+The operator binary is built as the `memory_sample` platform example and invoked
+by `tools/validation/memory-sample.sh`; it is not a packaged CLI command. The
+[recipe instructions](../validation/speech-candidate-recipes.md) document its
+phase labels, output contract and blocking-call limits. The in-agent invocation
+deadlines, lifecycle attribution, freshness policy, admission and hysteresis are
+separate consumers of this mechanism.
