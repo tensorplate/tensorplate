@@ -8,6 +8,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Add a candidate Kokoro-family batch runner with verified local model and static voice artifacts, bounded phonemization and PCM16 output, restricted weights-only loading, typed sanitized failures, and CPU lifecycle tests. L4 qualification remains pending. (V030-E01-F02-T02)
+
 - A supply-chain CI workflow, `.github/workflows/supply-chain.yml`, runs on
   every pull request, on pushes to `main` and `develop`, and weekly. It checks
   the Rust workspace with `cargo-deny` against a new `deny.toml`: licenses

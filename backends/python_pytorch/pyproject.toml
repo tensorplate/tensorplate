@@ -41,6 +41,14 @@ speech-stt = [
     "ctranslate2",
 ]
 
+# Development only; installed appliances use their locked runtime environment.
+speech-tts = [
+    "kokoro",
+    "torch",
+    "numpy",
+    "misaki[en]",
+]
+
 [project.scripts]
 tensorplate-backend-python-pytorch = "tensorplate_pytorch_backend.runner:main"
 
@@ -99,7 +107,7 @@ files = ["src", "tests"]
 # override once lerobot ships type stubs upstream. `transformers` exposes
 # Any-typed re-exports that don't add value under strict mode.
 [[tool.mypy.overrides]]
-module = ["numpy", "torch", "lerobot.*", "transformers", "faster_whisper", "ctranslate2"]
+module = ["numpy", "torch", "lerobot.*", "transformers", "faster_whisper", "ctranslate2", "kokoro", "kokoro.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
