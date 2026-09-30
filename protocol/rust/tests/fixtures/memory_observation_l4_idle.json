@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1",
+  "domain": "device_vram",
+  "source": "nvidia_smi_xml",
+  "availability": "available",
+  "allocated": {
+    "availability": "unavailable",
+    "reason": "unsupported"
+  },
+  "reserved": {
+    "availability": "unavailable",
+    "reason": "unsupported"
+  },
+  "process_aggregate": {
+    "availability": "available",
+    "processes": [
+      {
+        "pid": 5819,
+        "role": "python_sidecar",
+        "bytes": {
+          "availability": "available",
+          "bytes": 260046848
+        }
+      }
+    ]
+  },
+  "device_aggregate": {
+    "capacity": {
+      "availability": "available",
+      "bytes": 24152899584
+    },
+    "available": {
+      "availability": "available",
+      "bytes": 23391633408
+    },
+    "used": {
+      "availability": "available",
+      "bytes": 268435456
+    },
+    "driver_reserved": {
+      "availability": "available",
+      "bytes": 493879296
+    }
+  },
+  "sampled_monotonic_ns": 1000000000
+}
