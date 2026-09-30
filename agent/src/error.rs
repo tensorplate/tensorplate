@@ -12,9 +12,42 @@ use std::path::PathBuf;
 use tensorplate_platform::PlatformReason;
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::{BundleManifestError, BundleRuleCode};
 
 /// Result alias used throughout the agent crate.
 pub type AgentResult<T> = Result<T, AgentError>;
+
+/// Bundle diagnostic with an optional stable manifest rule code.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct BundleManifestFailure {
+    pub rule: Option<BundleRuleCode>,
+    pub message: String,
+}
+
+impl From<String> for BundleManifestFailure {
+    fn from(message: String) -> Self {
+        Self {
+            rule: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for BundleManifestFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl From<BundleManifestError> for BundleManifestFailure {
+    fn from(error: BundleManifestError) -> Self {
+        Self {
+            rule: error.rule_code(),
+            message: error.to_string(),
+        }
+    }
+}
 
 /// Typed error variants raised by agent components. Each variant carries
 /// enough context to be useful in a log line; the [`AgentError::to_record`]
@@ -26,7 +59,7 @@ pub enum AgentError {
     Config(String),
 
     #[error("bundle manifest is invalid: {0}")]
-    BundleManifest(String),
+    BundleManifest(BundleManifestFailure),
 
     #[error("bundle artifact `{path}` failed integrity check: {reason}")]
     BundleIntegrity { path: String, reason: String },
@@ -155,6 +188,9 @@ impl AgentError {
         // CLI or the durable store can read them. `context` is already
         // carried to the wire and rendered by the CLI.
         match self {
+            AgentError::BundleManifest(BundleManifestFailure {
+                rule: Some(rule), ..
+            }) => record.with_context(rule.as_str()),
             AgentError::PlatformNotAdmissible {
                 reason: Some(reason),
                 ..

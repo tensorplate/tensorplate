@@ -11,7 +11,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bundle_profile::{BundleProfile, BundleProfileError, PROFILE_FORMAT_VERSION};
+use crate::bundle_profile::{
+    check_model_class, check_speech_precision, check_streaming_state, required, rule,
+    BundleProfile, BundleProfileError, BundleRuleCode, SupportLevel, PROFILE_FORMAT_VERSION,
+};
 use crate::model_spec::{ModelClass, PrecisionHint};
 use crate::tensor_view::{DType, Layout};
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
@@ -702,6 +705,16 @@ pub enum BundleManifestError {
     ProfileFormatMismatch,
 }
 
+impl BundleManifestError {
+    #[must_use]
+    pub fn rule_code(&self) -> Option<BundleRuleCode> {
+        match self {
+            Self::Profile(error) => error.rule_code(),
+            _ => None,
+        }
+    }
+}
+
 fn validate_model_blocks(
     class: ModelClass,
     blocks: &ModelBlocks,
@@ -806,6 +819,9 @@ impl BundleManifest {
         }
         if self.profile.is_some() != (self.format_version == PROFILE_FORMAT_VERSION) {
             return Err(BundleManifestError::ProfileFormatMismatch);
+        }
+        if let Some(profile) = &self.profile {
+            self.validate_profile(profile)?;
         }
         if self.backend_hint.is_empty() {
             return Err(BundleManifestError::EmptyBackendHint);
@@ -947,6 +963,95 @@ impl BundleManifest {
         }
 
         Ok(self)
+    }
+
+    fn validate_profile(&self, profile: &BundleProfile) -> Result<(), BundleProfileError> {
+        let blocks = &self.model_blocks;
+        let active: Vec<_> = [
+            (ModelClass::Vision, blocks.vision.is_some()),
+            (ModelClass::Speech, blocks.speech.is_some()),
+            (ModelClass::Language, blocks.language.is_some()),
+            (ModelClass::Vla, blocks.vla.is_some()),
+            (ModelClass::Embedding, blocks.embedding.is_some()),
+            (ModelClass::Custom, blocks.custom.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(class, present)| present.then_some(class))
+        .collect();
+        if active != [self.model_class] {
+            return Err(rule(
+                BundleRuleCode::ModelBlock,
+                "model_blocks",
+                "must contain exactly the block selected by model_class",
+            ));
+        }
+        check_model_class(self.model_class)?;
+        required("support_level", profile.support_level.is_some())?;
+        required(
+            "hardware_compatibility",
+            !profile.hardware_compatibility.is_empty(),
+        )?;
+        if profile.runner_profile.is_some() || self.model_class == ModelClass::Speech {
+            for key in ["profile_id", "backend_profile", "default_backend"] {
+                if self.extra.contains_key(key) {
+                    return Err(rule(
+                        BundleRuleCode::AmbiguousSelector,
+                        key,
+                        "legacy selectors cannot select a format 0.2 runner",
+                    ));
+                }
+            }
+        }
+        if self.extra.contains_key("serving_mode") {
+            return Err(rule(
+                BundleRuleCode::AmbiguousSelector,
+                "serving_mode",
+                "the active class block owns the serving mode",
+            ));
+        }
+        if profile.support_level == Some(SupportLevel::Production)
+            || self.model_class == ModelClass::Speech
+        {
+            required(
+                "memory_budget_breakdown_bytes",
+                profile.memory_budget_breakdown_bytes.is_some(),
+            )?;
+        }
+        if let Some(speech) = &profile.speech {
+            check_streaming_state(speech, profile.memory_budget_by_domain.as_ref())?;
+            required("runner_profile", profile.runner_profile.is_some())?;
+            required("compute_type", profile.compute_type.is_some())?;
+            required("pipeline_stages", !profile.pipeline_stages.is_empty())?;
+            required(
+                "memory_budget_by_domain",
+                profile.memory_budget_by_domain.is_some(),
+            )?;
+            required(
+                "max_concurrent_sessions",
+                profile.max_concurrent_sessions.is_some(),
+            )?;
+            required("degraded_profile", profile.degraded_profile.is_some())?;
+            let minimum = self.runtime_compatibility.min_runtime_version.as_deref();
+            let floor = minimum.and_then(|version| {
+                let parts: Vec<u32> = version
+                    .split('.')
+                    .map(str::parse)
+                    .collect::<Result<_, _>>()
+                    .ok()?;
+                (parts.len() == 3).then_some(parts)
+            });
+            if !floor.is_some_and(|parts| parts.as_slice() >= [0, 3, 0].as_slice()) {
+                return Err(rule(
+                    BundleRuleCode::RequiredField,
+                    "runtime_compatibility.min_runtime_version",
+                    "speech requires a three-component runtime minimum of at least 0.3.0",
+                ));
+            }
+            if let Some(compute) = profile.compute_type {
+                check_speech_precision(self.precision_hint, compute)?;
+            }
+        }
+        Ok(())
     }
 
     /// Return the single `model` artifact entry, if present. Validated

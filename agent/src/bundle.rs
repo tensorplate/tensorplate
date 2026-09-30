@@ -269,22 +269,22 @@ fn parse_error_to_agent_error(err: ParseError) -> AgentError {
         ParseError::ManifestMissing { path } => AgentError::BundleManifest(format!(
             "manifest.json missing at {}",
             path.display()
-        )),
+        ).into()),
         ParseError::Io(e) => AgentError::Io(e),
-        ParseError::ManifestMalformed(m) => AgentError::BundleManifest(m),
+        ParseError::ManifestMalformed(m) => AgentError::BundleManifest(m.into()),
         ParseError::UnsupportedSchemaVersion { got, expected } => AgentError::BundleManifest(
-            format!("unsupported manifest schema_version `{got}` (expected `{expected}`)"),
+            format!("unsupported manifest schema_version `{got}` (expected `{expected}`)").into(),
         ),
         ParseError::UnsupportedFormatVersion {
             got,
             supported_major,
         } => AgentError::BundleManifest(format!(
             "unsupported bundle format_version `{got}` (runtime supports major {supported_major})"
-        )),
-        ParseError::ManifestSemantics(e) => AgentError::BundleManifest(e.to_string()),
+        ).into()),
+        ParseError::ManifestSemantics(e) => AgentError::BundleManifest(e.into()),
         ParseError::UnsafeArtifactPath { relative_path } => AgentError::BundleManifest(format!(
             "unsafe artifact path `{relative_path}` (absolute, contains `..`, or contains backslash)"
-        )),
+        ).into()),
         ParseError::ArtifactMissing { relative_path } => AgentError::BundleIntegrity {
             path: relative_path,
             reason: "missing on disk".into(),

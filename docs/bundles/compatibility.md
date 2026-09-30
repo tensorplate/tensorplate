@@ -1,6 +1,6 @@
 # Bundle Compatibility and Agent Deploy Integration
 
-**Status:** v0.1.0 (bundle format)
+**Status:** bundle formats 0.1 and 0.2
 **Code:** [`protocol/rust/src/bundle.rs`](../../protocol/rust/src/bundle.rs) (shared evaluator), [`agent/src/bundle.rs`](../../agent/src/bundle.rs) (agent integration).
 **Deploy transaction:** [`docs/architecture/agent.md`](../architecture/agent.md), [`docs/architecture/worker-supervision.md`](../architecture/worker-supervision.md).
 
@@ -23,9 +23,9 @@ validation surface that previously lived inside `agent/src/bundle.rs`.
 ```text
 parse_bundle(bundle_path)
     └── load manifest -> typed ParseError on missing/malformed/unsafe paths
+    └── validate manifest semantics (model class, IO names, blocks, ...)
     └── verify artifact digests (streaming sha256)
     └── verify optional manifest_digest
-    └── validate manifest semantics (model class, IO names, blocks, ...)
     └── BundleDescriptor                            ← value object
 
 evaluate_compatibility(descriptor, device_context)
@@ -82,8 +82,9 @@ staging**. Phases:
 If `verify()` returns `Err`, the transaction transitions to `failed` with
 the typed error and never modifies the active deployment.
 
-The serving worker receives a *validated deployment descriptor* through
-the agent's worker control plane (V01-E07/V01-E08). The worker does not
+The serving worker receives the verified candidate through the agent's
+worker control plane. The portable `DeploymentDescriptor` is a separate
+protocol value object; it has not replaced that load message. The worker does not
 re-parse unsafe bundle paths or recompute digests; runtime adapters may
 still validate declared backend/capability against the live SDK as
 defense in depth.
@@ -117,3 +118,57 @@ The runtime never selects a backend heuristically and never falls back
 at inference time. The agent's verify step has already chosen one
 backend; if it cannot run, the inference returns `Unsupported` rather
 than trying another adapter.
+
+## Format 0.2 manifest rules
+
+Format 0.2 opts into manifest-local checks before artifact staging or worker
+contact. Format 0.1 retains its previous class/block and optional-field behavior.
+The parser exposes a typed `BundleRuleCode` through
+`ParseError::ManifestSemantics`. The agent preserves it in
+`AgentError::BundleManifest` and the existing `ErrorRecord.context` string;
+the outer wire code remains `config_invalid` and the error is non-recoverable.
+The diagnostic message names the field and, for reserved classes, the unavailable
+posture. No new shared wire error enum is required.
+
+| Rule code | Refusal |
+| --- | --- |
+| `bundle_r1_model_block` | Missing, mismatched or multiple active class blocks. |
+| `bundle_r2_reserved_class` | Format 0.2 `language`, `embedding` or `custom` deployment. |
+| `bundle_r3_streaming_state` | Streaming speech lacks chunking or a nonzero `per_session_state_bytes` line across its declared memory domains. |
+| `bundle_r7_budget_line` | An aggregate or domain budget contains a noncanonical line name. |
+| `bundle_r10_caller_execution` | A caller-owned stage carries fields beyond `stage`, `ownership`, `observable` and `interface`. |
+| `bundle_r11_class_payload` | A VLA block declares a reserved serving mode. The supported tensor payload, including fractional control frequency, remains valid without that selector. |
+| `bundle_r12_required_field` | An applicable format 0.2 field is missing, or the speech runtime minimum is below 0.3.0 or is not three numeric components. |
+| `bundle_r12_ambiguous_selector` | A runner-selected profile carries legacy `profile_id`, `backend_profile` or `default_backend`, or a manifest carries a competing top-level `serving_mode`. Present-null selectors also reject. |
+| `bundle_r12_precision_conflict` | Speech precision and compute type disagree. |
+| `bundle_r12_explicit_precision` | Speech uses `auto`, including an omitted precision hint. |
+
+All format 0.2 manifests require `support_level`, `hardware_compatibility` and
+exactly the class block selected by `model_class`. Speech additionally requires
+`runner_profile`, `compute_type`, `pipeline_stages`, both budget declarations,
+`max_concurrent_sessions`, `degraded_profile` and a minimum runtime of at least
+0.3.0. A Production declaration also requires the aggregate budget and explicit
+`capability_requirements`. These are declarations, not evidence of support or
+sufficient admission capacity.
+Warmup remains conditional on the target benchmark profile.
+
+Speech precision pairs are `fp32`/`float32`, `fp16`/`float16`,
+`bfloat16`/`bfloat16`, and `int8` with `int8`, `int8_float32`,
+`int8_float16` or `int8_bfloat16`. The mixed int8 compute types retain int8
+weight precision. No precision hint represents `int16`; it cannot satisfy this
+speech contract. The installed runner's actual supported compute types are a
+separate capability check. Explicit precision is required even for qualification;
+an experimental support declaration does not permit a silent fallback.
+
+The deployment descriptor shares field decoding, including budget-line,
+caller-stage and chunking checks. Its own validation also requires speech
+class/contract agreement, a deployable class, nonzero streaming state, explicit
+matching precision and the execution fields it carries. Manifest-only fields
+(class blocks other than speech, requested support, hardware row declarations,
+aggregate budget, capability declarations, legacy selectors and minimum-runtime declarations) are checked
+before descriptor derivation and are not reconstructed from the descriptor.
+The descriptor omits disabled degradation rather than carrying manifest `null`.
+
+The fixture pairs under `test/models/bundles/v0_2/` are synthetic parser tests.
+They do not exercise installed-runner resolution, registry evidence, lineage,
+per-domain admission or real speech execution.

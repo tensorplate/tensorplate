@@ -269,7 +269,8 @@ overflow.
 `bundle::verify` is the single deploy-time gate. It checks, in order:
 
 1. The bundle path exists and is a directory.
-2. `manifest.json` decodes against `protocol/schemas/bundle_manifest.json`.
+2. `manifest.json` decodes through the shared protocol bundle parser, including
+   the format 0.2 [manifest-local rules](../bundles/compatibility.md#format-02-manifest-rules).
 3. Each declared artifact's `sha256` digest matches its content.
 4. (Optional) the manifest's `manifest_digest` field matches the canonical
    manifest with that field stripped.
@@ -284,6 +285,10 @@ overflow.
    with the typed `Unsupported` error.
 10. `capability_requirements` are satisfied by the configured
     `backend_capabilities` map. Missing capabilities are rejected.
+
+Manifest-local rule failures retain their typed rule code in the existing
+`ErrorRecord.context`, through the control response and quarantine record. They
+leave the active deployment unchanged and reach neither staging nor the worker.
 
 ## Deploy transaction state machine (V01-E08-F04)
 
