@@ -78,6 +78,7 @@ impl Harness {
             staging_dir,
             available_backends: vec!["mock".into()],
             backend_capabilities: capabilities,
+            memory_admission: None,
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: DeviceFamily::Any,
             admission_posture: None,

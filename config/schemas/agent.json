@@ -108,6 +108,78 @@
         }
       }
     },
+    "memory_admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "memory_profile_instance_id",
+        "domains"
+      ],
+      "properties": {
+        "row_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "memory_profile_instance_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "domains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "guest_ram",
+            "device_vram"
+          ],
+          "properties": {
+            "guest_ram": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reserve_bytes"
+              ],
+              "properties": {
+                "cap_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991,
+                  "description": "Optional policy cap; omission resolves to measured capacity. A cap above the measurement is refused."
+                },
+                "reserve_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Explicit row reserve, with no default. Must not exceed the resolved cap."
+                }
+              }
+            },
+            "device_vram": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reserve_bytes"
+              ],
+              "properties": {
+                "cap_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991,
+                  "description": "Optional policy cap; omission resolves to measured capacity. A cap above the measurement is refused."
+                },
+                "reserve_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991,
+                  "description": "Explicit row reserve, with no default. Must not exceed the resolved cap."
+                }
+              }
+            }
+          }
+        }
+      },
+      "description": "Optional discrete-GPU admission configuration joined to a platform row and memory-profile instance. Both domains require explicit reserves. No sampling or admission policy is enabled by this shape alone."
+    },
     "device_memory_bytes": {
       "type": "integer",
       "minimum": 0,

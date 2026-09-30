@@ -435,6 +435,7 @@ mod tests {
             staging_dir: td.join("staging"),
             available_backends: vec!["mock".into()],
             backend_capabilities: Default::default(),
+            memory_admission: None,
             device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
             device_family: Default::default(),
             admission_posture: None,
