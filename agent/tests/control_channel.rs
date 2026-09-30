@@ -298,3 +298,57 @@ fn blocked_exchange_keeps_the_queue_bounded_and_shutdown_resolves_waiters() {
     release.send(()).unwrap();
     worker.join().unwrap();
 }
+
+#[test]
+fn an_unanswered_command_cannot_delay_the_next_scheduled_poll() {
+    use tensorplate_protocol::decode_with_version_check;
+    use tensorplate_protocol::worker_control::{
+        encode_frame, LedgerStatus, WorkerControlRequest, WorkerControlResponse, WorkerOp,
+    };
+    let (stream, peer) = UnixStream::pair().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let (arrival, received) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let start = Instant::now();
+        let mut reader = BufReader::new(peer);
+        for index in 0..3 {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+            let request: WorkerControlRequest = decode_with_version_check(&line).unwrap();
+            if index == 1 {
+                assert_eq!(request.op, WorkerOp::AdmissionFence);
+                continue;
+            }
+            assert_eq!(request.op, WorkerOp::LedgerStatus);
+            if index == 2 {
+                arrival.send(start.elapsed()).unwrap();
+            }
+            let answer = WorkerControlResponse::answer(&request, member(), WorkerStatusOutcome::Ok)
+                .with_ledger(LedgerStatus::default());
+            reader
+                .get_mut()
+                .write_all(&encode_frame(&answer).unwrap())
+                .unwrap();
+        }
+    });
+    let channel = ControlChannel::start(stream, member()).unwrap();
+    wait_until(Duration::from_secs(1), || {
+        channel.snapshot().ledger.is_some()
+    });
+    thread::sleep(Duration::from_millis(650));
+    let result = channel
+        .submit(RuntimeCommand::AdmissionFence {
+            transaction_id: "tx-poll-window".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        result.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Err(ControlChannelError::Deadline)
+    );
+    let next_poll_at = received.recv_timeout(Duration::from_secs(2)).unwrap();
+    worker.join().unwrap();
+    assert!(
+        next_poll_at < Duration::from_millis(1200),
+        "next poll was delayed until {next_poll_at:?}"
+    );
+}
