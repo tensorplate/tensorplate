@@ -40,7 +40,7 @@ as the contract between authoring tools and the runtime.
 | Field            | Notes                                                                                    |
 | ---------------- | ---------------------------------------------------------------------------------------- |
 | `schema_version` | Locked to `0.1` for v0.1. Unknown values are rejected with a typed error.                |
-| `format_version` | `MAJOR.MINOR`. The agent accepts the runtime's major and rejects unknown future majors.   |
+| `format_version` | Exactly `0.1` or `0.2`. Unknown majors, minors and alternate spellings are rejected.       |
 | `name`           | Non-empty. Used in logs, status output, and the bundle `id` (`<name>@<version>`).        |
 | `version`        | Non-empty. Bundle-author-declared version string.                                        |
 | `model_class`    | One of the six classes (see [model classes](#model-classes)).                            |

@@ -14,7 +14,7 @@
 //   - Each artifact file's sha256 matches its declared digest.
 //   - manifest_digest (when present) matches the canonical manifest with
 //     that field stripped.
-//   - The format_version major matches the runtime's supported major.
+//   - format_version is exactly one of the supported formats, 0.1 or 0.2.
 //
 // Then the agent calls into the shared `evaluate_compatibility` to
 // check:
@@ -275,12 +275,9 @@ fn parse_error_to_agent_error(err: ParseError) -> AgentError {
         ParseError::UnsupportedSchemaVersion { got, expected } => AgentError::BundleManifest(
             format!("unsupported manifest schema_version `{got}` (expected `{expected}`)").into(),
         ),
-        ParseError::UnsupportedFormatVersion {
-            got,
-            supported_major,
-        } => AgentError::BundleManifest(format!(
-            "unsupported bundle format_version `{got}` (runtime supports major {supported_major})"
-        ).into()),
+        error @ ParseError::UnsupportedFormatVersion { .. } => {
+            AgentError::BundleManifest(error.to_string().into())
+        }
         ParseError::ManifestSemantics(e) => AgentError::BundleManifest(e.into()),
         ParseError::UnsafeArtifactPath { relative_path } => AgentError::BundleManifest(format!(
             "unsafe artifact path `{relative_path}` (absolute, contains `..`, or contains backslash)"

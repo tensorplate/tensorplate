@@ -23,13 +23,14 @@ packaging verification suite.
 | `verify_installer.sh` | Syntax-checks `packaging/scripts/install.sh`, runs `shellcheck` when available, and exercises installer self-check, supported OS, unsupported OS, `--force-os`, hardware warning, `--strict-hardware`, and `--cli-only` paths with fixtures. |
 | `verify_service_supervision.sh` | Drives the shipped systemd units against a real systemd: the agent reaches active and logs to the documented path, a hard crash is recovered, a crash LOOP is given up on rather than restarted forever, a clean stop is not restarted, observability survives the agent stopping, and no serving unit is registered. Mutates the host; refuses to run unless `CI=true` or `TP_SUPERVISION_ALLOW=1`. Not in `run.sh`. |
 | `verify_cpu_only_smoke.sh` | The Ubuntu x86_64 CPU-only Preview smoke, and the only check that installs REAL binaries and runs the REAL CLI: builds the runtime, installs the package set, asserts package closure and the x86_64 agent config, confirms the installed registry reports the row as Preview, starts the agent and observability, requires a GREEN `tensorplate doctor` that resolves the row by live detection with no Production claim and whose `agent_socket` finding names the socket from the packaged `/etc/tensorplate/cli.json` rather than the built-in default (the evidence line from issue #203, and the only check that tells a CLI that reads the conffile from one that ignores it), queries the control plane, and requires `tensorplate logs` either to exit `6` naming the journal to read instead, or to exit `0` having returned entries or said why it returned none. Writes evidence under `dist/smoke/`. Mutates the host; refuses unless `CI=true` or `TP_CPU_SMOKE_ALLOW=1`. Not in `run.sh`. |
-| `run.sh` | Orchestrator. Runs every verifier except the host-mutating `verify_arch_package_set.sh`, `verify_service_supervision.sh`, and `verify_cpu_only_smoke.sh`, and exits non-zero on the first failure. Takes an optional group: `core` (the packaging, installer, descriptor and harness-drift checks, which the release artifact build runs), `harness` (the five lifecycle harness verifiers, which CI runs as their own job because they take far longer), or `all`, the default. A `verify_*.sh` that is in no group and not listed as host-mutating fails the suite before anything runs. |
+| `verify_old_runtime_rejects_speech_bundle.sh` | Extracts the checksum-pinned v0.2.1 amd64 Debian agent without installing it. On a CPU host, both format 0.2 speech fixtures must produce the precise runtime-floor refusal before staging; lowering only their floor must reach the later missing-backend refusal. Uses a private socket and temporary state with a mock worker. No speech execution or hardware qualification. |
+| `run.sh` | Orchestrator. `core` runs packaging, installer, descriptor and harness-drift checks; `harness` runs lifecycle harness verifiers; `all` (the default) runs those two portable groups. `compatibility` is an explicit Linux amd64 CPU group with released-asset access. Host-mutating checks never run. Every `verify_*.sh` must be listed in one group or the host-mutating list; unlisted verifiers and verifier failures stop the suite. |
 | `run_groups_test.sh` | Tests `run.sh` against stub verifiers: each group runs exactly its own verifiers in order, host-mutating verifiers never run, an unknown group is a usage error, a verifier in no group fails the suite, a failing verifier stops it with its status, and every verifier `run.sh` names exists. |
 
 ## Running
 
 ```bash
-# Single command runs the full suite. Returns 0 on green.
+# Run the portable groups. Returns 0 on green.
 ./test/packaging/run.sh
 
 # Or run an individual verifier.
@@ -39,6 +40,20 @@ packaging verification suite.
 The suite does not require root: every check operates on the source
 tree or stages under `mktemp -d`. It runs on macOS dev hosts (no
 systemd present) and on Linux CI hosts.
+
+The released-binary group runs on Ubuntu 22.04 amd64 CPU CI:
+
+```bash
+./test/packaging/run.sh compatibility
+# To reuse an already downloaded release asset without network access:
+TP_RELEASE_ASSET_DIR=/path/to/release-assets ./test/packaging/run.sh compatibility
+```
+
+It requires Python 3, `dpkg-deb`, `sha256sum`, and (for downloading) `curl`.
+The offline asset must match the pinned published checksum; substituting a
+locally built agent fails. Platform admission remains active, so use a CPU
+host without accelerator devices visible. A platform refusal is a failure,
+not a passing compatibility result. The CPU APT workflow invokes this group.
 
 ## What is NOT verified here
 

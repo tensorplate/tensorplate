@@ -37,13 +37,16 @@ group_names() {
 
 core="$(group_names core)"
 harness="$(group_names harness)"
+compatibility="$(group_names compatibility)"
 host_mutating="$(group_names host_mutating)"
 
 check "run.sh declares core verifiers" yes "$([[ -n "$core" ]] && echo yes || echo no)"
 check "run.sh declares harness verifiers" yes "$([[ -n "$harness" ]] && echo yes || echo no)"
 
+check "run.sh declares compatibility verifiers" yes "$([[ -n "$compatibility" ]] && echo yes || echo no)"
+
 missing=""
-for name in $core $harness $host_mutating; do
+for name in $core $harness $compatibility $host_mutating; do
   [[ -f "${repo_root}/test/packaging/${name}" ]] || missing="${missing} ${name}"
 done
 check "every verifier run.sh names exists" "" "$missing"
@@ -56,7 +59,7 @@ stage() {
   rm -rf "$dir"
   mkdir -p "$dir"
   cp "$real" "${dir}/run.sh"
-  for name in $core $harness $host_mutating; do
+  for name in $core $harness $compatibility $host_mutating; do
     # The stub expands RUN_LOG when it runs, not here.
     # shellcheck disable=SC2016
     printf '#!/bin/sh\nprintf "%%s\\n" %s >>"$RUN_LOG"\n' "$name" >"${dir}/${name}"
@@ -78,6 +81,7 @@ suite="${td}/suite"
 stage "$suite"
 check "core runs exactly the core verifiers" "0|${core}" "$(drive "$suite" core)"
 check "harness runs exactly the harness verifiers" "0|${harness}" "$(drive "$suite" harness)"
+check "compatibility runs only its opt-in verifiers" "0|${compatibility}" "$(drive "$suite" compatibility)"
 check "no argument runs core, then harness" "0|${core} ${harness}" "$(drive "$suite")"
 check "all is the same as no argument" "0|${core} ${harness}" "$(drive "$suite" all)"
 check "an unknown group is a usage error that runs nothing" "2|" "$(drive "$suite" everything)"

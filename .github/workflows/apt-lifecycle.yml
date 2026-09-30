@@ -47,6 +47,11 @@ on:
       # same way.
       - 'config/schemas/**'
       - 'protocol/schemas/**'
+      # Released-agent compatibility reads the speech fixtures and exercises
+      # the runtime floor enforced by the protocol and agent.
+      - 'test/models/bundles/v0_2/**'
+      - 'protocol/rust/**'
+      - 'agent/**'
   workflow_dispatch:
 
 permissions:
@@ -113,6 +118,10 @@ jobs:
       - name: Packaging suite groups
         shell: bash
         run: test/packaging/run_groups_test.sh
+
+      - name: Released agent speech compatibility
+        shell: bash
+        run: test/packaging/run.sh compatibility
 
       - name: Release driver checks
         shell: bash

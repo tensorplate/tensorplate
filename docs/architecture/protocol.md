@@ -50,6 +50,10 @@ Manifest-local rule failures expose `BundleRuleCode` through the parser and
 agent, with its stable string in the existing error context; the shared wire
 error enum and protocol version remain unchanged.
 
+Both readers require the exact bundle format allowlist `0.1` or `0.2`;
+the deployment-descriptor reader applies that same allowlist to its bundle
+reference before checking the configuration and descriptor digests.
+
 Deployment descriptors decode through
 `tensorplate_protocol::DeploymentDescriptor::from_json`, which also requires
 the text's canonical JSON form, the manifest decoder's verdict on its format

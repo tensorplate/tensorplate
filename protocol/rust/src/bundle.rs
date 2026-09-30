@@ -132,8 +132,11 @@ pub enum ParseError {
     #[error("manifest schema_version `{got}` is not supported (expected `{expected}`)")]
     UnsupportedSchemaVersion { got: String, expected: &'static str },
 
-    #[error("manifest format_version `{got}` is not supported (runtime accepts major `{supported_major}`)")]
-    UnsupportedFormatVersion { got: String, supported_major: u32 },
+    #[error("manifest format_version `{got}` is not supported (runtime accepts {supported:?})")]
+    UnsupportedFormatVersion {
+        got: String,
+        supported: &'static [&'static str],
+    },
 
     #[error("manifest semantic validation failed: {0}")]
     ManifestSemantics(#[from] BundleManifestError),
@@ -352,15 +355,6 @@ pub fn parse_bundle_with(
     let raw = fs::read_to_string(&manifest_path)?;
     let manifest = decode_manifest(&raw)?;
     let canonical_digest = compute_canonical_manifest_digest(&raw)?;
-
-    let supported_major = crate::BUNDLE_FORMAT_VERSION_MAJOR;
-    let (major, _minor) = parse_format_version(&manifest.format_version)?;
-    if major != supported_major {
-        return Err(ParseError::UnsupportedFormatVersion {
-            got: manifest.format_version.clone(),
-            supported_major,
-        });
-    }
 
     let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
     for art in &manifest.artifacts {
@@ -624,11 +618,19 @@ fn decode_manifest(raw: &str) -> Result<BundleManifest, ParseError> {
             expected: SCHEMA_VERSION,
         });
     }
-    let profile = if value
+    let format = value
         .get("format_version")
         .and_then(serde_json::Value::as_str)
-        == Some(PROFILE_FORMAT_VERSION)
-    {
+        .ok_or_else(|| {
+            ParseError::ManifestMalformed("manifest missing or non-string format_version".into())
+        })?;
+    if !crate::SUPPORTED_BUNDLE_FORMAT_VERSIONS.contains(&format) {
+        return Err(ParseError::UnsupportedFormatVersion {
+            got: format.to_owned(),
+            supported: crate::SUPPORTED_BUNDLE_FORMAT_VERSIONS,
+        });
+    }
+    let profile = if format == PROFILE_FORMAT_VERSION {
         Some(BundleProfile::from_manifest_text(raw).map_err(BundleManifestError::from)?)
     } else {
         None
@@ -638,31 +640,6 @@ fn decode_manifest(raw: &str) -> Result<BundleManifest, ParseError> {
     manifest.profile = profile;
     let manifest = manifest.validate()?;
     Ok(manifest)
-}
-
-fn parse_format_version(v: &str) -> Result<(u32, u32), ParseError> {
-    let mut parts = v.split('.');
-    let major = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or_else(|| ParseError::UnsupportedFormatVersion {
-            got: v.to_string(),
-            supported_major: crate::BUNDLE_FORMAT_VERSION_MAJOR,
-        })?;
-    let minor = parts
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .ok_or_else(|| ParseError::UnsupportedFormatVersion {
-            got: v.to_string(),
-            supported_major: crate::BUNDLE_FORMAT_VERSION_MAJOR,
-        })?;
-    if parts.next().is_some() {
-        return Err(ParseError::UnsupportedFormatVersion {
-            got: v.to_string(),
-            supported_major: crate::BUNDLE_FORMAT_VERSION_MAJOR,
-        });
-    }
-    Ok((major, minor))
 }
 
 pub(crate) fn artifact_path_is_safe(p: &str) -> bool {

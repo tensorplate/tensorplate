@@ -121,7 +121,11 @@ implement rather than re-hashing.
   artifacts, or changes to digest semantics.
 
 Bundle format compatibility is validated by the agent during the
-`verified` phase before staging. Format 0.2 is an opt-in minor: a manifest
+`verified` phase before staging. The bundle parser, generic manifest
+validator and deployment-descriptor reader enforce the exact allowlist
+`SUPPORTED_BUNDLE_FORMAT_VERSIONS` (`0.1`, `0.2`); unknown minor versions are
+refused rather than accepted by major version alone. The reported
+`BUNDLE_FORMAT_VERSION` stays `"0.1"`. Format 0.2 is an opt-in minor: a manifest
 that declares it has its general profile fields and speech contract
 decoded strictly, and a format 0.1 manifest the schema accepts parses as
 before (see

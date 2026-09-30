@@ -10,6 +10,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Add a candidate Kokoro-family batch runner with verified local model and static voice artifacts, bounded phonemization and PCM16 output, restricted weights-only loading, typed sanitized failures, and CPU lifecycle tests. L4 qualification remains pending. (V030-E01-F02-T02)
 
+- Bundle, manifest and deployment-descriptor readers now accept exactly
+  bundle formats `0.1` and `0.2`, with typed errors for unsupported formats.
+  The reported bundle-format version remains `0.1`. Pinned runtime tests
+  and a CPU packaging check using the released v0.2.1 agent verify that
+  speech bundles requiring runtime `0.3.0` are refused before staging.
+  (V030-E02-F01-T05)
+
 - A supply-chain CI workflow, `.github/workflows/supply-chain.yml`, runs on
   every pull request, on pushes to `main` and `develop`, and weekly. It checks
   the Rust workspace with `cargo-deny` against a new `deny.toml`: licenses

@@ -45,6 +45,9 @@ pub enum DeploymentDescriptorError {
     #[error("deployment descriptor canonical_json_version {0} is not {CANONICAL_JSON_VERSION}")]
     UnsupportedCanonicalJsonVersion(String),
 
+    #[error("deployment descriptor bundle format_version `{0}` is unsupported")]
+    UnsupportedBundleFormatVersion(String),
+
     #[error("deployment descriptor configuration: {0}")]
     Profile(#[from] BundleProfileError),
 
@@ -79,6 +82,7 @@ impl From<DeploymentDescriptorError> for ProtocolError {
         let code = match value {
             DeploymentDescriptorError::UnsupportedSchemaVersion(_)
             | DeploymentDescriptorError::UnsupportedCanonicalJsonVersion(_)
+            | DeploymentDescriptorError::UnsupportedBundleFormatVersion(_)
             | DeploymentDescriptorError::UnknownRunnerProfile(_)
             | DeploymentDescriptorError::UnsupportedComputeType { .. } => ErrorCode::Unsupported,
             _ => ErrorCode::ConfigInvalid,
@@ -216,6 +220,11 @@ impl DeploymentConfiguration {
             return Err(invalid(
                 "configuration.bundle.format_version",
                 "must be MAJOR.MINOR",
+            ));
+        }
+        if !crate::SUPPORTED_BUNDLE_FORMAT_VERSIONS.contains(&c.bundle.format_version.as_str()) {
+            return Err(DeploymentDescriptorError::UnsupportedBundleFormatVersion(
+                c.bundle.format_version.clone(),
             ));
         }
         if !is_sha256_digest(&c.bundle.bundle_digest) {

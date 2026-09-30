@@ -317,6 +317,26 @@ fn a_format_0_1_bundle_derives_a_descriptor_without_profile_fields() {
         DeploymentDescriptor::from_json(&text).expect("read"),
         descriptor
     );
+    for version in ["0.0", "0.3", "0.99", "1.0"] {
+        let mut future = doc.clone();
+        future["configuration"]["bundle"]["format_version"] = json!(version);
+        future["configuration_digest"] = json!(sha256_digest(
+            &canonicalize(&future["configuration"].to_string()).expect("configuration")
+        ));
+        future
+            .as_object_mut()
+            .expect("object")
+            .remove("descriptor_digest");
+        future["descriptor_digest"] = json!(sha256_digest(
+            &canonicalize(&future.to_string()).expect("descriptor")
+        ));
+        let err = DeploymentDescriptor::from_json(&future.to_string())
+            .expect_err("unknown format with otherwise valid descriptor digests");
+        assert!(
+            matches!(&err, DeploymentDescriptorError::UnsupportedBundleFormatVersion(got) if got == version),
+            "{err}"
+        );
+    }
 }
 
 #[test]
@@ -351,6 +371,9 @@ fn refusal_of(err: &DeploymentDescriptorError) -> String {
         DeploymentDescriptorError::Malformed(_) => "Malformed".into(),
         DeploymentDescriptorError::UnsupportedSchemaVersion(_) => "SchemaVersion".into(),
         DeploymentDescriptorError::UnsupportedCanonicalJsonVersion(_) => "CanonicalVersion".into(),
+        DeploymentDescriptorError::UnsupportedBundleFormatVersion(_) => {
+            "BundleFormatVersion".into()
+        }
         DeploymentDescriptorError::Profile(_) => "Profile".into(),
         DeploymentDescriptorError::Invalid { field, .. } => format!("Invalid({field})"),
         DeploymentDescriptorError::NotNormalized => "NotNormalized".into(),
@@ -861,4 +884,20 @@ fn descriptor_task_field_omissions_retain_the_required_field_code() {
             other => panic!("{other}"),
         }
     }
+}
+
+#[test]
+fn descriptors_refuse_unsupported_bundle_formats_before_digest_checks() {
+    for version in ["0.0", "0.3", "0.99", "1.0"] {
+        let mut value = read_json(STT);
+        value["configuration"]["bundle"]["format_version"] = json!(version);
+        let error =
+            DeploymentDescriptor::from_json(&value.to_string()).expect_err("unsupported format");
+        assert!(
+            matches!(error, DeploymentDescriptorError::UnsupportedBundleFormatVersion(ref got) if got == version)
+        );
+        let mapped: ProtocolError = error.into();
+        assert_eq!(mapped.code, ErrorCode::Unsupported);
+    }
+    DeploymentDescriptor::from_json(&read(STT)).expect("supported format retains golden digest");
 }

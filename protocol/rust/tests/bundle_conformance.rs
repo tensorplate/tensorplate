@@ -843,3 +843,75 @@ fn production_requires_a_capability_declaration_and_class_blocks_cannot_be_null(
         .unwrap();
     }
 }
+
+#[test]
+fn speech_bundle_runtime_floor_is_independent_of_the_build_version() {
+    for fixture in ["speech_stt_streaming", "speech_tts_streaming"] {
+        let root = fixtures_root().parent().unwrap().join("v0_2").join(fixture);
+        let bundle = parse_bundle(&root).expect("speech fixture parses");
+        for (runtime, accepted) in [("0.2.1", false), ("0.3.0", true), ("0.3.1", true)] {
+            let result = evaluate_compatibility(&bundle, &x86_64_python_pytorch_device(runtime));
+            assert_eq!(result.ok, accepted, "{fixture} on {runtime}: {result:?}");
+            if !accepted {
+                assert_eq!(result.violations.len(), 1);
+                assert_eq!(result.violations[0].code(), "unsupported_runtime");
+            }
+        }
+    }
+}
+
+#[test]
+fn only_exact_supported_bundle_formats_reach_payload_and_artifact_validation() {
+    assert_eq!(
+        tensorplate_protocol::SUPPORTED_BUNDLE_FORMAT_VERSIONS,
+        ["0.1", "0.2"]
+    );
+    assert_eq!(tensorplate_protocol::BUNDLE_FORMAT_VERSION, "0.1");
+    let source = fixtures_root()
+        .parent()
+        .unwrap()
+        .join("v0_2/speech_stt_streaming");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(source.join("manifest.json")).unwrap())
+            .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    for version in [
+        "0.0", "0.3", "0.99", "1.0", "00.1", "0.01", "+0.1", "0.1.0", "", " 0.1", "0.1 ",
+    ] {
+        value["format_version"] = version.into();
+        std::fs::write(root.path().join("manifest.json"), value.to_string()).unwrap();
+        let err = parse_bundle(root.path()).expect_err("unsupported format");
+        assert!(
+            matches!(err, ParseError::UnsupportedFormatVersion { ref got, supported }
+            if got == version && supported == ["0.1", "0.2"]),
+            "{err}"
+        );
+    }
+    for fixture in [fixtures_root().join("vision_tensorrt"), source] {
+        parse_bundle(&fixture).expect("a supported format still parses");
+    }
+}
+
+#[test]
+fn generic_manifest_reader_cannot_bypass_the_format_allowlist() {
+    let source = fixtures_root().join("vision_tensorrt/manifest.json");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(source).unwrap()).unwrap();
+    for version in ["0.0", "0.3", "0.99", "1.0"] {
+        value["format_version"] = version.into();
+        let error = tensorplate_protocol::decode_with_version_check::<
+            tensorplate_protocol::BundleManifest,
+        >(&value.to_string())
+        .expect_err("unsupported format");
+        assert!(matches!(
+            error,
+            tensorplate_protocol::DecodeError::InvalidPayload(_)
+        ));
+        assert!(error.to_string().contains("format_version"));
+    }
+    value["format_version"] = "0.1".into();
+    tensorplate_protocol::decode_with_version_check::<tensorplate_protocol::BundleManifest>(
+        &value.to_string(),
+    )
+    .unwrap();
+}

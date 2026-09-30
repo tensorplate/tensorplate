@@ -1,20 +1,21 @@
 # Bundle Integrity
 
-**Status:** v0.1.0 (bundle format)
+**Supported bundle formats:** 0.1 and 0.2
 **Code:** [`protocol/rust/src/bundle.rs`](../../protocol/rust/src/bundle.rs)
 
-The parser verifies integrity in three layers:
+The parser checks the format before verifying integrity:
 
-1. **Artifact digests** — every artifact in `manifest.artifacts[]` must publish
+1. **Format version** — `format_version` must be exactly `0.1` or `0.2`.
+   Unknown majors, minors and alternate spellings raise
+   [`ParseError::UnsupportedFormatVersion`] before payload decoding or
+   artifact access.
+2. **Artifact digests** — every artifact in `manifest.artifacts[]` must publish
    a `sha256:hex` digest. The parser opens the file and streams it through
    `sha2::Sha256`; a mismatch raises [`ParseError::ArtifactDigestMismatch`].
-2. **Manifest self-digest** — when `manifest_digest` is set, the parser
+3. **Manifest self-digest** — when `manifest_digest` is set, the parser
    computes the *canonical* manifest digest (see below) with the field
    stripped, and compares them. Mismatches raise
    [`ParseError::ManifestDigestMismatch`].
-3. **Format version** — `format_version` must use the runtime's supported
-   major. Unknown future majors raise
-   [`ParseError::UnsupportedFormatVersion`].
 
 The verifier does **not** require the optional `signature` block. When
 present, the parser checks shape (non-empty `algorithm` and `value`) but
