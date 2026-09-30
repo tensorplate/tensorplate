@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Add an agent worker control client with bounded framing, independent ledger
+  polling, typed contact-loss escalation and safe inherited-socket spawning.
+  Production registry wiring remains deferred. (V030-E04-F01-T04)
 - Add explicit agent memory domain caps and reserves plus fixture-backed XML,
   CSV and Linux proc memory observations with per-field availability. Idle
   recordings remain parser evidence, not model peaks or reserve measurements.

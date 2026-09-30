@@ -433,3 +433,13 @@ file with any field it does not know.
 The durable state file is read only by the agent. The CLI (V01-E11) and
 observability (V01-E10) read the status the agent projects from it, and the
 deploy transaction phase names are load-bearing for both.
+
+## Worker runtime control transport
+
+The reusable `ControlChannel` owns a socket, bounded command queue and dedicated
+ledger-polling thread for one member generation. Its typed contact transitions
+are available through a bounded snapshot; process recovery is a registry
+responsibility. `spawn_with_control` supplies the corresponding safe stdin socket
+handoff. These APIs have no production caller yet and do not change the existing
+process managers. See [runtime control client](worker-supervision.md#runtime-control-client)
+for framing, deadlines, ownership and loss-of-contact behavior.

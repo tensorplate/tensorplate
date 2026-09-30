@@ -36,6 +36,8 @@ pub mod backend_detection;
 pub mod bundle;
 pub mod config;
 pub mod control;
+#[cfg(unix)]
+pub mod control_channel;
 pub mod coordinator;
 pub mod error;
 pub mod memory_admission;
