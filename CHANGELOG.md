@@ -10,6 +10,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Pinned Whisper CT2 and Kokoro/af_heart reference provisioning manifests, with resumable digest-verified retrieval and repeat-run verification that writes nothing. (V030-E01-F01-T05)
 
+- A candidate qualification recipe: `tools/validation/candidate-qualify.py`
+  deploys a predecessor and a candidate bundle, runs the fixture inventory
+  over `/infer`, samples warm-idle and load memory through the platform
+  sampler, drives the negative paths, tears down by rollback and writes one
+  record conforming to the new `candidate_qualification_record.json` schema,
+  with a fixture inventory, pinned integer audio derivations for the noisy
+  and 8 kHz telephony clips, and a fake-appliance test with a synthetic
+  golden record. Memory fields stay `not_run` until the hardware runs.
+  (V030-E01-F02-T03)
+
 - Add an agent worker control client with bounded framing, independent ledger
   polling, typed contact-loss escalation and safe inherited-socket spawning.
   Production registry wiring remains deferred. (V030-E04-F01-T04)

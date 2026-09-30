@@ -88,3 +88,123 @@ An operator's alternate manifest uses the same verification path. The VAD and
 G2P assets are runtime wheel data, not additional bundle downloads. Provisioning
 proves retrieval and integrity; the recipe still must measure real load,
 inference, unload and negative paths through the installed runner environment.
+
+## Candidate qualification recipe
+
+`tools/validation/candidate-qualify.py` qualifies one candidate bundle on the
+machine it runs on and writes one record conforming to
+`config/schemas/candidate_qualification_record.json`. It is a tool for any
+candidate runner family: the bundle's entry names the `backend_profile`, and
+the inventory maps that profile to a suite. The two reference candidates,
+`faster_whisper` (the `stt` suite) and `kokoro` (the `tts` suite), are its
+first two subjects. A record describes a candidate run and is never presented
+as Production evidence; the record says so in its `qualification` block.
+
+### What one run does
+
+1. Reads the candidate bundle, verifies every manifest digest and byte size
+   and records the artifact identities and the entry as deployed.
+2. Deploys the predecessor bundle named with `--predecessor-bundle`, so the
+   teardown has something to roll back to (the agent refuses `rollback` with
+   no previous active deployment and does not yet serve `undeploy`), then
+   samples its idle memory.
+3. Deploys the candidate with `tensorplate deploy`, takes a status snapshot
+   (agent state, active deployment, backend, serving URL, worker health) and
+   samples the candidate's warm-idle memory.
+4. Runs every fixture of the suite `--timing-iterations` times over the
+   serving worker's `/infer` route through the Python SDK, binary transport
+   by default, and records each exchange's client wall time, the worker's
+   timing, the runner's `timings_us` and the real-time factor: `decode` over
+   the clip's duration for STT, `synthesize` over the generated duration for
+   TTS. Each sample is judged against `--request-timeout-ms`, the worker's
+   whole-exchange timeout (8,000 ms in the packaged configuration).
+5. Starts the load window and keeps running the fixtures until the sampler
+   finishes, so the load peak is sampled under this tool's own workload.
+6. Drives the negative paths and records each typed outcome: malformed input
+   tensors, an undeclared language (STT) or an entry selecting an undeclared
+   voice (TTS), a bundle whose largest artifact differs by one byte from its
+   manifest digest, a request submitted and cancelled through the
+   asynchronous policy route (recorded, never judged: the Python-backed worker
+   refuses that route today, and a sidecar that serves one request at a time
+   could not honour the cancel if it did), and, with
+   `--oom-ballast-bytes`, a second deploy while `tools/validation/vram_ballast.py`
+   holds device memory.
+7. Takes a second status snapshot, which expects the agent `degraded` with the
+   last failed deploy as its `last_error`, tears the candidate down with
+   `tensorplate rollback`, confirms the predecessor is active and ready and
+   samples memory after the teardown.
+8. Writes `record.json`, the sampler's JSON Lines files under `memory/`, the
+   generated outputs under `outputs/` and the tool's log under `run.log`.
+
+The exit status is 0 when the record's `result.status` is `pass`, 2 for
+`fail` (a step ran and did not hold) and 3 for `incomplete` (a step did not
+run; `result.reasons` names each one). A record whose memory windows were
+not sampled is incomplete, never a pass.
+
+### Memory
+
+The record's memory fields come only from the platform sampler described
+above, invoked through `tools/validation/memory-sample.sh`; this tool never
+runs `nvidia-smi` itself. Pass the built `memory_sample` binary with
+`--sampler`. Each window runs two sampler invocations over the same
+`--window`: `device_vram` with the `python_sidecar` PID alone, and
+`guest_ram` with the agent, serving worker and sidecar PIDs. PIDs are
+discovered from the agent unit's main PID and its process tree, or given
+with `--pid <pid>:<role>`. A window is `measured` only when both invocations
+report complete coverage and every listed PID was observed; otherwise it is
+`incomplete` with the sampler's reason, and its maxima are kept for
+diagnosis only. The four windows are the predecessor's idle, the candidate's
+warm idle, the candidate under load and the state after the teardown; the
+last two together show what the teardown released. All of them are sampled
+maxima, not continuous-time peaks.
+
+Until the qualification runs happen, a record produced without hardware
+carries every memory window as `not_run` with the reason `pending hardware`.
+
+### Fixtures
+
+`test/models/speech/candidate_fixture_inventory.json` lists the fixtures. STT
+clips are mono 16-bit PCM WAV files provisioned outside the repository into
+the `--clips` directory as `<clip id>.wav`, pinned in the inventory by
+digest. Two clips are derived by the tool from their clean source with the
+derivation the inventory records, so their digests are stable and pinned the
+same way: a noisy variant mixes seeded, integer-generated noise at the given
+signal-to-noise ratio, and the telephony variant decimates to 8 kHz and
+transcodes through G.711 mu-law (the Sun reference encoder). A clip with a
+`null` digest, provisioned or derived, is unpinned and the tool refuses to run
+on it; for a derived clip the refusal names the digest to pin. The 8 kHz clip is resampled back to the
+entry's rate before it is sent, because the runner takes exactly the model's
+input rate; the record names the resampler (`tp-fir63-blackman-q15-v1`, a
+63-tap windowed sinc with literal Q15 taps in `tools/validation/candidate_audio.py`)
+so the derivation is reproducible. TTS sentences are the fixture bytes
+themselves, pinned by the digest of their UTF-8 encoding.
+
+### Running it
+
+Stage the candidate and predecessor bundles where the agent can read them,
+build the sampler once as described above, then:
+
+```sh
+tools/validation/candidate-qualify.py \
+  --candidate-bundle /var/lib/tensorplate/bundles/import/<candidate> \
+  --predecessor-bundle /var/lib/tensorplate/bundles/import/<predecessor> \
+  --clips /var/tmp/candidate-clips \
+  --sampler target/release/examples/memory_sample \
+  --window 60s --sample-interval 1s \
+  --evidence-dir /var/tmp/candidate-evidence-<date>
+```
+
+The evidence directory must be new. Variant bundles for the negative cases
+are written under `<evidence-dir>/staging` unless `--staging-dir` says
+otherwise; the agent reads them, so that path must be readable by its
+account. Generated transcripts and PCM under `outputs/` may carry licensed
+fixture content: keep the evidence directory access-controlled and publish
+only the sanitized record and sampler files, following the
+[fixture and evidence rules](fixture-and-evidence-rules.md). The record
+itself carries output metadata and digests, never request text or audio.
+
+`test/validation/candidate_qualify_test.py` runs the tool against a fake
+appliance (a CLI, worker, sampler and ballast that answer in the real shapes)
+for both suites, compares a fresh run with the committed synthetic record in
+`test/validation/fixtures/`, and breaks each guard once. The synthetic record
+measures nothing; its `provenance` says so.

@@ -1,0 +1,1344 @@
+{
+  "schema_version": "0.1",
+  "record_kind": "candidate_qualification",
+  "convention": "candidate_only_text_utf8_result_json",
+  "provenance": "synthetic",
+  "qualification": {
+    "presented_as": "candidate",
+    "production_evidence": false
+  },
+  "tool": {
+    "name": "candidate-qualify",
+    "source_commit": "0000000000000000000000000000000000000000",
+    "transport_preference": "binary"
+  },
+  "recorded_at_utc": "2026-09-30T23:14:45Z",
+  "request_timeout_ms": 8000,
+  "subject": {
+    "suite": "stt",
+    "backend_profile": "faster_whisper",
+    "bundle": {
+      "name": "stt-whisper-candidate",
+      "version": "0.1.0",
+      "format_version": "0.1",
+      "manifest_digest": "sha256:fbc44da7dca3d0c0fdf135e8c34c0ace7797eb28d723f55fd51ffc7234e0174f",
+      "entry_path": "stt-whisper-candidate.json"
+    },
+    "artifacts": [
+      {
+        "path": "stt-whisper-candidate.json",
+        "role": "model",
+        "kind": "python_pytorch_entry",
+        "digest": "sha256:ba7f2b7535c54c10774c1816ba72fa1a6965fe5b61c404249480b585e0307c7d",
+        "byte_size": 921
+      },
+      {
+        "path": "model/config.json",
+        "role": "auxiliary",
+        "kind": "auxiliary",
+        "digest": "sha256:b09b474b44f83c82461bf80785ac49359d50c96049bbfacbeca4d3b6e7f9a51e",
+        "byte_size": 61
+      },
+      {
+        "path": "model/model.bin",
+        "role": "weights",
+        "kind": "weights",
+        "digest": "sha256:0d9e69dca6185be37867b801e075e2961a49729c8828f6b89a2566766b25d1ee",
+        "byte_size": 78
+      },
+      {
+        "path": "model/preprocessor_config.json",
+        "role": "auxiliary",
+        "kind": "auxiliary",
+        "digest": "sha256:bcff0613928f664bb8a1a874ed660174458d51033e13ea3cd50457b078457616",
+        "byte_size": 62
+      },
+      {
+        "path": "model/tokenizer.json",
+        "role": "tokenizer",
+        "kind": "tokenizer",
+        "digest": "sha256:9f854f1497c4d81c43e2e2b0516c6e3db2e2dc45ccc837102fdc98877516854c",
+        "byte_size": 52
+      },
+      {
+        "path": "model/vocabulary.json",
+        "role": "tokenizer",
+        "kind": "tokenizer",
+        "digest": "sha256:0ed93b710e01d996eeff6df942c506a28fffa998c0526ffb5dc6430fe81b9910",
+        "byte_size": 65
+      }
+    ],
+    "entry": {
+      "backend_profile": "faster_whisper",
+      "model_directory": "model",
+      "device": "cuda",
+      "compute_type": "float16",
+      "languages": [
+        "en",
+        "ar"
+      ],
+      "sample_rate_hz": 16000
+    }
+  },
+  "device_facts": {
+    "source": "result_json.runtime",
+    "device": "cpu",
+    "compute_type_loaded": "float16",
+    "engine_versions": {
+      "faster_whisper": "0.0-fake",
+      "ctranslate2": "0.0-fake"
+    },
+    "cli_version": "0.3.1",
+    "protocol_version": "0.1",
+    "bundle_format_version": "0.1"
+  },
+  "lifecycle": {
+    "predecessor": {
+      "deployment_id": "qualify-stt-predecessor",
+      "bundle_digest": "sha256:eb2759a89b5a8661f16da06fd612cc94806a04a6308effe5b08d1cbaff38c6f5",
+      "phase": "active",
+      "wall_ms": 27,
+      "status": "ok"
+    },
+    "deploy": {
+      "deployment_id": "qualify-stt",
+      "transaction_id": "txn-2",
+      "phase": "active",
+      "bundle_digest": "sha256:fbc44da7dca3d0c0fdf135e8c34c0ace7797eb28d723f55fd51ffc7234e0174f",
+      "wall_ms": 33,
+      "status": "ok",
+      "failure": null
+    },
+    "status_after_deploy": {
+      "agent_state": "ready",
+      "last_error": null,
+      "active_deployment_id": "qualify-stt",
+      "active_backend": "python_pytorch",
+      "health_state": "ready",
+      "health_active_model_id": "qualify-stt",
+      "checks": {
+        "agent_state_as_expected": true,
+        "active_deployment_matches": true,
+        "active_backend_python_pytorch": true,
+        "serving_url_reported": true,
+        "health_ready": true,
+        "health_active_model_matches": true
+      }
+    },
+    "status_after_negatives": {
+      "agent_state": "degraded",
+      "last_error": {
+        "code": "oom_error",
+        "message": "the device is out of memory"
+      },
+      "active_deployment_id": "qualify-stt",
+      "active_backend": "python_pytorch",
+      "health_state": "ready",
+      "health_active_model_id": "qualify-stt",
+      "checks": {
+        "agent_state_as_expected": true,
+        "active_deployment_matches": true,
+        "active_backend_python_pytorch": true,
+        "serving_url_reported": true,
+        "health_ready": true,
+        "health_active_model_matches": true
+      }
+    },
+    "teardown": {
+      "method": "rollback",
+      "status": "ok",
+      "restored_deployment_id": "qualify-stt-predecessor",
+      "wall_ms": 28,
+      "reason": null
+    }
+  },
+  "memory": {
+    "sampler": {
+      "entry": "tools/validation/memory-sample.sh",
+      "interval_ms": 500,
+      "duration_ms": 1000
+    },
+    "processes": [
+      {
+        "pid": 101,
+        "role": "agent"
+      },
+      {
+        "pid": 102,
+        "role": "serving_worker"
+      },
+      {
+        "pid": 103,
+        "role": "python_sidecar"
+      }
+    ],
+    "windows": {
+      "predecessor_idle": {
+        "status": "measured",
+        "reason": null,
+        "phase": "warm-idle",
+        "observations": [
+          "memory/predecessor_idle-device_vram.jsonl",
+          "memory/predecessor_idle-guest_ram.jsonl"
+        ],
+        "report": {
+          "expected_ticks": 4,
+          "completed_ticks": 4,
+          "late_ticks": 0,
+          "complete": true
+        },
+        "domains": {
+          "device_vram": {
+            "consumed": {
+              "max_bytes": 4000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          },
+          "guest_ram": {
+            "consumed": {
+              "max_bytes": 6000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 101,
+                "role": "agent",
+                "peak": {
+                  "max_bytes": 1000000101,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 102,
+                "role": "serving_worker",
+                "peak": {
+                  "max_bytes": 1000000102,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          }
+        }
+      },
+      "candidate_warm_idle": {
+        "status": "measured",
+        "reason": null,
+        "phase": "warm-idle",
+        "observations": [
+          "memory/candidate_warm_idle-device_vram.jsonl",
+          "memory/candidate_warm_idle-guest_ram.jsonl"
+        ],
+        "report": {
+          "expected_ticks": 4,
+          "completed_ticks": 4,
+          "late_ticks": 0,
+          "complete": true
+        },
+        "domains": {
+          "device_vram": {
+            "consumed": {
+              "max_bytes": 4000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          },
+          "guest_ram": {
+            "consumed": {
+              "max_bytes": 6000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 101,
+                "role": "agent",
+                "peak": {
+                  "max_bytes": 1000000101,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 102,
+                "role": "serving_worker",
+                "peak": {
+                  "max_bytes": 1000000102,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          }
+        }
+      },
+      "candidate_load": {
+        "status": "measured",
+        "reason": null,
+        "phase": "load",
+        "observations": [
+          "memory/candidate_load-device_vram.jsonl",
+          "memory/candidate_load-guest_ram.jsonl"
+        ],
+        "report": {
+          "expected_ticks": 4,
+          "completed_ticks": 4,
+          "late_ticks": 0,
+          "complete": true
+        },
+        "domains": {
+          "device_vram": {
+            "consumed": {
+              "max_bytes": 4000000001,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          },
+          "guest_ram": {
+            "consumed": {
+              "max_bytes": 6000000001,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 101,
+                "role": "agent",
+                "peak": {
+                  "max_bytes": 1000000101,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 102,
+                "role": "serving_worker",
+                "peak": {
+                  "max_bytes": 1000000102,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          }
+        }
+      },
+      "after_teardown": {
+        "status": "measured",
+        "reason": null,
+        "phase": "warm-idle",
+        "observations": [
+          "memory/after_teardown-device_vram.jsonl",
+          "memory/after_teardown-guest_ram.jsonl"
+        ],
+        "report": {
+          "expected_ticks": 4,
+          "completed_ticks": 4,
+          "late_ticks": 0,
+          "complete": true
+        },
+        "domains": {
+          "device_vram": {
+            "consumed": {
+              "max_bytes": 4000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          },
+          "guest_ram": {
+            "consumed": {
+              "max_bytes": 6000000000,
+              "available_samples": 2
+            },
+            "processes": [
+              {
+                "pid": 101,
+                "role": "agent",
+                "peak": {
+                  "max_bytes": 1000000101,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 102,
+                "role": "serving_worker",
+                "peak": {
+                  "max_bytes": 1000000102,
+                  "available_samples": 2
+                }
+              },
+              {
+                "pid": 103,
+                "role": "python_sidecar",
+                "peak": {
+                  "max_bytes": 1000000103,
+                  "available_samples": 2
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "fixtures": [
+    {
+      "id": "en-clean-16k-01",
+      "stratum": "clean16k",
+      "language": "en",
+      "voice": null,
+      "digest": "sha256:60c1a231c2ff623c79e6c62ef1352c83b21140a958f976b126232c3ee64e7e4f",
+      "derived_from": null,
+      "derivation": null,
+      "input": {
+        "sample_rate_hz": 16000,
+        "samples": 24000,
+        "duration_us": 1500000,
+        "resampled_from_hz": null,
+        "resampler": null,
+        "text_bytes": null,
+        "text_chars": null
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104696,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-clean-16k-01-timing-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104183,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-clean-16k-01-timing-1.transcript.json"
+          }
+        },
+        {
+          "iteration": 0,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 102247,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-clean-16k-01-load-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103965,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-clean-16k-01-load-1.transcript.json"
+          }
+        }
+      ],
+      "summary": {
+        "ok_count": 4,
+        "failed_count": 0,
+        "exchange_wall_us": {
+          "count": 4,
+          "min": 102247,
+          "median": 103965,
+          "max": 104696
+        },
+        "rtf": {
+          "count": 4,
+          "min": 0.1,
+          "median": 0.1,
+          "max": 0.1
+        }
+      }
+    },
+    {
+      "id": "ar-clean-16k-01",
+      "stratum": "clean16k",
+      "language": "ar",
+      "voice": null,
+      "digest": "sha256:5c13a44dba69b31a3bbdcfeb2e773869831d1fb7eb6e675a15723431fa5c724e",
+      "derived_from": null,
+      "derivation": null,
+      "input": {
+        "sample_rate_hz": 16000,
+        "samples": 24000,
+        "duration_us": 1500000,
+        "resampled_from_hz": null,
+        "resampler": null,
+        "text_bytes": null,
+        "text_chars": null
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 102859,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-clean-16k-01-timing-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104068,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-clean-16k-01-timing-1.transcript.json"
+          }
+        },
+        {
+          "iteration": 0,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103875,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-clean-16k-01-load-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103786,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-clean-16k-01-load-1.transcript.json"
+          }
+        }
+      ],
+      "summary": {
+        "ok_count": 4,
+        "failed_count": 0,
+        "exchange_wall_us": {
+          "count": 4,
+          "min": 102859,
+          "median": 103786,
+          "max": 104068
+        },
+        "rtf": {
+          "count": 4,
+          "min": 0.1,
+          "median": 0.1,
+          "max": 0.1
+        }
+      }
+    },
+    {
+      "id": "en-noisy-16k-01",
+      "stratum": "noisy16k",
+      "language": "en",
+      "voice": null,
+      "digest": "sha256:0a77ff47acddff8230cf9b6d41c82450480327f54b95d88bbb9e1145b53125dd",
+      "derived_from": "en-clean-16k-01",
+      "derivation": {
+        "kind": "seeded_noise_mix",
+        "seed": 2026093001,
+        "snr_db": 10
+      },
+      "input": {
+        "sample_rate_hz": 16000,
+        "samples": 24000,
+        "duration_us": 1500000,
+        "resampled_from_hz": null,
+        "resampler": null,
+        "text_bytes": null,
+        "text_chars": null
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 101227,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-noisy-16k-01-timing-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103957,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-noisy-16k-01-timing-1.transcript.json"
+          }
+        },
+        {
+          "iteration": 0,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104122,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-noisy-16k-01-load-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103789,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-noisy-16k-01-load-1.transcript.json"
+          }
+        }
+      ],
+      "summary": {
+        "ok_count": 4,
+        "failed_count": 0,
+        "exchange_wall_us": {
+          "count": 4,
+          "min": 101227,
+          "median": 103789,
+          "max": 104122
+        },
+        "rtf": {
+          "count": 4,
+          "min": 0.1,
+          "median": 0.1,
+          "max": 0.1
+        }
+      }
+    },
+    {
+      "id": "ar-noisy-16k-01",
+      "stratum": "noisy16k",
+      "language": "ar",
+      "voice": null,
+      "digest": "sha256:41eaba2424dec729a4216a1ca2e1a83401ea2f6581675288e2a0460283b8559e",
+      "derived_from": "ar-clean-16k-01",
+      "derivation": {
+        "kind": "seeded_noise_mix",
+        "seed": 2026093002,
+        "snr_db": 10
+      },
+      "input": {
+        "sample_rate_hz": 16000,
+        "samples": 24000,
+        "duration_us": 1500000,
+        "resampled_from_hz": null,
+        "resampler": null,
+        "text_bytes": null,
+        "text_chars": null
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 102295,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-noisy-16k-01-timing-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103833,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-noisy-16k-01-timing-1.transcript.json"
+          }
+        },
+        {
+          "iteration": 0,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104265,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-noisy-16k-01-load-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104242,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-noisy-16k-01-load-1.transcript.json"
+          }
+        }
+      ],
+      "summary": {
+        "ok_count": 4,
+        "failed_count": 0,
+        "exchange_wall_us": {
+          "count": 4,
+          "min": 102295,
+          "median": 103833,
+          "max": 104265
+        },
+        "rtf": {
+          "count": 4,
+          "min": 0.1,
+          "median": 0.1,
+          "max": 0.1
+        }
+      }
+    },
+    {
+      "id": "en-telephony-8k-01",
+      "stratum": "telephony8k",
+      "language": "en",
+      "voice": null,
+      "digest": "sha256:43bb7cd4aac2e00eb1a18e0a10d2a03136c7853a915030ed0ffdf2c43e6a3f33",
+      "derived_from": "en-clean-16k-01",
+      "derivation": {
+        "kind": "telephony_8k_ulaw"
+      },
+      "input": {
+        "sample_rate_hz": 16000,
+        "samples": 24000,
+        "duration_us": 1500000,
+        "resampled_from_hz": 8000,
+        "resampler": "tp-fir63-blackman-q15-v1",
+        "text_bytes": null,
+        "text_chars": null
+      },
+      "samples": [
+        {
+          "iteration": 0,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103923,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-telephony-8k-01-timing-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "timing",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 102780,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-telephony-8k-01-timing-1.transcript.json"
+          }
+        },
+        {
+          "iteration": 0,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 103916,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-telephony-8k-01-load-0.transcript.json"
+          }
+        },
+        {
+          "iteration": 1,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 104139,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-telephony-8k-01-load-1.transcript.json"
+          }
+        }
+      ],
+      "summary": {
+        "ok_count": 4,
+        "failed_count": 0,
+        "exchange_wall_us": {
+          "count": 4,
+          "min": 102780,
+          "median": 103916,
+          "max": 104139
+        },
+        "rtf": {
+          "count": 4,
+          "min": 0.1,
+          "median": 0.1,
+          "max": 0.1
+        }
+      }
+    }
+  ],
+  "negatives": [
+    {
+      "case": "malformed_audio_dtype",
+      "description": "audio_frames sent as float32 instead of int16",
+      "disposition": "must_match",
+      "expected_codes": [
+        "shape_mismatch"
+      ],
+      "observed": {
+        "code": "shape_mismatch",
+        "message": "audio_frames must be a one-dimensional int16 tensor of its payload"
+      },
+      "observed_outcome": null,
+      "status": "matched",
+      "reason": null
+    },
+    {
+      "case": "malformed_text_utf8",
+      "description": "text_utf8 carrying a byte that is not UTF-8",
+      "disposition": "must_match",
+      "expected_codes": [
+        "config_invalid"
+      ],
+      "observed": {
+        "code": "config_invalid",
+        "message": "`text_utf8` is not valid UTF-8"
+      },
+      "observed_outcome": null,
+      "status": "matched",
+      "reason": null
+    },
+    {
+      "case": "unsupported_language",
+      "description": "a language code the entry does not declare (zz)",
+      "disposition": "must_match",
+      "expected_codes": [
+        "unsupported"
+      ],
+      "observed": {
+        "code": "unsupported",
+        "message": "the request's language is not declared"
+      },
+      "observed_outcome": null,
+      "status": "matched",
+      "reason": null
+    },
+    {
+      "case": "corrupt_artifact_digest",
+      "description": "a bundle whose largest non-entry artifact differs by one byte from its manifest digest",
+      "disposition": "must_match",
+      "expected_codes": [
+        "load_failed"
+      ],
+      "observed": {
+        "code": "load_failed",
+        "message": "bundle integrity: digest mismatch"
+      },
+      "observed_outcome": "failed",
+      "status": "matched",
+      "reason": null
+    },
+    {
+      "case": "cancel_during_request",
+      "description": "submit one request through the asynchronous policy route and cancel it; the Python-backed worker refuses that route today, so the outcome is recorded, not judged",
+      "disposition": "record_only",
+      "expected_codes": [],
+      "observed": {
+        "code": "unsupported",
+        "message": "async policy route unsupported"
+      },
+      "observed_outcome": "submit http 501",
+      "status": "recorded",
+      "reason": null
+    },
+    {
+      "case": "oom_at_load",
+      "description": "deploy the candidate again while a ballast process holds device memory",
+      "disposition": "must_match",
+      "expected_codes": [
+        "oom_error"
+      ],
+      "observed": {
+        "code": "oom_error",
+        "message": "the device is out of memory"
+      },
+      "observed_outcome": "failed",
+      "status": "matched",
+      "reason": null
+    }
+  ],
+  "result": {
+    "status": "pass",
+    "reasons": []
+  }
+}
