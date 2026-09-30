@@ -1,0 +1,157 @@
+[
+  {
+    "name": "three_misses_then_ten_seconds",
+    "samples": [
+      {
+        "at_ms": 0,
+        "reply": true,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 1000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 2000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 3000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 4000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 5000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 6000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 7000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 8000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 9000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 10000,
+        "reply": false,
+        "state": "failed"
+      }
+    ]
+  },
+  {
+    "name": "reply_resets_misses_and_failure_is_terminal",
+    "samples": [
+      {
+        "at_ms": 0,
+        "reply": true,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 1000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 2000,
+        "reply": true,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 3000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 4000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 5000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 6000,
+        "reply": true,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 7000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 8000,
+        "reply": false,
+        "state": "in_contact"
+      },
+      {
+        "at_ms": 9000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 10000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 11000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 12000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 13000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 14000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 15000,
+        "reply": false,
+        "state": "out_of_contact"
+      },
+      {
+        "at_ms": 16000,
+        "reply": false,
+        "state": "failed"
+      },
+      {
+        "at_ms": 17000,
+        "reply": true,
+        "state": "failed"
+      }
+    ]
+  }
+]
