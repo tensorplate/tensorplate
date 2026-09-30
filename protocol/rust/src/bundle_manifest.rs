@@ -632,6 +632,8 @@ pub enum BundleManifestError {
     EmptyVersion,
     #[error("BundleManifest.format_version must follow MAJOR.MINOR form")]
     InvalidFormatVersion,
+    #[error("BundleManifest.format_version `{0}` is unsupported")]
+    UnsupportedFormatVersion(String),
     #[error("BundleManifest.backend_hint must be non-empty")]
     EmptyBackendHint,
     #[error(
@@ -816,6 +818,11 @@ impl BundleManifest {
         }
         if !looks_like_version_pair(&self.format_version) {
             return Err(BundleManifestError::InvalidFormatVersion);
+        }
+        if !crate::SUPPORTED_BUNDLE_FORMAT_VERSIONS.contains(&self.format_version.as_str()) {
+            return Err(BundleManifestError::UnsupportedFormatVersion(
+                self.format_version.clone(),
+            ));
         }
         if self.profile.is_some() != (self.format_version == PROFILE_FORMAT_VERSION) {
             return Err(BundleManifestError::ProfileFormatMismatch);

@@ -275,12 +275,9 @@ fn parse_error_to_agent_error(err: ParseError) -> AgentError {
         ParseError::UnsupportedSchemaVersion { got, expected } => AgentError::BundleManifest(
             format!("unsupported manifest schema_version `{got}` (expected `{expected}`)").into(),
         ),
-        ParseError::UnsupportedFormatVersion {
-            got,
-            supported_major,
-        } => AgentError::BundleManifest(format!(
-            "unsupported bundle format_version `{got}` (runtime supports major {supported_major})"
-        ).into()),
+        error @ ParseError::UnsupportedFormatVersion { .. } => {
+            AgentError::BundleManifest(error.to_string().into())
+        }
         ParseError::ManifestSemantics(e) => AgentError::BundleManifest(e.into()),
         ParseError::UnsafeArtifactPath { relative_path } => AgentError::BundleManifest(format!(
             "unsafe artifact path `{relative_path}` (absolute, contains `..`, or contains backslash)"

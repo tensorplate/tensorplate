@@ -192,6 +192,9 @@ pub const BUNDLE_FORMAT_VERSION_MINOR: u32 = 1;
 /// Model bundle format version string in `MAJOR.MINOR` form.
 pub const BUNDLE_FORMAT_VERSION: &str = "0.1";
 
+/// Exact on-disk formats accepted by bundle and deployment descriptor readers.
+pub const SUPPORTED_BUNDLE_FORMAT_VERSIONS: &[&str] = &["0.1", "0.2"];
+
 /// Crate-level marker used by the v0.1.0 scaffolding tests. Retained for
 /// backwards compatibility with the V01-E01 smoke test; new code should
 /// not depend on it.
