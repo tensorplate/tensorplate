@@ -16,7 +16,10 @@ use crate::backend_descriptor::ComputeType;
 use crate::bundle_manifest::BundleArtifact;
 use crate::json_numbers;
 use crate::member_quota::MAX_MEMBER_SESSIONS;
-use crate::memory_budget::{MemoryBudgetBreakdown, MEMORY_BUDGET_LINE_MAX_BYTES};
+use crate::memory_budget::{
+    MemoryBudgetBreakdown, MEMORY_BUDGET_LINE_MAX_BYTES, MEMORY_BUDGET_LINE_NAMES,
+};
+use crate::model_spec::{ModelClass, PrecisionHint};
 use crate::platform_memory_profile::BudgetDomainName;
 use crate::serde_shape::{
     deserialize_map_only, deserialize_some, deserialize_some_map_only, deserialize_vec_map_only,
@@ -80,10 +83,56 @@ const TTS_MAX_SEGMENT_AUDIO_MS: u64 = 30_000;
 const TTS_MAX_SYNTHESIS_TEXT_BYTES: u64 = 16_384;
 const TTS_MAX_SYNTHESIS_AUDIO_MS: u64 = 120_000;
 
+/// Stable manifest-local rejection codes, also carried in agent error context.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BundleRuleCode {
+    ModelBlock,
+    ReservedClass,
+    StreamingState,
+    BudgetLine,
+    CallerExecution,
+    ClassPayload,
+    RequiredField,
+    AmbiguousSelector,
+    PrecisionConflict,
+    ExplicitPrecision,
+}
+
+impl BundleRuleCode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelBlock => "bundle_r1_model_block",
+            Self::ReservedClass => "bundle_r2_reserved_class",
+            Self::StreamingState => "bundle_r3_streaming_state",
+            Self::BudgetLine => "bundle_r7_budget_line",
+            Self::CallerExecution => "bundle_r10_caller_execution",
+            Self::ClassPayload => "bundle_r11_class_payload",
+            Self::RequiredField => "bundle_r12_required_field",
+            Self::AmbiguousSelector => "bundle_r12_ambiguous_selector",
+            Self::PrecisionConflict => "bundle_r12_precision_conflict",
+            Self::ExplicitPrecision => "bundle_r12_explicit_precision",
+        }
+    }
+}
+
+impl fmt::Display for BundleRuleCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Typed failures decoding the format 0.2 fields of a manifest. Every
 /// variant names the field it concerns.
 #[derive(Debug, thiserror::Error)]
 pub enum BundleProfileError {
+    /// A manifest-local rule failed; the code is independent of diagnostic text.
+    #[error("{code}: format 0.2 `{field}`: {reason}")]
+    Rule {
+        code: BundleRuleCode,
+        field: String,
+        reason: String,
+    },
     /// The field has the wrong JSON shape or type, an unknown key, or a
     /// missing required key.
     #[error("format 0.2 `{field}` is malformed: {detail}")]
@@ -105,6 +154,112 @@ pub enum BundleProfileError {
     /// The field decodes but its value is not allowed.
     #[error("format 0.2 `{field}`: {reason}")]
     Invalid { field: String, reason: String },
+}
+
+impl BundleProfileError {
+    #[must_use]
+    pub fn rule_code(&self) -> Option<BundleRuleCode> {
+        match self {
+            Self::Rule { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn rule(
+    code: BundleRuleCode,
+    field: &str,
+    reason: impl Into<String>,
+) -> BundleProfileError {
+    BundleProfileError::Rule {
+        code,
+        field: field.into(),
+        reason: reason.into(),
+    }
+}
+
+pub(crate) fn required(field: &str, present: bool) -> Result<(), BundleProfileError> {
+    if present {
+        Ok(())
+    } else {
+        Err(rule(
+            BundleRuleCode::RequiredField,
+            field,
+            "is required by this format 0.2 profile",
+        ))
+    }
+}
+
+pub(crate) fn check_model_class(class: ModelClass) -> Result<(), BundleProfileError> {
+    if matches!(
+        class,
+        ModelClass::Language | ModelClass::Embedding | ModelClass::Custom
+    ) {
+        return Err(rule(
+            BundleRuleCode::ReservedClass,
+            "model_class",
+            format!(
+                "`{}` is reserved and cannot deploy under format 0.2",
+                class.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_speech_precision(
+    precision: PrecisionHint,
+    compute: ComputeType,
+) -> Result<(), BundleProfileError> {
+    if precision == PrecisionHint::Auto {
+        return Err(rule(
+            BundleRuleCode::ExplicitPrecision,
+            "precision_hint",
+            "speech requires explicit precision, including during qualification",
+        ));
+    }
+    let compatible = matches!(
+        (precision, compute),
+        (PrecisionHint::Fp32, ComputeType::Float32)
+            | (PrecisionHint::Fp16, ComputeType::Float16)
+            | (PrecisionHint::Bfloat16, ComputeType::Bfloat16)
+            | (
+                PrecisionHint::Int8,
+                ComputeType::Int8
+                    | ComputeType::Int8Float32
+                    | ComputeType::Int8Float16
+                    | ComputeType::Int8Bfloat16
+            )
+    );
+    if !compatible {
+        return Err(rule(
+            BundleRuleCode::PrecisionConflict,
+            "compute_type",
+            "does not match precision_hint",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_streaming_state(
+    speech: &SpeechContract,
+    budget: Option<&MemoryBudgetByDomain>,
+) -> Result<(), BundleProfileError> {
+    if speech.serving_mode == SpeechServingMode::Streaming
+        && !budget.is_some_and(|b| {
+            [&b.shared_pool, &b.guest_ram, &b.device_vram]
+                .into_iter()
+                .flatten()
+                .any(|d| d.per_session_state_bytes > 0)
+        })
+    {
+        return Err(rule(
+            BundleRuleCode::StreamingState,
+            "memory_budget_by_domain",
+            "streaming speech requires nonzero per_session_state_bytes",
+        ));
+    }
+    Ok(())
 }
 
 /// Requested support claim. A bundle cannot grant itself one; registry
@@ -306,9 +461,7 @@ impl SpeechContract {
     }
 }
 
-/// The format 0.2 fields of one manifest. Absent keys stay `None` or
-/// empty; which of them a deployable bundle must declare is a manifest
-/// rule, not a decoding one.
+/// The normalized format 0.2 fields of one manifest.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BundleProfile {
     pub runner_profile: Option<String>,
@@ -333,8 +486,10 @@ impl BundleProfile {
     /// See [`BundleProfileError`].
     pub fn from_manifest_text(raw: &str) -> Result<Self, BundleProfileError> {
         let mut profile = Self::default();
+        let mut capabilities_declared = false;
         for (key, value) in object_members(raw, "manifest")? {
             match key.as_str() {
+                "capability_requirements" => capabilities_declared = true,
                 "runner_profile" => {
                     profile.runner_profile = Some(identifier(&key, value, true)?);
                 }
@@ -348,6 +503,7 @@ impl BundleProfile {
                     profile.memory_budget_by_domain = Some(budget_by_domain(value)?);
                 }
                 "memory_budget_breakdown_bytes" => {
+                    check_budget_keys(&key, value)?;
                     profile.memory_budget_breakdown_bytes = Some(decode_object(&key, value)?);
                 }
                 "max_concurrent_sessions" => {
@@ -365,13 +521,30 @@ impl BundleProfile {
                                 format!("`{block}` is not a model class block"),
                             ));
                         }
+                        if text.trim() == "null" {
+                            return Err(rule(
+                                BundleRuleCode::ModelBlock,
+                                "model_blocks",
+                                "a declared class block must be an object, not null",
+                            ));
+                        }
                         if block == "speech" {
                             profile.speech = Some(speech_contract(text)?);
+                        }
+                        if block == "vla"
+                            && object_members(text, "model_blocks.vla")?
+                                .iter()
+                                .any(|(key, _)| key == "serving_mode")
+                        {
+                            return Err(rule(BundleRuleCode::ClassPayload, "model_blocks.vla.serving_mode", "VLA serving modes are reserved; omit the selector for the supported tensor payload"));
                         }
                     }
                 }
                 _ => {}
             }
+        }
+        if profile.support_level == Some(SupportLevel::Production) {
+            required("capability_requirements", capabilities_declared)?;
         }
         if let (Some(by_domain), Some(declared)) = (
             profile.memory_budget_by_domain.as_ref(),
@@ -696,6 +869,19 @@ fn observable_by_default() -> bool {
 
 fn pipeline_stages(raw: &str) -> Result<Vec<PipelineStage>, BundleProfileError> {
     const FIELD: &str = "pipeline_stages";
+    let stages: Vec<serde_json::Value> =
+        serde_json::from_str(raw).map_err(|e| malformed(FIELD, e))?;
+    for stage in &stages {
+        if stage.get("ownership").and_then(serde_json::Value::as_str) == Some("caller_owned") {
+            if let Some(key) = stage.as_object().and_then(|o| {
+                o.keys().find(|k| {
+                    !["stage", "ownership", "observable", "interface"].contains(&k.as_str())
+                })
+            }) {
+                return Err(rule(BundleRuleCode::CallerExecution, FIELD, format!("caller-owned stage cannot declare `{key}`; only interface/span identity is allowed")));
+            }
+        }
+    }
     let text = canonical(FIELD, raw)?;
     let mut deserializer = serde_json::Deserializer::from_str(&text);
     let wires: Vec<PipelineStageWire> =
@@ -774,6 +960,11 @@ struct BudgetByDomainWire {
 
 fn budget_by_domain(raw: &str) -> Result<MemoryBudgetByDomain, BundleProfileError> {
     const FIELD: &str = "memory_budget_by_domain";
+    for (domain, text) in object_members(raw, FIELD)? {
+        if ["shared_pool", "guest_ram", "device_vram"].contains(&domain.as_str()) {
+            check_budget_keys(&format!("{FIELD}.{domain}"), text)?;
+        }
+    }
     let wire: BudgetByDomainWire = decode_object(FIELD, raw)?;
     let by_domain = MemoryBudgetByDomain {
         shared_pool: wire.shared_pool,
@@ -784,6 +975,19 @@ fn budget_by_domain(raw: &str) -> Result<MemoryBudgetByDomain, BundleProfileErro
         return Err(invalid(FIELD, "must declare at least one domain"));
     }
     Ok(by_domain)
+}
+
+fn check_budget_keys(field: &str, text: &str) -> Result<(), BundleProfileError> {
+    for (key, _) in object_members(text, field)? {
+        if !MEMORY_BUDGET_LINE_NAMES.contains(&key.as_str()) {
+            return Err(rule(
+                BundleRuleCode::BudgetLine,
+                field,
+                format!("`{key}` is not a canonical budget line"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn lines(b: &MemoryBudgetBreakdown) -> [u64; 11] {
@@ -883,7 +1087,42 @@ struct SpeechContractWire {
 
 const SPEECH: &str = "model_blocks.speech";
 
+fn check_speech_required_fields(raw: &str) -> Result<(), BundleProfileError> {
+    let fields = object_members(raw, SPEECH)?;
+    for key in [
+        "task",
+        "serving_mode",
+        "languages",
+        "algorithm_profile",
+        "quality_profile_digest",
+        "benchmark_profile_digest",
+    ] {
+        required(
+            &format!("{SPEECH}.{key}"),
+            fields.iter().any(|(name, _)| name == key),
+        )?;
+    }
+    let chunking = fields.iter().find(|(key, _)| key == "chunking");
+    if chunking.is_none() || chunking.is_some_and(|(_, text)| text.trim() == "null") {
+        let streaming = fields.iter().any(|(key, text)| {
+            key == "serving_mode"
+                && serde_json::from_str::<String>(text).ok().as_deref() == Some("streaming")
+        });
+        return Err(rule(
+            if streaming {
+                BundleRuleCode::StreamingState
+            } else {
+                BundleRuleCode::RequiredField
+            },
+            "model_blocks.speech.chunking",
+            "speech requires a chunking declaration",
+        ));
+    }
+    Ok(())
+}
+
 fn speech_contract(raw: &str) -> Result<SpeechContract, BundleProfileError> {
+    check_speech_required_fields(raw)?;
     let wire: SpeechContractWire = decode_object(SPEECH, raw)?;
     let task = match wire.task.as_str() {
         "stt" => SpeechTask::Stt,
@@ -1009,7 +1248,8 @@ fn task_declarations(
                 return Err(invalid(SPEECH, "a TTS contract declares no input audio"));
             }
             let voices = voices.ok_or_else(|| {
-                invalid(
+                rule(
+                    BundleRuleCode::RequiredField,
                     "model_blocks.speech.voices",
                     "a TTS contract names its voices",
                 )
@@ -1032,7 +1272,13 @@ fn audio_formats(
     declared: Option<Vec<AudioFormatWire>>,
     supported: &[AudioFormat],
 ) -> Result<Vec<AudioFormat>, BundleProfileError> {
-    let declared = declared.ok_or_else(|| invalid(field, "is required for this task"))?;
+    let declared = declared.ok_or_else(|| {
+        rule(
+            BundleRuleCode::RequiredField,
+            field,
+            "is required for this task",
+        )
+    })?;
     if declared.is_empty() {
         return Err(invalid(field, "must list at least one format"));
     }
@@ -1392,7 +1638,10 @@ mod tests {
         }
         let raw = r#"{"memory_budget_breakdown_bytes":{"model_weights_bytes":1,"model_weights_bytes":2}}"#;
         let err = BundleProfile::from_manifest_text(raw).expect_err("duplicate line");
-        assert!(err.to_string().contains("duplicate field"), "{err}");
+        assert!(
+            matches!(err, BundleProfileError::DuplicateKey { .. }),
+            "{err}"
+        );
     }
 
     #[test]

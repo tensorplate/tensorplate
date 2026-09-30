@@ -35,3 +35,14 @@ the repository's Apache-2.0 license:
 
 Regenerate artifact digests with `tensorplate-bundle-tool` as described in
 the [format 0.1 README](../v0_1/README.md#regenerating-digests).
+
+## Manifest-local rule pairs
+
+The `valid_r*/` and `invalid_r*/` directories each carry a complete manifest,
+a placeholder artifact and `expected.json`. A null `rule` means acceptance;
+a string names the exact typed refusal. `bundle_conformance.rs` replays every
+pair; the agent's deploy failure test also checks every refusal before staging,
+worker contact and active-deployment changes. These are authored contract
+fixtures derived from the STT schema fixture, not recordings or measurements.
+The vision and VLA examples exercise supported payload shapes. The existing
+format 0.1 fixtures remain unchanged.

@@ -464,3 +464,382 @@ fn fixture_digests_are_deterministic_under_parser() {
     let b = parse_bundle(&root).expect("b");
     assert_eq!(a.manifest_digest, b.manifest_digest);
 }
+
+fn rules_root() -> PathBuf {
+    fixtures_root().parent().unwrap().join("v0_2")
+}
+
+fn rule_manifest(fixture: &str) -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(rules_root().join(fixture).join("manifest.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+fn parse_rule_change(
+    fixture: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> Result<tensorplate_protocol::BundleDescriptor, ParseError> {
+    let source = rules_root().join(fixture);
+    let copy = tempfile::tempdir().unwrap();
+    let mut manifest = rule_manifest(fixture);
+    for artifact in manifest["artifacts"].as_array().unwrap() {
+        let path = artifact["path"].as_str().unwrap();
+        let target = copy.path().join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(source.join(path), target).unwrap();
+    }
+    edit(&mut manifest);
+    std::fs::write(copy.path().join("manifest.json"), manifest.to_string()).unwrap();
+    parse_bundle(copy.path())
+}
+
+fn assert_rule(
+    result: Result<tensorplate_protocol::BundleDescriptor, ParseError>,
+    expected: tensorplate_protocol::BundleRuleCode,
+) {
+    let err = result.expect_err("rule must refuse");
+    match err {
+        ParseError::ManifestSemantics(error) => {
+            assert_eq!(error.rule_code(), Some(expected), "{error}");
+        }
+        other => panic!("expected {expected}, got {other}"),
+    }
+}
+
+#[test]
+fn manifest_rule_fixture_pairs_retain_typed_reasons() {
+    let read = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let budget = read(&repo.join("config/schemas/memory_budget_breakdown.json"));
+    let mut options = jsonschema::JSONSchema::options();
+    options.with_document(budget["$id"].as_str().unwrap().to_owned(), budget.clone());
+    let validator = options
+        .compile(&read(&repo.join("protocol/schemas/bundle_manifest.json")))
+        .unwrap();
+    let mut counts = [0, 0];
+    for entry in std::fs::read_dir(rules_root()).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.join("expected.json").is_file() {
+            continue;
+        }
+        let expected: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path.join("expected.json")).unwrap())
+                .unwrap();
+        match expected["rule"].as_str() {
+            None => {
+                assert!(
+                    validator.is_valid(&read(&path.join("manifest.json"))),
+                    "{}",
+                    path.display()
+                );
+                parse_bundle(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                counts[0] += 1;
+            }
+            Some(code) => {
+                match parse_bundle(&path).expect_err("reject fixture") {
+                    ParseError::ManifestSemantics(e) => assert_eq!(
+                        e.rule_code()
+                            .map(tensorplate_protocol::BundleRuleCode::as_str),
+                        Some(code),
+                        "{}: {e}",
+                        path.display()
+                    ),
+                    e => panic!("{}: expected {code}, got {e}", path.display()),
+                }
+                counts[1] += 1;
+            }
+        }
+    }
+    assert_eq!(counts, [11, 11]);
+}
+
+#[test]
+fn manifest_rules_require_fields_only_in_their_applicable_profiles() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    for key in [
+        "support_level",
+        "hardware_compatibility",
+        "runner_profile",
+        "compute_type",
+        "pipeline_stages",
+        "memory_budget_breakdown_bytes",
+        "max_concurrent_sessions",
+        "degraded_profile",
+        "runtime_compatibility",
+    ] {
+        assert_rule(
+            parse_rule_change("speech_stt_streaming", |m| {
+                m.as_object_mut().unwrap().remove(key);
+            }),
+            Rule::RequiredField,
+        );
+    }
+    assert_rule(
+        parse_rule_change("speech_stt_streaming", |m| {
+            m.as_object_mut().unwrap().remove("memory_budget_by_domain");
+        }),
+        Rule::StreamingState,
+    );
+    for version in ["0.2.1", "0.3", "0.3.bad", "bad", "0.3.0.1"] {
+        assert_rule(
+            parse_rule_change("speech_stt_streaming", |m| {
+                m["runtime_compatibility"]["min_runtime_version"] = version.into();
+            }),
+            Rule::RequiredField,
+        );
+    }
+    for version in ["0.3.0", "0.3.1", "0.4.0", "1.0.0"] {
+        parse_rule_change("speech_stt_streaming", |m| {
+            m["runtime_compatibility"]["min_runtime_version"] = version.into();
+        })
+        .unwrap();
+    }
+    for class in ["language", "embedding", "custom"] {
+        assert_rule(
+            parse_rule_change("valid_r11_vla_payload", |m| {
+                m["model_class"] = class.into();
+                m["model_blocks"] = serde_json::json!({class: {}});
+            }),
+            Rule::ReservedClass,
+        );
+    }
+    for blocks in [
+        serde_json::json!({}),
+        serde_json::json!({"vision": {}}),
+        serde_json::json!({"vla": {}, "language": {}}),
+    ] {
+        assert_rule(
+            parse_rule_change("valid_r11_vla_payload", |m| m["model_blocks"] = blocks),
+            Rule::ModelBlock,
+        );
+    }
+    for key in [
+        "profile_id",
+        "backend_profile",
+        "default_backend",
+        "serving_mode",
+    ] {
+        assert_rule(
+            parse_rule_change("speech_stt_streaming", |m| m[key] = serde_json::Value::Null),
+            Rule::AmbiguousSelector,
+        );
+    }
+    for mode in [
+        "chunked_policy",
+        "autoregressive_action_tokens",
+        "flow_action_chunk",
+        "hybrid_policy",
+        "unknown",
+    ] {
+        assert_rule(
+            parse_rule_change("valid_r11_vla_payload", |m| {
+                m["model_blocks"]["vla"]["serving_mode"] = mode.into();
+            }),
+            Rule::ClassPayload,
+        );
+    }
+    parse_rule_change("valid_r11_vla_payload", |m| {
+        m.as_object_mut()
+            .unwrap()
+            .remove("memory_budget_breakdown_bytes");
+    })
+    .unwrap();
+    assert_rule(
+        parse_rule_change("valid_r11_vla_payload", |m| {
+            m["support_level"] = "production".into();
+            m["capability_requirements"] = serde_json::json!({});
+            m.as_object_mut()
+                .unwrap()
+                .remove("memory_budget_breakdown_bytes");
+        }),
+        Rule::RequiredField,
+    );
+}
+
+#[test]
+fn manifest_rules_preserve_legacy_class_and_profile_behavior() {
+    for class in ["language", "embedding", "custom", "vla", "vision"] {
+        parse_rule_change("valid_r11_vla_payload", |m| {
+            m["format_version"] = "0.1".into();
+            m["model_class"] = class.into();
+            m["model_blocks"] = serde_json::json!({class: {}});
+            for key in [
+                "support_level",
+                "hardware_compatibility",
+                "memory_budget_breakdown_bytes",
+            ] {
+                m.as_object_mut().unwrap().remove(key);
+            }
+            m["profile_id"] = "legacy".into();
+            m["runner_profile"] = "future".into();
+        })
+        .unwrap();
+    }
+    parse_rule_change("valid_r11_vla_payload", |m| {
+        m["format_version"] = "0.1".into();
+        m["model_blocks"]["language"] = serde_json::json!({});
+    })
+    .unwrap();
+}
+
+#[test]
+fn speech_precision_pairs_and_streaming_budget_boundaries() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    let pairs = [
+        ("float32", "fp32"),
+        ("float16", "fp16"),
+        ("bfloat16", "bfloat16"),
+        ("int8", "int8"),
+        ("int8_float16", "int8"),
+        ("int8_float32", "int8"),
+        ("int8_bfloat16", "int8"),
+    ];
+    for (compute, precision) in pairs {
+        for hint in ["auto", "fp16", "fp32", "bfloat16", "int8", "int4"] {
+            let result = parse_rule_change("speech_stt_streaming", |m| {
+                m["compute_type"] = compute.into();
+                m["precision_hint"] = hint.into();
+            });
+            if hint == precision {
+                result.unwrap();
+            } else {
+                assert_rule(
+                    result,
+                    if hint == "auto" {
+                        Rule::ExplicitPrecision
+                    } else {
+                        Rule::PrecisionConflict
+                    },
+                );
+            }
+        }
+    }
+    assert_rule(
+        parse_rule_change("speech_stt_streaming", |m| {
+            m["compute_type"] = "int16".into();
+        }),
+        Rule::PrecisionConflict,
+    );
+    assert_rule(
+        parse_rule_change("speech_stt_streaming", |m| {
+            m.as_object_mut().unwrap().remove("precision_hint");
+        }),
+        Rule::ExplicitPrecision,
+    );
+    parse_rule_change("invalid_r3_session_state", |m| {
+        m["model_blocks"]["speech"]["serving_mode"] = "batch".into();
+    })
+    .unwrap();
+    parse_rule_change("invalid_r3_session_state", |m| {
+        m["memory_budget_by_domain"]["guest_ram"]["per_session_state_bytes"] = 1.into();
+        m["memory_budget_breakdown_bytes"]["per_session_state_bytes"] = 1.into();
+    })
+    .unwrap();
+    assert_rule(
+        parse_rule_change("speech_stt_streaming", |m| {
+            m["memory_budget_by_domain"]["device_vram"]["typo_bytes"] = 1.into();
+        }),
+        Rule::BudgetLine,
+    );
+}
+
+#[test]
+fn speech_required_fields_and_chunking_have_typed_reasons() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    for fixture in ["speech_stt_streaming", "speech_tts_streaming"] {
+        let task_fields = if fixture == "speech_stt_streaming" {
+            vec!["input_audio_formats"]
+        } else {
+            vec!["voices", "output_audio_formats"]
+        };
+        for field in task_fields {
+            assert_rule(
+                parse_rule_change(fixture, |m| {
+                    m["model_blocks"]["speech"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(field);
+                }),
+                Rule::RequiredField,
+            );
+        }
+        for field in [
+            "task",
+            "serving_mode",
+            "languages",
+            "algorithm_profile",
+            "quality_profile_digest",
+            "benchmark_profile_digest",
+        ] {
+            assert_rule(
+                parse_rule_change(fixture, |m| {
+                    m["model_blocks"]["speech"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(field);
+                }),
+                Rule::RequiredField,
+            );
+        }
+        for streaming in [true, false] {
+            for missing in [true, false] {
+                assert_rule(
+                    parse_rule_change(fixture, |m| {
+                        let speech = &mut m["model_blocks"]["speech"];
+                        speech["serving_mode"] =
+                            if streaming { "streaming" } else { "batch" }.into();
+                        if missing {
+                            speech.as_object_mut().unwrap().remove("chunking");
+                        } else {
+                            speech["chunking"] = serde_json::Value::Null;
+                        }
+                    }),
+                    if streaming {
+                        Rule::StreamingState
+                    } else {
+                        Rule::RequiredField
+                    },
+                );
+            }
+        }
+        assert_rule(
+            parse_rule_change(fixture, |m| {
+                m["model_blocks"]["speech"]["serving_mode"] = "batch".into();
+                m.as_object_mut().unwrap().remove("memory_budget_by_domain");
+            }),
+            Rule::RequiredField,
+        );
+    }
+}
+
+#[test]
+fn production_requires_a_capability_declaration_and_class_blocks_cannot_be_null() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    assert_rule(
+        parse_rule_change("valid_r11_vla_payload", |m| {
+            m["support_level"] = "production".into();
+        }),
+        Rule::RequiredField,
+    );
+    parse_rule_change("valid_r11_vla_payload", |m| {
+        m["support_level"] = "production".into();
+        m["capability_requirements"] = serde_json::json!({});
+    })
+    .unwrap();
+    for block in ["vision", "speech", "language", "embedding", "custom", "vla"] {
+        assert_rule(
+            parse_rule_change("speech_stt_streaming", |m| {
+                m["model_blocks"][block] = serde_json::Value::Null;
+            }),
+            Rule::ModelBlock,
+        );
+        parse_rule_change("valid_r11_vla_payload", |m| {
+            m["format_version"] = "0.1".into();
+            m["model_blocks"][block] = serde_json::Value::Null;
+        })
+        .unwrap();
+    }
+}

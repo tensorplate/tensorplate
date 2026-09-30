@@ -766,3 +766,99 @@ fn refusals_map_to_protocol_error_codes() {
     let err = DeploymentDescriptor::from_json(&doc.to_string()).expect_err("digest");
     assert_eq!(code_of(err), ErrorCode::ConfigInvalid);
 }
+
+#[test]
+fn descriptor_profile_rules_reject_before_digest_checks() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    for (pointer, value, expected) in [
+        (
+            "/configuration/precision_hint",
+            json!("auto"),
+            Rule::ExplicitPrecision,
+        ),
+        (
+            "/configuration/precision_hint",
+            json!("fp32"),
+            Rule::PrecisionConflict,
+        ),
+        (
+            "/configuration/model_class",
+            json!("custom"),
+            Rule::ReservedClass,
+        ),
+    ] {
+        let mut value_in = read_json(STT);
+        *value_in.pointer_mut(pointer).expect("pointer") = value;
+        match DeploymentDescriptor::from_json(&value_in.to_string()).expect_err("profile rule") {
+            DeploymentDescriptorError::Profile(error) => {
+                assert_eq!(error.rule_code(), Some(expected));
+            }
+            other => panic!("expected {expected}, got {other}"),
+        }
+    }
+    for (field, expected) in [
+        ("speech", Rule::ModelBlock),
+        ("runner_profile", Rule::RequiredField),
+        ("compute_type", Rule::RequiredField),
+        ("pipeline_stages", Rule::RequiredField),
+        ("memory_budget_by_domain", Rule::StreamingState),
+        ("max_concurrent_sessions", Rule::RequiredField),
+    ] {
+        let mut value = read_json(STT);
+        value["configuration"]
+            .as_object_mut()
+            .expect("config")
+            .remove(field);
+        match DeploymentDescriptor::from_json(&value.to_string()).expect_err("missing field") {
+            DeploymentDescriptorError::Profile(error) => {
+                assert_eq!(error.rule_code(), Some(expected), "{field}");
+            }
+            other => panic!("expected {expected}, got {other}"),
+        }
+    }
+    let mut batch = read_json(STT);
+    batch["configuration"]["speech"]["serving_mode"] = json!("batch");
+    batch["configuration"]
+        .as_object_mut()
+        .expect("config")
+        .remove("memory_budget_by_domain");
+    match DeploymentDescriptor::from_json(&batch.to_string()).expect_err("batch budget") {
+        DeploymentDescriptorError::Profile(error) => {
+            assert_eq!(error.rule_code(), Some(Rule::RequiredField));
+        }
+        other => panic!("{other}"),
+    }
+    let mut value = read_json(STT);
+    for domain in ["guest_ram", "device_vram"] {
+        value["configuration"]["memory_budget_by_domain"][domain]["per_session_state_bytes"] =
+            json!(0);
+    }
+    match DeploymentDescriptor::from_json(&value.to_string()).expect_err("zero streaming state") {
+        DeploymentDescriptorError::Profile(error) => {
+            assert_eq!(error.rule_code(), Some(Rule::StreamingState));
+        }
+        other => panic!("{other}"),
+    }
+}
+
+#[test]
+fn descriptor_task_field_omissions_retain_the_required_field_code() {
+    for (fixture, field) in [
+        (STT, "input_audio_formats"),
+        (TTS, "voices"),
+        (TTS, "output_audio_formats"),
+    ] {
+        let mut value = read_json(fixture);
+        value["configuration"]["speech"]
+            .as_object_mut()
+            .expect("speech")
+            .remove(field);
+        match DeploymentDescriptor::from_json(&value.to_string()).expect_err("task field") {
+            DeploymentDescriptorError::Profile(error) => assert_eq!(
+                error.rule_code(),
+                Some(tensorplate_protocol::BundleRuleCode::RequiredField)
+            ),
+            other => panic!("{other}"),
+        }
+    }
+}

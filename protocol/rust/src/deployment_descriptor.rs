@@ -15,7 +15,8 @@ use crate::backend_descriptor::{is_normalized_absolute, ComputeType, RunnerProfi
 use crate::bundle::{artifact_path_is_safe, BundleDescriptor};
 use crate::bundle_manifest::{ArtifactKind, ArtifactRole, RECOGNIZED_BACKEND_HINTS};
 use crate::bundle_profile::{
-    is_sha256_digest, BundleProfile, BundleProfileError, DegradedProfile, MemoryBudgetByDomain,
+    check_model_class, check_speech_precision, check_streaming_state, is_sha256_digest, required,
+    rule, BundleProfile, BundleProfileError, BundleRuleCode, DegradedProfile, MemoryBudgetByDomain,
     PipelineStage, SpeechContract, Warmup, PROFILE_FORMAT_VERSION,
 };
 use crate::canonical_json::{self, CanonicalJsonError, CANONICAL_JSON_VERSION};
@@ -253,6 +254,9 @@ impl DeploymentConfiguration {
                 "a speech contract belongs to a `speech` or `custom` bundle",
             ));
         }
+        if c.bundle.format_version == PROFILE_FORMAT_VERSION {
+            c.validate_profile_rules()?;
+        }
         if let Some(runner) = &c.runner_profile {
             validate_runner_profile(runner)?;
         }
@@ -277,6 +281,41 @@ impl DeploymentConfiguration {
                     "configuration.acceptance_profile_digest",
                     "must be `sha256:` and 64 lowercase hex digits",
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_profile_rules(&self) -> Result<(), BundleProfileError> {
+        check_model_class(self.model_class)?;
+        if (self.model_class == ModelClass::Speech) != self.speech.is_some() {
+            return Err(rule(
+                BundleRuleCode::ModelBlock,
+                "configuration.speech",
+                "must be present exactly for the speech class",
+            ));
+        }
+        if let Some(speech) = &self.speech {
+            check_streaming_state(speech, self.memory_budget_by_domain.as_ref())?;
+            required(
+                "configuration.runner_profile",
+                self.runner_profile.is_some(),
+            )?;
+            required("configuration.compute_type", self.compute_type.is_some())?;
+            required(
+                "configuration.pipeline_stages",
+                !self.pipeline_stages.is_empty(),
+            )?;
+            required(
+                "configuration.memory_budget_by_domain",
+                self.memory_budget_by_domain.is_some(),
+            )?;
+            required(
+                "configuration.max_concurrent_sessions",
+                self.max_concurrent_sessions.is_some(),
+            )?;
+            if let Some(compute) = self.compute_type {
+                check_speech_precision(self.precision_hint, compute)?;
             }
         }
         Ok(())

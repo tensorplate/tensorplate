@@ -606,6 +606,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- Validate format 0.2 class blocks, streaming state, canonical budget lines, caller-owned stages, required profile fields and explicit speech precision before staging; preserve typed rule codes in agent errors and validate applicable descriptor fields. Format 0.1 behavior is unchanged. (V030-E02-F01-T02)
+
 - The Rust mirror of the sidecar IPC header, `IpcMessage`, now refuses
   what the closed schema refuses at its top level and in its `error`:
   unknown fields, explicit nulls, array forms and an `error` of another

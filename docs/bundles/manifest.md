@@ -259,6 +259,11 @@ only through the bundle parser; `decode_with_version_check` refuses them.
 | `max_concurrent_sessions` | Declared upper bound, 1–2048. |
 | `degraded_profile` | `null` for no quality-changing degradation, or a reserved profile id. |
 
+Manifest-local [deployment rules](compatibility.md#format-02-manifest-rules)
+require the applicable fields, one matching class block, explicit speech
+precision and unambiguous selectors. They refuse reserved classes and VLA modes
+under format 0.2 while retaining format 0.1 behavior.
+
 The schema validates the same fields in its `format_0_2` definition; its
 description lists the checks readers make beyond it. A validator must be
 given `config/schemas/memory_budget_breakdown.json` beside the manifest
