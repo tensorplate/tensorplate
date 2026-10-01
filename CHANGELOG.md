@@ -6,6 +6,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-01
+
 ### Added
 
 - The speech runtime package family: `tensorplate-speech-runtime-base`,
