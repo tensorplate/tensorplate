@@ -805,8 +805,21 @@ def main() -> int:
         assert completed.returncode == 2 and record["result"]["status"] == "fail"
         assert any("exceeded the request timeout" in r for r in record["result"]["reasons"])
 
+        unpinned = json.loads(harness.inventory.read_text())
+        unpinned["suites"]["stt"]["clips"][0]["digest"] = None
+        unpinned_path = harness.work / "inventory-unpinned-provisioned.json"
+        unpinned_path.write_text(json.dumps(unpinned))
+        completed, record, _ = harness.run("stt", "--inventory", str(unpinned_path))
+        assert completed.returncode == 1 and record is None
+        assert "en-clean-16k-01 is unpinned" in completed.stderr
+
+        # The committed pins are the provisioned clips'; the harness's synthetic clips are not them.
+        committed = json.loads(INVENTORY.read_text())["suites"]["stt"]["clips"]
+        assert all(isinstance(clip["digest"], str) for clip in committed)
         completed, record, _ = harness.run("stt", "--inventory", str(INVENTORY))
-        assert completed.returncode == 1 and record is None and "unpinned" in completed.stderr
+        assert completed.returncode == 1 and record is None
+        assert "en-clean-16k-01: digest" in completed.stderr
+        assert "does not match the inventory's pin" in completed.stderr
 
         wrong = json.loads(harness.inventory.read_text())
         wrong["suites"]["stt"]["clips"][0]["digest"] = "sha256:" + "f" * 64
