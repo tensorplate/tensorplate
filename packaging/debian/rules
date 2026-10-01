@@ -16,6 +16,11 @@ ifndef SOURCE_DATE_EPOCH
 export SOURCE_DATE_EPOCH := $(shell date +%s)
 endif
 
+# The speech runtime family builds only under this profile, from a wheelhouse
+# fetched beforehand by packaging/speech-runtime/build-environment.py fetch.
+speech_runtime_profile := $(filter pkg.tensorplate.speech-runtime,$(DEB_BUILD_PROFILES))
+TP_SPEECH_RUNTIME_LOCK_DIR ?= packaging/speech-runtime/lock
+
 %:
 	dh $@
 
@@ -42,6 +47,17 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	@echo "tensorplate: install is driven by per-package *.install manifests"
+ifneq (,$(speech_runtime_profile))
+	@if dh_listpackages | grep -qx tensorplate-speech-runtime-base; then \
+		test -n "$(TP_SPEECH_RUNTIME_WHEELHOUSE)" || \
+			{ echo "tensorplate: set TP_SPEECH_RUNTIME_WHEELHOUSE to a fetched wheelhouse" >&2; exit 1; }; \
+		set -x; /usr/bin/python3.12 packaging/speech-runtime/build-environment.py build \
+			--lock-dir "$(TP_SPEECH_RUNTIME_LOCK_DIR)" \
+			--wheelhouse "$(TP_SPEECH_RUNTIME_WHEELHOUSE)" \
+			--work-dir debian/speech-runtime-work \
+			--destdir debian --source-root .; \
+	fi
+endif
 
 # Make sure dh_installsystemd installs but does not start the units.
 # Operators run `systemctl enable --now tensorplate-agent` after the
@@ -54,6 +70,20 @@ override_dh_installsystemd:
 # Debian shlibs metadata. The serving worker links those libraries only
 # when built with TP_ENABLE_TENSORRT=ON for the Jetson package; doctor and
 # the E15 validation runbook own the runtime dependency check.
+ifeq (,$(speech_runtime_profile))
 override_dh_shlibdeps:
 	dh_shlibdeps -ptensorplate-serving --dpkg-shlibdeps-params=--ignore-missing-info
 	dh_shlibdeps -a -Ntensorplate-serving
+else
+# The environment ships its wheels as fetched: nothing strips, rewrites or
+# scans their libraries, and the driver library they load is not a package.
+override_dh_strip override_dh_dwz override_dh_strip_nondeterminism override_dh_makeshlibs override_dh_shlibdeps:
+	@echo "tensorplate: $@ is skipped for the speech runtime family"
+
+override_dh_compress:
+	dh_compress -Xthird-party-licenses.json
+
+# Pinned: the packages were sized against the release asset limit at this level.
+override_dh_builddeb:
+	dh_builddeb -- -Zzstd -z19
+endif

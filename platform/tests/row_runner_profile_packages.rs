@@ -104,8 +104,8 @@ fn per_profile_package_lists_validate_against_the_row_schema() {
 
 #[test]
 fn committed_rows_declare_no_per_profile_lists() {
-    // No package installs a speech runner profile yet, so no committed row
-    // requires one.
+    // No shipped descriptor declares a speech runner profile yet, so no
+    // committed row requires one.
     let dir = repo_path("config/platform/rows");
     let mut checked = 0;
     for entry in std::fs::read_dir(&dir).expect("rows directory") {

@@ -45,6 +45,7 @@ compatibility="verify_old_runtime_rejects_speech_bundle.sh"
 
 # Run elsewhere: they mutate the host they run on.
 host_mutating="verify_arch_package_set.sh
+verify_speech_runtime_packages.sh
 verify_service_supervision.sh
 verify_cpu_only_smoke.sh"
 

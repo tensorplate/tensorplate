@@ -51,6 +51,10 @@ else
     echo "FAIL: tensorplate must not depend on the apt bootstrap package" >&2
     fail=1
   fi
+  if printf '%s\n' "${stanza}" | grep -q 'tensorplate-speech-runtime'; then
+    echo "FAIL: tensorplate must not depend on, recommend or suggest the speech runtime family" >&2
+    fail=1
+  fi
   if printf '%s\n' "${stanza}" | sed -n '/^Suggests:/q;p' |
      grep -q 'tensorplate-backend-python-pytorch'; then
     echo "FAIL: the Python backend must stay optional (Suggests only, never Depends/Recommends)" >&2

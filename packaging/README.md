@@ -45,6 +45,7 @@ packaging/
 │   ├── build-install-from-source.sh Build/install unreleased branch snapshots through install.sh.
 │   ├── build-deb.sh                Source-tree helper for dpkg-buildpackage.
 │   └── ...                         Maintainer-script helpers installed by tensorplate-common.
+├── speech-runtime/                 Lock, builder and loader for the tensorplate-speech-runtime-* packages; see its README.
 └── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.
 ```
 
@@ -58,6 +59,7 @@ packaging/
 | `tensorplate-cli` | Operator CLI. | `tensorplate` | no |
 | `tensorplate-backend-python-pytorch` | Python sidecar backend for SmolVLA / Python-native bundles. | `tensorplate-backend-python-pytorch` (entrypoint) | no — backend lifecycle is per-session by the serving worker |
 | `tensorplate-apt-source` | One-time APT source bootstrap: archive keyring + stable Deb822 source. Installs no runtime component and never runs `apt update`. | — | no |
+| `tensorplate-speech-runtime-*` | Seven `amd64` packages and a metapackage holding the speech runner profiles' Python environment under `/usr/lib/tensorplate/speech-runtime/`. Built only under the `pkg.tensorplate.speech-runtime` build profile, on Ubuntu 24.04; see [`speech-runtime/README.md`](speech-runtime/README.md). | — | no |
 | `tensorplate` | Full-runtime metapackage, built once per runtime architecture: depends on agent, serving, observability, CLI, and common; ships no files. | — | no |
 
 Core packages do **not** depend on `tensorplate-backend-python-pytorch`.

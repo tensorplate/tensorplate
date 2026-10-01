@@ -6,6 +6,10 @@ Build-Depends:
  debhelper-compat (= 13),
  dh-exec,
  gnupg,
+ python3.12 <pkg.tensorplate.speech-runtime>,
+ python3.12-venv <pkg.tensorplate.speech-runtime>,
+ libespeak-ng1 <pkg.tensorplate.speech-runtime>,
+ espeak-ng-data <pkg.tensorplate.speech-runtime>,
 Standards-Version: 4.6.2
 Homepage: https://github.com/tensorplate/tensorplate
 Vcs-Browser: https://github.com/tensorplate/tensorplate
@@ -34,7 +38,7 @@ Description: TensorPlate shared maintainer-script helpers and platform registry
 
 Package: tensorplate-agent
 Architecture: any
-Build-Profiles: <!pkg.tensorplate.cli-only>
+Build-Profiles: <!pkg.tensorplate.cli-only !pkg.tensorplate.speech-runtime>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -59,7 +63,7 @@ Description: TensorPlate device agent (V01-E08/E09)
 
 Package: tensorplate-serving
 Architecture: any
-Build-Profiles: <!pkg.tensorplate.cli-only>
+Build-Profiles: <!pkg.tensorplate.cli-only !pkg.tensorplate.speech-runtime>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -79,7 +83,7 @@ Description: TensorPlate serving worker (V01-E07)
 
 Package: tensorplate-observability
 Architecture: any
-Build-Profiles: <!pkg.tensorplate.cli-only>
+Build-Profiles: <!pkg.tensorplate.cli-only !pkg.tensorplate.speech-runtime>
 Pre-Depends:
  ${misc:Pre-Depends},
  tensorplate-common (= ${source:Version}),
@@ -99,6 +103,7 @@ Description: TensorPlate observability service (V01-E10)
 
 Package: tensorplate-cli
 Architecture: any
+Build-Profiles: <!pkg.tensorplate.speech-runtime>
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
@@ -158,7 +163,7 @@ Description: TensorPlate APT repository source bootstrap
 Package: tensorplate
 Section: metapackages
 Architecture: any
-Build-Profiles: <!pkg.tensorplate.cli-only>
+Build-Profiles: <!pkg.tensorplate.cli-only !pkg.tensorplate.speech-runtime>
 Depends:
  ${misc:Depends},
  tensorplate-common (= ${source:Version}),
@@ -181,3 +186,152 @@ Description: TensorPlate full runtime (metapackage)
  same run, which are per-architecture. The optional Python/PyTorch
  backend stays a separate, suggested package. Users who only need the
  operator CLI should install tensorplate-cli instead.
+
+Package: tensorplate-speech-runtime-base
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ python3.12 (<< 3.13),
+ tensorplate-backend-python-pytorch (= ${source:Version}),
+Description: TensorPlate speech runtime: environment and sidecar
+ The virtual environment the speech runner profiles run in, the
+ TensorPlate sidecar module installed into it, and the distributions
+ every profile shares. The interpreter is the distribution's python3.12;
+ none is redistributed and the environment has no pip.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-cublas
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+Description: TensorPlate speech runtime: cuBLAS
+ The CUDA 12 cuBLAS user library, shared by CTranslate2 and PyTorch.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-cuda
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+ tensorplate-speech-runtime-cublas (= ${binary:Version}),
+Description: TensorPlate speech runtime: CUDA user libraries
+ The CUDA 12 user libraries PyTorch loads, cuDNN and NVRTC included.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-torch
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+ tensorplate-speech-runtime-cublas (= ${binary:Version}),
+ tensorplate-speech-runtime-cuda (= ${binary:Version}),
+Description: TensorPlate speech runtime: PyTorch
+ PyTorch built for CUDA 12 and the distributions only it needs.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-vad
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+Description: TensorPlate speech runtime: voice activity detection and resampling
+ ONNX Runtime (CPU) and the soxr resampler.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-ct2
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+ tensorplate-speech-runtime-cublas (= ${binary:Version}),
+ tensorplate-speech-runtime-vad (= ${binary:Version}),
+Description: TensorPlate speech runtime: CTranslate2 and faster-whisper
+ The engine of the faster_whisper runner profile: CTranslate2,
+ faster-whisper with the voice activity model its wheel carries, and the
+ audio decoder. Ships no Whisper model.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime-kokoro
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+ tensorplate-speech-runtime-torch (= ${binary:Version}),
+ libespeak-ng1,
+ espeak-ng-data,
+Description: TensorPlate speech runtime: Kokoro and grapheme-to-phoneme
+ The engine of the kokoro runner profile: Kokoro, its English
+ grapheme-to-phoneme stack with the spaCy model it needs, and a loader
+ that points the phonemizer at the distribution's espeak-ng. Ships no
+ Kokoro model and no voice.
+ .
+ Part of the locked Python environment under
+ /usr/lib/tensorplate/speech-runtime, built from a hash-locked wheelhouse
+ when the package is built. Installing it downloads nothing and runs no
+ pip. The distributions it ships keep their own licenses, listed in
+ /usr/share/doc/<package>/third-party-licenses.json.
+
+Package: tensorplate-speech-runtime
+Section: metapackages
+Architecture: amd64
+Build-Profiles: <pkg.tensorplate.speech-runtime>
+Depends:
+ ${misc:Depends},
+ tensorplate-serving (= ${binary:Version}),
+ tensorplate-speech-runtime-base (= ${binary:Version}),
+ tensorplate-speech-runtime-cublas (= ${binary:Version}),
+ tensorplate-speech-runtime-cuda (= ${binary:Version}),
+ tensorplate-speech-runtime-torch (= ${binary:Version}),
+ tensorplate-speech-runtime-vad (= ${binary:Version}),
+ tensorplate-speech-runtime-ct2 (= ${binary:Version}),
+ tensorplate-speech-runtime-kokoro (= ${binary:Version}),
+Description: TensorPlate speech runtime: all runner profiles (metapackage)
+ Installs the whole speech runtime environment: the packages of the
+ faster_whisper and kokoro runner profiles. Ships no files. The speech
+ models themselves are provisioned with `tensorplate bundle provision`. The
+ `tensorplate` metapackage neither depends on nor recommends it.

@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "espeakng-loader"
+# A local version, so no upstream release can satisfy the locked pin.
+version = "0.2.4+tensorplate.1"
+description = "Points espeak-ng callers at the distribution's library and data."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+
+[tool.setuptools]
+packages = ["espeakng_loader"]
