@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# tensorplate-speech-runtime-base post-remove.
+#
+# Removing the base removes the trigger with it, so a running agent is
+# restarted here to drop the package set it read at startup.
+
+set -e
+
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke try-restart tensorplate-agent.service >/dev/null ||
+                echo "tensorplate-speech-runtime-base: restart tensorplate-agent.service to drop the speech runtime" >&2
+        fi
+        ;;
+    purge|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+    *)
+        echo "tensorplate-speech-runtime-base.postrm: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

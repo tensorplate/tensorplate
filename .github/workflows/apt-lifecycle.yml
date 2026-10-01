@@ -52,6 +52,10 @@ on:
       - 'test/models/bundles/v0_2/**'
       - 'protocol/rust/**'
       - 'agent/**'
+      # The speech runtime family builds the sidecar module into its
+      # environment from these; python.yml covers the module's sources.
+      - 'backends/python_pytorch/pyproject.toml'
+      - 'backends/python_pytorch/README.md'
   workflow_dispatch:
 
 permissions:
@@ -168,6 +172,51 @@ jobs:
         env:
           CI: 'true'
         run: test/packaging/verify_arch_package_set.sh
+
+  speech-runtime-packages:
+    name: speech runtime package family (stub wheelhouse)
+    # Ubuntu 24.04 is the release the family is built on and for: its
+    # environment runs on that release's python3.12.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            build-essential \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            python3.12 \
+            python3.12-venv \
+            libespeak-ng1 \
+            espeak-ng-data
+
+      # Stub wheels only: the locked wheelhouse is several gigabytes.
+      - name: Speech runtime family from a stub wheelhouse
+        shell: bash
+        env:
+          CI: 'true'
+        run: test/packaging/verify_speech_runtime_packages.sh
 
   harness-checks:
     name: lifecycle harness verifiers

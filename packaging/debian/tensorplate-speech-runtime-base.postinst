@@ -1,0 +1,29 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# tensorplate-speech-runtime-base post-install.
+#
+# The agent reads the installed package set and probes its backends only
+# at startup. Every other package of the family activates this trigger, so
+# a running agent restarts once per dpkg run, inside its unit's start limit.
+
+set -e
+
+case "$1" in
+    triggered)
+        if [ -d /run/systemd/system ] && command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke try-restart tensorplate-agent.service >/dev/null ||
+                echo "tensorplate-speech-runtime-base: restart tensorplate-agent.service to pick up the speech runtime" >&2
+        fi
+        ;;
+    configure|abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "tensorplate-speech-runtime-base.postinst: unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

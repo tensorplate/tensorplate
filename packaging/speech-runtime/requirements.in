@@ -1,0 +1,9 @@
+# The resolution input the lock was compiled from; see README.md.
+torch==2.13.0+cu129
+ctranslate2==4.8.2
+faster-whisper==1.2.1
+kokoro==0.9.4
+misaki[en]==0.9.4
+onnxruntime==1.30.0
+soxr==1.1.0
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

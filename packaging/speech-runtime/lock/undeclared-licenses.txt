@@ -1,0 +1,2 @@
+# Distributions accepted without a declared license: name, then the reason.
+cuda-toolkit NVIDIA's meta-package: metadata only, it installs no file besides its own dist-info
