@@ -1,0 +1,8 @@
+cc1ad6009a5bf7ec70eaee6b29cc871583563233d8439bff9ca77cd372530f4c  tensorplate-speech-runtime-base_0.3.1~rc.1-1_amd64.deb
+729b98dc8ddcc0242186652e1e01e285b2d47f44c59664ad86615f891d85b4a7  tensorplate-speech-runtime-ct2_0.3.1~rc.1-1_amd64.deb
+3766836a4f990abf65db3a9f75df30060a94a10b602d65b05bac2b71141e80aa  tensorplate-speech-runtime-cublas_0.3.1~rc.1-1_amd64.deb
+1aae197dc16cd6d30b8cd336cf4dd74d12f4393cd3189f6c9d4dd1c89d2396fd  tensorplate-speech-runtime-cuda_0.3.1~rc.1-1_amd64.deb
+04b8e3571a3a8d7e2759cab2bc5b8d3aec93b310241bdbdb419cb1e887bd4804  tensorplate-speech-runtime-kokoro_0.3.1~rc.1-1_amd64.deb
+b4fdeba84b12f2cecd9499a96efc58bd26e72dd08a2cd03006e33a3b3b280f1b  tensorplate-speech-runtime-torch_0.3.1~rc.1-1_amd64.deb
+cc133358812f7be321002bd1d854214c8540353fae3ca28f77ad3382fdf2cf9b  tensorplate-speech-runtime-vad_0.3.1~rc.1-1_amd64.deb
+dd676acae02f7e9751bd6c8615ad0c5d2f851daa42bf58acf4c22e6b04652637  tensorplate-speech-runtime_0.3.1~rc.1-1_amd64.deb

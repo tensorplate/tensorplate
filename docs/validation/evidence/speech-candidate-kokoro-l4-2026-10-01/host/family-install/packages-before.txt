@@ -1,0 +1,6 @@
+tensorplate-agent	0.3.1~rc.1-1
+tensorplate-backend-python-pytorch	0.3.1~rc.1-1
+tensorplate-cli	0.3.1~rc.1-1
+tensorplate-common	0.3.1~rc.1-1
+tensorplate-observability	0.3.1~rc.1-1
+tensorplate-serving	0.3.1~rc.1-1

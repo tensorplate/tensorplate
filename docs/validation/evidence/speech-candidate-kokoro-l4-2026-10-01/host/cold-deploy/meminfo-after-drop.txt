@@ -1,0 +1,2 @@
+MemAvailable:   31615236 kB
+Cached:           132960 kB

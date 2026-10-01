@@ -208,3 +208,26 @@ appliance (a CLI, worker, sampler and ballast that answer in the real shapes)
 for both suites, compares a fresh run with the committed synthetic record in
 `test/validation/fixtures/`, and breaks each guard once. The synthetic record
 measures nothing; its `provenance` says so.
+
+## Recorded runs
+
+### Kokoro on an NVIDIA L4, 2026-10-01
+
+[`evidence/speech-candidate-kokoro-l4-2026-10-01/`](evidence/speech-candidate-kokoro-l4-2026-10-01/README.md)
+holds two runs of the `tts` suite against the first 0.3.1 release
+candidate on a `g2-standard-8`, with the host facts each run depends on:
+the speech runtime packages as built and installed, the interim agent
+settings, the provisioned files and a cold deploy.
+
+Both records are `fail` and are filed as recorded. Every fixture request
+returned `ok`, with a median real-time factor of 0.012 to 0.049, and the
+sidecar's sampled device memory was 552 MiB warm idle and 1,152 MiB under
+load. Every negative case that fails at request time or at admission
+returned its typed code. The two cases built to fail while the
+runner loads did not: `tensorplate deploy` reported `timeout` for an entry
+selecting an undeclared voice (expected `unsupported`) and for a load with
+the device's memory held by a ballast (expected `oom_error`), and a
+rollback issued right after was refused as `busy`. The worker's output is
+not captured, so what the runner raised is not in the records. The
+record's README shows the reproduction. The candidate is run again once
+the deploy path returns the runner's typed failure.
