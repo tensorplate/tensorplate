@@ -110,8 +110,8 @@ accepted.
 ## The host
 
 All of `host/` was recorded in the same session: the build, install,
-settings and provisioning before the runs, the cold deploy and the
-reproduction between them, and `default-startup-deadline/` after run 2.
+settings, provisioning and cold deploy before the runs, the reproduction
+between them, and `default-startup-deadline/` after run 2.
 
 ### The speech runtime packages (`host/family-build/`, `host/family-install/`)
 
