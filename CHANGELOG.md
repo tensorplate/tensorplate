@@ -6,6 +6,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
+  two candidate qualification runs of Whisper large-v3-turbo through
+  faster-whisper, filed under
+  `docs/validation/evidence/speech-candidate-whisper-l4-2026-10-01/` with
+  their memory observations and the host facts they depend on. Run 1 is
+  `fail` and run 2 `incomplete`, filed as recorded: every fixture request
+  returned `ok` and every request-time negative returned its typed code,
+  but the deploy built to fail at load for lack of device memory returned
+  `timeout` where `oom_error` was expected, and a rollback issued right
+  after was refused as `busy`.
+  Candidate records only; no support row's evidence changes. The speech
+  fixture inventory now pins the two provisioned clips (FLEURS test split,
+  CC BY 4.0) and the three clips derived from them.
+  (V030-E01-F02-T01, V030-E01-F02-T03)
+
+### Changed
+
+- `tools/validation/candidate-qualify.py` gives every deploy and rollback
+  a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
+  agent's warm timeout, so a load failure is recorded as the agent answered it and
+  not as the CLI's own `timeout`, and its teardown retries a rollback the
+  agent refuses as `busy` for up to `--teardown-busy-wait-ms` (60,000 by
+  default). (V030-E01-F02-T03)
+
 ## [0.3.1] - 2026-10-01
 
 ### Added

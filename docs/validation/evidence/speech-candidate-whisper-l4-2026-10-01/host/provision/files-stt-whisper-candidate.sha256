@@ -1,0 +1,7 @@
+bee62a4c9e005c838c08e184aed0301a4e4348d00169b52e7ec82fde8bb8e7e0  ./manifest.json
+b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e  ./model/config.json
+e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da  ./model/model.bin
+7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711  ./model/preprocessor_config.json
+297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd  ./model/tokenizer.json
+c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1  ./model/vocabulary.json
+7c46113f4d6a7623ca708c8e6ad5263358bf1c1354b5679157cfbcf4323a13c0  ./stt-whisper-candidate.json

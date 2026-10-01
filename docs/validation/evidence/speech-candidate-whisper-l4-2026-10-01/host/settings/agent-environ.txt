@@ -1,0 +1,3 @@
+LD_LIBRARY_PATH=/usr/lib/tensorplate/speech-runtime/lib/python3.12/site-packages/nvidia/cublas/lib
+TP_PYTHON_PYTORCH_EXECUTABLE=/usr/lib/tensorplate/speech-runtime/bin/python
+TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS=120000

@@ -108,7 +108,9 @@ as Production evidence; the record says so in its `qualification` block.
    teardown has something to roll back to (the agent refuses `rollback` with
    no previous active deployment and does not yet serve `undeploy`), then
    samples its idle memory.
-3. Deploys the candidate with `tensorplate deploy`, takes a status snapshot
+3. Deploys the candidate with `tensorplate deploy`, giving it (and every
+   other deploy and the rollback of the run) `--agent-timeout-ms` as the
+   CLI's per-call agent timeout, takes a status snapshot
    (agent state, active deployment, backend, serving URL, worker health) and
    samples the candidate's warm-idle memory.
 4. Runs every fixture of the suite `--timing-iterations` times over the
@@ -131,7 +133,8 @@ as Production evidence; the record says so in its `qualification` block.
    holds device memory.
 7. Takes a second status snapshot, which expects the agent `degraded` with the
    last failed deploy as its `last_error`, tears the candidate down with
-   `tensorplate rollback`, confirms the predecessor is active and ready and
+   `tensorplate rollback`, retrying for up to `--teardown-busy-wait-ms` while
+   the agent answers `busy`, confirms the predecessor is active and ready and
    samples memory after the teardown.
 8. Writes `record.json`, the sampler's JSON Lines files under `memory/`, the
    generated outputs under `outputs/` and the tool's log under `run.log`.
@@ -194,6 +197,18 @@ tools/validation/candidate-qualify.py \
   --evidence-dir /var/tmp/candidate-evidence-<date>
 ```
 
+`--agent-timeout-ms` (120,000 by default) must stay above the agent's
+`worker.warm_timeout_ms` (30,000 as packaged). A runner that fails while
+loading is answered by the agent only after that warm timeout, and the
+CLI's own default timeout is the same 30 s: a deploy left at the default
+gives up first, the negative case records `timeout` instead of the agent's
+answer, and the agent is still inside the transaction when the next
+command arrives. `--teardown-busy-wait-ms` (60,000 by default) bounds how
+long the teardown retries a rollback refused as `busy`, once a second
+(any other answer, an error included, is final);
+`teardown.wall_ms` covers the wait, and a teardown still refused at the
+bound fails with the wait in its reason.
+
 The evidence directory must be new. Variant bundles for the negative cases
 are written under `<evidence-dir>/staging` unless `--staging-dir` says
 otherwise; the agent reads them, so that path must be readable by its
@@ -208,3 +223,46 @@ appliance (a CLI, worker, sampler and ballast that answer in the real shapes)
 for both suites, compares a fresh run with the committed synthetic record in
 `test/validation/fixtures/`, and breaks each guard once. The synthetic record
 measures nothing; its `provenance` says so.
+
+## The clips of the 2026-10-01 run
+
+The two provisioned clips the inventory pins are from the test split of
+[FLEURS](https://huggingface.co/datasets/google/fleurs) (Conneau et al.,
+2022), which its dataset card licenses under CC BY 4.0: one utterance
+from the `en_us` configuration and one from `ar_eg`, 16 kHz mono.
+
+| Clip | Configuration, split | Duration | Digest of the provisioned file |
+| --- | --- | --- | --- |
+| `en-clean-16k-01` | `en_us`, test | 5.72 s | `sha256:12173c13a069a7fc024990679970ab7d634e39aeae881528f9f039b9f3b30d7c` |
+| `ar-clean-16k-01` | `ar_eg`, test | 9.62 s | `sha256:5075e14075e0adcd9df3dc8a224bee471b46023fcfc41f33b1aa79362a317cb6` |
+
+FLEURS distributes 32-bit float WAV, which the tool does not read. Each
+sample `x` was converted to 16-bit PCM as `clamp(round(x * 32768), -32768,
+32767)` with no dither, resampling, trimming or gain, and written with a
+canonical 44-byte header; no sample clipped. The digests above are of the
+converted files. The clips and the transcripts made from them are not in
+this repository; the attribution stays with any run that uses them.
+
+## Recorded runs
+
+### Whisper on an NVIDIA L4, 2026-10-01
+
+[`evidence/speech-candidate-whisper-l4-2026-10-01/`](evidence/speech-candidate-whisper-l4-2026-10-01/README.md)
+holds two runs of the `stt` suite against the first 0.3.1 release
+candidate on a `g2-standard-8`, with the host facts each run depends on:
+the speech runtime packages as built and installed, the interim agent
+settings, the provisioned files and a cold deploy.
+
+Run 1 is `fail` and run 2 is `incomplete`; both are filed as recorded.
+Every fixture request returned `ok`, with a median real-time factor of
+0.034 for English and 0.029 for Arabic, and the sidecar's sampled device
+memory was 2,138 MiB warm idle and 2,348 MiB under load. Every negative
+case that fails at request time or at admission returned its typed code.
+The one built to fail while the runner loads did not: with the device's
+memory held by a ballast, `tensorplate deploy` reported `timeout` where
+`oom_error` was expected, and the rollback issued right after was refused
+as `busy`, so run 1's teardown failed. The worker's output is not
+captured, so what the runner raised is not in the record. Run 2 ran without the ballast to
+complete the teardown and its last memory window, which leaves that case
+`not_run`. The two tool options above come from this run. The candidate
+is run again once the deploy path returns the runner's typed failure.

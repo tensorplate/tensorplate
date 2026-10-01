@@ -1,0 +1,16 @@
+2026-10-01T19:54:42Z cli version: status=ok exit=0 wall_ms=2
+2026-10-01T19:54:44Z cli deploy: status=ok exit=0 wall_ms=2102
+2026-10-01T19:54:44Z memory window predecessor_idle: sampling warm-idle for 60s
+2026-10-01T19:55:44Z memory window predecessor_idle: measured
+2026-10-01T19:56:01Z cli deploy: status=ok exit=0 wall_ms=16805
+2026-10-01T19:56:01Z cli status: status=ok exit=0 wall_ms=24
+2026-10-01T19:56:01Z memory window candidate_warm_idle: sampling warm-idle for 60s
+2026-10-01T19:57:01Z memory window candidate_warm_idle: measured
+2026-10-01T19:57:05Z memory window candidate_load: sampling load for 60s
+2026-10-01T19:58:06Z memory window candidate_load: measured
+2026-10-01T19:58:28Z cli deploy: status=error exit=3 wall_ms=9344
+2026-10-01T19:58:28Z cli status: status=ok exit=0 wall_ms=10
+2026-10-01T19:58:30Z cli rollback: status=ok exit=0 wall_ms=2082
+2026-10-01T19:58:30Z cli status: status=ok exit=0 wall_ms=26
+2026-10-01T19:58:30Z memory window after_teardown: sampling warm-idle for 60s
+2026-10-01T19:59:30Z memory window after_teardown: measured

@@ -1,0 +1,15 @@
+2026-10-01T19:43:59Z cli version: status=ok exit=0 wall_ms=2
+2026-10-01T19:44:02Z cli deploy: status=ok exit=0 wall_ms=3113
+2026-10-01T19:44:02Z memory window predecessor_idle: sampling warm-idle for 60s
+2026-10-01T19:45:02Z memory window predecessor_idle: measured
+2026-10-01T19:45:18Z cli deploy: status=ok exit=0 wall_ms=16583
+2026-10-01T19:45:19Z cli status: status=ok exit=0 wall_ms=25
+2026-10-01T19:45:19Z memory window candidate_warm_idle: sampling warm-idle for 60s
+2026-10-01T19:46:19Z memory window candidate_warm_idle: measured
+2026-10-01T19:46:23Z memory window candidate_load: sampling load for 60s
+2026-10-01T19:47:23Z memory window candidate_load: measured
+2026-10-01T19:47:46Z cli deploy: status=error exit=3 wall_ms=9581
+2026-10-01T19:47:47Z oom ballast holds 19466813440 bytes
+2026-10-01T19:48:18Z cli deploy: status=error exit=4 wall_ms=30200
+2026-10-01T19:48:18Z cli status: status=ok exit=0 wall_ms=11
+2026-10-01T19:48:18Z cli rollback: status=busy exit=5 wall_ms=24

@@ -1,0 +1,7 @@
+2227 ./manifest.json
+2263 ./model/config.json
+1617884929 ./model/model.bin
+340 ./model/preprocessor_config.json
+2710337 ./model/tokenizer.json
+1068114 ./model/vocabulary.json
+921 ./stt-whisper-candidate.json

@@ -1,0 +1,14 @@
+tensorplate-agent	0.3.1~rc.1-1
+tensorplate-backend-python-pytorch	0.3.1~rc.1-1
+tensorplate-cli	0.3.1~rc.1-1
+tensorplate-common	0.3.1~rc.1-1
+tensorplate-observability	0.3.1~rc.1-1
+tensorplate-serving	0.3.1~rc.1-1
+tensorplate-speech-runtime	0.3.1~rc.1-1
+tensorplate-speech-runtime-base	0.3.1~rc.1-1
+tensorplate-speech-runtime-ct2	0.3.1~rc.1-1
+tensorplate-speech-runtime-cublas	0.3.1~rc.1-1
+tensorplate-speech-runtime-cuda	0.3.1~rc.1-1
+tensorplate-speech-runtime-kokoro	0.3.1~rc.1-1
+tensorplate-speech-runtime-torch	0.3.1~rc.1-1
+tensorplate-speech-runtime-vad	0.3.1~rc.1-1

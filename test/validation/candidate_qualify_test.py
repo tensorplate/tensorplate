@@ -31,6 +31,7 @@ INVENTORY = ROOT / "test/models/speech/candidate_fixture_inventory.json"
 GOLDEN = ROOT / "test/validation/fixtures/candidate_qualification_record_synthetic.json"
 FAKES = ROOT / "test/validation/fixtures/candidate_qualify_fakes"
 BUNDLES = ROOT / "test/models/bundles/v0_1"
+EVIDENCE = ROOT / "docs/validation/evidence"
 sys.path.insert(0, str(ROOT / "tools/validation"))
 sys.path.insert(0, str(ROOT / "sdk/python/src"))
 import candidate_audio as audio  # noqa: E402
@@ -712,6 +713,26 @@ def main() -> int:
             + "\n".join(diff_pointers(normalize(committed), golden)[:20])
         )
 
+        # Records filed from hardware runs: valid, candidate-only, and with the result
+        # their own steps derive.
+        filed_paths = sorted(EVIDENCE.glob("speech-candidate-*/run-*/record.json"))
+        assert filed_paths, "no recorded candidate run is filed"
+        for path in filed_paths:
+            filed = json.loads(path.read_text())
+            check_schema(filed, schema)
+            assert filed["provenance"] == "recorded", path
+            assert filed["qualification"]["production_evidence"] is False, path
+            stop = next(
+                (r[len("stopped: ") :] for r in filed["result"]["reasons"] if r[:9] == "stopped: "),
+                None,
+            )
+            derived = record_mod.finalize(json.loads(json.dumps(filed)), stop)["result"]
+            assert derived == filed["result"], (path, derived)
+            for window in filed["memory"]["windows"].values():
+                for name in window.get("observations") or []:
+                    assert (path.parent / name).is_file(), (path, name)
+            assert not (path.parent / "outputs").exists(), f"{path.parent}: outputs/ is private"
+
         # -- guards, each broken once --
         completed, record, _ = harness.run("stt", mutate="wrong_code")
         assert completed.returncode == 2 and record["result"]["status"] == "fail", (
@@ -757,6 +778,75 @@ def main() -> int:
         )
         assert teardown["reason"] == "restored 'someone-else', expected 'qualify-stt-predecessor'"
         assert record["memory"]["windows"]["after_teardown"]["status"] == "not_run"
+
+        # A deploy timeout not above the agent's warm timeout cuts a load failure off as `timeout`.
+        completed, record, evidence = harness.run("tts", "--agent-timeout-ms", "30000")
+        assert completed.returncode == 2 and record["result"]["status"] == "fail"
+        cut_off = {n["case"]: n for n in record["negatives"]}
+        for case in ("unsupported_voice", "oom_at_load"):
+            assert (
+                cut_off[case]["status"] == "mismatched"
+                and cut_off[case]["observed"]["code"] == "timeout"
+            ), cut_off[case]
+        assert cut_off["corrupt_artifact_digest"]["status"] == "matched"
+        after = record["lifecycle"]["status_after_negatives"]
+        assert after["last_error"]["code"] == "load_failed", after
+        assert (
+            "status_after_negatives checks failed: agent_state_as_expected"
+            in (record["result"]["reasons"])
+        )
+        log = (evidence / "run.log").read_text()
+        assert log.count("cli rollback: status=busy exit=5") == 1, log
+        assert record["lifecycle"]["teardown"]["status"] == "ok"
+        assert record["memory"]["windows"]["after_teardown"]["status"] == "measured"
+
+        completed, record, evidence = harness.run(
+            "stt", env=harness.env(TP_FAKE_CLI_BUSY_ROLLBACKS="2")
+        )
+        assert completed.returncode == 0, record["result"]
+        log = (evidence / "run.log").read_text()
+        assert log.count("cli rollback: status=busy exit=5") == 2, log
+        assert log.count("cli rollback: status=ok exit=0") == 1, log
+        assert record["lifecycle"]["teardown"]["restored_deployment_id"] == (
+            "qualify-stt-predecessor"
+        )
+
+        completed, record, evidence = harness.run(
+            "stt",
+            "--teardown-busy-wait-ms",
+            "1500",
+            env=harness.env(TP_FAKE_CLI_BUSY_ROLLBACKS="1000"),
+        )
+        assert completed.returncode == 2 and record["result"]["status"] == "fail"
+        teardown = record["lifecycle"]["teardown"]
+        assert teardown["status"] == "failed" and teardown["reason"] == (
+            "not_ready: agent is busy with an in-flight transaction (still busy after 1500 ms)"
+        ), teardown
+        assert teardown["wall_ms"] >= 1500
+        assert record["memory"]["windows"]["after_teardown"]["status"] == "not_run"
+        polls = (evidence / "run.log").read_text().count("cli rollback: status=busy exit=5")
+        assert 2 <= polls <= 4, polls
+
+        # A restore slower than the CLI's default timeout still completes.
+        completed, record, _ = harness.run(
+            "stt", env=harness.env(TP_FAKE_CLI_SLOW_ROLLBACK_MS="40000")
+        )
+        assert completed.returncode == 0, record["lifecycle"]["teardown"]
+
+        # Slower than the timeout the tool gives it: an error, and only `busy` is retried.
+        completed, record, evidence = harness.run(
+            "stt", env=harness.env(TP_FAKE_CLI_SLOW_ROLLBACK_MS="200000")
+        )
+        assert completed.returncode == 2 and record["result"]["status"] == "fail"
+        assert record["lifecycle"]["teardown"]["reason"] == (
+            "timeout: operation timed out after 120000 ms"
+        ), record["lifecycle"]["teardown"]
+        assert (evidence / "run.log").read_text().count("cli rollback:") == 1
+
+        for flag, value in (("--agent-timeout-ms", "0"), ("--teardown-busy-wait-ms", "-1")):
+            completed, record, _ = harness.run("stt", flag, value)
+            assert completed.returncode == 2 and record is None, (flag, completed.returncode)
+            assert "must be positive" in completed.stderr, completed.stderr
 
         completed, record, _ = harness.run("stt", "--inventory", str(harness.unpinned_derived))
         assert completed.returncode == 1 and record is None

@@ -56,6 +56,7 @@ AUDIO_FRAMES = "audio_frames"
 TEXT_UTF8 = "text_utf8"
 RESULT_JSON = "result_json"
 CLI_TIMEOUT_S = 600
+BUSY_POLL_S = 1.0
 UNDECLARED_LANGUAGE_CANDIDATES = ("zz", "qq", "xx")
 UNDECLARED_VOICE = "undeclared_voice"
 MAX_RESULT_JSON_BYTES = 1 << 20
@@ -545,6 +546,8 @@ class Recipe:
             deployment_id,
             "--wait-timeout-ms",
             str(self.args.deploy_wait_timeout_ms),
+            "--timeout-ms",
+            str(self.args.agent_timeout_ms),
         )
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
         failure = payload.get("failure") if isinstance(payload.get("failure"), dict) else None
@@ -638,23 +641,40 @@ class Recipe:
         self.serving_origin = self.client.endpoint.origin  # type: ignore[attr-defined]
 
     def rollback(self) -> dict[str, Any]:
-        envelope, wall_ms = self.cli("rollback", "--reason", "candidate qualification teardown")
+        """Roll back, waiting out an agent still inside the last failed deploy's transaction."""
+        started = time.monotonic()
+        deadline = started + self.args.teardown_busy_wait_ms / 1000
+        while True:
+            envelope, _ = self.cli(
+                "rollback",
+                "--reason",
+                "candidate qualification teardown",
+                "--timeout-ms",
+                str(self.args.agent_timeout_ms),
+            )
+            remaining = deadline - time.monotonic()
+            if envelope.get("status") != "busy" or remaining <= 0:
+                break
+            time.sleep(min(BUSY_POLL_S, remaining))
+        wall_ms = int((time.monotonic() - started) * 1000)
         payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
         restored = payload.get("restored_deployment_id")
         ok = envelope.get("status") == "ok" and restored == self.predecessor_id
         error = self.envelope_error(envelope)
+        if ok:
+            reason = None
+        elif error:
+            reason = f"{error['code']}: {error['message']}"
+            if envelope.get("status") == "busy":
+                reason += f" (still busy after {self.args.teardown_busy_wait_ms} ms)"
+        else:
+            reason = f"restored {restored!r}, expected {self.predecessor_id!r}"
         return {
             "method": "rollback",
             "status": "ok" if ok else "failed",
             "restored_deployment_id": restored if isinstance(restored, str) else None,
             "wall_ms": wall_ms,
-            "reason": None
-            if ok
-            else (
-                f"{error['code']}: {error['message']}"
-                if error
-                else f"restored {restored!r}, expected {self.predecessor_id!r}"
-            ),
+            "reason": reason,
         }
 
     # -- processes and memory --
@@ -1573,6 +1593,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="the serving worker's whole-exchange request timeout",
     )
     parser.add_argument("--deploy-wait-timeout-ms", type=int, default=300000)
+    parser.add_argument(
+        "--agent-timeout-ms",
+        type=int,
+        default=120000,
+        help="the CLI's per-call agent timeout for every deploy and rollback; keep it above "
+        "the agent's worker.warm_timeout_ms, or a load failure is cut off as `timeout`",
+    )
+    parser.add_argument(
+        "--teardown-busy-wait-ms",
+        type=int,
+        default=60000,
+        help="how long the teardown keeps retrying a rollback the agent answers `busy`",
+    )
     parser.add_argument("--timing-iterations", type=int, default=3)
     parser.add_argument(
         "--sampler", help="the memory_sample binary; without it every memory window is not_run"
@@ -1605,6 +1638,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         args.request_timeout_ms <= 0
         or args.timing_iterations <= 0
         or args.deploy_wait_timeout_ms <= 0
+        or args.agent_timeout_ms <= 0
+        or args.teardown_busy_wait_ms < 0
         or args.oom_ballast_bytes < 0
     ):
         parser.error("timeouts and iteration counts must be positive")
