@@ -1,0 +1,28 @@
+{
+  "from": {
+    "allow_unsigned": false,
+    "packages": {
+      "tensorplate-agent": "0.2.1-1",
+      "tensorplate-backend-python-pytorch": "0.2.1-1",
+      "tensorplate-cli": "0.2.1-1",
+      "tensorplate-common": "0.2.1-1",
+      "tensorplate-observability": "0.2.1-1",
+      "tensorplate-serving": "0.2.1-1"
+    },
+    "release_tag": "v0.2.1",
+    "sha256sums_sha256": "e82a35657f7beedd4a94cac9603b86a79a28bb208d3e6453eb30b53c231a4670"
+  },
+  "to": {
+    "allow_unsigned": false,
+    "packages": {
+      "tensorplate-agent": "0.3.1~rc.1-1",
+      "tensorplate-backend-python-pytorch": "0.3.1~rc.1-1",
+      "tensorplate-cli": "0.3.1~rc.1-1",
+      "tensorplate-common": "0.3.1~rc.1-1",
+      "tensorplate-observability": "0.3.1~rc.1-1",
+      "tensorplate-serving": "0.3.1~rc.1-1"
+    },
+    "release_tag": "v0.3.1-rc.1",
+    "sha256sums_sha256": "887872caea0fb3701a2ec73a1cf931bc95de416cab049ecd4d4d0744b9830058"
+  }
+}

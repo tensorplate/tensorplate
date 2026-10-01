@@ -1,0 +1,17 @@
+tensorplate-v0.2.1-artifacts.json: OK
+tensorplate-common_0.2.1-1_all.deb: OK
+tensorplate-agent_0.2.1-1_amd64.deb: OK
+tensorplate-agent_0.2.1-1_arm64.deb: OK
+tensorplate-serving_0.2.1-1_amd64.deb: OK
+tensorplate-serving_0.2.1-1_arm64.deb: OK
+tensorplate-observability_0.2.1-1_amd64.deb: OK
+tensorplate-observability_0.2.1-1_arm64.deb: OK
+tensorplate-cli_0.2.1-1_amd64.deb: OK
+tensorplate-cli_0.2.1-1_arm64.deb: OK
+tensorplate-backend-python-pytorch_0.2.1-1_all.deb: OK
+tensorplate-apt-source_0.2.1-1_all.deb: OK
+tensorplate_0.2.1-1_amd64.deb: OK
+tensorplate_0.2.1-1_arm64.deb: OK
+install.sh: OK
+tensorplate_python-0.2.1-py3-none-any.whl: OK
+tensorplate_python-0.2.1.tar.gz: OK

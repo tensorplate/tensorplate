@@ -1,0 +1,12 @@
+{
+  "accelerator_kernel_executed": false,
+  "agent_state": "ready",
+  "backend": "python_pytorch",
+  "backend_profile": "fixture",
+  "deployment_id": "cloud-lifecycle-smoke",
+  "deployment_phase": "active",
+  "inference_round_trip": "echoed",
+  "serving_endpoint": "ready",
+  "status_severity": "ready",
+  "supervision_state": "not_configured"
+}

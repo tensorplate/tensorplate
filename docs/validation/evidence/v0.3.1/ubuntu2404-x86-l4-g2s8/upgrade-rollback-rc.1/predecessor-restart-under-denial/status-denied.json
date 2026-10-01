@@ -1,0 +1,43 @@
+{
+  "command": "status",
+  "correlation_id": "cli-43e6f7e8-937b-4ea5-9a53-2817154645ad",
+  "payload": {
+    "agent": {
+      "active": {
+        "backend": "python_pytorch",
+        "bundle_digest": "sha256:43bd72f1784830aa9c198e88ee2d6ceb2cdc73e5625db3383a6b9d9caa3da760",
+        "bundle_name": "x86-fixture-smoke",
+        "bundle_version": "0.1.0",
+        "deployment_id": "cloud-lifecycle-smoke",
+        "model_class": "custom",
+        "serving_url": "http://127.0.0.1:18080/infer"
+      },
+      "agent_state": "ready",
+      "available": true,
+      "candidate": null,
+      "in_flight_transaction": null,
+      "last_error": null,
+      "platform_telemetry": {
+        "memory": {
+          "accelerator_total_bytes": 24152899584,
+          "effective_budget_bytes": 24152899584,
+          "gate": "load_bearing",
+          "host_total_bytes": 33646985216,
+          "memory_profile": "discrete_gpu",
+          "row_nominal_capacity_bytes": 25769803776,
+          "shares_one_pool": false
+        },
+        "row_id": "ubuntu2404-x86-l4-g2s8",
+        "validated": true
+      },
+      "previous_active": null,
+      "quarantined": [],
+      "supervision": null
+    },
+    "agent_response_status": "ok",
+    "severity": "ready"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}
