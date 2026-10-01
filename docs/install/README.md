@@ -14,6 +14,7 @@ and validation handoff documentation.
 | [`services.md`](./services.md) | systemd units, restart policy, hardening profile, and lifecycle commands. |
 | [`lifecycle.md`](./lifecycle.md) | Reinstall, upgrade, downgrade, remove, and purge policy. |
 | [`python-pytorch-backend.md`](./python-pytorch-backend.md) | The separately installable Python/PyTorch backend, PyTorch wheel selection, and how doctor reports its status. |
+| [`speech-runtime.md`](./speech-runtime.md) | The speech runtime package family: what each package ships, what installing does, and what it does not do yet. |
 | [`packaging-validation-handoff.md`](./packaging-validation-handoff.md) | Artifacts, validation steps, package versions, hardware assumptions, and known risks for the hardware validation gate. |
 
 Doctor finding catalog: see [`docs/cli/doctor.md`](../cli/doctor.md).

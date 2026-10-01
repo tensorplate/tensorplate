@@ -40,7 +40,8 @@ and refuses to proceed if:
 
 When the preflight passes, dpkg unpacks the new package and runs
 `tensorplate-agent.postinst configure`. dpkg does **not** restart the
-services. The agent and observability `prerm` scripts stop both units
+services (the one exception: installing, upgrading or removing a
+[speech runtime package](speech-runtime.md) restarts a running agent). The agent and observability `prerm` scripts stop both units
 for the upgrade, and nothing in the packages starts them again: the
 units are installed with `dh_installsystemd --no-start`. Start them
 yourself after the upgrade:

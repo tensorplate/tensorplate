@@ -2,7 +2,8 @@ name: Supply chain
 
 # License policy, dependency sources and known vulnerabilities for the Rust
 # workspace (cargo-deny), and a CycloneDX SBOM plus a vulnerability audit
-# for each Python package (cyclonedx-py, pip-audit). Accepted
+# for each Python package and for the speech runtime lock (cyclonedx-py,
+# pip-audit). Accepted
 # vulnerabilities live in tools/release/vulnerability-dispositions.json;
 # see docs/release/artifacts.md, "Supply-chain checks".
 #
@@ -210,3 +211,84 @@ jobs:
           else
             echo "nothing to audit: the package has no third-party runtime dependency"
           fi
+
+  speech-runtime-lock:
+    name: SBOM and audit (speech runtime lock)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install the scanners in their own environment
+        run: |
+          python -m venv "${RUNNER_TEMP}/scanners"
+          "${RUNNER_TEMP}/scanners/bin/python" -m pip install --quiet \
+            "cyclonedx-bom==${CYCLONEDX_BOM_VERSION}" "pip-audit==${PIP_AUDIT_VERSION}"
+          "${RUNNER_TEMP}/scanners/bin/python" -m pip freeze
+
+      # The lock is read, never installed: its pins and digests are what the
+      # packages are built from. The loader built from this tree is left out.
+      - name: The lock as one requirements file
+        run: |
+          lock=packaging/speech-runtime/lock
+          first_party="$(awk '!/^#/ && $2 == "tree" {print $1}' "${lock}/sources.txt" | paste -sd'|')"
+          for file in "${lock}"/*.txt; do
+            case "$(basename "${file}")" in index.txt|sources.txt|undeclared-licenses.txt) continue ;; esac
+            cat "${file}"
+          done | grep -Ev "^(${first_party})==" >"${RUNNER_TEMP}/speech-lock.txt"
+          echo "$(wc -l <"${RUNNER_TEMP}/speech-lock.txt") third-party pins"
+          [ -s "${RUNNER_TEMP}/speech-lock.txt" ]
+
+      - name: CycloneDX SBOM
+        run: |
+          mkdir -p sbom
+          "${RUNNER_TEMP}/scanners/bin/cyclonedx-py" requirements \
+            --output-reproducible \
+            --output-format JSON \
+            -o sbom/tensorplate-speech-runtime.cdx.json \
+            "${RUNNER_TEMP}/speech-lock.txt"
+          python - sbom/tensorplate-speech-runtime.cdx.json "${RUNNER_TEMP}/speech-lock.txt" <<'PY'
+          import json, sys
+          components = json.load(open(sys.argv[1]))["components"]
+          pins = [line for line in open(sys.argv[2]) if line.strip()]
+          if len(components) != len(pins):
+              sys.exit(f"{len(components)} components for {len(pins)} pins")
+          unhashed = [c["name"] for c in components
+                      if not any(r.get("hashes") for r in c.get("externalReferences", []))]
+          if unhashed:
+              sys.exit(f"components without a digest: {unhashed}")
+          print(len(components), "components, each with its locked digest")
+          PY
+
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-tensorplate-speech-runtime
+          path: sbom/tensorplate-speech-runtime.cdx.json
+          if-no-files-found: error
+
+      # Advisories are published against public versions, so a local version
+      # label (the CUDA build of torch) is dropped for the audit. A pin that
+      # is not on PyPI is reported as skipped, not as clean.
+      - name: pip-audit, with the recorded dispositions
+        run: |
+          python -m pip install --quiet -r tools/release/requirements.txt
+          python tools/release/check-vulnerability-dispositions.py --pip-audit-args >"${RUNNER_TEMP}/pip-audit-args"
+          mapfile -t ignore <"${RUNNER_TEMP}/pip-audit-args"
+          audit=("${RUNNER_TEMP}/scanners/bin/pip-audit" --progress-spinner off --no-deps --disable-pip)
+
+          printf 'pip==25.0.1\n' >"${RUNNER_TEMP}/control.txt"
+          status=0
+          "${audit[@]}" -r "${RUNNER_TEMP}/control.txt" >"${RUNNER_TEMP}/control.out" 2>&1 || status=$?
+          if [ "$status" -ne 1 ] || ! grep -Eq 'PYSEC-|GHSA-' "${RUNNER_TEMP}/control.out"; then
+            cat "${RUNNER_TEMP}/control.out"
+            echo "positive control failed (exit ${status}): pip-audit did not report pip 25.0.1's published advisories" >&2
+            exit 1
+          fi
+
+          sed -E 's/^([^=]+==[^ +]+)\+[^ ]+/\1/' "${RUNNER_TEMP}/speech-lock.txt" >"${RUNNER_TEMP}/speech-audit.txt"
+          "${audit[@]}" -r "${RUNNER_TEMP}/speech-audit.txt" "${ignore[@]}"

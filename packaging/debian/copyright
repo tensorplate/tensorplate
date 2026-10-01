@@ -2,6 +2,12 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: tensorplate
 Upstream-Contact: TensorPlate Contributors <oss@tensorplate.com>
 Source: https://github.com/tensorplate/tensorplate
+Comment:
+ The tensorplate-speech-runtime-* binary packages also contain Python
+ distributions that are not part of this source tree: they are fetched by
+ digest when the packages are built, and each keeps its own license. Every
+ such package lists them, with their declared licenses and the license files
+ they ship, in /usr/share/doc/<package>/third-party-licenses.json.
 
 Files: *
 Copyright: 2025-2026 TensorPlate Inc

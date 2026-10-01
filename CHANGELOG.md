@@ -8,6 +8,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The speech runtime package family: `tensorplate-speech-runtime-base`,
+  `-cublas`, `-cuda`, `-torch`, `-vad`, `-ct2`, `-kokoro` and the
+  `tensorplate-speech-runtime` metapackage, `amd64`, built on Ubuntu 24.04
+  only under the `pkg.tensorplate.speech-runtime` build profile.
+  `packaging/speech-runtime/build-environment.py` fetches a hash-locked
+  wheelhouse and, with no network, installs it into a virtual environment at
+  `/usr/lib/tensorplate/speech-runtime` over the distribution's `python3.12`,
+  with the sidecar module, no pip, hash-checked bytecode caches and a license
+  manifest per package; the lock file a pin sits in decides the package that
+  ships it. espeak-ng comes from the distribution through a loader built from
+  this tree, and the `docopt` wheel is built from its source archive; both
+  must reproduce their locked digests. Installing downloads nothing and
+  restarts a running agent once per `dpkg` run. The packages ship no Whisper
+  or Kokoro model, no release builds them yet and the backend descriptor declares no runner
+  profile, so nothing selects the environment yet. A new workflow job builds
+  the family from a stub wheelhouse, and the supply-chain workflow writes an
+  SBOM of the lock and audits it. (V030-E01-F01-T04)
+
 - Pinned Whisper CT2 and Kokoro/af_heart reference provisioning manifests, with resumable digest-verified retrieval and repeat-run verification that writes nothing. (V030-E01-F01-T05)
 
 - A candidate qualification recipe: `tools/validation/candidate-qualify.py`
