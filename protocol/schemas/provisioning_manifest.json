@@ -5,7 +5,10 @@
   "description": "The trust root for `tensorplate bundle provision`: every file of every bundle it can provision, with the SHA-256 and size each file must have. The `tensorplate-cli` Debian package ships one at /usr/share/tensorplate/provisioning/manifest.json. A provisioned bundle directory holds exactly these files, one of which is the bundle's own `manifest.json`, and nothing else. Beyond this schema, readers also require unique bundle names, unique file paths within a bundle, no path that is also another path's directory, and a `manifest.json` file in every bundle.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "bundles"],
+  "required": [
+    "schema_version",
+    "bundles"
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -20,7 +23,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "files"],
+        "required": [
+          "name",
+          "files"
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -37,7 +43,11 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["path", "sha256", "size"],
+              "required": [
+                "path",
+                "sha256",
+                "size"
+              ],
               "properties": {
                 "path": {
                   "type": "string",
@@ -54,7 +64,25 @@
                   "type": "integer",
                   "minimum": 0,
                   "description": "The file's size in bytes."
+                },
+                "url": {
+                  "type": "string",
+                  "pattern": "^(https://[A-Za-z0-9.-]+(:[0-9]+)?|http://(127\\.0\\.0\\.1|localhost)(:[0-9]+)?)/[^\\s#]*$",
+                  "maxLength": 2048,
+                  "description": "Fetch location pinned by the file digest. HTTPS, or HTTP on the loopback test origin only; no credentials or fragment."
+                },
+                "source_path": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$",
+                  "maxLength": 512,
+                  "description": "Packaged file relative to this provisioning manifest, used when --from is absent."
                 }
+              },
+              "not": {
+                "required": [
+                  "url",
+                  "source_path"
+                ]
               }
             }
           }

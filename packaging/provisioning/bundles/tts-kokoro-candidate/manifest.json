@@ -1,0 +1,49 @@
+{
+  "schema_version": "0.1",
+  "name": "tts-kokoro-candidate",
+  "version": "0.1.0",
+  "format_version": "0.1",
+  "model_class": "custom",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp32",
+  "artifacts": [
+    {
+      "role": "model",
+      "kind": "python_pytorch_entry",
+      "path": "tts-kokoro-candidate.json",
+      "digest": "sha256:a679f3fca2a4c30611d590592e1fe1cc973143fa5b80c44d5923bcb456390820",
+      "byte_size": 833,
+      "description": "Candidate-only runner entry: selects the kokoro profile and lists its artifact set by relative path and digest."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/config.json",
+      "digest": "sha256:5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+      "byte_size": 2351,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "weights",
+      "kind": "weights",
+      "path": "model/kokoro-v1_0.pth",
+      "digest": "sha256:496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4",
+      "byte_size": 327212226,
+      "description": "Pinned upstream reference artifact."
+    },
+    {
+      "role": "auxiliary",
+      "kind": "auxiliary",
+      "path": "model/voices/af_heart.pt",
+      "digest": "sha256:0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff",
+      "byte_size": 523425,
+      "description": "Pinned upstream reference artifact."
+    }
+  ],
+  "target_hardware": {
+    "device_family": "x86_64"
+  },
+  "runtime_compatibility": {
+    "min_runtime_version": "0.3.0"
+  }
+}

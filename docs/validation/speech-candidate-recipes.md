@@ -72,3 +72,19 @@ and per-PID `VmRSS`. Raw command output and device identities are not written.
 Follow [fixture and evidence rules](fixture-and-evidence-rules.md) before
 publishing results. The repository's model-free idle recordings test the parser
 and loop; they supply no candidate memory or reserve qualification.
+
+## Provisioning the reference artifacts
+
+On the qualification host, run `tensorplate bundle provision
+stt-whisper-candidate` and `tensorplate bundle provision tts-kokoro-candidate`
+from the operator shell before denying egress. Use the resulting directories
+under `/var/lib/tensorplate/bundles/import/` unchanged. The
+[packaged example manifest](../../packaging/provisioning/manifest.json) pins
+the converted Whisper directory and Kokoro config, weights and af_heart voice;
+its companion [provenance record](../../packaging/provisioning/README.md) names
+the candidate revisions and the publisher's conversion-provenance limits.
+Record the provisioning manifest's SHA-256 and every file digest with the run.
+An operator's alternate manifest uses the same verification path. The VAD and
+G2P assets are runtime wheel data, not additional bundle downloads. Provisioning
+proves retrieval and integrity; the recipe still must measure real load,
+inference, unload and negative paths through the installed runner environment.

@@ -136,12 +136,12 @@ pub enum BundleCommand {
     Provision(ProvisionArgs),
 }
 
-/// `bundle provision <name> --from <dir> [--manifest <file>] [--into <dir>]`.
+/// `bundle provision <name> [--from <dir>] [--manifest <file>] [--into <dir>]`.
 #[derive(Clone, Debug, Default)]
 pub struct ProvisionArgs {
     /// The bundle's name in the provisioning manifest.
     pub name: String,
-    /// The local directory holding the bundle's files.
+    /// A local directory override; empty uses the manifest's fetch sources.
     pub from: PathBuf,
     /// The provisioning manifest; the one `tensorplate-cli` ships when absent.
     pub manifest: Option<PathBuf>,
@@ -199,7 +199,7 @@ Commands:
   undeploy            Retire one resident-set member.
   recover             Return a quarantined resident-set member to service.
   device              Manage the local SSH device registry.
-  bundle provision <name> --from <dir>
+  bundle provision <name> [--from <dir>]
                       Verify a bundle the provisioning manifest lists into
                       this host's bundle import directory.
   version             Print CLI and protocol versions.
@@ -733,7 +733,7 @@ fn parse_u16(value: &str, flag: &str) -> CliResult<u16> {
 const BUNDLE_USAGE: &str = "bundle <subcommand>
 
 Subcommands:
-  provision <name> --from <dir> [--manifest <file>] [--into <dir>]";
+  provision <name> [--from <dir>] [--manifest <file>] [--into <dir>]";
 
 fn parse_bundle(rest: &[String], global: &mut GlobalArgs) -> CliResult<BundleCommand> {
     let mut i = 0;
@@ -772,7 +772,7 @@ fn parse_bundle_provision(rest: &[String], global: &mut GlobalArgs) -> CliResult
             "--into" => args.into = Some(PathBuf::from(require_value(rest, &mut i, a)?)),
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "bundle provision <name> --from <dir> [--manifest <file>] [--into <dir>]"
+                    "bundle provision <name> [--from <dir>] [--manifest <file>] [--into <dir>]"
                         .into(),
                 ));
             }
@@ -794,12 +794,7 @@ fn parse_bundle_provision(rest: &[String], global: &mut GlobalArgs) -> CliResult
     }
     args.name =
         name.ok_or_else(|| CliError::Usage("bundle provision requires a <name> argument".into()))?;
-    args.from = from.ok_or_else(|| {
-        CliError::Usage(
-            "bundle provision requires `--from <dir>`, the directory holding the bundle's files"
-                .into(),
-        )
-    })?;
+    args.from = from.unwrap_or_default();
     Ok(BundleCommand::Provision(args))
 }
 

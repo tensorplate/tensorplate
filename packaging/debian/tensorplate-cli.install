@@ -1,3 +1,5 @@
 target/release/tensorplate                   usr/bin/
 packaging/conf/cli.json                      etc/tensorplate/
 packaging/provisioning/manifest.json         usr/share/tensorplate/provisioning/
+packaging/provisioning/bundles              usr/share/tensorplate/provisioning/
+packaging/provisioning/README.md            usr/share/tensorplate/provisioning/

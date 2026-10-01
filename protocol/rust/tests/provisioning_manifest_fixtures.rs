@@ -56,7 +56,11 @@ fn reader_error(doc: &Value) -> Option<String> {
 #[test]
 fn committed_manifests_validate_and_parse() {
     let validator = validator();
-    for relative in [FIXTURE, SHIPPED] {
+    for relative in [
+        FIXTURE,
+        SHIPPED,
+        "protocol/rust/tests/fixtures/provisioning_fetch.json",
+    ] {
         let doc: Value = serde_json::from_str(&read(relative)).expect("parses as JSON");
         assert!(validator.is_valid(&doc), "{relative} must validate");
         let parsed = ProvisioningManifest::parse(&read(relative))
@@ -66,11 +70,13 @@ fn committed_manifests_validate_and_parse() {
                 .expect("re-parse");
         assert_eq!(parsed, again, "{relative} must round-trip");
     }
-    // Nothing is provisionable until the model bundles are pinned.
-    assert!(ProvisioningManifest::parse(&read(SHIPPED))
-        .expect("shipped")
-        .bundles
-        .is_empty());
+    assert_eq!(
+        ProvisioningManifest::parse(&read(SHIPPED))
+            .expect("shipped")
+            .bundles
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -149,9 +155,10 @@ fn malformed_cases() -> Vec<(&'static str, Value, &'static str)> {
         (
             "an unknown file field",
             with(|doc| {
-                doc["bundles"][0]["files"][0]["url"] = json!("https://example.invalid/x");
+                doc["bundles"][0]["files"][0]["unknown_source"] =
+                    json!("https://example.invalid/x");
             }),
-            "unknown field `url`",
+            "unknown field `unknown_source`",
         ),
         (
             "a bundle with no files",
@@ -299,6 +306,67 @@ fn rules_the_schema_cannot_state_are_enforced_by_the_reader() {
         assert!(
             refused.contains(reason),
             "{label}: refused for another reason: {refused}"
+        );
+    }
+}
+
+#[test]
+fn fetch_source_shapes_agree_in_schema_and_reader() {
+    let validator = validator();
+    for (value, valid) in [
+        (
+            json!({"url": "https://models.example.invalid/rev/file"}),
+            true,
+        ),
+        (json!({"url": "http://127.0.0.1:1234/file"}), true),
+        (json!({"source_path": "bundles/model/manifest.json"}), true),
+        (json!({"url": "http://models.example.invalid/file"}), false),
+        (
+            json!({"url": "https://user:pass@models.example.invalid/file"}),
+            false,
+        ),
+        (
+            json!({"url": "https://models.example.invalid/file#fragment"}),
+            false,
+        ),
+        (json!({"url": "file:///etc/passwd"}), false),
+        (json!({"url": null}), false),
+        (json!({"source_path": null}), false),
+        (json!({"source_path": "../outside"}), false),
+        (
+            json!({"url": "https://models.example.invalid/file", "source_path": "inside"}),
+            false,
+        ),
+    ] {
+        let mut doc = fixture();
+        let target = doc["bundles"][0]["files"][0]
+            .as_object_mut()
+            .expect("object");
+        target.extend(value.as_object().expect("object").clone());
+        assert_eq!(validator.is_valid(&doc), valid, "schema: {value}");
+        assert_eq!(reader_error(&doc).is_none(), valid, "reader: {value}");
+    }
+}
+
+#[test]
+fn url_length_uses_schema_character_boundaries() {
+    let validator = validator();
+    let prefix = "https://models.example.invalid/";
+    for (path, valid) in [
+        ("é".repeat(1020), true),
+        ("é".repeat(2048 - prefix.len()), true),
+        ("a".repeat(2048 - prefix.len()), true),
+        ("é".repeat(2049 - prefix.len()), false),
+        ("a".repeat(2049 - prefix.len()), false),
+    ] {
+        let mut doc = fixture();
+        doc["bundles"][0]["files"][0]["url"] = json!(format!("{prefix}{path}"));
+        assert_eq!(validator.is_valid(&doc), valid, "schema: {}", path.len());
+        assert_eq!(
+            reader_error(&doc).is_none(),
+            valid,
+            "reader: {}",
+            path.len()
         );
     }
 }

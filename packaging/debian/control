@@ -102,6 +102,8 @@ Architecture: any
 Depends:
  ${misc:Depends},
  ${shlibs:Depends},
+ curl,
+ ca-certificates,
  tensorplate-common (= ${source:Version}),
 Recommends:
  tensorplate-agent (= ${binary:Version}),

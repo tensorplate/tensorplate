@@ -259,3 +259,15 @@ protocol 0.1 without changing existing envelopes or version constants. It is
 currently consumed only by the platform crate and its tests; no C++ worker,
 Python sidecar or SDK receives the record. Its field and availability rules
 are in [memory observations](memory-observation.md).
+
+## Operator provisioning manifest
+
+`provisioning_manifest.json` is consumed only by the Rust operator CLI, not
+exchanged over IPC. Its Rust binding validates the same file-path, digest and
+fetch-source grammar. Under schema 0.1, optional `url` and `source_path` fields
+extend local-directory provisioning with operator-requested fetch; they cannot
+coexist or be null. An older local-only CLI rejects these fields, so it fails
+closed on a new fetch manifest. Existing local manifests retain their behavior.
+The CLI retrieves before deployment; the agent and sidecar keep their separate
+bundle and artifact-set verification. See [bundle provisioning](../cli/bundle.md)
+for cache isolation, atomic publication and retry semantics.
