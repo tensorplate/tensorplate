@@ -1,0 +1,188 @@
+{
+  "schema_version": "0.1",
+  "convention": "candidate_only_text_utf8_result_json",
+  "description": "Fixture inventory for tools/validation/candidate-qualify.py. STT clips are provisioned outside the repository and pinned here by digest once provisioned; a null digest is unpinned and the tool refuses to run on it. Derived clips are produced by the tool from their clean source with the derivation recorded here, and their digests are pinned the same way. TTS sentences are the fixture bytes themselves, pinned by the digest of their UTF-8 encoding.",
+  "suites": {
+    "stt": {
+      "backend_profiles": [
+        "faster_whisper"
+      ],
+      "clip_format": "wav_pcm16_mono",
+      "clips": [
+        {
+          "id": "en-clean-16k-01",
+          "stratum": "clean16k",
+          "language": "en",
+          "sample_rate_hz": 16000,
+          "digest": null,
+          "derived_from": null,
+          "derivation": null,
+          "duration_s": {
+            "min": 1,
+            "max": 30
+          },
+          "content_note": "One English utterance, studio or close-microphone quality, no music."
+        },
+        {
+          "id": "ar-clean-16k-01",
+          "stratum": "clean16k",
+          "language": "ar",
+          "sample_rate_hz": 16000,
+          "digest": null,
+          "derived_from": null,
+          "derivation": null,
+          "duration_s": {
+            "min": 1,
+            "max": 30
+          },
+          "content_note": "One Modern Standard Arabic utterance, studio or close-microphone quality, no music."
+        },
+        {
+          "id": "en-noisy-16k-01",
+          "stratum": "noisy16k",
+          "language": "en",
+          "sample_rate_hz": 16000,
+          "digest": null,
+          "derived_from": "en-clean-16k-01",
+          "derivation": {
+            "kind": "seeded_noise_mix",
+            "seed": 2026093001,
+            "snr_db": 10
+          },
+          "duration_s": {
+            "min": 1,
+            "max": 30
+          },
+          "content_note": null
+        },
+        {
+          "id": "ar-noisy-16k-01",
+          "stratum": "noisy16k",
+          "language": "ar",
+          "sample_rate_hz": 16000,
+          "digest": null,
+          "derived_from": "ar-clean-16k-01",
+          "derivation": {
+            "kind": "seeded_noise_mix",
+            "seed": 2026093002,
+            "snr_db": 10
+          },
+          "duration_s": {
+            "min": 1,
+            "max": 30
+          },
+          "content_note": null
+        },
+        {
+          "id": "en-telephony-8k-01",
+          "stratum": "telephony8k",
+          "language": "en",
+          "sample_rate_hz": 8000,
+          "digest": null,
+          "derived_from": "en-clean-16k-01",
+          "derivation": {
+            "kind": "telephony_8k_ulaw"
+          },
+          "duration_s": {
+            "min": 1,
+            "max": 30
+          },
+          "content_note": null
+        }
+      ]
+    },
+    "tts": {
+      "backend_profiles": [
+        "kokoro"
+      ],
+      "language": "en-US",
+      "voice": "af_heart",
+      "texts": [
+        {
+          "id": "en-US-short-01",
+          "stratum": "short",
+          "text": "Hello there.",
+          "digest": "sha256:23ea498e82f4435b1c135324eedef4ba64061600897077bf76082a50b41a9c13"
+        },
+        {
+          "id": "en-US-short-02",
+          "stratum": "short",
+          "text": "Yes.",
+          "digest": "sha256:5f9a2b795615ba6a3d5455fd5624d773fbca5bcd16249c421fd37411dc9837da"
+        },
+        {
+          "id": "en-US-short-03",
+          "stratum": "short",
+          "text": "Please wait a moment.",
+          "digest": "sha256:11ee546c32b6dcc76a49e4e3227411d91e295068dffc5dc5ad7f2855b555c667"
+        },
+        {
+          "id": "en-US-short-04",
+          "stratum": "short",
+          "text": "The meeting starts at nine.",
+          "digest": "sha256:bacd3104ed27bb21730c1e210f2e12b3e5619a311f3430d98430d7d729514e89"
+        },
+        {
+          "id": "en-US-short-05",
+          "stratum": "short",
+          "text": "No, I did not say that.",
+          "digest": "sha256:5365b1ccb1735f0dc9a4239826f6bb495b164401384865a2a941ee7b2b80833e"
+        },
+        {
+          "id": "en-US-medium-01",
+          "stratum": "medium",
+          "text": "Your order of three items will arrive on Tuesday, between two and four in the afternoon.",
+          "digest": "sha256:b212335b783e1d1a9011a9a54940cd9eb92543f406c0b40b4a73f78c485d3fbc"
+        },
+        {
+          "id": "en-US-medium-02",
+          "stratum": "medium",
+          "text": "The quick brown fox jumps over the lazy dog while the river runs quietly past the old mill.",
+          "digest": "sha256:b9fff206ab447959bc4f1be911d6fc1df8f9b76b48a369879e44c78ca4d96025"
+        },
+        {
+          "id": "en-US-medium-03",
+          "stratum": "medium",
+          "text": "Turn left at the second light, then continue for about half a mile until you reach the station.",
+          "digest": "sha256:2fb794b4c48b1d739d89145710b6beeb1c57daee072cba89e2147bbeca67b63b"
+        },
+        {
+          "id": "en-US-numerals-01",
+          "stratum": "numerals",
+          "text": "The total comes to forty-two dollars and seventeen cents, due on the first of March.",
+          "digest": "sha256:1dcad7c78cae6336c44c86fd5df5bd719602be3e98013885067884e053e2ff3b"
+        },
+        {
+          "id": "en-US-numerals-02",
+          "stratum": "numerals",
+          "text": "Call 555-0100 before 10:30, or the reservation for 12 guests will be released.",
+          "digest": "sha256:647c58e4694e297dfa4165b706cc08f3dc9a8cef70fc741e995303fd51b779fb"
+        },
+        {
+          "id": "en-US-negation-01",
+          "stratum": "negation",
+          "text": "We are not closing early today; the store does not shut before eight.",
+          "digest": "sha256:948bb1dffb97ea33199d53607baec2c9cd75ac93336500ca9d2aa62f3204c24d"
+        },
+        {
+          "id": "en-US-punctuation-01",
+          "stratum": "punctuation",
+          "text": "Wait... are you sure? I thought so, but now I am not: check again, please!",
+          "digest": "sha256:500d18d3eab5b2eb49ecd8ce368d7572c41df6b94ff2dc1ded267bf71db89786"
+        },
+        {
+          "id": "en-US-long-01",
+          "stratum": "long",
+          "text": "Thank you for calling. Your account has been updated, your new balance is available in the app, and a confirmation email is on its way to the address we have on file.",
+          "digest": "sha256:0fa26b60bdb7921a59c655af700899d6e8742e5184e4cd0eba4eeef8b20847e4"
+        },
+        {
+          "id": "en-US-long-02",
+          "stratum": "long",
+          "text": "Before we begin, make sure the device is fully charged, connected to the network, and placed on a flat surface away from direct sunlight, water, and heat sources.",
+          "digest": "sha256:b9ac7edead066226701fdd2a283a6dadf5bb3db2a40231a261aeedbd6a1ca3d8"
+        }
+      ]
+    }
+  }
+}

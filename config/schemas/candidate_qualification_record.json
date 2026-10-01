@@ -1,0 +1,466 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/candidate_qualification_record.json",
+  "title": "Candidate qualification record",
+  "description": "Machine-readable result of one run of tools/validation/candidate-qualify.py against one candidate bundle on one machine: artifact identity, observed device facts, sampled memory windows, per-fixture latency and real-time factors, output metadata, negative-path outcomes and a pass/fail verdict. A record describes a candidate run; it is never Production evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_kind",
+    "convention",
+    "provenance",
+    "qualification",
+    "tool",
+    "recorded_at_utc",
+    "request_timeout_ms",
+    "subject",
+    "device_facts",
+    "lifecycle",
+    "memory",
+    "fixtures",
+    "negatives",
+    "result"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "record_kind": { "type": "string", "const": "candidate_qualification" },
+    "convention": {
+      "type": "string",
+      "const": "candidate_only_text_utf8_result_json",
+      "description": "The candidate-only request/response convention the run used: UTF-8 text as a uint8 `text_utf8` tensor and structured results as a uint8 `result_json` tensor."
+    },
+    "provenance": {
+      "type": "string",
+      "enum": ["recorded", "synthetic"],
+      "description": "`recorded` for a run against a real agent and worker; `synthetic` for a record produced by the tool's test environment, whose numbers measure nothing."
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["presented_as", "production_evidence"],
+      "properties": {
+        "presented_as": { "type": "string", "const": "candidate" },
+        "production_evidence": { "type": "boolean", "const": false }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_commit", "transport_preference"],
+      "properties": {
+        "name": { "type": "string", "const": "candidate-qualify" },
+        "source_commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "transport_preference": { "type": "string", "enum": ["auto", "binary", "json"] }
+      }
+    },
+    "recorded_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "request_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The serving worker's whole-exchange request timeout every sample's `within_request_timeout` is judged against."
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suite", "backend_profile", "bundle", "artifacts", "entry"],
+      "properties": {
+        "suite": { "type": "string", "enum": ["stt", "tts"] },
+        "backend_profile": { "type": "string", "minLength": 1 },
+        "bundle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "format_version", "manifest_digest", "entry_path"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "version": { "type": "string", "minLength": 1 },
+            "format_version": { "type": "string", "minLength": 1 },
+            "manifest_digest": { "$ref": "#/definitions/Digest" },
+            "entry_path": { "type": "string", "minLength": 1 }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "role", "kind", "digest", "byte_size"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "role": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "minLength": 1 },
+              "digest": { "$ref": "#/definitions/Digest" },
+              "byte_size": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "entry": {
+          "type": "object",
+          "description": "The runner entry as deployed, minus its `artifact_set` (which `artifacts` already records).",
+          "required": ["backend_profile"],
+          "properties": { "backend_profile": { "type": "string", "minLength": 1 } }
+        }
+      }
+    },
+    "device_facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "device", "compute_type_loaded", "engine_versions", "cli_version", "protocol_version", "bundle_format_version"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["result_json.runtime", "not_observed"],
+          "description": "Device and compute type come from the loaded runner's own report, never from the bundle's declaration."
+        },
+        "device": { "type": ["string", "null"] },
+        "compute_type_loaded": { "type": ["string", "null"] },
+        "engine_versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "cli_version": { "type": ["string", "null"] },
+        "protocol_version": { "type": ["string", "null"] },
+        "bundle_format_version": { "type": ["string", "null"] }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predecessor", "deploy", "status_after_deploy", "status_after_negatives", "teardown"],
+      "properties": {
+        "predecessor": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["deployment_id", "bundle_digest", "phase", "wall_ms", "status"],
+              "properties": {
+                "deployment_id": { "type": "string", "minLength": 1 },
+                "bundle_digest": { "type": ["string", "null"] },
+                "phase": { "type": ["string", "null"] },
+                "wall_ms": { "type": "integer", "minimum": 0 },
+                "status": { "$ref": "#/definitions/StepStatus" }
+              }
+            }
+          ]
+        },
+        "deploy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deployment_id", "transaction_id", "phase", "bundle_digest", "wall_ms", "status", "failure"],
+          "properties": {
+            "deployment_id": { "type": "string", "minLength": 1 },
+            "transaction_id": { "type": ["string", "null"] },
+            "phase": { "type": ["string", "null"] },
+            "bundle_digest": { "type": ["string", "null"] },
+            "wall_ms": { "type": "integer", "minimum": 0 },
+            "status": { "$ref": "#/definitions/StepStatus" },
+            "failure": { "$ref": "#/definitions/ObservedError" }
+          }
+        },
+        "status_after_deploy": { "$ref": "#/definitions/StatusSnapshot" },
+        "status_after_negatives": { "$ref": "#/definitions/StatusSnapshot" },
+        "teardown": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method", "status", "restored_deployment_id", "wall_ms", "reason"],
+          "properties": {
+            "method": { "type": "string", "enum": ["rollback", "none"] },
+            "status": { "$ref": "#/definitions/StepStatus" },
+            "restored_deployment_id": { "type": ["string", "null"] },
+            "wall_ms": { "type": "integer", "minimum": 0 },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampler", "processes", "windows"],
+      "properties": {
+        "sampler": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entry", "interval_ms", "duration_ms"],
+              "properties": {
+                "entry": { "type": "string", "const": "tools/validation/memory-sample.sh" },
+                "interval_ms": { "type": "integer", "minimum": 1 },
+                "duration_ms": { "type": "integer", "minimum": 1 }
+              }
+            }
+          ]
+        },
+        "processes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pid", "role"],
+            "properties": {
+              "pid": { "type": "integer", "minimum": 1 },
+              "role": { "type": "string", "enum": ["agent", "serving_worker", "python_sidecar", "external"] }
+            }
+          }
+        },
+        "windows": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["predecessor_idle", "candidate_warm_idle", "candidate_load", "after_teardown"],
+          "properties": {
+            "predecessor_idle": { "$ref": "#/definitions/MemoryWindow" },
+            "candidate_warm_idle": { "$ref": "#/definitions/MemoryWindow" },
+            "candidate_load": { "$ref": "#/definitions/MemoryWindow" },
+            "after_teardown": { "$ref": "#/definitions/MemoryWindow" }
+          }
+        }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/FixtureResult" }
+    },
+    "negatives": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/NegativeResult" }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail", "incomplete"],
+          "description": "`pass`: every step ran and held. `fail`: a step ran and did not hold. `incomplete`: a step did not run; the reasons name each one."
+        },
+        "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  },
+  "definitions": {
+    "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "StepStatus": { "type": "string", "enum": ["ok", "failed", "not_run"] },
+    "ObservedError": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[a-z_]+$",
+              "description": "A typed error code as the wire carried it; the tool checks it against error.json's enumeration."
+            },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "StatusSnapshot": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent_state", "last_error", "active_deployment_id", "active_backend", "health_state", "health_active_model_id", "checks"],
+          "properties": {
+            "agent_state": { "type": ["string", "null"] },
+            "last_error": { "$ref": "#/definitions/ObservedError", "description": "The agent's own last_error as status reports it; set after a failed deploy until the next successful promote or rollback." },
+            "active_deployment_id": { "type": ["string", "null"] },
+            "active_backend": { "type": ["string", "null"] },
+            "health_state": { "type": ["string", "null"] },
+            "health_active_model_id": { "type": ["string", "null"] },
+            "checks": { "type": "object", "additionalProperties": { "type": "boolean" } }
+          }
+        }
+      ]
+    },
+    "SamplePeak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_bytes", "available_samples"],
+      "properties": {
+        "max_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "available_samples": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "DomainPeak": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["consumed", "processes"],
+      "properties": {
+        "consumed": { "$ref": "#/definitions/SamplePeak" },
+        "processes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pid", "role", "peak"],
+            "properties": {
+              "pid": { "type": "integer", "minimum": 1 },
+              "role": { "type": "string", "enum": ["agent", "serving_worker", "python_sidecar", "external"] },
+              "peak": { "$ref": "#/definitions/SamplePeak" }
+            }
+          }
+        }
+      }
+    },
+    "MemoryWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "phase", "observations", "report", "domains"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["measured", "incomplete", "not_run"],
+          "description": "`measured` only when the sampler reported complete coverage for every selected domain; the maxima below are sampled maxima, not continuous-time peaks."
+        },
+        "reason": { "type": ["string", "null"] },
+        "phase": { "type": "string", "enum": ["warm-idle", "load"] },
+        "observations": {
+          "type": "array",
+          "description": "Evidence-directory-relative paths of the sampler's JSON Lines files, one per invocation.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "report": {
+          "description": "Tick counts summed over the window's sampler invocations (one per domain); `complete` only when every invocation reported complete coverage.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["expected_ticks", "completed_ticks", "late_ticks", "complete"],
+              "properties": {
+                "expected_ticks": { "type": "integer", "minimum": 0 },
+                "completed_ticks": { "type": "integer", "minimum": 0 },
+                "late_ticks": { "type": "integer", "minimum": 0 },
+                "complete": { "type": "boolean" }
+              }
+            }
+          ]
+        },
+        "domains": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "device_vram": { "$ref": "#/definitions/DomainPeak" },
+            "guest_ram": { "$ref": "#/definitions/DomainPeak" }
+          }
+        }
+      }
+    },
+    "Distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "min", "median", "max"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 1 },
+        "min": { "type": "number" },
+        "median": { "type": "number", "description": "Nearest-rank median of the raw samples." },
+        "max": { "type": "number" }
+      }
+    },
+    "Sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iteration", "phase", "status", "transport", "exchange_wall_us", "worker_timing_ns", "runner_timings_us", "rtf", "within_request_timeout", "error", "output"],
+      "properties": {
+        "iteration": { "type": "integer", "minimum": 0 },
+        "phase": { "type": "string", "enum": ["timing", "load"] },
+        "status": { "type": "string", "enum": ["ok", "failed"] },
+        "transport": { "type": ["string", "null"], "enum": ["binary", "json", null] },
+        "exchange_wall_us": { "type": "integer", "minimum": 0, "description": "Client wall time of the whole HTTP exchange, encode to decode." },
+        "worker_timing_ns": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "queue_latency_ns": { "type": ["integer", "null"], "minimum": 0 },
+                "execution_latency_ns": { "type": ["integer", "null"], "minimum": 0 },
+                "total_latency_ns": { "type": ["integer", "null"], "minimum": 0 }
+              }
+            }
+          ]
+        },
+        "runner_timings_us": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "rtf": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Runner processing time over audio duration: `decode` over the input clip for STT, `synthesize` over the generated audio for TTS."
+        },
+        "within_request_timeout": { "type": "boolean" },
+        "error": { "$ref": "#/definitions/ObservedError" },
+        "output": { "type": ["object", "null"] }
+      }
+    },
+    "FixtureResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "stratum", "language", "voice", "digest", "derived_from", "derivation", "input", "samples", "summary"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "stratum": { "type": "string", "minLength": 1 },
+        "language": { "type": "string", "minLength": 1 },
+        "voice": { "type": ["string", "null"] },
+        "digest": { "$ref": "#/definitions/Digest", "description": "Digest of the fixture bytes as provisioned or derived: the WAV file for a clip, the UTF-8 text for a sentence." },
+        "derived_from": { "type": ["string", "null"] },
+        "derivation": { "type": ["object", "null"] },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sample_rate_hz", "samples", "duration_us", "resampled_from_hz", "resampler", "text_bytes", "text_chars"],
+          "properties": {
+            "sample_rate_hz": { "type": ["integer", "null"], "minimum": 1 },
+            "samples": { "type": ["integer", "null"], "minimum": 0 },
+            "duration_us": { "type": ["integer", "null"], "minimum": 0 },
+            "resampled_from_hz": { "type": ["integer", "null"], "minimum": 1 },
+            "resampler": { "type": ["string", "null"] },
+            "text_bytes": { "type": ["integer", "null"], "minimum": 0 },
+            "text_chars": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "samples": { "type": "array", "items": { "$ref": "#/definitions/Sample" } },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ok_count", "failed_count", "exchange_wall_us", "rtf"],
+          "properties": {
+            "ok_count": { "type": "integer", "minimum": 0 },
+            "failed_count": { "type": "integer", "minimum": 0 },
+            "exchange_wall_us": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Distribution" }] },
+            "rtf": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Distribution" }] }
+          }
+        }
+      }
+    },
+    "NegativeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case", "description", "disposition", "expected_codes", "observed", "observed_outcome", "status", "reason"],
+      "properties": {
+        "case": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "disposition": {
+          "type": "string",
+          "enum": ["must_match", "record_only"],
+          "description": "`must_match`: the observed code must be one of `expected_codes` for the run to pass. `record_only`: the outcome is recorded and never judged."
+        },
+        "expected_codes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]+$" } },
+        "observed": { "$ref": "#/definitions/ObservedError" },
+        "observed_outcome": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["matched", "mismatched", "recorded", "not_run"] },
+        "reason": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

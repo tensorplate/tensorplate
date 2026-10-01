@@ -152,6 +152,12 @@ jobs:
         shell: bash
         run: test/validation/evidence_bundle_test.sh
 
+      # Runs the qualify tool against a fake appliance; the record check needs
+      # the jsonschema installed above.
+      - name: Candidate qualification recipe
+        shell: bash
+        run: test/validation/candidate_qualify_test.py
+
       # Which packages a binary-arch-only build emits is decided by debhelper
       # from debian/control, and the release workflow's amd64 job depends on
       # that answer. This runner IS x86_64, so it checks the real thing rather
