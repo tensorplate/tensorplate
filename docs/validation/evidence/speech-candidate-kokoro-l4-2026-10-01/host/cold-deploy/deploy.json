@@ -1,0 +1,14 @@
+{
+  "command": "deploy",
+  "correlation_id": "cli-22eb74dc-4ec6-42e4-9238-12a4d17b8aca",
+  "payload": {
+    "agent_response_status": "ok",
+    "bundle_digest": "sha256:fcad2d9284f4620e5d53d2ce9859b5634fd105b52c16c7b2bee2384bca85e708",
+    "deployment_id": "cold-kokoro-1",
+    "phase": "active",
+    "transaction_id": "tx-b0ff2be9-6ad7-4ae9-ab39-a280cb366795"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": "tx-b0ff2be9-6ad7-4ae9-ab39-a280cb366795"
+}

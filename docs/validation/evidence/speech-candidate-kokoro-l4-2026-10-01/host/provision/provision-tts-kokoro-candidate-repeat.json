@@ -1,0 +1,14 @@
+{
+  "command": "bundle",
+  "correlation_id": null,
+  "payload": {
+    "bundle": "tts-kokoro-candidate",
+    "bytes": 327740399,
+    "files": 5,
+    "outcome": "verified",
+    "path": "/var/lib/tensorplate/bundles/import/tts-kokoro-candidate"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}

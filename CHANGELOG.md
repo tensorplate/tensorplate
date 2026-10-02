@@ -8,6 +8,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
+  two candidate qualification runs of Kokoro-82M (voice `af_heart`), filed
+  under `docs/validation/evidence/speech-candidate-kokoro-l4-2026-10-01/`
+  with their memory observations and the host facts they depend on. Both
+  records are `fail` and are filed as recorded: every fixture request
+  returned `ok` and every request-time negative returned its typed code,
+  but the two deploys built to fail while the runner loads (an undeclared
+  voice, too little device memory) returned `timeout` where `unsupported`
+  and `oom_error` were expected, and a rollback issued right after was
+  refused as `busy`. Candidate records only; no support
+  row's evidence changes. (V030-E01-F02-T02, V030-E01-F02-T03)
 - Recorded on a `g2-standard-8` with one NVIDIA L4: the Ubuntu cloud
   lifecycle harness against the published `v0.3.1-rc.1` set with the
   published `v0.2.1` set as its baseline, both signature-verified. All

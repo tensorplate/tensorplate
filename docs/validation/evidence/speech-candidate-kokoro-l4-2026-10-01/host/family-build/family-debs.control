@@ -1,0 +1,40 @@
+Package: tensorplate-speech-runtime-base
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), python3.12 (<< 3.13), tensorplate-backend-python-pytorch (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime-ct2
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cublas (= 0.3.1~rc.1-1), tensorplate-speech-runtime-vad (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime-cublas
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime-cuda
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cublas (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime-kokoro
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1), tensorplate-speech-runtime-torch (= 0.3.1~rc.1-1), libespeak-ng1, espeak-ng-data
+
+Package: tensorplate-speech-runtime-torch
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cublas (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cuda (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime-vad
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1)
+
+Package: tensorplate-speech-runtime
+Version: 0.3.1~rc.1-1
+Architecture: amd64
+Depends: tensorplate-serving (= 0.3.1~rc.1-1), tensorplate-speech-runtime-base (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cublas (= 0.3.1~rc.1-1), tensorplate-speech-runtime-cuda (= 0.3.1~rc.1-1), tensorplate-speech-runtime-torch (= 0.3.1~rc.1-1), tensorplate-speech-runtime-vad (= 0.3.1~rc.1-1), tensorplate-speech-runtime-ct2 (= 0.3.1~rc.1-1), tensorplate-speech-runtime-kokoro (= 0.3.1~rc.1-1)
+

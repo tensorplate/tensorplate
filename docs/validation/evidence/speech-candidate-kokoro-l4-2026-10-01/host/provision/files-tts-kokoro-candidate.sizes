@@ -1,0 +1,5 @@
+1564 ./manifest.json
+2351 ./model/config.json
+327212226 ./model/kokoro-v1_0.pth
+523425 ./model/voices/af_heart.pt
+833 ./tts-kokoro-candidate.json

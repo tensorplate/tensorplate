@@ -1,0 +1,4 @@
+{"candidate": "kokoro", "page_cache": "cold", "exit": 0, "wall_ms": 16620, "phase": "active", "failure": null, "error": null, "error_message": ""}
+{"candidate": "kokoro", "page_cache": "warm", "exit": 0, "wall_ms": 11117, "phase": "active", "failure": null, "error": null, "error_message": ""}
+{"candidate": "whisper", "page_cache": "cold", "exit": 0, "wall_ms": 17997, "phase": "active", "failure": null, "error": null, "error_message": ""}
+{"candidate": "whisper", "page_cache": "warm", "exit": 0, "wall_ms": 17427, "phase": "active", "failure": null, "error": null, "error_message": ""}

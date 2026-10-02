@@ -1,0 +1,10 @@
+{
+  "command": "deploy",
+  "error": {
+    "code": "inference_failed",
+    "hint": "inspect the serving worker logs for backend-specific detail",
+    "message": "agent returned an error response: worker control failed: connect serving worker 127.0.0.1:18081: Connection refused (os error 111)"
+  },
+  "schema_version": "0.1",
+  "status": "error"
+}
