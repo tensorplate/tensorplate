@@ -1,0 +1,17 @@
+{
+  "ip_traffic_denied_except_the_two_host_addresses": true,
+  "metadata_operation": "required",
+  "operations_refused_under_the_denial": [
+    "udp_gce_metadata",
+    "udp_loopback_alias",
+    "udp_resolver_stub",
+    "udp_test_net_v4",
+    "udp_test_net_v4_from_child"
+  ],
+  "operations_silenced_under_the_denial": [],
+  "operations_this_host_cannot_send": [
+    "udp_documentation_v6"
+  ],
+  "scope": "unit"
+}
+classify exit=0

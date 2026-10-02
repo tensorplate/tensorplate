@@ -1,0 +1,24 @@
+{
+  "in_place": {
+    "fields": [
+      "boot_id",
+      "logical_cpus",
+      "machine_type",
+      "mem_total_bytes",
+      "nvidia_display_devices",
+      "schema_version"
+    ],
+    "schema_version": 2
+  },
+  "set_aside": {
+    "fields": [
+      "boot_id",
+      "logical_cpus",
+      "machine_type",
+      "mem_total_bytes",
+      "nvidia_display_devices",
+      "schema_version"
+    ],
+    "schema_version": 2
+  }
+}

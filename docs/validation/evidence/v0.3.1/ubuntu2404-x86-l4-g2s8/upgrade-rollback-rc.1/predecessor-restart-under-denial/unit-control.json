@@ -1,0 +1,15 @@
+{
+  "allowed": {
+    "udp_loopback_allowed_v4": "ok",
+    "udp_loopback_allowed_v6": "ok"
+  },
+  "denied": {
+    "udp_documentation_v6": "ENETUNREACH",
+    "udp_gce_metadata": "ok",
+    "udp_loopback_alias": "ok",
+    "udp_resolver_stub": "ok",
+    "udp_test_net_v4": "ok",
+    "udp_test_net_v4_from_child": "ok"
+  },
+  "unit": "tensorplate-agent.service"
+}
