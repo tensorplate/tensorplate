@@ -12,8 +12,9 @@ request in both runs returned `ok`, and every negative case that fails at
 request time or at admission returned its typed code. What failed is how a
 load failure inside the runner reaches the operator: for the two cases
 built to fail while the runner loads, `tensorplate deploy` reported
-`timeout` where a typed code was expected. That is a defect in the deploy
-path, not in the model or its runner, and it is described under
+`timeout` where a typed code was expected, because the CLI gave up before
+the agent answered. Nothing recorded attributes that to the model or its
+runner; it is described under
 [What the runs found](#what-the-runs-found). The
 candidate is to be run again once it is fixed.
 
@@ -103,8 +104,8 @@ So the agent answers about two seconds after the CLI's default timeout
 gives up, and its answer is not a typed runner code either. A
 `rollback` issued right after the cut-off deploy is refused as `busy`
 (exit 5), because the agent is still inside that deploy's transaction:
-that is run 2's failed teardown. Neither run shows a wrong result, a
-crash that lost the active deployment, or a negative case that was
+that is run 2's failed teardown. Neither run shows a failed fixture request,
+a crash that lost the active deployment, or a negative case that was
 accepted.
 
 ## The host
